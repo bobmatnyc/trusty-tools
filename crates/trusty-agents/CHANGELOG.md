@@ -73,6 +73,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Credential-test env isolation flake (#3464):** several `llm::credentials`,
+  `llm::helpers`, `llm::adapter`, `llm::http`, `ctrl::ctrl_turn::dispatch`, and
+  `runtime::cli_def` tests that assert "no credential resolves" or "the store
+  wins when env is absent" intermittently failed under `cargo test --workspace`
+  (and deterministically on any machine/CI runner with a real project or
+  `$HOME` `.env.local`). Root cause: `trusty_common`'s `.env.local` loader is a
+  process-global `OnceLock` that fires at most once per test binary; whichever
+  test's credential-resolution call happened to be first could have it silently
+  re-populate an env var a test had just cleared, mid-call. Fixed by forcing
+  that loader to have already run (`test_env::force_env_local_loaded`) before
+  any test clears credential env vars, and by clearing every registry-mapped
+  provider's env var (not just the three `openrouter`/`anthropic`/`claude-code`
+  names) in `other_configured_providers()`'s tests
+  (`test_env::clear_all_credential_env_vars`). Also sandboxes `$HOME` in
+  `ctrl_creds_errors_when_nothing_configured`, a pre-existing gap that made it
+  fail deterministically on any machine with a real secure-store credential.
 - **Favicon/RobotIcon drift (#3486):** `ui/public/favicon.svg` was a fourth,
   independently hand-drawn robot face (different rect/circle coordinates, a
   `<text>`-rendered `>_` mouth) that had drifted from `RobotIcon.svelte`'s

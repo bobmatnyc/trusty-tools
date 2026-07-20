@@ -304,7 +304,13 @@ mod tests {
     /// known-empty environment. SAFETY: every test below is `#[serial]` AND
     /// holds `crate::test_env::ENV_LOCK` to serialize against the rest of the
     /// crate's env-touching tests (#274 / #408).
+    ///
+    /// #3464: forces the process-global `.env.local` `OnceLock` loader to
+    /// have already fired before removing anything — see
+    /// `crate::test_env::force_env_local_loaded`'s docs for why a
+    /// remove-only helper is not reliably idempotent against that loader.
     fn clear_creds_env() {
+        crate::test_env::force_env_local_loaded();
         unsafe {
             std::env::remove_var("OPENROUTER_API_KEY");
             std::env::remove_var("ANTHROPIC_API_KEY");
@@ -368,19 +374,47 @@ mod tests {
 
     /// With no credentials configured the legacy path must surface an error
     /// instead of defaulting to OpenRouter.
+    ///
+    /// Also sandboxes `$HOME` to a fresh, never-written-to tempdir (a
+    /// pre-existing gap independent of #3464 — this test cleared only the
+    /// three env vars and never isolated the secure-store tier, so on any
+    /// machine/CI runner with a real `~/.trusty-tools/credentials.toml`
+    /// entry for openrouter/anthropic, `resolve_ctrl_turn_credentials` would
+    /// resolve a real credential from the store and this always-erroring
+    /// expectation would fail deterministically). Holds `HOME_LOCK` for the
+    /// whole body per `test_env`'s documented convention.
     #[test]
     #[serial]
     fn ctrl_creds_errors_when_nothing_configured() {
         let _g = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         clear_creds_env();
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: HOME_LOCK held for the entire test body.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+
         let mut cfg = AgentConfig::ctrl_default();
         let res = resolve_ctrl_turn_credentials(&mut cfg, &SessionOverrides::default());
         assert!(
             res.is_err(),
             "no credentials must be an error, not a default"
         );
+
+        // SAFETY: HOME_LOCK still held.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 
     /// A session `/model` override (when plumbed) must replace the agent model
