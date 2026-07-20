@@ -55,6 +55,10 @@ allow = [
   "session_status",
   "project_list",
   "console_metrics",
+  # system_status (epic #3052) — on-demand trusty-* subsystem health check
+  # (daemons, MCP servers, credential tiers by name/tier only, registry
+  # counts, and the assistant's own resolved model/runner). Read-only.
+  "system_status",
   # gworkspace — Gmail
   "compose_email",
   "download_gmail_attachment",

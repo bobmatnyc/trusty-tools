@@ -122,6 +122,7 @@ pub mod skills;
 pub mod slack;
 pub mod state_writer;
 pub mod subprocess;
+pub mod system_status;
 pub mod telegram;
 pub mod ticketing;
 pub mod tm;

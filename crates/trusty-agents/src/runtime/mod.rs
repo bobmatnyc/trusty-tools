@@ -92,6 +92,7 @@ mod startup;
 mod subagent_exec;
 mod subagent_mode;
 mod subcommands;
+mod system_cmd;
 mod tool_registry;
 mod workflow_mode;
 

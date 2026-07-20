@@ -229,6 +229,27 @@ pub async fn run_pm_task_with_persona(
                 crate::tools::web_search::BraveSearchTool::from_env(),
             ));
 
+            // system_status epic (#3052): lets a persona report on-demand
+            // trusty-* subsystem health (daemons, MCP servers, credential
+            // tiers, registry counts) without it being injected into every
+            // turn. Registering it here only makes it reachable — whether
+            // this persona can actually call it is still gated below by
+            // `filter_persona_tool_names` against its `[tools].allow` list.
+            //
+            // `with_resolved_endpoint` (not `new`) is required here: by this
+            // point `persona_cfg.agent.model`/`.runner` already carry any
+            // `/model` override applied above (line ~131) — passing the
+            // bare `persona_name` string would make the tool re-derive the
+            // STALE on-disk model, silently ignoring the override the user
+            // just set. See `tools::system_status` module docs.
+            registry.register(Arc::new(
+                crate::tools::system_status::SystemStatusTool::with_resolved_endpoint(
+                    persona_name,
+                    persona_cfg.agent.model.clone(),
+                    persona_cfg.agent.runner,
+                ),
+            ));
+
             for plugin in crate::tools::agent_plugin::plugins_for_persona(persona_name) {
                 for tool in &plugin.tools {
                     registry.register(std::sync::Arc::clone(tool));
