@@ -11,8 +11,11 @@
 //! sibling "project" directory that must never be touched.
 //! Test: this module IS the test suite for the hook-installation half of
 //! `commands::install`. The artifact-deploy half (`install_to`) is covered by
-//! `install_writes_all_artifacts` / `install_skips_existing_without_force` in
-//! `tests_behavior_a.rs`, unchanged by this issue.
+//! `install_writes_all_artifacts` in `tests_behavior_a.rs` and by
+//! `overwrite_artifact_refreshes_modified_file_without_force` /
+//! `seed_once_artifact_is_not_clobbered_without_force` /
+//! `seed_once_artifact_force_resets_to_shipped_default` in
+//! `install_policy_tests.rs`, unchanged by this issue.
 
 use super::*;
 

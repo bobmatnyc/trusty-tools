@@ -45,7 +45,10 @@
 /// deploys agents and skills, optionally resets the requested agent scope
 /// (user-level, then every intact session workspace when requested), then
 /// calls [`install_claude_hooks`].
-/// Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`,
+/// Test: `install_writes_all_artifacts`,
+/// `overwrite_artifact_refreshes_modified_file_without_force`,
+/// `seed_once_artifact_is_not_clobbered_without_force`,
+/// `seed_once_artifact_force_resets_to_shipped_default`,
 /// `install_claude_hooks_is_idempotent`,
 /// `instruction_pipeline::install_system_prompt_to_writes_assembled`.
 pub(crate) async fn install(

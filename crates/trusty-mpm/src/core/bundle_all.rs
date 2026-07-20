@@ -37,8 +37,9 @@ pub struct BundledArtifact {
 /// again the moment any bundled artifact is meant to be user-owned.
 /// What: [`Overwrite`](InstallPolicy::Overwrite) always writes the embedded
 /// contents; [`SeedOnce`](InstallPolicy::SeedOnce) writes only when absent.
-/// Test: `framework_instructions_overwrites`, `seed_once_does_not_clobber`,
-/// `seed_once_force_resets_to_shipped_default`.
+/// Test: `framework_instructions_overwrites`,
+/// `seed_once_artifact_is_not_clobbered_without_force`,
+/// `seed_once_artifact_force_resets_to_shipped_default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPolicy {
     /// Always write the embedded contents, replacing any existing file.
@@ -79,7 +80,9 @@ const fn overwrite(rel_path: &'static str, contents: &'static str) -> BundledArt
 /// to exercise it) — `pub(super)` so `bundle_tests.rs` can build a fixture
 /// artifact with it instead.
 /// What: returns a [`BundledArtifact`] with `install: InstallPolicy::SeedOnce`.
-/// Test: `seed_once_does_not_clobber`, `seed_once_force_resets_to_shipped_default`.
+/// Test: `seed_once_constructor_builds_the_expected_artifact`,
+/// `seed_once_artifact_is_not_clobbered_without_force`,
+/// `seed_once_artifact_force_resets_to_shipped_default`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) const fn seed_once(rel_path: &'static str, contents: &'static str) -> BundledArtifact {
     BundledArtifact {
