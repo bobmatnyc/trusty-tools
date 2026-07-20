@@ -310,16 +310,18 @@ fn apply_quit_event_signals_quit() {
 /// `ReplEvent::TurnFinished` (the `dispatch_pending` stuck-`busy` safety net)
 /// must clear `busy`/`streaming_idx` and touch NOTHING else — in particular
 /// it must never push a chat entry, which is exactly why it exists instead
-/// of reusing an empty `AssistantOutput { done: true, .. }`.
+/// of reusing an empty `AssistantOutput { done: true, .. }` — PROVIDED its
+/// `generation` matches `app.current_generation` (the live turn).
 #[test]
 fn apply_turn_finished_clears_busy_and_streaming_idx_without_touching_chat() {
     let mut app = ReplApp::new("demo", "u");
     app.busy = true;
     app.streaming_idx = Some(0);
+    app.current_generation = 1;
     app.push_status("unrelated"); // pre-existing chat content must survive
     let chat_before = app.chat.len();
 
-    apply(&mut app, ReplEvent::TurnFinished);
+    apply(&mut app, ReplEvent::TurnFinished { generation: 1 });
 
     assert!(!app.busy);
     assert!(app.streaming_idx.is_none());
@@ -327,6 +329,36 @@ fn apply_turn_finished_clears_busy_and_streaming_idx_without_touching_chat() {
         app.chat.len(),
         chat_before,
         "must not push/alter any chat entry"
+    );
+}
+
+/// The TOCTOU-race fix (PR #3477, final re-review round): a `TurnFinished`
+/// whose `generation` is STALE relative to `app.current_generation` (a
+/// newer turn is now live — e.g. the old turn was cancelled and the user
+/// already resubmitted) must be a complete no-op. Without this guard, a
+/// terminal signal that raced a cancel+resubmit could clear `busy`/
+/// `streaming_idx` out from under a genuinely in-flight NEWER turn,
+/// reintroducing the streaming-splice corruption class this whole PR
+/// closes. This is a deterministic reducer-level test — the point of the
+/// by-construction fix is that this comparison is the reducer's own logic,
+/// not a live cross-thread race that would need reproducing.
+#[test]
+fn apply_turn_finished_with_stale_generation_is_ignored() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    app.streaming_idx = Some(0);
+    app.current_generation = 2; // a newer turn is now live
+
+    apply(&mut app, ReplEvent::TurnFinished { generation: 1 }); // stale
+
+    assert!(
+        app.busy,
+        "a stale TurnFinished must not clear busy for a newer in-flight turn"
+    );
+    assert_eq!(
+        app.streaming_idx,
+        Some(0),
+        "a stale TurnFinished must not reset streaming_idx either"
     );
 }
 

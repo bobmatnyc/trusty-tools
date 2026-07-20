@@ -94,10 +94,26 @@ pub enum ReplEvent {
     /// (that would push a stray blank chat entry via the `None`-
     /// `streaming_idx` branch of `apply_assistant_output` — corrupting
     /// scrollback to fix a different bug).
+    ///
+    /// **Carries its own `generation`** (the turn number `crate::run::
+    /// dispatch_pending` assigned it) so the reducer — not the spawned
+    /// completion task — decides whether it's still relevant. A prior
+    /// revision had the spawned task load-and-compare the live generation
+    /// counter itself before deciding whether to send this event at all;
+    /// that compare-then-send was a genuine TOCTOU race under
+    /// multi-threaded tokio (a cancel + new submit could both run in the
+    /// gap between the load and the send), letting a stale terminal signal
+    /// from turn N clear `busy`/`streaming_idx` for a genuinely in-flight
+    /// turn N+2. Fixed by construction: the completion task now always
+    /// sends this event (stamped with its own generation, no load-then-
+    /// branch), and the reducer — which runs serially on the same task that
+    /// bumps the generation counter, so no cross-thread race is possible —
+    /// applies it only if `generation` still matches
+    /// `ReplApp::current_generation`.
     /// What: engine implementations should never construct this directly;
     /// it exists purely as `crate::run::dispatch_pending`'s per-turn
     /// completion safety net (see that function's doc comment).
-    TurnFinished,
+    TurnFinished { generation: u64 },
 
     // ── Engine-origin (produced by `TuiEngine` implementations) ────────
     /// A chunk of streamed assistant output. `done` marks the final chunk of
@@ -309,12 +325,19 @@ mod tests {
         assert_ne!(ReplEvent::Quit, ReplEvent::Cancel);
     }
 
-    /// `TurnFinished` (the `dispatch_pending` completion safety net) is a
-    /// distinct unit variant, same as `Quit`/`ClearScrollback` above.
+    /// `TurnFinished` (the `dispatch_pending` completion safety net) carries
+    /// its own `generation` and compares by value, same as any other field.
     #[test]
-    fn turn_finished_is_a_distinct_unit_variant() {
-        assert_eq!(ReplEvent::TurnFinished, ReplEvent::TurnFinished);
-        assert_ne!(ReplEvent::TurnFinished, ReplEvent::Quit);
+    fn turn_finished_carries_and_compares_its_generation() {
+        assert_eq!(
+            ReplEvent::TurnFinished { generation: 1 },
+            ReplEvent::TurnFinished { generation: 1 }
+        );
+        assert_ne!(
+            ReplEvent::TurnFinished { generation: 1 },
+            ReplEvent::TurnFinished { generation: 2 }
+        );
+        assert_ne!(ReplEvent::TurnFinished { generation: 1 }, ReplEvent::Quit);
     }
 
     /// `WorkstreamActivationChanged`'s field is named `new_active_id` to

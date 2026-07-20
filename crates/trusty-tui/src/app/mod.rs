@@ -262,6 +262,17 @@ pub struct ReplApp {
     /// non-blank line into an empty input buffer — direct port of tagent's
     /// `last_bash_block` (`crates/trusty-agents/src/repl/tui/types.rs`).
     pub last_bash_block: Option<String>,
+    /// The generation number of the turn currently considered "live" —
+    /// mirrors `crate::run::dispatch_pending`'s `AtomicU64` counter, updated
+    /// via [`TuiModel::set_current_generation`] on the SAME serial
+    /// event-loop task that owns that counter (never from a spawned task).
+    /// A `ReplEvent::TurnFinished { generation }` whose `generation` no
+    /// longer matches this field is a stale signal from a superseded turn
+    /// and is ignored — see that variant's doc comment for the TOCTOU race
+    /// this by-construction design closes (the comparison happens here, in
+    /// the reducer, serially — never as a spawned task's load-then-branch
+    /// against the shared counter).
+    pub current_generation: u64,
 }
 
 impl ReplApp {
@@ -307,6 +318,7 @@ impl ReplApp {
             pending_cancel: false,
             last_prompt: String::new(),
             last_bash_block: None,
+            current_generation: 0,
         }
     }
 
@@ -652,5 +664,16 @@ impl TuiModel for ReplApp {
         self.busy = false;
         self.streaming_idx = None;
         self.push_status("cancelled");
+    }
+
+    /// Record `generation` into [`Self::current_generation`] — see
+    /// [`crate::run::TuiModel::set_current_generation`]'s doc comment for
+    /// why this is called only from `dispatch_pending` on the serial
+    /// event-loop task, and [`ReplEvent::TurnFinished`]'s doc comment for
+    /// the race this by-construction design closes.
+    /// Test: [`reduce::tests::apply_turn_finished_with_stale_generation_is_ignored`],
+    /// [`reduce::tests::apply_turn_finished_clears_busy_and_streaming_idx_without_touching_chat`].
+    fn set_current_generation(&mut self, generation: u64) {
+        self.current_generation = generation;
     }
 }

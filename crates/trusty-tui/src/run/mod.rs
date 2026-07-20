@@ -157,6 +157,30 @@ pub trait TuiModel {
     /// What: default no-op — a model with no busy/streaming state to reset
     /// needs no override.
     fn on_cancelled(&mut self) {}
+
+    /// Record the generation number [`dispatch_pending`] just assigned to a
+    /// new turn (submit) or bumped past (cancel), so a later
+    /// `ReplEvent::TurnFinished { generation }` can compare against it.
+    ///
+    /// Why: a prior revision had `dispatch_pending`'s spawned completion
+    /// task load the live `AtomicU64` generation counter and compare it to
+    /// its own turn's number before deciding whether to send
+    /// `TurnFinished` — a genuine TOCTOU race under multi-threaded tokio
+    /// (a cancel and a new submit could both run in the gap between that
+    /// load and the send, so a stale terminal signal from turn N could
+    /// clear `busy`/`streaming_idx` for a genuinely in-flight turn N+2).
+    /// Fixed by construction instead of narrowing the window: this method
+    /// is called from `dispatch_pending` ONLY on the single serial
+    /// event-loop task (the same task `apply`/the reducer run on, and the
+    /// same task that owns the `AtomicU64` bump) — so a model tracking its
+    /// own copy of "the current generation" lets the REDUCER do the
+    /// comparison with no cross-thread race possible at all, rather than a
+    /// spawned task racing a shared counter.
+    /// What: default no-op — a model with no generation concept (or one not
+    /// wired through [`run`]) needs no override.
+    fn set_current_generation(&mut self, generation: u64) {
+        let _ = generation;
+    }
 }
 
 /// Pure classification of one crossterm `Event` into an optional [`ReplEvent`].
@@ -513,17 +537,30 @@ async fn forward_while_current_generation(
 /// this is the synchronization point that guarantees `saw_terminal`
 /// reflects everything the engine actually sent, not a racy snapshot taken
 /// the instant `handle_input`'s future resolves. If `saw_terminal` is still
-/// `false` AND `generation` still equals `my_gen` (this turn was not
-/// superseded/cancelled in the meantime — if it was, `on_cancelled` already
-/// handled `busy` independently, and a stale top-up here must NOT clear
-/// `busy` for whatever NEWER turn might already be in flight), a
-/// `ReplEvent::TurnFinished` is sent directly on the real `tx` — see that
-/// variant's doc comment for why it is a dedicated variant rather than a
-/// reused empty `AssistantOutput { done: true, .. }` (the latter would push
-/// a stray blank chat entry via that event's `None`-`streaming_idx` branch).
+/// `false`, a `ReplEvent::TurnFinished { generation: my_gen }` is sent
+/// unconditionally on the real `tx` — see that variant's doc comment for why
+/// it is a dedicated variant rather than a reused empty `AssistantOutput {
+/// done: true, .. }` (the latter would push a stray blank chat entry via
+/// that event's `None`-`streaming_idx` branch).
+///
+/// **By-construction TOCTOU fix (second re-review round):** an earlier
+/// revision ALSO compared `generation.load(..) == my_gen` on this spawned
+/// task before deciding whether to send `TurnFinished` at all — a genuine
+/// race under multi-threaded tokio (a cancel + a new submit could both run
+/// in the gap between that load and the send, letting a stale terminal from
+/// turn N clear state for a genuinely in-flight turn N+2). Fixed by moving
+/// the comparison into the REDUCER instead of narrowing the window: this
+/// task now always sends `TurnFinished` stamped with its own `my_gen`, and
+/// `dispatch_pending` calls `model.set_current_generation` on THIS (serial,
+/// single event-loop) task at the exact point it bumps `generation` (both
+/// branches above) — so the reducer's later `generation ==
+/// app.current_generation` compare (`ReplApp`'s implementation) runs
+/// serially against a value only ever written from the same task that reads
+/// it back, with no cross-thread race possible at all.
 /// Net invariant: every `handle_input` completion path — `Ok(true)` with a
 /// done chunk, `Ok(true)` with none, `Ok(false)`, and `Err` — deterministically
-/// leaves `busy == false` once no task is in flight.
+/// leaves `busy == false` once no task is in flight, and a stale completion
+/// from a superseded turn never clobbers a newer one.
 /// Test: [`tests::dispatch_pending_submit_reaches_handle_input`],
 /// [`tests::dispatch_pending_cancel_reaches_cancel_session`],
 /// [`tests::dispatch_pending_cancel_aborts_genuinely_in_flight_submit_task`],
@@ -548,8 +585,13 @@ fn dispatch_pending<E, M>(
         // abort even runs, so a chunk already sitting in `turn_rx`'s buffer
         // (pushed before `abort()` takes effect at the task's next
         // `.await`) is dropped rather than relayed once the forwarder next
-        // polls it.
-        generation.fetch_add(1, Ordering::SeqCst);
+        // polls it. `set_current_generation` runs on THIS (serial,
+        // event-loop) task, same as every reducer `apply` call — see
+        // `TuiModel::set_current_generation`'s doc comment for why that
+        // makes the model's copy of "the live generation" race-free against
+        // a spawned completion task's `TurnFinished` send.
+        let new_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        model.set_current_generation(new_gen);
         model.on_cancelled();
         if let Some(handle) = current_task.lock().unwrap().take() {
             handle.abort();
@@ -565,6 +607,7 @@ fn dispatch_pending<E, M>(
 
     if let Some(line) = model.take_pending_submit() {
         let my_gen = generation.fetch_add(1, Ordering::SeqCst) + 1;
+        model.set_current_generation(my_gen);
 
         // Private per-turn channel: `engine.handle_input` only ever sees
         // `turn_tx`, never the real `tx` — see the doc comment above for why
@@ -585,7 +628,6 @@ fn dispatch_pending<E, M>(
 
         let engine = Arc::clone(engine);
         let completion_tx = tx.clone();
-        let completion_generation = Arc::clone(generation);
         let handle = tokio::spawn(async move {
             let result = engine.handle_input(line, turn_tx.clone()).await;
             match &result {
@@ -615,15 +657,22 @@ fn dispatch_pending<E, M>(
             // Safety net: `handle_input` returning `Ok(true)` is not a
             // guarantee a terminal signal was ever sent (see this
             // function's doc comment for the real `CodeEngine` paths that
-            // don't). Top one up so `busy` cannot stay stuck forever — but
-            // only if THIS turn is still the live one; if it was cancelled
-            // and superseded by a newer submit in the meantime,
-            // `on_cancelled` already reset `busy` for the old turn and this
-            // must not clobber whatever the NEW turn's state is.
-            if !saw_terminal.load(Ordering::SeqCst)
-                && completion_generation.load(Ordering::SeqCst) == my_gen
-            {
-                let _ = completion_tx.send(ReplEvent::TurnFinished);
+            // don't). Top one up so `busy` cannot stay stuck forever.
+            //
+            // Deliberately UNCONDITIONAL on the live generation here — no
+            // load-and-compare against the shared `AtomicU64` on this
+            // spawned task. An earlier revision did that compare here,
+            // which was a genuine TOCTOU race under multi-threaded tokio: a
+            // cancel + a new submit could both run in the gap between this
+            // task's load and its send, so a stale `TurnFinished` from turn
+            // N could still clear `busy`/`streaming_idx` for a genuinely
+            // in-flight turn N+2. Fixed by construction instead: this event
+            // always carries `my_gen`, and the REDUCER (serial, same task
+            // that bumps the counter) is what decides whether `generation`
+            // still matches — see `ReplEvent::TurnFinished`'s and
+            // `TuiModel::set_current_generation`'s doc comments.
+            if !saw_terminal.load(Ordering::SeqCst) {
+                let _ = completion_tx.send(ReplEvent::TurnFinished { generation: my_gen });
             }
         });
         let mut slot = current_task.lock().unwrap();

@@ -64,11 +64,19 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         ReplEvent::Quit => app.quit = true,
         // `crate::run::dispatch_pending`'s completion safety net (see
         // `ReplEvent::TurnFinished`'s doc comment for the stuck-`busy`
-        // deadlock this closes) — deliberately touches ONLY these two
-        // fields, never `chat`, so it can never push a stray blank entry.
-        ReplEvent::TurnFinished => {
-            app.busy = false;
-            app.streaming_idx = None;
+        // deadlock this closes). Applied ONLY if `generation` still matches
+        // `app.current_generation` — a stale signal from a turn that was
+        // since cancelled/superseded is a no-op, by construction (this
+        // compare runs serially in the reducer, never as a spawned task's
+        // load-then-branch against the shared counter — see that variant's
+        // doc comment for the TOCTOU race this closes). When applied, it
+        // touches ONLY these two fields, never `chat`, so it can never push
+        // a stray blank entry.
+        ReplEvent::TurnFinished { generation } => {
+            if generation == app.current_generation {
+                app.busy = false;
+                app.streaming_idx = None;
+            }
         }
         ReplEvent::AssistantOutput {
             chunk,
