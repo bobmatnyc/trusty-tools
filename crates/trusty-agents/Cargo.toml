@@ -171,6 +171,10 @@ tokio-test = "0.4"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 serial_test = "3"
+# Exposes async-openai's `OpenAIConfig::api_key()` (a `SecretString`) in
+# tests so credential-resolution tests can assert on the actual value that
+# reaches the request builder, not just "no panic" (see #3431 follow-up).
+secrecy = "0.10"
 
 [lints.clippy]
 doc_lazy_continuation = "allow"

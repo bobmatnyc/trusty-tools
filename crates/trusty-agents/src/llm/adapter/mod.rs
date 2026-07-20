@@ -175,13 +175,21 @@ pub trait ModelAdapter: Send + Sync + std::fmt::Debug {
 ///
 /// Why: Keeps the single source of truth for base URL + env-var name in one
 /// place so tests and adapters agree on the fallback shape.
-/// What: Reads `OPENROUTER_BASE_URL` (override for tests) and
-/// `OPENROUTER_API_KEY`; builds `Authorization: Bearer <key>`.
-/// Test: Indirectly via `anthropic_api_endpoint_falls_back_to_openrouter`.
+/// What: Reads `OPENROUTER_BASE_URL` (override for tests) and resolves the
+/// OpenRouter credential via the shared 3-tier resolver
+/// (`trusty_common::inference::credentials::resolve_key` — process env >
+/// `.env.local` > secure store, #3248/#3431); builds
+/// `Authorization: Bearer <key>`. Before this fix (issue #3443) the key was
+/// read via a raw `std::env::var`, so a credential configured ONLY in the
+/// secure store (never exported to the shell) silently produced an empty
+/// bearer token and a 401 even though `pick_credentials`/startup banners
+/// correctly reported the credential as configured.
+/// Test: Indirectly via `anthropic_api_endpoint_falls_back_to_openrouter`;
+/// `openrouter_endpoint_resolves_key_from_store_when_env_absent`.
 pub fn openrouter_endpoint() -> ApiEndpoint {
     let base_url = std::env::var("OPENROUTER_BASE_URL")
         .unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
-    let key = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default();
+    let key = trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default();
     ApiEndpoint {
         base_url,
         auth_header_name: "Authorization".to_string(),

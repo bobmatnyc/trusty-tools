@@ -127,8 +127,15 @@ impl ModelAdapter for AnthropicAdapter {
         //
         // Priority 1: ANTHROPIC_API_KEY → api.anthropic.com with x-api-key header.
         // Fallback: OpenRouter — preserves existing deployments unchanged.
+        //
+        // The key VALUE is resolved via the shared 3-tier resolver (env >
+        // `.env.local` > secure store, same as `pick_credentials`'s *routing*
+        // decision) rather than a raw `std::env::var` — a credential
+        // configured only via `tagent config keys set anthropic` must resolve
+        // here too, not just in the reporting/banner path (see module-level
+        // fix note on `openrouter_endpoint`).
         if use_direct
-            && let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+            && let Some(key) = trusty_common::inference::credentials::resolve_key("anthropic")
             && !key.is_empty()
         {
             return ApiEndpoint {

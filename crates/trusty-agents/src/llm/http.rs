@@ -280,9 +280,10 @@ pub(super) async fn send_raw_completion(
         endpoint.base_url.trim_end_matches('/')
     );
     let auth_value = if endpoint.auth_header_value.is_empty() {
-        // Fall back to the OpenRouter env var when the adapter doesn't supply
-        // a credential (legacy callers that rely on OPENROUTER_API_KEY here).
-        std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY).unwrap_or_default()
+        // Fall back to the resolved OpenRouter credential (env > .env.local >
+        // secure store) when the adapter doesn't supply one (legacy callers
+        // that rely on this fallback rather than a populated `ApiEndpoint`).
+        trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default()
     } else {
         endpoint
             .auth_header_value
@@ -291,7 +292,11 @@ pub(super) async fn send_raw_completion(
             .to_string()
     };
     if auth_value.is_empty() && !url.contains("localhost") && !url.contains("127.0.0.1") {
-        anyhow::bail!("OPENROUTER_API_KEY not set (and adapter supplied no credential)");
+        anyhow::bail!(
+            "openrouter credential not found (checked process env, .env.local, and the \
+             secure store — run `tagent config keys set openrouter` or export \
+             OPENROUTER_API_KEY) and adapter supplied no credential"
+        );
     }
     // backon retry: on transient 429/5xx + connection errors, retry up to 3x
     // with exponential backoff. Auth/quota errors (400/401/402) fail fast.
@@ -417,6 +422,210 @@ mod tests {
     use async_openai::types::{
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
     };
+
+    /// Why (fix regression test): `send_raw_completion` takes its auth value
+    /// from `adapter.api_endpoint(false)`, which for `GenericAdapter` (no
+    /// override) is `openrouter_endpoint()` — the exact function that
+    /// previously read `OPENROUTER_API_KEY` via a raw `std::env::var`, so a
+    /// credential configured ONLY via the secure store never reached the
+    /// request. This test proves the credential now resolves through the
+    /// shared 3-tier resolver (env > `.env.local` > secure store) by seeding
+    /// a `FileKeyStore` directly, with env absent, and asserting the request
+    /// actually reaches the network (a loopback, connection-refused target)
+    /// with a non-empty bearer token instead of bailing with "credential not
+    /// found".
+    /// Test: itself.
+    // NOTE: none of the three async tests below hold `crate::test_env::{ENV_LOCK,
+    // HOME_LOCK}` (`std::sync::Mutex`) across their `.await` — clippy's
+    // `await_holding_lock` correctly forbids that for a sync mutex. `#[serial]`
+    // (unnamed group) provides the cross-test exclusion instead, matching the
+    // established pattern in `inference_client::tests::with_store_honours_openrouter_base_url_override`.
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn send_raw_completion_resolves_key_from_store_when_env_absent() {
+        let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: `#[serial]` (unnamed group) serializes against every other
+        // unnamed `#[serial]` test in this binary.
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+
+        let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+        trusty_common::inference::credentials::KeyStore::set(
+            &store,
+            "openrouter",
+            "sk-or-FAKE-store-value", // pragma: allowlist secret
+        )
+        .expect("seed store");
+
+        // GenericAdapter's default `api_endpoint` is `openrouter_endpoint()`
+        // pointed at the real OpenRouter host but with NO override — routing
+        // to a real host with a fake key would attempt a live network call.
+        // Point it at an unroutable loopback port instead so the request
+        // fails fast on connection refusal (not on auth), letting us assert
+        // the fallback resolved a non-empty key without touching the network.
+        // SAFETY: still under `#[serial]` exclusion.
+        unsafe {
+            std::env::set_var("OPENROUTER_BASE_URL", "http://127.0.0.1:1");
+        }
+
+        let adapter = crate::llm::adapter::GenericAdapter;
+        let body = serde_json::json!({"model": "gpt-4o", "messages": []});
+        let err = send_raw_completion(&body, &adapter)
+            .await
+            .expect_err("connection to 127.0.0.1:1 must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("credential not found") && !msg.contains("not set"),
+            "must not report a missing credential when the store has one: {msg}"
+        );
+
+        // SAFETY: still under `#[serial]` exclusion.
+        unsafe {
+            std::env::remove_var("OPENROUTER_BASE_URL");
+            match prev_openrouter {
+                Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+                None => std::env::remove_var("OPENROUTER_API_KEY"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// Why: when NO tier (env, `.env.local`, or store) resolves a credential,
+    /// `send_raw_completion` must fail with a clear, provider-named error
+    /// instead of silently sending an empty bearer token and letting the
+    /// provider's bare 401 stand in for the real problem.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn send_raw_completion_missing_everywhere_errors_with_provider_name() {
+        let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: `#[serial]` (unnamed group) provides exclusion.
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        // No store seeded — every tier is absent.
+
+        let adapter = crate::llm::adapter::GenericAdapter;
+        let body = serde_json::json!({"model": "gpt-4o", "messages": []});
+        let err = send_raw_completion(&body, &adapter)
+            .await
+            .expect_err("no credential anywhere must error, not send an empty key");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("openrouter") && msg.contains("credential not found"),
+            "error must name the provider and say credential not found: {msg}"
+        );
+
+        // SAFETY: still under `#[serial]` exclusion.
+        unsafe {
+            match prev_openrouter {
+                Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+                None => std::env::remove_var("OPENROUTER_API_KEY"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// Adapter fixture whose `ApiEndpoint` supplies NO credential (empty
+    /// `auth_header_value`, mirroring `OllamaAdapter`'s "no auth needed"
+    /// shape) so `send_raw_completion`'s literal fallback branch — `if
+    /// endpoint.auth_header_value.is_empty() { resolve_key("openrouter")... }`
+    /// — is exercised directly rather than via a populated `ApiEndpoint`.
+    #[derive(Debug)]
+    struct NoCredentialAdapter;
+
+    impl ModelAdapter for NoCredentialAdapter {
+        fn provider(&self) -> crate::llm::adapter::Provider {
+            crate::llm::adapter::Provider::Generic
+        }
+        fn tool_choice_any(&self) -> Option<serde_json::Value> {
+            None
+        }
+        fn tool_choice_auto(&self) -> Option<serde_json::Value> {
+            None
+        }
+        fn inject_cache_control(&self, _: &mut serde_json::Value, _: bool) {}
+        fn parse_usage(&self, _: &serde_json::Value) -> TokenUsage {
+            TokenUsage::default()
+        }
+        fn api_endpoint(&self, _use_direct: bool) -> adapter::ApiEndpoint {
+            adapter::ApiEndpoint {
+                base_url: "http://127.0.0.1:1".to_string(),
+                auth_header_name: "Authorization".to_string(),
+                auth_header_value: String::new(),
+                extra_headers: vec![],
+                auth_source: adapter::AuthSource::OpenRouter,
+            }
+        }
+    }
+
+    /// Why: the literal `send_raw_completion` fallback branch (an adapter
+    /// that supplies NO credential in its `ApiEndpoint`) must still resolve
+    /// through the shared 3-tier resolver rather than a raw env read.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn send_raw_completion_empty_endpoint_credential_falls_back_to_store() {
+        let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: `#[serial]` (unnamed group) provides exclusion.
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+        let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+        trusty_common::inference::credentials::KeyStore::set(
+            &store,
+            "openrouter",
+            "sk-or-FAKE-store-value", // pragma: allowlist secret
+        )
+        .expect("seed store");
+
+        let adapter = NoCredentialAdapter;
+        let body = serde_json::json!({"model": "gpt-4o", "messages": []});
+        let err = send_raw_completion(&body, &adapter)
+            .await
+            .expect_err("connection to 127.0.0.1:1 must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("credential not found"),
+            "must not report a missing credential when the store has one: {msg}"
+        );
+
+        // SAFETY: still under `#[serial]` exclusion.
+        unsafe {
+            match prev_openrouter {
+                Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
+                None => std::env::remove_var("OPENROUTER_API_KEY"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 
     #[test]
     fn http_client_returns_same_instance() {
