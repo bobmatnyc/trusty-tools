@@ -34,6 +34,7 @@
 //! conformance.
 
 mod frontmatter;
+pub mod protocol;
 
 use std::path::{Path, PathBuf};
 
@@ -112,18 +113,39 @@ pub fn locate_skills_dir(project_root: &Path) -> PathBuf {
 /// `discover_skill_metadata_disk_wins_when_present`,
 /// `discover_skill_metadata_falls_back_to_dirname`.
 pub fn discover_skill_metadata(dir: &Path) -> Vec<SkillMetadata> {
+    let skills = discover_disk_skill_metadata(dir);
+    if skills.is_empty() {
+        return embedded_skill_metadata();
+    }
+    skills
+}
+
+/// Scan `dir` for disk skills WITHOUT the embedded-fallback threshold —
+/// returns an empty `Vec` for a missing/empty directory rather than
+/// substituting `embedded_skill_metadata()` (#3449).
+///
+/// Why: `protocol::skills_list` needs to distinguish "this project genuinely
+/// has zero custom skills" from "here is the bundled catalog" — merging the
+/// two (as [`discover_skill_metadata`]'s fallback does, correctly, for the
+/// *tool-facing* discovery/prompt-injection path) would mislabel every
+/// bundled entry as `tier: "project"` in the catalog endpoint whenever a
+/// project's `.claude/skills/` happens to be empty. Factored out of
+/// [`discover_skill_metadata`] so the fallback threshold lives in exactly
+/// one place; the tool-facing function above is unchanged in behavior.
+/// What: identical directory scan/sort to [`discover_skill_metadata`], minus
+/// the embedded-fallback branch.
+/// Test: `protocol::tests::list_disk_only_entries_are_additive`,
+/// `protocol::tests::list_returns_bundled_when_projectless`.
+pub(crate) fn discover_disk_skill_metadata(dir: &Path) -> Vec<SkillMetadata> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         tracing::debug!("skills dir not found or unreadable: {}", dir.display());
-        return embedded_skill_metadata();
+        return Vec::new();
     };
 
     let mut skills: Vec<SkillMetadata> = entries
         .flatten()
         .filter_map(|entry| load_metadata_from_skill_dir(&entry.path()))
         .collect();
-    if skills.is_empty() {
-        return embedded_skill_metadata();
-    }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
 }

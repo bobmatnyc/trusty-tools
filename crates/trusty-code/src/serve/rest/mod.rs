@@ -55,19 +55,28 @@
 //! its module docs for why the paths are unprefixed rather than DOC-48
 //! §5.2's literal `/api/v1/workstreams`. [`projects`] adds `GET /projects`
 //! -> `fs.list_projects` (issue #3365 — the GUI's workstream-first
-//! project-picker modal's roster data source). Every slice reuses
-//! [`respond`]/[`throwaway_ctx`] rather than reimplementing the glue.
+//! project-picker modal's roster data source). [`agent_catalog`]/
+//! [`skill_catalog`] (issue #3449) add the Foundry GUI's Agents/Skills
+//! management tabs' full surface — `GET`/`POST /agents`,
+//! `DELETE /agents/{name}` and the `skills` twin — over
+//! `crate::agents::protocol`/`crate::skills::protocol`; distinct from this
+//! module's own [`agents`] group (`GET /sessions/{id}/agents`, the
+//! per-session LIVE roster, unrelated to the disk/embedded catalog these two
+//! new groups manage). Every slice reuses [`respond`]/[`throwaway_ctx`]
+//! rather than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
 //! assertion per `rpc_error_to_status` mapping. See `sessions::tests` for
 //! the Slice 2 route-level coverage.
 
+pub mod agent_catalog;
 pub mod agents;
 pub mod fs;
 pub mod projects;
 pub mod search_audit;
 pub mod sessions;
 pub mod sessions_write;
+pub mod skill_catalog;
 pub mod tasks;
 pub mod workstreams;
 

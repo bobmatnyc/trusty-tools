@@ -915,6 +915,49 @@ of replaying and folding the SSE stream itself.
 > debt (see above), not a re-opening of either concern this callout
 > originally raised.
 
+### 5.4.1 Agent/Skill catalog management — NEW (issue #3449)
+
+**Shipped.** Distinct from §5.4's `session.get_agents` (a per-session LIVE
+roster — "who is running right now"), this is the daemon's disk/embedded
+CATALOG surface — "what agents/skills could I dispatch?", independent of any
+session. Backs the Foundry GUI's Agents/Skills management tabs (§8's
+`NAV_TABS`, amended below) and closes the "no pre-task agent roster
+endpoint" gap `StartWorkingForm`'s agent selector previously carried as a
+standing note.
+
+```rust
+agents.list()                     -> { agents: [{ name, tier, description?, model? }] }
+agents.create({ name, content })  -> { name, tier }   // 403 embedded collision, 409 exists
+agents.delete({ name })           -> {}               // 404 unknown, 403 embedded
+
+skills.list()                     -> { skills: [{ name, tier, description }] }
+skills.create({ name, content })  -> { name, tier: "project" }  // 400 projectless, 403/409
+skills.delete({ name })           -> {}
+```
+
+REST twins: `GET`/`POST /agents`, `DELETE /agents/{name}` and the `skills`
+equivalent (`crate::serve::rest::agent_catalog`/`skill_catalog`).
+
+**Tier model differs between the two catalogs — by design, not oversight.**
+Agents have TWO disk-adjacent tiers behind one `agents_dir` resolution
+(`ProjectBinding::agents_dir`): `"project"` (`<root>/.claude/agents`) when
+bound, `"user"` (`~/.claude/agents`) when projectless — never both at once
+for a single daemon instance. `"embedded"` (32 agents incl. `pm`) is always
+present and read-only; a disk entry of the same name wins and suppresses
+the embedded copy in the listing (mirrors `resolve_agent`'s precedence).
+Skills, by contrast, have exactly ONE disk tier — `"project"`
+(`<project_root>/.claude/skills`) — and NO user-level tier;
+`crate::skills::discover_skill_metadata` never reads a `$HOME`-rooted path,
+so `skills.create`/`skills.delete` require an actually-bound project
+(`-32003 invalid_argument`/`400` when projectless) rather than inventing a
+tier nothing else in the crate consumes. `"bundled"` is skills' read-only
+tier name (trusty-mpm's universal skill set minus `tm-*` orchestration
+skills).
+
+Both `create` endpoints validate `name` against `^[a-z0-9-]+$` — the same
+check doubles as the path-traversal guard (no `/`, `..`, or other
+path-breaking character can match).
+
 ### 5.5 Project binding (PARTIAL — the two surfaces must converge)
 
 **Corrected model** (§4.2) — this is a **daemon-bootstrap / binding-lifecycle** change,
@@ -1674,6 +1717,29 @@ This is carried forward verbatim because it is the one piece of the visual syste
   app's root font-size 10% (rem-scale, `app.css`) per issue #3447 item 3. Explicitly
   NOT in scope: §4A's infinite-thread virtualization/pagination/compaction-boundary
   machinery, which remains unbuilt (Phase 2+).
+- **2026-07-20** — **Agents + Skills management tabs, and their catalog endpoints**
+  (issue #3449). Adds **§5.4.1** (new): `agents.*`/`skills.*` JSON-RPC methods
+  (`agents.list`/`.create`/`.delete`, `skills.list`/`.create`/`.delete`) plus their
+  `GET`/`POST /agents`, `DELETE /agents/{name}` REST twins (and the `skills`
+  equivalent) — the daemon's disk/embedded CATALOG management surface, distinct from
+  §5.4's `session.get_agents` per-session live roster. Amends the shell's tab
+  catalog (§8, `lib/nav-tabs.ts`): an 8th tab, **Skills**, is added immediately
+  after **Agents** — the prior 7-tab catalog (Workstream · Project · Agents ·
+  Memory · Search · Workflow · Files, from issue #3153's build brief) is
+  superseded by Workstream · Project · Agents · **Skills** · Memory · Search ·
+  Workflow · Files. `AgentsTab.svelte` (previously a stub deferring everything
+  to §4.5/§5.4's per-session roster — that feature is UNCHANGED and still not
+  built) is replaced with the new catalog-management UI; `SkillsTab.svelte` is
+  new. Both follow the same "locked, not hidden, when projectless" default
+  (AC-4.2) every non-`workstream`/`workflow` tab already uses. Also closes the
+  "no pre-task agent roster endpoint exists yet" gap `StartWorkingForm`'s agent
+  selector previously carried as a standing note (new `lib/agent-roster.ts`);
+  `task.run`'s/`POST /tasks`' `agent_name` param is unchanged — only a GUI
+  affordance to populate it now exists. **Tier model note:** agents have a
+  `"project"`/`"user"` disk split (mirroring `ProjectBinding::agents_dir`'s
+  existing fallback); skills have exactly one disk tier, `"project"` — no
+  user-level skills directory exists anywhere in the crate (see §5.4.1).
+
 - **2026-07-20** — **Shared project registry becomes the roster's source of truth**
   (issue #3435). Amends **§5.8.1** (`SPEC-TCUI-05~draft`): `GET /projects`/
   `fs.list_projects` is re-sourced from trusty-mpm's shared project registry

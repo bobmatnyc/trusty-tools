@@ -102,8 +102,10 @@ struct HttpState {
 /// `POST /workstreams/{id}/activate`/`.../deactivate` (DOC-48 §5.2, issue
 /// #3294) — plus (issue #3297) `GET /workstreams/{id}/events` (the
 /// workstream-level SSE aggregation route, `crate::workstreams::sse::routes`)
-/// — none of which collide with the paths registered directly on this
-/// router or with each other.
+/// — plus (issue #3449) `GET`/`POST /agents`, `DELETE /agents/{name}` and the
+/// `skills` twin (the Foundry GUI's Agents/Skills management tabs,
+/// `rest::agent_catalog`/`rest::skill_catalog`) — none of which collide with
+/// the paths registered directly on this router or with each other.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
 /// `http_health_matches_jsonrpc_health_payload`,
@@ -117,7 +119,8 @@ struct HttpState {
 /// `http_rest_get_session_search_audit_route_is_merged_in`,
 /// `http_rest_get_workstreams_route_is_merged_in` (also pins the
 /// `GET /workstreams/{id}/events` merge),
-/// `http_rest_get_projects_route_is_merged_in`.
+/// `http_rest_get_projects_route_is_merged_in`,
+/// `http_rest_get_agent_and_skill_catalog_routes_are_merged_in`.
 pub fn build_axum_router(
     router: Arc<Router>,
     sessions: Arc<SessionRegistry>,
@@ -139,6 +142,8 @@ pub fn build_axum_router(
         .merge(rest::fs::routes(router.clone()))
         .merge(rest::projects::routes(router.clone()))
         .merge(rest::agents::routes(router.clone()))
+        .merge(rest::agent_catalog::routes(router.clone()))
+        .merge(rest::skill_catalog::routes(router.clone()))
         .merge(rest::search_audit::routes(router.clone()))
         .merge(rest::workstreams::routes(router))
         .merge(crate::workstreams::sse::routes(workstreams));

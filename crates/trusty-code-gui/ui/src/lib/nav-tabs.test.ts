@@ -10,11 +10,12 @@ import { describe, expect, it } from 'vitest';
 import { NAV_TABS, tabVisibility, type TabId } from './nav-tabs';
 
 describe('NAV_TABS catalog', () => {
-  it('is the 7 canonical tabs, in order', () => {
+  it('is the 8 canonical tabs, in order (skills added by issue #3449)', () => {
     expect(NAV_TABS.map((t) => t.id)).toEqual([
       'workstream',
       'project',
       'agents',
+      'skills',
       'memory',
       'search',
       'workflow',
@@ -29,15 +30,15 @@ describe('tabVisibility', () => {
     expect(tabVisibility('workstream', true, true)).toEqual({ visible: true, locked: false });
   });
 
-  it('project-scoped tabs (e.g. project/agents/memory/search/files) are locked, not hidden, when projectless', () => {
-    const scoped: TabId[] = ['project', 'agents', 'memory', 'search', 'files'];
+  it('project-scoped tabs (e.g. project/agents/skills/memory/search/files) are locked, not hidden, when projectless', () => {
+    const scoped: TabId[] = ['project', 'agents', 'skills', 'memory', 'search', 'files'];
     for (const tab of scoped) {
       expect(tabVisibility(tab, false, false)).toEqual({ visible: true, locked: true });
     }
   });
 
   it('project-scoped tabs unlock once a project is bound, regardless of git-ness', () => {
-    const scoped: TabId[] = ['project', 'agents', 'memory', 'search', 'files'];
+    const scoped: TabId[] = ['project', 'agents', 'skills', 'memory', 'search', 'files'];
     for (const tab of scoped) {
       expect(tabVisibility(tab, true, false)).toEqual({ visible: true, locked: false });
       expect(tabVisibility(tab, true, true)).toEqual({ visible: true, locked: false });

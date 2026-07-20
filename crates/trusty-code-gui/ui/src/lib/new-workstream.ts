@@ -88,17 +88,26 @@ export interface CreateWorkstreamBody {
 }
 
 /** Request body for `POST /tasks`, mirroring
- * `crate::serve::rest::tasks::RunTaskBody` minus `agent_name` (see the
- * module doc's carried-over gap note from `create-session.ts` — this form
- * still never sends `agent_name`; there is no pre-session roster route for
- * it, distinct from this ticket's own project roster). `session_id` is
- * issue #3446's chat-continuation addition — see [`buildRunTaskBody`]'s own
- * doc for why it and `workstream_id` are mutually exclusive on the wire. */
+ * `crate::serve::rest::tasks::RunTaskBody`. `session_id` is issue #3446's
+ * chat-continuation addition — see [`buildRunTaskBody`]'s own doc for why
+ * it and `workstream_id` are mutually exclusive on the wire. `agent_name`
+ * is optional and omitted unless the caller explicitly picks one — issue
+ * #3449 closed the "no pre-session roster route" gap this module's doc
+ * previously carried (`GET /agents`, `lib/agent-roster.ts`), so
+ * `StartWorkingForm.svelte` can now offer a selector; omitting the field
+ * still means "daemon default" exactly as before (`task::protocol`'s own
+ * `agent_name` default, #3437). Unlike `session_id`/`workstream_id`,
+ * `agent_name` is NOT exclusive with either — `task::protocol::task_run`
+ * applies it per-CALL, not just at session mint, so it is sent alongside a
+ * `session_id` reuse too (see [`buildRunTaskBody`]'s doc): otherwise a
+ * resumed session's per-run agent would silently reset to the daemon
+ * default on every follow-up turn. */
 export interface RunTaskBody {
   task_description: string;
   project?: string;
   workstream_id?: string;
   session_id?: string;
+  agent_name?: string;
 }
 
 /** Whether the create-workstream submit control may be enabled. */
@@ -147,26 +156,35 @@ export function buildCreateWorkstreamBody(name: string): CreateWorkstreamBody {
  * Build the `POST /tasks` request body from form state.
  *
  * Why: the single place task text is trimmed and the optional project/
- * workstream/session bindings are attached — kept out of the component so
- * it's testable without mounting Svelte (carried over from
- * `create-session.ts`, extended with `workstream_id` for issue #3365, then
- * `session_id` for issue #3446's chat continuation).
+ * workstream/session/agent bindings are attached — kept out of the
+ * component so it's testable without mounting Svelte (carried over from
+ * `create-session.ts`, extended with `workstream_id` for issue #3365,
+ * `session_id` for issue #3446's chat continuation, and `agentName` for
+ * issue #3449).
  * What: `task_description` is trimmed; `project` is included whenever a
  * project is selected — on BOTH the mint path and the continuation path,
  * since `task.run` treats a per-call `project` that RESTATES a reused
  * session's own persisted binding as valid (`task::protocol::task_run`'s
  * docs: "project may only restate it, not change it"), so there is no need
  * to omit it just because `sessionId` is also present.
- * `sessionId` and `workstreamId` are MUTUALLY EXCLUSIVE on the wire —
- * when `sessionId` is passed (a chat-continuation follow-up reusing an
- * existing session), `workstream_id` is deliberately never sent alongside
- * it: `task::protocol::task_run`'s docs are explicit that on the reuse path
+ * `sessionId` and `workstreamId` are MUTUALLY EXCLUSIVE on the wire — when
+ * `sessionId` is passed (a chat-continuation follow-up reusing an existing
+ * session), `workstream_id` is deliberately never sent alongside it:
+ * `task::protocol::task_run`'s docs are explicit that on the reuse path
  * "`None` here never rejects: ambient default-targeting (§4.2) applies only
  * at a session's FIRST binding, never re-applied on reuse" — the reused
  * session's own persisted workstream binding is already authoritative, so
  * restating it explicitly would be redundant at best. `workstreamId` is
- * only ever sent on the MINT path (`sessionId` absent). `agent_name` is
- * never sent (see the module doc's gap note).
+ * only ever sent on the MINT path (`sessionId` absent).
+ * `agentName` is NOT exclusive with either, unlike `sessionId`/
+ * `workstreamId` — it is included whenever passed and non-empty regardless
+ * of which of those two is set, because `task::protocol::task_run` applies
+ * `agent_name` per-CALL (`spawn_task_run`'s `task_params.agent_name`), not
+ * only at session mint; omitting it on a `sessionId` reuse call would
+ * silently reset a resumed conversation's per-run agent back to the daemon
+ * default on every follow-up turn. An omitted/empty `agentName` (the
+ * selector's "daemon default" option) means the daemon applies its own
+ * default exactly as before issue #3449.
  * Test: `new-workstream.test.ts::buildRunTaskBody`.
  */
 export function buildRunTaskBody(
@@ -174,6 +192,7 @@ export function buildRunTaskBody(
   project: ProjectSelection | null,
   workstreamId?: string | null,
   sessionId?: string | null,
+  agentName?: string | null,
 ): RunTaskBody {
   const body: RunTaskBody = { task_description: task.trim() };
   if (project) body.project = project.path;
@@ -182,6 +201,7 @@ export function buildRunTaskBody(
   } else if (workstreamId) {
     body.workstream_id = workstreamId;
   }
+  if (agentName) body.agent_name = agentName;
   return body;
 }
 

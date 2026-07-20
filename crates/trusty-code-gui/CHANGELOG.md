@@ -8,6 +8,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Agents + Skills management tabs (issue #3449).** Two new nav tabs —
+  `AgentsTab.svelte` (replacing the prior per-session-roster stub) and the
+  new `SkillsTab.svelte` — list the daemon's full agent/skill catalog with
+  tier badges (embedded/bundled = read-only) and add/remove for the
+  user-editable disk tier, via a two-step inline confirm on remove
+  (matching `WorkstreamSwitcher.svelte`'s pattern). New `lib/agent-roster.ts`/
+  `lib/skill-roster.ts` wrap the new `GET`/`POST /agents`,
+  `DELETE /agents/{name}` REST routes (and the `skills` equivalent).
+  `StartWorkingForm.svelte`'s task form gained an optional agent selector,
+  closing the "no pre-task agent roster endpoint exists yet" gap that form
+  previously carried as a standing note — omitting a selection still defers
+  to the daemon's own default, unchanged from before.
+
 ### Changed
 
 - **`ProjectPickerModal` marks unregistered (local-only) roster rows

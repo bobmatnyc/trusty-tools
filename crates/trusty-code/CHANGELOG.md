@@ -8,6 +8,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Agent/Skill catalog management endpoints (issue #3449).** New `agents.*`/
+  `skills.*` JSON-RPC methods (`crate::agents::protocol`,
+  `crate::skills::protocol`) plus their REST twins — `GET`/`POST /agents`,
+  `DELETE /agents/{name}` and the `skills` equivalent
+  (`crate::serve::rest::agent_catalog`/`skill_catalog`) — back the Foundry
+  GUI's new Agents/Skills management tabs. `GET /agents` returns the union of
+  the embedded roster (32 agents incl. `pm`) and the resolved disk tier
+  (`project` when bound, `user` for `~/.claude/agents` when projectless),
+  disk overriding embedded by name; `POST`/`DELETE` manage the disk tier
+  only, refusing to shadow or delete an embedded name (`403`) and refusing
+  to overwrite an existing disk file (`409`). `GET /skills` returns the union
+  of the bundled catalog and a bound project's `.claude/skills/` — there is
+  no user-level skill tier (`crate::skills::protocol`'s docs explain why), so
+  `POST`/`DELETE /skills` require a bound project (`400` when projectless).
+  All names are validated against `[a-z0-9-]+` (also the path-traversal
+  guard).
+
 ### Changed
 
 - **`fs.list_projects` / `GET /projects` re-sourced from trusty-mpm's shared
