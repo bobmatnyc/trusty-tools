@@ -50,7 +50,7 @@
   stroke-width="1.5"
   stroke-linecap="round"
   stroke-linejoin="round"
-  aria-label="Trusty Assistant robot"
+  aria-label="Trusty Code"
   role="img"
 >
   {#if variant === 'badge'}

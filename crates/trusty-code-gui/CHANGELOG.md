@@ -10,6 +10,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **App / dock icon — stale "AI COMMANDER" placeholder replaced with the real
+  Foundry robot mark.** The entire `icons/` set (`icon.png`/`icon.ico`, every
+  PNG size, the `Square*Logo.png` / `StoreLogo.png` tiles) depicted a
+  robot-in-a-terminal reading "AI COMMANDER" — a placeholder for a different
+  product, shown in the macOS dock and app switcher. It is regenerated from a
+  new 1024×1024 master (`icons/icon-master.svg`) derived from the canonical
+  Foundry robot mark (`docs/design/UI/design-system/icons/RobotIcon.svelte`,
+  the `full` hero variant): a dark oxide squircle (`#2B1C12` / deeper `#241610`
+  ground) with the rust-accented (`#b7410e`, the `--trusty-primary` token)
+  robot face — antenna, two eyes, `>_` terminal mouth, sparkle. The set was
+  regenerated with `cargo tauri icon` (rendered SVG→PNG via `rsvg-convert`),
+  which also creates a macOS `icons/icon.icns` (previously absent — the app had
+  no `.icns` bundle icon at all). `tauri.conf.json` now wires `bundle.icon`
+  explicitly to `32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.icns` /
+  `icon.ico` rather than relying on Tauri's implicit lookup. The orphaned,
+  unreferenced `icons/aic-logo.svg` (the "AIC" letterform, wrong product) is
+  deleted.
+
 - **Header brand mark — placeholder diamond replaced with the canonical
   Foundry robot mark.** `AppHeader.svelte` rendered a literal `◆` diamond
   glyph to the left of the "Trusty Code" wordmark — a placeholder, not the
@@ -53,6 +71,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to the daemon's own default, unchanged from before.
 
 ### Changed
+
+- **Branding cleanups.** `ui/index.html`'s `<title>` is corrected from the
+  lowercase crate name `trusty-code` to `Trusty Code`, matching the window
+  title and header wordmark. `tauri.conf.json` gains an explicit
+  `mainBinaryName` of `Trusty Code` so the OS process / bundle binary is no
+  longer the raw crate name `trusty-code-gui`. This crate's vendored
+  `ui/src/lib/icons/RobotIcon.svelte` has its `aria-label` changed from the
+  inherited `Trusty Assistant robot` to the app-appropriate `Trusty Code`
+  (canonical design-system source left unchanged).
 
 - **`ProjectPickerModal` marks unregistered (local-only) roster rows
   (issue #3435).** The daemon's `GET /projects` roster is now primarily
