@@ -1030,6 +1030,60 @@ async fn set_run_outcome_stores_transcript_and_usage() {
     registry.set_run_outcome("nope", turns, crate::perf::TokenUsage::default(), None);
 }
 
+/// (Issue #3298) `set_run_outcome` must record+publish
+/// `Event::SessionActivityUpdate` on the session's own ring buffer/live bus
+/// — but ONLY when the session is workstream-bound (see the gate rationale
+/// on `set_run_outcome`'s docs and the sibling test below).
+#[tokio::test]
+async fn set_run_outcome_publishes_activity_update_when_workstream_bound() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    registry
+        .bind_workstream(&session.id, crate::workstreams::WorkstreamId::new())
+        .expect("bind");
+
+    registry.set_run_outcome(
+        &session.id,
+        vec![],
+        crate::perf::TokenUsage::default(),
+        None,
+    );
+
+    let events = registry.replay(&session.id).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.event, Event::SessionActivityUpdate { has_running_task, .. } if !has_running_task)),
+        "expected a SessionActivityUpdate event: {events:?}"
+    );
+}
+
+/// (PR #3354 CI regression) An UNBOUND session's `set_run_outcome` must
+/// publish NO `SessionActivityUpdate` — the M1 cutline e2e contract
+/// (`tests/m1_cutline_e2e.rs`) freezes the exact event-kind sequence a
+/// plain, workstream-less session emits, and this event is not in that
+/// baseline; unconditional emission broke it on both transports.
+#[tokio::test]
+async fn set_run_outcome_stays_silent_for_unbound_session() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    registry.set_run_outcome(
+        &session.id,
+        vec![],
+        crate::perf::TokenUsage::default(),
+        None,
+    );
+
+    let events = registry.replay(&session.id).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.event, Event::SessionActivityUpdate { .. })),
+        "an unbound session must emit no SessionActivityUpdate (frozen M1 baseline): {events:?}"
+    );
+}
+
 /// `set_run_outcome` must ACCUMULATE across two calls (#2344): the second
 /// run's turns are appended (not replacing the first run's), and usage/cost
 /// are added onto the running total — `session.get_transcript` must reflect

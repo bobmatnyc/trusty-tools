@@ -59,6 +59,8 @@ mod status;
 mod types;
 
 #[cfg(test)]
+mod tests_choices_history;
+#[cfg(test)]
 mod tests_input;
 #[cfg(test)]
 mod tests_render;

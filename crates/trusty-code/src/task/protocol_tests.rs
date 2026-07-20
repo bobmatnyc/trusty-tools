@@ -47,6 +47,7 @@ async fn register_wires_task_run() {
         registry,
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     );
 
     let req = Request {
@@ -88,6 +89,7 @@ async fn register_wires_task_run_projectless() {
         registry,
         ProjectBinding::None,
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     );
 
     let req = Request {
@@ -124,6 +126,7 @@ async fn task_run_rejects_empty_task_description() {
         json!({"task_description": "   "}),
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .unwrap_err();
@@ -149,6 +152,7 @@ async fn task_run_creates_session_when_none_given() {
         json!({"task_description": "say hi"}),
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await;
     unsafe {
@@ -198,6 +202,7 @@ async fn task_run_resolves_and_reports_mode() {
         json!({"task_description": "say hi"}),
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .expect("task.run should succeed");
@@ -222,6 +227,7 @@ async fn task_run_resolves_and_reports_mode() {
         json!({"task_description": "say hi"}),
         ProjectBinding::resolve(Some(project2.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .expect("task.run should succeed");
@@ -235,6 +241,7 @@ async fn task_run_resolves_and_reports_mode() {
         json!({"task_description": "say hi", "mode": "daily-driver"}),
         ProjectBinding::resolve(Some(project2.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .expect("task.run should succeed");
@@ -253,6 +260,7 @@ async fn task_run_resolves_and_reports_mode() {
         json!({"task_description": "say hi", "mode": "daily-driver"}),
         ProjectBinding::resolve(Some(project2.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .expect("task.run should succeed");
@@ -279,6 +287,7 @@ async fn task_run_unknown_session_id_errors() {
         json!({"task_description": "say hi", "session_id": "does-not-exist"}),
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .unwrap_err();
@@ -308,6 +317,7 @@ async fn task_run_without_project_keeps_boot_binding() {
         json!({"task_description": "say hi"}),
         boot_binding.clone(),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .expect("task.run should succeed");
@@ -341,6 +351,7 @@ async fn task_run_with_project_overrides_boot_binding() {
         }),
         ProjectBinding::None,
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .expect("task.run should succeed");
@@ -366,6 +377,7 @@ async fn task_run_rejects_invalid_project() {
         json!({"task_description": "say hi", "project": "/no/such/path/anywhere"}),
         ProjectBinding::None,
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .unwrap_err();
@@ -397,6 +409,7 @@ async fn task_run_sessionful_reuses_existing_session() {
         json!({"task_description": "say hi", "session_id": existing.id}),
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await;
     unsafe {
@@ -434,6 +447,7 @@ async fn task_run_session_id_with_matching_project_succeeds() {
         }),
         ProjectBinding::None,
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await;
     unsafe {
@@ -468,6 +482,7 @@ async fn task_run_session_id_with_mismatched_project_is_rejected() {
         }),
         ProjectBinding::None,
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .unwrap_err();
@@ -506,6 +521,7 @@ async fn task_run_second_call_after_finish_continues_the_session() {
         json!({"task_description": "say hi"}),
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await
     .expect("first task.run should succeed");
@@ -529,6 +545,7 @@ async fn task_run_second_call_after_finish_continues_the_session() {
         json!({"task_description": "say hi again", "session_id": session_id}),
         ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
         agents.path().to_path_buf(),
+        crate::workstreams::test_shared_store().await,
     )
     .await;
     unsafe {
@@ -537,4 +554,187 @@ async fn task_run_second_call_after_finish_continues_the_session() {
     let value = second.expect("a second task.run on a Finished session must be accepted");
     assert_eq!(value["session_id"], session_id);
     assert_eq!(value["status"], "running");
+}
+
+// -- Workstream binding (DOC-48 §4.1/§4.2, issue #3298) --
+
+/// Seed a workstream and activate it on `workstreams`, returning its id.
+async fn seed_active_workstream(
+    workstreams: &crate::workstreams::SharedWorkstreamStore,
+) -> crate::workstreams::WorkstreamId {
+    let id = workstreams
+        .lock()
+        .await
+        .create("active")
+        .await
+        .expect("create");
+    crate::workstreams::activation::activate(workstreams, id, false)
+        .await
+        .expect("activate");
+    id
+}
+
+/// `task.run` minting a NEW session with no explicit `workstream_id`, while
+/// a workstream is active, must bind to the ACTIVE workstream (§4.2) and
+/// publish `Event::SessionAdded`.
+#[tokio::test]
+async fn task_run_binds_ambient_active_workstream_and_publishes_session_added() {
+    let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+    unsafe {
+        std::env::set_var(
+            super::super::mock_llm::MOCK_LLM_ENV,
+            super::super::mock_llm::MOCK_LLM_ECHO,
+        );
+    }
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let active_id = seed_active_workstream(&workstreams).await;
+
+    let mut rx = crate::events::subscribe();
+    let value = task_run(
+        Arc::clone(&registry),
+        json!({"task_description": "say hi"}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams.clone(),
+    )
+    .await;
+    unsafe {
+        std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+    }
+    let value = value.expect("task.run should succeed");
+    let session_id = value["session_id"].as_str().unwrap().to_string();
+
+    let status = registry.status(&session_id).expect("status");
+    assert_eq!(status.workstream_id, Some(active_id));
+
+    let found = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let envelope = rx.recv().await.expect("event bus channel closed");
+            if let crate::events::Event::SessionAdded {
+                session_id: sid,
+                workstream_id,
+                ..
+            } = envelope.event
+                && sid == session_id
+            {
+                return workstream_id;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for SessionAdded");
+    assert_eq!(found, active_id.to_string());
+}
+
+/// `task.run` reusing an EXISTING session that is already bound to a
+/// workstream, with a `workstream_id` param naming a DIFFERENT workstream,
+/// must be rejected (§4.1 AC-1.3 immutability) — mirroring the sibling
+/// `project` mismatch guard.
+#[tokio::test]
+async fn task_run_mismatched_workstream_on_reuse_is_rejected() {
+    let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+    unsafe {
+        std::env::set_var(
+            super::super::mock_llm::MOCK_LLM_ENV,
+            super::super::mock_llm::MOCK_LLM_ECHO,
+        );
+    }
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let bound_id = seed_active_workstream(&workstreams).await;
+
+    let first = task_run(
+        Arc::clone(&registry),
+        json!({"task_description": "say hi"}),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams.clone(),
+    )
+    .await
+    .expect("first task.run should succeed");
+    let session_id = first["session_id"].as_str().unwrap().to_string();
+
+    let other_id = workstreams
+        .lock()
+        .await
+        .create("other")
+        .await
+        .expect("create");
+    let err = task_run(
+        Arc::clone(&registry),
+        json!({
+            "task_description": "say hi again",
+            "session_id": session_id,
+            "workstream_id": other_id.to_string(),
+        }),
+        ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+        agents.path().to_path_buf(),
+        workstreams.clone(),
+    )
+    .await;
+    unsafe {
+        std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+    }
+    let err = err.expect_err("a mismatched workstream_id on reuse must be rejected");
+    assert_eq!(err.code, -32003);
+    assert_ne!(bound_id, other_id);
+}
+
+/// (PR #3354 code-critic HIGH 2 regression) A rejected bind on `task.run`'s
+/// mint path must leave the `SessionRegistry` UNCHANGED — no phantom,
+/// caller-invisible session may survive the error — for ALL THREE
+/// caller-triggerable failure modes: closed workstream, unknown workstream,
+/// malformed id. No mock-LLM env is needed: the rejection fires before
+/// `build_llm_client` is ever reached.
+#[tokio::test]
+async fn task_run_rejected_bind_leaves_no_phantom_session() {
+    let registry = Arc::new(SessionRegistry::new());
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let workstreams = crate::workstreams::test_shared_store().await;
+    let closed = workstreams
+        .lock()
+        .await
+        .create("closed")
+        .await
+        .expect("create");
+    workstreams.lock().await.close(closed).await.expect("close");
+
+    let cases: &[(&str, String, i32)] = &[
+        ("closed workstream", closed.to_string(), -32003),
+        (
+            "unknown workstream",
+            crate::workstreams::WorkstreamId::new().to_string(),
+            -32002,
+        ),
+        ("malformed id", "not-a-uuid".to_string(), -32602),
+    ];
+    for (label, ws_id, expected_code) in cases {
+        let before = registry.list().len();
+        let err = task_run(
+            Arc::clone(&registry),
+            json!({"task_description": "say hi", "workstream_id": ws_id}),
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+            agents.path().to_path_buf(),
+            workstreams.clone(),
+        )
+        .await
+        .expect_err("bind must be rejected");
+        assert_eq!(err.code, *expected_code, "{label}: wrong error code");
+        assert_eq!(
+            registry.list().len(),
+            before,
+            "{label}: a rejected bind must not leave a phantom session"
+        );
+    }
+    assert_eq!(
+        registry.list().len(),
+        0,
+        "no session may exist after three rejected task.run calls"
+    );
 }

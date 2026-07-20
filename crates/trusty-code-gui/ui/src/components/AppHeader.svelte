@@ -2,28 +2,25 @@
   // Why: DOC-39 §2's "two nested scopes" framing (issue #3153 shell rebuild)
   // — the header is the OUTER "app context" scope: branding + the
   // workstream switcher, always present, rendering an empty or hydrated
-  // state (§4.4 AC-4.1). Phase 1 has no workstream registry yet (§6.3/7B —
-  // "single synthetic current session entry, no registry"), so the
-  // workstream box is a READ-ONLY label rather than a real switcher.
-  //
-  // DOC-48 reservation (PR #3284, tcode workstreams spec): a NEW spec
-  // reserves a workstream-switcher control slot in this exact header
-  // position per DOC-39 §2/§8. This component must not preclude that slot —
-  // it renders a disabled placeholder control next to the read-only label
-  // rather than omitting the affordance outright, so DOC-48's follow-up
-  // only needs to enable it, not carve out header space from scratch.
+  // state (§4.4 AC-4.1). Phase 1 shipped a READ-ONLY label + disabled `▾`
+  // placeholder here because "Phase 1 has no workstream registry yet"; DOC-48
+  // (epic #3292) built that registry, and its Phase C — issue #3300 — is the
+  // real switcher now mounted in the exact slot the placeholder reserved:
+  // `WorkstreamSwitcher.svelte` (state display, activation, close, rename;
+  // see its own module docs for the full design).
   //
   // Tokens/cost on the right is a compact GLOBAL readout (distinct from
   // `StatusBar.svelte`'s per-session TOKENS/COST segments) — both are stub
   // text today since live cost tracking is issue #3254, not yet shipped.
   //
-  // What: A `.hdr` flex row: brand mark + name on the left, the read-only
-  // workstream box + reserved switcher slot in the middle, tokens/cost stub
-  // + a disabled settings control on the right.
+  // What: A `.hdr` flex row: brand mark + name on the left, `WorkstreamSwitcher`
+  // in the middle, tokens/cost stub + a disabled settings control on the
+  // right.
   // Test: `App.test.ts` pins `.hdr` renders inside `.app` as the shell's
-  // first child (structural smoke coverage) — no dedicated
-  // `AppHeader.test.ts` exists yet since every value here is static Phase 1
-  // stub content, nothing pure/branchy to unit-test independently.
+  // first child (structural smoke coverage); `WorkstreamSwitcher.test.ts`
+  // covers the switcher itself — this component has no branchy logic of its
+  // own to test independently.
+  import WorkstreamSwitcher from './WorkstreamSwitcher.svelte';
 </script>
 
 <header
@@ -37,21 +34,7 @@
   </div>
 
   <div class="flex min-w-0 flex-1 items-center justify-center gap-1.5">
-    <span
-      class="truncate rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-2.5 py-1 font-mono text-[11px] uppercase tracking-wide text-trusty-text-secondary"
-      title="Workstream switcher lands with DOC-48 (PR #3284) — Phase 1 shows the current workstream as a read-only label."
-    >
-      workstream: current session
-    </span>
-    <button
-      type="button"
-      disabled
-      aria-label="switch workstream"
-      title="Workstream switcher — reserved slot, DOC-48 (PR #3284), not yet built"
-      class="rounded-sm border-1.5 border-trusty-border bg-trusty-card px-1.5 py-1 font-mono text-[10px] text-trusty-text-muted disabled:cursor-not-allowed disabled:opacity-50"
-    >
-      ▾
-    </button>
+    <WorkstreamSwitcher />
   </div>
 
   <div class="flex items-center gap-3">

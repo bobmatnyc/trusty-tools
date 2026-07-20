@@ -15,7 +15,8 @@
    * Personality — App.svelte owns `activeView`; this component only
    * dispatches `switch-view` so App.svelte's unsaved-Personality-buffer
    * guard in `switchView()` stays the single gate on navigation), the
-   * `AgentSwitcher` roster dropdown (#3223), a DESKTOP/WEB transport badge
+   * `AgentSwitcher` roster dropdown (#3223), the `ModelSwitcher` model/
+   * provider picker (#3245), a DESKTOP/WEB transport badge
    * (replaces the old floating pill), an API READY/CONNECTING status badge
    * driven by `apiReady`, and `ThemeToggle`.
    * Test: Mount `<Header activeView="chat" apiReady={true} />`, verify the
@@ -28,6 +29,7 @@
   import RobotIcon from '../lib/icons/RobotIcon.svelte';
   import ThemeToggle from './ThemeToggle.svelte';
   import AgentSwitcher from './AgentSwitcher.svelte';
+  import ModelSwitcher from './ModelSwitcher.svelte';
   import { isDesktop } from '../lib/transport';
 
   export let activeView: 'chat' | 'projects' | 'personality' = 'chat';
@@ -81,6 +83,7 @@
     </div>
 
     <AgentSwitcher />
+    <ModelSwitcher />
 
     <span
       class="rounded-md border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide {desktop

@@ -8,6 +8,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Known-sibling port guard extended to `trusty-mpm`'s supervisor metrics
+  listener (7881) and `trusty-code`'s new default (7882) (#3364).**
+  `default_port_does_not_collide_with_known_siblings` now also rejects a
+  future `DEFAULT_PORT` edit that collides with either — the supervisor
+  entry was previously missing from every sibling's guard table, which is
+  how it silently collided with `trusty-code`'s old default.
+- **trusty-agents proxy route (#3331):** `agents` is now in the reverse-proxy
+  allowlist, so the trusty-agents API surface is reachable via `/api/agents/*`.
+  Under the loopback-only doctrine (#3328) the agents daemon binds `127.0.0.1`
+  by default, making this console proxy the intended remote path to it. A new
+  `AgentsConnector` resolves the daemon's live base URL from the standard
+  `http_addr` discovery file — the same mechanism the other proxied siblings use
+  (`resolve_data_dir("trusty-agents")/http_addr`, gated on the `tagent` binary).
+  `all_connectors()` now returns six connectors.
+
 ### Changed
 
 - **Security (internal):** the write-origin (CSRF) guard implementation moved

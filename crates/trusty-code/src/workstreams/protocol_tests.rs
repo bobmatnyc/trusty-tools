@@ -91,8 +91,9 @@ async fn register_wires_create_get_list_close() {
     let id = resp.result.unwrap()["id"].clone();
 
     for (method, params) in [
-        ("workstream.get", json!({"id": id})),
+        ("workstream.get", json!({"id": id.clone()})),
         ("workstream.list", json!({})),
+        ("workstream.rename", json!({"id": id.clone(), "name": "B"})),
         ("workstream.close", json!({"id": id})),
     ] {
         let resp = router.dispatch(req(method, params), &test_ctx()).await;
@@ -415,6 +416,48 @@ async fn close_succeeds_and_clears_active_pointer() {
     assert_eq!(list_result["active_workstream_id"], Value::Null);
 }
 
+/// (issue #3297) `workstream.close` must publish
+/// `Event::WorkstreamStateInferred{state: "closed"}`.
+#[tokio::test]
+async fn close_publishes_state_inferred() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create")["id"]
+        .clone();
+    let ws_id: WorkstreamId = serde_json::from_value(id.clone()).unwrap();
+
+    let mut rx = crate::events::subscribe();
+    close(&store, json!({"id": id}), test_ctx())
+        .await
+        .expect("close");
+
+    // `crate::events::bus()` is a process-wide singleton shared by every
+    // concurrently-running test (issue #3297 CI: `cargo test` runs tests in
+    // parallel by default, so a raw `rx.recv().await` can observe another
+    // test's unrelated envelope first) — loop past anything that doesn't
+    // name THIS test's own workstream id, mirroring
+    // `workstreams::activation_tests::next_state_inferred_for`.
+    let target = ws_id.to_string();
+    let (state, _reason) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let envelope = rx.recv().await.expect("event bus channel closed");
+            if let crate::events::Event::WorkstreamStateInferred {
+                workstream_id,
+                state,
+                reason,
+            } = envelope.event
+                && workstream_id == target
+            {
+                return (state, reason);
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for WorkstreamStateInferred naming this workstream");
+    assert_eq!(state, "closed");
+}
+
 #[tokio::test]
 async fn close_unknown_id_maps_to_not_found() {
     let (store, _dir) = shared_store().await;
@@ -426,4 +469,222 @@ async fn close_unknown_id_maps_to_not_found() {
     .await
     .unwrap_err();
     assert_eq!(err.code, -32002);
+}
+
+/// `workstream.rename` (issue #3300, Phase C) must overwrite `name` and
+/// return the updated view.
+#[tokio::test]
+async fn rename_succeeds_and_returns_updated_view() {
+    let (store, _dir) = shared_store().await;
+    let id = create(&store, json!({"name": "A"}), test_ctx())
+        .await
+        .expect("create")["id"]
+        .clone();
+
+    let renamed = rename(&store, json!({"id": id, "name": "B"}), test_ctx())
+        .await
+        .expect("rename");
+    assert_eq!(renamed["name"], "B");
+    assert_eq!(renamed["state"], "idle");
+}
+
+#[tokio::test]
+async fn rename_unknown_id_maps_to_not_found() {
+    let (store, _dir) = shared_store().await;
+    let err = rename(
+        &store,
+        json!({"id": WorkstreamId::new().to_string(), "name": "B"}),
+        test_ctx(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, -32002);
+}
+
+#[tokio::test]
+async fn rename_invalid_params_maps_to_invalid_params() {
+    let (store, _dir) = shared_store().await;
+    let err = rename(&store, json!({"id": "not-a-uuid", "name": "B"}), test_ctx())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, trusty_common::mcp::error_codes::INVALID_PARAMS);
+}
+
+// -- resolve_validate_bind / check_workstream_immutable (issue #3298;
+//    validate-before-mint atomicity per PR #3354 code-critic HIGH 1 & 2) --
+
+/// A mint closure that returns a fixed id and records whether it ran — the
+/// critic's required property is precisely "the mint must NOT run on any
+/// rejected bind".
+fn tracked_mint(
+    id: &str,
+) -> (
+    impl FnOnce() -> String,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    let minted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = minted.clone();
+    let id = id.to_string();
+    (
+        move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            id
+        },
+        minted,
+    )
+}
+
+#[tokio::test]
+async fn resolve_validate_bind_explicit_wins_over_active() {
+    let (store, _dir) = shared_store().await;
+    let active = seed_workstream(&store, "active").await;
+    let explicit = seed_workstream(&store, "explicit").await;
+    activation::activate(&store, active, false)
+        .await
+        .expect("activate");
+
+    let (session_id, bound) =
+        resolve_validate_bind(&store, Some(&explicit.to_string()), "test", || {
+            "s-1".to_string()
+        })
+        .await
+        .expect("resolve");
+    assert_eq!(session_id, "s-1");
+    assert_eq!(bound, Some(explicit));
+    let ws = store.lock().await.get(explicit).await.expect("get");
+    assert_eq!(ws.session_ids, vec!["s-1".to_string()]);
+}
+
+#[tokio::test]
+async fn resolve_validate_bind_falls_back_to_active() {
+    let (store, _dir) = shared_store().await;
+    let active = seed_workstream(&store, "active").await;
+    activation::activate(&store, active, false)
+        .await
+        .expect("activate");
+
+    let (_, bound) = resolve_validate_bind(&store, None, "test", || "s-1".to_string())
+        .await
+        .expect("resolve");
+    assert_eq!(bound, Some(active));
+}
+
+#[tokio::test]
+async fn resolve_validate_bind_none_when_nothing_active() {
+    let (store, _dir) = shared_store().await;
+    let (session_id, bound) = resolve_validate_bind(&store, None, "test", || "s-1".to_string())
+        .await
+        .expect("resolve");
+    assert_eq!(session_id, "s-1", "the projectless path must still mint");
+    assert_eq!(
+        bound, None,
+        "no explicit param and nothing active must stay projectless"
+    );
+}
+
+#[tokio::test]
+async fn resolve_validate_bind_rejects_closed_target_without_minting() {
+    let (store, _dir) = shared_store().await;
+    let id = seed_workstream(&store, "closed").await;
+    store.lock().await.close(id).await.expect("close");
+    let (mint, minted) = tracked_mint("s-1");
+
+    let err = resolve_validate_bind(&store, Some(&id.to_string()), "test", mint)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, -32003);
+    assert!(
+        !minted.load(std::sync::atomic::Ordering::SeqCst),
+        "a rejected bind must never mint a session (PR #3354 HIGH)"
+    );
+}
+
+#[tokio::test]
+async fn resolve_validate_bind_rejects_unknown_id_without_minting() {
+    let (store, _dir) = shared_store().await;
+    let (mint, minted) = tracked_mint("s-1");
+
+    let err = resolve_validate_bind(&store, Some(&WorkstreamId::new().to_string()), "test", mint)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, -32002);
+    assert!(
+        !minted.load(std::sync::atomic::Ordering::SeqCst),
+        "a rejected bind must never mint a session (PR #3354 HIGH)"
+    );
+}
+
+#[tokio::test]
+async fn resolve_validate_bind_rejects_malformed_id_without_minting() {
+    let (store, _dir) = shared_store().await;
+    let (mint, minted) = tracked_mint("s-1");
+
+    let err = resolve_validate_bind(&store, Some("not-a-uuid"), "test", mint)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, -32602);
+    assert!(
+        !minted.load(std::sync::atomic::Ordering::SeqCst),
+        "a rejected bind must never mint a session (PR #3354 HIGH)"
+    );
+}
+
+/// A rejected AMBIENT target (the active workstream was closed out from
+/// under the pointer) must likewise reject without minting — the ambient
+/// path validates identically to the explicit one.
+#[tokio::test]
+async fn resolve_validate_bind_rejects_closed_ambient_target_without_minting() {
+    let (store, _dir) = shared_store().await;
+    let active = seed_workstream(&store, "active").await;
+    activation::activate(&store, active, false)
+        .await
+        .expect("activate");
+    // `close` clears the active pointer, so force the dangling-pointer shape
+    // directly at the store level: close, then restore the pointer as a
+    // simulated concurrent-writer artifact.
+    store.lock().await.close(active).await.expect("close");
+    store
+        .lock()
+        .await
+        .set_active(Some(active))
+        .await
+        .expect("restore pointer");
+    let (mint, minted) = tracked_mint("s-1");
+
+    let err = resolve_validate_bind(&store, None, "test", mint)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, -32003);
+    assert!(
+        !minted.load(std::sync::atomic::Ordering::SeqCst),
+        "a rejected ambient bind must never mint a session"
+    );
+}
+
+#[test]
+fn check_workstream_immutable_allows_none() {
+    let existing = Some(WorkstreamId::new());
+    assert!(check_workstream_immutable(existing, None, "test").is_ok());
+}
+
+#[test]
+fn check_workstream_immutable_allows_restating_same_id() {
+    let id = WorkstreamId::new();
+    assert!(check_workstream_immutable(Some(id), Some(&id.to_string()), "test").is_ok());
+}
+
+#[test]
+fn check_workstream_immutable_rejects_mismatch() {
+    let existing = WorkstreamId::new();
+    let requested = WorkstreamId::new();
+    let err = check_workstream_immutable(Some(existing), Some(&requested.to_string()), "test")
+        .unwrap_err();
+    assert_eq!(err.code, -32003);
+}
+
+#[test]
+fn check_workstream_immutable_rejects_binding_an_unbound_session() {
+    let requested = WorkstreamId::new();
+    let err = check_workstream_immutable(None, Some(&requested.to_string()), "test").unwrap_err();
+    assert_eq!(err.code, -32003);
 }

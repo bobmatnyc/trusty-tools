@@ -8,8 +8,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`serve::DEFAULT_HTTP_PORT` moved from 7881 to 7882 (closes #3364).** The
+  old default silently collided with `trusty-mpm`'s supervisor metrics
+  listener (`DEFAULT_METRICS_ADDR`, also 7881) — the supervisor's generic
+  `/health` masked the collision by answering `{"status":"ok"}`, so both
+  ops probes and the `trusty-code-gui` client saw a false-healthy daemon
+  while every real `tcode` route 404'd. `trusty-code-gui`'s hardcoded
+  `DEFAULT_DAEMON_URL` moves in lockstep; a new cross-crate test
+  (`default_daemon_url_matches_tcode_default_http_port` in
+  `trusty-code-gui/src/state.rs`) pins the two together. See
+  `docs/architecture/port-assignments.md` for the full workspace port table
+  this fix introduces.
+
 ### Added
 
+- **`workstream.rename` RPC + REST verb (issue #3300, DOC-48 §5.1, Phase C).**
+  `workstream.rename{id, name} -> Workstream` overwrites a workstream's name
+  and refreshes `updated_at`; `-32002 not_found` for an unknown `id`. REST
+  twin: `POST /workstreams/{id}/rename` (JSON body `{"name": string}`),
+  mapped `404` for the same case. Renaming a closed workstream is allowed —
+  closure only rejects new session bindings (§4.4), not label edits. DOC-48
+  §5.1 marked this verb "future, Phase C" when Phase 1A shipped; this is
+  that phase's first caller, the GUI workstream switcher.
 - **`tcode workstream` / `tcode ws` CLI family (issue #3296, DOC-48 §5.4,
   epic #3292).** `list [--include-closed]` (tmux-`list-sessions`-style
   table: id prefix, state, session count, humanized age, name — `*` marks

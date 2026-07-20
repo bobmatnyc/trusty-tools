@@ -15,7 +15,7 @@
 //! `POST /rpc` directly, exactly as `tests/session_e2e.rs`'s HTTP scenario
 //! already does.
 //! What: [`TcodeConnector::new`] targets the default `tcode serve --http`
-//! port ([`crate::serve::DEFAULT_HTTP_PORT`], `7881`);
+//! port ([`crate::serve::DEFAULT_HTTP_PORT`], `7882`);
 //! [`TcodeConnector::with_daemon_url`] targets an explicit daemon (every test
 //! in `tests/connector_e2e.rs` uses this against a `--port 0` instance). Every
 //! trait method's doc comment states the exact route/method it maps onto.

@@ -166,6 +166,14 @@ pub(super) struct Cli {
     #[arg(long)]
     pub(super) port: Option<u16>,
 
+    /// Interface to bind the API server on (#3329). Defaults to loopback
+    /// (`127.0.0.1`). A non-loopback bind (e.g. `0.0.0.0`) is an explicit
+    /// opt-in and REQUIRES `--api-token`; the server refuses to start
+    /// unauthenticated on a non-loopback interface. Prefer the trusty-console
+    /// proxy (`/api/agents/*`) for remote access over binding this directly.
+    #[arg(long)]
+    pub(super) bind: Option<std::net::IpAddr>,
+
     /// Bearer token required for `POST /api/task` (overrides
     /// `TAGENT_API_TOKEN`).
     #[arg(long = "api-token")]

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-agents-common"
-version = "0.2.2"
+version = "0.2.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -33,6 +33,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 # workstreams::ledger assigns each Workstream a UUIDv4 id (#3008, twin Phase 2).
 uuid = { workspace = true }
+# transport::aggregate_live is Stream-combinator based (filter_map over a
+# boxed EventSource stream); StreamExt is not in std (#3299, DOC-48 AC-7).
+futures-util = { workspace = true }
 
 [dev-dependencies]
 # session_registry tests use tempfile for isolated state-dir creation.
@@ -40,3 +43,6 @@ tempfile = { workspace = true }
 # events::tests use serial_test to serialise tests that share the
 # process-global broadcast bus (issue #2961; precedent: #2271 bm25_client).
 serial_test = { workspace = true }
+# transport_tests exercises EventSource over a real tokio broadcast channel,
+# wrapped as a Stream via BroadcastStream (#3299).
+tokio-stream = { workspace = true }

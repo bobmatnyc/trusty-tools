@@ -123,6 +123,19 @@ pub struct Session {
     /// older persisted/serialized `Session` without the field still reads back.
     #[serde(default)]
     pub binding: crate::binding::ProjectBinding,
+    /// (Issue #3298, DOC-48 §4.1) The workstream this session is bound to, if
+    /// any. `None` means projectless/unbound — a fully valid state (DOC-39
+    /// §4.2), not a missing one. Set exactly once, at creation
+    /// (`session::protocol::create` / `task::protocol::task_run` resolve
+    /// either an explicit `workstream_id` param or §4.2's ambient
+    /// active-workstream default before calling
+    /// `SessionRegistry::bind_workstream`); there is no setter that changes
+    /// it afterward, mirroring `binding`'s own immutability convention — see
+    /// `SessionRegistry::bind_workstream`'s docs for the enforcement point.
+    /// `#[serde(default)]` keeps an older persisted/serialized `Session`
+    /// (predating this field) reading back as unbound.
+    #[serde(default)]
+    pub workstream_id: Option<crate::workstreams::model::WorkstreamId>,
 }
 
 #[cfg(test)]
@@ -200,6 +213,7 @@ mod tests {
             status: SessionStatus::Running,
             created_at: Utc::now(),
             mode: Some(crate::mode::HarnessMode::DailyDriver),
+            workstream_id: None,
         };
         let value = serde_json::to_value(&session).unwrap();
         assert_eq!(value["id"], "s-1");
@@ -232,6 +246,7 @@ mod binding_model_tests {
             status: SessionStatus::Running,
             created_at: Utc::now(),
             mode: None,
+            workstream_id: None,
         };
         let value = serde_json::to_value(&session).expect("serialize");
         assert_eq!(value["binding"]["state"], "projectless");
@@ -251,5 +266,32 @@ mod binding_model_tests {
             crate::binding::ProjectBinding::None,
             "a missing binding field must default to projectless"
         );
+        assert_eq!(
+            back.workstream_id, None,
+            "a missing workstream_id field must default to unbound"
+        );
+    }
+
+    /// (Issue #3298) A `Session` bound to a workstream must round-trip that
+    /// binding through JSON.
+    #[test]
+    fn workstream_bound_session_round_trips() {
+        let ws_id = crate::workstreams::model::WorkstreamId::new();
+        let session = Session {
+            id: "s-1".to_string(),
+            task: "t".to_string(),
+            agent: None,
+            project: None,
+            binding: crate::binding::ProjectBinding::None,
+            status: SessionStatus::Running,
+            created_at: Utc::now(),
+            mode: None,
+            workstream_id: Some(ws_id),
+        };
+        let value = serde_json::to_value(&session).expect("serialize");
+        assert_eq!(value["workstream_id"], ws_id.to_string());
+
+        let back: Session = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back.workstream_id, Some(ws_id));
     }
 }

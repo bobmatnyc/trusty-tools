@@ -48,7 +48,7 @@ use tracing::info;
 use crate::binding::ProjectBinding;
 use crate::jsonrpc::Router;
 use crate::session::SessionRegistry;
-use crate::workstreams::WorkstreamStore;
+use crate::workstreams::{SharedWorkstreamStore, WorkstreamStore};
 
 /// How long a graceful stop waits for in-flight `task.run` executions to
 /// observe cancellation and unwind before the process exits anyway.
@@ -63,13 +63,25 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// Why: the trusty-* family reserves a block of fixed local ports so
 /// operators/tooling can find a daemon without a discovery file
 /// (`trusty-memory` 7070, `trusty-search` 7878, `trusty-analyze` 7879,
-/// `trusty-review` 7880). `7881` is the next free port in that sequence.
+/// `trusty-mpm` daemon 7880, `trusty-review` 7891, `trusty-embedderd`
+/// `--http` mode 7890). This constant previously reused `7881`, which turned
+/// out to collide with `trusty-mpm`'s supervisor metrics listener
+/// (`trusty_mpm::supervisor::config::DEFAULT_METRICS_ADDR`,
+/// `crates/trusty-mpm/src/supervisor/config.rs`) — the two defaults were
+/// picked independently and nothing pinned them apart, so a fresh install
+/// with both `tm supervisor` and `tcode serve` running answered `/health` on
+/// `tcode`'s port with the supervisor's generic `{"status":"ok"}`, masking a
+/// real 404 for every other route (#3364). `7882` is verified free against
+/// the full known-sibling table in
+/// `docs/architecture/port-assignments.md` and matches the session-local
+/// workaround used to confirm the fix (`tcode serve --http --port 7882`).
 /// Pass `--port 0` to bind an OS-assigned ephemeral port instead (e.g. for
 /// tests or running multiple instances side by side); the real bound port
 /// is always logged to stderr regardless of which is used.
-/// What: `7881`.
-/// Test: `default_http_port_is_documented_value`.
-pub const DEFAULT_HTTP_PORT: u16 = 7881;
+/// What: `7882`.
+/// Test: `default_http_port_is_documented_value`,
+/// `default_http_port_does_not_collide_with_known_siblings`.
+pub const DEFAULT_HTTP_PORT: u16 = 7882;
 
 /// Assemble the router (+ its session registry) with every method this
 /// build of `tcode` knows about, scoped to `project`.
@@ -118,12 +130,21 @@ pub const DEFAULT_HTTP_PORT: u16 = 7881;
 /// resolves via `ProjectBinding::agents_dir`, which falls back to the
 /// user-level `~/.claude/agents` when projectless rather than to the process
 /// CWD (which would silently bind a directory nobody chose).
+/// (issue #3297) Also returns the [`SharedWorkstreamStore`] itself (not just
+/// the `Router` it registered `workstream.*` against) — `run_http` needs the
+/// SAME handle to hand to `crate::serve::http::run_http`, which merges
+/// `crate::workstreams::sse::routes` (the `GET /workstreams/{id}/events`
+/// aggregation route) alongside the JSON-RPC-backed REST surface. This is
+/// why the return type grew a third element rather than staying a 2-tuple.
+///
 /// Test: `run_stdio_router_recognises_proof_of_life_methods`,
 /// `build_router_wires_session_methods`, `build_router_wires_task_run`,
 /// `build_router_is_projectless_without_a_project`,
 /// `build_router_wires_fs_list_dir`, `build_router_wires_workstream_methods`,
 /// `build_router_reconciles_dangling_active_pointer_on_boot`.
-pub async fn build_router(binding: ProjectBinding) -> Result<(Router, Arc<SessionRegistry>)> {
+pub async fn build_router(
+    binding: ProjectBinding,
+) -> Result<(Router, Arc<SessionRegistry>, SharedWorkstreamStore)> {
     build_router_at(binding, &crate::workstreams::default_data_dir()).await
 }
 
@@ -142,7 +163,7 @@ pub async fn build_router(binding: ProjectBinding) -> Result<(Router, Arc<Sessio
 async fn build_router_at(
     binding: ProjectBinding,
     data_dir: &std::path::Path,
-) -> Result<(Router, Arc<SessionRegistry>)> {
+) -> Result<(Router, Arc<SessionRegistry>, SharedWorkstreamStore)> {
     let sessions = Arc::new(SessionRegistry::new());
     let agents_dir = binding.agents_dir();
 
@@ -157,11 +178,17 @@ async fn build_router_at(
 
     let mut router = Router::new();
     methods::register(&mut router);
-    crate::session::protocol::register(&mut router, sessions.clone());
+    crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::fs_browse::protocol::register(&mut router);
-    crate::task::protocol::register(&mut router, sessions.clone(), binding, agents_dir);
-    crate::workstreams::protocol::register(&mut router, workstreams);
-    Ok((router, sessions))
+    crate::task::protocol::register(
+        &mut router,
+        sessions.clone(),
+        binding,
+        agents_dir,
+        workstreams.clone(),
+    );
+    crate::workstreams::protocol::register(&mut router, workstreams.clone());
+    Ok((router, sessions, workstreams))
 }
 
 /// Run `tcode serve --stdio` to completion.
@@ -182,7 +209,7 @@ pub async fn run_stdio(binding: ProjectBinding) -> Result<()> {
         project = binding.label().unwrap_or_else(|| "<projectless>".into()),
         "tcode serve --stdio: starting"
     );
-    let (router, sessions) = build_router(binding).await?;
+    let (router, sessions, _workstreams) = build_router(binding).await?;
     transport::run_stdio_loop(router).await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --stdio: stopped");
@@ -207,8 +234,8 @@ pub async fn run_http(binding: ProjectBinding, port: u16) -> Result<()> {
         port,
         "tcode serve --http: starting"
     );
-    let (router, sessions) = build_router(binding).await?;
-    http::run_http(router, sessions.clone(), port).await?;
+    let (router, sessions, workstreams) = build_router(binding).await?;
+    http::run_http(router, sessions.clone(), workstreams, port).await?;
     sessions.shutdown_executions(SHUTDOWN_GRACE).await;
     info!("tcode serve --http: stopped");
     Ok(())
@@ -230,7 +257,7 @@ mod tests {
     async fn run_stdio_router_recognises_proof_of_life_methods() {
         let project = tempfile::tempdir().expect("project tempdir");
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, _sessions) = build_router_at(
+        let (router, _sessions, _workstreams) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             data_dir.path(),
         )
@@ -258,7 +285,7 @@ mod tests {
     async fn build_router_wires_session_methods() {
         let project = tempfile::tempdir().expect("project tempdir");
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, sessions) = build_router_at(
+        let (router, sessions, _workstreams) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             data_dir.path(),
         )
@@ -288,7 +315,7 @@ mod tests {
     async fn build_router_wires_fs_list_dir() {
         let project = tempfile::tempdir().expect("project tempdir");
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, _sessions) = build_router_at(
+        let (router, _sessions, _workstreams) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             data_dir.path(),
         )
@@ -310,12 +337,86 @@ mod tests {
         assert!(resp.result.expect("result")["entries"].is_array());
     }
 
-    /// `DEFAULT_HTTP_PORT` must stay the documented value (7881) so a
+    /// `DEFAULT_HTTP_PORT` must stay the documented value (7882) so a
     /// change is a deliberate edit to both the constant and its doc comment,
     /// not an accidental drift.
     #[test]
     fn default_http_port_is_documented_value() {
-        assert_eq!(DEFAULT_HTTP_PORT, 7881);
+        assert_eq!(DEFAULT_HTTP_PORT, 7882);
+    }
+
+    /// Cross-crate port-uniqueness contract (#3364).
+    ///
+    /// Why: `DEFAULT_HTTP_PORT` previously reused `7881`, silently colliding
+    /// with `trusty-mpm`'s supervisor metrics listener
+    /// (`DEFAULT_METRICS_ADDR`, `crates/trusty-mpm/src/supervisor/config.rs`)
+    /// — the supervisor's generic `/health` masked the collision until a real
+    /// `tcode` route 404'd. This mirrors the `default_port_does_not_collide_
+    /// with_known_siblings` guard already used by `trusty-console` and
+    /// `trusty-review` so a future edit here that reintroduces a collision
+    /// fails this test instead of shipping a crash-loop.
+    /// What: asserts `DEFAULT_HTTP_PORT` is absent from the known-sibling
+    /// ports list.
+    /// Test: this is the test.
+    #[test]
+    fn default_http_port_does_not_collide_with_known_siblings() {
+        // (binary, port, source-of-truth pointer)
+        let known_siblings: &[(&str, u16, &str)] = &[
+            (
+                "trusty-memory",
+                7070,
+                "trusty-memory/src/http_server.rs::DEFAULT_HTTP_PORT",
+            ),
+            (
+                "trusty-search",
+                7878,
+                "trusty-search/src/service/constants.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-analyze",
+                7879,
+                "trusty-analyze/src/service/events.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-mpm",
+                7880,
+                "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
+            ),
+            (
+                // #3364: the collision that motivated this guard — trusty-mpm's
+                // supervisor metrics listener, deployed via launchd and never
+                // moved (unlike this crate's daemon default).
+                "trusty-mpm-supervisor",
+                7881,
+                "trusty-mpm/src/supervisor/config.rs::DEFAULT_METRICS_ADDR",
+            ),
+            (
+                "trusty-console",
+                7788,
+                "trusty-console/src/lib.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-embedderd",
+                7890,
+                "trusty-embedderd/src/lib.rs::Args::http_addr (--http default_value, manual/dev-run only)",
+            ),
+            (
+                "trusty-review",
+                7891,
+                "trusty-review/src/service/mod.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-agents",
+                8080,
+                "trusty-agents/src/runtime/mode_dispatch.rs (--port default 8080)",
+            ),
+        ];
+        for (binary, port, source) in known_siblings {
+            assert_ne!(
+                DEFAULT_HTTP_PORT, *port,
+                "trusty-code DEFAULT_HTTP_PORT {DEFAULT_HTTP_PORT} collides with {binary}'s {port} ({source})"
+            );
+        }
     }
 
     /// The daemon must ASSEMBLE with no project bound — `build_router` took a
@@ -325,9 +426,10 @@ mod tests {
     #[tokio::test]
     async fn build_router_is_projectless_without_a_project() {
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, _sessions) = build_router_at(ProjectBinding::None, data_dir.path())
-            .await
-            .expect("build_router_at");
+        let (router, _sessions, _workstreams) =
+            build_router_at(ProjectBinding::None, data_dir.path())
+                .await
+                .expect("build_router_at");
         for method in ["task.run", "session.create", "session.list"] {
             let req = Request {
                 jsonrpc: Some("2.0".to_string()),
@@ -377,7 +479,7 @@ mod tests {
             );
         }
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let (router, sessions) = build_router_at(
+        let (router, sessions, _workstreams) = build_router_at(
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
             data_dir.path(),
         )
@@ -418,7 +520,7 @@ mod tests {
         let binding =
             ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind");
 
-        let (router, _sessions) = build_router_at(binding.clone(), data_dir.path())
+        let (router, _sessions, _workstreams) = build_router_at(binding.clone(), data_dir.path())
             .await
             .expect("build_router_at");
 
@@ -460,7 +562,7 @@ mod tests {
         // rather than starting from a brand-new empty one — proven here by
         // reconciliation completing without error on the same file the
         // first instance created.
-        let (_router2, _sessions2) = build_router_at(binding, data_dir.path())
+        let (_router2, _sessions2, _workstreams2) = build_router_at(binding, data_dir.path())
             .await
             .expect("a second build_router_at over the same data_dir must succeed");
     }
@@ -496,7 +598,7 @@ mod tests {
             .await
             .expect("seed raw store file with a dangling active_workstream_id");
 
-        let (router, _sessions) = build_router_at(binding, data_dir.path())
+        let (router, _sessions, _workstreams) = build_router_at(binding, data_dir.path())
             .await
             .expect("build_router_at must reconcile the dangling pointer, not fail");
 

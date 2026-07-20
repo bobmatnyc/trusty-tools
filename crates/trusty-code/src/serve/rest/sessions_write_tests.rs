@@ -31,10 +31,14 @@ use crate::session::SessionRegistry;
 /// Build a router wired with every `session.*` method plus a fresh
 /// `SessionRegistry`, then this module's write route group over it —
 /// mirrors `sessions::tests::app_and_registry`.
-fn app_and_registry() -> (AxumRouter, Arc<SessionRegistry>) {
+async fn app_and_registry() -> (AxumRouter, Arc<SessionRegistry>) {
     let sessions = Arc::new(SessionRegistry::new());
     let mut router = Router::new();
-    crate::session::protocol::register(&mut router, sessions.clone());
+    crate::session::protocol::register(
+        &mut router,
+        sessions.clone(),
+        crate::workstreams::test_shared_store().await,
+    );
     let app = routes(Arc::new(router));
     (app, sessions)
 }
@@ -82,7 +86,7 @@ async fn send(
 /// `Session` JSON.
 #[tokio::test]
 async fn create_session_returns_201_with_running_session() {
-    let (app, _sessions) = app_and_registry();
+    let (app, _sessions) = app_and_registry().await;
 
     let resp = send(&app, "POST", "/sessions", Some(r#"{"task": "do it"}"#)).await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -96,7 +100,7 @@ async fn create_session_returns_201_with_running_session() {
 /// case, since a create request has no `session_id` to be missing.
 #[tokio::test]
 async fn create_session_empty_task_returns_400() {
-    let (app, _sessions) = app_and_registry();
+    let (app, _sessions) = app_and_registry().await;
 
     let resp = send(&app, "POST", "/sessions", Some(r#"{"task": "   "}"#)).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -108,7 +112,7 @@ async fn create_session_empty_task_returns_400() {
 /// extractor rejects it with a client error before `session.create` runs.
 #[tokio::test]
 async fn create_session_malformed_body_returns_400() {
-    let (app, _sessions) = app_and_registry();
+    let (app, _sessions) = app_and_registry().await;
 
     let resp = send(&app, "POST", "/sessions", Some("{not valid json")).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -122,7 +126,7 @@ async fn create_session_malformed_body_returns_400() {
 /// `{"acknowledged": true}`.
 #[tokio::test]
 async fn send_message_returns_200_acknowledged() {
-    let (app, sessions) = app_and_registry();
+    let (app, sessions) = app_and_registry().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let resp = send(
@@ -141,7 +145,7 @@ async fn send_message_returns_200_acknowledged() {
 /// `session_not_found` envelope.
 #[tokio::test]
 async fn send_message_missing_session_returns_404() {
-    let (app, _sessions) = app_and_registry();
+    let (app, _sessions) = app_and_registry().await;
 
     let resp = send(
         &app,
@@ -159,7 +163,7 @@ async fn send_message_missing_session_returns_404() {
 /// extractor before `session.send` runs.
 #[tokio::test]
 async fn send_message_malformed_body_returns_400() {
-    let (app, sessions) = app_and_registry();
+    let (app, sessions) = app_and_registry().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let resp = send(
@@ -180,7 +184,7 @@ async fn send_message_malformed_body_returns_400() {
 /// terminal `Session` snapshot.
 #[tokio::test]
 async fn cancel_session_returns_200_with_session_json() {
-    let (app, sessions) = app_and_registry();
+    let (app, sessions) = app_and_registry().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let resp = send(
@@ -198,7 +202,7 @@ async fn cancel_session_returns_200_with_session_json() {
 /// Cancelling an unknown session must be a real `404`.
 #[tokio::test]
 async fn cancel_session_missing_session_returns_404() {
-    let (app, _sessions) = app_and_registry();
+    let (app, _sessions) = app_and_registry().await;
 
     let resp = send(&app, "POST", "/sessions/does-not-exist/cancel", None).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -211,7 +215,7 @@ async fn cancel_session_missing_session_returns_404() {
 /// substitute for the "malformed body" case, since it takes no body.
 #[tokio::test]
 async fn cancel_session_is_idempotent() {
-    let (app, sessions) = app_and_registry();
+    let (app, sessions) = app_and_registry().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let first = send(
@@ -241,7 +245,7 @@ async fn cancel_session_is_idempotent() {
 /// `200` with `{}`.
 #[tokio::test]
 async fn set_goal_returns_200_empty_object() {
-    let (app, sessions) = app_and_registry();
+    let (app, sessions) = app_and_registry().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     seed_pm_transcript(&sessions, &session.id);
 
@@ -260,7 +264,7 @@ async fn set_goal_returns_200_empty_object() {
 /// Setting a goal on an unknown session must be a real `404`.
 #[tokio::test]
 async fn set_goal_missing_session_returns_404() {
-    let (app, _sessions) = app_and_registry();
+    let (app, _sessions) = app_and_registry().await;
 
     let resp = send(
         &app,
@@ -278,7 +282,7 @@ async fn set_goal_missing_session_returns_404() {
 /// extractor before `session.set_goal` runs.
 #[tokio::test]
 async fn set_goal_malformed_body_returns_400() {
-    let (app, sessions) = app_and_registry();
+    let (app, sessions) = app_and_registry().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let resp = send(
@@ -298,7 +302,7 @@ async fn set_goal_malformed_body_returns_400() {
 /// Clearing a previously-set goal slot must return `200` with `{}`.
 #[tokio::test]
 async fn clear_goal_returns_200_empty_object() {
-    let (app, sessions) = app_and_registry();
+    let (app, sessions) = app_and_registry().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
     seed_pm_transcript(&sessions, &session.id);
     sessions.set_goal(&session.id, 3, "temp").unwrap();
@@ -318,7 +322,7 @@ async fn clear_goal_returns_200_empty_object() {
 /// Clearing a goal on an unknown session must be a real `404`.
 #[tokio::test]
 async fn clear_goal_missing_session_returns_404() {
-    let (app, _sessions) = app_and_registry();
+    let (app, _sessions) = app_and_registry().await;
 
     let resp = send(
         &app,
@@ -336,7 +340,7 @@ async fn clear_goal_missing_session_returns_404() {
 /// extractor before `session.clear_goal` runs.
 #[tokio::test]
 async fn clear_goal_malformed_body_returns_400() {
-    let (app, sessions) = app_and_registry();
+    let (app, sessions) = app_and_registry().await;
     let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
     let resp = send(

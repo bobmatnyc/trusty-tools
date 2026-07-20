@@ -233,6 +233,8 @@ pub(crate) async fn process_event<H: ReplHandler + 'static>(
             a.choices = items;
             a.choice_cursor = 0;
             a.choices_context = context;
+            // Fresh picker instance — not yet navigated (#3346).
+            a.choices_navigated = false;
         }
         ReplEvent::TmSessionCount(n) => {
             let mut a = app.lock().await;

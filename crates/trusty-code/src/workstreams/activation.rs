@@ -39,15 +39,77 @@
 //!     from "never existed" without an extra lookup the spec does not ask
 //!     for).
 //!
+//! (issue #3297) [`activate`]/[`deactivate`] are also the sole publishers of
+//! [`crate::events::Event::WorkstreamActivationChanged`] (DOC-48 §5.3/§6.3,
+//! AC-3.3) — emitted exactly when the persisted active pointer actually
+//! changes (a fresh activation, a force-switch, or a real deactivation),
+//! never on the idempotent no-op branches. Centralising the emission here
+//! (rather than at each RPC/REST call site) means every current AND future
+//! caller of these two functions gets the notification for free — see
+//! [`crate::events::Event::WorkstreamActivationChanged`]'s own docs for why
+//! this reuses the existing global event bus instead of a second channel.
+//! They also publish [`crate::events::Event::WorkstreamStateInferred`] for
+//! every workstream whose computed state actually transitions alongside the
+//! pointer change (the newly-active workstream on every real activation, plus
+//! the prior one on a force-switch); [`super::protocol::close`] publishes the
+//! same event's `"closed"` state via [`publish_state_inferred`] (`pub(super)`
+//! for exactly that one cross-file call).
+//!
 //! Test: `activation_tests`.
 
 use std::sync::Arc;
 
+use chrono::Utc;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+use crate::events::{Event, SessionEventEnvelope};
+
 use super::model::WorkstreamId;
 use super::store::{StoreError, WorkstreamStore};
+
+/// Publish `Event::WorkstreamActivationChanged` on the global event bus.
+///
+/// Why: the one place [`activate`]/[`deactivate`] construct this event, so
+/// both always build the same envelope shape.
+/// What: `seq` is always `0` — this event is not part of any per-session
+/// ring buffer (there is no owning session to sequence it against), unlike
+/// every other envelope this daemon publishes. `session_id` is the empty
+/// string for the same reason (see the event's own docs).
+fn publish_activation_changed(new_active_id: Option<WorkstreamId>, prior_id: Option<WorkstreamId>) {
+    let event = Event::WorkstreamActivationChanged {
+        new_active_id: new_active_id.map(|id| id.to_string()),
+        prior_id: prior_id.map(|id| id.to_string()),
+    };
+    crate::events::publish(SessionEventEnvelope::new(
+        String::new(),
+        0,
+        Utc::now(),
+        event,
+    ));
+}
+
+/// Publish `Event::WorkstreamStateInferred` on the global event bus.
+///
+/// Why: shared by [`activate`]/[`deactivate`] (this file) and
+/// `super::protocol::close` (the one place outside this module that
+/// transitions a workstream's state) — see the module docs for why `close`
+/// reaches into this helper rather than duplicating the envelope shape.
+/// What: mirrors [`publish_activation_changed`]'s `seq`/`session_id`
+/// convention (both are meaningless for a daemon-scoped event).
+pub(super) fn publish_state_inferred(workstream_id: WorkstreamId, state: &str, reason: &str) {
+    let event = Event::WorkstreamStateInferred {
+        workstream_id: workstream_id.to_string(),
+        state: state.to_string(),
+        reason: reason.to_string(),
+    };
+    crate::events::publish(SessionEventEnvelope::new(
+        String::new(),
+        0,
+        Utc::now(),
+        event,
+    ));
+}
 
 /// Shared, lock-wrapped handle to a project's workstream store.
 ///
@@ -119,7 +181,9 @@ pub struct ActivateOutcome {
 /// `activation_tests::activate_already_active_is_idempotent`,
 /// `activation_tests::activate_without_force_returns_active_conflict`,
 /// `activation_tests::activate_with_force_switches_and_reports_prior`,
-/// `activation_tests::activate_unknown_id_returns_not_found`.
+/// `activation_tests::activate_unknown_id_returns_not_found`,
+/// `activation_tests::activate_with_no_prior_active_publishes_state_inferred`,
+/// `activation_tests::activate_with_force_publishes_state_inferred_for_both`.
 pub async fn activate(
     store: &SharedWorkstreamStore,
     id: WorkstreamId,
@@ -140,6 +204,9 @@ pub async fn activate(
         Some(active) if !force => Err(ActivationError::ActiveConflict(active)),
         Some(active) => {
             store.set_active(Some(id)).await?;
+            publish_activation_changed(Some(id), Some(active));
+            publish_state_inferred(id, "active", "activated (force-switch)");
+            publish_state_inferred(active, "idle", "deactivated (force-switch)");
             Ok(ActivateOutcome {
                 active_id: id,
                 prior_id: Some(active),
@@ -147,6 +214,8 @@ pub async fn activate(
         }
         None => {
             store.set_active(Some(id)).await?;
+            publish_activation_changed(Some(id), None);
+            publish_state_inferred(id, "active", "activated");
             Ok(ActivateOutcome {
                 active_id: id,
                 prior_id: None,
@@ -165,7 +234,8 @@ pub async fn activate(
 /// is idempotent by design (§4.3), so this never looks the id up in
 /// `workstreams[]` at all.
 /// Test: `activation_tests::deactivate_active_clears_pointer`,
-/// `activation_tests::deactivate_non_active_is_idempotent_noop`.
+/// `activation_tests::deactivate_non_active_is_idempotent_noop`,
+/// `activation_tests::deactivate_active_publishes_state_inferred_idle`.
 pub async fn deactivate(
     store: &SharedWorkstreamStore,
     id: WorkstreamId,
@@ -173,6 +243,8 @@ pub async fn deactivate(
     let mut store = store.lock().await;
     if store.active_workstream_id().await? == Some(id) {
         store.set_active(None).await?;
+        publish_activation_changed(None, Some(id));
+        publish_state_inferred(id, "idle", "deactivated");
         Ok(Some(id))
     } else {
         Ok(None)

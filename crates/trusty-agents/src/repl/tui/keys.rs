@@ -4,6 +4,53 @@
 
 use super::*;
 
+/// Whether an Up/Down keypress should navigate `app.choices` right now,
+/// rather than being reinterpreted as shell-style history recall (#3346).
+///
+/// Why: `handle_key` used to let Up/Down always navigate `app.choices`
+/// whenever it was non-empty, even before the input-editing match arms ever
+/// saw the key. That's still correct for two picker kinds the user is
+/// *actively driving with arrow keys on purpose* — a live slash-command
+/// completion list (rebuilt from `input_buf` on every keystroke) and the
+/// tagged `/switch` persona picker (`choices_context == Some("switch")`),
+/// which has no other input mechanism than Up/Down + Enter. Those must
+/// always navigate, on the very first press, no exceptions — dismissing
+/// `/switch` on its first Down (e.g. after the user paused a couple of
+/// seconds reading the persona names before pressing a key) would make the
+/// picker unusable, which an earlier wall-clock-based version of this fix
+/// actually did (caught by `inline_choices_switch_context_dispatches_submit`
+/// during review).
+///
+/// The #3325/#3346 residual case is narrower: an *untagged* `detect_choices`
+/// LLM list (`choices_context.is_none()`, not a live slash completion) that
+/// was offered alongside an assistant reply and then left untouched — the
+/// user's attention has moved on to composing a new message, and their first
+/// Up/Down is far more likely to be history recall than picker browsing.
+/// Untagged lists ARE still arrow-navigable by design (`draw_inline_choice_picker`
+/// highlights `choice_cursor`, and Enter inserts the highlighted item into
+/// `input_buf` for editing) — so this predicate only reinterprets the very
+/// first Up/Down on such a list, and only while the buffer is empty; once
+/// the user has genuinely started navigating it (`choices_navigated`), every
+/// further press keeps navigating.
+/// What: True (navigate) when `app.choices` is a live slash-command
+/// completion (`is_live_slash_completion`), OR `choices_context.is_some()`
+/// (covers `/switch` and any future tagged picker), OR `choices_navigated`
+/// is already `true`, OR `input_buf` is non-empty. False only for a
+/// never-navigated, untagged, non-live picker with an empty buffer — the
+/// #3346 history-recall case. Deliberately time-independent: no wall clock,
+/// no tick counter.
+/// Test: `repl_app_first_up_over_stale_untagged_picker_recalls_history`,
+/// `repl_app_first_down_over_stale_untagged_picker_recalls_history`,
+/// `repl_app_switch_picker_up_down_always_navigates`,
+/// `repl_app_live_slash_picker_up_down_still_navigates`,
+/// `repl_app_untagged_picker_navigates_once_started`.
+fn should_navigate_picker(app: &ReplApp) -> bool {
+    is_live_slash_completion(app)
+        || app.choices_context.is_some()
+        || app.choices_navigated
+        || !app.input_buf.is_empty()
+}
+
 /// Handle one key press. Returns `Some(line)` if the user submitted.
 pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
     // Picker modal: when an overlay is open, capture all keys here so
@@ -14,18 +61,45 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
     // Inline choice picker: when the LLM offered a list and we surfaced it,
     // arrow keys navigate the choices, Enter commits the selection into the
     // input buffer (or clears for free-type on the "Other…" row), Esc
-    // dismisses. Other keys fall through so the user can keep typing.
+    // dismisses. Other keys fall through so the user can keep typing — and
+    // (#3325) dismiss a *stale picker* first, since `app.choices` otherwise
+    // stays populated indefinitely (it's set once per assistant turn by
+    // `push_assistant` -> `detect_choices`, or once by `/switch`, not
+    // per-keystroke) and would keep intercepting the *next* Enter as
+    // "confirm choice" (or, for `/switch`, silently dispatch a persona
+    // switch) instead of "submit the line I just typed", swallowing the
+    // whole typed message. This applies to BOTH the untagged
+    // (`choices_context == None`) LLM list AND the tagged `/switch` picker
+    // (`choices_context == Some("switch")`) — the only exemption is live
+    // slash-command completions, which are also untagged but rebuilt from
+    // `input_buf` on every keystroke by `update_slash_completions` below,
+    // so they must survive typing rather than being dismissed by it.
     if !app.choices.is_empty() {
         match key.code {
             KeyCode::Up => {
-                app.choice_cursor = app.choice_cursor.saturating_sub(1);
-                return None;
+                if should_navigate_picker(app) {
+                    app.choice_cursor = app.choice_cursor.saturating_sub(1);
+                    app.choices_navigated = true;
+                    return None;
+                }
+                // Untagged, never-navigated, empty input buffer: this is
+                // shell-style history recall, not picker navigation (#3346).
+                // Dismiss and fall through to the normal Up-arrow handling
+                // below instead of returning early. `/switch` and live
+                // slash completions never reach here — `should_navigate_picker`
+                // already returned `true` for both.
+                app.dismiss_choices();
             }
             KeyCode::Down => {
-                if app.choice_cursor + 1 < app.choices.len() {
-                    app.choice_cursor += 1;
+                if should_navigate_picker(app) {
+                    if app.choice_cursor + 1 < app.choices.len() {
+                        app.choice_cursor += 1;
+                    }
+                    app.choices_navigated = true;
+                    return None;
                 }
-                return None;
+                // Same disambiguation as Up above, mirrored for `history_next`.
+                app.dismiss_choices();
             }
             KeyCode::Enter => {
                 let idx = app.choice_cursor;
@@ -38,15 +112,12 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                         .unwrap_or(false);
                 if is_other {
                     // Free-type path: leave input empty for the user.
-                    app.choices.clear();
-                    app.choice_cursor = 0;
-                    app.choices_context = None;
+                    app.dismiss_choices();
                     return None;
                 }
                 let pick = app.choices[idx].clone();
-                let ctx = app.choices_context.take();
-                app.choices.clear();
-                app.choice_cursor = 0;
+                let ctx = app.choices_context.clone();
+                app.dismiss_choices();
                 match ctx.as_deref() {
                     Some("switch") => {
                         // Direct dispatch — synthesize `/switch <name>`
@@ -62,12 +133,25 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                 return None;
             }
             KeyCode::Esc => {
-                app.choices.clear();
-                app.choice_cursor = 0;
-                app.choices_context = None;
+                app.dismiss_choices();
                 return None;
             }
-            _ => { /* fall through to normal input editing */ }
+            _ => {
+                // Any other key means the user is editing/typing instead of
+                // navigating the picker. Dismiss a stale picker — the
+                // untagged LLM-offered list OR the tagged `/switch` list —
+                // so the normal input-editing match below runs unobstructed
+                // and a subsequent Enter submits the line instead of
+                // confirming a choice (#3325) or firing an unintended
+                // persona switch (#3325 follow-up). Leave live slash
+                // completions alone: `is_live_slash_completion` only ever
+                // matches the untagged, all-`/`-prefixed shape
+                // `update_slash_completions` produces, so it never
+                // shadows the tagged `/switch` picker.
+                if !is_live_slash_completion(app) {
+                    app.dismiss_choices();
+                }
+            }
         }
     }
     // Ctrl combos.
@@ -141,8 +225,7 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
                 let selected = app.choices[app.choice_cursor].clone();
                 app.input_buf = format!("{selected} ");
                 app.cursor_pos = app.input_buf.len();
-                app.choices.clear();
-                app.choice_cursor = 0;
+                app.dismiss_choices();
             }
             None
         }

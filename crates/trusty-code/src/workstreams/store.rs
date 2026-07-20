@@ -52,6 +52,35 @@ pub enum StoreError {
     NotFound(String),
 }
 
+/// Typed failure surface for [`WorkstreamStore::bind_session`] (issue
+/// #3298).
+///
+/// Why: a SEPARATE enum from [`StoreError`] rather than two new variants on
+/// it — `StoreError` already has non-exhaustive `match`es at existing call
+/// sites outside this ticket's file ownership (`workstreams::sse`'s own
+/// `map_store_err`, owned by the concurrent sibling ticket #3299), which
+/// widening `StoreError` would silently break. `BindError::Store` wraps
+/// every other [`StoreError`] variant unchanged.
+/// What: [`Self::NotFound`] — the target workstream does not exist.
+/// [`Self::Closed`] — DOC-48 §4.1/§4.4: "If a workstream is closed, new
+/// sessions may not bind to it". [`Self::AlreadyBound`] — DOC-48 §2: a
+/// session appears in at most one workstream's `session_ids`; this session
+/// id is already bound to a DIFFERENT workstream.
+/// Test: `store_tests::bind_session_rejects_unknown_workstream`,
+/// `store_tests::bind_session_rejects_closed_workstream`,
+/// `store_tests::bind_session_rejects_double_binding_to_different_workstream`.
+#[derive(Debug, Error)]
+pub enum BindError {
+    #[error("workstream not found: {0}")]
+    NotFound(String),
+    #[error("workstream is closed: {0}")]
+    Closed(String),
+    #[error("session already bound to another workstream: {0}")]
+    AlreadyBound(String),
+    #[error(transparent)]
+    Store(#[from] StoreError),
+}
+
 /// The versioned, on-disk JSON shape (§3.1): `version`, `active_workstream_id`,
 /// and a flat `workstreams` array — NOT a file-per-record or a keyed map.
 #[derive(Debug, Serialize, Deserialize)]
@@ -367,6 +396,102 @@ impl WorkstreamStore {
             .find(|w| w.id == id)
             .cloned()
             .ok_or_else(|| StoreError::NotFound(id.to_string()))
+    }
+
+    /// Rename a workstream (DOC-48 §5.1 `workstream.rename`, Phase C —
+    /// issue #3300).
+    ///
+    /// Why: the persistence primitive `workstream.rename` calls. The domain
+    /// model has always documented `name` as mutable ("future rename
+    /// support, Phase C" — [`Workstream`]'s own doc comment); this is that
+    /// support landing. Renaming a closed workstream is allowed — closure
+    /// only rejects new session bindings (§4.4), it says nothing about the
+    /// label, and forbidding it would leave a typo permanently unfixable.
+    /// What: reloads first, overwrites `name` and calls
+    /// [`Workstream::touch`] to refresh `updated_at`, persists, and returns
+    /// the updated record. `NotFound` if `id` does not exist.
+    /// Test: `store_tests::rename_updates_name_and_persists`,
+    /// `store_tests::rename_missing_id_returns_not_found`,
+    /// `store_tests::rename_closed_workstream_succeeds`.
+    pub async fn rename(
+        &mut self,
+        id: WorkstreamId,
+        name: impl Into<String>,
+    ) -> Result<Workstream, StoreError> {
+        self.reload_if_changed().await?;
+        {
+            let ws = self
+                .data
+                .workstreams
+                .iter_mut()
+                .find(|w| w.id == id)
+                .ok_or_else(|| StoreError::NotFound(id.to_string()))?;
+            ws.name = name.into();
+            ws.touch();
+        }
+        self.save().await?;
+        self.data
+            .workstreams
+            .iter()
+            .find(|w| w.id == id)
+            .cloned()
+            .ok_or_else(|| StoreError::NotFound(id.to_string()))
+    }
+
+    /// Bind `session_id` to `workstream_id`, persisting the append (DOC-48
+    /// §4.1, issue #3298).
+    ///
+    /// Why: the persistence primitive `session::protocol::create` and
+    /// `task::protocol::task_run` call once they have resolved the EFFECTIVE
+    /// target workstream (either the caller's explicit `workstream_id` or
+    /// §4.2's ambient active-workstream default) for a freshly minted
+    /// session — mirrors [`Self::set_active`]'s role as the low-level
+    /// "write it and persist" primitive beneath the higher-level resolution
+    /// logic those call sites own.
+    /// What: reloads first. Idempotent no-op success if `session_id` is
+    /// already bound to `workstream_id` itself (a caller resolving the SAME
+    /// binding twice — e.g. a retried request — must not error). Otherwise:
+    /// `AlreadyBound` if `session_id` is bound to a DIFFERENT workstream
+    /// (§2's at-most-one-workstream invariant); `NotFound` if `workstream_id`
+    /// names no record; `Closed` if the target workstream is closed (§4.1/
+    /// §4.4). On success, appends `session_id` to the target's `session_ids`
+    /// (append-only, §2.1), touches it, and persists.
+    /// Test: `store_tests::bind_session_appends_and_persists`,
+    /// `store_tests::bind_session_is_idempotent_for_same_workstream`,
+    /// `store_tests::bind_session_rejects_double_binding_to_different_workstream`,
+    /// `store_tests::bind_session_rejects_unknown_workstream`,
+    /// `store_tests::bind_session_rejects_closed_workstream`.
+    pub async fn bind_session(
+        &mut self,
+        workstream_id: WorkstreamId,
+        session_id: &str,
+    ) -> Result<(), BindError> {
+        self.reload_if_changed().await?;
+        if let Some(existing) = self
+            .data
+            .workstreams
+            .iter()
+            .find(|w| w.session_ids.iter().any(|s| s == session_id))
+        {
+            return if existing.id == workstream_id {
+                Ok(())
+            } else {
+                Err(BindError::AlreadyBound(session_id.to_string()))
+            };
+        }
+        let ws = self
+            .data
+            .workstreams
+            .iter_mut()
+            .find(|w| w.id == workstream_id)
+            .ok_or_else(|| BindError::NotFound(workstream_id.to_string()))?;
+        if ws.is_closed() {
+            return Err(BindError::Closed(workstream_id.to_string()));
+        }
+        ws.session_ids.push(session_id.to_string());
+        ws.touch();
+        self.save().await?;
+        Ok(())
     }
 
     /// Boot-time reconciliation (DOC-48 §3.3, AC-1.4, AC-6.1, AC-6.2).

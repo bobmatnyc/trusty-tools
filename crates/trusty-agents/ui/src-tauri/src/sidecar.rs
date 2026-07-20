@@ -10,11 +10,19 @@
 //! quit / window-close handlers) and `task_commands.rs` (per-request health
 //! checks and API base URL).
 //! What: `ApiServerState`/`SharedApi`, `api_base`, `ensure_api_server`
-//! (Tauri command), `resolve_tagent_binary`, `http_health`, `kill_sidecar`.
+//! (Tauri command), `resolve_tagent_binary`, `sidecar_candidate_names`,
+//! `http_health`, `kill_sidecar`.
 //! Test: `cargo check` in `ui/src-tauri/`; the process-spawn/respawn logic
-//! itself isn't unit-testable without an actual `trusty-agents` binary on
-//! disk (see the module-level doc in the original `main.rs` for prior manual
-//! test notes).
+//! itself isn't unit-testable without an actual `tagent` binary on disk (see
+//! the module-level doc in the original `main.rs` for prior manual test
+//! notes), but the pure candidate-name ordering is covered by the `tests`
+//! module at the bottom of this file.
+//!
+//! Longer term, the sidecar should probably be bundled via Tauri's
+//! `externalBin` mechanism (see `tauri.conf.json`) instead of resolved by
+//! name search at runtime — that would make packaging self-contained and
+//! remove this whole resolution dance. Out of scope here; tracked as a
+//! follow-up, not fixed in this pass.
 
 use std::sync::Arc;
 
@@ -129,25 +137,61 @@ pub async fn ensure_api_server(port: u16, state: State<'_, SharedApi>) -> Result
     Ok(())
 }
 
-/// Find the `trusty-agents` binary. Prefers `$PATH`, then the sibling Cargo
-/// workspace's debug/release target so `cargo run` in this repo's root
-/// doesn't require a global install.
+/// Env var letting power users point the sidecar spawn at an explicit binary
+/// path, bypassing name resolution entirely.
+const SIDECAR_BIN_ENV: &str = "TRUSTY_AGENTS_SIDECAR_BIN";
+
+/// Ordered list of binary names `resolve_tagent_binary` searches for.
+///
+/// Why: The crate's actual `[[bin]]` target (`crates/trusty-agents/Cargo.toml`)
+/// is named `tagent` — `trusty-agents` is only the crate/directory name, and
+/// no binary by that name is ever produced by `cargo build`/`cargo install`.
+/// Searching for `trusty-agents` alone means `resolve_tagent_binary` can never
+/// find a stock install, so `ensure_api_server` spawns a nonexistent path and
+/// the desktop app fails with "subprocess exited with status Some(1)" on
+/// first launch (part of epic #3052). `tagent` is tried first as the correct,
+/// canonical name; `trusty-agents` is kept as a secondary candidate for
+/// backward compatibility with any manual symlink/alias a user already
+/// created as a workaround.
+/// What: Pure, filesystem-free ordered candidate list — no I/O, so it is
+/// trivially unit-testable independent of `$PATH`/`$HOME` state.
+/// Test: `sidecar_candidate_names_prefers_tagent_over_legacy_name`.
+fn sidecar_candidate_names() -> &'static [&'static str] {
+    &["tagent", "trusty-agents"]
+}
+
+/// Find the sidecar binary. Honors an explicit `TRUSTY_AGENTS_SIDECAR_BIN`
+/// override first, then searches `$PATH`, well-known install dirs, and the
+/// sibling Cargo workspace's debug/release target — in that order, trying
+/// each candidate name from `sidecar_candidate_names()` at every location —
+/// so `cargo run` in this repo's root doesn't require a global install.
 fn resolve_tagent_binary() -> std::path::PathBuf {
+    // 0. Explicit override for power users pointing at a specific build.
+    if let Ok(explicit) = std::env::var(SIDECAR_BIN_ENV) {
+        if !explicit.is_empty() {
+            return std::path::PathBuf::from(explicit);
+        }
+    }
+
+    let candidates = sidecar_candidate_names();
+
     // 1. $PATH (works in dev / CLI contexts)
-    if let Ok(path) = which("trusty-agents") {
-        return path;
+    for name in candidates {
+        if let Ok(path) = which(name) {
+            return path;
+        }
     }
     // 2. Explicit well-known install locations (macOS .app bundles get a
     //    minimal PATH like `/usr/bin:/bin:/usr/sbin:/sbin` so $HOME/.cargo/bin
     //    and $HOME/.local/bin are invisible above). #364
     if let Ok(home) = std::env::var("HOME") {
         let home = std::path::Path::new(&home);
-        for candidate in [
-            home.join(".cargo/bin/trusty-agents"),
-            home.join(".local/bin/trusty-agents"),
-        ] {
-            if candidate.is_file() {
-                return candidate;
+        for dir in [".cargo/bin", ".local/bin"] {
+            for name in candidates {
+                let candidate = home.join(dir).join(name);
+                if candidate.is_file() {
+                    return candidate;
+                }
             }
         }
     }
@@ -155,14 +199,16 @@ fn resolve_tagent_binary() -> std::path::PathBuf {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     if let Some(root) = manifest.ancestors().nth(2) {
         for profile in ["release", "debug"] {
-            let candidate = root.join("target").join(profile).join("trusty-agents");
-            if candidate.is_file() {
-                return candidate;
+            for name in candidates {
+                let candidate = root.join("target").join(profile).join(name);
+                if candidate.is_file() {
+                    return candidate;
+                }
             }
         }
     }
-    // 4. Fallback: trust $PATH resolution at spawn time.
-    std::path::PathBuf::from("trusty-agents")
+    // 4. Fallback: trust $PATH resolution at spawn time using the canonical name.
+    std::path::PathBuf::from(candidates[0])
 }
 
 /// Minimal `which` that tolerates missing `which` crate dep.
@@ -206,5 +252,65 @@ pub async fn kill_sidecar(state: &SharedApi) {
     if let Some(mut child) = guard.take() {
         let _ = child.start_kill();
         let _ = child.wait().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Why: `resolve_tagent_binary` reads the process-global `TRUSTY_AGENTS_SIDECAR_BIN`
+    // env var; this lock keeps the one test that mutates it from racing other
+    // tests in this binary that also touch process env state (e.g.
+    // `overlay.rs`'s `HOME`-mutating tests), matching the established
+    // convention in `overlay.rs`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Before this fix, resolution only ever searched for a binary literally
+    /// named `trusty-agents` — which `cargo build`/`cargo install` never
+    /// produces (the crate's `[[bin]]` target is `tagent`). This test pins
+    /// the fixed ordering: `tagent` (the real, installable binary name) must
+    /// be tried before the legacy `trusty-agents` fallback. Asserting on the
+    /// pre-fix single-candidate behavior would have failed this exact
+    /// assertion (`candidates[0] == "tagent"`), since the old code had no
+    /// `tagent` candidate at all.
+    #[test]
+    fn sidecar_candidate_names_prefers_tagent_over_legacy_name() {
+        let candidates = sidecar_candidate_names();
+        assert_eq!(
+            candidates.first().copied(),
+            Some("tagent"),
+            "the real, installable binary name must be the first candidate"
+        );
+        assert!(
+            candidates.contains(&"trusty-agents"),
+            "legacy name kept as a backward-compat fallback"
+        );
+    }
+
+    /// `resolve_tagent_binary` must let power users bypass name resolution
+    /// entirely via `TRUSTY_AGENTS_SIDECAR_BIN`, e.g. to point at a
+    /// non-standard build. This exercises `resolve_tagent_binary` end to
+    /// end rather than just the candidate list.
+    #[test]
+    fn resolve_tagent_binary_honors_explicit_override_env() {
+        let _guard = ENV_LOCK.lock().expect("lock poisoned");
+        let prev = std::env::var_os(SIDECAR_BIN_ENV);
+        // SAFETY: guarded by ENV_LOCK; restored before returning.
+        unsafe {
+            std::env::set_var(SIDECAR_BIN_ENV, "/tmp/custom-tagent-build");
+        }
+        let resolved = resolve_tagent_binary();
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            match &prev {
+                Some(v) => std::env::set_var(SIDECAR_BIN_ENV, v),
+                None => std::env::remove_var(SIDECAR_BIN_ENV),
+            }
+        }
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from("/tmp/custom-tagent-build")
+        );
     }
 }

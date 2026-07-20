@@ -9,6 +9,7 @@
 mod agent_patch;
 mod cancel;
 mod ctrl_sessions;
+mod guard;
 mod listing;
 mod models;
 

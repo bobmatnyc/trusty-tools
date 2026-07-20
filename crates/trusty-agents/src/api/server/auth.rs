@@ -17,19 +17,25 @@ use axum::{
 };
 use serde::Serialize;
 
-/// Server configuration. (#181)
+/// Server configuration. (#181, #3329)
 ///
 /// Why: Bearer-token auth must be configurable per-launch so users can run
 /// the server unauthenticated for local-only dev or token-protected when
 /// exposing the bound port over a LAN. Keeping this as a struct (instead of
 /// extra bare args to `serve`) gives us a clean place to grow more knobs
 /// (TLS, allowed origins, …) without breaking callers.
-/// What: `port` is the TCP port to bind on `0.0.0.0`. `token`, when `Some`,
-/// makes every `/api/*` route (except `GET /api/health`) require an
+/// What: `bind` is the interface to listen on (#3329: defaults to loopback
+/// `127.0.0.1`; a non-loopback bind is an explicit opt-in that REQUIRES a
+/// token — see `serve_with_config`). `port` is the TCP port. `token`, when
+/// `Some`, makes every `/api/*` route (except the public probes) require an
 /// `Authorization: Bearer <token>` header that exactly matches `token`.
-/// Test: `auth_middleware_rejects_missing_token`, `auth_middleware_allows_health`.
+/// Test: `auth_middleware_rejects_missing_token`, `auth_middleware_allows_health`,
+/// and the loopback-doctrine tests in `super::tests::guard`.
 #[derive(Clone, Debug)]
 pub struct ApiConfig {
+    /// Interface to bind. Defaults to loopback (`127.0.0.1`) per the
+    /// loopback-only doctrine (#3329); non-loopback is opt-in via `--bind`.
+    pub bind: std::net::IpAddr,
     pub port: u16,
     pub token: Option<String>,
 }
@@ -38,12 +44,17 @@ impl ApiConfig {
     /// Convenience constructor mirroring the previous bare-port API.
     ///
     /// Why: Lets unauthenticated callers (tests, `serve`) construct a config
-    /// without naming the `token` field.
-    /// What: Builds `ApiConfig { port, token: None }`.
+    /// without naming every field. Binds loopback — the only interface on
+    /// which an unauthenticated server is permitted to start (#3329).
+    /// What: Builds `ApiConfig { bind: 127.0.0.1, port, token: None }`.
     /// Test: Used by `serve` and `super::tests`.
     #[allow(dead_code)]
     pub fn unauthenticated(port: u16) -> Self {
-        Self { port, token: None }
+        Self {
+            bind: std::net::Ipv4Addr::LOCALHOST.into(),
+            port,
+            token: None,
+        }
     }
 }
 

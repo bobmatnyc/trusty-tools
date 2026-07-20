@@ -8,6 +8,51 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DEFAULT_DAEMON_URL` moved from `http://127.0.0.1:7881` to
+  `http://127.0.0.1:7882`, in lockstep with `trusty-code`'s
+  `serve::DEFAULT_HTTP_PORT` (closes #3364).** The old port collided with
+  `trusty-mpm`'s supervisor metrics listener, producing "DAEMON UNREACHABLE
+  — LOAD FAILED" on a fresh install when both processes were running. A new
+  test, `default_daemon_url_matches_tcode_default_http_port`, pins this
+  constant against `trusty_code::serve::DEFAULT_HTTP_PORT` directly (new
+  dev-dependency on `trusty-code`) so the two cannot drift apart silently
+  again. The web-mode fallback — `ui/src/lib/api-config.ts`'s own
+  `DEFAULT_DAEMON_URL`, used by `apiBase()` outside the Tauri webview (the
+  `pnpm dev` loop and any plain browser tab) — carried a THIRD copy of this
+  port that the initial #3364 fix missed; it is now 7882 too, with
+  `ui/src/lib/api-config.test.ts` parsing `trusty-code/src/serve/mod.rs`
+  directly to assert the two stay in sync.
+
+### Added
+
+- **GUI workstream switcher in the header (closes #3300, DOC-48 §8 Phase C,
+  DOC-39 §2/§8).** New `WorkstreamSwitcher.svelte` fills the reserved header
+  slot `AppHeader.svelte`/PR #3301 left as a disabled placeholder: a trigger
+  button showing the active workstream's name + state dot, opening a
+  dropdown that lists every workstream with an active indicator. Clicking a
+  non-active row activates it (`POST /workstreams/{id}/activate`,
+  `force: false`); a `409` (DOC-48 §6.1 `ActiveConflict` — another client
+  activated concurrently) surfaces an inline banner with a Refresh action
+  rather than silently retrying with `force: true`. Each row has inline
+  rename (text input, no `window.prompt()`) and close (two-step confirm, no
+  `window.confirm()` — mirrors `SessionMonitor.svelte`'s cancel action) —
+  close and rename call the new `workstream.close`/`workstream.rename`
+  REST routes. Polls `GET /workstreams` every 5s (same
+  `$effect`/`AbortController` shape as `StatusBar.svelte`) as the
+  authoritative source, plus an `EventSource` subscription to
+  `/workstreams/{active_id}/events` for a low-latency nudge on
+  `workstream_activation_changed`/`workstream_state_inferred` frames — a
+  latency optimization only; there is no daemon-wide "any workstream
+  changed" push channel today (a documented API gap, DOC-39 §2.1 C-2), so
+  polling never becomes secondary. New `lib/workstreams.ts` (wire types +
+  `fetchWorkstreams`/`activateWorkstream`/`closeWorkstream`/
+  `renameWorkstream` + pure helpers), unit tested in `workstreams.test.ts`;
+  component covered in `WorkstreamSwitcher.test.ts`. `AppHeader.svelte`
+  itself is otherwise unchanged — only the reserved slot's content was
+  filled in.
+
 ### Changed
 
 - Shell rebuild to the DOC-39 §8 Foundry skeleton (closes #3153). `App.svelte`

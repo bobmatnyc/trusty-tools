@@ -461,3 +461,296 @@ fn ctrl_e_noop_when_python_block_but_no_shell_block() {
     assert_eq!(a.input_buf, "");
     assert_eq!(a.cursor_pos, 0);
 }
+
+// ---------------------------------------------------------------------
+// #3325: REPL swallows a fully-typed message when a stale LLM-offered
+// choice list is still showing from the previous turn. Root cause:
+// `handle_key`'s inline-choice branch intercepted every Enter as "confirm
+// picker selection" while `app.choices` was non-empty, and `app.choices`
+// is only populated once per assistant turn (`push_assistant` ->
+// `detect_choices`) — it never clears itself just because the user typed
+// something new. The fix dismisses non-live pickers the moment the user
+// presses any key other than Up/Down/Enter/Esc.
+// ---------------------------------------------------------------------
+
+/// Why: This is the exact user-visible symptom from #3325 — type a brand
+/// new message after a numbered/bulleted assistant response and press
+/// Enter, and the whole line used to vanish (replaced by the first stale
+/// choice) instead of submitting.
+/// What: Seed `app.choices` the way `push_assistant` would after a
+/// numbered-list response, type a fresh message character-by-character
+/// (mirroring real keystroke delivery), then press Enter. Assert the
+/// typed message is returned as the submitted line and the picker state
+/// is cleared — not swallowed and replaced by "Apple".
+/// Test: `repl_app_choices_dismissed_on_typing_over_llm_list` (this test).
+#[test]
+fn repl_app_choices_dismissed_on_typing_over_llm_list() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    // Simulate the picker state left behind by a numbered-list assistant
+    // response (mirrors what `push_assistant` -> `detect_choices` sets).
+    a.choices = vec![
+        "Apple".to_string(),
+        "Banana".to_string(),
+        "Orange".to_string(),
+        "Other (type your own)".to_string(),
+    ];
+    a.choice_cursor = 0;
+    a.choices_context = None;
+
+    for ch in "totally different followup message".chars() {
+        let r = handle_key(&mut a, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        assert_eq!(r, None, "no key mid-message should submit");
+    }
+    // The stale picker must be gone the moment typing started.
+    assert!(
+        a.choices.is_empty(),
+        "typing over a stale LLM choice list must dismiss it"
+    );
+    let submitted = handle_key(&mut a, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        submitted.as_deref(),
+        Some("totally different followup message"),
+        "Enter must submit the freshly typed line, not a stale picker choice"
+    );
+}
+
+/// Why (#3325 follow-up, HIGH from code-critic review of PR #3344): The
+/// original fix only dismissed the *untagged* (`choices_context == None`)
+/// LLM-offered list on typing, gated by `app.choices_context.is_none()`.
+/// That left the tagged `/switch` picker (`choices_context ==
+/// Some("switch")`) exempt, so it stayed open while the user typed an
+/// unrelated message right over it. Typed characters still landed in
+/// `input_buf` (the `KeyCode::Char` arm is unconditional), but the
+/// following Enter never reached `take_input` — it hit the `choices`
+/// branch's `Some("switch")` case instead, cleared the input-less
+/// `pending_submit = "/switch <highlighted-persona>"`, and fired an
+/// unintended persona switch while silently discarding the fully-typed
+/// message. Same bug class as #3325, just a second producer.
+/// What: Open the `/switch` picker (`choices_context = Some("switch")`,
+/// mirroring `bridge.rs`'s handler), type a full unrelated message
+/// char-by-char, then press Enter. Assert the typed message is returned
+/// as the submitted line (i.e. it reached `take_input`, not the picker's
+/// `Some("switch")` dispatch path) and `pending_submit` was never set to
+/// a `/switch ...` command — no persona-switch side effect fired.
+/// Test: `repl_app_switch_picker_dismissed_on_typing_over_it` (this test).
+#[test]
+fn repl_app_switch_picker_dismissed_on_typing_over_it() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    // Mirrors bridge.rs's `/switch` handler: SetChoices { items, context:
+    // Some("switch") } with no arg after `/switch`.
+    a.choices = vec![
+        "ctrl".to_string(),
+        "Izzie".to_string(),
+        "CTO Assistant".to_string(),
+    ];
+    a.choice_cursor = 0;
+    a.choices_context = Some("switch".to_string());
+
+    for ch in "please just answer my question".chars() {
+        let r = handle_key(&mut a, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        assert_eq!(r, None, "no key mid-message should submit");
+    }
+    assert!(
+        a.choices.is_empty(),
+        "typing over the /switch picker must dismiss it"
+    );
+    assert!(
+        a.choices_context.is_none(),
+        "the switch context tag must be cleared along with the choices"
+    );
+
+    let submitted = handle_key(&mut a, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        submitted.as_deref(),
+        Some("please just answer my question"),
+        "Enter must submit the freshly typed line via take_input, not \
+         confirm a stale /switch selection"
+    );
+    assert_eq!(
+        a.pending_submit, None,
+        "no synthetic '/switch <persona>' dispatch must fire — the user \
+         never selected a persona, they typed over the picker"
+    );
+}
+
+/// Why (MEDIUM from code-critic review of PR #3344): `is_live_slash_completion`
+/// distinguishes an untagged LLM-offered list from a live slash-completion
+/// list purely by content shape (`all(|c| c.starts_with('/'))`) — that's
+/// only safe because `push_assistant` always appends a non-`/`-prefixed
+/// `"Other (type your own)"` sentinel to every `detect_choices` result
+/// (see `app.rs`), so a real LLM list can never accidentally look like an
+/// all-`/` slash-completion list. Nothing pinned that invariant; a future
+/// change to the sentinel text (e.g. dropping it, or prefixing it with
+/// `/`) would silently break the #3325 dismiss-on-type fix for every
+/// LLM-offered list. This test pins it directly.
+/// What: Drive `detect_choices` + `push_assistant`'s exact list-building
+/// path via a numbered-list assistant response, then assert the resulting
+/// `app.choices` is non-empty, contains at least one non-`/`-prefixed
+/// entry (the sentinel), and `is_live_slash_completion` correctly reports
+/// `false` for it.
+/// Test: `is_live_slash_completion_sentinel_pins_non_slash_shape` (this test).
+#[test]
+fn is_live_slash_completion_sentinel_pins_non_slash_shape() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    a.push_assistant("Pick one:\n1. Apple\n2. Banana\n3. Orange", false);
+
+    assert!(
+        !a.choices.is_empty(),
+        "push_assistant should have detected the numbered list"
+    );
+    assert!(
+        a.choices.iter().any(|c| !c.starts_with('/')),
+        "detect_choices results must retain a non-slash sentinel \
+         ('Other (type your own)') so they never look like a live slash \
+         completion, got {:?}",
+        a.choices
+    );
+    assert!(
+        !is_live_slash_completion(&a),
+        "an LLM-offered list carrying the 'Other (type your own)' \
+         sentinel must never be classified as a live slash completion"
+    );
+}
+
+/// Why: Slash-command autocomplete also lives in `app.choices`, but unlike
+/// an LLM-offered list it is rebuilt from `input_buf` on every keystroke
+/// (`update_slash_completions`), so it must NOT be force-dismissed by the
+/// same-key fall-through path — that would make the completion list flicker
+/// away on every character instead of narrowing normally.
+/// What: Type `/mo` char-by-char; after each character, `app.choices`
+/// should still contain the live `/model` completion (never spuriously
+/// emptied by the choices dismissal added for #3325).
+/// Test: `repl_app_slash_completion_choices_survive_typing` (this test).
+#[test]
+fn repl_app_slash_completion_choices_survive_typing() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    for ch in "/mo".chars() {
+        handle_key(&mut a, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert_eq!(a.input_buf, "/mo");
+    assert!(
+        a.choices.iter().any(|c| c == "/model"),
+        "live slash completions must survive typing, got {:?}",
+        a.choices
+    );
+    assert!(a.choices_context.is_none());
+}
+
+/// No-op `ReplHandler` for driving `process_event` in tests without a real
+/// LLM backend. `handle_input` is never actually invoked by the assertions
+/// below (Enter's spawned dispatch task is fire-and-forget and the test
+/// checks state that `process_event` sets synchronously before spawning),
+/// but the trait bound requires a concrete impl.
+struct NoopReplHandler;
+
+#[async_trait::async_trait]
+impl ReplHandler for NoopReplHandler {
+    async fn handle_input(&self, _line: String, _tx: UnboundedSender<ReplEvent>) -> Result<bool> {
+        Ok(true)
+    }
+}
+
+/// Why (#3325): The confirmed root cause is stale picker state, not a
+/// channel-level race — `run.rs`'s `event_loop` drains `ReplEvent`s off an
+/// unbounded mpsc channel strictly in send order, so no keystroke is ever
+/// dropped at the channel/`select!` layer. But the *symptom* is only
+/// user-visible when an `LlmResponse` (which can populate `app.choices`
+/// via `push_assistant` -> `detect_choices`) is interleaved with the
+/// user's next round of keystrokes — a test that only drives `handle_key`
+/// directly (as the two tests above do) never exercises the actual async
+/// entry point the event loop uses per-event (`process_event` in
+/// `events.rs`), so it can't catch a regression in that ordered
+/// interleaving — e.g. a future change that mishandles keys processed
+/// while `process_event` holds the app lock to apply an `LlmResponse`.
+/// This test drives `process_event` directly (the same function
+/// `run_tui`'s `event_loop` calls for every `ReplEvent`), interleaving
+/// `Key` events with an `LlmResponse` event mid-message, awaited in
+/// sequence exactly as the real event loop would deliver them.
+/// What: Types "abc" via `process_event(ReplEvent::Key(..))`, then
+/// processes an `LlmResponse` carrying a numbered list — populating
+/// `app.choices` exactly like a real assistant turn arriving while the
+/// user keeps typing — then types "def" the rest of the message, then
+/// Enter. Asserts every character survived (`input_buf`/submitted line is
+/// exactly "abcdef", nothing dropped) and the concurrently-arrived
+/// picker didn't swallow the final Enter.
+/// Test: `repl_process_event_keys_survive_concurrent_llm_response` (this
+/// test).
+#[tokio::test]
+async fn repl_process_event_keys_survive_concurrent_llm_response() {
+    let app = Arc::new(Mutex::new(ReplApp::new("ctrl".into(), "u".into())));
+    let current_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let handler = Arc::new(NoopReplHandler);
+
+    async fn send_key(
+        app: &Arc<Mutex<ReplApp>>,
+        current_task: &Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+        tx: &UnboundedSender<ReplEvent>,
+        handler: &Arc<NoopReplHandler>,
+        code: KeyCode,
+    ) {
+        process_event(
+            ReplEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+            app,
+            current_task,
+            tx,
+            handler,
+        )
+        .await;
+    }
+
+    for ch in "abc".chars() {
+        send_key(&app, &current_task, &tx, &handler, KeyCode::Char(ch)).await;
+    }
+
+    // Model output for the prior turn lands mid-keystroke — mirrors
+    // `push_assistant`/`detect_choices` populating `app.choices` while the
+    // user is still typing their next message.
+    process_event(
+        ReplEvent::LlmResponse {
+            text: "Pick one:\n1. Apple\n2. Banana\n3. Orange".to_string(),
+            is_error: false,
+        },
+        &app,
+        &current_task,
+        &tx,
+        &handler,
+    )
+    .await;
+
+    for ch in "def".chars() {
+        send_key(&app, &current_task, &tx, &handler, KeyCode::Char(ch)).await;
+    }
+
+    {
+        let a = app.lock().await;
+        assert_eq!(
+            a.input_buf, "abcdef",
+            "keystrokes must survive an LlmResponse landing mid-message"
+        );
+        // The stale picker is dismissed the moment the user resumes typing
+        // (the first "d" keystroke after the LlmResponse) rather than
+        // lingering until Enter — see the `is_live_slash_completion` guard
+        // in `keys.rs`. Confirmed empty here as a sanity check on that
+        // dismiss-on-type behavior before asserting the Enter path below.
+        assert!(
+            a.choices.is_empty(),
+            "the stale picker should already be dismissed by the 'd' \
+             keystroke that followed the LlmResponse"
+        );
+    }
+
+    send_key(&app, &current_task, &tx, &handler, KeyCode::Enter).await;
+
+    let a = app.lock().await;
+    assert!(
+        a.choices.is_empty(),
+        "Enter after typing over a stale picker must dismiss it"
+    );
+    assert_eq!(
+        a.chat.last().map(|l| l.text.as_str()),
+        Some("abcdef"),
+        "the freshly typed line must be submitted verbatim, not swallowed by \
+         the concurrently-arrived choice list"
+    );
+}
