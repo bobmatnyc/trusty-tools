@@ -115,32 +115,49 @@ fn chunk_id_prefix_boundary_ok(candidate: &str, prefix: &str) -> bool {
 }
 
 /// `true` when `suffix` (everything in a chunk id after a matched file-path
-/// prefix) is a syntactically valid chunk-id suffix — i.e. `suffix` starts
-/// with the literal grammar `make_chunk_id` emits, not merely a colon.
+/// prefix) is EXACTLY one of the two shapes `make_chunk_id` emits — the
+/// WHOLE remainder is validated, not just its first byte or two (code
+/// review finding, issue #3401: peeking only at the leading bytes let
+/// `src/foo::bar.rs:10:20` and `src/foo:9lives.rs:15:25` — neither of which
+/// is a real chunk-id suffix — pass as if they were, letting a
+/// coincidentally-named sibling file consume a slot in a lane's `want`
+/// candidate pool ahead of a genuine in-scope match — a recall bug, not a
+/// disclosure one, but the exact property #3401 exists to guarantee).
 ///
-/// `make_chunk_id` emits exactly two shapes after `file`:
+/// `make_chunk_id` emits exactly two shapes after `file`, and no others:
 ///
-///   - `:{start_line}:{end_line}` — a SINGLE `:` immediately followed by an
-///     ASCII digit (line numbers are `usize`, so always `\d+`).
-///   - `::{chunk_type}::{name}::{start_line}` — a DOUBLE `::`.
-///
-/// Requiring a digit after a single `:` (rather than accepting any byte) is
-/// what distinguishes the real suffix `:10:20` from a real path segment
-/// that merely starts with a colon, e.g. `:evil/secret.rs` (`e` is not a
-/// digit → rejected) or `:bar.rs` (`b` is not a digit → rejected).
+///   - `:{start_line}:{end_line}` — a single `:`, then a non-empty run of
+///     ASCII digits, then `:`, then a non-empty run of ASCII digits, with
+///     NOTHING else (line numbers are `usize`, so always plain `\d+`).
+///   - `::{chunk_type}::{name}::{start_line}` — `::`, then a non-empty
+///     colon-free run (`chunk_type`), then `::`, then a non-empty
+///     colon-free run (`name`), then `::`, then a non-empty run of ASCII
+///     digits (`start_line`), with NOTHING else.
 fn is_chunk_id_suffix(suffix: &str) -> bool {
-    let bytes = suffix.as_bytes();
-    let Some(&first) = bytes.first() else {
-        return false; // no suffix at all — file_prefix_boundary_ok already covers this case
-    };
-    if first != b':' {
-        return false;
+    fn all_digits(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
     }
-    match bytes.get(1) {
-        Some(b':') => true,            // "::type::name::start" shape
-        Some(b) => b.is_ascii_digit(), // "start:end" shape
-        None => false,                 // bare trailing ":" — not a real suffix
+    fn colon_free(s: &str) -> bool {
+        !s.is_empty() && !s.contains(':')
     }
+
+    if let Some(rest) = suffix.strip_prefix("::") {
+        // "::{chunk_type}::{name}::{start_line}" — must split into exactly
+        // three non-empty parts on "::", the last of which is all digits.
+        let parts: Vec<&str> = rest.split("::").collect();
+        return matches!(parts.as_slice(), [chunk_type, name, start]
+            if colon_free(chunk_type) && colon_free(name) && all_digits(start));
+    }
+    if let Some(rest) = suffix.strip_prefix(':') {
+        // "{start_line}:{end_line}" — must split into exactly two non-empty
+        // digit-only parts on the first remaining `:`.
+        let mut parts = rest.splitn(2, ':');
+        return match (parts.next(), parts.next()) {
+            (Some(start), Some(end)) => all_digits(start) && all_digits(end),
+            _ => false,
+        };
+    }
+    false
 }
 
 #[cfg(test)]
@@ -246,6 +263,29 @@ mod tests {
         ));
         // And the extracted repro from the code-review comment.
         assert!(!matches_chunk_id("src/foo:bar.rs", Some("src/foo"), &[]));
+    }
+
+    /// Third code-review pass (issue #3401): the boundary check must fully
+    /// parse the chunk-id suffix, not merely peek at its first byte or two.
+    /// Peeking accepted `src/foo::bar.rs:10:20` (the `::` branch matched
+    /// unconditionally past byte 2) and `src/foo:9lives.rs:15:25` (the
+    /// single-`:` branch accepted on one leading digit, never requiring the
+    /// rest of the segment to actually BE digits). Neither is a real
+    /// `make_chunk_id` suffix — both are real file names that happen to
+    /// start with a shape the old peek-based check mistook for one. Full
+    /// validation of the entire remainder rejects both.
+    #[test]
+    fn test_chunk_id_prefix_rejects_lookalike_full_suffix() {
+        assert!(!matches_chunk_id(
+            "src/foo::bar.rs:10:20",
+            Some("src/foo"),
+            &[]
+        ));
+        assert!(!matches_chunk_id(
+            "src/foo:9lives.rs:15:25",
+            Some("src/foo"),
+            &[]
+        ));
     }
 
     /// Canary: a `path_prefix` naming one exact file (no trailing
