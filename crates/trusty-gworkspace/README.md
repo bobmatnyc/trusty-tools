@@ -59,6 +59,25 @@ console's downloaded shape are accepted:
 (`web` is accepted in place of `installed`.) Environment variables take
 precedence over the file.
 
+#### Per-profile OAuth clients
+
+Every profile uses this global client by default. A profile can instead
+authorize (and forever after refresh) against its OWN client — useful for a
+per-domain "Internal" Google Workspace app instead of one shared client:
+
+```sh
+trusty-gworkspace-mcp setup --profile work --oauth-client ~/Downloads/client_secret_work.json
+```
+
+`--oauth-client` takes a PATH to a client JSON file (same flat or
+`installed`/`web` shapes as above) — never inline `client_id`/`client_secret`.
+It is validated, then persisted to
+`~/.gworkspace-mcp/clients/<profile>.json` (0600) and reused automatically on
+every future refresh for that profile. A profile with no per-profile client
+keeps using the global one exactly as before — no migration is needed for
+existing accounts. `accounts list` and `doctor` both show which client each
+profile is using.
+
 ### 2. Authorize an account
 
 ```sh
@@ -133,10 +152,13 @@ unreachable rather than failing the whole diagnostic.
 ## Managing accounts
 
 ```sh
-trusty-gworkspace-mcp accounts list                 # show profiles + which is default
+trusty-gworkspace-mcp accounts list                 # show profiles + which is default + client
 trusty-gworkspace-mcp accounts default work         # switch the default profile
 trusty-gworkspace-mcp accounts remove work          # forget a local token (no revoke)
 ```
+
+`accounts list` shows a `CLIENT` column: `global`, or `per-profile (<path>)`
+for a profile authorized via `setup --oauth-client` (see above).
 
 Removing the current default reassigns it to another remaining profile
 (alphabetically next) rather than leaving no default at all.
@@ -144,7 +166,8 @@ Removing the current default reassigns it to another remaining profile
 The same operations are also available as MCP tools (issue #3503), so an
 agent can manage accounts without shelling out to the CLI:
 
-- `list_accounts` — read-only, as above.
+- `list_accounts` — read-only, as above; each entry includes a `client` field
+  (`"global"` or `"per-profile (<path>)"`).
 - `set_default_account {name}` — same behavior as `accounts default`.
 - `remove_account {name}` — same behavior as `accounts remove`, including the
   default-reassignment above; the response reports which profile (if any)
@@ -155,7 +178,10 @@ agent can manage accounts without shelling out to the CLI:
   a browser, and always returns the consent URL in the response (whether it
   succeeded or timed out) so the calling agent can relay it and, on a
   time-out, simply call `add_account` again for a fresh URL. No partial or
-  corrupt token is ever written on a time-out or abandoned consent.
+  corrupt token is ever written on a time-out or abandoned consent. Pass
+  `oauth_client_path` (a FILE PATH, never inline secrets) to authorize this
+  profile against its own OAuth client instead of the shared global one — see
+  "Per-profile OAuth clients" above.
 
 ## Configuration
 
@@ -275,6 +301,16 @@ adding a new tool means: write the function, add a `match` arm in
   blocks for up to the timeout, so clients with a shorter built-in call
   timeout may see it fail even though retrying is always safe (no token is
   persisted until the exchange fully succeeds).
+- **Per-profile OAuth clients (issue #3518).** A Google refresh token is bound
+  to the client that issued it, so `oauth::client_store` resolves the client
+  to use PER PROFILE — its own file at `~/.gworkspace-mcp/clients/<profile>.json`
+  if one was persisted (via `setup --oauth-client` or `add_account`'s
+  `oauth_client_path`), else the shared global `oauth_client.json`/env vars.
+  `oauth::flow::run_consent_with` (authorization) and
+  `auth::manager::OAuthManager::refresh` (every subsequent refresh) both
+  resolve through the same function, so a profile can never be authorized
+  with one client and refreshed with another. `list_accounts` / `doctor`
+  label each profile's resolved client for diagnosability.
 - **Local filesystem access is intentionally broad.** `compose_email`
   attachments (`path`/`local_path`), `manage_drive_file`'s `upload` action
   (`local_path`), and `get_drive_file_content`'s `save_path` all read or

@@ -4,39 +4,51 @@
 //! and add profiles without shelling out to the `trusty-gworkspace-mcp`
 //! CLI (issue #3503). `list_accounts` was the only MCP-exposed surface;
 //! `set_default_account` / `remove_account` / `add_account` close that gap.
+//! `add_account` also accepts an optional `oauth_client_path` (issue #3518)
+//! so a profile can authorize against its OWN OAuth client instead of the
+//! shared global one — see its doc comment.
 //! What: `set_default_account` / `remove_account` wrap the same lock-guarded
 //! `TokenStorage` methods the CLI uses (`api::auth::storage`, #3502) so both
 //! surfaces share one mutation implementation. `add_account` reuses the
 //! native PKCE consent flow (`api::auth::oauth::flow::run_consent_with`) —
-//! see its doc comment for the blocking-call design and why.
+//! see its doc comment for the blocking-call design and why. `accounts_json`
+//! labels every profile with which OAuth client it uses
+//! (`oauth::profile_client_source`).
 //! Test: Indirect — covered by storage tests plus the argument-validation
 //! smoke tests below.
 
+use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
-use crate::api::auth::oauth::{DefaultMode, flow};
+use crate::api::auth::oauth::{self, DefaultMode, flow};
 use crate::api::client::BaseClient;
 use crate::api::services::{opt_str, require_str};
 
-/// Build the `[{name, email, is_default}, ...]` JSON array from storage.
+/// Build the `[{name, email, is_default, client}, ...]` JSON array from
+/// storage.
 ///
 /// Why: Shared by `list_accounts` and every mutating tool below so each
 /// response includes an up-to-date account list without repeating the
-/// row-to-JSON mapping.
-/// What: Reads via `TokenStorage::list_accounts` (no network).
+/// row-to-JSON mapping. `client` (issue #3518) reports `"global"` or
+/// `"per-profile (<path>)"` so a per-profile-client misconfiguration is
+/// diagnosable from the same response, without a separate `doctor` round trip.
+/// What: Reads via `TokenStorage::list_accounts` plus
+/// `oauth::profile_client_source` per profile (no network).
 /// Test: Covered indirectly via `TokenStorage` storage round-trip tests.
 fn accounts_json(client: &BaseClient) -> Result<Vec<Value>> {
     let rows = client.storage().list_accounts()?;
     Ok(rows
         .into_iter()
         .map(|(name, email, is_default)| {
+            let client_label = oauth::profile_client_source(&name).label();
             json!({
                 "name": name,
                 "email": email,
                 "is_default": is_default,
+                "client": client_label,
             })
         })
         .collect())
@@ -127,13 +139,22 @@ const ADD_ACCOUNT_TIMEOUT_MAX_SECS: u64 = 90;
 /// What: Args: `profile` (optional, defaults to the shared default profile
 /// name), `make_default` / `no_default` (mutually exclusive, mirrors `setup`
 /// flags; default is `DefaultMode::Auto`), `timeout_secs` (optional, clamped
-/// to the bounds above). Returns `{"status": "authorized", "auth_url", ...}`
-/// on success, or `{"status": "timed_out", "auth_url", "message"}` if the
-/// browser step didn't complete in time — the caller can retry `add_account`
-/// for a fresh URL. Any other failure (e.g. missing OAuth client
-/// credentials) propagates as a tool error.
+/// to the bounds above), `oauth_client_path` (optional, issue #3518 — a FILE
+/// PATH to a JSON file holding this profile's OWN OAuth client; never a raw
+/// client_id/secret, so no secret material ever appears in a tool call or its
+/// logs). When `oauth_client_path` is given it is validated and persisted to
+/// `~/.gworkspace-mcp/clients/<profile>.json` BEFORE the consent flow runs
+/// (fast-failing on a missing/malformed file with no network call), so the
+/// authorization that follows uses that client, and every later refresh for
+/// this profile reuses it automatically. Returns
+/// `{"status": "authorized", "auth_url", ...}` on success, or
+/// `{"status": "timed_out", "auth_url", "message"}` if the browser step
+/// didn't complete in time — the caller can retry `add_account` for a fresh
+/// URL. Any other failure (e.g. missing OAuth client credentials, or an
+/// invalid `oauth_client_path`) propagates as a tool error.
 /// Test: `add_account_rejects_conflicting_default_flags`,
-/// `add_account_clamps_timeout_bounds`.
+/// `add_account_clamps_timeout_bounds`,
+/// `add_account_rejects_invalid_oauth_client_path_before_consent`.
 pub async fn add_account(client: &BaseClient, args: Value) -> Result<Value> {
     let profile = flow::effective_profile(opt_str(&args, "profile"));
     let no_default = args
@@ -157,6 +178,11 @@ pub async fn add_account(client: &BaseClient, args: Value) -> Result<Value> {
         DefaultMode::Auto
     };
     let timeout = clamp_timeout(args.get("timeout_secs").and_then(Value::as_u64));
+
+    if let Some(path) = opt_str(&args, "oauth_client_path") {
+        oauth::persist_profile_client(&profile, Path::new(path))
+            .with_context(|| format!("persist OAuth client for profile '{profile}'"))?;
+    }
 
     // `std::sync::Mutex` (not `RefCell`) because the closure below is held
     // across an `.await` inside a `Send` future (`run_stdio_loop` requires
@@ -209,7 +235,9 @@ mod tests {
     use super::*;
     use crate::api::auth::TokenStorage;
     use crate::api::auth::models::{OAuthToken, StoredToken, TokenMetadata};
+    use crate::api::auth::test_support::{EnvGuard, fresh_temp_home};
     use chrono::{Duration as ChronoDuration, Utc};
+    use serial_test::serial;
     use std::collections::HashMap;
 
     fn test_client() -> BaseClient {
@@ -316,5 +344,62 @@ mod tests {
             Duration::from_secs(ADD_ACCOUNT_TIMEOUT_MAX_SECS)
         );
         assert_eq!(clamp_timeout(Some(45)), Duration::from_secs(45));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn add_account_rejects_invalid_oauth_client_path_before_consent() {
+        // Issue #3518: an invalid `oauth_client_path` must fail fast — no
+        // network call, no browser, no partial file — before entering the
+        // (slow, network-touching) consent flow at all.
+        let _guard = EnvGuard::capture(&["HOME"]);
+        let home = fresh_temp_home("add-account-bad-client");
+        // SAFETY: serialised via #[serial]; EnvGuard restores on drop.
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let client = test_client();
+        let missing = home.join("does-not-exist.json");
+        let err = add_account(
+            &client,
+            json!({
+                "profile": "newprof",
+                "oauth_client_path": missing.to_string_lossy(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("OAuth client"), "{err}");
+        assert!(
+            !oauth::profile_client_path("newprof").exists(),
+            "a failed persist must never leave a partial per-profile client file"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn list_accounts_labels_client_source() {
+        let _guard = EnvGuard::capture(&["HOME"]);
+        let home = fresh_temp_home("list-accounts-client-label");
+        // SAFETY: see above.
+        unsafe { std::env::set_var("HOME", &home) };
+
+        let client = test_client();
+        seed(&client);
+        // Give profile "a" its own client; "b" keeps using the global one.
+        let source_dir = std::env::temp_dir().join(format!("gw-src-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("client.json");
+        std::fs::write(&source, r#"{"client_id":"id","client_secret":"secret"}"#).unwrap();
+        oauth::persist_profile_client("a", &source).unwrap();
+
+        let result = list_accounts(&client, json!({})).await.unwrap();
+        let accounts = result["accounts"].as_array().unwrap();
+        let a = accounts.iter().find(|v| v["name"] == "a").unwrap();
+        let b = accounts.iter().find(|v| v["name"] == "b").unwrap();
+        assert!(
+            a["client"].as_str().unwrap().starts_with("per-profile ("),
+            "{a}"
+        );
+        assert_eq!(b["client"], "global");
     }
 }

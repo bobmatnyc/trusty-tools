@@ -164,11 +164,13 @@ pub fn resolve_client_creds() -> Result<ClientCreds> {
 /// Why: Google's console downloads credentials as
 /// `{"installed":{"client_id":...,"client_secret":...}}`; supporting that
 /// verbatim lets users drop the file in unchanged, while a flat shape is
-/// simpler to hand-write.
+/// simpler to hand-write. `pub(super)` so `oauth::client_store` (issue #3518)
+/// can validate/parse a per-profile client file with the identical accepted
+/// shapes instead of re-implementing this.
 /// What: Accepts `{"client_id","client_secret"}` or the nested `installed`
 /// (or `web`) object.
 /// Test: `parses_flat_creds`, `parses_installed_creds`.
-fn parse_client_creds_json(data: &str) -> Result<ClientCreds> {
+pub(super) fn parse_client_creds_json(data: &str) -> Result<ClientCreds> {
     let v: serde_json::Value = serde_json::from_str(data).context("invalid client creds JSON")?;
     let obj = v.get("installed").or_else(|| v.get("web")).unwrap_or(&v);
     let client_id = obj
@@ -355,7 +357,14 @@ pub async fn run_consent_with(
     timeout: std::time::Duration,
     on_auth_url: impl FnOnce(&str),
 ) -> Result<ConsentOutcome> {
-    let creds = resolve_client_creds()?;
+    // Issue #3518: resolve THIS profile's own client (persisted via
+    // `setup --oauth-client` / `add_account`'s `oauth_client_path`) if it has
+    // one, falling back to the global client otherwise. The minted refresh
+    // token is bound to whichever client authorizes it, so authorization and
+    // every later refresh (`OAuthManager::refresh`) MUST agree on the same
+    // client for a given profile — this is the single call site that decides
+    // it for authorization.
+    let creds = super::client_store::resolve_client_creds_for_profile(profile)?;
 
     let existing = storage.load()?;
     let set_default = should_set_default(default_mode, profile, &existing);
