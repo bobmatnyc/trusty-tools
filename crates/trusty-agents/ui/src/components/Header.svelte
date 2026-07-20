@@ -6,10 +6,15 @@
    * bar inside App.svelte's `<main>`, and a floating Desktop/Web pill
    * absolutely-positioned over the whole page. The Foundry mockup
    * (`docs/design/gui/Foundry Ecosystem.dc.html:140-161`) integrates all of
-   * that into one 52px header: wordmark + tagline on the left, view tabs +
+   * that into one header: wordmark + tagline on the left, view tabs +
    * status badges + the agent roster switcher on the right. Consolidating
    * here means there is exactly one place that answers "what app is this,
    * what am I looking at, is it connected, and who am I talking to."
+   * Header height is `h-16` (64px, up from the original 52px per owner
+   * visual feedback on #3479 — the 28px-tall lockup read too small) so the
+   * 40px-tall `<Logo>` lockup keeps the Foundry clear-space rule (~one
+   * robot-eye width) above/below it instead of touching the header's
+   * top/bottom border.
    * What: Renders the Trusty Agents brand lockup (`<Logo>` — mark +
    * "TRUSTY AGENTS" wordmark + "UNIT-04 · MPM ORCHESTRATION" descriptor,
    * theme-aware per `docs/design/UI/icons/README.md`) on the left. On the
@@ -51,10 +56,10 @@
 </script>
 
 <header
-  class="sticky top-0 z-20 flex h-[52px] w-full shrink-0 items-center justify-between border-b border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-4"
+  class="sticky top-0 z-20 flex h-16 w-full shrink-0 items-center justify-between border-b border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-4"
 >
   <div class="flex items-center gap-3 min-w-0">
-    <Logo height={28} />
+    <Logo height={40} />
   </div>
 
   <div class="flex items-center gap-2.5">
