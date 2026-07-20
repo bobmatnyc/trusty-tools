@@ -23,9 +23,14 @@
 //! (0.30/0.29 — see `Cargo.toml`'s comment on why that diverges from the
 //! rest of the workspace's 0.29/0.28 pin during the migration window) but
 //! stay confined to `terminal`/`run`/`keys`; [`event`] and [`model`]
-//! themselves still have zero terminal-library dependency, by design. See
-//! DOC-50 §5 for the full slice breakdown (Slice 4 adds the widgets, Slice
-//! 10 the tagent cutover).
+//! themselves still have zero terminal-library dependency, by design.
+//! **Slice 4** (#3416, epic #3411, DOC-50 §5 Slice 4) adds the render/reducer
+//! model ([`app`]), the widgets that draw it ([`widgets`]), the pure
+//! markdown-rendering helpers those widgets call into ([`render`]), and the
+//! top-level frame composition ([`layout`]) — generalized, behavior-
+//! preserving ports of tagent's `repl/tui/{chat,banner,markdown,layout}.rs`.
+//! See DOC-50 §5 for the full slice breakdown (Slice 10 is the tagent
+//! cutover this crate is building toward).
 //!
 //! Dependency direction (DOC-50 §2.2, binding): `trusty-code` and
 //! `trusty-agents` depend on `trusty-tui`; `trusty-tui` depends on neither.
@@ -35,18 +40,25 @@
 //! # Spec References
 //! - [`SPEC-TTUI-02~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-02~draft) — architecture, the engine-adapter seam.
 //! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — extraction and migration plan.
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 1 and Slice 2 deliverables and acceptance criteria.
+//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 1, 2, and 4 deliverables and acceptance criteria.
 
+pub mod app;
 pub mod engine;
 pub mod event;
 pub mod keys;
+pub mod layout;
 pub mod model;
+pub mod render;
 pub mod run;
 pub mod terminal;
+pub mod text;
+pub mod widgets;
 
+pub use app::{ChatLine, ChatRole, ReplApp};
 pub use engine::TuiEngine;
 pub use event::{KeyCode, KeyInput, KeyModifiers, ReplEvent, WorkstreamSummary};
 pub use keys::translate_key_event;
+pub use layout::draw;
 pub use model::{CommandDescriptor, CommandRouting, PickerItem, PickerRequest, StatuslineSegment};
 pub use run::{KeyReaderGuard, TuiModel, event_loop, run, spawn_key_reader};
 pub use terminal::TerminalGuard;
