@@ -131,6 +131,10 @@ async fn bare_claude_model_routes_through_shared_adapter_when_flag_enabled() {
         false, // enable_prompt_caching
         None,  // tool_choice
         false, // use_finish_task
+        false, // strict_tool_discipline (#3371): use_finish_task=false and
+        // tool_choice=None (Auto), so LlmParams::strict_tool_discipline()'s
+        // `use_finish_task || tool_choice == Any` is false — mirrors every
+        // production call site's derivation for this same param combo.
         false, // use_anthropic_direct
         &[],   // stop_sequences
     )
@@ -257,6 +261,10 @@ async fn caching_active_keeps_raw_path_even_with_flag_enabled() {
         true,  // enable_prompt_caching — the term under test
         None,  // tool_choice
         false, // use_finish_task
+        false, // strict_tool_discipline (#3371): use_finish_task=false and
+        // tool_choice=None (Auto), so LlmParams::strict_tool_discipline()'s
+        // `use_finish_task || tool_choice == Any` is false — mirrors every
+        // production call site's derivation for this same param combo.
         false, // use_anthropic_direct — keeps route_native_anthropic false
         &[],   // stop_sequences
     )
