@@ -219,8 +219,18 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
         // your Sunday's going well" and then "happy Monday!" minutes later,
         // once the wall clock crossed midnight, because the value was never
         // refreshed after being computed the first time.
+        let runner_debug = format!("{:?}", agent_cfg.agent.runner);
+        let provider_label = crate::llm::credentials::pick_credentials(Some(agent_cfg.agent.runner))
+            .map(|c| c.label())
+            .unwrap_or("none");
+        let identity = super::config::AgentIdentity {
+            agent_name: &agent_cfg.agent.name,
+            model: &agent_cfg.agent.model,
+            runner: &runner_debug,
+            provider: provider_label,
+        };
         system_prompt.push_str("\n\n");
-        system_prompt.push_str(&super::config::render_user_context_block());
+        system_prompt.push_str(&super::config::render_user_context_block(&identity));
     }
 
     if !is_ctrl_persona {
