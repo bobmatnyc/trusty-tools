@@ -199,6 +199,16 @@ mod tests {
         assert!(root.exists(), "hermetic root must exist: {root:?}");
     }
 
+    /// Why serial: reads `$HOME` (via `guard_against_project_tree`, indirectly
+    /// through `hermetic_temp_dir`) and asserts on it below. Must be
+    /// serialized against every other test in this binary that mutates or
+    /// reads `$HOME` for the same reason — same shared default group as
+    /// `session_manager::workspace_guard::tests::is_safe_to_remove_rejects_home`
+    /// (#2461 sweep) and the three `HomeOverride`-mutating tests below; a
+    /// code reviewer noted the mutating tests' own `Mutex` only serializes
+    /// them against each other, not against `$HOME`-reading tests elsewhere,
+    /// which `#[serial]`'s shared default group closes.
+    #[serial_test::serial]
     #[test]
     fn hermetic_temp_dir_is_prefixed_and_outside_home() {
         let dir = hermetic_temp_dir();
@@ -228,20 +238,29 @@ mod tests {
         }
     }
 
-    /// Serializes tests that mutate `$HOME` and restores the prior value on
-    /// drop (including on panic-driven unwind, via `#[should_panic]` tests) —
-    /// mirrors `core::workspace_scan::tests::clear_env`'s env-mutation
-    /// pattern. `guard_against_project_tree` reads `$HOME` directly, so
-    /// concurrent mutation from another test in this process would make
-    /// these tests flaky without serialization.
+    /// RAII guard that overrides `$HOME` for the duration of a `#[serial]`
+    /// test and restores the prior value on drop (including on panic-driven
+    /// unwind, via the `#[should_panic]` test below) — mirrors
+    /// `core::session_launch::tests::EnvVarGuard`'s established pattern in
+    /// this crate.
+    ///
+    /// Why NOT an internal `Mutex` (a code reviewer flagged an earlier
+    /// revision that had one): a `Mutex` scoped to this struct only
+    /// serializes `HomeOverride`-using tests against EACH OTHER, not against
+    /// every other test in this binary that reads `$HOME` without going
+    /// through this guard — e.g.
+    /// [`hermetic_temp_dir_is_prefixed_and_outside_home`] above, or
+    /// `session_manager::workspace_guard::tests::is_safe_to_remove_rejects_home`.
+    /// `#[serial_test::serial]`'s shared default group, tagged on every one
+    /// of those tests, closes that gap crate-wide instead of only locally.
     struct HomeOverride {
         prev: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl Drop for HomeOverride {
         fn drop(&mut self) {
-            // SAFETY: serialised by `_lock`, held for this guard's lifetime.
+            // SAFETY: every caller of `override_home` is `#[serial]`, so no
+            // other test thread races this set/restore.
             match self.prev.take() {
                 Some(v) => unsafe { std::env::set_var("HOME", v) },
                 None => unsafe { std::env::remove_var("HOME") },
@@ -249,17 +268,22 @@ mod tests {
         }
     }
 
+    /// Set `$HOME` to `value`, returning a guard that restores it on drop.
+    /// Callers MUST be tagged `#[serial_test::serial]` — see [`HomeOverride`].
     fn override_home(value: &str) -> HomeOverride {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os("HOME");
-        // SAFETY: serialised by `lock`, held until the returned guard drops.
+        // SAFETY: caller is `#[serial]`.
         unsafe { std::env::set_var("HOME", value) };
-        HomeOverride { prev, _lock: lock }
+        HomeOverride { prev }
     }
 
     /// The genuine positive case: a real per-user home (e.g. `/Users/x`,
     /// `/home/x`) containing the candidate root must still panic.
+    ///
+    /// Why serial: mutates `$HOME` via [`override_home`] — see
+    /// [`HomeOverride`] for why serialization must be crate-wide, not a
+    /// locally scoped lock.
+    #[serial_test::serial]
     #[test]
     #[should_panic(expected = "resolves inside $HOME")]
     fn guard_panics_on_genuine_home_containment() {
@@ -272,6 +296,9 @@ mod tests {
     /// `real_system_tmp()`'s `/tmp` trivially equals `$HOME`, so a naive
     /// `starts_with` check panicked on EVERY `hermetic_temp_dir()` call —
     /// strictly worse than the pre-fix behavior. Must be a no-op.
+    ///
+    /// Why serial: see [`guard_panics_on_genuine_home_containment`].
+    #[serial_test::serial]
     #[test]
     fn guard_does_not_panic_when_home_is_tmp() {
         let _home = override_home("/tmp");
@@ -281,6 +308,9 @@ mod tests {
     /// Regression for the same false-positive with `HOME=/`: every absolute
     /// path trivially "starts with" `/`, so a naive check panicked on every
     /// `hermetic_temp_dir()` call. Must be a no-op.
+    ///
+    /// Why serial: see [`guard_panics_on_genuine_home_containment`].
+    #[serial_test::serial]
     #[test]
     fn guard_does_not_panic_when_home_is_root() {
         let _home = override_home("/");

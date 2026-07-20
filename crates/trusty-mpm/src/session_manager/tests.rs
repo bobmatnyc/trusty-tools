@@ -321,7 +321,7 @@ pub(super) async fn make_manager(dir: &TempDir) -> (SessionManager, Arc<FakeTmux
 
 #[tokio::test]
 async fn manager_create_record() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -360,7 +360,7 @@ async fn manager_create_record() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_known_tmux_names_collects_all() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let r1 = mgr
@@ -408,7 +408,7 @@ async fn manager_known_tmux_names_collects_all() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_create_success_does_not_reap_session() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -449,7 +449,7 @@ async fn manager_create_success_does_not_reap_session() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_create_store_failure_reaps_orphan() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     // Sabotage the store: replace `sessions.json` (a file after `load`) with a
@@ -498,7 +498,7 @@ async fn manager_create_store_failure_reaps_orphan() {
 
 #[tokio::test]
 async fn manager_name_hint_overrides() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -525,8 +525,8 @@ async fn manager_name_hint_overrides() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_stop_keeps_workspace() {
-    let dir = TempDir::new().unwrap();
-    let workspace_dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
+    let workspace_dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -574,8 +574,8 @@ async fn manager_stop_keeps_workspace() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_resume_respawns_in_existing_workspace() {
-    let dir = TempDir::new().unwrap();
-    let workspace_dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
+    let workspace_dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     let workspace_path = workspace_dir.path().to_owned();
@@ -651,13 +651,13 @@ async fn manager_resume_respawns_in_existing_workspace() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_decommission_removes_workspace() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     // Build a workspace path INSIDE a temp "managed root" dir so the
     // path-containment guard passes. `decommission_with_root` is called with
     // the managed root injected directly — no env var mutation required.
-    let managed_root = TempDir::new().unwrap();
+    let managed_root = crate::test_support::hermetic_temp_dir();
     let workspace_path = managed_root
         .path()
         .join("owner")
@@ -760,7 +760,7 @@ fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> Sessio
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_reconcile_gone_tmux_yields_stopped() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let fake = FakeTmuxDriver::new();
 
     // Seed a live tmux session.
@@ -814,7 +814,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_reconcile_skips_decommissioned() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
@@ -861,7 +861,7 @@ async fn manager_reconcile_skips_decommissioned() {
 
 #[tokio::test]
 async fn manager_send_input() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -897,7 +897,7 @@ async fn manager_send_input() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_send_input_rejected_for_stopped_and_decommissioned() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -942,7 +942,7 @@ async fn manager_env_scrub_command_sent() {
     // The actual send is in ClaudeCodeAdapter, but we can verify the
     // convention here: the command must not reference ANTHROPIC_API_KEY
     // without the `env -u` prefix.
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
@@ -982,7 +982,7 @@ async fn manager_env_scrub_command_sent() {
 
 #[tokio::test]
 async fn manager_answer_decision() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -1124,7 +1124,7 @@ async fn spawn_session_tmux_cwd_is_workspace() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_create_defaults_runtime_to_claude_code() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -1152,7 +1152,7 @@ async fn manager_create_defaults_runtime_to_claude_code() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_create_persists_runtime() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -1195,13 +1195,13 @@ async fn manager_create_persists_runtime() {
 /// Test: this test.
 #[tokio::test]
 async fn manager_get_reflects_out_of_process_write() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     // #2250: resume() now existence-checks cwd/workspace_path before handing
     // either to tmux, so the workspace must be a REAL directory (a fake
     // "/tmp/wt-shared" placeholder made `mgr_b.resume` below fail loudly with
     // `WorkspaceMissing` — correct new behavior, but orthogonal to what this
     // test actually verifies: cross-manager reload-on-read).
-    let workspace_dir = TempDir::new().unwrap();
+    let workspace_dir = crate::test_support::hermetic_temp_dir();
 
     // Manager A = the daemon's view; Manager B = the supervisor's view.
     // Both point at the same data dir / sessions.json.
@@ -1294,7 +1294,7 @@ pub(super) fn corrupt_store_file(mgr: &SessionManager) {
 /// Test: this test.
 #[tokio::test]
 async fn manager_list_returns_last_known_on_reload_error() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -1427,7 +1427,7 @@ pub(super) async fn seed_record(
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_create_persists_ephemeral_flag() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let eph = mgr
@@ -1481,7 +1481,7 @@ async fn manager_create_persists_ephemeral_flag() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn decommission_all_ephemeral_ignores_non_ephemeral() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let eph_active = ManagedSessionId::new();
@@ -1527,7 +1527,7 @@ async fn decommission_all_ephemeral_ignores_non_ephemeral() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn prune_by_state_never_touches_active() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let active = ManagedSessionId::new();
@@ -1561,7 +1561,7 @@ async fn prune_by_state_never_touches_active() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn prune_decommissioned_compacts() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let t1 = ManagedSessionId::new();
@@ -1616,7 +1616,7 @@ async fn prune_decommissioned_compacts() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn prune_deleted_compacts() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let d1 = ManagedSessionId::new();
@@ -1659,7 +1659,7 @@ async fn prune_deleted_compacts() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn prune_all_targets_non_running() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let active = ManagedSessionId::new();
@@ -1709,7 +1709,7 @@ async fn prune_all_targets_non_running() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn prune_dry_run_reports_without_mutating() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let stopped = ManagedSessionId::new();
@@ -1765,7 +1765,7 @@ fn prune_filter_parse_round_trip() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn prune_outcome_serializes() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
     let id = ManagedSessionId::new();
     seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, true).await;
@@ -1791,7 +1791,7 @@ async fn prune_outcome_serializes() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn compact_record_removes_from_store() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
     let id = ManagedSessionId::new();
     seed_record(&mgr, &dir, id, ManagedSessionState::Decommissioned, false).await;
@@ -1818,7 +1818,7 @@ async fn compact_record_removes_from_store() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     // Helper: seed a record with an explicit created_at + ephemeral flag.
@@ -1906,11 +1906,11 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_decommission_unowned_skips_deletion() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     // This dir represents a REAL user repo — it was not created by the SM.
-    let real_user_repo = TempDir::new().unwrap();
+    let real_user_repo = crate::test_support::hermetic_temp_dir();
     let repo_path = real_user_repo.path().to_owned();
     // Write a sentinel file; if decommission deletes the dir this assert fails.
     std::fs::write(repo_path.join("important_file.txt"), "do not delete").unwrap();
@@ -1988,7 +1988,7 @@ async fn manager_decommission_unowned_skips_deletion() {
 /// Test: this function IS the test.
 #[tokio::test]
 async fn workspace_owned_flag_round_trips_via_set() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let record = mgr
@@ -2038,7 +2038,7 @@ async fn workspace_owned_flag_round_trips_via_set() {
 /// Test: this is the test.
 #[tokio::test]
 async fn fake_driver_graceful_stop_with_pid() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     mgr.create(
@@ -2081,7 +2081,7 @@ async fn fake_driver_graceful_stop_with_pid() {
 /// Test: this is the test.
 #[tokio::test]
 async fn fake_driver_graceful_stop_without_pid() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     mgr.create(
@@ -2124,7 +2124,7 @@ async fn fake_driver_graceful_stop_without_pid() {
 /// Test: this is the test.
 #[tokio::test]
 async fn shutdown_calls_graceful_stop_for_active_sessions() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, fake) = make_manager(&dir).await;
 
     // Create a session and advance it to Active state.
@@ -2175,7 +2175,7 @@ async fn claude_session_id_persists_on_session() {
     // resume_managed can read the id back after a daemon restart.
     // What: create a session, write the id via hook_sync, reload from disk,
     // assert the id is present on the re-read record.
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let (mgr, _fake) = make_manager(&dir).await;
 
     let record = mgr
