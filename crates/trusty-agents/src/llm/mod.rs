@@ -8,7 +8,11 @@
 //! What: Declares the provider adapters, the Anthropic-native / Bedrock
 //! backends, the HTTP/event/compression/helper submodules, and the chat entry
 //! points (single-shot in `single_turn`, multi-turn in `tool_loop`), then
-//! re-exports them under their historical `llm::` paths.
+//! re-exports them under their historical `llm::` paths. `inference_bridge`
+//! and `inference_client` (#2410, epic #2400) are the shared-inference seam:
+//! a pure `async-openai` ↔ `trusty_common::inference` type bridge plus the
+//! OpenRouter transport built on it, wired into `tool_loop::turn::dispatch_turn`
+//! behind the default-OFF `TAGENT_INFERENCE_SHARED` flag.
 //! Test: Each submodule carries its own unit tests; the dispatch loop's
 //! parallel-tool behavior is covered by `tool_loop::tests`.
 
@@ -20,6 +24,8 @@ pub mod credentials;
 mod events;
 mod helpers;
 mod http;
+pub mod inference_bridge;
+pub mod inference_client;
 mod single_turn;
 pub mod thinking_classifier;
 mod tool_loop;
