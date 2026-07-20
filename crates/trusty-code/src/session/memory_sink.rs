@@ -347,11 +347,20 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
 /// `derive_palace_id_for` convention exactly, so a session's turns land in
 /// the SAME palace `catchup::pm_catchup_context` reads its digest from — the
 /// PM's own catch-up section and the turn recorder's writes must agree on
-/// "which palace is this project."
+/// "which palace is this project." Both this function and
+/// `trusty_common::catchup::derive_palace_id_for` previously carried their
+/// OWN copy of a 4th, unslugified `file_name()` fallback for when
+/// `derive_palace_id` returned `None`; since each copy re-derived the
+/// fallback from its own local `project_dir` handle, the two could in
+/// principle diverge (and could leak a storage-unsafe, unslugified token as
+/// a palace id) — see issue #1772. Both call sites now share the exact same
+/// terminal behavior — a fixed, non-derived placeholder — so `derive_palace_id`
+/// remains the single source of truth for every real precedence level.
 /// What: probes `git config --get remote.origin.url` from `project_dir`,
 /// then calls `trusty_common::derive_palace_id` (explicit override env ->
-/// git owner/repo slug -> parent/dir slug), falling back to the directory's
-/// basename (or `"unknown-project"`) when all three yield `None`.
+/// git owner/repo slug -> parent/dir slug), falling back to the fixed
+/// literal `"unknown-project"` (never a directory-derived value) when all
+/// three yield `None`.
 /// Test: `memory_sink::tests::derive_palace_id_for_project_falls_back_to_dirname`.
 pub fn derive_palace_id_for_project(project_dir: &Path) -> String {
     let remote = std::process::Command::new("git")
@@ -366,13 +375,7 @@ pub fn derive_palace_id_for_project(project_dir: &Path) -> String {
 
     let override_val = trusty_common::palace_override_from_env();
     trusty_common::derive_palace_id(project_dir, remote.as_deref(), override_val.as_deref())
-        .unwrap_or_else(|| {
-            project_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown-project")
-                .to_string()
-        })
+        .unwrap_or_else(|| "unknown-project".to_string())
 }
 
 #[cfg(test)]

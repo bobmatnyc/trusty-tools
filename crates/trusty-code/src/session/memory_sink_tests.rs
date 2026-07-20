@@ -370,3 +370,36 @@ fn derive_palace_id_for_project_falls_back_to_dirname() {
         "derivation must be deterministic for the same path"
     );
 }
+
+/// No git remote, no override -> agrees with the shared `derive_palace_id`
+/// core (issue #1772).
+///
+/// Why: this function used to carry its own copy of the divergent 4th
+/// fallback that `trusty_common::catchup::derive_palace_id_for` also carried
+/// (a raw, unslugified `file_name()` basename), which could disagree with
+/// `derive_palace_id` on the same inputs. Both call sites now delegate
+/// entirely to `trusty_common::derive_palace_id` and only fall back to a
+/// fixed, non-derived placeholder, so for a plain (non-git) temp dir with no
+/// `TRUSTY_MEMORY_PALACE` override, this function's result must equal calling
+/// `trusty_common::derive_palace_id(project_dir, None, None)` directly.
+/// What: clears the env override for the duration of the test (no other test
+/// in this crate mutates `TRUSTY_MEMORY_PALACE`, so no `#[serial]` guard is
+/// needed), then asserts the two calls agree.
+/// Test: itself.
+#[test]
+fn derive_palace_id_for_project_agrees_with_derive_palace_id_no_remote_no_env() {
+    // SAFETY: no other test in this crate mutates TRUSTY_MEMORY_PALACE.
+    unsafe {
+        std::env::remove_var(trusty_common::PALACE_OVERRIDE_ENV);
+    }
+    let tmp = TempDir::new().expect("tempdir");
+
+    let project_value = derive_palace_id_for_project(tmp.path());
+    let core_value = trusty_common::derive_palace_id(tmp.path(), None, None)
+        .expect("a real temp dir always has a usable parent/dir slug");
+
+    assert_eq!(
+        project_value, core_value,
+        "turn-recorder derivation must agree with the shared derive_palace_id core"
+    );
+}
