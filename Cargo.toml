@@ -66,6 +66,7 @@ default-members = [
     "crates/trusty-review",
     "crates/trusty-search",
     "crates/trusty-sld-lint",
+    "crates/trusty-tui",
 ]
 
 [workspace.package]

@@ -1,0 +1,25 @@
+[package]
+name = "trusty-tui"
+description = "Engine-agnostic terminal-UI seam (TuiEngine trait + ReplEvent) shared by trusty-code and trusty-agents interactive REPLs"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["tui", "repl", "terminal", "ratatui", "engine-adapter"]
+categories = ["command-line-interface", "asynchronous"]
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Slice 1 (#3412, epic #3411, DOC-50 §3.1/§5 Slice 1): scaffold only — the
+# `TuiEngine` trait and `ReplEvent` enum that let one TUI drive both tagent
+# and tcode. Deliberately dependency-minimal: no ratatui/crossterm yet (that
+# terminal layer + the ratatui-0.30 decision are Slice 2, #3414). This crate
+# will grow the event loop, widgets, and layout in later slices per DOC-50
+# §3.1 and §5.
+
+[dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }

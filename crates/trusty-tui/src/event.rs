@@ -1,0 +1,283 @@
+//! The shared event vocabulary: [`ReplEvent`] and its small payload types.
+//!
+//! Why: both `TuiEngine` implementations (tagent's `AgentEngine`, tcode's
+//! `CodeEngine`) and the shared event loop (Slice 2+) need one common
+//! language for "things that happened" — a key press, a chunk of streamed
+//! assistant output, a tool call, a workstream change. `ReplEvent` is that
+//! language; generalizing it from tagent's existing (tagent-specific)
+//! `ReplEvent` in `crates/trusty-agents/src/repl/tui/types.rs` is the whole
+//! point of the extraction (DOC-50 §2.3, §3.2).
+//!
+//! What: this module defines the enum and the handful of payload types it
+//! needs. It intentionally does NOT depend on `crossterm` — [`KeyInput`] is
+//! trusty-tui's own minimal key representation; Slice 2 (#3414) adds the
+//! crossterm-backed terminal layer that translates real `crossterm::event::KeyEvent`
+//! values into this type at the boundary, keeping `ReplEvent` itself
+//! terminal-library-agnostic.
+//!
+//! # Spec References
+//! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 `ReplEvent` deliverable (§5, Slice 1).
+//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — per-variant slice ownership (Slices 5/6/8/9).
+
+use serde::{Deserialize, Serialize};
+
+/// Every event that can flow through the shared TUI's event channel.
+///
+/// Why: one `mpsc::UnboundedSender<ReplEvent>` is threaded through the whole
+/// stack (engine adapters, the key-reader task, the render loop), mirroring
+/// tagent's proven design in `crates/trusty-agents/src/repl/tui/run.rs`. A
+/// single enum keeps that channel typed and keeps `TuiEngine` implementors
+/// from needing bespoke channels per concern.
+/// What: variants are grouped below by who produces them. Terminal-origin
+/// variants (`Key`, `Resize`, `Scroll`) are produced by the Slice 2 terminal
+/// layer; engine-origin variants (`AssistantOutput` and later) are produced
+/// by `TuiEngine` implementations; `Submit` is synthesized by the shared
+/// event loop itself (echoed input, picker selection, etc. — see tagent's
+/// `process_event` for the precedent). The enum is exhaustive per DOC-50 §5
+/// Slice 1's acceptance criterion ("`ReplEvent` enum covers all expected
+/// event types"); new variants are additive as later slices land (tool
+/// cards in Slice 8, permission prompts in Slice 9).
+///
+/// # Spec References
+/// - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft)
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReplEvent {
+    // ── Terminal-origin (Slice 2, #3414, wires the producer) ──────────
+    /// Raw keyboard input from the terminal's key-reader task.
+    Key(KeyInput),
+    /// The terminal was resized to `(cols, rows)`.
+    Resize(u16, u16),
+    /// Mouse-wheel scroll delta. Negative scrolls toward older history
+    /// (up), positive toward newer (down) — same convention as tagent's
+    /// `ReplEvent::Scroll`.
+    Scroll(isize),
+
+    // ── User-input dispatch (shared event loop) ────────────────────────
+    /// A line was submitted for the engine to process — either typed and
+    /// confirmed with Enter, or synthesized (e.g. a picker selection
+    /// resolving to a slash command). Consumed by `TuiEngine::handle_input`.
+    Submit(String),
+    /// The user requested cancellation of the in-flight request (Ctrl-C).
+    /// The shared event loop relays this to `TuiEngine::cancel_session`
+    /// (DOC-50 §5 Slice 5) rather than only clearing local UI state, per the
+    /// thin-client axiom (C-2).
+    Cancel,
+
+    // ── Engine-origin (produced by `TuiEngine` implementations) ────────
+    /// A chunk of streamed assistant output. `done` marks the final chunk of
+    /// a response so the scrollback can stop showing a "thinking" indicator;
+    /// `is_error` marks the text as an error message rather than a normal
+    /// response (mirrors tagent's `LlmResponse { text, is_error }`).
+    AssistantOutput {
+        chunk: String,
+        done: bool,
+        is_error: bool,
+    },
+    /// A tool was invoked by the backend agent. `result` is `None` while the
+    /// call is in flight and `Some(..)` once it completes. Rendering (text
+    /// vs. fancy card) is a Slice 8 (#TBD, Phase 2) concern; the event shape
+    /// is defined now so `TuiEngine` implementations don't need a breaking
+    /// change later.
+    ToolInvocation {
+        tool_name: String,
+        args: serde_json::Value,
+        result: Option<String>,
+    },
+    /// A one-line status message (e.g. "cancelled", "Switched to: izzie").
+    StatusMessage(String),
+    /// Engine-supplied statusline segments replacing the current set
+    /// (session id, model, project, workstream, …). See
+    /// [`StatuslineSegment`]; full segment taxonomy lands in Slice 1.5
+    /// (#3413).
+    StatuslineUpdate(Vec<StatuslineSegment>),
+    /// The active workstream's summary changed (initial load or refetch
+    /// after an activation change).
+    WorkstreamUpdated(WorkstreamSummary),
+    /// The daemon activated a different workstream (DOC-48 §5.3
+    /// `WorkstreamActivationChanged`), pushed via
+    /// `TuiEngine::subscribe_workstream_events`. `prior_id` is `None` on the
+    /// very first activation observed in this session.
+    WorkstreamActivationChanged {
+        new_id: String,
+        prior_id: Option<String>,
+    },
+    /// The backend connection was lost (daemon restart, SSE stream closed,
+    /// HTTP timeout/502/503). The TUI shows a "Connection lost" status;
+    /// input remains live and the next `handle_input`/
+    /// `subscribe_workstream_events` call attempts to reconnect (DOC-50
+    /// §2.4).
+    ConnectionLost { reason: String },
+}
+
+/// Minimal, `crossterm`-independent representation of a single key press.
+///
+/// Why: `ReplEvent` must not force a `crossterm` dependency onto every
+/// `TuiEngine` consumer (only the Slice 2 terminal layer needs to know a
+/// terminal library exists at all). This type is the boundary: Slice 2
+/// translates `crossterm::event::KeyEvent` into `KeyInput` once, at the
+/// key-reader task.
+/// What: `code` identifies the key; `modifiers` are the held modifier keys.
+/// Deliberately small — only what tagent's existing line editor
+/// (`crates/trusty-agents/src/repl/tui/keys.rs`) actually switches on
+/// (Ctrl-a/e/u/c/d, arrows, Enter, Backspace, printable chars).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyInput {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+}
+
+/// The identity of a key, independent of any terminal library's own enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyCode {
+    Char(char),
+    Enter,
+    Backspace,
+    Delete,
+    Tab,
+    Esc,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    /// A key not yet mapped to a named variant above. Slice 2 can extend
+    /// this enum as the line editor grows new bindings; keeping this
+    /// fallback avoids a breaking change for every new key tagent's editor
+    /// happens to read.
+    Other,
+}
+
+/// Modifier keys held alongside a [`KeyCode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct KeyModifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+/// One labeled segment of the status line (e.g. `("model", "sonnet-5")`).
+///
+/// Why: DOC-50 §3.2 (Slice 1.5) requires the statusline to be engine-driven,
+/// not hardcoded per product (tagent's `status.rs` today hardcodes
+/// OpenRouter pricing and tm/claude-mpm session counts — exactly the
+/// divergence Slice 1.5 removes). This type is the wire shape Slice 1
+/// commits to so `ReplEvent::StatuslineUpdate` has a stable payload before
+/// Slice 1.5 builds the full segment taxonomy and rendering behavior.
+/// What: a flat `label`/`value` pair; ordering in the containing `Vec` is
+/// render order. Deliberately minimal — populated in full by Slice 1.5
+/// (#3413).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatuslineSegment {
+    pub label: String,
+    pub value: String,
+}
+
+/// One selectable row in an engine-supplied picker (model, agent,
+/// workstream, …).
+///
+/// Why: DOC-50 §3.3 requires picker data sources to be engine-provided
+/// rather than hardcoded lists (tagent's model/provider pickers today are
+/// hardcoded in `pickers.rs`). This is the item shape the picker widget
+/// (Slice 4+) will render; the data-source trait it comes from is a Slice
+/// 1.5 concern (#3413).
+/// What: `id` is what gets sent back to the engine on selection; `label` is
+/// the display text (may differ, e.g. a friendly name over a UUID).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PickerItem {
+    pub id: String,
+    pub label: String,
+}
+
+/// One entry in an engine-supplied slash-command registry.
+///
+/// Why: DOC-50 §5 Slice 7 splits slash commands into client-side built-ins
+/// (`/help`, `/clear`, `/quit`) and engine-routed commands (`/model`,
+/// `/agent`, `/workstream`). `/help` needs to enumerate both, so the
+/// registry needs one common descriptor shape regardless of which side
+/// handles the command.
+/// What: `name` is the command without its leading `/` (e.g. `"workstream"`);
+/// `summary` is the one-line help text `/help` renders. The full
+/// `SlashCommandRegistry` trait this feeds lands in Slice 1.5 (#3413).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandDescriptor {
+    pub name: String,
+    pub summary: String,
+}
+
+/// A minimal summary of a workstream (DOC-48 §2.1), enough for the status
+/// line and `/workstream list` output.
+///
+/// Why: `ReplEvent::WorkstreamUpdated` needs a payload; the full
+/// `Workstream` type lives in trusty-code/trusty-agents-common and must not
+/// become a `trusty-tui` dependency (that would invert DOC-50 §2.2's
+/// dependency direction — `trusty-tui` depends on nothing product-specific).
+/// What: `id` and `name` are the two fields DOC-50 §5 Slice 6's status-line
+/// example ("WS: Token rotation (a1b2c3d4)") actually needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkstreamSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ReplEvent` must round-trip through `Clone`/`PartialEq` for the
+    /// event-loop tests Slice 2+ will add (asserting "this event was
+    /// pushed"); a `Debug`/`Clone`/`PartialEq` derive failing to compile on
+    /// any variant would be a stub with unusable payload types.
+    #[test]
+    fn repl_event_variants_are_cloneable_and_comparable() {
+        let a = ReplEvent::StatusMessage("hello".to_string());
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        let ws = ReplEvent::WorkstreamUpdated(WorkstreamSummary {
+            id: "a1b2c3d4".to_string(),
+            name: "Token rotation".to_string(),
+        });
+        assert_eq!(ws.clone(), ws);
+    }
+
+    /// `KeyInput` default modifiers must be "nothing held" so a bare
+    /// `KeyCode` translation (Slice 2) doesn't need to construct
+    /// `KeyModifiers` by hand for the common case.
+    #[test]
+    fn key_modifiers_default_to_none_held() {
+        let m = KeyModifiers::default();
+        assert!(!m.ctrl && !m.alt && !m.shift);
+    }
+
+    /// `StatuslineSegment`/`PickerItem`/`CommandDescriptor` are the wire
+    /// shapes Slice 1.5 builds on; a (de)serialization round-trip is the
+    /// cheapest guarantee that later HTTP-transported engines (CodeEngine)
+    /// can carry them without a custom `Serialize` impl.
+    #[test]
+    fn shared_stub_types_round_trip_through_json() {
+        let seg = StatuslineSegment {
+            label: "model".to_string(),
+            value: "sonnet-5".to_string(),
+        };
+        let json = serde_json::to_string(&seg).expect("serialize");
+        let back: StatuslineSegment = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(seg, back);
+
+        let item = PickerItem {
+            id: "opus".to_string(),
+            label: "Claude Opus".to_string(),
+        };
+        let json = serde_json::to_string(&item).expect("serialize");
+        assert_eq!(item, serde_json::from_str(&json).expect("deserialize"));
+
+        let cmd = CommandDescriptor {
+            name: "workstream".to_string(),
+            summary: "List or activate a workstream".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).expect("serialize");
+        assert_eq!(cmd, serde_json::from_str(&json).expect("deserialize"));
+    }
+}
