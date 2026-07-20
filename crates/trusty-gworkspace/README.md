@@ -3,7 +3,7 @@
 Google Workspace MCP server for the Trusty suite — a Rust port of the
 Python [`gworkspace-mcp`](https://pypi.org/project/gworkspace-mcp/) project.
 
-Exposes 43 [Model Context Protocol](https://modelcontextprotocol.io/) tools
+Exposes 46 [Model Context Protocol](https://modelcontextprotocol.io/) tools
 across Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, and Accounts.
 Authentication is fully native: the `trusty-gworkspace-mcp` binary runs the
 OAuth consent flow itself and reads/writes `~/.gworkspace-mcp/tokens.json` —
@@ -138,6 +138,25 @@ trusty-gworkspace-mcp accounts default work         # switch the default profile
 trusty-gworkspace-mcp accounts remove work          # forget a local token (no revoke)
 ```
 
+Removing the current default reassigns it to another remaining profile
+(alphabetically next) rather than leaving no default at all.
+
+The same operations are also available as MCP tools (issue #3503), so an
+agent can manage accounts without shelling out to the CLI:
+
+- `list_accounts` — read-only, as above.
+- `set_default_account {name}` — same behavior as `accounts default`.
+- `remove_account {name}` — same behavior as `accounts remove`, including the
+  default-reassignment above; the response reports which profile (if any)
+  became the new default.
+- `add_account` — runs the native OAuth consent flow for a new (or re-auth of
+  an existing) profile. This blocks the tool call for up to `timeout_secs`
+  (default 60s, clamped to 10-90s) waiting for the user to complete consent in
+  a browser, and always returns the consent URL in the response (whether it
+  succeeded or timed out) so the calling agent can relay it and, on a
+  time-out, simply call `add_account` again for a fresh URL. No partial or
+  corrupt token is ever written on a time-out or abandoned consent.
+
 ## Configuration
 
 | Env var                       | Purpose                                                        |
@@ -180,9 +199,10 @@ per profile (two-tier lookup) — useful for per-project accounts.
 
 ## Tool Surface
 
-43 tools, grouped by service:
+46 tools, grouped by service:
 
-- **Accounts:** `list_accounts`
+- **Accounts:** `list_accounts`, `set_default_account`, `remove_account`,
+  `add_account`
 - **Calendar:** `manage_calendars`, `manage_events`, `query_free_busy`
 - **Gmail:** `search_gmail_messages`, `get_gmail_message_content`,
   `download_gmail_attachment`, `list_message_attachments`, `compose_email`,
@@ -236,9 +256,25 @@ adding a new tool means: write the function, add a `match` arm in
   native; no external CLI is involved.
 - **Two-tier token lookup.** `./.gworkspace-mcp/tokens.json` overrides
   `~/.gworkspace-mcp/tokens.json` — useful for per-project profiles.
+- **Concurrency-safe token writes (issue #3502).** Every read-modify-write of
+  `tokens.json` (refresh, consent persistence, account default/remove) goes
+  through `TokenStorage::update`, which serialises callers in-process and
+  holds an advisory cross-process lock on a sidecar `tokens.json.lock` file
+  for the duration. Two profiles refreshing at the same moment — in the same
+  or different processes — can no longer silently lose one write.
 - **Errors as data.** Tool failures return `{"error": "..."}` inside the
   MCP `content` envelope rather than JSON-RPC framing errors, so the
   model gets actionable feedback.
+- **`add_account`'s blocking design (issue #3503).** Authorizing an account
+  needs a human to finish consent in a browser, which an MCP tool call can't
+  do end-to-end on its own. Rather than adding a background task + a separate
+  poll/status tool, `add_account` reuses the existing consent flow verbatim
+  with a short, bounded timeout (default 60s) and always returns the consent
+  URL in the response, success or time-out. This was a deliberate choice to
+  avoid new state-management machinery; it does mean the tool call itself
+  blocks for up to the timeout, so clients with a shorter built-in call
+  timeout may see it fail even though retrying is always safe (no token is
+  persisted until the exchange fully succeeds).
 - **Local filesystem access is intentionally broad.** `compose_email`
   attachments (`path`/`local_path`), `manage_drive_file`'s `upload` action
   (`local_path`), and `get_drive_file_content`'s `save_path` all read or
