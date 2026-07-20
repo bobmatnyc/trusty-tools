@@ -1,49 +1,69 @@
 /*
- * Trusty Suite design tokens.
+ * Trusty Suite design tokens — Foundry v2 "rust-on-paper" (issue #3487).
  *
  * Why: A shared palette + typography across trusty-memory, trusty-search,
- * and other Trusty tools. Reuse this file (or import these custom properties)
- * in sibling projects to keep the visual identity coherent.
- * What: CSS custom properties scoped to :root.
- * Test: Inspect any .trusty-* class in DevTools and confirm values resolve.
+ * and other Trusty tools. This file mirrors the canonical Foundry v2 source
+ * at docs/design/UI/design-system/tokens.css — same `--trusty-*` custom
+ * property names this crate already used pre-migration (the legacy
+ * indigo/slate palette), so no component var() reference needed to change
+ * for the tokens that already existed; only the VALUES moved to the
+ * rust-on-paper palette, plus a new `[data-theme='dark']` block (this crate
+ * previously had no dark theme at all). Five tokens the design system
+ * defines but this crate's pre-migration copy omitted
+ * (--trusty-surface-raised, --trusty-surface-hover, --trusty-primary,
+ * --trusty-primary-soft, --trusty-display) are added here too — several
+ * components already referenced them via `var(--x, fallback)` with an
+ * inline fallback that silently never resolved (dangling names); they now
+ * resolve for real instead of always falling through to the fallback.
+ * What: CSS custom properties scoped to :root (light) and
+ * [data-theme='dark'] (dark). Reuse this file (or import these custom
+ * properties) in sibling projects to keep the visual identity coherent.
+ * Test: Inspect any .trusty-* class in DevTools and confirm values resolve
+ * in both themes; toggle OS appearance (see main.js's theme bootstrap) and
+ * confirm the page recolors.
  */
 :root {
-  /* Sidebar (dark) */
-  --trusty-sidebar-bg: #1e1e2e;
-  --trusty-sidebar-text: #cdd6f4;
-  --trusty-sidebar-muted: #7f849c;
-  --trusty-sidebar-accent: #89b4fa;
-  --trusty-sidebar-active: #313244;
-  --trusty-sidebar-border: #313244;
+  /* Sidebar (dark oxide chassis) */
+  --trusty-sidebar-bg: #2b1c12;
+  --trusty-sidebar-text: #e6d8c8;
+  --trusty-sidebar-muted: #a58a6b;
+  --trusty-sidebar-accent: #e9b98a;
+  --trusty-sidebar-active: #46311f;
+  --trusty-sidebar-border: #46311f;
 
-  /* Content (light) */
-  --trusty-content-bg: #f8f9fc;
-  --trusty-card-bg: #ffffff;
-  --trusty-border: #e2e8f0;
-  --trusty-border-strong: #cbd5e1;
+  /* Content (warm paper) */
+  --trusty-content-bg: #f5efe7;
+  --trusty-card-bg: #fffdf9;
+  --trusty-border: #d8c9b4;
+  --trusty-border-strong: #c4b096;
+  --trusty-surface-raised: #efe6d8;
+  --trusty-surface-hover: rgba(183, 65, 14, 0.06);
 
   /* Text */
-  --trusty-text-primary: #1e293b;
-  --trusty-text-secondary: #475569;
-  --trusty-text-muted: #64748b;
+  --trusty-text-primary: #2b1c12;
+  --trusty-text-secondary: #6e5843;
+  --trusty-text-muted: #8a7460;
   --trusty-text-inverse: #ffffff;
 
-  /* Accents */
-  --trusty-accent: #6366f1;
-  --trusty-accent-hover: #4f46e5;
-  --trusty-accent-soft: #eef2ff;
-  --trusty-success: #22c55e;
-  --trusty-success-soft: #dcfce7;
-  --trusty-warning: #f59e0b;
-  --trusty-warning-soft: #fef3c7;
-  --trusty-danger: #ef4444;
-  --trusty-danger-soft: #fee2e2;
-  --trusty-info: #0ea5e9;
-  --trusty-info-soft: #e0f2fe;
+  /* Accents (rust core) */
+  --trusty-accent: #b7410e;
+  --trusty-accent-hover: #8a2f0b;
+  --trusty-accent-soft: #f3d9cb;
+  --trusty-primary: #b7410e;
+  --trusty-primary-soft: rgba(183, 65, 14, 0.07);
+  --trusty-success: #3f6f2a;
+  --trusty-success-soft: #dcedd2;
+  --trusty-warning: #b07d10;
+  --trusty-warning-soft: #f5e7c4;
+  --trusty-danger: #c2331f;
+  --trusty-danger-soft: #f6d7d0;
+  --trusty-info: #3d6b8a;
+  --trusty-info-soft: #dde9f0;
 
   /* Typography */
-  --trusty-font: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  --trusty-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, Menlo, monospace;
+  --trusty-font: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --trusty-display: 'Chakra Petch', 'IBM Plex Sans', sans-serif;
+  --trusty-mono: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
   --trusty-fs-xs: 0.75rem;
   --trusty-fs-sm: 0.875rem;
   --trusty-fs-md: 1rem;
@@ -51,21 +71,71 @@
   --trusty-fs-xl: 1.5rem;
   --trusty-fs-2xl: 2rem;
 
-  /* Surface */
-  --trusty-radius-sm: 4px;
-  --trusty-radius: 8px;
-  --trusty-radius-lg: 12px;
-  --trusty-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --trusty-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
-  --trusty-shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.1);
+  /* Surface — flat, clean line borders (no offset shadows) */
+  --trusty-radius-sm: 3px;
+  --trusty-radius: 5px;
+  --trusty-radius-lg: 8px;
+  --trusty-shadow-sm: none;
+  --trusty-shadow: 0 1px 2px rgba(43, 28, 18, 0.06);
+  --trusty-shadow-lg: 0 14px 32px rgba(43, 28, 18, 0.28);
 
   /* Layout */
   --trusty-sidebar-width: 240px;
-  --trusty-topbar-height: 60px;
+  --trusty-topbar-height: 56px;
   --trusty-space-1: 4px;
   --trusty-space-2: 8px;
   --trusty-space-3: 12px;
   --trusty-space-4: 16px;
   --trusty-space-5: 24px;
   --trusty-space-6: 32px;
+}
+
+/*
+ * Dark theme — "NIGHT SHIFT". Activate with <html data-theme="dark">
+ * (see lib/theme-bootstrap.js, which follows OS prefers-color-scheme and
+ * is wired up from main.js before the shell mounts). Same rust hue family
+ * as light; surfaces flip to oxide chassis, the accent brightens one step
+ * (#D97742) to hold contrast on dark paper.
+ */
+[data-theme='dark'] {
+  /* Sidebar (deepest chassis) */
+  --trusty-sidebar-bg: #171009;
+  --trusty-sidebar-text: #e6d8c8;
+  --trusty-sidebar-muted: #a58a6b;
+  --trusty-sidebar-accent: #e9b98a;
+  --trusty-sidebar-active: #382513;
+  --trusty-sidebar-border: #382513;
+
+  /* Content (dark oxide) */
+  --trusty-content-bg: #201612;
+  --trusty-card-bg: #2b1c12;
+  --trusty-border: #46311f;
+  --trusty-border-strong: #5c4126;
+  --trusty-surface-raised: #382513;
+  --trusty-surface-hover: rgba(217, 119, 66, 0.09);
+
+  /* Text */
+  --trusty-text-primary: #f0e7d8;
+  --trusty-text-secondary: #cbb69c;
+  --trusty-text-muted: #a58a6b;
+  --trusty-text-inverse: #201612;
+
+  /* Accents — rust brightens one step on dark */
+  --trusty-accent: #d97742;
+  --trusty-accent-hover: #e8905c;
+  --trusty-accent-soft: rgba(217, 119, 66, 0.16);
+  --trusty-primary: #d97742;
+  --trusty-primary-soft: rgba(217, 119, 66, 0.1);
+  --trusty-success: #8fbf6a;
+  --trusty-success-soft: rgba(143, 191, 106, 0.14);
+  --trusty-warning: #d9a83a;
+  --trusty-warning-soft: rgba(217, 168, 58, 0.14);
+  --trusty-danger: #e06a52;
+  --trusty-danger-soft: rgba(224, 106, 82, 0.14);
+  --trusty-info: #7ba7c4;
+  --trusty-info-soft: rgba(123, 167, 196, 0.14);
+
+  /* Surface */
+  --trusty-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --trusty-shadow-lg: 0 14px 32px rgba(0, 0, 0, 0.55);
 }

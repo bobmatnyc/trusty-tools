@@ -14,6 +14,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Migrated the admin UI to Foundry v2 design tokens** ([#3487](https://github.com/bobmatnyc/trusty-tools/issues/3487)):
+  `ui/src/lib/styles/tokens.css` now sources its palette, fonts, radii, and
+  shadows from the canonical `docs/design/UI/design-system/tokens.css`
+  (rust-on-paper light theme) and ships a full `[data-theme='dark']` block
+  ("Night Shift") — this UI previously had no dark theme at all. Existing
+  `--trusty-*` custom-property names are unchanged; several components that
+  referenced tokens the old palette never actually defined
+  (`--trusty-bg-subtle`, `--trusty-border-light`, `--trusty-font-mono`, a bare
+  `--trusty-text`) now resolve to real values instead of silently falling
+  through to their inline fallback. Dark-mode activation follows OS
+  `prefers-color-scheme` via a new `lib/theme-bootstrap.js`, wired from
+  `main.js` before the shell mounts.
+
 ### Security
 
 - **Router-wide same-origin (CSRF) write guard** ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)):
