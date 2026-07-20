@@ -3,15 +3,42 @@
 //! Why: The profile setup is a self-contained side concern of CTRL startup;
 //! splitting it from the command dispatcher + stdin loop keeps both files under
 //! the line cap.
-//! What: `load_or_create_user_profile` (load-or-interview) and
+//! What: `load_or_create_user_profile` (load-or-env-or-interview) and
 //! `conduct_user_interview` (the interactive prompts).
 //! Test: Smoke-tested via the tmux REPL harness; the load path short-circuits
-//! when a complete profile already exists.
+//! when a complete profile already exists; the env-resolution path is unit
+//! tested on `UserProfile::from_env` directly (`identity::user_profile::tests`)
+//! since it needs no REPL/stdin scaffolding.
 
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-/// Load `~/.trusty-agents/user.toml`, or run the first-run interview to create it. (#193)
+/// Load `~/.trusty-agents/user.toml`, resolve from the environment
+/// (`.env.local`), or run the first-run interview to create it (#193,
+/// extended by #3406 follow-up).
+///
+/// Why: the interactive interview blocks on stdin every time
+/// `~/.trusty-agents/user.toml` is absent/incomplete — friction for a user
+/// who already has `TAGENT_USER_NAME`/`_EMAIL`/`_TIMEZONE` in a `.env.local`
+/// (owner directive: "I don't want to have to set the credential. You have
+/// them, use them." — extended from credentials to the profile). Precedence
+/// mirrors the credential resolver's shape: an already-saved, complete
+/// `user.toml` wins outright (never overwritten here); otherwise the
+/// environment (which `run_startup_init` has already merged from process env
+/// > project `.env.local` > user `$HOME/.env.local`, per
+/// `UserProfile::from_env`'s docs) is tried BEFORE the interactive prompt;
+/// the prompt is the last resort.
+/// What: `UserProfile::load()` short-circuits when complete. Otherwise
+/// `UserProfile::from_env()` is tried; a hit is persisted to `user.toml` (so
+/// later runs skip straight to the fast path and stop depending on
+/// `.env.local` still being present/unchanged) and returned WITHOUT
+/// prompting. A save failure is logged, not fatal — the resolved profile is
+/// still used in-memory for this run. Only when neither source yields a
+/// profile does the interactive interview (or the `TAGENT_NONINTERACTIVE`
+/// placeholder) run.
+/// Test: `identity::user_profile::tests::from_env_*` cover the resolution
+/// rules; this function's persistence step is exercised via the tmux REPL
+/// harness (module docs) since it drives real stdin/`$HOME`.
 pub(super) async fn load_or_create_user_profile()
 -> Result<Option<crate::identity::user_profile::UserProfile>> {
     use crate::identity::user_profile::UserProfile;
@@ -20,6 +47,22 @@ pub(super) async fn load_or_create_user_profile()
         && p.is_complete()
     {
         return Ok(Some(p));
+    }
+
+    if let Some(profile) = UserProfile::from_env() {
+        if let Err(e) = profile.save() {
+            tracing::warn!(
+                error = %e,
+                "failed to persist env-resolved user profile (continuing in-memory)"
+            );
+        } else {
+            eprintln!(
+                "[trusty-agents] resolved profile for {} from the environment (.env.local); \
+                 saved to ~/.trusty-agents/user.toml",
+                profile.name
+            );
+        }
+        return Ok(Some(profile));
     }
 
     let noninteractive =

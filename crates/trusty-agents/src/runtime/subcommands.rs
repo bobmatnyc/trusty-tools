@@ -53,7 +53,7 @@
 //! `start`/`stop`/`status`, `session`, `dashboard`, …) and the
 //! flag-aware subcommand locator used by the `om` shell alias.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::{postmortem, registry_cmds, service_cmds, session_cmds};
 use crate::{cli, debugger, inspection};
@@ -271,6 +271,101 @@ pub(super) async fn run_config_subcommand(argv_tail: &[String]) -> Result<()> {
     }
 
     ConfigParser::parse_from(argv_tail).cmd.run().await
+}
+
+/// Parse and run `tagent config profile show|set` (#3406 follow-up).
+///
+/// Why: managing `~/.trusty-agents/user.toml` (name/email/timezone) today
+/// means hand-editing TOML or deleting the file to re-trigger the
+/// interactive first-run interview — this gives it a proper CLI, mirroring
+/// `config keys`'s `show`/`set` shape. Kept local to trusty-agents (not
+/// folded into the shared `trusty_common::inference::config::ConfigCommand`)
+/// since `UserProfile` is a trusty-agents-only concept, not something every
+/// trusty-* binary shares.
+/// What: `argv_tail` starts after the literal `profile` token. `show` prints
+/// the current profile (or "not set"); `set --name/--email/--timezone`
+/// loads the existing profile (or starts a fresh default), overwrites only
+/// the flags actually passed, and saves. Unlike credential values, profile
+/// fields are not secrets — printed in full.
+/// Test: `crates/trusty-agents/tests/config_mount.rs::profile_show_then_set_round_trips`.
+pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Result<()> {
+    use crate::identity::user_profile::UserProfile;
+    use clap::Parser as _;
+
+    /// `tagent config profile <verb>`.
+    #[derive(clap::Parser)]
+    #[command(
+        name = "tagent config profile",
+        about = "Manage the CTRL user profile."
+    )]
+    struct ProfileParser {
+        #[command(subcommand)]
+        verb: ProfileVerb,
+    }
+
+    #[derive(clap::Subcommand)]
+    enum ProfileVerb {
+        /// Print the current profile (or "not set").
+        Show,
+        /// Update one or more profile fields, creating the profile if absent.
+        Set {
+            #[arg(long)]
+            name: Option<String>,
+            #[arg(long)]
+            email: Option<String>,
+            #[arg(long)]
+            timezone: Option<String>,
+        },
+    }
+
+    let parsed = ProfileParser::parse_from(
+        std::iter::once("tagent config profile".to_string()).chain(argv_tail.iter().cloned()),
+    );
+
+    match parsed.verb {
+        ProfileVerb::Show => match UserProfile::load() {
+            Some(p) => {
+                println!("name:     {}", p.name);
+                println!("email:    {}", p.email.as_deref().unwrap_or("(not set)"));
+                println!("timezone: {}", p.timezone.as_deref().unwrap_or("(not set)"));
+                println!("saved at: {}", UserProfile::profile_path().display());
+            }
+            None => println!(
+                "No profile set. Run `tagent` interactively (first-run interview), set \
+                 TAGENT_USER_NAME/_EMAIL/_TIMEZONE in .env.local, or run \
+                 `tagent config profile set --name <name>`."
+            ),
+        },
+        ProfileVerb::Set {
+            name,
+            email,
+            timezone,
+        } => {
+            let mut profile = UserProfile::load().unwrap_or_default();
+            if let Some(name) = name {
+                profile.name = name;
+            }
+            if email.is_some() {
+                profile.email = email;
+            }
+            if timezone.is_some() {
+                profile.timezone = timezone;
+            }
+            if profile.created_at.is_empty() {
+                profile.created_at = chrono::Utc::now().to_rfc3339();
+            }
+            if !profile.is_complete() {
+                anyhow::bail!("refusing to save a profile with no name — pass --name");
+            }
+            profile.save().context("failed to save user profile")?;
+            println!(
+                "Saved profile for {} to {}.",
+                profile.name,
+                UserProfile::profile_path().display()
+            );
+        }
+    }
+    Ok(())
 }
 
 // #409: Find the subcommand position even when preceded by mode flags.

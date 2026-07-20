@@ -124,6 +124,34 @@ pub fn missing_credentials_error() -> String {
         .to_string()
 }
 
+/// Providers configured (via any resolver tier) that ctrl/PM's own LLM calls
+/// cannot route through — `openrouter`/`anthropic`/`claude-code` are the only
+/// three [`pick_credentials`] ever selects.
+///
+/// Why (#3406 follow-up, live-confirmed): a store entry for e.g. `fireworks`
+/// (configured for a DIFFERENT consumer, such as a sub-agent's own model)
+/// makes `pick_credentials` correctly return `None` for ctrl/PM — but a bare
+/// "credential=none" then reads as "nothing is configured anywhere", which is
+/// misleading when the store demonstrably has a working key. Naming the
+/// mismatched provider turns a confusing dead end into an actionable
+/// diagnostic ("you have `fireworks` configured, but ctrl/PM needs
+/// openrouter/anthropic/claude-code").
+/// What: walks the shared provider registry, excludes the three providers
+/// `pick_credentials` already checks, and returns the `id` of every
+/// remaining provider whose credential resolves via
+/// [`trusty_common::inference::credentials::resolve_key`]. Never exposes a
+/// value — names only, same discipline as `config keys list`.
+/// Test: `other_configured_providers_names_fireworks_when_store_has_it`,
+/// `other_configured_providers_empty_when_nothing_else_configured`.
+pub fn other_configured_providers() -> Vec<&'static str> {
+    trusty_common::inference::registry::all()
+        .iter()
+        .map(|caps| caps.id.as_str())
+        .filter(|id| !matches!(*id, "openrouter" | "anthropic" | "claude-code"))
+        .filter(|id| resolve_key_set(id))
+        .collect()
+}
+
 /// Whether `provider`'s credential resolves via the shared 3-tier resolver,
 /// without ever exposing the resolved value.
 ///
@@ -437,5 +465,93 @@ mod tests {
     fn leaves_unrelated_id_alone() {
         let r = qualify_openrouter_model(&LlmCredentials::OpenRouter, "gpt-4o");
         assert_eq!(r, "gpt-4o");
+    }
+
+    /// Why: the exact confusing case the owner hit live — `fireworks`
+    /// configured via the secure store (a real, working key for a DIFFERENT
+    /// consumer) while ctrl/PM's own three providers are all absent. The
+    /// diagnostic must name `fireworks` rather than reporting a bare "none".
+    /// Sandboxes `$HOME` (mirrors `pick_consults_store_when_env_absent`) so
+    /// the store write never touches the real machine's store.
+    /// Test: itself.
+    #[test]
+    #[serial]
+    fn other_configured_providers_names_fireworks_when_store_has_it() {
+        let _env_guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_all();
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: HOME_LOCK held for the entire test body.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+
+        let store = trusty_common::inference::credentials::FileKeyStore::at(tmp.path());
+        trusty_common::inference::credentials::KeyStore::set(
+            &store,
+            "fireworks",
+            "fw-from-store", // pragma: allowlist secret
+        )
+        .expect("seed store");
+
+        assert_eq!(pick_credentials(None), None);
+        let other = other_configured_providers();
+        assert!(
+            other.contains(&"fireworks"),
+            "expected fireworks to be named: {other:?}"
+        );
+        assert!(
+            !other
+                .iter()
+                .any(|p| matches!(*p, "openrouter" | "anthropic" | "claude-code")),
+            "the three providers pick_credentials already checks must never \
+             appear here: {other:?}"
+        );
+
+        // SAFETY: HOME_LOCK still held.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// Why: when NOTHING is configured anywhere, the diagnostic must be
+    /// empty — the plain-CLI banner falls back to a bare "none" in that case.
+    /// Test: itself.
+    #[test]
+    #[serial]
+    fn other_configured_providers_empty_when_nothing_else_configured() {
+        let _env_guard = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _home_guard = crate::test_env::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_all();
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: HOME_LOCK held for the entire test body.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+        }
+
+        assert_eq!(other_configured_providers(), Vec::<&'static str>::new());
+
+        // SAFETY: HOME_LOCK still held.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 }

@@ -59,8 +59,8 @@ use anyhow::Result;
 
 use super::cli_def::check_credentials_and_warn;
 use crate::{
-    api, build_info, bus, ctrl, logging, mcp, memory, process_tracker, registry, repl, search,
-    session_registry, workflow,
+    agents, api, build_info, bus, ctrl, logging, mcp, memory, process_tracker, registry, repl,
+    search, session_registry, workflow,
 };
 
 use build_info::BuildInfo;
@@ -140,6 +140,20 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // Test: `trusty-agents-local` integration; `trusty-agents` standalone has an
     //       empty plugin list.
 
+    // #3405/#3406 follow-up: deploy the bundled agent roster (`assistant`,
+    // `ctrl`, `pm`, the specialist set) to `$HOME/.trusty-agents/agents/` so
+    // `tagent` launched from ANY directory — not just inside this repo
+    // checkout — resolves `assistant` instead of failing with "agent not
+    // found" and silently degrading to `ctrl`. Idempotent (never overwrites
+    // an existing file) and best-effort: a failure (e.g. a read-only
+    // `$HOME`) is logged, not fatal — the pre-fix "not found" error is the
+    // worst case, not a crash. Runs unconditionally (even in quiet modes)
+    // since it has no stdout/stderr output of its own beyond an optional
+    // one-time note gated the same way the credentials banner is.
+    let bundled_agents_deployed = agents::bundled::ensure_bundled_agents_deployed()
+        .inspect_err(|e| tracing::warn!(error = %e, "failed to deploy bundled agents to $HOME"))
+        .unwrap_or(0);
+
     // #366: Credential onboarding banner. After env loading is the right time
     // to check — both `.env.local` files and the host environment have been
     // merged in. Suppress in quiet/non-interactive modes (sub-agent IPC,
@@ -151,6 +165,12 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             .iter()
             .any(|a| matches!(a.as_str(), "--agent" | "--serve" | "--api" | "--workflow"));
         if !quiet_mode {
+            if bundled_agents_deployed > 0 {
+                eprintln!(
+                    "[trusty-agents] deployed {bundled_agents_deployed} bundled agent file(s) to \
+                     ~/.trusty-agents/agents/ (first run outside a project checkout)"
+                );
+            }
             check_credentials_and_warn();
         }
     }

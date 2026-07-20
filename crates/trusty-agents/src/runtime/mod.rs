@@ -120,6 +120,15 @@ pub async fn run() -> Result<()> {
     // which would otherwise skew `config keys list`'s tier report by folding the
     // file into the process env before the verb inspects it.
     if args.len() > 1 && args[1] == "config" {
+        // #3406 follow-up: `tagent config profile show|set` manages
+        // `~/.trusty-agents/user.toml` directly (a trusty-agents-only
+        // concept — unlike `keys`, it isn't part of the shared
+        // `trusty_common::inference::config::ConfigCommand` surface every
+        // trusty-* binary mounts) — so it's intercepted here rather than
+        // folded into that shared parser.
+        if args.len() > 2 && args[2] == "profile" {
+            return subcommands::run_config_profile_subcommand(&args[3..]).await;
+        }
         return subcommands::run_config_subcommand(&args[1..]).await;
     }
 

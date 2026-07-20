@@ -11,6 +11,7 @@
 //! Test: `AgentConfig::load` on bundled `pm.toml` / `python-engineer.toml`
 //! returns Ok with expected `agent.name` / `agent.model`; see `tests.rs`.
 
+pub mod bundled;
 pub mod claude_code_runner;
 pub mod claude_mpm_loader;
 mod config;

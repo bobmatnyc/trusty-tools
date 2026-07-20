@@ -116,16 +116,51 @@ use tools::write_file::WriteFileTool;
 use tools::{ToolRegistry, delegate::DelegateToAgentTool, shell_exec::ShellExecTool};
 use workflow::WorkflowEngine;
 
-/// Handle `trusty-agents agents <subcommand>` (#167).
+/// Handle `trusty-agents agents <subcommand>` (#167, `deploy` added by
+/// #3405/#3406 follow-up).
 ///
 /// Why: Exposes the discovery results to operators. Without this, there's
 /// no way to verify which agents were picked up from which directory.
-/// What: Currently supports `agents list`. Prints discovered agents with
-/// their source and capability tags in the format described in the issue.
-/// Test: Covered manually; unit-tested via `AgentRegistry::list`.
+/// `deploy` gives an explicit, re-runnable repair path for the automatic
+/// first-run deploy in `runtime::startup::run_startup_init` — useful when a
+/// user deletes `~/.trusty-agents/agents/` or wants to confirm the bundled
+/// roster landed without waiting for the next interactive startup.
+/// What: `list` (default) prints discovered agents with their source and
+/// capability tags. `deploy` writes any bundled agent files MISSING from
+/// `$HOME/.trusty-agents/agents/`, reporting how many were newly written
+/// (idempotent — a repeat run reports 0). Deliberate tradeoff, stated in the
+/// output text below (code-critic follow-up on #3429/#3431): a file that
+/// ALREADY EXISTS there — whether from a prior deploy or a user's own
+/// edit — is never touched, even if the bundled version has since changed.
+/// A future release that improves a bundled persona will NOT reach a user
+/// who already has the old file; `rm ~/.trusty-agents/agents/<name>` (or the
+/// whole directory) before re-running `deploy` is the escape hatch.
+/// Test: Covered manually; unit-tested via `AgentRegistry::list` and
+/// `agents::bundled::deploy_bundled_agents`'s own tests
+/// (`deploy_never_overwrites_existing_file`).
 pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
     let sub = args.first().map(String::as_str).unwrap_or("list");
     match sub {
+        "deploy" => {
+            let written = agents::bundled::ensure_bundled_agents_deployed()
+                .context("failed to deploy bundled agents to $HOME/.trusty-agents/agents")?;
+            if written > 0 {
+                println!(
+                    "Deployed {written} bundled agent file(s) to ~/.trusty-agents/agents/ \
+                     (only files that did not already exist there — existing files, including \
+                     prior deploys and your own edits, are never overwritten or updated)."
+                );
+            } else {
+                println!(
+                    "Bundled agents already present in ~/.trusty-agents/agents/ — nothing to \
+                     deploy. Note: deploy only WRITES MISSING files; it never updates an \
+                     existing file even if the bundled version has changed. To pick up an \
+                     updated bundled agent, remove it from ~/.trusty-agents/agents/ first, \
+                     then re-run `tagent agents deploy`."
+                );
+            }
+            Ok(())
+        }
         "list" => {
             let reg = agents::registry::AgentRegistry::load(&agents::registry::agent_search_paths(
                 &default_bundled_config_dir(),
@@ -168,11 +203,11 @@ pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
         other => {
             // #366: Surface a "did you mean?" hint for typos like
             // `agents lst` -> `agents list`.
-            let known = &["list"];
+            let known = &["list", "deploy"];
             if let Some(s) = cli::did_you_mean(other, known, 2) {
                 eprintln!("tagent agents: unknown subcommand '{other}'. Did you mean '{s}'?");
             } else {
-                eprintln!("tagent agents: unknown subcommand '{other}'. Try: list");
+                eprintln!("tagent agents: unknown subcommand '{other}'. Try: list, deploy");
             }
             bail!("unknown agents subcommand: {other}");
         }
