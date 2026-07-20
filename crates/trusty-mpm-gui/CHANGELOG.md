@@ -10,6 +10,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **UI tokens now CI-enforced against the canonical Foundry source** (refs [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): flipped from the `scripts/check_token_drift.mjs` allowlist to ENFORCED. The `token-drift` CI job now re-derives `ui/src/app.css`'s Tailwind `--color-*: R G B` triples from `docs/design/UI/design-system/tokens.css` on every push/PR, so a hand-edit that drifts this crate's palette from canonical fails the build.
 - Migrated the Svelte UI from its placeholder indigo/slate palette to Foundry v2 design tokens (closes #3488, part of epic #3486): `ui/src/app.css` now defines `--color-*` RGB-triple custom properties (light `:root` + `[data-theme='dark']`) sourced 1:1 from `docs/design/UI/design-system/tokens.css`, and `ui/tailwind.config.js` resolves every `trusty-*`/`status-*` color through `rgb(var(--color-*) / <alpha-value>)` instead of hardcoded hex literals — the same CSS-var bridge `crates/trusty-code-gui/ui` uses, keeping the crates in lockstep for a future `scripts/check_token_drift.mjs` enforcement flip. Dark-mode activation switched from a bare `<html class="dark">` to the `[data-theme='dark']` attribute (`ui/src/stores/theme.ts`); the existing manual `ThemeToggle` + `localStorage`-persisted preference is unchanged, only the DOM attribute it drives. All components dropped their `-light` token suffix + `dark:` variant pairs in favor of the single self-theming token each now resolves through.
 
 ### Security
