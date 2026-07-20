@@ -53,10 +53,28 @@ fn should_navigate_picker(app: &ReplApp) -> bool {
 
 /// Handle one key press. Returns `Some(line)` if the user submitted.
 pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
-    // Picker modal: when an overlay is open, capture all keys here so
-    // arrow / Enter / Esc don't leak through to the input editor.
+    // Picker modal (`/model`, `/provider`): while an overlay is open, Up /
+    // Down / Enter / Esc drive `handle_picker_key` exclusively so navigation
+    // doesn't leak into the input editor underneath. Any OTHER key (#3403 —
+    // sibling of #3325/#3346, which fixed the same swallow class for
+    // `app.choices`) used to hit `handle_picker_key`'s `_ => {}` catch-all
+    // and vanish with zero effect: the user would type a few characters
+    // while `/model` was open, see nothing happen, and have no idea their
+    // keystrokes were being eaten. Type-to-dismiss: a non-navigation key
+    // closes the picker and falls through to the normal input path below,
+    // so a printable character lands in `input_buf` exactly like it would
+    // with no picker open. Mirrors the #3325 resolution for `app.choices`.
     if app.picker.is_some() {
-        return handle_picker_key(app, key);
+        match key.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc => {
+                return handle_picker_key(app, key);
+            }
+            _ => {
+                app.picker = None;
+                // Fall through — the rest of `handle_key` treats this as a
+                // normal keystroke (char insert, backspace, cursor move, …).
+            }
+        }
     }
     // Inline choice picker: when the LLM offered a list and we surfaced it,
     // arrow keys navigate the choices, Enter commits the selection into the
@@ -285,7 +303,11 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
     }
 }
 
-/// Handle a key while a picker overlay is open.
+/// Handle a key while a picker overlay is open, for the navigation keys
+/// `handle_key` routes here (Up/Down/Enter/Esc). Every other key is
+/// intercepted one level up in `handle_key`, which dismisses the picker and
+/// falls through to normal input editing instead of calling this function
+/// (#3403) — so this function only ever sees the four keys it understands.
 ///
 /// Why: Centralizes the modal-state key routing so `handle_key`'s normal path
 /// can stay focused on the input editor. Up/Down navigate (with wrap-around),
@@ -295,7 +317,7 @@ pub(crate) fn handle_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
 /// never produce a submitted line directly; the event loop synthesizes a
 /// `Submit("/model …")` after observing `pending_picker_selection`.
 /// Test: `repl_app_picker_navigation_wraps`, `repl_app_picker_enter_sets_pending_selection`,
-/// `repl_app_picker_esc_dismisses`.
+/// `repl_app_picker_esc_dismisses`, `repl_app_picker_printable_key_dismisses_and_inserts`.
 pub(crate) fn handle_picker_key(app: &mut ReplApp, key: KeyEvent) -> Option<String> {
     let picker = app.picker.as_mut().expect("picker present");
     match key.code {
