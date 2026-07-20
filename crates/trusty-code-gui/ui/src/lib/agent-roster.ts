@@ -23,10 +23,14 @@
 //
 // Test: `agent-roster.test.ts`.
 
-/** Mirrors `crate::agents::protocol`'s per-entry wire shape. */
+/** Mirrors `crate::agents::protocol`'s per-entry wire shape. `"broken"`
+ * marks a disk file that failed to parse — dispatch of that name will fail
+ * until it is fixed or deleted (`agents_list`'s docs; code-critic PR #3465
+ * review, MEDIUM), so it is disk-tier for management purposes (removable)
+ * but must never render as a healthy embedded/dispatchable entry. */
 export interface AgentCatalogEntry {
   name: string;
-  tier: 'embedded' | 'project' | 'user';
+  tier: 'embedded' | 'project' | 'user' | 'broken';
   description: string | null;
   model: string | null;
 }

@@ -170,6 +170,25 @@ impl RpcError {
         Self::new(-32008, format!("another workstream is active: {active_id}"))
             .with_data(json!({"error_type": "active_conflict", "active_id": active_id}))
     }
+
+    /// Build a `-32009 already_exists` error (issue #3449).
+    ///
+    /// Why: `agents.create`/`skills.create` must refuse to overwrite an
+    /// existing disk entry, and that conflict needs its OWN code — an early
+    /// cut reused the literal `-32008`, but that slot is
+    /// [`Self::active_conflict`]'s (DOC-48 §5.2, constructor-backed, and
+    /// asserted on numerically by the workstreams tests), so sharing it
+    /// would make the two semantically different conflicts
+    /// indistinguishable to a client matching on code (code-critic PR #3465
+    /// review, LOW). `-32009` is the next free slot after it.
+    /// What: `data.error_type = "already_exists"`. The REST layer maps this
+    /// to `409 Conflict` (`serve::rest::rpc_error_to_status`), same HTTP
+    /// status as `active_conflict` — the distinction lives in the JSON-RPC
+    /// code/`error_type`, where protocol clients look.
+    /// Test: `rpc_error_already_exists_sets_code_and_type`.
+    pub fn already_exists(message: impl Into<String>) -> Self {
+        Self::domain(-32009, "already_exists", message)
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -276,5 +295,15 @@ mod tests {
                 "active_id": "a1b2c3d4-e5f6-4748-9a0b-1c2d3e4f5a6b",
             }))
         );
+    }
+
+    /// `already_exists` must use `-32009` — its OWN slot, distinct from
+    /// `active_conflict`'s `-32008` (code-critic PR #3465 review, LOW).
+    #[test]
+    fn rpc_error_already_exists_sets_code_and_type() {
+        let e = RpcError::already_exists("agent 'dup' already exists on disk");
+        assert_eq!(e.code, -32009);
+        assert_ne!(e.code, RpcError::active_conflict("x").code);
+        assert_eq!(e.data, Some(json!({"error_type": "already_exists"})));
     }
 }

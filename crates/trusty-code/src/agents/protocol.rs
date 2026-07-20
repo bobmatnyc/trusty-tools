@@ -26,7 +26,10 @@
 //!     overriding an embedded name WINS and suppresses the embedded copy of
 //!     that name, mirroring [`super::resolve_agent`]'s disk-wins precedence
 //!     exactly (so the catalog never shows the same name twice with two
-//!     different tiers).
+//!     different tiers). An unparseable disk file surfaces as `tier:
+//!     "broken"` (see [`agents_list`]'s docs) — again mirroring
+//!     `resolve_agent`, whose disk-wins rule applies even to a malformed
+//!     file, so dispatch of that name fails rather than falling back.
 //!   - `agents.create{name, content}` -> writes
 //!     `<dir>/<name>.md` from the caller-supplied Markdown+frontmatter body.
 //!     Rejects (see [`validate_agent_name`]) a `name` that is empty, exceeds
@@ -34,7 +37,7 @@
 //!     collides with an EMBEDDED name (embedded is read-only — this endpoint
 //!     never lets a disk file silently shadow it) with `-32001
 //!     permission_denied` (403); an already-existing disk file of the same
-//!     name with a `-32008`-shaped "already exists" conflict (409, use
+//!     name with a `-32009 already_exists` conflict (409, use
 //!     delete-then-create to replace).
 //!   - `agents.delete{name}` -> removes `<dir>/<name>.md`. `-32002 not_found`
 //!     (404) if no disk file exists under that name; `-32001
@@ -145,13 +148,22 @@ fn entry_json(cfg: &AgentConfig, tier: &str) -> Value {
 /// Why: the GUI's Agents tab roster fetch — see module docs for the
 /// disk-wins-over-embedded union rule.
 /// What: ignores `params` (no filters yet). Builds the embedded set keyed by
-/// name, then overlays disk entries (skipping any disk `.md` that fails to
-/// parse, logged at WARN — mirrors `load_all_agents`'s graceful-skip
-/// convention), removing the embedded entry of the same name whenever a
-/// disk override exists. Sorted by name.
+/// name, then overlays disk entries, removing the embedded entry of the same
+/// name whenever a disk override exists. A disk `.md` that FAILS to parse is
+/// surfaced as `tier: "broken"` (description = the parse error, still
+/// overriding any embedded entry of the same name) rather than skipped —
+/// because [`super::resolve_agent`]'s disk-wins rule applies even to a
+/// malformed file ("a disk parse error is surfaced, never silently
+/// substituted", #3441), dispatch of that name WILL fail, and a catalog
+/// that skipped the broken file would show the shadowed embedded entry as
+/// healthy/dispatchable — lying about what `task.run` will actually do
+/// (code-critic PR #3465 review, MEDIUM). A broken entry keeps the delete
+/// affordance: removing the bad file is exactly the repair path. Sorted by
+/// name.
 /// Test: `tests::list_returns_embedded_when_disk_empty`,
 /// `tests::list_disk_override_wins_and_suppresses_embedded`,
-/// `tests::list_disk_only_entries_are_additive`.
+/// `tests::list_disk_only_entries_are_additive`,
+/// `tests::list_marks_unparseable_disk_override_as_broken`.
 async fn agents_list(
     state: &AgentsCatalogState,
     _params: Value,
@@ -163,17 +175,21 @@ async fn agents_list(
         .collect();
 
     for (name, path) in discover_agents(&state.dir) {
-        match md_loader::load_md_agent(&path) {
-            Ok(cfg) => {
-                let entry = entry_json(&cfg, state.tier);
-                match by_name.iter_mut().find(|(n, _)| *n == name) {
-                    Some(slot) => slot.1 = entry,
-                    None => by_name.push((name, entry)),
-                }
-            }
+        let entry = match md_loader::load_md_agent(&path) {
+            Ok(cfg) => entry_json(&cfg, state.tier),
             Err(e) => {
-                tracing::warn!("agents.list: skipping unparseable disk agent '{name}': {e}");
+                tracing::warn!("agents.list: disk agent '{name}' is unparseable: {e}");
+                json!({
+                    "name": name,
+                    "tier": "broken",
+                    "description": format!("unparseable agent file — dispatch of this name will fail until it is fixed or deleted: {e}"),
+                    "model": Value::Null,
+                })
             }
+        };
+        match by_name.iter_mut().find(|(n, _)| *n == name) {
+            Some(slot) => slot.1 = entry,
+            None => by_name.push((name, entry)),
         }
     }
 
@@ -231,12 +247,19 @@ pub(crate) fn validate_agent_name(name: &str) -> Result<(), RpcError> {
 /// `201 Created`, see `serve::rest::agent_catalog::create`). Errors: invalid
 /// `name` (`-32602`/`-32003`), `name` collides with an embedded agent
 /// (`-32001 permission_denied`, 403 — embedded is read-only), an existing
-/// disk file of the same name (`-32008`-shaped conflict, 409), or a
-/// write-side I/O failure (`-32603 internal`).
+/// disk file of the same name (`-32009 already_exists`, 409, use
+/// delete-then-create to replace), or a write-side I/O failure (`-32603
+/// internal`). The existence check is NOT a separate `path.exists()`
+/// pre-check — that was a TOCTOU hole (code-critic PR #3465 review, HIGH 1:
+/// two concurrent creates with the same name could both pass the check and
+/// the second would silently clobber the first, violating the documented
+/// 409 invariant). [`write_new_file`] makes the check-and-create a single
+/// atomic `O_CREAT|O_EXCL` filesystem operation instead.
 /// Test: `tests::create_writes_file_and_returns_tier`,
 /// `tests::create_rejects_invalid_name`,
 /// `tests::create_rejects_embedded_name_collision`,
-/// `tests::create_rejects_existing_disk_file`.
+/// `tests::create_rejects_existing_disk_file`,
+/// `tests::create_conflict_does_not_clobber_existing_content`.
 async fn agents_create(
     state: &AgentsCatalogState,
     params: Value,
@@ -258,21 +281,55 @@ async fn agents_create(
     }
 
     let path = agent_path(&state.dir, &p.name)?;
-    if path.exists() {
-        return Err(
-            RpcError::new(-32008, format!("agent '{}' already exists on disk", p.name))
-                .with_data(json!({"error_type": "already_exists"})),
-        );
-    }
-
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| RpcError::internal(format!("creating agents dir: {e}")))?;
     }
-    std::fs::write(&path, &p.content)
-        .map_err(|e| RpcError::internal(format!("writing agent file: {e}")))?;
+    write_new_file(&path, &p.content, || {
+        format!("agent '{}' already exists on disk", p.name)
+    })?;
 
     Ok(json!({ "name": p.name, "tier": state.tier }))
+}
+
+/// Atomically create `path` with `content`, failing with `-32009
+/// already_exists` if the file already exists — the ONE way both
+/// `agents.create` and `skills.create` materialise a new catalog file.
+///
+/// Why: a `path.exists()` pre-check followed by `std::fs::write` is a
+/// TOCTOU race — two concurrent creates can both pass the check, and the
+/// loser's `write` silently clobbers the winner (code-critic PR #3465
+/// review, HIGH 1/HIGH 2). `OpenOptions::create_new(true)` maps to
+/// `O_CREAT|O_EXCL`: the kernel makes existence-check-plus-create one
+/// atomic operation, so exactly one of N racing creates succeeds and every
+/// other receives `ErrorKind::AlreadyExists`, which this maps onto the same
+/// `409`-shaped conflict the pre-check used to (approximately) provide.
+/// What: `conflict_msg` is lazily built only on the conflict path. Any
+/// other I/O failure maps to `-32603 internal`.
+/// Test: `tests::create_rejects_existing_disk_file`,
+/// `tests::create_conflict_does_not_clobber_existing_content`,
+/// `crate::skills::protocol::tests::create_rejects_existing_disk_skill`.
+pub(crate) fn write_new_file(
+    path: &Path,
+    content: &str,
+    conflict_msg: impl FnOnce() -> String,
+) -> Result<(), RpcError> {
+    use std::io::Write;
+
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(RpcError::already_exists(conflict_msg()));
+        }
+        Err(e) => return Err(RpcError::internal(format!("creating file: {e}"))),
+    };
+    file.write_all(content.as_bytes())
+        .map_err(|e| RpcError::internal(format!("writing file: {e}")))?;
+    Ok(())
 }
 
 /// `params` shape for `agents.delete`.
@@ -421,6 +478,35 @@ mod tests {
         );
     }
 
+    /// An unparseable disk file shadowing an embedded name must surface as
+    /// `tier: "broken"` — never as the healthy embedded entry, because
+    /// `resolve_agent`'s disk-wins rule means dispatch of that name WILL
+    /// fail (code-critic PR #3465 review, MEDIUM).
+    #[tokio::test]
+    async fn list_marks_unparseable_disk_override_as_broken() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // `extends:` naming a nonexistent parent makes `load_md_agent`'s
+        // compose step fail — the same failure `resolve_agent` would refuse
+        // to dispatch through.
+        std::fs::write(
+            tmp.path().join("engineer.md"),
+            "---\nname: engineer\nextends: nonexistent-parent\n---\n\nBody.\n",
+        )
+        .expect("write");
+        let s = state(tmp.path(), true);
+        let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+        let agents = result["agents"].as_array().expect("array");
+        let engineer_entries: Vec<_> = agents.iter().filter(|a| a["name"] == "engineer").collect();
+        assert_eq!(engineer_entries.len(), 1, "must appear exactly once");
+        assert_eq!(engineer_entries[0]["tier"], "broken");
+        assert!(
+            engineer_entries[0]["description"]
+                .as_str()
+                .expect("description")
+                .contains("unparseable"),
+        );
+    }
+
     #[tokio::test]
     async fn create_writes_file_and_returns_tier() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -485,7 +571,100 @@ mod tests {
         )
         .await
         .expect_err("must reject existing file");
-        assert_eq!(err.code, -32008);
+        // `-32009 already_exists` — NOT `-32008`, which is the workstreams'
+        // `active_conflict` slot (code-critic PR #3465 review, LOW).
+        assert_eq!(err.code, -32009);
+        assert_eq!(err.data.as_ref().unwrap()["error_type"], "already_exists");
+    }
+
+    /// The conflict path must go through `create_new` (`O_CREAT|O_EXCL`) —
+    /// meaning a losing create can NEVER have truncated or overwritten the
+    /// existing file's content, even transiently (code-critic PR #3465
+    /// review, HIGH 1: the prior `exists()`-then-`write` shape let the
+    /// second of two racing creates silently clobber the first).
+    #[tokio::test]
+    async fn create_conflict_does_not_clobber_existing_content() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let original = "---\nname: dup\ndescription: ORIGINAL\n---\n\nBody.\n";
+        std::fs::write(tmp.path().join("dup.md"), original).expect("write");
+        let s = state(tmp.path(), true);
+
+        let err = agents_create(&s, json!({"name": "dup", "content": "CLOBBER"}), ctx())
+            .await
+            .expect_err("must conflict");
+        assert_eq!(err.code, -32009);
+
+        let on_disk = std::fs::read_to_string(tmp.path().join("dup.md")).expect("read");
+        assert_eq!(on_disk, original, "existing content must be untouched");
+    }
+
+    /// `write_new_file` is the shared atomic-create seam — exercise the io
+    /// `AlreadyExists` mapping directly, without a handler in the way.
+    #[test]
+    fn write_new_file_maps_already_exists_io_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("f.md");
+        write_new_file(&path, "first", || "conflict".to_string()).expect("first create");
+        let err =
+            write_new_file(&path, "second", || "conflict".to_string()).expect_err("second create");
+        assert_eq!(err.code, -32009);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "first",
+            "loser must not touch the winner's content"
+        );
+    }
+
+    /// Genuine concurrency: N threads race `write_new_file` against the
+    /// SAME path at the same time. Exactly one must win; every other must
+    /// get `AlreadyExists` (mapped to `-32009`) — never a torn/mixed write
+    /// (code-critic PR #3465 review, HIGH 1/HIGH 2: the original
+    /// `exists()`-then-`write` shape had no such guarantee under real
+    /// concurrency, only under the sequential re-creation this module's
+    /// other tests exercise).
+    #[test]
+    fn write_new_file_concurrent_create_exactly_one_wins() {
+        use std::sync::{Arc, Barrier};
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = Arc::new(tmp.path().join("race.md"));
+        const N: usize = 16;
+        let barrier = Arc::new(Barrier::new(N));
+
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_new_file(&path, &format!("writer-{i}"), || "conflict".to_string())
+                        .map(|_| i)
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect();
+        let winners: Vec<_> = results.iter().filter(|r| r.is_ok()).collect();
+        let losers: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
+
+        assert_eq!(winners.len(), 1, "exactly one racing create must win");
+        assert_eq!(losers.len(), N - 1, "every other racer must lose");
+        for loser in &losers {
+            let err = loser.as_ref().unwrap_err();
+            assert_eq!(
+                err.code, -32009,
+                "loser must get already_exists, not a torn write"
+            );
+        }
+
+        // The file on disk must be exactly the winner's untouched content —
+        // never a mix, truncation, or empty file from a lost race.
+        let winner_idx = *winners[0].as_ref().unwrap();
+        let on_disk = std::fs::read_to_string(path.as_path()).expect("read");
+        assert_eq!(on_disk, format!("writer-{winner_idx}"));
     }
 
     #[tokio::test]

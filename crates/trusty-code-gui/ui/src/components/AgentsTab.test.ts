@@ -75,6 +75,29 @@ describe('AgentsTab', () => {
     expect(target.querySelector('[aria-label="remove engineer"]')).toBeNull();
   });
 
+  it('renders a broken disk entry with the broken badge and keeps the remove affordance (repair path)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        agentsResponse([
+          {
+            name: 'engineer',
+            tier: 'broken',
+            description: 'unparseable agent file — dispatch of this name will fail',
+            model: null,
+          },
+        ]),
+      ),
+    );
+    instance = mount(AgentsTab, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => normalizedText().includes('engineer'));
+    expect(normalizedText()).toContain('broken');
+    expect(normalizedText()).not.toContain('embedded');
+    // Deleting the bad file is the repair path — the remove button must stay.
+    expect(target.querySelector('[aria-label="remove engineer"]')).not.toBeNull();
+  });
+
   it('renders a remove button for a disk-tier agent and arms two-step confirm', async () => {
     vi.stubGlobal(
       'fetch',

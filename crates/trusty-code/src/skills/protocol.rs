@@ -34,7 +34,7 @@
 //!     `agents::protocol::validate_agent_name` (shared, not reimplemented —
 //!     see that function's docs): rejects a name colliding with a bundled
 //!     skill (`-32001 permission_denied`, 403) or an already-existing disk
-//!     skill directory (`-32008`-shaped conflict, 409). `-32003
+//!     skill (`-32009 already_exists`, 409). `-32003
 //!     invalid_argument` (400) when projectless.
 //!   - `skills.delete{name}` -> removes `<skills_dir>/<name>/` recursively.
 //!     `-32002 not_found` (404) absent; `-32001 permission_denied` (403) for
@@ -166,12 +166,19 @@ struct CreateParams {
 /// Why: the GUI's Skills tab add-flow.
 /// What: `{"name", "tier": "project"}` on success. `-32003 invalid_argument`
 /// when projectless (nowhere to write); invalid `name`; embedded/bundled
-/// name collision (`-32001`, 403); existing disk skill directory (`-32008`
-/// shaped conflict, 409).
+/// name collision (`-32001`, 403); existing disk skill (`-32009
+/// already_exists`, 409). The existence check is NOT a separate
+/// `skill_md.exists()` pre-check — the same TOCTOU hole
+/// `agents::protocol::agents_create` had (code-critic PR #3465 review,
+/// HIGH 2). Instead: `create_dir_all` the skill directory unconditionally
+/// (idempotent — an existing dir is fine, only the `SKILL.md` inside it is
+/// the conflict unit), then `agents::protocol::write_new_file`'s atomic
+/// `O_CREAT|O_EXCL` create on `SKILL.md` itself.
 /// Test: `tests::create_writes_file_and_returns_project_tier`,
 /// `tests::create_rejects_when_projectless`,
 /// `tests::create_rejects_bundled_name_collision`,
-/// `tests::create_rejects_existing_disk_skill`.
+/// `tests::create_rejects_existing_disk_skill`,
+/// `tests::create_conflict_does_not_clobber_existing_skill`.
 async fn skills_create(
     state: &SkillsCatalogState,
     params: Value,
@@ -199,17 +206,11 @@ async fn skills_create(
 
     let skill_dir = dir.join(&p.name);
     let skill_md = skill_dir.join("SKILL.md");
-    if skill_md.exists() {
-        return Err(
-            RpcError::new(-32008, format!("skill '{}' already exists on disk", p.name))
-                .with_data(json!({"error_type": "already_exists"})),
-        );
-    }
-
     std::fs::create_dir_all(&skill_dir)
         .map_err(|e| RpcError::internal(format!("creating skill dir: {e}")))?;
-    std::fs::write(&skill_md, &p.content)
-        .map_err(|e| RpcError::internal(format!("writing SKILL.md: {e}")))?;
+    crate::agents::protocol::write_new_file(&skill_md, &p.content, || {
+        format!("skill '{}' already exists on disk", p.name)
+    })?;
 
     Ok(json!({ "name": p.name, "tier": "project" }))
 }
@@ -400,7 +401,38 @@ mod tests {
         let err = skills_create(&s, json!({"name": "dup-skill", "content": "new"}), ctx())
             .await
             .expect_err("must reject existing disk skill");
-        assert_eq!(err.code, -32008);
+        // `-32009 already_exists` — NOT `-32008 active_conflict` (code-critic
+        // PR #3465 review, LOW).
+        assert_eq!(err.code, -32009);
+        assert_eq!(err.data.as_ref().unwrap()["error_type"], "already_exists");
+    }
+
+    /// The conflict path must go through `write_new_file`'s atomic
+    /// `O_CREAT|O_EXCL` create — a losing `skills.create` can NEVER have
+    /// truncated or overwritten the existing `SKILL.md`, even transiently
+    /// (code-critic PR #3465 review, HIGH 2).
+    #[tokio::test]
+    async fn create_conflict_does_not_clobber_existing_skill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("dup-skill");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let original = "---\nname: dup-skill\ndescription: ORIGINAL\n---\n\nBody.\n";
+        std::fs::write(dir.join("SKILL.md"), original).expect("write");
+
+        let s = SkillsCatalogState {
+            dir: Some(tmp.path().to_path_buf()),
+        };
+        let err = skills_create(
+            &s,
+            json!({"name": "dup-skill", "content": "CLOBBER"}),
+            ctx(),
+        )
+        .await
+        .expect_err("must conflict");
+        assert_eq!(err.code, -32009);
+
+        let on_disk = std::fs::read_to_string(dir.join("SKILL.md")).expect("read");
+        assert_eq!(on_disk, original, "existing SKILL.md must be untouched");
     }
 
     #[tokio::test]

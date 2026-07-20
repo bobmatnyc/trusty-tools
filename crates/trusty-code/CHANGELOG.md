@@ -25,7 +25,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   no user-level skill tier (`crate::skills::protocol`'s docs explain why), so
   `POST`/`DELETE /skills` require a bound project (`400` when projectless).
   All names are validated against `[a-z0-9-]+` (also the path-traversal
-  guard).
+  guard). **Code-critic PR #3465 review fixes (same-day, before merge):**
+  both creates now use an atomic `O_CREAT|O_EXCL` create
+  (`agents::protocol::write_new_file`) instead of an exists-then-write
+  pre-check, closing a TOCTOU race where two concurrent creates of the same
+  name could silently clobber each other (HIGH 1/HIGH 2); the 409 conflict
+  is minted as `-32009 already_exists` via a new `RpcError::already_exists`
+  constructor rather than reusing the workstreams' `-32008 active_conflict`
+  literal (LOW); and `agents.list` surfaces an unparseable disk file as
+  `tier: "broken"` instead of silently showing the shadowed embedded entry
+  as healthy — `resolve_agent`'s disk-wins rule means dispatch of that name
+  will fail, and the catalog must not misreport it (MEDIUM).
 
 ### Changed
 

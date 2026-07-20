@@ -162,6 +162,7 @@
   function tierLabel(tier: AgentCatalogEntry['tier']): string {
     if (tier === 'embedded') return 'embedded · read-only';
     if (tier === 'project') return 'project';
+    if (tier === 'broken') return 'broken · dispatch will fail';
     return 'user';
   }
 </script>

@@ -140,7 +140,8 @@ pub async fn call(
 /// What: matches on the numeric JSON-RPC error code: `-32002 not_found` ->
 /// 404, `-32001 permission_denied` -> 403, `-32003 invalid_argument` and
 /// `-32602 Invalid params` -> 400, `-32007 session_not_found` -> 404,
-/// `-32008 active_conflict` (DOC-48 §5.2, issue #3294) -> 409, `-32603
+/// `-32008 active_conflict` (DOC-48 §5.2, issue #3294) and `-32009
+/// already_exists` (issue #3449) -> 409, `-32603
 /// Internal error` -> 500. Any other/future code (including
 /// `-32601`/`-32600`, which a REST handler should never see because it
 /// calls `call` with a hardcoded, known-good method name) falls back to 500
@@ -157,6 +158,7 @@ pub fn rpc_error_to_status(err: &RpcError) -> axum::http::StatusCode {
         -32001 => StatusCode::FORBIDDEN,   // permission_denied
         -32003 => StatusCode::BAD_REQUEST, // invalid_argument
         -32008 => StatusCode::CONFLICT,    // active_conflict (DOC-48 §5.2)
+        -32009 => StatusCode::CONFLICT,    // already_exists (issue #3449)
         c if c == error_codes::INVALID_PARAMS => StatusCode::BAD_REQUEST,
         c if c == error_codes::INTERNAL_ERROR => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -333,6 +335,14 @@ mod tests {
     fn status_mapping_active_conflict_is_409() {
         assert_eq!(
             rpc_error_to_status(&RpcError::active_conflict("ws-1")),
+            axum::http::StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn status_mapping_already_exists_is_409() {
+        assert_eq!(
+            rpc_error_to_status(&RpcError::already_exists("dup")),
             axum::http::StatusCode::CONFLICT
         );
     }

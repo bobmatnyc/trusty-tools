@@ -935,6 +935,19 @@ skills.create({ name, content })  -> { name, tier: "project" }  // 400 projectle
 skills.delete({ name })           -> {}
 ```
 
+The 409 conflict is `-32009 already_exists` (`data.error_type:
+"already_exists"`) — its own JSON-RPC code, distinct from the workstreams'
+`-32008 active_conflict` — and is enforced by an atomic `O_CREAT|O_EXCL`
+create (`agents::protocol::write_new_file`), not an exists-then-write
+pre-check, so two racing creates can never silently clobber each other
+(code-critic PR #3465 review). `agents.list` additionally surfaces an
+unparseable disk file as `tier: "broken"` (still overriding any embedded
+entry of the same name) — because `resolve_agent`'s disk-wins rule applies
+even to a malformed file, dispatch of that name WILL fail, and a catalog
+that showed the shadowed embedded entry as healthy would misreport what
+`task.run` will do; deleting the broken file is the repair path, so the
+entry keeps the delete affordance.
+
 REST twins: `GET`/`POST /agents`, `DELETE /agents/{name}` and the `skills`
 equivalent (`crate::serve::rest::agent_catalog`/`skill_catalog`).
 
