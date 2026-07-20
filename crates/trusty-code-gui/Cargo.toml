@@ -25,3 +25,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
+# Test-only: pins `DEFAULT_DAEMON_URL` (state.rs) against trusty-code's own
+# `serve::DEFAULT_HTTP_PORT` so the two compiled-in defaults cannot drift
+# apart silently the way they did in #3364 — see
+# `default_daemon_url_matches_tcode_default_http_port` in `src/state.rs`.
+trusty-code = { workspace = true }

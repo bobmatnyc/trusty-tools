@@ -10988,6 +10988,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
+ "trusty-code",
 ]
 
 [[package]]
