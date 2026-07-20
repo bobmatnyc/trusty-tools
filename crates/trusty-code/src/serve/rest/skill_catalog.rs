@@ -156,6 +156,45 @@ mod tests {
         assert_eq!(v["name"], "my-skill");
     }
 
+    /// A second `POST /skills` for the same name must surface as `409
+    /// Conflict` at the REST layer — `rpc_error_to_status` mapping
+    /// `RpcError::already_exists`'s `-32009` (code-critic PR #3465 review,
+    /// HIGH 2's atomic `write_new_file` fix), not the old `-32008` slot.
+    #[tokio::test]
+    async fn create_conflict_returns_409() {
+        let a = app();
+        let first = a
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/skills")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"dup-skill","content":"---\nname: dup-skill\n---\n\nBody.\n"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let second = a
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/skills")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"dup-skill","content":"---\nname: dup-skill\n---\n\nCLOBBER.\n"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
     #[tokio::test]
     async fn delete_skill_returns_200() {
         let a = app();

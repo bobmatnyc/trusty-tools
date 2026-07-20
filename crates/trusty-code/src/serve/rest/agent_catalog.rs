@@ -187,6 +187,45 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
+    /// A second `POST /agents` for the same name must surface as `409
+    /// Conflict` at the REST layer — `rpc_error_to_status` mapping
+    /// `RpcError::already_exists`'s `-32009` (code-critic PR #3465 review,
+    /// HIGH 1's atomic `write_new_file` fix), not the old `-32008` slot.
+    #[tokio::test]
+    async fn create_conflict_returns_409() {
+        let a = app();
+        let body =
+            Body::from(r#"{"name":"dup-agent","content":"---\nname: dup-agent\n---\n\nBody.\n"}"#);
+        let first = a
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents")
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::CREATED);
+
+        let second = a
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"name":"dup-agent","content":"---\nname: dup-agent\n---\n\nCLOBBER.\n"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::CONFLICT);
+    }
+
     #[tokio::test]
     async fn delete_agent_returns_200() {
         let a = app();

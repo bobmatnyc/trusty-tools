@@ -134,8 +134,9 @@ pub fn discover_skill_metadata(dir: &Path) -> Vec<SkillMetadata> {
 /// one place; the tool-facing function above is unchanged in behavior.
 /// What: identical directory scan/sort to [`discover_skill_metadata`], minus
 /// the embedded-fallback branch.
-/// Test: `protocol::tests::list_disk_only_entries_are_additive`,
-/// `protocol::tests::list_returns_bundled_when_projectless`.
+/// Test: `protocol::tests::list_returns_disk_only_when_disk_non_empty_no_bundled_entries`,
+/// `protocol::tests::list_returns_bundled_when_projectless`,
+/// `protocol::tests::list_returns_bundled_when_disk_empty`.
 pub(crate) fn discover_disk_skill_metadata(dir: &Path) -> Vec<SkillMetadata> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         tracing::debug!("skills dir not found or unreadable: {}", dir.display());

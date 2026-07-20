@@ -20,13 +20,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (`project` when bound, `user` for `~/.claude/agents` when projectless),
   disk overriding embedded by name; `POST`/`DELETE` manage the disk tier
   only, refusing to shadow or delete an embedded name (`403`) and refusing
-  to overwrite an existing disk file (`409`). `GET /skills` returns the union
-  of the bundled catalog and a bound project's `.claude/skills/` — there is
-  no user-level skill tier (`crate::skills::protocol`'s docs explain why), so
-  `POST`/`DELETE /skills` require a bound project (`400` when projectless).
-  All names are validated against `[a-z0-9-]+` (also the path-traversal
-  guard). **Code-critic PR #3465 review fixes (same-day, before merge):**
-  both creates now use an atomic `O_CREAT|O_EXCL` create
+  to overwrite an existing disk file (`409`). `GET /skills` returns whatever
+  will ACTUALLY resolve for the project at `task.run` time — the bundled
+  catalog when the project has no (or an empty) `.claude/skills/`, or
+  EXCLUSIVELY that directory's entries once it has at least one, mirroring
+  `discover_skill_metadata`'s whole-catalog-replacement semantics rather
+  than a per-name overlay. There is no user-level skill tier
+  (`crate::skills::protocol`'s docs explain why), so `POST`/`DELETE /skills`
+  require a bound project (`400` when projectless). All names are validated
+  against `[a-z0-9-]+` (also the path-traversal guard).
+  **Code-critic PR #3465 review fixes (same-day, before merge):** both
+  creates now use an atomic `O_CREAT|O_EXCL` create
   (`agents::protocol::write_new_file`) instead of an exists-then-write
   pre-check, closing a TOCTOU race where two concurrent creates of the same
   name could silently clobber each other (HIGH 1/HIGH 2); the 409 conflict
@@ -36,6 +40,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `tier: "broken"` instead of silently showing the shadowed embedded entry
   as healthy — `resolve_agent`'s disk-wins rule means dispatch of that name
   will fail, and the catalog must not misreport it (MEDIUM).
+  **Code-critic PR #3465 RE-review fix:** `skills.list` was still doing a
+  per-name bundled ∪ disk overlay, unlike the corrected `agents.list` — so a
+  project with one custom skill reported all ~28 bundled skills as
+  available even though `FsSkillResolver` discards the entire bundled
+  catalog the moment disk has anything, making every bundled name
+  unresolvable at runtime. Fixed to match the resolver's actual
+  whole-catalog-replacement behavior (MEDIUM).
 
 ### Changed
 

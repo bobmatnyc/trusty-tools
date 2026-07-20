@@ -23,11 +23,21 @@
 //! What: [`register`] wires three methods onto a shared, immutable
 //! [`SkillsCatalogState`] (an `Option<PathBuf>` project skills dir — `None`
 //! when projectless):
-//!   - `skills.list` -> `{"skills": [{name, tier, description}]}`, the union
-//!     of the bundled catalog (`tier: "bundled"`) and, when a project is
-//!     bound, its disk skills (`tier: "project"`) — a disk skill overriding
-//!     a bundled name WINS, mirroring `discover_skill_metadata`'s disk-wins
-//!     precedence (see that function's docs) exactly.
+//!   - `skills.list` -> `{"skills": [{name, tier, description}]}` — WHOLE-
+//!     CATALOG REPLACEMENT, mirroring `discover_skill_metadata`'s own
+//!     `if !skills.is_empty() { return skills }` threshold (see that
+//!     function's docs) exactly, at the catalog level rather than per-name:
+//!     when a project is bound and its disk skills directory has at least
+//!     one entry, the response is ONLY those disk skills (`tier:
+//!     "project"`) — the bundled catalog is entirely absent, because that
+//!     is what actually resolves at `task.run` time (`FsSkillResolver`
+//!     discards the whole bundled set the instant disk has anything).
+//!     Otherwise (projectless, or a bound project with no/empty disk
+//!     skills) the response is the full bundled catalog (`tier: "bundled"`).
+//!     A per-name bundled-∪-disk overlay would be WRONG here — it would
+//!     report bundled skills as available for a project whose real
+//!     `use_skill` catalog resolves only its own custom entries
+//!     (code-critic PR #3465 re-review, MEDIUM).
 //!   - `skills.create{name, content}` -> writes
 //!     `<skills_dir>/<name>/SKILL.md` from the caller-supplied
 //!     Markdown+frontmatter body. Same name-validation contract as
@@ -118,39 +128,58 @@ fn entry_json(m: &SkillMetadata, tier: &str) -> Value {
     json!({ "name": m.name, "tier": tier, "description": m.description })
 }
 
-/// `skills.list` -> the full bundled ∪ project-disk catalog.
+/// `skills.list` -> the catalog that will ACTUALLY resolve for this project
+/// at `task.run` time.
 ///
-/// Why: the GUI's Skills tab roster fetch.
-/// What: ignores `params`. Builds the bundled set keyed by name (always
-/// present, even projectless), then overlays project-disk entries when
-/// `state.dir` is `Some` — a disk override suppresses the bundled entry of
-/// the same name (mirrors `discover_skill_metadata`'s disk-wins rule).
-/// Sorted by name.
+/// Why: the GUI's Skills tab roster fetch. The runtime resolver
+/// (`discover_skill_metadata`, wired through `FsSkillResolver` at
+/// `task::executor::daily_driver_skills_catalog`) does WHOLE-CATALOG
+/// REPLACEMENT, not a per-name overlay: the instant a project's
+/// `.claude/skills/` has even one entry, the ENTIRE bundled catalog is
+/// discarded — every bundled name becomes unresolvable
+/// (`skills::SkillError::Unknown` on `use_skill`), disk or not. An earlier
+/// version of this handler built a bundled ∪ disk union with per-name
+/// override (disk winning only for names it actually shadowed), which made
+/// `skills.list` report every bundled skill as available for a project that
+/// had, say, one custom skill and nothing else — the catalog lied about
+/// what would actually resolve (code-critic PR #3465 re-review, MEDIUM:
+/// "half-fixed" — the agents side already mirrored its resolver correctly,
+/// this side did not). Fixed by mirroring `discover_skill_metadata`'s own
+/// `if !skills.is_empty() { return skills }` threshold exactly, at the
+/// catalog level rather than per-name.
+/// What: ignores `params`. When `state.dir` is `Some` and
+/// `discover_disk_skill_metadata` returns anything non-empty, the response
+/// is EXACTLY those disk entries (`tier: "project"`) — no bundled entries
+/// at all. Otherwise (`state.dir` is `None`, i.e. projectless, OR the
+/// project's skills dir is missing/empty) the response is the full bundled
+/// catalog (`tier: "bundled"`). Sorted by name either way.
 /// Test: `tests::list_returns_bundled_when_projectless`,
-/// `tests::list_disk_override_wins_and_suppresses_bundled`,
-/// `tests::list_disk_only_entries_are_additive`.
+/// `tests::list_returns_bundled_when_disk_empty`,
+/// `tests::list_returns_disk_only_when_disk_non_empty_no_bundled_entries`.
 async fn skills_list(
     state: &SkillsCatalogState,
     _params: Value,
     _ctx: ConnectionContext,
 ) -> Result<Value, RpcError> {
-    let mut by_name: Vec<(String, Value)> = super::embedded_skill_metadata()
-        .iter()
-        .map(|m| (m.name.clone(), entry_json(m, "bundled")))
-        .collect();
+    let disk = state
+        .dir
+        .as_ref()
+        .map(|dir| super::discover_disk_skill_metadata(dir))
+        .unwrap_or_default();
 
-    if let Some(dir) = &state.dir {
-        for m in super::discover_disk_skill_metadata(dir) {
-            let entry = entry_json(&m, "project");
-            match by_name.iter_mut().find(|(n, _)| *n == m.name) {
-                Some(slot) => slot.1 = entry,
-                None => by_name.push((m.name.clone(), entry)),
-            }
-        }
-    }
+    let mut entries: Vec<(String, Value)> = if disk.is_empty() {
+        super::embedded_skill_metadata()
+            .iter()
+            .map(|m| (m.name.clone(), entry_json(m, "bundled")))
+            .collect()
+    } else {
+        disk.iter()
+            .map(|m| (m.name.clone(), entry_json(m, "project")))
+            .collect()
+    };
 
-    by_name.sort_by(|a, b| a.0.cmp(&b.0));
-    let skills: Vec<Value> = by_name.into_iter().map(|(_, v)| v).collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let skills: Vec<Value> = entries.into_iter().map(|(_, v)| v).collect();
     Ok(json!({ "skills": skills }))
 }
 
@@ -297,34 +326,34 @@ mod tests {
         assert!(skills.iter().all(|sk| sk["tier"] == "bundled"));
     }
 
+    /// A bound project with an EXISTING BUT EMPTY skills directory still
+    /// falls back to the bundled catalog — the same threshold
+    /// `discover_skill_metadata`'s own `if !skills.is_empty()` uses, pinned
+    /// here at the `skills.list` handler level too (code-critic PR #3465
+    /// re-review, MEDIUM).
     #[tokio::test]
-    async fn list_disk_override_wins_and_suppresses_bundled() {
+    async fn list_returns_bundled_when_disk_empty() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let bundled_name = crate::assets::DEFAULT_SKILLS[0].name;
-        let dir = tmp.path().join(bundled_name);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        std::fs::write(
-            dir.join("SKILL.md"),
-            format!("---\nname: {bundled_name}\ndescription: DISK OVERRIDE\n---\n\nBody.\n"),
-        )
-        .expect("write");
-
         let s = SkillsCatalogState {
             dir: Some(tmp.path().to_path_buf()),
         };
         let result = skills_list(&s, Value::Null, ctx()).await.expect("list");
         let skills = result["skills"].as_array().expect("array");
-        let matches: Vec<_> = skills
-            .iter()
-            .filter(|sk| sk["name"] == bundled_name)
-            .collect();
-        assert_eq!(matches.len(), 1, "must appear exactly once");
-        assert_eq!(matches[0]["tier"], "project");
-        assert_eq!(matches[0]["description"], "DISK OVERRIDE");
+        assert_eq!(skills.len(), crate::assets::DEFAULT_SKILLS.len());
+        assert!(skills.iter().all(|sk| sk["tier"] == "bundled"));
     }
 
+    /// The core fix under test (code-critic PR #3465 re-review, MEDIUM): a
+    /// project with even ONE custom disk skill must see ONLY that skill —
+    /// zero bundled entries — because that is exactly what
+    /// `FsSkillResolver`/`discover_skill_metadata` will actually resolve at
+    /// `task.run` time (whole-catalog replacement, not a per-name overlay).
+    /// A prior version of `skills_list` built a bundled ∪ disk union here,
+    /// which reported every bundled skill as available even though none of
+    /// them would actually dispatch — this test pins the corrected,
+    /// resolver-matching behavior.
     #[tokio::test]
-    async fn list_disk_only_entries_are_additive() {
+    async fn list_returns_disk_only_when_disk_non_empty_no_bundled_entries() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("my-custom-skill");
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -339,11 +368,16 @@ mod tests {
         };
         let result = skills_list(&s, Value::Null, ctx()).await.expect("list");
         let skills = result["skills"].as_array().expect("array");
-        assert_eq!(skills.len(), crate::assets::DEFAULT_SKILLS.len() + 1);
+        assert_eq!(
+            skills.len(),
+            1,
+            "must be ONLY the one disk skill — no bundled entries alongside it"
+        );
+        assert_eq!(skills[0]["name"], "my-custom-skill");
+        assert_eq!(skills[0]["tier"], "project");
         assert!(
-            skills
-                .iter()
-                .any(|sk| sk["name"] == "my-custom-skill" && sk["tier"] == "project")
+            skills.iter().all(|sk| sk["tier"] != "bundled"),
+            "the bundled catalog must be entirely absent once disk is non-empty"
         );
     }
 
