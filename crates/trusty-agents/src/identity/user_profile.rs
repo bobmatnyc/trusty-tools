@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// Why: Personalizes the CTRL system prompt and gives downstream tools a
 /// stable identity for the user (later: API tokens scoped to the user
 /// profile).
-/// What: name + optional email/timezone/preferred_model + creation
+/// What: name + optional email/timezone/location/preferred_model + creation
 /// timestamp.
 /// Test: `profile_round_trip_through_toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -31,6 +31,20 @@ pub struct UserProfile {
     pub preferred_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    /// Free-text location (e.g. "New York, NY, USA"), user-supplied only
+    /// (#3052 follow-up).
+    ///
+    /// Why: The agent context previously had no notion of "where" the user
+    /// is, only "when" (timezone). The owner asked for location awareness
+    /// without any network/IP-based geolocation and without inferring it
+    /// from the timezone — this field exists purely so the user can state it
+    /// themselves, exactly like name/email/timezone.
+    /// What: Optional; omitted from the rendered `## User Context` block
+    /// entirely when unset (no placeholder, no guess).
+    /// Test: `profile_round_trip_through_toml_with_location`,
+    /// `from_env_reads_location`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
     #[serde(default)]
     pub created_at: String,
 }
