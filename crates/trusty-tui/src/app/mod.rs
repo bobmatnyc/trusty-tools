@@ -588,4 +588,36 @@ impl TuiModel for ReplApp {
     fn should_quit(&self) -> bool {
         self.quit
     }
+
+    /// Drain [`Self::pending_submit`] — see [`crate::run::dispatch_pending`]
+    /// (private to `crate::run`, called from [`crate::run::run`]) for the
+    /// caller that reads this after every `apply` call.
+    fn take_pending_submit(&mut self) -> Option<String> {
+        self.pending_submit.take()
+    }
+
+    /// Drain-and-clear [`Self::pending_cancel`].
+    fn take_pending_cancel(&mut self) -> bool {
+        std::mem::replace(&mut self.pending_cancel, false)
+    }
+
+    /// Reset the in-flight-request UI state the moment a cancel is
+    /// dispatched (before the `TuiEngine::cancel_session` RPC even starts) —
+    /// direct parity with tagent's real cancel path, which resets
+    /// `thinking`/`busy_since` synchronously ahead of `h.abort()`
+    /// (`crates/trusty-agents/src/repl/tui/events.rs::process_event`). See
+    /// [`crate::run::TuiModel::on_cancelled`]'s doc comment for why this is
+    /// synchronous rather than waiting on the RPC.
+    /// What: clears [`Self::busy`] and abandons the in-progress streaming
+    /// entry index (a future response starts a fresh chat entry rather than
+    /// appending to one no more chunks will ever arrive for), then pushes a
+    /// "cancelled" status line.
+    /// Test: [`reduce::tests::apply_ctrl_c_signals_pending_cancel`] covers
+    /// the reducer half; `crate::run::tests` covers this method being
+    /// invoked from the dispatch step.
+    fn on_cancelled(&mut self) {
+        self.busy = false;
+        self.streaming_idx = None;
+        self.push_status("cancelled");
+    }
 }

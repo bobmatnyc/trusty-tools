@@ -63,6 +63,15 @@ pub enum ReplEvent {
     /// (DOC-50 §5 Slice 5) rather than only clearing local UI state, per the
     /// thin-client axiom (C-2).
     Cancel,
+    /// The engine's `handle_input` returned `Ok(false)` (DOC-50 §5 Slice 5) —
+    /// synthesized by `crate::run::run`'s dispatch step, never by a key press
+    /// directly (Ctrl-D sets `ReplApp::quit` straight from the reducer since
+    /// it needs no round-trip through the engine). Exists because the
+    /// dispatch step only holds `&mut M` synchronously inside `apply`; the
+    /// spawned `handle_input` task that later learns "the engine wants to
+    /// quit" can reach the model only by pushing an event back onto the
+    /// shared channel, same as every other engine-originated signal here.
+    Quit,
 
     // ── Engine-origin (produced by `TuiEngine` implementations) ────────
     /// A chunk of streamed assistant output. `done` marks the final chunk of
@@ -263,6 +272,15 @@ mod tests {
     fn clear_scrollback_is_a_distinct_unit_variant() {
         assert_eq!(ReplEvent::ClearScrollback, ReplEvent::ClearScrollback);
         assert_ne!(ReplEvent::ClearScrollback, ReplEvent::Cancel);
+    }
+
+    /// `Quit` (DOC-50 §5 Slice 5) is a distinct unit variant, same as
+    /// `ClearScrollback` above — `crate::run::run`'s dispatch step sends it
+    /// when `TuiEngine::handle_input` returns `Ok(false)`.
+    #[test]
+    fn quit_is_a_distinct_unit_variant() {
+        assert_eq!(ReplEvent::Quit, ReplEvent::Quit);
+        assert_ne!(ReplEvent::Quit, ReplEvent::Cancel);
     }
 
     /// `WorkstreamActivationChanged`'s field is named `new_active_id` to

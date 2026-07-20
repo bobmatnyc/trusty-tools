@@ -47,8 +47,8 @@
 //! # Spec References
 //! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 2 deliverable (§5, Slice 2): the event loop.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event as CtEvent, KeyEventKind, MouseEvent, MouseEventKind};
@@ -84,19 +84,72 @@ const KEY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// older history, positive toward newer.
 const SCROLL_DELTA: isize = 3;
 
-/// A render/reducer model the shared [`event_loop`] can drive without
-/// knowing its shape.
+/// A render/reducer model the shared [`event_loop`]/[`run`] can drive
+/// without knowing its concrete shape.
 ///
-/// Why: the loop needs exactly one piece of information it cannot get from
-/// `ReplEvent` alone — whether the model just decided to quit (e.g. the user
-/// typed `/quit`, hit `Ctrl-D`, or the engine returned `Ok(false)` from
-/// `handle_input`). Everything else about `M` is opaque to this crate; Slice
-/// 4 defines the real model.
-/// What: a single predicate, checked after every tick redraw and every
-/// processed event.
+/// Why: [`event_loop`] needs exactly one piece of information it cannot get
+/// from `ReplEvent` alone — whether the model just decided to quit (e.g. the
+/// user typed `/quit`, hit `Ctrl-D`, or the engine returned `Ok(false)` from
+/// `handle_input`). [`run`] (Slice 5, DOC-50 §5) needs two more: whether
+/// `apply` just staged a line to submit or a cancel signal to relay, so it
+/// can dispatch both to `TuiEngine` without `event_loop` itself needing to
+/// know `TuiEngine` exists (keeping `event_loop` terminal-generic and
+/// testable against `TestBackend` with no engine at all — see that
+/// function's doc comment). Everything else about `M` stays opaque to this
+/// crate; Slice 4 defines the real model ([`crate::app::ReplApp`]).
+/// What: three methods, all defaulted so a minimal `TuiModel` (like this
+/// module's own test-only `CountingModel`) compiles unchanged — only
+/// `should_quit` is required to mean anything for [`event_loop`] alone to
+/// work; the pending-take methods only matter to callers that go through
+/// [`run`]'s engine-dispatch wrapper.
+/// Test: [`crate::app::ReplApp`]'s implementation is exercised via
+/// `crate::app::reduce::tests`; this module's own dispatch wiring is
+/// exercised in [`tests::dispatch_pending`] below.
 pub trait TuiModel {
     /// Whether the render loop should exit after the current frame.
     fn should_quit(&self) -> bool;
+
+    /// Take the line staged by `apply` for `TuiEngine::handle_input`, if any.
+    ///
+    /// Why: `apply` (a synchronous `FnMut(&mut M, ReplEvent)`) cannot itself
+    /// call an `async fn` on the engine, so it stages the line on `M`
+    /// instead (mirrors [`crate::app::ReplApp::pending_submit`]); [`run`]
+    /// drains it right after `apply` returns and dispatches it.
+    /// What: a drain-on-read `Option::take`-shaped accessor. Default `None`
+    /// — a model with nothing to submit (or one not wired through [`run`]
+    /// at all) needs no override.
+    fn take_pending_submit(&mut self) -> Option<String> {
+        None
+    }
+
+    /// Take-and-clear the cancel signal staged by `apply` (Ctrl-C, or Up-
+    /// arrow while busy), if any.
+    ///
+    /// Why: same shape as [`Self::take_pending_submit`], for
+    /// `TuiEngine::cancel_session` instead of `handle_input`.
+    /// What: default `false` — a model with no cancellation concept needs no
+    /// override.
+    fn take_pending_cancel(&mut self) -> bool {
+        false
+    }
+
+    /// Called by [`run`]'s dispatch step immediately after a drained cancel
+    /// signal, before the `cancel_session` call is even dispatched.
+    ///
+    /// Why: the actual `TuiEngine::cancel_session` RPC is async and runs on
+    /// a spawned task (so a slow/hung backend never freezes the render
+    /// loop), but the visible "busy" state should clear the moment the user
+    /// asked to cancel, not whenever the RPC eventually resolves — direct
+    /// parity with tagent's real cancel path
+    /// (`crates/trusty-agents/src/repl/tui/events.rs::process_event`), which
+    /// resets `thinking`/`busy_since` synchronously, before `h.abort()` even
+    /// runs. Nothing in this crate's widgets gate keystrokes on `busy`
+    /// either, so "block user input until cancel completes" (DOC-50 §5
+    /// Slice 5's prose) is satisfied by the RPC still firing for real
+    /// server-side cancellation, not by literally freezing the input box.
+    /// What: default no-op — a model with no busy/streaming state to reset
+    /// needs no override.
+    fn on_cancelled(&mut self) {}
 }
 
 /// Pure classification of one crossterm `Event` into an optional [`ReplEvent`].
@@ -304,10 +357,100 @@ where
 /// ([`event_loop`]) carries the loop's test coverage, and [`TerminalGuard`]/
 /// [`KeyReaderGuard`]'s own tests cover the panic-safety and prompt-shutdown
 /// contracts this function relies on.
+/// The in-flight `handle_input` task, if any — `std::sync::Mutex` (not
+/// `tokio::sync::Mutex`) because [`dispatch_pending`] only ever locks it
+/// synchronously (take-and-abort, or store-and-replace), never across an
+/// `.await`, so the cheaper std primitive is correct and avoids an
+/// accidental `.await` inside the lock.
+type CurrentTask = Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>;
+
+/// Drain whatever [`TuiModel::take_pending_submit`]/
+/// [`TuiModel::take_pending_cancel`] report on `model` (staged by the
+/// caller's `apply` immediately before this runs) and dispatch each to
+/// `engine`, per DOC-50 §5 Slice 5's `process_event(event, app, handler)`
+/// deliverable — generalized here to two drains instead of one dispatch
+/// function, matching this crate's `pending_submit`/`pending_cancel` split
+/// (see [`crate::app::reduce`]'s doc comment) rather than tagent's single
+/// `Option<String>` return.
+///
+/// Why: `apply` is a synchronous `FnMut`, so it cannot itself `.await`
+/// `TuiEngine::handle_input`/`cancel_session` — this is the seam that picks
+/// up where `apply` stopped, mirroring tagent's `process_event`
+/// (`crates/trusty-agents/src/repl/tui/events.rs`): spawn `handle_input` on
+/// its own task (so the render loop keeps redrawing while a request is in
+/// flight) and stash the `JoinHandle` in `current_task` so a later cancel
+/// can abort it — same `current_task: Arc<Mutex<Option<JoinHandle<()>>>>`
+/// shape tagent uses, adapted to `std::sync::Mutex` since nothing here holds
+/// the lock across an `.await`.
+/// What: cancel is drained and dispatched FIRST (aborts any in-flight
+/// `handle_input` task, calls [`TuiModel::on_cancelled`] synchronously so
+/// the UI's busy state clears immediately — see that method's doc comment
+/// for why — then relays `engine.cancel_session()` on its own task so a slow
+/// backend never blocks the render loop). Submit is drained second: any
+/// previous task in `current_task` is aborted (defensive — busy-gating
+/// should prevent overlapping submits, same caveat as tagent's precedent)
+/// and replaced. `Ok(false)` from `handle_input` is relayed back as
+/// `ReplEvent::Quit` (the spawned task can't reach `&mut M` directly — see
+/// that variant's doc comment); an `Err` is relayed as an error-flavored
+/// `ReplEvent::AssistantOutput` chunk, the closest existing vocabulary to
+/// tagent's `LlmResponse { text: format!("error: {e:#}"), is_error: true }`.
+/// Test: [`tests::dispatch_pending_submit_reaches_handle_input`],
+/// [`tests::dispatch_pending_cancel_reaches_cancel_session`],
+/// [`tests::dispatch_pending_cancel_aborts_in_flight_submit_task`],
+/// [`tests::dispatch_pending_noop_when_nothing_pending`].
+fn dispatch_pending<E, M>(
+    model: &mut M,
+    engine: &Arc<E>,
+    tx: &UnboundedSender<ReplEvent>,
+    current_task: &CurrentTask,
+) where
+    E: TuiEngine + 'static,
+    M: TuiModel,
+{
+    if model.take_pending_cancel() {
+        model.on_cancelled();
+        if let Some(handle) = current_task.lock().unwrap().take() {
+            handle.abort();
+        }
+        let engine = Arc::clone(engine);
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = engine.cancel_session().await {
+                let _ = tx.send(ReplEvent::StatusMessage(format!("cancel failed: {e:#}")));
+            }
+        });
+    }
+
+    if let Some(line) = model.take_pending_submit() {
+        let engine = Arc::clone(engine);
+        let dtx = tx.clone();
+        let handle = tokio::spawn(async move {
+            match engine.handle_input(line, dtx.clone()).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = dtx.send(ReplEvent::Quit);
+                }
+                Err(e) => {
+                    let _ = dtx.send(ReplEvent::AssistantOutput {
+                        chunk: format!("error: {e:#}"),
+                        done: true,
+                        is_error: true,
+                    });
+                }
+            }
+        });
+        let mut slot = current_task.lock().unwrap();
+        if let Some(prev) = slot.take() {
+            prev.abort();
+        }
+        *slot = Some(handle);
+    }
+}
+
 pub async fn run<E, M>(
     engine: Arc<E>,
     model: M,
-    apply: impl FnMut(&mut M, ReplEvent),
+    mut apply: impl FnMut(&mut M, ReplEvent),
     render: impl FnMut(&mut ratatui::Frame, &M),
 ) -> anyhow::Result<()>
 where
@@ -317,11 +460,27 @@ where
     let (guard, mut terminal) = TerminalGuard::enter()?;
     let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
     let key_guard = spawn_key_reader(tx.clone());
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
 
     let result: anyhow::Result<M> = async {
         engine.setup(tx.clone()).await?;
         engine.subscribe_workstream_events(tx.clone()).await?;
-        event_loop(&mut terminal, model, rx, apply, render).await
+
+        // Wrap the caller's `apply` so every event still gets the caller's
+        // reducer behavior first, then drains whatever `ReplApp`-shaped
+        // pending state (Slice 5, DOC-50 §5) that reducer just staged and
+        // dispatches it to `engine` — see [`dispatch_pending`] and
+        // [`TuiModel::take_pending_submit`]/[`TuiModel::take_pending_cancel`]
+        // for why this can't live inside `event_loop` itself (kept
+        // engine-agnostic and `TestBackend`-testable).
+        let dispatch_engine = Arc::clone(&engine);
+        let dispatch_tx = tx.clone();
+        let dispatching_apply = move |model: &mut M, ev: ReplEvent| {
+            apply(model, ev);
+            dispatch_pending(model, &dispatch_engine, &dispatch_tx, &current_task);
+        };
+
+        event_loop(&mut terminal, model, rx, dispatching_apply, render).await
     }
     .await;
 
@@ -343,296 +502,4 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use async_trait::async_trait;
-    use crossterm::event::{
-        KeyCode as CtKeyCode, KeyEvent, KeyEventState, KeyModifiers as CtKeyModifiers,
-    };
-    use ratatui::backend::TestBackend;
-    use std::sync::atomic::AtomicUsize;
-    use std::time::Instant;
-    use tokio::time::{self, Duration as TokioDuration};
-
-    #[derive(Default)]
-    struct CountingModel {
-        events_seen: usize,
-        quit: bool,
-    }
-
-    impl TuiModel for CountingModel {
-        fn should_quit(&self) -> bool {
-            self.quit
-        }
-    }
-
-    fn render_counts(f: &mut ratatui::Frame, model: &CountingModel) {
-        use ratatui::widgets::Paragraph;
-        f.render_widget(Paragraph::new(format!("{}", model.events_seen)), f.area());
-    }
-
-    /// A dummy `TuiEngine` — these tests exercise [`event_loop`] directly
-    /// (not [`run`]), so no engine method is actually invoked; it exists only
-    /// to satisfy trait bounds shared with `run`'s signature in case a future
-    /// test grows to call it.
-    struct NoopEngine;
-
-    #[async_trait]
-    impl TuiEngine for NoopEngine {
-        async fn handle_input(
-            &self,
-            _line: String,
-            _tx: UnboundedSender<ReplEvent>,
-        ) -> anyhow::Result<bool> {
-            Ok(true)
-        }
-
-        async fn setup(&self, _tx: UnboundedSender<ReplEvent>) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn key_event(code: CtKeyCode, kind: KeyEventKind) -> KeyEvent {
-        KeyEvent {
-            code,
-            modifiers: CtKeyModifiers::NONE,
-            kind,
-            state: KeyEventState::NONE,
-        }
-    }
-
-    #[test]
-    fn classify_maps_key_press_and_repeat() {
-        let press = classify(CtEvent::Key(key_event(
-            CtKeyCode::Char('a'),
-            KeyEventKind::Press,
-        )));
-        assert!(matches!(press, Some(ReplEvent::Key(_))));
-
-        let repeat = classify(CtEvent::Key(key_event(
-            CtKeyCode::Char('a'),
-            KeyEventKind::Repeat,
-        )));
-        assert!(matches!(repeat, Some(ReplEvent::Key(_))));
-    }
-
-    #[test]
-    fn classify_filters_key_release() {
-        let release = classify(CtEvent::Key(key_event(
-            CtKeyCode::Char('a'),
-            KeyEventKind::Release,
-        )));
-        assert_eq!(
-            release, None,
-            "Release must not fire a second ReplEvent::Key"
-        );
-    }
-
-    #[test]
-    fn classify_maps_resize() {
-        assert_eq!(
-            classify(CtEvent::Resize(120, 40)),
-            Some(ReplEvent::Resize(120, 40))
-        );
-    }
-
-    #[test]
-    fn classify_maps_mouse_scroll_up_and_down() {
-        let up = classify(CtEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: CtKeyModifiers::NONE,
-        }));
-        assert_eq!(up, Some(ReplEvent::Scroll(-SCROLL_DELTA)));
-
-        let down = classify(CtEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 0,
-            row: 0,
-            modifiers: CtKeyModifiers::NONE,
-        }));
-        assert_eq!(down, Some(ReplEvent::Scroll(SCROLL_DELTA)));
-    }
-
-    #[test]
-    fn classify_ignores_other_mouse_events() {
-        let moved = classify(CtEvent::Mouse(MouseEvent {
-            kind: MouseEventKind::Moved,
-            column: 0,
-            row: 0,
-            modifiers: CtKeyModifiers::NONE,
-        }));
-        assert_eq!(moved, None);
-    }
-
-    /// The regression test for the shutdown hang: [`spawn_key_reader`]'s
-    /// returned guard must join promptly on `Drop` WITHOUT needing a
-    /// keystroke to unblock a `read()` call. Bounded to a few multiples of
-    /// [`KEY_POLL_INTERVAL`] with generous headroom so this stays reliable
-    /// across real TTYs (where `poll` genuinely waits out the interval) and
-    /// TTY-less sandboxes (where `poll` errors immediately) alike — the
-    /// prior blocking-`read()` design had no such bound at all.
-    #[test]
-    fn key_reader_guard_drop_completes_promptly_without_a_keypress() {
-        let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
-        let guard = spawn_key_reader(tx);
-
-        let start = Instant::now();
-        drop(guard);
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "KeyReaderGuard::drop must not block on a keystroke; took {:?}",
-            elapsed
-        );
-    }
-
-    #[tokio::test]
-    async fn event_loop_applies_events_and_redraws() {
-        let backend = TestBackend::new(20, 5);
-        let mut terminal = Terminal::new(backend).expect("construct terminal");
-        let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
-
-        tx.send(ReplEvent::StatusMessage("one".into())).unwrap();
-        tx.send(ReplEvent::StatusMessage("two".into())).unwrap();
-        drop(tx); // closes the channel so the loop exits after both events
-
-        let model = event_loop(
-            &mut terminal,
-            CountingModel::default(),
-            rx,
-            |m, _ev| {
-                m.events_seen += 1;
-            },
-            render_counts,
-        )
-        .await
-        .expect("event_loop must succeed");
-
-        assert_eq!(model.events_seen, 2);
-    }
-
-    #[tokio::test]
-    async fn event_loop_stops_when_model_requests_quit() {
-        let backend = TestBackend::new(20, 5);
-        let mut terminal = Terminal::new(backend).expect("construct terminal");
-        let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
-
-        // Send far more events than we expect to be processed — the loop
-        // must stop as soon as `should_quit()` flips, not drain the channel.
-        for _ in 0..10 {
-            tx.send(ReplEvent::Cancel).unwrap();
-        }
-
-        let model = event_loop(
-            &mut terminal,
-            CountingModel::default(),
-            rx,
-            |m, _ev| {
-                m.events_seen += 1;
-                if m.events_seen == 1 {
-                    m.quit = true;
-                }
-            },
-            render_counts,
-        )
-        .await
-        .expect("event_loop must succeed");
-
-        assert_eq!(
-            model.events_seen, 1,
-            "must stop at the first quit-triggering event"
-        );
-    }
-
-    #[tokio::test]
-    async fn event_loop_stops_when_channel_closes() {
-        let backend = TestBackend::new(20, 5);
-        let mut terminal = Terminal::new(backend).expect("construct terminal");
-        let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
-        drop(tx);
-
-        let model = event_loop(
-            &mut terminal,
-            CountingModel::default(),
-            rx,
-            |m, _ev| m.events_seen += 1,
-            render_counts,
-        )
-        .await
-        .expect("event_loop must succeed even with zero events");
-
-        assert_eq!(model.events_seen, 0);
-        assert!(!model.quit);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn event_loop_redraws_on_tick_even_without_events() {
-        let backend = TestBackend::new(20, 5);
-        let mut terminal = Terminal::new(backend).expect("construct terminal");
-        let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
-
-        let redraw_count = Arc::new(AtomicUsize::new(0));
-        let redraw_count_in_render = redraw_count.clone();
-
-        // Quit after the 3rd tick-driven redraw so the loop terminates
-        // deterministically under paused time.
-        let handle = tokio::spawn(async move {
-            event_loop(
-                &mut terminal,
-                CountingModel::default(),
-                rx,
-                move |m, _ev| m.events_seen += 1,
-                move |f, m| {
-                    redraw_count_in_render.fetch_add(1, Ordering::SeqCst);
-                    render_counts(f, m);
-                },
-            )
-            .await
-        });
-
-        // Let the initial draw happen, then advance paused time past three
-        // tick intervals; each tick redraws without needing an event.
-        time::sleep(TokioDuration::from_millis(1)).await;
-        for _ in 0..3 {
-            time::advance(TICK).await;
-        }
-        // One more advance so the final scheduled tick actually fires before
-        // we close the channel and let the loop exit on `None`.
-        time::advance(TICK).await;
-        drop(tx);
-
-        let _model = handle
-            .await
-            .expect("task must not panic")
-            .expect("loop must succeed");
-        // Initial draw (1) + at least the ticks we advanced past (4, since a
-        // `Skip`-behavior interval still fires once per elapsed period here
-        // because we only advance one tick at a time) — assert a lower bound
-        // rather than an exact count to avoid coupling the test to
-        // `tokio::time::interval`'s internal scheduling.
-        assert!(
-            redraw_count.load(Ordering::SeqCst) >= 4,
-            "expected at least 4 redraws (1 initial + 3 ticks), got {}",
-            redraw_count.load(Ordering::SeqCst)
-        );
-    }
-
-    /// Compile-time check that `run`'s generic bounds are satisfiable by a
-    /// real `TuiEngine` + `TuiModel` pair — exercised only for the type
-    /// signature; `run` itself requires a TTY so it is not called (and not
-    /// invoked) here, only referenced in a dead-code path the compiler still
-    /// has to type-check.
-    #[allow(dead_code)]
-    async fn run_type_checks(engine: Arc<NoopEngine>) -> anyhow::Result<()> {
-        run(
-            engine,
-            CountingModel::default(),
-            |m: &mut CountingModel, _ev| m.events_seen += 1,
-            render_counts,
-        )
-        .await
-    }
-}
+mod tests;

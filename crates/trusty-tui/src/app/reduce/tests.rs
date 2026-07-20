@@ -232,11 +232,38 @@ fn apply_ctrl_c_signals_pending_cancel() {
     assert!(app.pending_cancel);
 }
 
+/// Direct port of tagent's real `KeyCode::Char('d')` arm: Ctrl-D only quits
+/// on an EMPTY input buffer (the readline EOF convention).
 #[test]
-fn apply_ctrl_d_signals_quit() {
+fn apply_ctrl_d_signals_quit_when_input_empty() {
     let mut app = ReplApp::new("demo", "u");
     assert!(!app.should_quit());
     apply(&mut app, ctrl_key('d'));
+    assert!(app.should_quit());
+}
+
+/// Direct port of tagent's real `KeyCode::Char('d')` arm: with text still in
+/// the buffer, Ctrl-D is a no-op (tagent has no forward-delete fallback) —
+/// pins the gap this slice's audit found and fixed (an earlier revision
+/// quit unconditionally, losing unsaved input on a stray Ctrl-D).
+#[test]
+fn apply_ctrl_d_is_noop_when_input_nonempty() {
+    let mut app = ReplApp::new("demo", "u");
+    app.set_input("still typing".to_string());
+    apply(&mut app, ctrl_key('d'));
+    assert!(!app.should_quit());
+    assert_eq!(app.input_buf, "still typing");
+}
+
+/// `ReplEvent::Quit` (synthesized by `crate::run::run`'s dispatch step when
+/// `TuiEngine::handle_input` returns `Ok(false)`) must set `ReplApp::quit`
+/// exactly like Ctrl-D does — the two are independent triggers for the same
+/// state.
+#[test]
+fn apply_quit_event_signals_quit() {
+    let mut app = ReplApp::new("demo", "u");
+    assert!(!app.should_quit());
+    apply(&mut app, ReplEvent::Quit);
     assert!(app.should_quit());
 }
 
