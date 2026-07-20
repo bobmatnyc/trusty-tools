@@ -61,7 +61,14 @@
 //! timeout), [`merged_roster`] degrades to the plain filesystem-only roster
 //! (every entry `registered: false`) rather than an empty picker or a
 //! caller-facing error — the same best-effort philosophy `super::roster`
-//! already documents.
+//! already documents. Critically, this degraded roster is
+//! INDISTINGUISHABLE from "the registry has nothing registered" by its
+//! entries alone — the #3363 lesson is that silently collapsing "empty" and
+//! "unreachable" into the same shape hides a real outage from the operator.
+//! [`super::roster::ProjectRoster::source`] (`RosterSource::Registry` vs.
+//! `RosterSource::FsOnly`, code-critic PR #3439 review, HIGH 2) is the
+//! caller-visible signal that tells the two apart; the GUI renders a banner
+//! when `source` is `fs_only`.
 //!
 //! What: [`merged_roster`] is the real entry point `fs.list_projects`
 //! (`super::protocol::list_projects`) calls — it resolves the mpm daemon URL,
@@ -81,7 +88,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::is_git_repo;
-use super::roster::{MAX_ENTRIES, ProjectCandidate, ProjectRoster};
+use super::roster::{MAX_ENTRIES, ProjectCandidate, ProjectRoster, RosterSource};
 
 /// Default loopback base URL for the trusty-mpm daemon's REST API.
 ///
@@ -190,10 +197,23 @@ async fn fetch_registry_projects(
 /// `None` for anything that doesn't resolve to a non-empty `owner` and
 /// `repo` — a malformed/unexpected `repo_url` shape must never panic or
 /// fabricate a bogus path.
+///
+/// **Only an EXACT `<owner>/<repo>` pair is supported** (code-critic PR
+/// #3439 review, MEDIUM 1): a compound remainder after the host — a GitLab
+/// subgroup path (`gitlab.com/group/subgroup/repo`) or a port-qualified host
+/// that this function's simple `split_once(['/', ':'])` mis-splits (e.g.
+/// `git.example.com:8443/owner/repo` splits on the PORT's `:`, leaving
+/// `8443/owner/repo`) — is rejected outright rather than silently absorbed
+/// into a multi-segment "owner" via `rsplit_once`. Letting that through
+/// would hand [`resolve_local_path`]'s `Path::join` an owner string
+/// containing `/`, fabricating a 3+-level lookup path no `repo_url` of this
+/// shape was ever meant to produce.
 /// Test: `tests::parse_owner_repo_handles_https_url`,
 /// `tests::parse_owner_repo_handles_https_url_with_git_suffix`,
 /// `tests::parse_owner_repo_handles_ssh_url`,
-/// `tests::parse_owner_repo_rejects_malformed_url`.
+/// `tests::parse_owner_repo_rejects_malformed_url`,
+/// `tests::parse_owner_repo_rejects_gitlab_style_subgroup_path`,
+/// `tests::parse_owner_repo_rejects_port_qualified_host_misparse`.
 fn parse_owner_repo(repo_url: &str) -> Option<(String, String)> {
     let trimmed = repo_url.trim().trim_end_matches('/');
     let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
@@ -207,6 +227,12 @@ fn parse_owner_repo(repo_url: &str) -> Option<(String, String)> {
     // `git@<host>:<owner>/<repo>` (SSH) — either way, the first `/` or `:`
     // after the host separates it from the `<owner>/<repo>` pair.
     let (_, after_host) = path_part.split_once(['/', ':'])?;
+    // Reject anything but an EXACT `<owner>/<repo>` pair — see the docs
+    // above for why a compound remainder must not fall through to
+    // `rsplit_once` below.
+    if after_host.matches('/').count() != 1 {
+        return None;
+    }
     let (owner, repo) = after_host.rsplit_once('/')?;
     if owner.is_empty() || repo.is_empty() {
         return None;
@@ -230,6 +256,35 @@ fn resolve_local_path(home: &Path, owner: &str, repo: &str) -> Option<PathBuf> {
     (candidate.is_dir() && is_git_repo(&candidate)).then_some(candidate)
 }
 
+/// Normalize `path` into the string [`merge`] indexes and compares on.
+///
+/// Why (code-critic PR #3439 review, HIGH 1): the fs scan's `path` string
+/// carries whatever casing `std::fs::read_dir` reported for the on-disk
+/// entry, while [`resolve_local_path`]'s candidate carries whatever casing
+/// the registry's `repo_url` happened to use. On a case-insensitive,
+/// case-preserving filesystem (default macOS APFS — the dev platform)
+/// `Path::is_dir` succeeds for BOTH castings of the identical directory, so
+/// exact-string equality between the two would miss the match and double
+/// the row: one `registered: false` (from the fs scan) and one
+/// `registered: true` (freshly appended from the registry) for the SAME
+/// checkout — precisely what DOC-39 §5.8.1 AC-20.7/AC-20.8 forbid. The same
+/// mismatch can also happen via symlink indirection (a registry-derived
+/// path reached through a symlinked alias of `home`) on ANY platform.
+/// What: `std::fs::canonicalize` resolves both symlinks and (on the
+/// platforms where the kernel's `realpath` does so, including macOS) case,
+/// collapsing every string representation of one real directory to the
+/// SAME canonical string. Degrades to `path` verbatim if canonicalization
+/// fails (a TOCTOU race, or a permission refusal) — matching this module's
+/// best-effort philosophy rather than dropping a candidate over a
+/// transient stat failure.
+/// Test: `tests::merge_dedupes_paths_reached_via_a_symlinked_home_alias`,
+/// `tests::merge_dedupes_case_differing_paths_on_case_insensitive_filesystems`.
+fn normalize_for_comparison(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
 /// Merge the filesystem-scanned roster with registry projects, registry
 /// primary.
 ///
@@ -239,20 +294,25 @@ fn resolve_local_path(home: &Path, owner: &str, repo: &str) -> Option<PathBuf> {
 /// with hand-built inputs, no mock server required.
 /// What: for each registry project that resolves to an existing local
 /// checkout ([`resolve_local_path`]): if a filesystem-scanned entry already
-/// has that exact path, it is promoted in place (`registered: true`, `name`
-/// and `owner` set from the registry's canonical values); otherwise a new
-/// entry is appended with `registered: true`. Filesystem-scanned entries
-/// with no matching registry project are kept as-is (`registered: false` —
-/// the local-only, unregistered secondary view). `home: None` (no resolvable
-/// home directory) short-circuits to the filesystem roster untouched, since
-/// no registry project could resolve a local path either. Result is
-/// re-sorted case-insensitively by `name` and re-capped at
-/// [`MAX_ENTRIES`] (a registered project can newly enter the roster, so the
-/// cap must be re-applied after merging, not just inherited from the fs
-/// scan).
+/// resolves ([`normalize_for_comparison`]) to that SAME real directory, it is
+/// promoted in place (`registered: true`, `name` and `owner` set from the
+/// registry's canonical values); otherwise a new entry is appended with
+/// `registered: true`, its `path` the normalized (canonical) string.
+/// Filesystem-scanned entries with no matching registry project are kept
+/// as-is (`registered: false` — the local-only, unregistered secondary
+/// view). `home: None` (no resolvable home directory) short-circuits to the
+/// filesystem roster untouched, since no registry project could resolve a
+/// local path either. Result is re-sorted case-insensitively by `name`,
+/// re-capped at [`MAX_ENTRIES`] (a registered project can newly enter the
+/// roster, so the cap must be re-applied after merging, not just inherited
+/// from the fs scan), and stamped [`RosterSource::Registry`] — this
+/// function is only ever called after a successful registry fetch (see
+/// [`merged_roster_with`]).
 /// Test: `tests::merge_marks_registered_projects_with_local_checkout`,
 /// `tests::merge_marks_unregistered_local_only_projects`,
-/// `tests::merge_skips_registry_projects_without_local_checkout`.
+/// `tests::merge_skips_registry_projects_without_local_checkout`,
+/// `tests::merge_dedupes_paths_reached_via_a_symlinked_home_alias`,
+/// `tests::merge_dedupes_case_differing_paths_on_case_insensitive_filesystems`.
 fn merge(
     fs_roster: ProjectRoster,
     registry_projects: &[RegistryProject],
@@ -263,7 +323,7 @@ fn merge(
         let mut path_index: HashMap<String, usize> = entries
             .iter()
             .enumerate()
-            .map(|(i, e)| (e.path.clone(), i))
+            .map(|(i, e)| (normalize_for_comparison(Path::new(&e.path)), i))
             .collect();
         for rp in registry_projects {
             let Some((owner, repo)) = parse_owner_repo(&rp.repo_url) else {
@@ -272,8 +332,8 @@ fn merge(
             let Some(path) = resolve_local_path(home, &owner, &repo) else {
                 continue;
             };
-            let path_str = path.display().to_string();
-            if let Some(&idx) = path_index.get(&path_str) {
+            let normalized = normalize_for_comparison(&path);
+            if let Some(&idx) = path_index.get(&normalized) {
                 entries[idx].registered = true;
                 entries[idx].name = rp.name.clone();
                 entries[idx].owner = Some(owner);
@@ -281,17 +341,20 @@ fn merge(
                 let idx = entries.len();
                 entries.push(ProjectCandidate {
                     name: rp.name.clone(),
-                    path: path_str.clone(),
+                    path: normalized.clone(),
                     owner: Some(owner),
                     registered: true,
                 });
-                path_index.insert(path_str, idx);
+                path_index.insert(normalized, idx);
             }
         }
     }
     entries.sort_by_key(|e| e.name.to_lowercase());
     entries.truncate(MAX_ENTRIES);
-    ProjectRoster { entries }
+    ProjectRoster {
+        entries,
+        source: RosterSource::Registry,
+    }
 }
 
 /// Fetch the registry (if reachable) and merge it with an already-computed
@@ -302,9 +365,11 @@ fn merge(
 /// tests supply hand-built inputs instead of touching the real filesystem or
 /// spawning a real mpm daemon, mirroring `super::roster`'s
 /// `list_projects`/`list_projects_in` split.
-/// What: on a successful fetch, delegates to [`merge`]. On ANY failure
-/// (unreachable daemon, non-2xx, malformed body), logs a `tracing::warn!`
-/// and returns `fs_roster` unchanged — already all `registered: false`, i.e.
+/// What: on a successful fetch, delegates to [`merge`] (stamps
+/// `RosterSource::Registry`). On ANY failure (unreachable daemon, non-2xx,
+/// malformed body), logs a `tracing::warn!` and returns `fs_roster`
+/// unchanged — already all `registered: false` AND already
+/// `RosterSource::FsOnly` (`super::roster::list_projects_in` sets it), i.e.
 /// exactly the graceful-degradation view module docs describe.
 /// Test: `tests::merged_roster_with_uses_registry_when_daemon_reachable`,
 /// `tests::merged_roster_with_degrades_to_fs_only_when_daemon_unreachable`.
@@ -404,6 +469,30 @@ mod tests {
         assert_eq!(parse_owner_repo(""), None);
     }
 
+    /// A GitLab-style subgroup path (`group/subgroup/repo`) must be
+    /// rejected, not absorbed into a bogus multi-segment "owner" (code-critic
+    /// PR #3439 review, MEDIUM 1).
+    #[test]
+    fn parse_owner_repo_rejects_gitlab_style_subgroup_path() {
+        assert_eq!(
+            parse_owner_repo("https://gitlab.com/group/subgroup/repo"),
+            None
+        );
+    }
+
+    /// A port-qualified host (`host:PORT/owner/repo`) must be rejected —
+    /// this function's simple `split_once(['/', ':'])` splits on the PORT's
+    /// `:`, not a host/path boundary, so without the compound-remainder
+    /// guard this would silently fabricate `owner = "PORT/owner"` (code-critic
+    /// PR #3439 review, MEDIUM 1).
+    #[test]
+    fn parse_owner_repo_rejects_port_qualified_host_misparse() {
+        assert_eq!(
+            parse_owner_repo("https://git.example.com:8443/owner/repo"),
+            None
+        );
+    }
+
     // ── `merge` ──────────────────────────────────────────────────────────
 
     /// A registry project whose repo_url resolves to an existing local git
@@ -473,6 +562,113 @@ mod tests {
         assert!(merged.entries.is_empty());
     }
 
+    /// Best-effort detection of a case-insensitive, case-preserving
+    /// filesystem (default macOS APFS, NTFS) — used to gate the case-folding
+    /// regression test below, which can only reproduce on such a volume.
+    fn fs_is_case_insensitive(dir: &Path) -> bool {
+        let probe = dir.join("CaseProbeDir3435");
+        if std::fs::create_dir(&probe).is_err() {
+            return false;
+        }
+        let insensitive = dir.join("caseprobedir3435").is_dir();
+        let _ = std::fs::remove_dir(&probe);
+        insensitive
+    }
+
+    /// Code-critic PR #3439 review, HIGH 1: on a case-insensitive,
+    /// case-preserving filesystem, a fs-scanned entry's on-disk casing and
+    /// the registry-derived candidate's `repo_url`-sourced casing must still
+    /// dedupe to exactly ONE roster row, not two. Gated to actually run only
+    /// when the temp filesystem is case-insensitive (CI's Linux ext4
+    /// typically is not); `merge_dedupes_paths_reached_via_a_symlinked_home_alias`
+    /// below covers the same `normalize_for_comparison` mechanism in a way
+    /// that reproduces on every platform.
+    #[test]
+    fn merge_dedupes_case_differing_paths_on_case_insensitive_filesystems() {
+        let home = tempfile::tempdir().expect("tempdir");
+        if !fs_is_case_insensitive(home.path()) {
+            return;
+        }
+
+        // The fs scan observes the on-disk casing "Trusty-Tools" — same
+        // characters as the registry's "trusty-tools" below, differing ONLY
+        // in case (not, e.g., hyphenation — a hyphen is not a case fold).
+        mk_git_repo(
+            &home
+                .path()
+                .join("trusty-mpm-projects")
+                .join("bobmatnyc")
+                .join("Trusty-Tools"),
+        );
+        let fs_roster = super::super::roster::list_projects_in(home.path());
+        assert_eq!(fs_roster.entries.len(), 1, "fs scan must find the repo");
+
+        // The registry's repo_url carries a DIFFERENT casing for the same repo.
+        let registry = vec![RegistryProject {
+            name: "trusty-tools".to_string(),
+            repo_url: "https://github.com/bobmatnyc/trusty-tools".to_string(),
+        }];
+
+        let merged = merge(fs_roster, &registry, Some(home.path()));
+
+        assert_eq!(
+            merged.entries.len(),
+            1,
+            "must dedupe to exactly one row, not two (DOC-39 AC-20.7/20.8)"
+        );
+        assert!(merged.entries[0].registered);
+    }
+
+    /// Code-critic PR #3439 review, HIGH 1: a portable (OS-independent)
+    /// equivalent of the case-folding scenario above. Filesystem case
+    /// sensitivity varies by platform, but symlink resolution does not: the
+    /// fs scan observes the repo under the REAL home dir, while `merge` is
+    /// given a symlinked ALIAS of that same home dir — two different path
+    /// strings, one real directory. Exact-string dedup (pre-fix) would
+    /// double the row; canonicalizing (post-fix) must not.
+    #[cfg(unix)]
+    #[test]
+    fn merge_dedupes_paths_reached_via_a_symlinked_home_alias() {
+        let real_home = tempfile::tempdir().expect("tempdir");
+        mk_git_repo(
+            &real_home
+                .path()
+                .join("trusty-mpm-projects")
+                .join("bobmatnyc")
+                .join("trusty-tools"),
+        );
+        let fs_roster = super::super::roster::list_projects_in(real_home.path());
+        assert_eq!(fs_roster.entries.len(), 1, "fs scan must find the repo");
+
+        let parent = real_home.path().parent().expect("tempdir has a parent");
+        let alias = parent.join(format!(
+            "alias-of-{}",
+            real_home
+                .path()
+                .file_name()
+                .expect("tempdir has a name")
+                .to_string_lossy()
+        ));
+        std::os::unix::fs::symlink(real_home.path(), &alias).expect("symlink alias");
+
+        let registry = vec![RegistryProject {
+            name: "trusty-tools".to_string(),
+            repo_url: "https://github.com/bobmatnyc/trusty-tools".to_string(),
+        }];
+
+        // `merge` resolves the registry entry against the ALIAS, not the
+        // real path the fs scan used.
+        let merged = merge(fs_roster, &registry, Some(&alias));
+        let _ = std::fs::remove_file(&alias);
+
+        assert_eq!(
+            merged.entries.len(),
+            1,
+            "must dedupe to exactly one row, not two (DOC-39 AC-20.7/20.8)"
+        );
+        assert!(merged.entries[0].registered);
+    }
+
     // ── `merged_roster_with` (network integration) ──────────────────────
 
     /// Spin up a one-route mock mpm daemon serving `GET /api/v1/projects`
@@ -521,6 +717,11 @@ mod tests {
 
         assert_eq!(roster.entries.len(), 1);
         assert!(roster.entries[0].registered);
+        assert_eq!(
+            roster.source,
+            RosterSource::Registry,
+            "a reachable registry must be signaled via `source` (code-critic PR #3439, HIGH 2)"
+        );
     }
 
     /// When the mpm daemon is unreachable, the merge must degrade to the
@@ -558,6 +759,12 @@ mod tests {
         assert!(
             !roster.entries[0].registered,
             "must degrade to fs-only (unregistered) view"
+        );
+        assert_eq!(
+            roster.source,
+            RosterSource::FsOnly,
+            "an unreachable registry must be signaled via `source`, distinct from \
+             'the registry legitimately has nothing registered' (code-critic PR #3439, HIGH 2)"
         );
     }
 

@@ -25,12 +25,21 @@
   // close the modal, keeping "what was picked" and "is the modal open" as
   // two separate pieces of state the parent owns, not duplicated here.
   // Backdrop click and the `×` button call `onClose` directly.
+  //
+  // Update (issue #3435, code-critic PR #3439 review HIGH 2): `roster.source`
+  // distinguishes "the shared mpm registry legitimately has nothing
+  // registered" from "the registry was unreachable, this is the local-only
+  // fallback view" — the #3363 lesson is that collapsing those into the same
+  // all-`registered: false` shape hides a real outage from the operator. A
+  // `source === 'fs_only'` roster renders a banner above the row list; row
+  // selection/binding behavior is unchanged either way.
   // Test: `ProjectPickerModal.test.ts`.
   import { apiBase } from '../lib/api-config';
   import {
     fetchProjectRoster,
     projectCandidateLabel,
     type ProjectCandidate,
+    type RosterSource,
   } from '../lib/project-roster';
   import type { ProjectSelection } from '../lib/new-workstream';
 
@@ -48,6 +57,7 @@
 
   let phase = $state<Phase>('loading');
   let entries = $state<ProjectCandidate[]>([]);
+  let source = $state<RosterSource | undefined>(undefined);
   let error = $state<string | null>(null);
 
   async function load(signal: AbortSignal) {
@@ -68,6 +78,7 @@
       const roster = await fetchProjectRoster(base, signal);
       if (signal.aborted) return;
       entries = roster.entries;
+      source = roster.source;
       phase = 'ready';
       error = null;
     } catch (e) {
@@ -126,6 +137,18 @@
         ×
       </button>
     </div>
+
+    {#if phase === 'ready' && source === 'fs_only'}
+      <!-- Issue #3435, code-critic PR #3439 review HIGH 2: mirrors
+           `WorkstreamSwitcher.svelte`'s existing inline warning-banner
+           pattern (`bg-status-warn/10` + `text-status-warn`), amber rather
+           than red — the picker is still usable, just degraded. -->
+      <p
+        class="mt-2 rounded-sm bg-status-warn/10 px-2 py-1.5 text-[11px] text-status-warn"
+      >
+        shared registry unavailable — showing local checkouts only
+      </p>
+    {/if}
 
     <div class="mt-3 max-h-72 space-y-1 overflow-y-auto">
       {#if phase === 'loading'}

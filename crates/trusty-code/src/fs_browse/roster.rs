@@ -103,19 +103,54 @@ pub struct ProjectCandidate {
     pub registered: bool,
 }
 
+/// Which source produced a [`ProjectRoster`] (issue #3435, code-critic PR
+/// #3439 review, HIGH 2).
+///
+/// Why: the #3363 lesson — "nothing registered" and "the registry was
+/// unreachable" are different operator-facing situations and must not
+/// collapse into the same-looking empty/all-unregistered roster. A bare
+/// `bool` would work, but a named enum reads at the call site
+/// (`source == RosterSource::FsOnly`) without a comment explaining which
+/// state `true`/`false` means, and its `serde` rendering (`"registry"` /
+/// `"fs_only"`) is self-describing on the wire too.
+/// What: [`Self::Registry`] means the mpm daemon was reached and `entries`
+/// is the registry-primary/fs-secondary merge (see `super::mpm_registry`);
+/// [`Self::FsOnly`] means the registry was never reached (unreachable
+/// daemon, or not yet queried) and `entries` is the bare filesystem scan,
+/// every candidate `registered: false`.
+/// Test: `super::mpm_registry::tests::merged_roster_with_uses_registry_when_daemon_reachable`,
+/// `super::mpm_registry::tests::merged_roster_with_degrades_to_fs_only_when_daemon_unreachable`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RosterSource {
+    /// The mpm registry was reached; `entries` is the registry-primary merge.
+    Registry,
+    /// The mpm registry was unreachable (or never queried); `entries` is the
+    /// filesystem scan alone.
+    #[default]
+    FsOnly,
+}
+
 /// The `fs.list_projects` response body — everything the picker needs for
 /// one render.
 ///
 /// Why: a bare `Vec<ProjectCandidate>` would work equally well over the
 /// wire, but wrapping it in a named struct (mirroring [`super::DirListing`])
 /// leaves room to add roster-level metadata later (e.g. a `truncated: bool`
-/// flag) without a breaking wire-shape change.
+/// flag) without a breaking wire-shape change — `source` (issue #3435) is
+/// exactly that: an additive field a client predating it can simply ignore.
 /// Test: `tests::empty_home_returns_empty_roster`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct ProjectRoster {
     /// Candidate projects, sorted case-insensitively by `name`, capped at
     /// [`MAX_ENTRIES`].
     pub entries: Vec<ProjectCandidate>,
+    /// Which source produced `entries` (issue #3435). A bare filesystem scan
+    /// (this module's own [`list_projects`]/[`list_projects_in`]) always
+    /// reports [`RosterSource::FsOnly`] — only `super::mpm_registry::merge`
+    /// reports [`RosterSource::Registry`], on a successful registry fetch.
+    #[serde(default)]
+    pub source: RosterSource,
 }
 
 /// `fs.list_projects()` — the daemon-side entry point (issue #3365).
@@ -166,7 +201,10 @@ pub(super) fn list_projects_in(home: &Path) -> ProjectRoster {
     };
     entries.sort_by_key(|e| e.name.to_lowercase());
     entries.truncate(MAX_ENTRIES);
-    ProjectRoster { entries }
+    ProjectRoster {
+        entries,
+        source: RosterSource::FsOnly,
+    }
 }
 
 /// Scan `<home>/trusty-mpm-projects/<owner>/<repo>` two levels deep,

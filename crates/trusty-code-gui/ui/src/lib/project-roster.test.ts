@@ -58,6 +58,19 @@ describe('isProjectRoster', () => {
       isProjectRoster({ entries: [{ name: 'x', path: '/x', owner: null, registered: 'yes' }] }),
     ).toBe(false);
   });
+
+  it('code-critic PR #3439 review HIGH 2: accepts a top-level source of "registry" or "fs_only", or absent', () => {
+    expect(isProjectRoster({ entries: [], source: 'registry' })).toBe(true);
+    expect(isProjectRoster({ entries: [], source: 'fs_only' })).toBe(true);
+    // Backward compatibility: an older daemon predating this field must
+    // still validate.
+    expect(isProjectRoster({ entries: [] })).toBe(true);
+  });
+
+  it('code-critic PR #3439 review HIGH 2: rejects an unrecognized top-level source value', () => {
+    expect(isProjectRoster({ entries: [], source: 'unknown' })).toBe(false);
+    expect(isProjectRoster({ entries: [], source: true })).toBe(false);
+  });
 });
 
 describe('fetchProjectRoster', () => {

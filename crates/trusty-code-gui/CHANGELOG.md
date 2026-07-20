@@ -16,7 +16,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   registry match (e.g. a scratch checkout the operator never registered)
   now shows a small "local only" label, following `new-workstream.ts::
   bindingLabel`'s existing state-driven-label precedent. No change to row
-  selection/binding behavior.
+  selection/binding behavior. **Update (code-critic PR #3439 review,
+  HIGH 2):** when the shared registry itself was unreachable (not merely
+  empty), the modal now shows an amber banner — "shared registry
+  unavailable — showing local checkouts only" — driven by a new additive
+  `source` field on the roster response, so an outage is never mistaken for
+  "you have nothing registered."
 
 ### Fixed
 

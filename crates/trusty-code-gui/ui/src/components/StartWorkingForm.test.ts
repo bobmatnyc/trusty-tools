@@ -58,6 +58,7 @@ function openPickerButton(): HTMLButtonElement {
 
 const ROSTER = {
   entries: [{ name: 'acme-api', path: '/home/bob/acme-api', owner: null, registered: true }],
+  source: 'registry',
 };
 
 /** A `fetch` stub covering every route this component's full submit

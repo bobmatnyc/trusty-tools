@@ -1004,9 +1004,33 @@ fs.list_projects()
             owner: Option<String>,  // "bobmatnyc" under the owner-scoped layout; None otherwise
             registered: bool,       // NEW (#3435): known to trusty-mpm's shared project registry
         }
-    ]
+    ],
+    source: "registry" | "fs_only", // NEW (#3435, code-critic PR #3439 review HIGH 2)
 }
 ```
+
+**`source` (code-critic PR #3439 review, HIGH 2):** distinguishes "the registry legitimately
+has nothing registered" from "the registry was unreachable" — collapsing those into the same
+all-`registered: false` shape would hide a real mpm-daemon outage from the operator (the
+#3363 lesson). `"registry"` means the mpm daemon was reached and `entries` is the
+registry-primary/fs-secondary merge; `"fs_only"` means the registry was never reached and
+`entries` is the bare filesystem scan. `ProjectPickerModal` renders a banner ("shared
+registry unavailable — showing local checkouts only") when `source` is `"fs_only"`.
+
+**Path-identity normalization (code-critic PR #3439 review, HIGH 1):** the merge step
+canonicalizes (`std::fs::canonicalize`) both the filesystem-scanned entry's path and the
+registry-derived candidate path before comparing them, so a case-differing path (a
+case-insensitive, case-preserving filesystem — default macOS APFS — accepts both castings of
+the same on-disk directory) or a symlink-indirected path to the SAME checkout dedupes to
+exactly one roster row rather than appearing twice (once `registered: false` from the fs
+scan, once `registered: true` freshly appended from the registry).
+
+**`repo_url` parsing restriction (code-critic PR #3439 review, MEDIUM 1):** only an EXACT
+`<owner>/<repo>` pair after the host is accepted. A GitLab-style subgroup path
+(`gitlab.com/group/subgroup/repo`) or a port-qualified host that the simple host/path
+splitter mis-splits (`git.example.com:8443/owner/repo` splits on the port's `:`) is rejected
+outright — `None`, the registry entry is skipped — rather than silently absorbed into a
+multi-segment "owner" that would fabricate a bogus 3+-level lookup path.
 
 **Discovery heuristic (best-effort, never a caller-facing error) — now the SECONDARY
 source (issue #3435; PRIMARY is the mpm registry, see the amendment above):** when
@@ -1047,6 +1071,11 @@ for the same reason.
 is never dropped from the roster — it appears with `registered: false`.
 **AC-20.8** (NEW, #3435) A registry entry with no resolvable local checkout on this
 machine is never fabricated into a roster row with a made-up path.
+**AC-20.9** (NEW, code-critic PR #3439 review, HIGH 1) A filesystem-scanned entry and a
+registry-derived candidate that resolve to the SAME real directory (via case-folding or
+symlink indirection) dedupe to exactly one roster row, never two.
+**AC-20.10** (NEW, code-critic PR #3439 review, HIGH 2) `source` is `"fs_only"` whenever the
+mpm daemon was unreachable, distinct from a reachable registry with zero matching entries.
 
 ---
 
@@ -1530,6 +1559,13 @@ This is carried forward verbatim because it is the one piece of the visual syste
   field to each roster entry (additive-only wire change) and AC-20.7/AC-20.8. See
   `crates/trusty-code/src/fs_browse/mpm_registry.rs` module docs for the full survey
   and design rationale; DOC-48 §8 (Phase C+ roster bullet) carries a pointer note.
+  **Code-critic PR #3439 review fixes (same-day, before merge):** adds the
+  `source: "registry" | "fs_only"` roster-level field and AC-20.10 (HIGH 2 —
+  distinguishes "nothing registered" from "registry unreachable"); adds
+  path-identity normalization before the merge's dedup comparison and AC-20.9
+  (HIGH 1 — a case-differing or symlink-indirected path to the same checkout no
+  longer double-lists); restricts `repo_url` parsing to an exact `<owner>/<repo>`
+  pair, rejecting GitLab-style subgroup paths and port-qualified hosts (MEDIUM 1).
 - **2026-07-20** — **Implicit workstream inference + monitoring reframe** (issue #3384,
   Phase C+). Amends §7A (`SPEC-TCUI-10~draft`) to record Bob's follow-up direction after
   test-driving the Phase C flow: the explicit **NEW WORKSTREAM** entry-control ceremony is
