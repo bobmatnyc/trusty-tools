@@ -12,7 +12,7 @@
 // THIS daemon version's handler, not from whatever actually answered the
 // socket — the shape must be verified before it becomes reactive state.
 // `parseSearchAuditResponse` is the runtime shape guard, mirroring
-// `create-session.ts::isDirListing`'s per-field structural check.
+// `project-roster.ts::isProjectRoster`'s per-field structural check.
 //
 // PARTIAL-VALIDITY note (issue #3111 MEDIUM, PR #3110 critic review): the
 // first cut of this guard (`isSearchAuditResponse`, a `body is
@@ -74,7 +74,7 @@ export interface SearchAuditResponse {
  * Structural check for one `SearchAuditRecord` — used only through
  * {@link parseSearchAuditResponse}, never called directly by the component.
  *
- * Why: same root pattern as `create-session.ts::isDirListing` — a record
+ * Why: same root pattern as `project-roster.ts::isProjectRoster` — a record
  * whose `kind` doesn't match either known variant, or whose fields don't
  * match that variant's expected types, must not silently pass through as a
  * usable row (`record.lane.toUpperCase()`-style dereferences later would

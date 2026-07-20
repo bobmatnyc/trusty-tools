@@ -2,7 +2,7 @@
 // formatting/decision rule `WorkstreamSwitcher.svelte` depends on —
 // covering it here means those wire-shape and error-mapping invariants
 // (`409` -> `ActiveConflictError`, no auto-force-retry) are checked without
-// mounting Svelte, mirroring `create-session.test.ts`'s split.
+// mounting Svelte, mirroring `new-workstream.test.ts`'s split.
 // What: One `describe` block per exported function; network calls are
 // exercised against a stubbed global `fetch` (`vi.stubGlobal`), matching
 // `App.test.ts`'s existing stubbing convention for this crate.

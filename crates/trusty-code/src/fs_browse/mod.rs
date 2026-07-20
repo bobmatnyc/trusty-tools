@@ -43,6 +43,7 @@
 //! `.git`-as-file shape, error distinguishability, 7a response shape).
 
 pub mod protocol;
+pub mod roster;
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -187,7 +188,10 @@ fn collapse_home(path: &Path) -> String {
 ///
 /// Why: this is 7a's `git` badge and the binding model's non-git → git
 /// discriminator, so it has to be right on the shapes this repo actually
-/// contains — and this workspace lives in linked worktrees.
+/// contains — and this workspace lives in linked worktrees. `pub(crate)` (not
+/// private) since [`roster::list_projects`] (issue #3365's project-picker
+/// roster) reuses the exact same discriminator to filter candidate
+/// directories down to git repos — one implementation, not a second copy.
 ///
 /// **The subtlety:** in a linked git worktree (and in a submodule), `.git` is a
 /// FILE containing a `gitdir: <path>` pointer, NOT a directory. Testing
@@ -220,7 +224,7 @@ fn collapse_home(path: &Path) -> String {
 /// Test: `tests::git_dir_is_detected`, `tests::linked_worktree_gitfile_is_detected`,
 /// `tests::bogus_dot_git_file_is_not_a_repo`, `tests::non_git_dir_is_reported_as_non_git`,
 /// `tests::large_dot_git_file_is_not_a_repo`, `tests::gitdir_pointer_at_exactly_the_read_bound`.
-fn is_git_repo(dir: &Path) -> bool {
+pub(crate) fn is_git_repo(dir: &Path) -> bool {
     let dot_git = dir.join(".git");
     // `metadata` follows symlinks, matching how git itself resolves `.git`.
     match std::fs::metadata(&dot_git) {

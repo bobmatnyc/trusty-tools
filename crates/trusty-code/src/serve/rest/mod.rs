@@ -53,7 +53,9 @@
 //! #3292) and `POST /workstreams/{id}/activate`,
 //! `POST /workstreams/{id}/deactivate` (DOC-48 §5.2/§6, issue #3294) — see
 //! its module docs for why the paths are unprefixed rather than DOC-48
-//! §5.2's literal `/api/v1/workstreams`. Every slice reuses
+//! §5.2's literal `/api/v1/workstreams`. [`projects`] adds `GET /projects`
+//! -> `fs.list_projects` (issue #3365 — the GUI's workstream-first
+//! project-picker modal's roster data source). Every slice reuses
 //! [`respond`]/[`throwaway_ctx`] rather than reimplementing the glue.
 //!
 //! Test: `tests::*` — a success round-trip, an error round-trip, and one
@@ -62,6 +64,7 @@
 
 pub mod agents;
 pub mod fs;
+pub mod projects;
 pub mod search_audit;
 pub mod sessions;
 pub mod sessions_write;

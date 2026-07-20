@@ -5,16 +5,18 @@
 // the nesting. The remaining assertions were rewritten for the issue #3153
 // shell rebuild: `App.svelte` no longer stacks every card in one flat
 // `.body` — content now lives behind `ServiceNav`'s 7 tabs, with Workstream
-// (hosting `CreateSessionForm`/`SessionMonitor`, via `WorkstreamTab.svelte`)
+// (hosting `NewWorkstreamForm`/`SessionMonitor`, via `WorkstreamTab.svelte`)
 // as the default `activeTab`, and `SearchTab` reachable only after
 // selecting the Search nav button. These assertions exercise that through
 // the same "mount the real component" approach as before, just following
 // the new default-tab / tab-switch shape rather than assuming simultaneous
-// rendering.
+// rendering. Issue #3365 renamed `CreateSessionForm` to `NewWorkstreamForm`
+// (workstream-first entry, replacing the session-first one) — the
+// assertions below follow that rename.
 // What: Mounts the real `App.svelte` (with `fetch` stubbed so the mount
 // doesn't make a real network call) and asserts `.statusbar` is a direct
 // child of `.app` and NOT a descendant of `.body`, that the Workstream
-// tab's content (`SessionMonitor`/`CreateSessionForm`) renders inside
+// tab's content (`SessionMonitor`/`NewWorkstreamForm`) renders inside
 // `.body` by default, and that clicking the Search nav tab swaps in
 // `SearchTab`'s content.
 // Test: this file.
@@ -98,14 +100,14 @@ describe('Workstream tab (default activeTab) — DOC-39 §4.6/§4.2.1', () => {
     expect(headings.some((h) => h.textContent === 'session monitor')).toBe(true);
   });
 
-  it('CreateSessionForm (7a picker + task form) renders inside .body by default', () => {
+  it('NewWorkstreamForm (issue #3365 workstream-first create+prompt form) renders inside .body by default', () => {
     instance = mount(App, { target }) as unknown as Record<string, unknown>;
 
     const body = target.querySelector('.body');
     const headings = Array.from(body?.querySelectorAll('h2') ?? []);
 
     expect(body).not.toBeNull();
-    expect(headings.some((h) => h.textContent === 'new session')).toBe(true);
+    expect(headings.some((h) => h.textContent === 'new workstream')).toBe(true);
   });
 });
 
