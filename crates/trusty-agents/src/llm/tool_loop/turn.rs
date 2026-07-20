@@ -25,6 +25,8 @@ use crate::llm::http::{
     build_raw_request, create_chat_completion_lenient, send_anthropic_native_completion,
     send_raw_completion,
 };
+use crate::llm::inference_bridge;
+use crate::llm::inference_client::{shared_client, shared_inference_enabled};
 use crate::perf::TokenUsage;
 
 /// Routing flags resolved once per `chat_with_tools_gated` call and reused for
@@ -131,6 +133,28 @@ pub(super) async fn dispatch_turn(
         return send_raw_completion(&raw, adapter).await;
     }
 
+    // #2410 (epic #2400) Step 2: this is trusty-agents' plain OpenRouter
+    // happy path — no caching, no explicit tool_choice, not native-Anthropic,
+    // not ollama/bedrock (all already handled/returned above). Route it
+    // through the shared `trusty_common::inference` adapter instead of the
+    // typed `async-openai` client ONLY when the caller has opted in via
+    // `TAGENT_INFERENCE_SHARED=1`. Default OFF — every other branch in this
+    // function (raw/native-Anthropic/ollama) is untouched by the flag and
+    // always uses the legacy path, so cache_control/tool_choice-forcing
+    // traffic and Anthropic-direct/Bedrock routing behave exactly as before
+    // regardless of this flag's value.
+    if shared_inference_enabled() {
+        return dispatch_turn_shared(
+            model,
+            messages,
+            openai_tools,
+            temperature,
+            max_tokens,
+            stop_sequences,
+        )
+        .await;
+    }
+
     let mut builder = CreateChatCompletionRequestArgs::default();
     builder
         .model(model)
@@ -181,4 +205,61 @@ pub(super) async fn dispatch_turn(
         message.tool_calls.unwrap_or_default(),
         usage,
     ))
+}
+
+/// Route this turn through the shared `trusty_common::inference` OpenRouter
+/// adapter (#2410, epic #2400, Step 2) instead of the typed `async-openai`
+/// client.
+///
+/// Why: `dispatch_turn`'s typed-async-openai branch calls this when
+/// `TAGENT_INFERENCE_SHARED=1`; keeping it as a separate function (rather
+/// than inlining) keeps both this file and `inference_client`/`inference_bridge`
+/// independently testable and under the 500-SLOC cap.
+/// What: applies `llm::credentials::qualify_openrouter_model` to `model` (this
+/// client always routes to OpenRouter — see `inference_client`'s module doc
+/// for why the model resolution itself is NOT used to pick a provider —
+/// so the same bare-`claude-*` → `anthropic/claude-*` normalization the
+/// legacy client's upstream callers apply is re-applied here, defensively and
+/// idempotently: `qualify_openrouter_model` is a documented no-op on an
+/// already-prefixed id), bridges `messages`/`openai_tools`/`stop_sequences`
+/// via `inference_bridge`, sends through the process-wide `shared_client()`,
+/// and bridges the response back into the same `(content, tool_calls, usage)`
+/// tuple every other branch returns.
+/// Test: `crates/trusty-agents/tests/inference_shared_adapter_e2e.rs`
+/// (offline, black-box wire-shape proof against a loopback mock).
+async fn dispatch_turn_shared(
+    model: &str,
+    messages: &[ChatCompletionRequestMessage],
+    openai_tools: &[ChatCompletionTool],
+    temperature: f32,
+    max_tokens: u32,
+    stop_sequences: &[String],
+) -> Result<(
+    Option<String>,
+    Vec<ChatCompletionMessageToolCall>,
+    TokenUsage,
+)> {
+    let wire_model = crate::llm::credentials::qualify_openrouter_model(
+        &crate::llm::credentials::LlmCredentials::OpenRouter,
+        model,
+    );
+
+    let mut req = trusty_common::inference::ChatRequest::new(
+        wire_model,
+        inference_bridge::to_shared_messages(messages),
+    );
+    req.temperature = Some(temperature);
+    req.max_tokens = Some(max_tokens);
+    if !openai_tools.is_empty() {
+        req.tools = Some(inference_bridge::to_shared_tools(openai_tools));
+    }
+    if !stop_sequences.is_empty() {
+        req.stop = Some(stop_sequences.to_vec());
+    }
+
+    let resp = shared_client()
+        .chat(&req)
+        .await
+        .context("chat_with_tools: shared-inference OpenRouter request failed")?;
+    Ok(inference_bridge::from_shared_response(resp))
 }
