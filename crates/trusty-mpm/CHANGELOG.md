@@ -9,6 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- `tm doctor`'s `skill_staleness` check now escalates to `Fail` (instead of `Warn`) when a **conventions-bearing** bundled skill has drifted from its bundled source — `documentation-style`, `tm-pr-workflow`, or `tm-git-file-tracking`, the small allowlist of skills whose text is the sole carrier of a framework-guaranteed rule (e.g. the commit/PR attribution footer). Ordinary skill drift stays `Warn` as before; the escalated message names the drifted skill(s) and points at `tm install` to restore the bundled version. This hardens the exact silent-drift path behind the PR #2825 attribution bypass (issue [#2825](https://github.com/bobmatnyc/trusty-tools/issues/2825)) without blocking session start — the escalation is a doctor signal only.
 - `tm`'s launch/connect splash art now sources from the shared `trusty_common::banner::TRUSTY_SPLASH_ART` / `shade_bucket` instead of a locally embedded `image.txt` + `shade_bucket` copy, so it can never silently drift from `trusty-agents`' REPL splash again (issue [#3326](https://github.com/bobmatnyc/trusty-tools/issues/3326)). Byte-identical art and rendering — `tm`'s own banner is unchanged; all 41 existing banner unit tests pass unmodified.
 
 ### Security
