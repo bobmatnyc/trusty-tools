@@ -55,7 +55,7 @@
 
 use anyhow::{Context, Result};
 
-use super::{postmortem, registry_cmds, service_cmds, session_cmds};
+use super::{postmortem, registry_cmds, service_cmds, session_cmds, system_cmd};
 use crate::{cli, debugger, inspection};
 
 /// Dispatch subcommand prefixes that own their own clap schema and must be
@@ -102,6 +102,8 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
         "config",
         // #3062: resume a checkpointed workflow run (`resume <run-id>`).
         "resume",
+        // system_status epic (#3052): `system status [--json]`.
+        "system",
     ];
     if args.len() > 1 {
         let candidate = &args[1];
@@ -195,6 +197,14 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
     // checkpointed workflow run from its first incomplete phase.
     if args.len() > 1 && args[1] == "resume" {
         super::workflow_mode::run_resume_subcommand(&args[2..]).await?;
+        return Ok(false);
+    }
+
+    // system_status epic (#3052): `trusty-agents system status [--json]` —
+    // CLI surface for the `system_status` tool, so subsystem health is
+    // checkable without burning an LLM turn.
+    if args.len() > 1 && args[1] == "system" {
+        system_cmd::run_system_subcommand(&args[2..]).await?;
         return Ok(false);
     }
 

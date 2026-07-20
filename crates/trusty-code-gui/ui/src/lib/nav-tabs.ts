@@ -14,23 +14,46 @@
 // so `ServiceNav.svelte` has nothing to unit-test around — the component
 // only renders what this function returns.
 //
-// What: `NAV_TABS` is the fixed, ordered 7-tab catalog. `tabVisibility`
+// `skills` is an 8th tab ADDED by issue #3449 (DOC-39 amendment) — Bob:
+// "Also add a 'Skills' tab along with 'Agents', and the user should have the
+// ability to add/remove both." Placed immediately after `agents` (the two
+// are siblings: both are catalog-management tabs over a disk-tier +
+// embedded/bundled roster). It follows the SAME default `tabVisibility`
+// branch every non-`workstream`/`workflow` tab already uses (locked, not
+// hidden, when no project is bound) — consistent with `agents` itself, even
+// though `GET /skills` happens to still return the bundled catalog
+// projectless; the CREATE/DELETE half of the tab genuinely needs a bound
+// project (`crate::skills::protocol` has no user-level tier — see that
+// module's docs), so locking the whole tab until a project is bound is the
+// simpler, honest default rather than a tab that half-works.
+//
+// What: `NAV_TABS` is the fixed, ordered 8-tab catalog. `tabVisibility`
 // returns whether a given tab should render at all (`visible`) and, if so,
 // whether it should render disabled (`locked`).
 // Test: `nav-tabs.test.ts`.
 
-export type TabId = 'workstream' | 'project' | 'agents' | 'memory' | 'search' | 'workflow' | 'files';
+export type TabId =
+  | 'workstream'
+  | 'project'
+  | 'agents'
+  | 'skills'
+  | 'memory'
+  | 'search'
+  | 'workflow'
+  | 'files';
 
 export interface TabDef {
   id: TabId;
   label: string;
 }
 
-/** The 7 canonical service-nav tabs, in display order (brief: 9a/9b/10d/10e/11b). */
+/** The 8 canonical service-nav tabs, in display order (brief:
+ * 9a/9b/10d/10e/11b, `skills` added by issue #3449). */
 export const NAV_TABS: readonly TabDef[] = [
   { id: 'workstream', label: 'Workstream' },
   { id: 'project', label: 'Project' },
   { id: 'agents', label: 'Agents' },
+  { id: 'skills', label: 'Skills' },
   { id: 'memory', label: 'Memory' },
   { id: 'search', label: 'Search' },
   { id: 'workflow', label: 'Workflow' },

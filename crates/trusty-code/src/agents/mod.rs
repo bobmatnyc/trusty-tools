@@ -30,6 +30,7 @@
 
 pub mod config;
 pub mod md_loader;
+pub mod protocol;
 
 pub use config::{
     AgentConfig, AgentInfo, LlmParams, RunnerConfig, RunnerKind, SystemPrompt, ToolsConfig,
@@ -176,7 +177,7 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 /// Test: `load_all_agents_falls_back_to_embedded_when_disk_empty`,
 /// `assets::tests::default_agents_field_identical_to_retired_toml`,
 /// `assets::tests::default_agents_parse_and_names_match`.
-fn load_embedded_default_agents() -> Vec<AgentConfig> {
+pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
     crate::assets::DEFAULT_AGENTS
         .iter()
         .filter_map(|embedded| match embedded {

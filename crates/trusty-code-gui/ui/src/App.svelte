@@ -48,6 +48,7 @@
   import WorkstreamTab from './components/WorkstreamTab.svelte';
   import ProjectTab from './components/ProjectTab.svelte';
   import AgentsTab from './components/AgentsTab.svelte';
+  import SkillsTab from './components/SkillsTab.svelte';
   import MemoryTab from './components/MemoryTab.svelte';
   import SearchTab from './components/SearchTab.svelte';
   import WorkflowTab from './components/WorkflowTab.svelte';
@@ -130,6 +131,8 @@
           <ProjectTab />
         {:else if activeTab === 'agents'}
           <AgentsTab />
+        {:else if activeTab === 'skills'}
+          <SkillsTab />
         {:else if activeTab === 'memory'}
           <MemoryTab />
         {:else if activeTab === 'search'}

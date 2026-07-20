@@ -10,20 +10,33 @@
 //! instruction-load omission (see `docs/specs/trusty-mpm-self-awareness.md`
 //! §6, §9).
 //! What: [`check_output_style`] resolves Claude Code's EFFECTIVE `outputStyle`
-//! — the project-level `.claude/settings.json` value when that file exists
-//! AND carries the key, otherwise the global `~/.claude/settings.json` value
-//! (issue #1863: a project settings file that exists but is silent on
-//! `outputStyle` must NOT shadow a bad global value, since project settings
-//! only override keys they actually set) — and validates it against
-//! [`OUTPUT_STYLES`] and the deployed style files under
-//! `<home>/.claude/output-styles/`. The report names which scope
-//! ("project"/"global") the resolved value came from.
+//! by walking the FULL settings precedence chain Claude Code itself applies —
+//! `project-local` (`<project>/.claude/settings.local.json`) > `project`
+//! (`<project>/.claude/settings.json`) > `user-local`
+//! (`<home>/.claude/settings.local.json`) > `user`
+//! (`<home>/.claude/settings.json`) — stopping at the first layer that sets
+//! the key (issue #1863: a settings file that exists but is silent on
+//! `outputStyle` must NOT shadow a value in a lower-precedence layer, since a
+//! settings file only overrides keys it actually sets). The scope-ordering
+//! (project fully outranks user) is empirically confirmed against a real
+//! Claude Code build in `docs/specs/standalone-managed-trusty-mpm.md:707`
+//! ("Local > Project > User"); Claude Code does not itself document a
+//! user-level `.local` tier, but issue #3453 extends the same
+//! local-overrides-plain rule to the user scope for consistency, since
+//! trusty-mpm already models `user_local_settings` as a first-class layer
+//! (`ClaudeConfigReader::paths_for_project`). The resolved value is validated
+//! against [`OUTPUT_STYLES`] and the deployed style files under
+//! `<home>/.claude/output-styles/`; the report names which scope the resolved
+//! value came from (see [`resolution_layers`]).
 //! Test: `output_style_ok_when_style_resolves`,
 //! `output_style_fail_when_id_unknown`, `output_style_warn_when_key_absent`,
 //! `output_style_fail_when_file_missing`, `output_style_fail_on_malformed_json`,
 //! `output_style_prefers_project_over_global`,
 //! `output_style_falls_back_to_global_when_project_silent`,
-//! `output_style_falls_back_to_global_when_project_missing`.
+//! `output_style_falls_back_to_global_when_project_missing`,
+//! `output_style_project_local_overrides_project`,
+//! `output_style_user_local_overrides_user`,
+//! `output_style_project_local_wins_even_when_project_settings_correct`.
 //!
 //! [`check_output_style_staleness`] closes a second gap (issue #2333): even
 //! when [`check_output_style`] reports `Ok` (the configured id resolves to a
@@ -41,11 +54,27 @@
 //! `staleness_warns_on_orphan`, `staleness_ok_when_dir_missing`,
 //! `staleness_ok_when_file_never_deployed`,
 //! `staleness_orphan_exempts_configured_custom_id`.
+//!
+//! [`check_output_style_legacy_ids`] closes a third gap (issue #3453 part 2):
+//! `check_output_style` only ever inspects the single EFFECTIVE layer, by
+//! design — but a legacy/unresolvable id left behind in a lower-precedence,
+//! currently-*shadowed* layer (e.g. a corrected `settings.json` sitting under
+//! a stale `settings.local.json` that DOESN'T currently win) is invisible to
+//! it, and is a landmine: tm's config-seed/repair path rewrites `settings.json`
+//! but never touches `settings.local.json` (often gitignored personal
+//! config), so the moment the winning layer's key is ever removed, the
+//! dormant stale id silently becomes effective. This is advisory-only
+//! (`Warn`, never `Fail`, and NEVER auto-migrates) — see the function doc for
+//! why silently rewriting `.local` files is unsafe.
+//! Test: `legacy_ids_warns_on_shadowed_layer`, `legacy_ids_ok_when_all_known`,
+//! `legacy_ids_ok_when_none_configured`,
+//! `legacy_ids_does_not_double_report_the_effective_layer`.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::core::bundle::OUTPUT_STYLES;
+use crate::core::claude_config::ClaudeConfigReader;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
 /// Result of reading the `outputStyle` key out of one settings file.
@@ -101,6 +130,39 @@ fn read_style_key(path: &Path) -> Result<StyleKey, DoctorCheck> {
     }
 }
 
+/// Build the ordered settings-file layers Claude Code actually consults for
+/// one project, highest-precedence first.
+///
+/// Why: [`check_output_style`], [`resolve_effective_style_id`], and
+/// [`check_output_style_legacy_ids`] all need the IDENTICAL precedence chain —
+/// duplicating it per caller is exactly how a check drifts from the consumer
+/// it's supposed to model (the general lesson of issue #3453). Reuses
+/// [`ClaudeConfigReader::paths_for_project_with_home`] (the project/user
+/// four-file path model already shared with the `claude-config` analyzer and
+/// checkpointer) rather than re-joining `.claude/settings*.json` a second
+/// time.
+/// What: `project-local > project > user-local > user`, matching Claude
+/// Code's real precedence — scope (project outranks user) applied first,
+/// then format (`.local.json` outranks the plain file) within each scope; see
+/// the module doc for the evidence trail. The two project-scope layers are
+/// omitted entirely when `project_dir` is `None` (no project to resolve).
+/// Test: `output_style_project_local_overrides_project`,
+/// `output_style_user_local_overrides_user`,
+/// `output_style_falls_back_to_global_when_project_missing`.
+fn resolution_layers(project_dir: Option<&Path>, home: &Path) -> Vec<(PathBuf, &'static str)> {
+    let project = project_dir.unwrap_or(home);
+    let paths = ClaudeConfigReader::paths_for_project_with_home(project, home);
+
+    let mut layers = Vec::with_capacity(4);
+    if project_dir.is_some() {
+        layers.push((paths.project_local_settings, "project-local"));
+        layers.push((paths.project_settings, "project"));
+    }
+    layers.push((paths.user_local_settings, "user-local"));
+    layers.push((paths.user_settings, "user"));
+    layers
+}
+
 /// Probe whether the EFFECTIVE `outputStyle` setting resolves to a real,
 /// on-disk trusty-mpm style file.
 ///
@@ -108,49 +170,49 @@ fn read_style_key(path: &Path) -> Result<StyleKey, DoctorCheck> {
 /// exact incident condition (an `outputStyle` value that does not exist),
 /// which no session-side "please confirm you loaded" instruction can ever
 /// catch, because that instruction itself would be part of what failed to
-/// load. It must inspect the value Claude Code will ACTUALLY resolve — the
-/// project settings when they set the key, else the global settings — so a
-/// bad global value is never masked by a project file that is silent on it
-/// (issue #1863).
-/// What: tries `<project_dir>/.claude/settings.json` first (when
-/// `project_dir` is given); if that file is missing or has no `outputStyle`
-/// key, falls back to `<home>/.claude/settings.json`. `Fail`s immediately on
-/// an unreadable/malformed settings file at whichever scope it was found in.
-/// `Warn` when neither scope configures a value (Claude Code will use its own
+/// load. It must inspect the value Claude Code will ACTUALLY resolve across
+/// EVERY layer it consults — including `settings.local.json`, which Claude
+/// Code applies ahead of the plain `settings.json` at the same scope — so a
+/// stale value there is never masked by a correct value in a
+/// lower-precedence layer (issue #1863's original project-vs-user gap;
+/// issue #3453's `.local` gap).
+/// What: walks [`resolution_layers`] in precedence order, returning at the
+/// first layer that sets the key. `Fail`s immediately on an
+/// unreadable/malformed settings file at whichever layer it was found in.
+/// `Warn` when NO layer configures a value (Claude Code will use its own
 /// default, a valid if unconfigured state). Otherwise validates the resolved
 /// id against [`OUTPUT_STYLES`] and the deployed file under
 /// `<home>/.claude/output-styles/`, reporting `Fail`/`Ok` with the resolved
-/// scope ("project"/"global") named in the message.
+/// scope (`"project-local"`/`"project"`/`"user-local"`/`"user"`) named in the
+/// message.
 /// Test: `output_style_ok_when_style_resolves`, `output_style_fail_when_id_unknown`,
 /// `output_style_warn_when_key_absent`, `output_style_fail_when_file_missing`,
-/// `output_style_falls_back_to_global_when_project_silent`.
+/// `output_style_falls_back_to_global_when_project_silent`,
+/// `output_style_project_local_wins_even_when_project_settings_correct`.
 pub(crate) fn check_output_style(project_dir: Option<&Path>, home: &Path) -> DoctorCheck {
-    let global_path = home.join(".claude").join("settings.json");
+    let layers = resolution_layers(project_dir, home);
 
-    if let Some(dir) = project_dir {
-        let project_path = dir.join(".claude").join("settings.json");
-        match read_style_key(&project_path) {
-            Ok(StyleKey::Present(style_id)) => {
-                return evaluate_style(&style_id, home, &project_path, "project");
-            }
-            Ok(StyleKey::Silent) => { /* fall through to global scope below */ }
+    for (path, scope) in &layers {
+        match read_style_key(path) {
+            Ok(StyleKey::Present(style_id)) => return evaluate_style(&style_id, home, path, scope),
+            Ok(StyleKey::Silent) => { /* fall through to the next layer */ }
             Err(check) => return check,
         }
     }
 
-    match read_style_key(&global_path) {
-        Ok(StyleKey::Present(style_id)) => evaluate_style(&style_id, home, &global_path, "global"),
-        Ok(StyleKey::Silent) => DoctorCheck::new(
-            "output_style",
-            CheckStatus::Warn,
-            format!(
-                "no outputStyle configured (checked project and {}) — \
-                 Claude Code will use its own default",
-                global_path.display()
-            ),
+    let checked = layers
+        .iter()
+        .map(|(p, _)| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    DoctorCheck::new(
+        "output_style",
+        CheckStatus::Warn,
+        format!(
+            "no outputStyle configured in any resolved scope (checked {checked}) — \
+             Claude Code will use its own default"
         ),
-        Err(check) => check,
-    }
+    )
 }
 
 /// Validate a resolved `outputStyle` id against the known styles and the
@@ -216,23 +278,101 @@ fn evaluate_style(style_id: &str, home: &Path, source_path: &Path, source: &str)
 /// Why: [`check_output_style_staleness`] must not flag the file backing a
 /// deliberately configured custom style id (one that resolves to no
 /// [`OUTPUT_STYLES`] entry — already `Fail`ed by [`evaluate_style`], but the
-/// operator's own file, not a foreign leftover) as an orphan.
-/// What: project scope first (when `project_dir` is given and sets the key),
-/// else global scope; any unreadable/malformed/absent file at either scope
-/// resolves to `None` rather than propagating an error, since this helper
-/// only narrows an advisory scan.
+/// operator's own file, not a foreign leftover) as an orphan. Must walk the
+/// SAME [`resolution_layers`] precedence [`check_output_style`] does — before
+/// issue #3453 this only checked plain `settings.json` at each scope, so a
+/// custom id configured only via `settings.local.json` was wrongly treated as
+/// an orphan.
+/// What: first non-silent layer in [`resolution_layers`] order; any
+/// unreadable/malformed/absent file at any layer is skipped (resolves to
+/// `None` if no layer sets it) rather than propagating an error, since this
+/// helper only narrows an advisory scan.
 /// Test: `staleness_orphan_exempts_configured_custom_id`.
 fn resolve_effective_style_id(project_dir: Option<&Path>, home: &Path) -> Option<String> {
-    if let Some(dir) = project_dir
-        && let Ok(StyleKey::Present(id)) =
-            read_style_key(&dir.join(".claude").join("settings.json"))
-    {
-        return Some(id);
+    for (path, _) in resolution_layers(project_dir, home) {
+        if let Ok(StyleKey::Present(id)) = read_style_key(&path) {
+            return Some(id);
+        }
     }
-    match read_style_key(&home.join(".claude").join("settings.json")) {
-        Ok(StyleKey::Present(id)) => Some(id),
-        _ => None,
+    None
+}
+
+/// Scan every resolution layer — not just the effective one — for a
+/// legacy/unresolvable `outputStyle` id (issue #3453 part 2).
+///
+/// Why: [`check_output_style`] only ever inspects the single layer that WINS
+/// (by design — that's the only value that affects the current session), so
+/// a stale id sitting in a currently-*shadowed*, lower-precedence layer is
+/// invisible to it. That is precisely how the live incident happened in
+/// reverse: tm's config-seed/repair path rewrites `settings.json` but never
+/// touches `settings.local.json` (frequently gitignored personal config), so
+/// a legacy id left behind in a shadowed layer is a landmine — it silently
+/// becomes effective the moment the winning layer's key is ever removed or
+/// the winning file is deleted. This probe is Warn-only and NEVER rewrites
+/// any file: `settings.local.json` in particular is often gitignored,
+/// operator-owned config that may be mid-edit, and even the shared
+/// `settings.json` is edited by the operator directly in many projects, so a
+/// doctor probe silently mutating it without being asked would violate the
+/// "no silent fallbacks/rewrites" rule — naming the exact file and offending
+/// value is enough to make the fix (edit or run `tm run`/`tm load`) obvious,
+/// mirroring how [`evaluate_style`] already reports the winning-layer case.
+/// What: reads the `outputStyle` key out of EVERY layer in
+/// [`resolution_layers`] order. The FIRST layer that sets the key is the
+/// effective one — already reported by [`check_output_style`], so it is
+/// intentionally excluded here to avoid double-reporting the same offender
+/// under two check names. Every layer AFTER that (i.e. genuinely shadowed) is
+/// checked against [`OUTPUT_STYLES`]; an id matching no entry is an offender,
+/// named as `"<scope> <path> = <id>"`. Unreadable/malformed shadowed layers
+/// are skipped (best-effort advisory scan, not a second `Fail` source). `Ok`
+/// when no shadowed layer carries an unknown id (including when nothing is
+/// configured anywhere); `Warn` naming every offender otherwise.
+/// Test: `legacy_ids_warns_on_shadowed_layer`, `legacy_ids_ok_when_all_known`,
+/// `legacy_ids_ok_when_none_configured`,
+/// `legacy_ids_does_not_double_report_the_effective_layer`.
+pub(crate) fn check_output_style_legacy_ids(
+    project_dir: Option<&Path>,
+    home: &Path,
+) -> DoctorCheck {
+    let known_ids: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.id).collect();
+    let mut seen_effective_layer = false;
+    let mut offenders: Vec<String> = Vec::new();
+
+    for (path, scope) in resolution_layers(project_dir, home) {
+        let Ok(StyleKey::Present(id)) = read_style_key(&path) else {
+            continue;
+        };
+        if !seen_effective_layer {
+            // This is the layer `check_output_style` itself resolves to and
+            // already reports on (Fail/Ok) — don't double-report it here.
+            seen_effective_layer = true;
+            continue;
+        }
+        if !known_ids.contains(&id.as_str()) {
+            offenders.push(format!("{scope} {} = {id:?}", path.display()));
+        }
     }
+
+    if offenders.is_empty() {
+        return DoctorCheck::new(
+            "output_style_legacy_ids",
+            CheckStatus::Ok,
+            "no legacy/unresolvable outputStyle ids found in any shadowed settings layer",
+        );
+    }
+
+    DoctorCheck::new(
+        "output_style_legacy_ids",
+        CheckStatus::Warn,
+        format!(
+            "legacy/unresolvable outputStyle id(s) found in shadowed (currently non-effective) \
+             settings layers ({}) — valid ids: {}; these are dormant until the higher-precedence \
+             layer's key is ever removed. The known pre-rebrand id `claude_mpm` has no deployed \
+             style and falls back to Claude Code's built-in default if it ever becomes effective \
+             — edit or remove the key in the named file(s)",
+            offenders.join("; "),
+            known_ids.join(", ")
+        ),
+    )
 }
 
 /// Probe deployed output-style files for content drift against the bundled
@@ -327,240 +467,5 @@ pub(crate) fn check_output_style_staleness(project_dir: Option<&Path>, home: &Pa
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Write `<dir>/.claude/settings.json` with the given raw JSON text.
-    fn write_settings(dir: &Path, json: &str) {
-        let claude_dir = dir.join(".claude");
-        std::fs::create_dir_all(&claude_dir).unwrap();
-        std::fs::write(claude_dir.join("settings.json"), json).unwrap();
-    }
-
-    /// Deploy the default trusty-mpm style file under `<home>/.claude/output-styles/`.
-    fn deploy_default_style(home: &Path) {
-        let styles_dir = home.join(".claude").join("output-styles");
-        std::fs::create_dir_all(&styles_dir).unwrap();
-        let default = OUTPUT_STYLES[0];
-        std::fs::write(styles_dir.join(default.file_name), default.content).unwrap();
-    }
-
-    /// Deploy every bundled style, byte-exact, under `<home>/.claude/output-styles/`.
-    fn deploy_all_styles(home: &Path) {
-        let styles_dir = home.join(".claude").join("output-styles");
-        std::fs::create_dir_all(&styles_dir).unwrap();
-        for style in OUTPUT_STYLES {
-            std::fs::write(styles_dir.join(style.file_name), style.content).unwrap();
-        }
-    }
-
-    #[test]
-    fn output_style_ok_when_style_resolves() {
-        let home = tempfile::tempdir().unwrap();
-        deploy_default_style(home.path());
-        write_settings(home.path(), r#"{"outputStyle": "trusty-mpm"}"#);
-        let check = check_output_style(None, home.path());
-        assert_eq!(check.status, CheckStatus::Ok);
-    }
-
-    #[test]
-    fn output_style_fail_when_id_unknown() {
-        // This is the exact incident condition: a stale/foreign style id.
-        let home = tempfile::tempdir().unwrap();
-        write_settings(home.path(), r#"{"outputStyle": "claude_mpm"}"#);
-        let check = check_output_style(None, home.path());
-        assert_eq!(check.status, CheckStatus::Fail);
-        assert!(check.message.contains("claude_mpm"));
-        assert!(
-            check.message.contains("trusty-mpm"),
-            "valid id list must be present"
-        );
-    }
-
-    #[test]
-    fn output_style_warn_when_key_absent() {
-        let home = tempfile::tempdir().unwrap();
-        write_settings(home.path(), r#"{}"#);
-        let check = check_output_style(None, home.path());
-        assert_eq!(check.status, CheckStatus::Warn);
-    }
-
-    #[test]
-    fn output_style_warn_when_settings_missing() {
-        let home = tempfile::tempdir().unwrap();
-        let check = check_output_style(None, home.path());
-        assert_eq!(check.status, CheckStatus::Warn);
-    }
-
-    #[test]
-    fn output_style_fail_when_file_missing() {
-        // A known id whose deployed file was never written (or was deleted).
-        let home = tempfile::tempdir().unwrap();
-        write_settings(home.path(), r#"{"outputStyle": "trusty-mpm"}"#);
-        let check = check_output_style(None, home.path());
-        assert_eq!(check.status, CheckStatus::Fail);
-    }
-
-    #[test]
-    fn output_style_fail_on_malformed_json() {
-        let home = tempfile::tempdir().unwrap();
-        write_settings(home.path(), "{not valid json");
-        let check = check_output_style(None, home.path());
-        assert_eq!(check.status, CheckStatus::Fail);
-        assert!(check.message.contains("not valid JSON"));
-    }
-
-    #[test]
-    fn output_style_prefers_project_over_global() {
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        deploy_default_style(home.path());
-        // Global settings carry the bad incident value...
-        write_settings(home.path(), r#"{"outputStyle": "claude_mpm"}"#);
-        // ...but the project-local settings (written by `prepare_session`)
-        // carry the correct one and must take precedence.
-        write_settings(project.path(), r#"{"outputStyle": "trusty-mpm"}"#);
-        let check = check_output_style(Some(project.path()), home.path());
-        assert_eq!(check.status, CheckStatus::Ok);
-    }
-
-    #[test]
-    fn output_style_falls_back_to_global_when_project_silent() {
-        // Issue #1863: the exact incident condition. A project settings file
-        // EXISTS (so the old `effective_settings_path` would stop looking
-        // there) but does not set `outputStyle` — Claude Code itself falls
-        // back to the global value in that case, and so must this check. The
-        // global value here is the bad incident id, so this must Fail, not
-        // silently report Warn/Ok from the project scope.
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        write_settings(home.path(), r#"{"outputStyle": "claude_mpm"}"#);
-        write_settings(project.path(), r#"{"theme": "dark"}"#);
-        let check = check_output_style(Some(project.path()), home.path());
-        assert_eq!(check.status, CheckStatus::Fail);
-        assert!(check.message.contains("claude_mpm"));
-        assert!(
-            check.message.contains("global"),
-            "message must name the resolved scope: {}",
-            check.message
-        );
-    }
-
-    #[test]
-    fn output_style_falls_back_to_global_when_project_missing() {
-        // No project settings file at all (e.g. `tm doctor` run before the
-        // project has ever launched a session) must still catch a bad global
-        // value.
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        write_settings(home.path(), r#"{"outputStyle": "claude_mpm"}"#);
-        let check = check_output_style(Some(project.path()), home.path());
-        assert_eq!(check.status, CheckStatus::Fail);
-        assert!(check.message.contains("claude_mpm"));
-    }
-
-    #[test]
-    fn output_style_reports_project_scope_on_success() {
-        // The `Ok` message must name which scope ("project") supplied the
-        // resolved value, so operators can tell the two apart.
-        let home = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        deploy_default_style(home.path());
-        write_settings(project.path(), r#"{"outputStyle": "trusty-mpm"}"#);
-        let check = check_output_style(Some(project.path()), home.path());
-        assert_eq!(check.status, CheckStatus::Ok);
-        assert!(
-            check.message.contains("project"),
-            "message must name the resolved scope: {}",
-            check.message
-        );
-    }
-
-    #[test]
-    fn staleness_ok_when_in_sync() {
-        // All three bundled styles deployed byte-exact must be Ok.
-        let home = tempfile::tempdir().unwrap();
-        deploy_all_styles(home.path());
-        let check = check_output_style_staleness(None, home.path());
-        assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
-    }
-
-    #[test]
-    fn staleness_warns_on_drift() {
-        // This is the exact incident condition (issue #2333): PR #2328
-        // corrected the bundled content, but the deployed copy never got
-        // refreshed. A byte-level mismatch must Warn and point at `tm install`.
-        let home = tempfile::tempdir().unwrap();
-        deploy_all_styles(home.path());
-        let styles_dir = home.path().join(".claude").join("output-styles");
-        let first = &OUTPUT_STYLES[0];
-        std::fs::write(
-            styles_dir.join(first.file_name),
-            "stale pre-#2328 identity text",
-        )
-        .unwrap();
-
-        let check = check_output_style_staleness(None, home.path());
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(check.message.contains(first.file_name));
-        assert!(check.message.contains("tm install"));
-    }
-
-    #[test]
-    fn staleness_warns_on_orphan() {
-        // A dormant foreign file (issue #2333's `claude-mpm.md` example) must
-        // be flagged, but never deleted.
-        let home = tempfile::tempdir().unwrap();
-        deploy_all_styles(home.path());
-        let styles_dir = home.path().join(".claude").join("output-styles");
-        std::fs::write(styles_dir.join("claude-mpm.md"), "pre-rebrand lineage").unwrap();
-
-        let check = check_output_style_staleness(None, home.path());
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(check.message.contains("claude-mpm.md"));
-        assert!(
-            styles_dir.join("claude-mpm.md").exists(),
-            "orphan detection must never delete the foreign file"
-        );
-    }
-
-    #[test]
-    fn staleness_ok_when_dir_missing() {
-        // Nothing deployed yet is not staleness — `check_output_style` already
-        // reports on that state (Warn/Fail depending on configuration).
-        let home = tempfile::tempdir().unwrap();
-        let check = check_output_style_staleness(None, home.path());
-        assert_eq!(check.status, CheckStatus::Ok);
-    }
-
-    #[test]
-    fn staleness_ok_when_file_never_deployed() {
-        // A style present in the bundle but never written to disk (a subset
-        // deploy, or a deletion) must be skipped, not reported as drift —
-        // that state is `check_output_style`'s Fail, not this probe's Warn.
-        let home = tempfile::tempdir().unwrap();
-        deploy_default_style(home.path()); // only OUTPUT_STYLES[0]
-        let check = check_output_style_staleness(None, home.path());
-        assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
-    }
-
-    #[test]
-    fn staleness_orphan_exempts_configured_custom_id() {
-        // A deliberately configured custom style id (unknown to OUTPUT_STYLES,
-        // already `Fail`ed by `check_output_style` itself) is the operator's
-        // own file, not a foreign leftover — orphan detection must not also
-        // flag it.
-        let home = tempfile::tempdir().unwrap();
-        deploy_all_styles(home.path());
-        write_settings(home.path(), r#"{"outputStyle": "my-custom-style"}"#);
-        let styles_dir = home.path().join(".claude").join("output-styles");
-        std::fs::write(
-            styles_dir.join("my-custom-style.md"),
-            "operator's own style",
-        )
-        .unwrap();
-
-        let check = check_output_style_staleness(None, home.path());
-        assert_eq!(check.status, CheckStatus::Ok, "message: {}", check.message);
-    }
-}
+#[path = "doctor_output_style_tests.rs"]
+mod tests;

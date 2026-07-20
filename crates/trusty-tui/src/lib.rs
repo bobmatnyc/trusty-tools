@@ -29,6 +29,15 @@
 //! markdown-rendering helpers those widgets call into ([`render`]), and the
 //! top-level frame composition ([`layout`]) — generalized, behavior-
 //! preserving ports of tagent's `repl/tui/{chat,banner,markdown,layout}.rs`.
+//! **Slice 7** (#3420, epic #3411, DOC-50 §5 Slice 7 / §6 Q4) adds the
+//! [`commands`] module: the slash-command parser/dispatcher implementing
+//! "mixed routing" — `/help`/`/clear`/`/quit`/`/exit` are client-side
+//! built-ins that never reach `TuiEngine::handle_input`; every other
+//! command (domain commands like `/model`/`/workstream`, plain chat, and
+//! any command this crate doesn't recognize) forwards verbatim, per the
+//! thin-client axiom. Also adds the inline-picker half of that routing
+//! (DOC-50 §3.2/§6 Q6): a bare `/name` matching `TuiEngine::picker(name)`
+//! opens [`ReplApp::active_picker`] instead of forwarding.
 //! See DOC-50 §5 for the full slice breakdown (Slice 10 is the tagent
 //! cutover this crate is building toward).
 //!
@@ -43,6 +52,7 @@
 //! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 1, 2, and 4 deliverables and acceptance criteria.
 
 pub mod app;
+pub mod commands;
 pub mod engine;
 pub mod event;
 pub mod keys;
@@ -55,6 +65,7 @@ pub mod text;
 pub mod widgets;
 
 pub use app::{ChatLine, ChatRole, ReplApp};
+pub use commands::{BuiltIn, Forward, Route, dispatch_forward, resolve_forward, route};
 pub use engine::TuiEngine;
 pub use event::{KeyCode, KeyInput, KeyModifiers, ReplEvent, WorkstreamSummary};
 pub use keys::translate_key_event;
