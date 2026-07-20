@@ -44,7 +44,7 @@ pub use supervisor::{CtrlSupervisor, SupervisorOutcome};
 // (main.rs, REPL, tests). All implementations live in the submodules above.
 pub use config::SessionOverrides;
 pub use pm_task::{run_pm_task_with_history, run_pm_task_with_persona, run_pm_task_with_session};
-pub use repl::{run_ctrl, run_ctrl_headless};
+pub use repl::{run_ctrl, run_ctrl_headless, run_plain_cli};
 pub use socket_listener::{forward_to_controller, spawn_socket_listener};
 pub use state::ConversationTurn;
 pub use util::{PmMessageRecord, append_pm_message, detect_self_project};

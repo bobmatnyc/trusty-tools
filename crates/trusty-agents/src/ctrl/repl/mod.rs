@@ -11,6 +11,7 @@
 //! Test: `cmd_*` tests cover slash-command dispatch; the larger setup paths
 //! are smoke-tested via tmux REPL harness.
 
+mod plain_cli;
 mod profile;
 
 use std::path::PathBuf;
@@ -31,6 +32,7 @@ use super::socket_listener::spawn_socket_listener;
 use super::state::{Ctrl, PmMsg};
 use super::util::{append_pm_message, detect_self_project};
 
+pub use plain_cli::run_plain_cli;
 use profile::load_or_create_user_profile;
 
 // INTENT: Print the CTRL command reference.
