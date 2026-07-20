@@ -233,3 +233,20 @@ pub mod telegram;
 /// unit-tested; enabled by the `slack` feature.
 #[cfg(feature = "slack")]
 pub mod slack;
+
+// ── Test-only support ────────────────────────────────────────────────────────
+
+/// Hermetic test temp-directory helper (#3382).
+///
+/// Why: bare `tempfile::TempDir::new()` honors an inherited `$TMPDIR`, which
+/// let a polluted sandbox environment variable deposit test scaffolding
+/// directly into a real project tree (`~/trusty-mpm-projects`, ~167MB / 50
+/// directories over ~24h — see #3382). Centralizing the fix in one module
+/// means every test site gets the hermetic behavior and the leak-sweep for
+/// free, and clippy's `disallowed-methods` config (`crates/trusty-mpm/clippy.toml`)
+/// blocks new bare `TempDir::new()` call sites from creeping back in.
+/// What: [`test_support::hermetic_temp_dir`] is the one replacement for
+/// `TempDir::new()` in trusty-mpm's test code.
+/// Test: `test_support::tests`.
+#[cfg(test)]
+pub(crate) mod test_support;

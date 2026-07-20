@@ -104,8 +104,6 @@ pub(crate) fn is_safe_to_remove(workspace_path: &Path, managed_root: &Path) -> b
 mod tests {
     use std::path::PathBuf;
 
-    use tempfile::TempDir;
-
     use super::is_safe_to_remove;
 
     // ── is_safe_to_remove unit tests (#1511) ────────────────────────────────
@@ -117,7 +115,7 @@ mod tests {
     /// Test: this function IS the test.
     #[test]
     fn is_safe_to_remove_accepts_valid_child() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let child = root.path().join("owner").join("repo").join("session-abc");
         std::fs::create_dir_all(&child).unwrap();
         assert!(
@@ -132,7 +130,7 @@ mod tests {
     /// Test: this function IS the test.
     #[test]
     fn is_safe_to_remove_rejects_root_itself() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         assert!(
             !is_safe_to_remove(root.path(), root.path()),
             "the managed root itself must be rejected"
@@ -146,8 +144,8 @@ mod tests {
     /// Test: this function IS the test.
     #[test]
     fn is_safe_to_remove_rejects_outside_root() {
-        let root = TempDir::new().unwrap();
-        let outside = TempDir::new().unwrap(); // different temp dir
+        let root = crate::test_support::hermetic_temp_dir();
+        let outside = crate::test_support::hermetic_temp_dir(); // different temp dir
         let outside_child = outside.path().join("some").join("path");
         std::fs::create_dir_all(&outside_child).unwrap();
         assert!(
@@ -162,7 +160,7 @@ mod tests {
     /// Test: this function IS the test.
     #[test]
     fn is_safe_to_remove_rejects_shallow_path() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         // A 1-component path like "/" or a 2-component path like "/tmp" must be
         // rejected before even reaching canonicalization.
         let shallow = PathBuf::from("/tmp");
@@ -203,7 +201,7 @@ mod tests {
     /// Test: this function IS the test.
     #[test]
     fn is_safe_to_remove_returns_false_for_nonexistent_path() {
-        let root = TempDir::new().unwrap();
+        let root = crate::test_support::hermetic_temp_dir();
         let nonexistent = root.path().join("ghost").join("nope").join("absent");
         // path does not exist → canonicalize fails → returns false
         assert!(

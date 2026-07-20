@@ -224,7 +224,6 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use std::process::Command;
-    use tempfile::TempDir;
 
     fn make_record_with_workspace(workspace: PathBuf) -> SessionRecord {
         SessionRecord {
@@ -286,7 +285,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn derive_source_id_ssh_remote() {
-        let tmp = TempDir::new().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let dir = tmp.path();
         let git = |args: &[&str]| {
             Command::new("git")
@@ -315,7 +314,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn derive_source_id_https_remote() {
-        let tmp = TempDir::new().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let dir = tmp.path();
         let git = |args: &[&str]| {
             Command::new("git")
@@ -344,7 +343,7 @@ mod tests {
     /// Test: itself.
     #[test]
     fn derive_source_id_none_for_no_remote() {
-        let tmp = TempDir::new().expect("tempdir");
+        let tmp = crate::test_support::hermetic_temp_dir();
         let dir = tmp.path();
         Command::new("git")
             .arg("-C")
