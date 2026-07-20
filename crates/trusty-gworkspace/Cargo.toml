@@ -29,6 +29,7 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 clap = { workspace = true }
 open = { workspace = true }
+fd-lock = { workspace = true }
 
 [dev-dependencies]
 # serial_test: env-mutating tests (HOME override for oauth_client.json

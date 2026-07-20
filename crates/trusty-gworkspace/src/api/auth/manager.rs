@@ -152,9 +152,12 @@ impl OAuthManager {
         stored.token = new_token.clone();
         stored.metadata.last_refreshed = Some(Utc::now());
 
-        let mut all = storage.load()?;
-        all.insert(profile.to_string(), stored);
-        storage.save(&all)?;
+        // Guard against a concurrent refresh of a different profile (or the
+        // same one) losing this write — see `TokenStorage::update` (#3502).
+        storage.update(|all| {
+            all.insert(profile.to_string(), stored);
+            Ok(())
+        })?;
 
         Ok(new_token)
     }

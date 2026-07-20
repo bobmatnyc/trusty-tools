@@ -183,6 +183,10 @@ base64 = "0.22"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
+# Cross-process advisory file locking for trusty-gworkspace's tokens.json
+# read-modify-write critical section (issue #3502) — small, actively
+# maintained, no unsafe beyond the platform lock syscalls it wraps.
+fd-lock = "4"
 # Gzip decompression for prebuilt-binary tarballs (trusty-installer Phase 2).
 flate2 = "1"
 # Tar archive extraction for prebuilt-binary tarballs (trusty-installer Phase 2).

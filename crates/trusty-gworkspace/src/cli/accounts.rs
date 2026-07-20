@@ -2,12 +2,17 @@
 //!
 //! Why: Once tokens can be minted natively, users need a way to inspect and
 //! manage the profiles in `tokens.json` without hand-editing JSON.
-//! What: Free functions over [`TokenStorage`] that load the map, mutate it,
-//! and save. All output goes to stdout (human-facing CLI), logs to stderr.
-//! Test: `set_default_moves_flag` and `remove_deletes_profile` exercise the
-//! mutation logic against a temp storage.
+//! What: Thin stdout-printing wrappers over the shared, lock-guarded
+//! [`TokenStorage::set_default_profile`] / [`TokenStorage::remove_profile`]
+//! (the same methods the `set_default_account` / `remove_account` MCP tools
+//! use — see `api::services::accounts`) so both surfaces get identical
+//! mutation semantics, including the remove-the-default reassignment
+//! (#3502). All output goes to stdout (human-facing CLI), logs to stderr.
+//! Test: `set_default_moves_flag` and `remove_deletes_profile` exercise this
+//! wrapper end-to-end against a temp storage; the mutation logic itself is
+//! unit-tested in `api::auth::storage::tests`.
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use crate::api::auth::TokenStorage;
 
@@ -41,21 +46,11 @@ pub fn list(storage: &TokenStorage) -> Result<()> {
 ///
 /// Why: Users with multiple accounts need to choose which one tools use when
 /// no explicit `account` is passed.
-/// What: Loads the map, errors if `name` is absent, clears all defaults, sets
-/// the target's `is_default`, and saves.
+/// What: Delegates to [`TokenStorage::set_default_profile`] (errors if
+/// `name` is absent) and prints the confirmation.
 /// Test: `set_default_moves_flag`.
 pub fn set_default(storage: &TokenStorage, name: &str) -> Result<()> {
-    let mut all = storage.load()?;
-    if !all.contains_key(name) {
-        return Err(anyhow!("no profile named '{name}'"));
-    }
-    for entry in all.values_mut() {
-        entry.metadata.is_default = false;
-    }
-    if let Some(entry) = all.get_mut(name) {
-        entry.metadata.is_default = true;
-    }
-    storage.save(&all)?;
+    storage.set_default_profile(name)?;
     println!("Default profile set to '{name}'.");
     Ok(())
 }
@@ -63,16 +58,20 @@ pub fn set_default(storage: &TokenStorage, name: &str) -> Result<()> {
 /// Remove the named profile from storage.
 ///
 /// Why: Revoking or cleaning up an account should not require editing JSON.
-/// What: Loads the map, errors if absent, removes the entry, and saves. Note:
-/// this only forgets the local token; it does not revoke Google's grant.
+/// What: Delegates to [`TokenStorage::remove_profile`] (errors if absent;
+/// reassigns the default to another remaining profile if the removed one was
+/// it) and prints the outcome. Note: this only forgets the local token; it
+/// does not revoke Google's grant.
 /// Test: `remove_deletes_profile`.
 pub fn remove(storage: &TokenStorage, name: &str) -> Result<()> {
-    let mut all = storage.load()?;
-    if all.remove(name).is_none() {
-        return Err(anyhow!("no profile named '{name}'"));
+    let outcome = storage.remove_profile(name)?;
+    match &outcome.reassigned_default {
+        Some(new_default) => println!(
+            "Removed profile '{name}'. (Google's grant is not revoked.) \
+             Default profile reassigned to '{new_default}'."
+        ),
+        None => println!("Removed profile '{name}'. (Google's grant is not revoked.)"),
     }
-    storage.save(&all)?;
-    println!("Removed profile '{name}'. (Google's grant is not revoked.)");
     Ok(())
 }
 
