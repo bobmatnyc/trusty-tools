@@ -31,9 +31,9 @@
   // Theme-adaptive CSS custom property ref (resolved against the active palette
   // at render time) instead of hardcoded hex — badge recolors on theme flip.
   let statusVar = $derived(
-    report?.status === 'ok'         ? 'var(--color-status-ok)'
-    : report?.status === 'degraded' ? 'var(--color-status-warn)'
-    : 'var(--color-status-error)'
+    report?.status === 'ok'         ? 'var(--trusty-success)'
+    : report?.status === 'degraded' ? 'var(--trusty-warning)'
+    : 'var(--trusty-danger)'
   );
 </script>
 
@@ -61,22 +61,22 @@
 <style>
   .tab-content { padding: 0.25rem 0; }
   .section-title {
-    font-size: 1.25rem; font-weight: 600; margin: 0 0 1rem; color: var(--color-text-primary);
+    font-size: 1.25rem; font-weight: 600; margin: 0 0 1rem; color: var(--trusty-text-primary);
   }
   .placeholder, .not-available {
-    background: var(--color-surface); border-radius: 0.5rem;
-    padding: 1.25rem; color: var(--color-text-secondary); font-size: 0.9rem;
+    background: var(--trusty-card-bg); border-radius: 0.5rem;
+    padding: 1.25rem; color: var(--trusty-text-secondary); font-size: 0.9rem;
   }
-  .not-available { color: var(--color-status-warn); }
+  .not-available { color: var(--trusty-warning); }
   .meta-row {
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
   }
-  /* --_s supplied inline (statusVar) as a theme-adaptive --color-status-* ref. */
+  /* --_s supplied inline (statusVar) as a theme-adaptive --trusty-status-* ref. */
   .badge {
     display: inline-flex; align-items: center; gap: 0.35rem;
     font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem;
     border-radius: 9999px; border: 1px solid;
-    --_s: var(--color-text-muted);
+    --_s: var(--trusty-text-muted);
     color: var(--_s);
     background: rgba(0,0,0,0.08);
     background: color-mix(in srgb, var(--_s) 13%, transparent);
@@ -84,10 +84,10 @@
     border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }
-  .version { color: var(--color-text-secondary); font-size: 0.85rem; }
+  .version { color: var(--trusty-text-secondary); font-size: 0.85rem; }
   .metrics-dump {
-    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem;
-    padding: 1rem; font-size: 0.8rem; color: var(--color-text-secondary);
+    background: var(--trusty-card-bg); border: 1px solid var(--trusty-border); border-radius: 0.5rem;
+    padding: 1rem; font-size: 0.8rem; color: var(--trusty-text-secondary);
     overflow: auto; max-height: 400px;
     font-family: 'JetBrains Mono', monospace;
   }

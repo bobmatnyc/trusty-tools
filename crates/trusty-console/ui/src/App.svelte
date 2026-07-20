@@ -130,8 +130,8 @@
   :global(body) {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: var(--color-bg);
-    color: var(--color-text-primary);
+    background: var(--trusty-content-bg);
+    color: var(--trusty-text-primary);
     min-height: 100vh;
   }
   main {
@@ -149,13 +149,13 @@
     font-size: 2rem;
     font-weight: 700;
     margin: 0 0 0.25rem;
-    background: linear-gradient(135deg, #7c3aed, #2563eb);
+    background: linear-gradient(135deg, var(--trusty-accent), var(--trusty-accent-hover));
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
   }
   .subtitle {
-    color: var(--color-text-secondary);
+    color: var(--trusty-text-secondary);
     margin: 0;
   }
   .header-left {
@@ -166,7 +166,7 @@
   div.tabs {
     display: flex;
     gap: 0.25rem;
-    border-bottom: 1px solid var(--color-border);
+    border-bottom: 1px solid var(--trusty-border);
     margin-bottom: 1.5rem;
   }
   .tab-btn {
@@ -174,7 +174,7 @@
     border: none;
     border-bottom: 2px solid transparent;
     padding: 0.6rem 1.2rem;
-    color: var(--color-text-secondary);
+    color: var(--trusty-text-secondary);
     font-size: 0.9rem;
     font-weight: 500;
     cursor: pointer;
@@ -182,11 +182,11 @@
     margin-bottom: -1px;
   }
   .tab-btn:hover {
-    color: var(--color-text-primary);
+    color: var(--trusty-text-primary);
   }
   .tab-btn.active {
-    color: var(--color-accent);
-    border-bottom-color: var(--color-accent);
+    color: var(--trusty-accent);
+    border-bottom-color: var(--trusty-accent);
   }
 
   /* Panel */
@@ -202,8 +202,8 @@
   .error {
     padding: 1.5rem;
     border-radius: 0.5rem;
-    background: var(--color-surface);
-    color: var(--color-text-secondary);
+    background: var(--trusty-card-bg);
+    color: var(--trusty-text-secondary);
   }
-  .error { color: var(--color-status-error); }
+  .error { color: var(--trusty-danger); }
 </style>
