@@ -10,6 +10,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Markdown transcript endpoint for dev observability (issue #3526).** New
+  `GET /sessions/{id}/transcript.md` (`crate::serve::rest::sessions`) renders
+  a session's full transcript as a readable `text/markdown` document —
+  a header (session id, workstream id, project, task, mode, status, start/
+  export timestamps, turn count, cost) then one section per turn, each
+  `tool_calls` entry rendered as its own `` - `ROLE` ran: <tool> `` bullet so
+  a runaway loop stays visible line-by-line. This makes a run inspectable in
+  local dev independent of the GUI (`curl
+  http://127.0.0.1:7882/sessions/<id>/transcript.md`) and is the single
+  source of truth for the Markdown the Foundry GUI's "Download transcript"
+  button saves. Session-scoped, loopback-only (no new bind — rides the
+  existing daemon listener), `404` on an unknown id like the JSON transcript
+  route.
 - **Agent/Skill catalog management endpoints (issue #3449).** New `agents.*`/
   `skills.*` JSON-RPC methods (`crate::agents::protocol`,
   `crate::skills::protocol`) plus their REST twins — `GET`/`POST /agents`,

@@ -114,7 +114,12 @@
     type SessionDetail,
     type SessionListResponse,
   } from '../lib/session-status';
-  import { formatElapsed, selectChatEntries, type TranscriptRecord } from '../lib/transcript';
+  import {
+    formatElapsed,
+    selectChatEntries,
+    transcriptFilename,
+    type TranscriptRecord,
+  } from '../lib/transcript';
   import { fetchWorkstreams, workstreamLabel, type Workstream } from '../lib/workstreams';
 
   const POLL_MS = 5000; // matches StatusBar.svelte's poll cadence
@@ -411,6 +416,53 @@
   let chatEntries = $derived(transcript ? selectChatEntries(transcript.turns) : []);
   let canCancel = $derived(session !== null && !TERMINAL_SESSION_STATUSES.has(session.status));
 
+  // Download-transcript affordance (issue #3526). Shown once a bound session
+  // is selected for the active workstream — that session's transcript is what
+  // the daemon renders to Markdown. The DAEMON is the single source of truth
+  // for the Markdown format (`GET /sessions/{id}/transcript.md`,
+  // `crate::serve::rest::sessions::render_transcript_markdown`), so the same
+  // bytes a developer gets via `curl` in local dev are what this button saves
+  // — no second, drift-prone TS serializer. See that endpoint's docs.
+  let canDownload = $derived(activeWorkstream !== null && session !== null);
+
+  /**
+   * Fetch the daemon-rendered Markdown transcript for the active workstream's
+   * session and trigger a browser download of it. The serialization happens
+   * server-side (single source of truth — see `canDownload`'s note); this is
+   * purely the DOM-side save (Blob + object URL + a synthetic `<a download>`
+   * click), so it lives in the component rather than `lib/transcript.ts`
+   * (`transcriptFilename` — the timestamped filename — stays pure there).
+   * No-ops when there is nothing to download or the runtime lacks the
+   * Blob/URL APIs (SSR/older environments); a fetch failure surfaces in the
+   * existing in-pane `error` line rather than throwing.
+   */
+  async function downloadTranscript() {
+    if (!session || !activeWorkstream) return;
+    if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return;
+
+    let markdown: string;
+    try {
+      const base = await apiBase();
+      const res = await fetch(`${base}/sessions/${session.id}/transcript.md`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      markdown = await res.text();
+    } catch (e) {
+      error = `transcript download failed — ${e instanceof Error ? e.message : String(e)}`;
+      return;
+    }
+
+    const filename = transcriptFilename(activeWorkstream.id, Date.now());
+    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
   $effect(() => {
     // Auto-scroll to the newest entry as the stream "builds up" (issue
     // #3446), unless the operator has scrolled up to read backlog. Reads
@@ -466,14 +518,26 @@
       <span class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-secondary">
         {workstreamLabel(activeWorkstream)}
       </span>
-      {#if session}
-        <span class="flex items-center gap-2 font-mono text-[11px]">
-          <span class={`h-1.5 w-1.5 rounded-full ${statusDotClass(session.status)}`}></span>
-          <span class="font-semibold uppercase tracking-wide text-trusty-text">{session.status}</span>
-          <span class="text-trusty-text-muted">·</span>
-          <span class="text-trusty-text-secondary">{formatElapsed(session.created_at, now)}</span>
-        </span>
-      {/if}
+      <div class="flex items-center gap-3">
+        {#if session}
+          <span class="flex items-center gap-2 font-mono text-[11px]">
+            <span class={`h-1.5 w-1.5 rounded-full ${statusDotClass(session.status)}`}></span>
+            <span class="font-semibold uppercase tracking-wide text-trusty-text">{session.status}</span>
+            <span class="text-trusty-text-muted">·</span>
+            <span class="text-trusty-text-secondary">{formatElapsed(session.created_at, now)}</span>
+          </span>
+        {/if}
+        {#if canDownload}
+          <button
+            type="button"
+            class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+            title="Download this workstream's full transcript as a Markdown file"
+            onclick={downloadTranscript}
+          >
+            download transcript
+          </button>
+        {/if}
+      </div>
     </div>
 
     <div

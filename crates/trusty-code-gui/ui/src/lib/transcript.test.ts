@@ -11,7 +11,12 @@
 // 60s/3600s rollover points).
 // Test: this file.
 import { describe, expect, it } from 'vitest';
-import { formatElapsed, selectChatEntries, type TurnRecord } from './transcript';
+import {
+  formatElapsed,
+  selectChatEntries,
+  transcriptFilename,
+  type TurnRecord,
+} from './transcript';
 
 function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
   return {
@@ -92,5 +97,27 @@ describe('formatElapsed', () => {
 
   it('clamps a negative delta (now before created_at) to 0s', () => {
     expect(formatElapsed('2026-07-18T10:00:00Z', base - 5_000)).toBe('0s');
+  });
+});
+
+describe('transcriptFilename', () => {
+  // 2026-07-18T14:05:09 local — filename stamps in LOCAL time, so build the
+  // instant from local components to keep the assertion timezone-independent.
+  const generatedAtMs = new Date(2026, 6, 18, 14, 5, 9).getTime();
+
+  it('builds transcript-<id>-<YYYYMMDD-HHMMSS>.md from the export instant', () => {
+    expect(transcriptFilename('ws-123', generatedAtMs)).toBe('transcript-ws-123-20260718-140509.md');
+  });
+
+  it('sanitizes unsafe characters in the workstream id', () => {
+    expect(transcriptFilename('a/b c:d', generatedAtMs)).toBe(
+      'transcript-a-b-c-d-20260718-140509.md',
+    );
+  });
+
+  it('falls back to "workstream" when the id sanitizes to empty', () => {
+    expect(transcriptFilename('///', generatedAtMs)).toBe(
+      'transcript-workstream-20260718-140509.md',
+    );
   });
 });
