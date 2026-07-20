@@ -29,6 +29,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Shared-inference seam, Step 1+2 (#2410):** `llm::inference_bridge` is a
+  pure, field-by-field conversion between `async-openai`'s wire types
+  (`ChatCompletionRequestMessage`, `ChatCompletionTool`,
+  `ChatCompletionMessageToolCall`) and `trusty_common::inference`'s shared
+  request/response model, and `llm::inference_client::InferenceClient` is an
+  OpenRouter transport built on it (mirrors `trusty-code`'s
+  `OpenAiCompatClient`). Wired into `tool_loop::turn::dispatch_turn`'s plain
+  OpenRouter branch behind `TAGENT_INFERENCE_SHARED=1` — **inert by default**:
+  with the flag unset (or any value other than `"1"`), every existing call
+  path is byte-for-byte unchanged, including the cache_control/tool_choice-
+  forcing raw path, native-Anthropic-direct, ollama, and Bedrock, none of
+  which this flag ever touches. Anthropic-direct migration and Fireworks
+  routing are explicitly out of scope for this step (later epic steps).
 - The API server now writes the standard `http_addr` discovery file on bind
   (and removes it on graceful shutdown), so the trusty-console reverse proxy can
   resolve the agents surface at `/api/agents/*` (#3331).

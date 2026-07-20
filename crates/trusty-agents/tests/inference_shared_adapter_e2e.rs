@@ -17,15 +17,26 @@
 //! evidence Step 2's wiring works end-to-end, not just at the unit level.
 //!
 //! `OPENROUTER_BASE_URL` and `TAGENT_INFERENCE_SHARED` are process-global env
-//! vars this file mutates; this is the only test function in this binary
-//! (each file under `tests/` is its own process) so there is no cross-test
-//! race, and `InferenceClient`'s process-wide `shared_client()` `OnceLock` is
-//! guaranteed to see the override on its first (and only) initialisation.
+//! vars both tests in this file mutate; both are `#[serial]` (unnamed group)
+//! so they never interleave within this binary (each file under `tests/` is
+//! its own process, so there is no cross-FILE race either), and
+//! `InferenceClient`'s process-wide `shared_client()` `OnceLock` is
+//! guaranteed to see whichever override was active at its first
+//! initialisation.
 //!
-//! What: one test — routes a bare `claude-*` model through
-//! `chat_with_tools_gated` with the flag on, and asserts the parsed response
-//! AND the captured wire request (path, `Bearer` auth, qualified model id,
-//! detailed-usage directive).
+//! What: two tests —
+//! 1. `bare_claude_model_routes_through_shared_adapter_when_flag_enabled`:
+//!    routes a bare `claude-*` model through `chat_with_tools_gated` with the
+//!    flag on, and asserts the parsed response AND the captured wire request
+//!    (path, `Bearer` auth, qualified model id, detailed-usage directive).
+//! 2. `caching_active_keeps_raw_path_even_with_flag_enabled`: the regression
+//!    the plan calls the highest-value test in the epic — proves
+//!    `enable_prompt_caching`'s `caching_active` term still forces
+//!    `needs_raw` (`llm/tool_loop/mod.rs`'s `let needs_raw = caching_active ||
+//!    …`) even when `TAGENT_INFERENCE_SHARED=1`, so a caching turn is NEVER
+//!    silently routed through the shared adapter. See that test's own doc for
+//!    why the wire signal is the OpenRouter-only `usage:{include:true}`
+//!    directive's ABSENCE, not `cache_control`'s presence.
 //! Test: this file (`cargo test -p trusty-agents --test inference_shared_adapter_e2e`).
 
 use std::sync::Arc;
@@ -37,6 +48,7 @@ use async_openai::types::{
     ChatCompletionRequestUserMessageArgs,
 };
 use serde_json::json;
+use serial_test::serial;
 
 use trusty_agents::llm::adapter::adapter_for_model;
 use trusty_agents::llm::chat_with_tools_gated;
@@ -71,6 +83,7 @@ fn canned_response() -> serde_json::Value {
 /// captured wire request.
 /// Test: this test.
 #[tokio::test]
+#[serial]
 async fn bare_claude_model_routes_through_shared_adapter_when_flag_enabled() {
     let server = MockInferenceServer::spawn(200, canned_response())
         .await
@@ -147,6 +160,123 @@ async fn bare_claude_model_routes_through_shared_adapter_when_flag_enabled() {
         body["usage"],
         json!({"include": true}),
         "shared OpenRouter adapter must inject the detailed-usage directive"
+    );
+
+    unsafe {
+        std::env::remove_var(SHARED_INFERENCE_ENV);
+        std::env::remove_var("OPENROUTER_BASE_URL");
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+}
+
+/// Regression: a prompt-caching turn must keep taking the RAW dispatch path
+/// — never the shared adapter — even with `TAGENT_INFERENCE_SHARED=1` set.
+///
+/// Why: `dispatch_turn`'s shared branch is reachable only when
+/// `!routing.needs_raw` (`llm/tool_loop/mod.rs`: `let needs_raw =
+/// caching_active || tool_choice.is_some() || route_native_anthropic ||
+/// is_ollama;`). That's a plain boolean OR with no test pinning any one of
+/// its terms — if a future refactor dropped or reordered `caching_active`,
+/// prompt-caching traffic would silently start flowing through the shared
+/// adapter with zero test failure and a real dollar cost (a dropped cache
+/// discount). This test drives EXACTLY that term: `enable_prompt_caching =
+/// true` on an Anthropic-family model with `use_anthropic_direct = false`
+/// (so `route_native_anthropic` is false and does NOT independently force
+/// `needs_raw` — only `caching_active` does here), which must resolve
+/// `caching_active = true` and therefore `needs_raw = true`, sending the
+/// turn down `send_raw_completion` instead of `dispatch_turn_shared`.
+///
+/// The observable wire signal is the ABSENCE of the OpenRouter-only
+/// `usage:{include:true}` directive — NOT `cache_control`'s presence.
+/// `dispatch_turn`'s raw branch only calls `adapter.inject_cache_control`
+/// when `routing.route_native_anthropic` is true (see the `if
+/// routing.route_native_anthropic { adapter.inject_cache_control(..) }` guard
+/// inside the `needs_raw` block in `turn.rs`) — and `route_native_anthropic`
+/// is deliberately false in this test so it isolates `caching_active` as the
+/// sole thing forcing `needs_raw`. That's a pre-existing trusty-agents
+/// behaviour (OpenRouter-routed, non-native-Anthropic caching has never
+/// injected `cache_control` — the comment at that call site says injecting it
+/// for OpenRouter breaks the OpenAI-format body OpenRouter expects) predating
+/// and unrelated to #2410; this test does not change or depend on fixing it.
+/// What `usage:{include:true}` DOES prove: only `inference_client`'s shared
+/// `OpenAiCompatAdapter` ever injects that directive (`prepare_body`, driven
+/// by the OpenRouter capability registry) — the raw path (`build_raw_request`)
+/// and the legacy typed path (`CreateChatCompletionRequestArgs`) never set a
+/// `usage` key at all. So `usage`'s absence is direct, wire-level proof this
+/// request did NOT go through `dispatch_turn_shared` — the property that
+/// would break with zero signal if `caching_active` fell out of the
+/// `needs_raw` OR.
+/// What: spawn a mock, point `OPENROUTER_BASE_URL` at it, enable the shared
+/// flag, drive `chat_with_tools_gated` with `enable_prompt_caching = true`
+/// and `use_anthropic_direct = false` on a `claude-*` model, then assert the
+/// captured wire request has NO `usage` key.
+/// Test: this test.
+#[tokio::test]
+#[serial]
+async fn caching_active_keeps_raw_path_even_with_flag_enabled() {
+    let server = MockInferenceServer::spawn(200, canned_response())
+        .await
+        .expect("spawn mock");
+
+    // SAFETY: guarded by `#[serial]` against the sibling test in this file;
+    // this is the only other test in this binary that touches these vars.
+    unsafe {
+        std::env::set_var("OPENROUTER_BASE_URL", server.url());
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-mock"); // pragma: allowlist secret
+        std::env::set_var(SHARED_INFERENCE_ENV, "1");
+    }
+
+    let messages: Vec<ChatCompletionRequestMessage> = vec![
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content("You are a concise assistant.")
+            .build()
+            .unwrap()
+            .into(),
+        ChatCompletionRequestUserMessageArgs::default()
+            .content("Reply with exactly the word: pong")
+            .build()
+            .unwrap()
+            .into(),
+    ];
+
+    let legacy_client = Client::with_config(OpenAIConfig::new());
+    let model = "claude-sonnet-4-6"; // Anthropic-family -> caching_active eligible
+    let adapter = adapter_for_model(model);
+    let registry = Arc::new(ToolRegistry::new());
+
+    let (content, _usage) = chat_with_tools_gated(
+        &legacy_client,
+        model,
+        &*adapter,
+        messages,
+        registry,
+        None,  // allowed_tools
+        0.0,   // temperature
+        16,    // max_tokens
+        1,     // max_turns
+        true,  // enable_prompt_caching — the term under test
+        None,  // tool_choice
+        false, // use_finish_task
+        false, // use_anthropic_direct — keeps route_native_anthropic false
+        &[],   // stop_sequences
+    )
+    .await
+    .expect("chat_with_tools_gated via raw path");
+
+    assert_eq!(content, "pong-mock");
+
+    let captured = server.last_request().expect("one request captured");
+    assert_eq!(
+        captured.path, "/chat/completions",
+        "the raw path posts to the same OpenAI-compatible endpoint as the shared/legacy paths"
+    );
+    let body = captured.body.expect("json body");
+    assert!(
+        body.get("usage").is_none(),
+        "a caching-active turn must take the raw path, which never sets `usage` — \
+         its presence would mean the shared adapter (the only thing that injects \
+         `usage:{{include:true}}`) handled this call instead, i.e. `caching_active` \
+         stopped forcing `needs_raw`. Body: {body}"
     );
 
     unsafe {

@@ -171,32 +171,88 @@ fn system_content_text(content: &ChatCompletionRequestSystemMessageContent) -> S
 
 /// Concatenate a user-message content value to plain text, dropping any
 /// non-text parts (image/audio — see compromise #2 in the module doc).
+///
+/// Why: unreachable today (verified: no `ImageUrl`/`InputAudio` content-part
+/// call site exists in this crate as of #2410) but silent on a future
+/// vision-capable call site would degrade a prompt with zero signal. A
+/// `tracing::warn!` — not an error, since dropping is still the documented,
+/// intended behaviour for now — makes that degradation loud instead.
+/// What: keeps `Text` parts, drops `ImageUrl`/`InputAudio` parts after
+/// logging how many of each were dropped.
+/// Test: `multi_part_user_content_collapses_to_concatenated_text`.
 fn user_content_text(content: &ChatCompletionRequestUserMessageContent) -> String {
     match content {
         ChatCompletionRequestUserMessageContent::Text(s) => s.clone(),
-        ChatCompletionRequestUserMessageContent::Array(parts) => parts
-            .iter()
-            .filter_map(|p| match p {
-                ChatCompletionRequestUserMessageContentPart::Text(t) => Some(t.text.as_str()),
-                ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
-                | ChatCompletionRequestUserMessageContentPart::InputAudio(_) => None,
-            })
-            .collect::<String>(),
+        ChatCompletionRequestUserMessageContent::Array(parts) => {
+            let (mut images, mut audio) = (0u32, 0u32);
+            let text = parts
+                .iter()
+                .filter_map(|p| match p {
+                    ChatCompletionRequestUserMessageContentPart::Text(t) => Some(t.text.as_str()),
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => {
+                        images += 1;
+                        None
+                    }
+                    ChatCompletionRequestUserMessageContentPart::InputAudio(_) => {
+                        audio += 1;
+                        None
+                    }
+                })
+                .collect::<String>();
+            if images > 0 || audio > 0 {
+                tracing::warn!(
+                    images_dropped = images,
+                    audio_parts_dropped = audio,
+                    "inference_bridge: dropped non-text content part(s) — the shared \
+                     inference seam's ChatMessage.content is text-only (see \
+                     inference_bridge module doc, compromise #2)"
+                );
+            }
+            text
+        }
     }
 }
 
 /// Concatenate an assistant-message content value to plain text, dropping any
 /// refusal parts.
+///
+/// Why: same silent-degradation risk as [`user_content_text`] — a refusal
+/// part carries the model's stated refusal reason, which is currently
+/// discarded rather than surfaced as `content`.
+/// What: keeps `Text` parts, drops `Refusal` parts after logging how many
+/// were dropped.
+/// Test: exercised via `assistant_message_with_tool_calls_maps_fields`
+/// (single-string content path); the `Array`/refusal branch has no
+/// constructible call site in this crate today (same verification as
+/// compromise #2), so it is defended by this warn rather than a dedicated
+/// unit test.
 fn assistant_content_text(content: &ChatCompletionRequestAssistantMessageContent) -> String {
     match content {
         ChatCompletionRequestAssistantMessageContent::Text(s) => s.clone(),
-        ChatCompletionRequestAssistantMessageContent::Array(parts) => parts
-            .iter()
-            .filter_map(|p| match p {
-                ChatCompletionRequestAssistantMessageContentPart::Text(t) => Some(t.text.as_str()),
-                ChatCompletionRequestAssistantMessageContentPart::Refusal(_) => None,
-            })
-            .collect::<String>(),
+        ChatCompletionRequestAssistantMessageContent::Array(parts) => {
+            let mut refusals = 0u32;
+            let text = parts
+                .iter()
+                .filter_map(|p| match p {
+                    ChatCompletionRequestAssistantMessageContentPart::Text(t) => {
+                        Some(t.text.as_str())
+                    }
+                    ChatCompletionRequestAssistantMessageContentPart::Refusal(_) => {
+                        refusals += 1;
+                        None
+                    }
+                })
+                .collect::<String>();
+            if refusals > 0 {
+                tracing::warn!(
+                    refusal_parts_dropped = refusals,
+                    "inference_bridge: dropped assistant refusal content part(s) — the \
+                     shared inference seam's ChatMessage.content is text-only (see \
+                     inference_bridge module doc, compromise #2)"
+                );
+            }
+            text
+        }
     }
 }
 
