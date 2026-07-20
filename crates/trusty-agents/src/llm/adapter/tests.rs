@@ -8,6 +8,7 @@
 
 use super::*;
 use serde_json::json;
+use serial_test::serial;
 
 #[test]
 fn adapter_for_model_routes_anthropic() {
@@ -483,9 +484,15 @@ fn empty_oauth_token_with_api_key_uses_api_key() {
 // tempdir) and assert the resolved VALUE reaches the built `ApiEndpoint`, not
 // just that construction doesn't panic. Locks both `ENDPOINT_ENV_LOCK` (this
 // file's existing env-var lock) and `crate::test_env::{ENV_LOCK,HOME_LOCK}`
-// since these tests are the first in this file to also mutate `$HOME`.
+// since these tests are the first in this file to also mutate `$HOME`. Each
+// is also `#[serial]`: `llm::http::tests` and `llm::inference_client::tests`
+// mutate the same credential env vars from `#[tokio::test]`s that rely on
+// `#[serial]` alone (they cannot hold a `std::sync::Mutex` guard across
+// `.await`), so every sync test touching these vars must also carry
+// `#[serial]` to stay mutually exclusive with them.
 
 #[test]
+#[serial]
 fn openrouter_endpoint_resolves_key_from_store_when_env_absent() {
     let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
     let _env_guard = crate::test_env::ENV_LOCK
@@ -535,6 +542,7 @@ fn openrouter_endpoint_resolves_key_from_store_when_env_absent() {
 }
 
 #[test]
+#[serial]
 fn openrouter_endpoint_env_beats_store() {
     let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
     let _env_guard = crate::test_env::ENV_LOCK
@@ -583,6 +591,7 @@ fn openrouter_endpoint_env_beats_store() {
 }
 
 #[test]
+#[serial]
 fn anthropic_direct_endpoint_resolves_key_from_store_when_env_absent() {
     let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
     let _env_guard = crate::test_env::ENV_LOCK
@@ -633,6 +642,7 @@ fn anthropic_direct_endpoint_resolves_key_from_store_when_env_absent() {
 }
 
 #[test]
+#[serial]
 fn anthropic_direct_endpoint_env_beats_store() {
     let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
     let _env_guard = crate::test_env::ENV_LOCK
