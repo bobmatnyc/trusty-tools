@@ -376,7 +376,7 @@ async fn subscribe_workstream_events_emits_activation_changed_with_wire_field_na
             new_active_id,
             prior_id,
         } => {
-            assert_eq!(new_active_id, WS_2);
+            assert_eq!(new_active_id.as_deref(), Some(WS_2));
             assert_eq!(prior_id.as_deref(), Some(WS_1));
         }
         other => panic!("unexpected {other:?}"),
@@ -389,16 +389,17 @@ async fn subscribe_workstream_events_emits_activation_changed_with_wire_field_na
 /// `WorkstreamActivationChanged` event with `new_active_id: null` (this
 /// workstream deactivated with no replacement active — a state the daemon
 /// legitimately publishes, DOC-48 §4.2/§4.3) must NOT be silently dropped.
-/// Before the fix, `run_workstream_subscription` only matched
+/// Before the original fix, `run_workstream_subscription` only matched
 /// `new_active_id: Some(..)`, so the whole event fell through the `if let`
 /// unhandled: no `ReplEvent` was sent and `refresh_workstream_cache` never
 /// ran, leaving the TUI's status line and the `"workstream"` picker cache
 /// stale indefinitely. This asserts BOTH halves of the fix: the cache
 /// actually refreshes (a second `workstream.list` call beyond `setup()`'s
-/// own), and the engine surfaces a user-visible signal (a `StatusMessage`
-/// naming the deactivation — `trusty-tui`'s `ReplEvent::WorkstreamActivationChanged`
-/// declares `new_active_id` as a non-optional `String`, so it structurally
-/// cannot carry this state; see `workstream_subscription.rs`'s docs).
+/// own), and the engine surfaces a structured signal — now that
+/// `trusty-tui`'s `ReplEvent::WorkstreamActivationChanged` carries
+/// `new_active_id: Option<String>`, deactivation-with-no-replacement is
+/// `WorkstreamActivationChanged { new_active_id: None, prior_id: Some(..) }`
+/// rather than a free-text `StatusMessage` fallback.
 #[tokio::test]
 async fn subscribe_workstream_events_refreshes_cache_on_deactivation_with_no_replacement() {
     let server = MockServer::start().await;
@@ -441,22 +442,27 @@ async fn subscribe_workstream_events_refreshes_cache_on_deactivation_with_no_rep
     .await
     .expect("timed out waiting for refresh_workstream_cache to re-call workstream.list");
 
-    // Half 2 of the fix: the engine must not go silent — some ReplEvent
-    // must report the deactivation.
-    let saw_deactivation_status = tokio::time::timeout(Duration::from_secs(5), async {
+    // Half 2 of the fix: the engine must not go silent — a structured
+    // `WorkstreamActivationChanged { new_active_id: None, .. }` must report
+    // the deactivation.
+    let saw_deactivation_event = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match rx.recv().await {
-                Some(ReplEvent::StatusMessage(msg)) if msg.contains("deactivated") => return true,
+                Some(ReplEvent::WorkstreamActivationChanged {
+                    new_active_id: None,
+                    prior_id,
+                }) => return prior_id,
                 Some(_) => continue,
-                None => return false,
+                None => panic!("channel closed before observing the deactivation event"),
             }
         }
     })
     .await
-    .expect("timed out waiting for a deactivation status message");
-    assert!(
-        saw_deactivation_status,
-        "expected a StatusMessage naming the deactivation"
+    .expect("timed out waiting for the deactivation event");
+    assert_eq!(
+        saw_deactivation_event.as_deref(),
+        Some(WS_1),
+        "expected WorkstreamActivationChanged{{new_active_id: None, prior_id: Some(WS_1)}}"
     );
 
     engine.shutdown().await.expect("shutdown");
