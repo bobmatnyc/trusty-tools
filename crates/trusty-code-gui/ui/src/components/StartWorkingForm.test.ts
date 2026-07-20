@@ -1,30 +1,42 @@
 // Why: `StartWorkingForm.svelte` (renamed from `NewWorkstreamForm.svelte`,
 // issue #3384) is the primary GUI entry point — issue #3365/PR #3375's
 // explicit "create workstream" ceremony is gone; this file pins that it
-// STAYS gone (no "new workstream" header, no "create workstream" button
-// text anywhere) while the underlying create -> run -> activate machinery
-// is unchanged. Its pure logic is covered by `lib/new-workstream.test.ts`;
-// this file covers what only mounting the real component (plus its
+// STAYS gone (no "new workstream"/"create workstream" text anywhere) while
+// the underlying create -> run -> activate machinery is unchanged. Issue
+// #3446 turns it into a bottom-docked chat input bar ("send"/"sending…"
+// replace "go"/"starting…", no card header) and adds chat continuation
+// (after the first successful task, a subsequent submit resumes the SAME
+// session via `session_id` rather than minting a new workstream). Issue
+// #3447 fixes project-selection persistence (a picked project no longer
+// resets to projectless on a successful submit) — solved as ONE state model
+// with continuation (`lib/selected-project.svelte.ts`'s shared store; a
+// project CHANGE is what resets continuation, not a successful submit).
+// Its pure logic is covered by `lib/new-workstream.test.ts`; this file
+// covers what only mounting the real component (plus its
 // `ProjectPickerModal` child) can: the submit button's disabled/enabled
-// states, the no-double-submit guard, the picker-modal wiring (open -> pick
-// a roster row / go projectless -> "selected:" line updates), the create ->
+// states, the no-double-submit guard, the picker-modal wiring, the create ->
 // run -> activate submit sequence (code-critic PR #3375 review, HIGH —
-// activation now fires ONLY after a successful task-run, never before, and
-// a task-run failure after a successful create reuses the same workstream
-// id on retry rather than minting another), and the carried-over
-// Enter/Shift+Enter keyboard behavior (issue #3132).
+// activation fires ONLY after a successful task-run, and a task-run failure
+// after a successful create reuses the same workstream id on retry), the
+// carried-over Enter/Shift+Enter keyboard behavior (issue #3132), project-
+// selection PERSISTENCE across a successful submit (issue #3447 bug 1), and
+// chat continuation's session-reuse-first/mint-fallback sequence plus its
+// reset-on-project-change rule (issue #3446).
 // What: Mounts the real component with `fetch` stubbed to answer
 // `GET /projects`, `POST /workstreams`, `POST /workstreams/{id}/activate`,
 // and `POST /tasks` by URL/method — mirrors this file's own predecessors'
 // stub-fetch-by-URL-suffix mounting pattern. `fullSuccessFetch`'s optional
 // `callLog` records `{method, url}` per call, in order, so tests can assert
 // the CALL SEQUENCE itself (e.g. "no `/activate` call before `/tasks`
-// resolves"), not just which routes were eventually hit.
+// resolves"), not just which routes were eventually hit. Resets the shared
+// `selectedProjectState` store between tests (module-level state persists
+// across tests in the same file otherwise).
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
 import StartWorkingForm from './StartWorkingForm.svelte';
 import { clearPendingWorkstream, pendingWorkstream } from '../lib/pending-workstream.svelte';
+import { selectProject } from '../lib/selected-project.svelte';
 
 let target: HTMLDivElement;
 let instance: Record<string, unknown> | null = null;
@@ -40,7 +52,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 
 function submitButton(): HTMLButtonElement {
   const button = Array.from(target.querySelectorAll('button')).find(
-    (b) => b.textContent === 'go' || b.textContent === 'starting…',
+    (b) => b.textContent === 'send' || b.textContent === 'sending…',
   );
   if (!button) throw new Error('submit button not found');
   return button as HTMLButtonElement;
@@ -93,9 +105,11 @@ beforeEach(() => {
   target = document.createElement('div');
   document.body.appendChild(target);
   // The pending-workstream fallback marker (code-critic PR #3392 review,
-  // MEDIUM) is a MODULE-level store shared across every test in this file
-  // — reset it so one test's mint never leaks into the next.
+  // MEDIUM) and the shared project selection (issue #3447) are both
+  // MODULE-level stores shared across every test in this file — reset both
+  // so one test's mint/selection never leaks into the next.
   clearPendingWorkstream();
+  selectProject(null);
 });
 
 afterEach(() => {
@@ -104,6 +118,7 @@ afterEach(() => {
     instance = null;
   }
   target.remove();
+  selectProject(null);
   vi.unstubAllGlobals();
 });
 
@@ -132,12 +147,11 @@ describe('StartWorkingForm submit gating', () => {
     expect(target.textContent).toContain('projectless');
   });
 
-  it('issue #3384: no explicit creation ceremony — header reads "start working", submit reads "go", no "new workstream"/"create workstream" text anywhere', () => {
+  it('issue #3384/#3446: no explicit creation ceremony and no card header — a bare docked input bar, submit reads "send", no "new workstream"/"create workstream"/"start working" heading text anywhere', () => {
     instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
 
-    const heading = target.querySelector('h2');
-    expect(heading?.textContent?.trim()).toBe('start working');
-    expect(submitButton().textContent).toBe('go');
+    expect(target.querySelector('h2')).toBeNull();
+    expect(submitButton().textContent).toBe('send');
     expect(target.textContent).not.toContain('new workstream');
     expect(target.textContent).not.toContain('create workstream');
   });
@@ -294,7 +308,7 @@ describe('StartWorkingForm submit sequence', () => {
     await waitFor(() => !submitButton().disabled);
 
     submitButton().click();
-    await waitFor(() => submitButton().disabled && submitButton().textContent === 'starting…');
+    await waitFor(() => submitButton().disabled && submitButton().textContent === 'sending…');
 
     // A second click while in flight must be a no-op.
     submitButton().click();
@@ -557,6 +571,233 @@ describe('StartWorkingForm submit sequence', () => {
     await waitFor(() => target.textContent?.includes('started') ?? false);
 
     expect(capturedDuringTaskRun).toEqual({ id: 'ws-abc123', name: expect.any(String) });
+  });
+});
+
+describe('StartWorkingForm project-selection persistence + chat continuation (issues #3447 bug 1 + #3446 — one state model)', () => {
+  it('issue #3447 bug 1: a picked project stays selected after a successful submit — no longer resets to projectless', async () => {
+    vi.stubGlobal('fetch', fullSuccessFetch());
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    openPickerButton().click();
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+    (Array.from(target.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'acme-api',
+    ) as HTMLButtonElement).click();
+    await waitFor(() => target.textContent?.includes('git repo — acme-api') ?? false);
+
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    expect(target.textContent).toContain('git repo — acme-api');
+    expect(target.textContent).not.toContain('projectless');
+  });
+
+  it('issue #3446: after the first task, a second submit continues the SAME session via session_id — no second POST /workstreams, no second /activate', async () => {
+    const callLog: string[] = [];
+    const taskBodies: unknown[] = [];
+    let taskCallCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        callLog.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          taskCallCount += 1;
+          taskBodies.push(JSON.parse(init!.body as string));
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'first message';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    taskField().value = 'second message';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => taskCallCount === 2);
+
+    expect(callLog.filter((c) => c === 'POST /workstreams')).toHaveLength(1);
+    expect(callLog.filter((c) => c.includes('/activate'))).toHaveLength(1);
+    expect(taskBodies[1]).toEqual({
+      task_description: 'second message',
+      session_id: 'sess-abc12345',
+    });
+  });
+
+  it('issue #3446: when the session-reuse call fails (terminal session), the fallback mints a fresh session under the SAME workstream — still no second POST /workstreams', async () => {
+    const callLog: string[] = [];
+    let nonReuseCallCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        callLog.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          const body = JSON.parse(init!.body as string) as { session_id?: string };
+          if (body.session_id) {
+            // The reuse attempt — the session is already terminal.
+            return {
+              ok: false,
+              status: 409,
+              json: async () => ({ error: { message: 'session already terminal' } }),
+            } as Response;
+          }
+          nonReuseCallCount += 1;
+          const sessionId = nonReuseCallCount === 1 ? 'sess-abc12345' : 'sess-def67890';
+          return { ok: true, status: 202, json: async () => ({ session_id: sessionId }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'first message';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    taskField().value = 'second message';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => callLog.filter((c) => c === 'POST /tasks').length === 3);
+
+    // Call order: mint's /tasks, then the second submit's reuse attempt
+    // (fails), then its fallback mint (succeeds) — never a second
+    // POST /workstreams.
+    expect(callLog.filter((c) => c === 'POST /workstreams')).toHaveLength(1);
+    expect(nonReuseCallCount).toBe(2);
+  });
+
+  it('issue #3447 regression: pick a project, submit, submit again — both tasks carry the same project + workstream/session, and the selection stays shown', async () => {
+    const taskBodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url.includes('/projects')) {
+          return { ok: true, status: 200, json: async () => ROSTER } as Response;
+        }
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          taskBodies.push(JSON.parse(init!.body as string));
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    openPickerButton().click();
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+    (Array.from(target.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'acme-api',
+    ) as HTMLButtonElement).click();
+    await waitFor(() => target.textContent?.includes('git repo — acme-api') ?? false);
+
+    taskField().value = 'first task';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    taskField().value = 'second task';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => taskBodies.length === 2);
+
+    expect(target.textContent).toContain('git repo — acme-api');
+    expect(taskBodies[0]).toEqual({
+      task_description: 'first task',
+      project: '/home/bob/acme-api',
+      workstream_id: 'ws-abc123',
+    });
+    expect(taskBodies[1]).toEqual({
+      task_description: 'second task',
+      project: '/home/bob/acme-api',
+      session_id: 'sess-abc12345',
+    });
+  });
+
+  it('issue #3446 + #3447: picking a DIFFERENT project after a successful submit resets continuation — the next submit mints a fresh workstream, not a second POST /workstreams-free continuation', async () => {
+    let wsCallCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url.includes('/projects')) {
+          return { ok: true, status: 200, json: async () => ROSTER } as Response;
+        }
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          wsCallCount += 1;
+          return { ok: true, status: 201, json: async () => ({ id: `ws-${wsCallCount}` }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          return { ok: true, status: 202, json: async () => ({ session_id: `sess-${wsCallCount}` }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'first message (projectless)';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+    expect(wsCallCount).toBe(1);
+
+    // Pick a project — the shared selection changes, which must reset
+    // continuation (a session's project binding is immutable once set).
+    openPickerButton().click();
+    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
+    (Array.from(target.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'acme-api',
+    ) as HTMLButtonElement).click();
+    await waitFor(() => target.textContent?.includes('git repo — acme-api') ?? false);
+
+    taskField().value = 'second message (now with a project)';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => wsCallCount === 2);
   });
 });
 

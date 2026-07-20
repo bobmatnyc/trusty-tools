@@ -1,80 +1,76 @@
 <script lang="ts">
-  // Why: issue #3384 — Bob, after test-driving PR #3375's workstream-first
-  // flow: "We shouldn't need to 'create' a workstream, it should be
-  // inferred. Just pick a project and start working." This REMOVES the
-  // explicit NEW WORKSTREAM creation step `NewWorkstreamForm.svelte` (issue
-  // #3365, PR #3375) shipped — no more "new workstream" section header, no
-  // "create workstream" button/ceremony. The flow collapses to exactly what
-  // Bob describes: pick a project (`ProjectPickerModal`, optional — skip for
-  // projectless) -> type the task -> go.
+  // Why: issue #3446 — Bob, after test-driving the implicit-workstream flow:
+  // "'Start Working' should be at the bottom of the pane, and the workstream
+  // activity above it. Refactor the main chat pane similar to a TUI. Chat at
+  // the bottom, enter as a button to the right (or enter), and the stream
+  // builds up." This component is now a PERSISTENT BOTTOM-DOCKED INPUT BAR
+  // (`WorkstreamTab.svelte` stacks it below `WorkstreamActivity`, which fills
+  // the rest of the pane and scrolls as the chat stream — see that
+  // component's own docs) rather than a titled card — no more "start
+  // working" section header; the textarea + send button ARE the whole
+  // surface now, chat-composer-style.
   //
-  // **The underlying machinery is UNCHANGED — only the user-facing framing
-  // is gone.** `submit()` below is byte-for-byte the same create -> run ->
-  // activate orchestration PR #3375 shipped (workstream still mints
-  // implicitly on first submit via `POST /workstreams`, named from the
-  // interim `inferWorkstreamName` default — DOC-48 §9 Q1's prompt-derived
-  // naming remains the open upgrade path, and matters MORE now that the
-  // operator never types a name at all; still runs the first task via
-  // `POST /tasks{workstream_id}` BEFORE activating via `POST
-  // /workstreams/{id}/activate{force:true}`, deliberately LAST — see
-  // `submit()`'s own doc, carried over verbatim from the code-critic PR
-  // #3375 HIGH fix; still reuses `pendingWorkstreamId` on a
-  // create-succeeded-but-run-failed retry rather than minting another). None
-  // of that changed — component renamed `NewWorkstreamForm.svelte` ->
-  // `StartWorkingForm.svelte` to match the new framing, `lib/new-workstream.ts`
-  // (the pure logic module) keeps its name since the WORKSTREAM MACHINERY it
-  // describes is exactly what is unchanged.
+  // **All prior semantics are preserved — layout/interaction shell only.**
+  // Project picker access (`ProjectPickerModal`), implicit workstream mint
+  // (create -> run -> activate, deliberately in that order — code-critic PR
+  // #3375 HIGH fix), `pendingWorkstreamId` retry-reuse on a create-succeeded-
+  // but-run-failed attempt, and the projectless path are all byte-for-byte
+  // the same mechanics issues #3365/#3384/#3392 shipped.
   //
-  // **Renaming/closing/switching an EXISTING workstream is untouched** —
-  // that stays in `WorkstreamSwitcher.svelte` (issue #3300/PR #3356) for
-  // power users; this component only ever mints (or reuses a pending) NEW
-  // one, never manages an existing one.
+  // **Chat continuation is the one behavioral addition (issue #3446 Scope
+  // 3).** Investigated what the daemon actually supports for a "follow-up
+  // turn" vs. a brand-new task before picking an implementation:
+  // `SessionRegistry::begin_execution` (`crates/trusty-code/src/session/
+  // registry.rs`) allows a `Finished` session to be RESUMED back to
+  // `Running` by a second `task.run{session_id}` call — a genuine follow-up
+  // TURN appended to the SAME session's transcript, not a new session. Only
+  // `Cancelled`/`Failed`/`DeadlineExceeded` sessions are permanently
+  // terminal (`begin_execution` rejects them outright), and a session with
+  // an execution already in flight rejects a second overlapping call. This
+  // is the HONEST implementation: `lastSessionId` (set once a task-run
+  // succeeds, mint or continuation) is tried FIRST via `session_id` on every
+  // subsequent submit — genuinely resuming the same session/transcript when
+  // the daemon allows it. Only when that reuse attempt fails (terminal
+  // session, or one still running) does the form fall back to minting a
+  // FRESH session under the SAME already-active workstream
+  // (`continuationWorkstreamId`, explicit `workstream_id`, no `session_id`)
+  // — still zero additional `POST /workstreams` calls either way, so "stay
+  // in the same workstream" holds regardless of which of the two paths a
+  // given follow-up takes.
   //
-  // **Activation retries once, and falls back to a shared pending-workstream
-  // marker on failure (code-critic PR #3392 review, MEDIUM).** A failed
-  // activation after a successful task-run used to leave
-  // `WorkstreamActivity.svelte` showing "no active workstream — pick a
-  // project to start" WHILE the operator's just-accepted task was actually
-  // running — a narrow repeat of the exact complaint issue #3384 was filed
-  // over, just triggered by a different cause. Two changes close this:
-  // `activateWithRetry` below retries the activation call ONCE before
-  // giving up (closing the common transient-failure case silently), and
-  // `lib/pending-workstream.svelte.ts` (a small cross-module Svelte 5 rune
-  // store) records the minted workstream's id/name so
-  // `WorkstreamActivity.svelte` can fall back to showing IT when the
-  // daemon's real active-workstream pointer is absent — never invented
-  // data, always an id this form itself just confirmed the daemon created.
+  // **Project-selection persistence + chat continuation are ONE state
+  // model (issue #3447 bug 1, solved together per the coordinator's own
+  // framing).** Root cause of "project selection doesn't stick": the PRIOR
+  // `submit()` unconditionally reset `selectedProject = null` at the end of
+  // every successful call — so the very next glance at the form (never mind
+  // the next submit) already read back "projectless." Fixed by (a) moving
+  // the selection into `lib/selected-project.svelte.ts`, a shared
+  // cross-module store `WorkstreamRail`'s new Projects section (issue #3447
+  // bug 2) ALSO reads/writes, and (b) simply never resetting it on success
+  // anymore — a picked project is the active binding until the operator
+  // explicitly changes it (a different pick, or "clear"). Changing the
+  // selection is exactly the signal that also resets chat continuation: a
+  // session's project binding is immutable once set
+  // (`task::protocol::task_run`'s docs), so switching projects mid-
+  // conversation can only honestly mean "start a new workstream on the next
+  // submit" — the `$effect` below watches the shared selection's `path` and
+  // clears `lastSessionId`/`continuationWorkstreamId` (and the mint-retry
+  // state) whenever it changes.
   //
-  // **Projectless <-> unbound-session mapping (design call, carried over
-  // from issue #3365).** The modal's "start chatting without a project"
-  // option maps to a workstream whose first (and so far only) session has NO
-  // `project` binding — DOC-39 §4.2's existing projectless state, unchanged
-  // at the session layer. The UI never uses the word "session" or "unbound"
-  // here — it stays workstream-neutral throughout.
-  //
-  // What: Markup drops the "new workstream" section header (this card now
-  // reads "start working", echoing Bob's own phrase) and renames the submit
-  // button/phase text from "create workstream"/"creating…" to "go"/
-  // "starting…". The success message drops "workstream created" ceremony
-  // language (and the session-id fragment it used to show) in favor of a
-  // plain "started" — issue #3384 Scope B pushes session vocabulary out of
-  // user-facing text project-wide, and a raw internal id was never
-  // meaningful to the operator anyway; `WorkstreamActivity.svelte` (renamed
-  // from `SessionMonitor.svelte`, same issue) is where live status now
-  // lives. Two independent `$effect`s carried over unchanged in shape:
-  // the submit-controller unmount-only teardown. There is still no network
-  // call at mount — project selection happens inside `ProjectPickerModal`
-  // (fetched only while that modal is open). Submit is gated by
-  // `canSubmitCreate` (unchanged); `handleTaskKeydown`
-  // (Enter-goes/Shift+Enter-newlines) is carried over unchanged from issue
-  // #3132's fix.
-  // Test: `StartWorkingForm.test.ts` covers the form's disabled/enabled
-  // submit states, the no-double-submit guard, Enter-vs-Shift+Enter
-  // keyboard behavior, the picker-modal wiring (open/select/clear), the
-  // create -> run -> activate call ORDER (activation never fires before a
-  // successful task-run), the workstream-id-reuse-on-retry path (no second
-  // `POST /workstreams` after a task-run failure), and partial-failure
-  // paths. `lib/new-workstream.test.ts` covers the pure
+  // What: Markup keeps the same project-selection row (now reading the
+  // shared store) and the same textarea, restyled as a docked bar: the send
+  // button sits to the textarea's right (issue #3446's literal ask) rather
+  // than below it, and the "new workstream"/"start working" card header is
+  // gone. `handleTaskKeydown` (Enter-sends/Shift+Enter-newlines) is carried
+  // over unchanged from issue #3132's fix.
+  // Test: `StartWorkingForm.test.ts` covers the docked-bar layout (no
+  // heading, send button to the textarea's right), Enter-vs-Shift+Enter,
+  // the no-double-submit guard, the picker-modal wiring, the create -> run
+  // -> activate call ORDER, the workstream-id-reuse-on-retry path, project-
+  // selection PERSISTENCE across a successful submit (issue #3447 bug 1),
+  // and the second-submit chat-continuation call sequence (issue #3446 — no
+  // second `POST /workstreams`, `session_id` reuse tried first, project
+  // carried forward). `lib/new-workstream.test.ts` covers the pure
   // gating/body-construction/name-inference logic.
   import { apiBase } from '../lib/api-config';
   import {
@@ -82,19 +78,19 @@
     buildCreateWorkstreamBody,
     buildRunTaskBody,
     canSubmitCreate,
+    extractTaskSessionId,
     extractWorkstreamId,
     inferWorkstreamName,
-    type ProjectSelection,
     type SubmitPhase,
   } from '../lib/new-workstream';
   import { clearPendingWorkstream, setPendingWorkstream } from '../lib/pending-workstream.svelte';
+  import { selectedProjectState, selectProject } from '../lib/selected-project.svelte';
   import ProjectPickerModal from './ProjectPickerModal.svelte';
 
   /** Delay between the two `activateWithRetry` attempts — see that
    * function's own doc for why a single retry, not unbounded. */
   const ACTIVATE_RETRY_DELAY_MS = 250;
 
-  let selectedProject = $state<ProjectSelection | null>(null);
   let pickerOpen = $state(false);
   let task = $state('');
 
@@ -102,13 +98,21 @@
   let submitError = $state<string | null>(null);
   let successMessage = $state<string | null>(null);
 
-  // Set once `POST /workstreams` succeeds; cleared only once the WHOLE
-  // sequence (through a successful task-run) completes. A `POST /tasks`
-  // failure after a successful create leaves these set so the next
-  // `submit()` call reuses the same workstream instead of minting another
-  // (code-critic PR #3375 review, HIGH — see the module doc's note).
+  // Mint-retry state (issues #3365/#3392) — set once `POST /workstreams`
+  // succeeds; cleared only once the WHOLE first-message sequence (through a
+  // successful task-run) completes. A `POST /tasks` failure after a
+  // successful create leaves these set so the next `submit()` call reuses
+  // the same workstream instead of minting another.
   let pendingWorkstreamId = $state<string | null>(null);
   let pendingWorkstreamName = $state<string | null>(null);
+
+  // Chat-continuation state (issue #3446) — set once the FIRST task-run in
+  // this conversation succeeds (mint path) and updated on every subsequent
+  // successful submit (continuation path); NEVER cleared on success — only
+  // when the selected project changes (see the `$effect` below), since
+  // that is the one event that honestly invalidates "the same conversation."
+  let lastSessionId = $state<string | null>(null);
+  let continuationWorkstreamId = $state<string | null>(null);
 
   let submitController: AbortController | null = null;
 
@@ -120,21 +124,55 @@
     pickerOpen = false;
   }
 
-  function onProjectSelected(project: ProjectSelection | null) {
-    selectedProject = project;
+  function onProjectSelected(project: Parameters<typeof selectProject>[0]) {
+    selectProject(project);
     pickerOpen = false;
   }
 
   function clearSelection() {
-    selectedProject = null;
+    selectProject(null);
   }
+
+  /**
+   * Reset chat-continuation state whenever the SHARED selected-project
+   * store changes (issue #3446 + #3447 bug 1, one state model).
+   *
+   * Why: a session's project binding is immutable once set
+   * (`task::protocol::task_run`'s docs — a per-call `project` may only
+   * RESTATE a reused session's own binding, never change it), so if the
+   * operator picks a different project (via this form's own modal OR
+   * `WorkstreamRail`'s new Projects section — both write to the same
+   * shared store) or clears the selection mid-conversation, continuing the
+   * OLD session/workstream would either silently fail the immutability
+   * check or, worse, keep running against a project the operator just
+   * moved away from. The only honest behavior is: a project change starts
+   * fresh on the next submit.
+   * What: tracks the previous selection's `path` (or `null`) across runs;
+   * on a genuine change (not the initial mount run), clears BOTH the chat-
+   * continuation state and the mint-retry state (a stale retry-reuse mint
+   * for the OLD project would be equally wrong) and the shared
+   * `pendingWorkstream` fallback marker (also now stale).
+   * Test: `StartWorkingForm.test.ts`.
+   */
+  let previousProjectPath: string | null | undefined = undefined;
+  $effect(() => {
+    const currentPath = selectedProjectState.project?.path ?? null;
+    if (previousProjectPath !== undefined && previousProjectPath !== currentPath) {
+      lastSessionId = null;
+      continuationWorkstreamId = null;
+      pendingWorkstreamId = null;
+      pendingWorkstreamName = null;
+      clearPendingWorkstream();
+    }
+    previousProjectPath = currentPath;
+  });
 
   /**
    * Task-field `keydown` handler — issue #3132, carried over unchanged from
    * `CreateSessionForm.svelte`/`NewWorkstreamForm.svelte`.
    *
-   * Why/What: plain `Enter` submits (goes), `Shift+Enter` inserts a newline
-   * (the textarea's own default behavior).
+   * Why/What: plain `Enter` sends, `Shift+Enter` inserts a newline (the
+   * textarea's own default behavior).
    * Test: `StartWorkingForm.test.ts`.
    */
   function handleTaskKeydown(e: KeyboardEvent) {
@@ -147,9 +185,9 @@
    * Parse a REST error envelope's `error.message`, falling back to a bare
    * HTTP status when the body is missing/malformed.
    *
-   * Why: two separate fetch calls in [`submit`] need the exact same
-   * "extract a caller-actionable message from a non-OK response" step —
-   * factored out once rather than repeated twice.
+   * Why: every fetch call in [`submit`] needs the exact same "extract a
+   * caller-actionable message from a non-OK response" step — factored out
+   * once rather than repeated at each call site.
    */
   async function errorMessage(res: Response): Promise<string> {
     const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
@@ -204,11 +242,77 @@
   }
 
   /**
+   * The chat-continuation submit path (issue #3446): try to resume
+   * `lastSessionId` as a follow-up turn; on failure (the session is
+   * terminal, or still has a task running), mint a fresh session under the
+   * SAME already-active workstream instead — never a second `POST
+   * /workstreams`.
+   *
+   * Why: see the module doc's "Chat continuation" section for the full
+   * investigation of what the daemon supports. This function is the
+   * client-side expression of it: attempt the cheap, genuinely-continuous
+   * path first (same session, new turn, same transcript — the daemon's
+   * `SessionRegistry::begin_execution` resume mechanism), and only fall
+   * back to minting when the daemon tells us reuse isn't possible right
+   * now.
+   * What: returns `true` on success (either sub-path) after updating
+   * `lastSessionId` to whatever session id the SUCCESSFUL call actually
+   * ran against, `false` on failure (with `submitError` already set).
+   * Test: `StartWorkingForm.test.ts`.
+   */
+  async function submitContinuation(base: string, signal: AbortSignal): Promise<boolean> {
+    const reuseBody = buildRunTaskBody(task, selectedProjectState.project, null, lastSessionId);
+    const reuseRes = await fetch(`${base}/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reuseBody),
+      signal,
+    });
+    if (signal.aborted) return false;
+
+    if (reuseRes.status === 202) {
+      const created: unknown = await reuseRes.json().catch(() => null);
+      if (signal.aborted) return false;
+      lastSessionId = extractTaskSessionId(created) ?? lastSessionId;
+      return true;
+    }
+
+    // Reuse failed — the session is terminal or still running. Fall back to
+    // a FRESH session under the same workstream (still no new
+    // `POST /workstreams`), since `continuationWorkstreamId` is only ever
+    // set alongside `lastSessionId`.
+    if (!continuationWorkstreamId) {
+      submitError = await errorMessage(reuseRes);
+      return false;
+    }
+
+    const fallbackBody = buildRunTaskBody(task, selectedProjectState.project, continuationWorkstreamId, null);
+    const fallbackRes = await fetch(`${base}/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fallbackBody),
+      signal,
+    });
+    if (signal.aborted) return false;
+
+    if (fallbackRes.status !== 202) {
+      submitError = await errorMessage(fallbackRes);
+      return false;
+    }
+    const created: unknown = await fallbackRes.json().catch(() => null);
+    if (signal.aborted) return false;
+    const newId = extractTaskSessionId(created);
+    if (newId) lastSessionId = newId;
+    return true;
+  }
+
+  /**
    * The create sequence: mint (or reuse) a workstream, run the first task
    * bound to it, and only THEN activate it. Byte-for-byte the same
    * orchestration `NewWorkstreamForm.svelte` (issue #3365/PR #3375) shipped
-   * — issue #3384 changes only the surrounding UI framing, not this
-   * function's logic.
+   * — issue #3384 changed only the surrounding UI framing, issue #3446
+   * changes only what happens on submits AFTER this one succeeds (see
+   * [`submitContinuation`]).
    *
    * Why: DOC-48 has no single "create + run + activate" verb (§5.1's
    * surface is three independent REST routes), so this is client-side
@@ -236,6 +340,81 @@
    * knows it already exists.
    * Test: `StartWorkingForm.test.ts`.
    */
+  async function submitFirstMessage(base: string, signal: AbortSignal): Promise<boolean> {
+    let workstreamId = pendingWorkstreamId;
+    let workstreamName = pendingWorkstreamName;
+    if (!workstreamId) {
+      workstreamName = inferWorkstreamName(selectedProjectState.project);
+      const wsRes = await fetch(`${base}/workstreams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildCreateWorkstreamBody(workstreamName)),
+        signal,
+      });
+      if (signal.aborted) return false;
+      if (wsRes.status !== 201) {
+        submitError = await errorMessage(wsRes);
+        return false;
+      }
+      const wsCreated: unknown = await wsRes.json().catch(() => null);
+      if (signal.aborted) return false;
+      const newId = extractWorkstreamId(wsCreated);
+      if (!newId) {
+        submitError = 'workstream created but the daemon did not return an id';
+        return false;
+      }
+      workstreamId = newId;
+      pendingWorkstreamId = newId;
+      pendingWorkstreamName = workstreamName;
+    }
+    // Record the fallback marker (code-critic PR #3392 review, MEDIUM)
+    // whether this attempt just minted the workstream or is reusing one
+    // from a prior create-succeeded-but-run-failed attempt — either way
+    // `WorkstreamActivity.svelte` needs it available BEFORE the task-run
+    // below, in case activation ultimately fails again.
+    setPendingWorkstream(workstreamId, workstreamName ?? inferWorkstreamName(selectedProjectState.project));
+
+    const body = buildRunTaskBody(task, selectedProjectState.project, workstreamId);
+    const res = await fetch(`${base}/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (signal.aborted) return false;
+
+    if (res.status !== 202) {
+      // `pendingWorkstreamId`/`pendingWorkstreamName` deliberately stay
+      // set here — the workstream exists; a retry must reuse it, not
+      // mint another (code-critic PR #3375 review, HIGH).
+      const daemonMessage = await errorMessage(res);
+      submitError = `${daemonMessage} — workstream "${workstreamName}" was created but not activated; it will be reused if you retry.`;
+      return false;
+    }
+
+    // Task run succeeded — chat continuation now targets this workstream/
+    // session for every future submit (issue #3446).
+    const created: unknown = await res.json().catch(() => null);
+    if (signal.aborted) return false;
+    continuationWorkstreamId = workstreamId;
+    lastSessionId = extractTaskSessionId(created);
+
+    // NOW activate, with one retry (best-effort, deliberately last; see the
+    // doc above for why this is not the second step).
+    const activationWarning = await activateWithRetry(base, workstreamId, signal);
+    if (signal.aborted) return false;
+    // Activation succeeded (either attempt) — the daemon's real active
+    // pointer will reflect this workstream on the next poll, so the
+    // fallback marker is no longer needed. Left SET on failure — that is
+    // exactly the case `pending-workstream.svelte.ts` exists to cover.
+    if (!activationWarning) clearPendingWorkstream();
+
+    successMessage = activationWarning ? `started (${activationWarning})` : 'started';
+    pendingWorkstreamId = null;
+    pendingWorkstreamName = null;
+    return true;
+  }
+
   async function submit() {
     if (!canSubmitCreate(task, submitPhase)) return;
     submitPhase = 'submitting';
@@ -248,78 +427,19 @@
       const base = await apiBase();
       if (controller.signal.aborted) return;
 
-      let workstreamId = pendingWorkstreamId;
-      let workstreamName = pendingWorkstreamName;
-      if (!workstreamId) {
-        workstreamName = inferWorkstreamName(selectedProject);
-        const wsRes = await fetch(`${base}/workstreams`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildCreateWorkstreamBody(workstreamName)),
-          signal: controller.signal,
-        });
-        if (controller.signal.aborted) return;
-        if (wsRes.status !== 201) {
-          submitError = await errorMessage(wsRes);
-          return;
-        }
-        const wsCreated: unknown = await wsRes.json().catch(() => null);
-        if (controller.signal.aborted) return;
-        const newId = extractWorkstreamId(wsCreated);
-        if (!newId) {
-          submitError = 'workstream created but the daemon did not return an id';
-          return;
-        }
-        workstreamId = newId;
-        pendingWorkstreamId = newId;
-        pendingWorkstreamName = workstreamName;
-      }
-      // Record the fallback marker (code-critic PR #3392 review, MEDIUM)
-      // whether this attempt just minted the workstream or is reusing one
-      // from a prior create-succeeded-but-run-failed attempt — either way
-      // `WorkstreamActivity.svelte` needs it available BEFORE the task-run
-      // below, in case activation ultimately fails again.
-      setPendingWorkstream(workstreamId, workstreamName ?? inferWorkstreamName(selectedProject));
-
-      const body = buildRunTaskBody(task, selectedProject, workstreamId);
-      const res = await fetch(`${base}/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      const ok = lastSessionId
+        ? await submitContinuation(base, controller.signal)
+        : await submitFirstMessage(base, controller.signal);
       if (controller.signal.aborted) return;
-
-      if (res.status !== 202) {
-        // `pendingWorkstreamId`/`pendingWorkstreamName` deliberately stay
-        // set here — the workstream exists; a retry must reuse it, not
-        // mint another (code-critic PR #3375 review, HIGH).
-        const daemonMessage = await errorMessage(res);
-        submitError = `${daemonMessage} — workstream "${workstreamName}" was created but not activated; it will be reused if you retry.`;
-        return;
-      }
-
-      // Task run succeeded — NOW activate, with one retry (best-effort,
-      // deliberately last; see the doc above for why this is not the second
-      // step, and `activateWithRetry`'s own doc for the retry-once fix).
-      const activationWarning = await activateWithRetry(base, workstreamId, controller.signal);
-      if (controller.signal.aborted) return;
-      // Activation succeeded (either attempt) — the daemon's real active
-      // pointer will reflect this workstream on the next poll, so the
-      // fallback marker is no longer needed. Left SET on failure — that is
-      // exactly the case `pending-workstream.svelte.ts` exists to cover.
-      if (!activationWarning) clearPendingWorkstream();
+      if (!ok) return;
 
       // The response body (`{session_id, status, mode, binding}`) carries no
-      // information this form still displays — issue #3384 drops the
-      // "workstream created — session <id>" ceremony message in favor of a
-      // plain "started"; `WorkstreamActivity.svelte` is where live status
-      // now lives. The body is intentionally left unconsumed.
-      successMessage = activationWarning ? `started (${activationWarning})` : 'started';
+      // information this form still displays beyond what was already
+      // extracted above — issue #3384 drops the "workstream created —
+      // session <id>" ceremony message in favor of a plain "started";
+      // `WorkstreamActivity.svelte` is where live status now lives.
+      if (!successMessage) successMessage = 'started';
       task = '';
-      selectedProject = null;
-      pendingWorkstreamId = null;
-      pendingWorkstreamName = null;
     } catch (e) {
       if (!controller.signal.aborted) {
         submitError = e instanceof Error ? e.message : String(e);
@@ -339,83 +459,60 @@
   });
 </script>
 
-<section class="mt-4 rounded border-1.5 border-trusty-border bg-trusty-card">
-  <div class="border-b border-trusty-border bg-trusty-raised px-4 py-2.5">
-    <h2 class="font-display text-xs font-bold uppercase tracking-wide text-trusty-text">
-      start working
-    </h2>
-  </div>
-
-  <div class="p-4">
-    <div>
-      <p class="font-mono text-[10px] font-semibold uppercase tracking-wide text-trusty-text-muted">
-        project
-      </p>
-      <p class="mt-1 text-xs text-trusty-text-secondary">
-        selected: <span class="font-mono">{bindingLabel(selectedProject)}</span>
-      </p>
-      <div class="mt-1.5 flex items-center gap-2">
-        <button
-          type="button"
-          onclick={openPicker}
-          class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
-        >
-          choose project
-        </button>
-        {#if selectedProject}
-          <button
-            type="button"
-            class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted underline hover:text-trusty-primary"
-            onclick={clearSelection}
-          >
-            clear
-          </button>
-        {/if}
-      </div>
-    </div>
-
-    <div class="mt-3">
-      <label
-        class="font-mono text-[10px] font-semibold uppercase tracking-wide text-trusty-text-muted"
-        for="start-working-task"
-      >
-        task
-      </label>
-      <textarea
-        id="start-working-task"
-        bind:value={task}
-        onkeydown={handleTaskKeydown}
-        rows="3"
-        placeholder="Describe what you want to work on… (Enter to go, Shift+Enter for a new line)"
-        class="mt-1 w-full rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card p-2 text-xs text-trusty-text"
-      ></textarea>
-    </div>
-
-    <p
-      class="mt-2 text-[11px] text-trusty-text-muted"
-      title="session.get_agents (GET /sessions/{'{'}id{'}'}/agents) requires an existing session — there is no pre-task AGENT roster route (distinct from this ticket's own project roster), so this form omits `agent_name` and the daemon applies its own default (DOC-39 §5.4)."
+<div class="ibar shrink-0 border-t border-1.5 border-trusty-border bg-trusty-card p-3">
+  <div class="flex flex-wrap items-center gap-2 text-xs text-trusty-text-secondary">
+    <span class="font-mono uppercase tracking-wide text-trusty-text-muted">project:</span>
+    <span class="font-mono">{bindingLabel(selectedProjectState.project)}</span>
+    <button
+      type="button"
+      onclick={openPicker}
+      class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
     >
-      agent: daemon default — no pre-task agent roster endpoint exists yet
-    </p>
-
-    {#if submitError}
-      <p class="mt-2 text-xs text-status-error">{submitError}</p>
-    {/if}
-    {#if successMessage}
-      <p class="mt-2 text-xs text-status-ok">{successMessage}</p>
-    {/if}
-
-    <div class="mt-3">
+      choose project
+    </button>
+    {#if selectedProjectState.project}
       <button
         type="button"
-        disabled={!canSubmitCreate(task, submitPhase)}
-        onclick={submit}
-        class="rounded-sm border-1.5 border-trusty-primary-hover bg-trusty-primary px-3 py-1.5 font-mono text-xs font-semibold uppercase tracking-wide text-trusty-text-inverse hover:bg-trusty-primary-hover disabled:cursor-not-allowed disabled:border-trusty-border disabled:bg-trusty-raised disabled:text-trusty-text-muted"
+        class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted underline hover:text-trusty-primary"
+        onclick={clearSelection}
       >
-        {submitPhase === 'submitting' ? 'starting…' : 'go'}
+        clear
       </button>
-    </div>
+    {/if}
   </div>
-</section>
+
+  <div class="mt-2 flex items-end gap-2">
+    <textarea
+      id="start-working-task"
+      bind:value={task}
+      onkeydown={handleTaskKeydown}
+      rows="2"
+      placeholder="Type a message… (Enter to send, Shift+Enter for a new line)"
+      class="min-w-0 flex-1 resize-none rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised p-2 text-xs text-trusty-text"
+    ></textarea>
+    <button
+      type="button"
+      disabled={!canSubmitCreate(task, submitPhase)}
+      onclick={submit}
+      class="shrink-0 self-stretch rounded-sm border-1.5 border-trusty-primary-hover bg-trusty-primary px-4 font-mono text-xs font-semibold uppercase tracking-wide text-trusty-text-inverse hover:bg-trusty-primary-hover disabled:cursor-not-allowed disabled:border-trusty-border disabled:bg-trusty-raised disabled:text-trusty-text-muted"
+    >
+      {submitPhase === 'submitting' ? 'sending…' : 'send'}
+    </button>
+  </div>
+
+  <p
+    class="mt-1.5 text-[11px] text-trusty-text-muted"
+    title="session.get_agents (GET /sessions/{'{'}id{'}'}/agents) requires an existing session — there is no pre-task AGENT roster route (distinct from this ticket's own project roster), so this form omits `agent_name` and the daemon applies its own default (DOC-39 §5.4)."
+  >
+    agent: daemon default — no pre-task agent roster endpoint exists yet
+  </p>
+
+  {#if submitError}
+    <p class="mt-1.5 text-xs text-status-error">{submitError}</p>
+  {/if}
+  {#if successMessage}
+    <p class="mt-1.5 text-xs text-status-ok">{successMessage}</p>
+  {/if}
+</div>
 
 <ProjectPickerModal open={pickerOpen} onSelect={onProjectSelected} onClose={closePicker} />
