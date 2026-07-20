@@ -1,17 +1,18 @@
 <script lang="ts">
   /**
-   * Canonical source: docs/design/UI/design-system/icons/ActionIcon.svelte
-   * (refs #3486). This is a vendored copy — fix bugs/add glyphs there first,
-   * then propagate here, until #3492 (`@trusty/foundry` package) replaces
-   * copy-paste vendoring with a real import.
-   *
    * Why: Action icons appear inline with role labels, tool calls, and event
-   * markers throughout the chat surface. A single component keyed by name
-   * keeps stroke width / viewBox / line caps consistent across the set and
-   * avoids importing a heavyweight icon library for a fixed vocabulary.
+   * markers throughout Foundry chat/console surfaces. A single component
+   * keyed by name keeps stroke width / viewBox / line caps consistent across
+   * the set and avoids importing a heavyweight icon library for a fixed
+   * vocabulary. This file is the CANONICAL source for the ActionIcon
+   * vocabulary — see ../icons/README.md. Crate copies (e.g.
+   * crates/trusty-agents/ui/src/lib/icons/ActionIcon.svelte) must be kept in
+   * sync with this file until #3492 (`@trusty/foundry` package) replaces
+   * copy-paste distribution with a real import.
    * What: Renders one of a fixed set of 24x24 stroke-based SVG icons by
    * name. Falls back to an empty <svg> for unknown names so callers never
-   * crash. Stroke color defaults to currentColor so icons inherit text color.
+   * crash. Stroke color defaults to currentColor so icons inherit text color
+   * and react to theme automatically (no light/dark-specific markup needed).
    * Test: <ActionIcon name="pm" /> and <ActionIcon name="agent" /> render
    * distinct shapes; <ActionIcon name="bogus" /> renders nothing visible.
    */

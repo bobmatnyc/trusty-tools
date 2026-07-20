@@ -9,6 +9,7 @@ Foundry is the authoritative design system for trusty-* UIs (trusty-search, trus
 - **[design-system/README.md](design-system/README.md)** — Design philosophy, guardrails, and component quick-reference
 - **design-system/tokens.css** — CSS custom properties (--trusty-*) for both light and dark palettes; activate dark theme with `<html data-theme="dark">` or `.dark` class
 - **design-system/foundry.css** — Component styles (.btn, .card, .badge, .modal, .toast, etc.) drop-in for Svelte UIs
+- **[design-system/icons/README.md](design-system/icons/README.md)** — Canonical icon set (`ActionIcon`, `RobotIcon`, `LogoMark`): the `ActionIcon` name→glyph vocabulary, the `currentColor`/theme-reactivity convention, and the vendored-copy list crate integrations must stay in sync with (refs #3486)
 
 ### Design Documentation
 

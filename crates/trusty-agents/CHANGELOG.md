@@ -29,6 +29,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Canonical Foundry icon set (#3486):** `ActionIcon`, `RobotIcon`, and
+  `LogoMark` — previously only defined inline in this crate's
+  `ui/src/lib/icons/` — now have a documented canonical source at
+  `docs/design/UI/design-system/icons/` (README covers the `ActionIcon`
+  name→glyph vocabulary and the `currentColor`/theme-reactivity convention).
+  This crate's copies are unchanged behaviorally but now carry a header
+  comment pointing back at the canonical source, to be kept in sync until
+  #3492 (`@trusty/foundry` package) replaces copy-paste vendoring with a real
+  import.
+
+### Fixed
+
+- **Favicon/RobotIcon drift (#3486):** `ui/public/favicon.svg` was a fourth,
+  independently hand-drawn robot face (different rect/circle coordinates, a
+  `<text>`-rendered `>_` mouth) that had drifted from `RobotIcon.svelte`'s
+  actual markup. Regenerated the favicon's geometry from `RobotIcon.svelte`'s
+  `full`-variant paths (same head rect, antenna, eye positions, and stroked
+  chevron+underscore mouth) so there is a single robot design instead of two.
+
 - **Shared-inference seam, Step 1+2 (#2410):** `llm::inference_bridge` is a
   pure, field-by-field conversion between `async-openai`'s wire types
   (`ChatCompletionRequestMessage`, `ChatCompletionTool`,
