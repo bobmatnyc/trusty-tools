@@ -15,7 +15,6 @@ pub mod always_on;
 pub mod analysis;
 pub mod ast_tools;
 pub mod delegate;
-pub mod docs_lookup;
 pub mod file_filter;
 pub mod finish_task;
 pub mod format_translator;
