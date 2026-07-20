@@ -5,19 +5,19 @@
 //! that shape lives in, generalized from the proven design in
 //! `crates/trusty-agents/src/repl/tui/run.rs::event_loop` (100ms redraw tick,
 //! `tokio::select!` over the tick and the event channel, a dedicated OS
-//! thread for crossterm's blocking key read so it never parks the tokio
-//! runtime).
+//! thread for the key read so it never parks the tokio runtime).
 //!
-//! What: three pieces. [`spawn_key_reader`] is the OS thread that blocks on
-//! `crossterm::event::read()` and forwards translated [`ReplEvent`]s (key
-//! presses via [`crate::keys::translate_key_event`], resizes, mouse-wheel
-//! scroll) onto an `mpsc` channel. [`event_loop`] is the terminal-generic
-//! `tick`/`recv` select loop — generic over `ratatui::backend::Backend` (not
-//! just `CrosstermBackend`) specifically so it can be unit-tested against
-//! `ratatui::backend::TestBackend` without a real TTY. [`run`] is the
-//! opinionated top-level entry point that wires a [`TerminalGuard`], the key
-//! reader, and an `E: TuiEngine` together the way a real product binary
-//! actually wants to call this crate.
+//! What: three pieces. [`spawn_key_reader`] is the OS thread that polls for
+//! crossterm events and forwards translated [`ReplEvent`]s (key presses via
+//! [`crate::keys::translate_key_event`], resizes, mouse-wheel scroll) onto an
+//! `mpsc` channel; it returns a [`KeyReaderGuard`] rather than a bare
+//! `JoinHandle` (see that type's doc comment for why). [`event_loop`] is the
+//! terminal-generic `tick`/`recv` select loop — generic over
+//! `ratatui::backend::Backend` (not just `CrosstermBackend`) specifically so
+//! it can be unit-tested against `ratatui::backend::TestBackend` without a
+//! real TTY. [`run`] is the opinionated top-level entry point that wires a
+//! [`TerminalGuard`], the key reader, and an `E: TuiEngine` together the way
+//! a real product binary actually wants to call this crate.
 //!
 //! Deliberately NOT decided here: what `M` (the render/reducer model) looks
 //! like inside a product. Slice 4 owns the shared chat/statusline/picker
@@ -29,10 +29,26 @@
 //! generalized to not require `Arc<Mutex<_>>` (the caller decides its own
 //! interior mutability, if any).
 //!
+//! A prior revision of [`run`] blocked `crossterm::event::read()` directly on
+//! the key-reader thread and shut it down with `drop(tx); thread.join()`.
+//! That hangs: `read()` only notices the channel closed on its NEXT `send()`,
+//! which can't happen until a key is actually pressed — and by the time `run`
+//! reaches shutdown, the user has usually just pressed the key that made
+//! `should_quit()` true, so the thread is parked in a SECOND, indefinite
+//! `read()`. Worse, the terminal restore ran after that join, so the
+//! terminal stayed frozen in raw/alt-screen mode with no feedback while
+//! hung. It also leaked the thread entirely on the `engine.setup`/
+//! `subscribe_workstream_events` error paths, which returned via `?` before
+//! ever reaching the join. [`KeyReaderGuard`] and the restructured [`run`]
+//! fix both: the thread polls with a bounded timeout and checks an atomic
+//! stop flag every poll, and terminal restoration happens unconditionally,
+//! before the (now-bounded) thread join, on every exit path.
+//!
 //! # Spec References
 //! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 2 deliverable (§5, Slice 2): the event loop.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{self, Event as CtEvent, KeyEventKind, MouseEvent, MouseEventKind};
@@ -52,6 +68,16 @@ use crate::terminal::TerminalGuard;
 /// smoothly animating spinner/elapsed-time display, cheap enough (a full diff
 /// against an idle frame) not to burn meaningful CPU.
 pub const TICK: Duration = Duration::from_millis(100);
+
+/// How often the key-reader thread's `crossterm::event::poll` call returns so
+/// it can re-check [`KeyReaderGuard`]'s stop flag.
+///
+/// Why: this bounds `KeyReaderGuard::drop`'s join to roughly one interval
+/// after shutdown is requested, instead of the prior blocking-`read()`
+/// design's "whenever the user next happens to press a key" (see the module
+/// doc comment). Short enough that shutdown feels immediate; long enough not
+/// to busy-loop.
+const KEY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Mouse-wheel scroll delta per notch, matching tagent's existing convention
 /// (`crates/trusty-agents/src/repl/tui/run.rs`): negative scrolls toward
@@ -73,66 +99,126 @@ pub trait TuiModel {
     fn should_quit(&self) -> bool;
 }
 
-/// Spawn the dedicated OS thread that blocks on `crossterm::event::read()`
-/// and forwards translated events onto `tx`.
+/// Pure classification of one crossterm `Event` into an optional [`ReplEvent`].
+///
+/// Why: pulled out of [`spawn_key_reader`]'s thread body specifically so it
+/// is unit-testable without a real TTY or `crossterm::event::read()` — the
+/// thread itself is a thin loop that calls this once per polled event.
+/// What: filters `Key` events to `Press`/`Repeat` only, dropping `Release`
+/// (some terminals — notably on Windows — emit key-release events crossterm
+/// surfaces there; tagent's precedent drops them so a single physical
+/// keystroke doesn't fire twice) and translating the rest via
+/// [`translate_key_event`]. `Resize` passes straight through. Mouse-wheel
+/// `ScrollUp`/`ScrollDown` map to [`ReplEvent::Scroll`]. Everything else
+/// (other mouse events, focus/paste events depending on which crossterm
+/// event kinds are enabled) yields `None`.
+/// Test: [`tests::classify_filters_key_release`],
+/// [`tests::classify_maps_key_press_and_repeat`],
+/// [`tests::classify_maps_resize`],
+/// [`tests::classify_maps_mouse_scroll_up_and_down`],
+/// [`tests::classify_ignores_other_mouse_events`].
+fn classify(ev: CtEvent) -> Option<ReplEvent> {
+    match ev {
+        CtEvent::Key(k) => {
+            if k.kind != KeyEventKind::Press && k.kind != KeyEventKind::Repeat {
+                None
+            } else {
+                Some(ReplEvent::Key(translate_key_event(k)))
+            }
+        }
+        CtEvent::Resize(cols, rows) => Some(ReplEvent::Resize(cols, rows)),
+        CtEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            ..
+        }) => Some(ReplEvent::Scroll(-SCROLL_DELTA)),
+        CtEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            ..
+        }) => Some(ReplEvent::Scroll(SCROLL_DELTA)),
+        _ => None,
+    }
+}
+
+/// RAII handle for the key-reader thread spawned by [`spawn_key_reader`].
+///
+/// Why: a bare `JoinHandle` let every fallible step between spawning the
+/// thread and the function's tail cleanup code leak it — `engine.setup`/
+/// `subscribe_workstream_events` returning via `?` skipped straight past the
+/// `drop(tx); thread.join()` lines that used to live at the end of [`run`].
+/// Wrapping the handle in a type whose `Drop` does that join means EVERY
+/// exit path — success, an early `?`, or an unwinding panic — cleans the
+/// thread up, the same guarantee [`TerminalGuard`] gives the terminal itself.
+/// What: holds the thread's `JoinHandle` plus an `Arc<AtomicBool>` stop flag
+/// the thread polls every [`KEY_POLL_INTERVAL`]. `Drop` sets the flag then
+/// joins — bounded to roughly one poll interval, not "whenever the user
+/// next presses a key" (the shutdown hang described in the module doc
+/// comment).
+/// Test: [`tests::key_reader_guard_drop_completes_promptly_without_a_keypress`].
+pub struct KeyReaderGuard {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for KeyReaderGuard {
+    /// Why: see [`KeyReaderGuard`] — runs on every exit path, including a
+    /// panic unwind, which is the entire reason this type exists rather than
+    /// a bare `JoinHandle` cleaned up by hand at the end of `run`.
+    /// What: signals the stop flag, then joins — the thread notices within
+    /// one [`KEY_POLL_INTERVAL`] because its loop condition checks the flag
+    /// on every iteration, not just when a `send()` fails.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Spawn the dedicated OS thread that polls for crossterm events and forwards
+/// translated events onto `tx`, returning a [`KeyReaderGuard`] that stops and
+/// joins it on drop.
 ///
 /// Why: crossterm's blocking read is happiest on its own OS thread rather
 /// than parking a tokio worker — matches
-/// `crates/trusty-agents/src/repl/tui/run.rs`'s `key_thread`. Running this on
-/// the tokio runtime instead would either block a worker thread outright (if
-/// spawned as a blocking task without `spawn_blocking`) or require polling,
-/// which reintroduces the input-latency tradeoff a dedicated thread avoids.
-/// What: loops `event::read()` until it errors or `tx.send` fails (the
-/// receiver dropped, i.e. the event loop exited); translates `Key` events via
-/// [`translate_key_event`], filtering out `Release`/other non-Press/Repeat
-/// kinds (Windows terminals emit key-release events crossterm surfaces on
-/// this platform; tagent's precedent drops them so a single physical
-/// keystroke doesn't fire twice). `Resize` and mouse-wheel `Scroll` events
-/// pass straight through un-filtered.
-/// Test: [`tests::spawn_key_reader_exits_when_receiver_drops`] proves the
-/// thread doesn't leak once the channel closes; the crossterm-parsing
-/// branches themselves have no unit-testable seam (they require a real
-/// event source) and are covered by [`crate::keys`]'s translation tests plus
-/// manual verification via launching the TUI, mirroring the tagent
-/// precedent's own test strategy.
-pub fn spawn_key_reader(tx: UnboundedSender<ReplEvent>) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        loop {
-            match event::read() {
-                Ok(CtEvent::Key(k)) => {
-                    if k.kind != KeyEventKind::Press && k.kind != KeyEventKind::Repeat {
-                        continue;
+/// `crates/trusty-agents/src/repl/tui/run.rs`'s `key_thread`. Polling (rather
+/// than that precedent's blocking `read()`) is what makes shutdown bounded
+/// instead of tied to the next physical keystroke — see the module doc
+/// comment for the hang this replaces.
+/// What: loops `crossterm::event::poll(KEY_POLL_INTERVAL)` until the stop
+/// flag is set, `poll`/`read` errors (e.g. no input reader available, which
+/// is expected in a TTY-less sandbox and simply ends the loop), or `tx.send`
+/// fails (the receiver dropped). Each polled event is classified by
+/// [`classify`]; `None` results (filtered keys, unhandled mouse events) are
+/// silently dropped.
+/// Test: [`tests::key_reader_guard_drop_completes_promptly_without_a_keypress`]
+/// proves the returned guard's `Drop` doesn't block on a keystroke; the
+/// event-classification logic itself is covered directly via [`classify`]'s
+/// tests (no TTY needed for those).
+pub fn spawn_key_reader(tx: UnboundedSender<ReplEvent>) -> KeyReaderGuard {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        while !stop_for_thread.load(Ordering::Relaxed) {
+            match event::poll(KEY_POLL_INTERVAL) {
+                Ok(true) => match event::read() {
+                    Ok(ev) => {
+                        if let Some(replay) = classify(ev)
+                            && tx.send(replay).is_err()
+                        {
+                            break;
+                        }
                     }
-                    if tx.send(ReplEvent::Key(translate_key_event(k))).is_err() {
-                        break;
-                    }
-                }
-                Ok(CtEvent::Resize(cols, rows)) => {
-                    if tx.send(ReplEvent::Resize(cols, rows)).is_err() {
-                        break;
-                    }
-                }
-                Ok(CtEvent::Mouse(MouseEvent {
-                    kind: MouseEventKind::ScrollUp,
-                    ..
-                })) => {
-                    if tx.send(ReplEvent::Scroll(-SCROLL_DELTA)).is_err() {
-                        break;
-                    }
-                }
-                Ok(CtEvent::Mouse(MouseEvent {
-                    kind: MouseEventKind::ScrollDown,
-                    ..
-                })) => {
-                    if tx.send(ReplEvent::Scroll(SCROLL_DELTA)).is_err() {
-                        break;
-                    }
-                }
-                Ok(_) => continue,
+                    Err(_) => break,
+                },
+                Ok(false) => continue, // timed out — loop back and re-check `stop`
                 Err(_) => break,
             }
         }
-    })
+    });
+    KeyReaderGuard {
+        stop,
+        handle: Some(handle),
+    }
 }
 
 /// The terminal-generic tick/event select loop.
@@ -198,19 +284,26 @@ where
 ///
 /// Why: bundles the pieces every real product binary needs in the order
 /// tagent's `run_tui` already proves out, but routed through [`TerminalGuard`]
-/// so a panic anywhere in `apply`/`render`/`engine` calls still restores the
-/// terminal (the bug this crate's terminal layer fixes — see
-/// `crate::terminal`'s doc comment).
+/// and [`KeyReaderGuard`] so a panic OR an early `?` anywhere in
+/// `engine.setup`/`subscribe_workstream_events`/`apply`/`render` still
+/// restores the terminal and stops the key-reader thread — see the module
+/// doc comment for the hang and the leak this fixes relative to a prior
+/// revision.
 /// What: generic over `E: TuiEngine` (Slice 1's adapter trait) and `M:
 /// TuiModel` (this module's minimal render/reducer contract) so it drives
-/// either tagent's future adapter or tcode's. Errors from `engine.setup`/
-/// `subscribe_workstream_events`/`shutdown` are propagated for setup, but
-/// only logged (not fatal) for shutdown — mirrors `TuiEngine::shutdown`'s own
-/// doc comment ("Errors are logged, not fatal").
+/// either tagent's future adapter or tcode's. The fallible setup + the event
+/// loop itself run inside one `async` block so `run` always reaches its two
+/// explicit `drop()` calls afterward, in a fixed order, regardless of which
+/// step inside failed: `guard` (terminal restore) drops FIRST — never gated
+/// behind the thread join — then `key_guard` (bounded to roughly
+/// [`KEY_POLL_INTERVAL`]) drops second. `engine.shutdown`'s error is logged,
+/// not propagated, mirroring `TuiEngine::shutdown`'s own doc comment
+/// ("errors are logged, not fatal").
 /// Test: requires a real TTY (via `TerminalGuard::enter`) so it is not
 /// unit-tested directly — the terminal-generic core it delegates to
-/// ([`event_loop`]) carries the loop's test coverage, and [`TerminalGuard`]'s
-/// own tests cover the panic-safety contract this function relies on.
+/// ([`event_loop`]) carries the loop's test coverage, and [`TerminalGuard`]/
+/// [`KeyReaderGuard`]'s own tests cover the panic-safety and prompt-shutdown
+/// contracts this function relies on.
 pub async fn run<E, M>(
     engine: Arc<E>,
     model: M,
@@ -223,37 +316,42 @@ where
 {
     let (guard, mut terminal) = TerminalGuard::enter()?;
     let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let key_guard = spawn_key_reader(tx.clone());
 
-    let key_thread = spawn_key_reader(tx.clone());
+    let result: anyhow::Result<M> = async {
+        engine.setup(tx.clone()).await?;
+        engine.subscribe_workstream_events(tx.clone()).await?;
+        event_loop(&mut terminal, model, rx, apply, render).await
+    }
+    .await;
 
-    engine.setup(tx.clone()).await?;
-    engine.subscribe_workstream_events(tx.clone()).await?;
-
-    let loop_result = event_loop(&mut terminal, model, rx, apply, render).await;
+    // Restore the terminal FIRST and unconditionally — regardless of which
+    // step above failed, and never gated behind the key-reader thread's
+    // join below (that ordering, with an unbounded join, was the shutdown
+    // hang described in the module doc comment).
+    drop(guard);
+    // Signal + join the key-reader thread second. Bounded to roughly
+    // `KEY_POLL_INTERVAL` thanks to `spawn_key_reader`'s poll-based loop, so
+    // this no longer waits for a keystroke that may never come.
+    drop(key_guard);
 
     if let Err(e) = engine.shutdown().await {
         tracing::warn!(error = %e, "TuiEngine::shutdown returned an error (non-fatal)");
     }
 
-    // Drop the sender so the key-reader thread's next `send` fails and it
-    // exits; then join it so `run` doesn't return while the thread is still
-    // blocked in `event::read()` against a terminal we're about to restore.
-    drop(tx);
-    let _ = key_thread.join();
-
-    // Explicit for readability — the guard would restore on scope exit
-    // regardless, including if `event_loop` above had panicked.
-    drop(guard);
-
-    loop_result.map(|_model| ())
+    result.map(|_model| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use crossterm::event::{
+        KeyCode as CtKeyCode, KeyEvent, KeyEventState, KeyModifiers as CtKeyModifiers,
+    };
     use ratatui::backend::TestBackend;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
     use tokio::time::{self, Duration as TokioDuration};
 
     #[derive(Default)]
@@ -294,19 +392,101 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn spawn_key_reader_exits_when_receiver_drops() {
-        // We can't feed real crossterm events without a TTY, but we CAN prove
-        // the thread doesn't hang forever once nothing is listening: drop the
-        // paired receiver immediately and confirm the join handle is backed
-        // by a thread that terminates in bounded time once its next `send`
-        // fails. Since `event::read()` blocks indefinitely without real
-        // input, we instead verify the send-side contract directly: a sender
-        // whose receiver is gone reports `Err` on send, which is the
-        // condition `spawn_key_reader`'s loop checks to exit.
-        let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
-        drop(rx);
-        assert!(tx.send(ReplEvent::Resize(80, 24)).is_err());
+    fn key_event(code: CtKeyCode, kind: KeyEventKind) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: CtKeyModifiers::NONE,
+            kind,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn classify_maps_key_press_and_repeat() {
+        let press = classify(CtEvent::Key(key_event(
+            CtKeyCode::Char('a'),
+            KeyEventKind::Press,
+        )));
+        assert!(matches!(press, Some(ReplEvent::Key(_))));
+
+        let repeat = classify(CtEvent::Key(key_event(
+            CtKeyCode::Char('a'),
+            KeyEventKind::Repeat,
+        )));
+        assert!(matches!(repeat, Some(ReplEvent::Key(_))));
+    }
+
+    #[test]
+    fn classify_filters_key_release() {
+        let release = classify(CtEvent::Key(key_event(
+            CtKeyCode::Char('a'),
+            KeyEventKind::Release,
+        )));
+        assert_eq!(
+            release, None,
+            "Release must not fire a second ReplEvent::Key"
+        );
+    }
+
+    #[test]
+    fn classify_maps_resize() {
+        assert_eq!(
+            classify(CtEvent::Resize(120, 40)),
+            Some(ReplEvent::Resize(120, 40))
+        );
+    }
+
+    #[test]
+    fn classify_maps_mouse_scroll_up_and_down() {
+        let up = classify(CtEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: CtKeyModifiers::NONE,
+        }));
+        assert_eq!(up, Some(ReplEvent::Scroll(-SCROLL_DELTA)));
+
+        let down = classify(CtEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: CtKeyModifiers::NONE,
+        }));
+        assert_eq!(down, Some(ReplEvent::Scroll(SCROLL_DELTA)));
+    }
+
+    #[test]
+    fn classify_ignores_other_mouse_events() {
+        let moved = classify(CtEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 0,
+            row: 0,
+            modifiers: CtKeyModifiers::NONE,
+        }));
+        assert_eq!(moved, None);
+    }
+
+    /// The regression test for the shutdown hang: [`spawn_key_reader`]'s
+    /// returned guard must join promptly on `Drop` WITHOUT needing a
+    /// keystroke to unblock a `read()` call. Bounded to a few multiples of
+    /// [`KEY_POLL_INTERVAL`] with generous headroom so this stays reliable
+    /// across real TTYs (where `poll` genuinely waits out the interval) and
+    /// TTY-less sandboxes (where `poll` errors immediately) alike — the
+    /// prior blocking-`read()` design had no such bound at all.
+    #[test]
+    fn key_reader_guard_drop_completes_promptly_without_a_keypress() {
+        let (tx, _rx) = mpsc::unbounded_channel::<ReplEvent>();
+        let guard = spawn_key_reader(tx);
+
+        let start = Instant::now();
+        drop(guard);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "KeyReaderGuard::drop must not block on a keystroke; took {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]

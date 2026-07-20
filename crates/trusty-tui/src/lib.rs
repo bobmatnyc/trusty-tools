@@ -43,5 +43,5 @@ pub use event::{
     WorkstreamSummary,
 };
 pub use keys::translate_key_event;
-pub use run::{TuiModel, event_loop, run, spawn_key_reader};
+pub use run::{KeyReaderGuard, TuiModel, event_loop, run, spawn_key_reader};
 pub use terminal::TerminalGuard;
