@@ -60,8 +60,9 @@ use super::*;
 async fn spawn_test_daemon() -> (tempfile::TempDir, String) {
     use crate::daemon::{api, state::DaemonState};
     let root_guard = crate::test_support::hermetic_temp_dir();
-    let state =
-        std::sync::Arc::new(DaemonState::with_root_isolated_managed(root_guard.path().to_owned()).await);
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root_guard.path().to_owned()).await,
+    );
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -278,10 +279,7 @@ async fn create_session_full_lifecycle() {
     // workspace — attach/delegate below never re-provision.
     unsafe {
         match prev_workspace_root {
-            Some(v) => std::env::set_var(
-                crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV,
-                v,
-            ),
+            Some(v) => std::env::set_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV, v),
             None => std::env::remove_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV),
         }
     }
