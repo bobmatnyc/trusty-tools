@@ -39,6 +39,12 @@ mod worktree_sync;
 #[cfg(test)]
 #[path = "tests_roster.rs"]
 mod tests_roster;
+// Split out of `tests.rs` to keep it under the 1500-SLOC test-file cap
+// (issue #3427 scaffolding-gitignore wiring coverage) — mirrors the
+// `tests_roster.rs` split pattern above.
+#[cfg(test)]
+#[path = "tests_scaffold_gitignore.rs"]
+mod tests_scaffold_gitignore;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
