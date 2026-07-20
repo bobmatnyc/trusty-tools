@@ -718,6 +718,20 @@ fn prepare_session_inner(
         tracing::warn!("failed to deploy project-tier trusty-mpm output style: {err}");
     }
 
+    // Issue #3427: ensure the harness-scaffolding paths this deploy just wrote
+    // (or may write in a future session) are gitignored in `project_dir`, so
+    // they never enter this project's git history — the precondition for the
+    // "would be overwritten by merge" collision this issue reports. A no-op
+    // when `project_dir` is not a git working tree, and idempotent otherwise
+    // (see `scaffold_gitignore` module docs). Non-fatal: a write failure only
+    // means the operator keeps doing this manually, it never blocks launch.
+    // This only prevents FUTURE commits — a project that already committed
+    // these paths needs the `scaffold_tracking` doctor check's remediation,
+    // not this step.
+    if let Err(err) = crate::core::scaffold_gitignore::ensure_scaffold_gitignored(project_dir) {
+        tracing::warn!("failed to update .gitignore for harness scaffolding: {err}");
+    }
+
     // DOC-28 cutover bridge — auto-inject catch-up as seed context (#1762).
     // Fail-open: if catch-up fails for any reason (daemon not running, no git
     // repo, runtime error), the session still launches; catchup_context is None.
