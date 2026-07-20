@@ -39,6 +39,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   #3492 (`@trusty/foundry` package) replaces copy-paste vendoring with a real
   import.
 
+- **CI token drift-check (refs #3486):** a new `scripts/check_token_drift.mjs`
+  pins this crate's `app.css` Foundry `--color-*` RGB-triple values to
+  `docs/design/UI/design-system/tokens.css` (the canonical hex source),
+  wired into CI as the `token-drift` workflow. Fails with a per-token diff if
+  the two silently diverge; run locally via `pnpm run check:tokens`. No
+  drift was found in this crate — every value already matched canonical.
+
 ### Fixed
 
 - **Favicon/RobotIcon drift (#3486):** `ui/public/favicon.svg` was a fourth,
@@ -47,6 +54,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   actual markup. Regenerated the favicon's geometry from `RobotIcon.svelte`'s
   `full`-variant paths (same head rect, antenna, eye positions, and stroked
   chevron+underscore mouth) so there is a single robot design instead of two.
+
+### Added
 
 - **Shared-inference seam, Step 1+2 (#2410):** `llm::inference_bridge` is a
   pure, field-by-field conversion between `async-openai`'s wire types

@@ -6,7 +6,8 @@
     "dev": "vite",
     "build": "vite build",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "check:tokens": "node ../../../scripts/check_token_drift.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
