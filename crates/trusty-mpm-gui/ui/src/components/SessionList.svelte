@@ -169,11 +169,11 @@
 </script>
 
 <aside
-  class="flex h-full w-full flex-col overflow-y-auto bg-trusty-surface-light dark:bg-trusty-surface"
+  class="flex h-full w-full flex-col overflow-y-auto bg-trusty-surface"
 >
   <!-- Sidebar header: tab switcher + close button -->
   <div
-    class="flex items-center border-b border-trusty-border-light dark:border-trusty-border"
+    class="flex items-center border-b border-trusty-border"
   >
     <button
       type="button"
@@ -214,10 +214,10 @@
     <button
       type="button"
       on:click={() => activeSessionId.set(null)}
-      class={`flex items-center gap-2 border-b border-trusty-border-light px-3 py-2 text-left dark:border-trusty-border ${
+      class={`flex items-center gap-2 border-b border-trusty-border px-3 py-2 text-left ${
         $activeSessionId === null
           ? 'bg-trusty-primary/10'
-          : 'hover:bg-trusty-border-light/60 dark:hover:bg-trusty-border/60'
+          : 'hover:bg-trusty-border/60'
       }`}
     >
       <span class="h-2 w-2 shrink-0 rounded-full bg-trusty-primary"></span>
@@ -231,11 +231,11 @@
 
     {#each [...$groupedSessions] as [projectKey, group] (projectKey)}
       {@const collapsed = $collapsedProjects.has(projectKey)}
-      <div class="border-b border-trusty-border-light dark:border-trusty-border">
+      <div class="border-b border-trusty-border">
         <button
           type="button"
           on:click={() => toggleProject(projectKey)}
-          class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide opacity-80 hover:bg-trusty-border-light/60 dark:hover:bg-trusty-border/60"
+          class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] font-medium uppercase tracking-wide opacity-80 hover:bg-trusty-border/60"
         >
           {#if collapsed}
             <ChevronRight size={12} />
@@ -260,10 +260,10 @@
             tabindex="0"
             on:click={() => select(session.id)}
             on:keydown={(e) => handleRowKeydown(session.id, e)}
-            class={`flex flex-col gap-1 border-t border-trusty-border-light pl-6 pr-3 py-2 text-left dark:border-trusty-border ${
+            class={`flex flex-col gap-1 border-t border-trusty-border pl-6 pr-3 py-2 text-left ${
               $activeSessionId === session.id
                 ? 'bg-trusty-primary/10'
-                : 'hover:bg-trusty-border-light/60 dark:hover:bg-trusty-border/60'
+                : 'hover:bg-trusty-border/60'
             }`}
           >
             <div class="flex items-center gap-2">
@@ -286,7 +286,7 @@
                 type="button"
                 on:click={(e) => toggle(session, e)}
                 aria-label={session.status === 'paused' ? 'Resume' : 'Pause'}
-                class="rounded p-0.5 hover:bg-trusty-border-light dark:hover:bg-trusty-border"
+                class="rounded p-0.5 hover:bg-trusty-border"
               >
                 {#if session.status === 'paused'}
                   <Play size={13} />
@@ -298,7 +298,7 @@
                 type="button"
                 on:click={(e) => stop(session, e)}
                 aria-label="Stop"
-                class="rounded p-0.5 hover:bg-trusty-border-light dark:hover:bg-trusty-border"
+                class="rounded p-0.5 hover:bg-trusty-border"
               >
                 <Square size={13} />
               </button>

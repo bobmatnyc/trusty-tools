@@ -4,7 +4,7 @@
   // What: An icon button showing a Moon in dark mode and a Sun in light mode;
   // clicking calls `toggleTheme()`.
   // Test: Click the button and assert the icon swaps and `<html>` toggles its
-  // `dark` class.
+  // `data-theme="dark"` attribute.
   import { Moon, Sun } from 'lucide-svelte';
   import { theme, toggleTheme } from '../stores/theme';
 </script>
@@ -14,7 +14,7 @@
   on:click={toggleTheme}
   aria-label="Toggle theme"
   title="Toggle theme"
-  class="rounded-md p-1.5 text-trusty-text-light hover:bg-trusty-border-light dark:text-trusty-text dark:hover:bg-trusty-border"
+  class="rounded-md p-1.5 text-trusty-text hover:bg-trusty-border"
 >
   {#if $theme === 'dark'}
     <Moon size={16} />

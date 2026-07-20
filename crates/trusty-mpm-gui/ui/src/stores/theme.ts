@@ -1,9 +1,15 @@
 // Why: Dark/light preference must survive reloads and apply before paint to
-// avoid a flash; one store owns the value and the `<html>` class side effect.
+// avoid a flash; one store owns the value and the `<html>` attribute side
+// effect. Foundry v2 (issue #3488, docs/design/UI/design-system/tokens.css)
+// activates dark via the `[data-theme='dark']` attribute — the same
+// mechanism `crates/trusty-code-gui/ui/src/lib/theme-bootstrap.ts` uses —
+// rather than a bare `.dark` class, so `app.css`'s `[data-theme='dark']`
+// block is what this store's DOM sync now drives.
 // What: A `theme` writable persisted to `localStorage['trusty-mpm.theme']`,
 // an `applyTheme()` DOM sync, and a `toggleTheme()` helper for ThemeToggle.
-// Test: Call `toggleTheme()` and assert `<html>` gains/loses the `dark` class
-// and `localStorage` holds the new value across a simulated reload.
+// Test: Call `toggleTheme()` and assert `<html>` gains/loses the
+// `data-theme="dark"` attribute and `localStorage` holds the new value
+// across a simulated reload.
 
 import { writable } from 'svelte/store';
 
@@ -18,10 +24,14 @@ function initialTheme(): Theme {
   return localStorage.getItem(STORAGE_KEY) === 'light' ? 'light' : 'dark';
 }
 
-/** Sync the `<html>` `dark` class to the given theme. */
+/** Sync the `<html data-theme="dark">` attribute to the given theme. */
 function applyTheme(value: Theme): void {
   if (typeof document === 'undefined') return;
-  document.documentElement.classList.toggle('dark', value === 'dark');
+  if (value === 'dark') {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
 }
 
 /** Current theme; updates persist to localStorage and the DOM. */
