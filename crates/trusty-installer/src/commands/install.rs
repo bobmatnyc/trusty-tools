@@ -109,8 +109,12 @@ pub struct InstallReport {
     pub members: Vec<InstallOutcome>,
     /// Whether every member installed AND every attempted service bootstrap
     /// succeeded (see [`InstallOutcome`]'s field docs for what counts as a
-    /// service failure).
+    /// service failure) AND, when the verify tail ran, it reported verified.
     pub all_ok: bool,
+    /// The post-install verify-tail result (#2560): `ensure` + health (with
+    /// the #2498 kickstart retry). `None` when `--no-verify` skipped it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify: Option<super::verify_tail::VerifyTailReport>,
 }
 
 impl InstallReport {
@@ -119,7 +123,7 @@ impl InstallReport {
     /// Why: Centralises the `all_ok` derivation so the exit code and JSON agree,
     /// and so the report cannot claim success while a genuine service-bootstrap
     /// failure occurred (#2566 review finding).
-    /// What: Sets `command = "install"` and
+    /// What: Sets `command = "install"`, `verify = None`, and
     /// `all_ok = every outcome has ok == true AND service_ok == true`.
     /// Test: `tests::report_all_ok`, `tests::report_all_ok_reflects_service_failure`.
     fn build(members: Vec<InstallOutcome>) -> Self {
@@ -128,7 +132,28 @@ impl InstallReport {
             command: "install",
             members,
             all_ok,
+            verify: None,
         }
+    }
+
+    /// Fold the post-install verify-tail result into this report (#2560).
+    ///
+    /// Why: `--json` consumers must see ONE object whose `all_ok` (and hence
+    /// exit code) already reflects the verify-tail outcome — a caller must
+    /// never read `all_ok: true` while the verify tail reported an unhealthy
+    /// stack (the exact "looks installed, actually broken" class #2557 /
+    /// #2498 existed because of).
+    /// What: attaches `verify`; if it reports `!verified`, flips `all_ok` to
+    /// `false` (binary + service success alone does not override a verify
+    /// failure).
+    /// Test: `tests::with_verify_failure_flips_all_ok`,
+    /// `tests::with_verify_success_preserves_all_ok`.
+    fn with_verify(mut self, verify: super::verify_tail::VerifyTailReport) -> Self {
+        if !verify.verified {
+            self.all_ok = false;
+        }
+        self.verify = Some(verify);
+        self
     }
 
     /// Process exit code: 0 when all installed, 2 when any failed.
@@ -199,6 +224,23 @@ pub struct DryRunReport {
 /// path.
 fn plans_service_bootstrap(m: &StableMember, service_enabled: bool) -> bool {
     service_enabled && m.manage == ManageStrategy::Launchd
+}
+
+/// Whether an install would attempt the trusty-mpm launchd SUPERVISOR
+/// bootstrap for `m` (#3527).
+///
+/// Why: `install_mpm_supervisor()` used to run UNCONDITIONALLY whenever
+/// trusty-mpm installed — the one member exempt from the #2556
+/// `plans_service_bootstrap` opt-out, because trusty-mpm's
+/// [`ManageStrategy::OwnVerb`] makes that Launchd-only predicate always return
+/// `false` for it regardless of `service_enabled`. This mirrors
+/// `plans_service_bootstrap`'s *intent* (respect `--no-service` /
+/// `TCTL_NO_SERVICE_BOOTSTRAP`) for the supervisor specifically, so trusty-mpm
+/// is no longer the one member that ignores the opt-out.
+/// What: `true` iff `service_enabled` AND `m.crate_name == "trusty-mpm"`.
+/// Test: `tests::plans_mpm_supervisor_bootstrap_respects_flag`.
+fn plans_mpm_supervisor_bootstrap(m: &StableMember, service_enabled: bool) -> bool {
+    service_enabled && m.crate_name == "trusty-mpm"
 }
 
 /// Build the `--dry-run` preview report from the resolved member set.
@@ -288,13 +330,29 @@ fn print_dry_run(selected: &[StableMember], service_enabled: bool, json: bool) -
 /// (#2556) so operators who manage launchd themselves, or CI, install binaries
 /// only.
 ///
+/// `force` (#3527) overrides the trusty-mpm supervisor downgrade guard (see
+/// `plist_bootstrap::decide_downgrade`) — it has no effect on any other member.
+///
+/// `no_verify` (#2560) skips the post-install `ensure` + health verify tail
+/// (see `super::verify_tail`); the install itself (binaries + services) is
+/// unaffected — only the final verification pass is skipped.
+///
 /// Test: `tests::run_unknown_member_is_error`, `tests::run_dry_run_exits_zero`,
 /// `tests::dry_run_full_set_when_no_members_named`. The non-TTY refusal gate
 /// itself is TTY-independent and exhaustively covered by
 /// `super::install_gate::tests` (see that module's doc for why a `run()`-level
 /// refusal test is unsound — it would block forever on a real terminal). The
 /// install path is side-effecting (`cargo install`) and validated manually.
-pub fn run(members: &[String], yes: bool, json: bool, no_service: bool, dry_run: bool) -> i32 {
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    members: &[String],
+    yes: bool,
+    json: bool,
+    no_service: bool,
+    dry_run: bool,
+    force: bool,
+    no_verify: bool,
+) -> i32 {
     // Phase 4: interactive component picker.
     // Only activates when: no explicit members, stdin is a TTY, not --json,
     // and not --dry-run (a preview must behave identically regardless of TTY).
@@ -431,7 +489,17 @@ pub fn run(members: &[String], yes: bool, json: bool, no_service: bool, dry_run:
         }
     }
 
-    let report = block_on(install_all(&selected, json, service_enabled));
+    let mut report = block_on(install_all(&selected, json, service_enabled, force));
+
+    // #2560: post-install verify tail — ensure + health (with the #2498
+    // kickstart retry), folded into the SAME report/exit-code so `--json`
+    // consumers never see `all_ok: true` while the stack is actually down.
+    // Skipped entirely by `--no-verify` (the install itself is unaffected).
+    if !no_verify {
+        let verify = super::verify_tail::run_verify_tail(&selected);
+        report = report.with_verify(verify);
+    }
+
     if json {
         // A failed machine-readable write must not exit 0: automation would
         // read success from the exit code while the JSON never arrived.
@@ -441,6 +509,11 @@ pub fn run(members: &[String], yes: bool, json: bool, no_service: bool, dry_run:
         }
     } else {
         print_human_summary(&report);
+        // The verify tail is printed LAST — it is the final, authoritative
+        // "did this actually work" signal the operator should see (#2560).
+        if let Some(verify) = &report.verify {
+            super::verify_tail::print_human(verify);
+        }
     }
     report.exit_code()
 }
@@ -461,6 +534,7 @@ async fn install_all(
     selected: &[StableMember],
     json: bool,
     service_enabled: bool,
+    force: bool,
 ) -> InstallReport {
     let narr = narrator(json);
     let _ = narr.info(&format!("installing {} component(s)", selected.len()));
@@ -481,11 +555,25 @@ async fn install_all(
             Ok(()) => {
                 tracker.add(Component::new(m.binary.clone(), binary_size(&m.binary)));
                 // Phase 7: bootstrap trusty-mpm supervisor plist (fail-soft).
+                // #3527: gated behind the SAME `--no-service` /
+                // `TCTL_NO_SERVICE_BOOTSTRAP` decision as every other daemon —
+                // previously this ran unconditionally and could tear down /
+                // downgrade a live production supervisor regardless of the
+                // opt-out. A refusal from the downgrade guard inside
+                // `install_mpm_supervisor` also surfaces here as a (non-fatal)
+                // `Err`, which correctly leaves the running daemon untouched.
                 if m.crate_name == "trusty-mpm" {
-                    if let Err(e) = super::plist_bootstrap::install_mpm_supervisor() {
-                        let _ = narr.info(&format!(
-                            "warning: trusty-mpm supervisor bootstrap failed (non-fatal): {e}"
-                        ));
+                    if plans_mpm_supervisor_bootstrap(m, service_enabled) {
+                        if let Err(e) = super::plist_bootstrap::install_mpm_supervisor(force) {
+                            let _ = narr.info(&format!(
+                                "warning: trusty-mpm supervisor bootstrap failed (non-fatal): {e}"
+                            ));
+                        }
+                    } else {
+                        let _ = narr.info(
+                            "trusty-mpm supervisor bootstrap skipped (--no-service / \
+                             TCTL_NO_SERVICE_BOOTSTRAP)",
+                        );
                     }
                 }
                 // Phase 8: codesign + FDA guidance for trusty-search (single
@@ -685,230 +773,10 @@ fn print_human_summary(report: &InstallReport) {
     }
 }
 
+// ── Unit tests ───────────────────────────────────────────────────────────────
+// Tests are in a sibling file to keep this definition file under the 500-line
+// production cap (CLAUDE.md / scripts/check_line_cap.sh) — mirrors the
+// `cli.rs` / `cli_tests.rs` split.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Build an `InstallOutcome` with the pre-#2566 default service state
-    /// (not attempted — `service_ok: true`, empty detail), so tests that only
-    /// care about the binary-install dimension don't have to repeat the two
-    /// new fields at every call site.
-    fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
-        InstallOutcome {
-            member: member.to_owned(),
-            ok,
-            detail: detail.to_owned(),
-            service_ok: true,
-            service_detail: String::new(),
-        }
-    }
-
-    /// Why: The JSON envelope is a public contract; pin its shape.
-    /// What: Builds a report and asserts the serialised keys/values.
-    /// Test: This is the test.
-    #[test]
-    fn report_serialises() {
-        let report = InstallReport::build(vec![outcome("trusty-search", true, "installed")]);
-        let v = serde_json::to_value(&report).expect("serialises");
-        assert_eq!(v["command"], "install");
-        assert_eq!(v["all_ok"], true);
-        assert_eq!(v["members"][0]["member"], "trusty-search");
-        assert_eq!(v["members"][0]["service_ok"], true);
-    }
-
-    /// Why: `all_ok` must be false if any member's BINARY install failed.
-    /// What: Mixes an ok and a failed outcome; asserts `all_ok = false`.
-    /// Test: This is the test.
-    #[test]
-    fn report_all_ok() {
-        let report =
-            InstallReport::build(vec![outcome("a", true, ""), outcome("b", false, "boom")]);
-        assert!(!report.all_ok);
-    }
-
-    /// Why: #2566 review — a binary can install cleanly (`ok: true`) while its
-    /// SERVICE bootstrap genuinely fails; the report must not claim
-    /// `all_ok: true` in that case (the exact failure class #2557 existed
-    /// because of: a "successfully installed" daemon that never actually
-    /// works). A `Skipped` service outcome (opt-out, non-service member, or
-    /// plist already present) must NOT be treated as a failure.
-    /// What: one member with `ok: true, service_ok: false` → `all_ok == false`;
-    /// a second report with `ok: true, service_ok: true` (skip case) →
-    /// `all_ok == true`.
-    /// Test: this is the test.
-    #[test]
-    fn report_all_ok_reflects_service_failure() {
-        let failed = InstallReport::build(vec![InstallOutcome {
-            member: "trusty-search".to_owned(),
-            ok: true,
-            detail: "installed".to_owned(),
-            service_ok: false,
-            service_detail: "service bootstrap failed (non-fatal): boom".to_owned(),
-        }]);
-        assert!(
-            !failed.all_ok,
-            "a genuine service bootstrap failure must flip all_ok to false"
-        );
-        assert_eq!(failed.exit_code(), 2);
-
-        let skipped = InstallReport::build(vec![InstallOutcome {
-            member: "trusty-search".to_owned(),
-            ok: true,
-            detail: "installed".to_owned(),
-            service_ok: true,
-            service_detail: "launchd plist already present — left untouched".to_owned(),
-        }]);
-        assert!(
-            skipped.all_ok,
-            "a skipped (not failed) service bootstrap must not flip all_ok"
-        );
-        assert_eq!(skipped.exit_code(), 0);
-    }
-
-    /// Why: The exit code must track the verdict for automation.
-    /// What: Asserts 0 for all-ok and 2 for a failure.
-    /// Test: This is the test.
-    #[test]
-    fn exit_code_reflects_all_ok() {
-        let ok = InstallReport::build(vec![outcome("a", true, "")]);
-        assert_eq!(ok.exit_code(), 0);
-        let bad = InstallReport::build(vec![outcome("a", false, "x")]);
-        assert_eq!(bad.exit_code(), 2);
-    }
-
-    /// Why: Re-review fix — `binary_size` must resolve under a non-default
-    /// `CARGO_HOME` (CI installs there). The rule lives in the pure
-    /// `cargo_bin_dir_from_env`, exercised here WITHOUT mutating the process
-    /// environment so the test is safe to run in parallel with any other test.
-    /// What: A non-empty value yields `<that>/bin`.
-    /// Test: This is the test.
-    #[test]
-    fn cargo_bin_dir_from_env_honours_value() {
-        assert_eq!(
-            cargo_bin_dir_from_env(Some("/tmp/fake-cargo-home")),
-            Some(std::path::PathBuf::from("/tmp/fake-cargo-home").join("bin"))
-        );
-    }
-
-    /// Why: An empty or absent `CARGO_HOME` must fall back to `~/.cargo/bin`.
-    /// What: Both `Some("")` and `None` resolve to a path ending in `.cargo/bin`.
-    /// Test: This is the test.
-    #[test]
-    fn cargo_bin_dir_from_env_falls_back() {
-        for value in [Some(""), None] {
-            if let Some(p) = cargo_bin_dir_from_env(value) {
-                assert!(p.ends_with(std::path::Path::new(".cargo").join("bin")));
-            }
-        }
-    }
-
-    /// Why: An unknown member must be a clean error (exit 3), not a silent skip.
-    /// What: Calls `run` with a bogus member in `--json` mode; asserts exit 3.
-    /// Test: This is the test.
-    #[test]
-    fn run_unknown_member_is_error() {
-        let code = run(&["not-a-real-tool".to_owned()], true, true, false, false);
-        assert_eq!(code, 3);
-    }
-
-    /// Why: #2112 — `--dry-run` must preview and exit 0 WITHOUT installing,
-    /// regardless of `--yes`. A `--json` invocation keeps the test hermetic
-    /// (no interactive picker, no TTY-dependent branch).
-    /// What: Calls `run` with `dry_run: true`, `yes: false`; asserts exit 0.
-    /// Test: This is the test.
-    #[test]
-    fn run_dry_run_exits_zero() {
-        let code = run(&["tga".to_owned()], false, true, false, true);
-        assert_eq!(code, 0);
-    }
-
-    // #2112 review (HIGH): a `run_non_tty_no_yes_refuses` test previously
-    // called the real `run()` relying on the test harness's ambient stdin not
-    // being a TTY. That is unsound: on a developer's interactive terminal
-    // `is_tty()` returns true → `InstallGate::NeedsPrompt` → `prompt_yes_no`
-    // blocks forever on `stdin().read_line()`, hanging the test suite. The
-    // #2112 regression this was meant to guard — non-TTY + no `--yes` must
-    // REFUSE — is already exhaustively covered, TTY-independent, by
-    // `super::install_gate::tests::decide_non_tty_refuses` (mirrors the
-    // established `upgrade.rs`/`update_engine.rs` split: `resolve_and_apply`
-    // is side-effecting and validated manually, `decide_apply` is the unit-
-    // tested pure gate). No `run()`-level replacement is added here.
-
-    /// Why: The `--dry-run` JSON envelope is a public contract; pin its shape
-    /// and the `service_bootstrap` derivation (enabled AND launchd-managed).
-    /// What: Builds a report over a launchd daemon + a non-daemon with service
-    /// bootstrap enabled; asserts per-member `service_bootstrap` values.
-    /// Test: This is the test.
-    #[test]
-    fn dry_run_report_shape() {
-        let members = vec![
-            stable_member_for_test("trusty-search", "trusty-search", ManageStrategy::Launchd),
-            stable_member_for_test("tga", "tga", ManageStrategy::None),
-        ];
-        let report = build_dry_run_report(&members, true);
-        assert_eq!(report.command, "install");
-        assert!(report.dry_run);
-        assert!(report.service_bootstrap_enabled);
-        assert_eq!(report.members.len(), 2);
-        assert!(
-            report.members[0].service_bootstrap,
-            "launchd member should plan a service bootstrap"
-        );
-        assert!(
-            !report.members[1].service_bootstrap,
-            "non-daemon member must not plan a service bootstrap"
-        );
-
-        let disabled = build_dry_run_report(&members, false);
-        assert!(
-            !disabled.members[0].service_bootstrap,
-            "disabled service bootstrap must suppress every member"
-        );
-    }
-
-    /// Why: #2112 review (MEDIUM) — `--dry-run` always bypasses the
-    /// interactive picker (`run`'s picker gate requires `!dry_run`), so a
-    /// no-members `--dry-run` must preview the FULL stable set, not whatever
-    /// subset a TTY-driven picker might otherwise offer. `run()`'s exit code
-    /// can't be inspected for the resolved set without capturing stdout, so
-    /// this pins the composition `run()` itself uses:
-    /// `select_members_transitive(&[])` (what an empty `members` slice
-    /// resolves to) fed into `build_dry_run_report`.
-    /// What: Resolving `&[]` yields every [`stable_set`] member, in order,
-    /// and the dry-run report carries them all.
-    /// Test: This is the test.
-    #[test]
-    fn dry_run_full_set_when_no_members_named() {
-        let resolved = select_members_transitive(&[]);
-        let all = super::super::stable_set::stable_set();
-        assert_eq!(
-            resolved.members.len(),
-            all.len(),
-            "empty members must resolve to the full stable set"
-        );
-
-        let report = build_dry_run_report(&resolved.members, true);
-        let names: Vec<&str> = report.members.iter().map(|m| m.member.as_str()).collect();
-        let expected: Vec<&str> = all.iter().map(|m| m.crate_name.as_str()).collect();
-        assert_eq!(
-            names, expected,
-            "dry-run preview must list every stable-set member, in order, when none are named"
-        );
-    }
-
-    /// Test-only `StableMember` builder — its fields are public for reads but
-    /// `stable_set` only constructs instances via its own invariant-deriving
-    /// constructor; this builds one directly for the dry-run shaping test.
-    fn stable_member_for_test(
-        crate_name: &str,
-        binary: &str,
-        manage: ManageStrategy,
-    ) -> StableMember {
-        StableMember {
-            crate_name: crate_name.to_owned(),
-            binary: binary.to_owned(),
-            daemon: manage == ManageStrategy::Launchd,
-            manage,
-        }
-    }
-}
+#[path = "install_tests.rs"]
+mod tests;

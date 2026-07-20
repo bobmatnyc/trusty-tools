@@ -223,6 +223,19 @@ pub enum Commands {
         /// context.
         #[arg(long)]
         dry_run: bool,
+
+        /// Allow the trusty-mpm supervisor bootstrap to replace an
+        /// already-registered launchd supervisor with an older-or-equal
+        /// version (#3527 downgrade guard override). Has no effect on any
+        /// other member or check.
+        #[arg(long)]
+        force: bool,
+
+        /// Skip the post-install `ensure` + `stack health` verify tail
+        /// (#2560). The install itself (binaries + service bootstrap) still
+        /// runs; only the final automated verification pass is skipped.
+        #[arg(long)]
+        no_verify: bool,
     },
 
     /// Upgrade the stack (or named members) to the BOM-pinned versions, then restart. (DOC-9)
