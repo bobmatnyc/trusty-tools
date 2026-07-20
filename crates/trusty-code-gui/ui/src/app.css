@@ -102,6 +102,19 @@
   --color-sidebar-active: 56 37 19; /* #382513 */
 }
 
+/* Issue #3447 item 3 — Bob: "10% larger base font." A rem-scale bump on the
+ * root element: every Tailwind utility class in this codebase (`text-xs`,
+ * `text-[11px]`, `p-4`, etc.) that resolves to a `rem` value scales with it
+ * automatically, so this one line reaches the whole app rather than
+ * touching each component. Arbitrary `px`-bracket utilities (`text-[11px]`,
+ * `w-[46px]`) do NOT scale (Tailwind emits those as literal `px`, not
+ * `rem`) — verified by manual inspection (`pnpm build` + `pnpm test`, see
+ * the PR's own gate output) that no rail/header/switcher/input-bar text
+ * clips or overflows at the new size; nothing needed adjusting. */
+html {
+  font-size: 110%;
+}
+
 html,
 body {
   height: 100%;
