@@ -7,6 +7,7 @@
 //! (the primary concrete impl).
 //! Test: see `tests` submodule for async unit tests.
 
+pub(crate) mod path_match;
 #[cfg(test)]
 mod tests;
 mod types;

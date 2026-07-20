@@ -302,6 +302,8 @@ async fn global_search_nested_hierarchy_dedup_count_present() {
             routing_threshold: None,
             max_fanout_concurrency: None,
             serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await
@@ -382,6 +384,8 @@ async fn global_search_sub_index_boost_applied() {
             routing_threshold: None,
             max_fanout_concurrency: None,
             serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await
@@ -465,6 +469,8 @@ async fn global_search_serial_returns_all_results() {
             routing_threshold: None,
             max_fanout_concurrency: None,
             serial: true,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await
@@ -526,6 +532,8 @@ async fn global_search_request_override_echoed() {
             routing_threshold: None,
             max_fanout_concurrency: Some(4),
             serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await

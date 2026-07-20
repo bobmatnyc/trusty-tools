@@ -886,3 +886,103 @@ async fn test_concurrent_saves_are_serialized_and_end_consistent() {
          partial/interleaved snapshot on disk"
     );
 }
+
+// ---- Predicate-pushed filtered search (issue #3401) --------------------
+
+/// This is the core proof for issue #3401's vector lane: a chunk that a
+/// plain `top_k` search would never surface (it ranks outside the window by
+/// raw cosine similarity) must still be found once the search is scoped to
+/// its repo/path, because `search_filtered` pushes the predicate INTO the
+/// HNSW traversal (`usearch::Index::filtered_search`) rather than filtering
+/// an already-truncated result set.
+///
+/// Why: a naive over-fetch-then-filter implementation would pass this test
+/// too IF the over-fetch factor happened to be deep enough, which is exactly
+/// the false confidence the issue warns about — so this test uses far more
+/// filler vectors (50) than any hard-coded over-fetch constant in this crate
+/// (`HNSW_OVERSAMPLE = 4`, so a `top_k=3` unfiltered call only ever
+/// considers ~12 candidates) to make sure the target is unreachable by
+/// over-fetch depth alone, and can only be found via genuine predicate
+/// pushdown.
+/// What: inserts 50 filler vectors near the query (under `"repoA/"`) plus
+/// one dissimilar target vector under `"repoB/target"`. Asserts (1) a plain
+/// `top_k=3` search never returns the target, then (2) `search_filtered`
+/// scoped to `"repoB/"` returns exactly the target.
+#[tokio::test]
+async fn test_filtered_search_finds_match_ranked_below_top_k() {
+    let store = UsearchStore::new(4).expect("store init");
+    let query = vec![1.0f32, 0.0, 0.0, 0.0];
+
+    // 50 filler vectors, all near-identical to the query — every one of them
+    // outranks the dissimilar target by cosine similarity.
+    for i in 0..50 {
+        store
+            .upsert(&format!("repoA/filler{i}"), vec![1.0, 0.0, 0.0, 0.0])
+            .await
+            .expect("upsert filler");
+    }
+    // The target: orthogonal to the query, so it ranks dead last among all
+    // 51 vectors by raw cosine similarity.
+    store
+        .upsert("repoB/target", vec![0.0, 1.0, 0.0, 0.0])
+        .await
+        .expect("upsert target");
+
+    // Precondition: a plain top_k=3 search never surfaces the target — it
+    // genuinely ranks outside the window, not just outside some arbitrary
+    // over-fetch depth.
+    let unfiltered = store.search(&query, 3).await.expect("unfiltered search");
+    assert_eq!(unfiltered.len(), 3);
+    assert!(
+        unfiltered.iter().all(|h| h.chunk_id != "repoB/target"),
+        "precondition failed: target must rank below top_k=3 unfiltered"
+    );
+
+    // Scoped search: the predicate is pushed into HNSW traversal, so it
+    // keeps exploring past the raw-similarity top_k window until it finds a
+    // match under "repoB/" — recovering the target despite its last-place
+    // global rank.
+    let repos = vec!["repoB".to_string()];
+    let filtered = store
+        .search_filtered(&query, 3, None, &repos)
+        .await
+        .expect("filtered search");
+    assert_eq!(
+        filtered.len(),
+        1,
+        "only one vector exists under repoB — filtered search must return exactly it"
+    );
+    assert_eq!(filtered[0].chunk_id, "repoB/target");
+}
+
+/// Companion correctness check: the predicate must also EXCLUDE non-matching
+/// keys, not just admit deep matches — a filter that always says "yes" would
+/// pass the recall test above for the wrong reason.
+#[tokio::test]
+async fn test_filtered_search_excludes_non_matching_keys() {
+    let store = UsearchStore::new(4).expect("store init");
+    let query = vec![1.0f32, 0.0, 0.0, 0.0];
+    for i in 0..5 {
+        store
+            .upsert(&format!("repoA/file{i}"), vec![1.0, 0.0, 0.0, 0.0])
+            .await
+            .expect("upsert repoA");
+    }
+    for i in 0..5 {
+        store
+            .upsert(&format!("repoB/file{i}"), vec![1.0, 0.0, 0.0, 0.0])
+            .await
+            .expect("upsert repoB");
+    }
+
+    let repos = vec!["repoA".to_string()];
+    let hits = store
+        .search_filtered(&query, 10, None, &repos)
+        .await
+        .expect("filtered search");
+    assert_eq!(hits.len(), 5, "only repoA's 5 vectors must be returned");
+    assert!(
+        hits.iter().all(|h| h.chunk_id.starts_with("repoA/")),
+        "no repoB chunk may leak through the filter: {hits:?}"
+    );
+}
