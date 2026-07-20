@@ -501,7 +501,10 @@ fn apply_workstream_updated_sets_active_workstream() {
 }
 
 #[test]
-fn apply_workstream_activation_changed_is_a_deliberate_noop() {
+fn apply_workstream_activation_changed_some_is_a_deliberate_noop() {
+    // `Some(new_id)` alone names an id with no display name — the engine's
+    // subsequent `WorkstreamUpdated` (asserted separately above) is what
+    // actually sets the displayed workstream in this case, not this event.
     let mut app = ReplApp::new("demo", "u");
     apply(
         &mut app,
@@ -512,6 +515,37 @@ fn apply_workstream_activation_changed_is_a_deliberate_noop() {
     );
     assert!(app.active_workstream.is_none());
     assert!(app.chat.is_empty());
+}
+
+/// Regression test (DOC-50 §5.3, Slice 6): a `WorkstreamActivationChanged`
+/// with `new_active_id: None` (the workstream was deactivated with no
+/// replacement, DOC-48 §4.2/§4.3) must clear `app.active_workstream`
+/// immediately. `ReplEvent::WorkstreamUpdated`'s payload is a concrete
+/// `WorkstreamSummary`, so it can never represent "no active workstream" —
+/// this event, and only this event, is what clears the indicator. Before
+/// this fix, `WorkstreamActivationChanged` was treated as an unconditional
+/// no-op for EVERY `new_active_id` value, so a deactivation left the status
+/// line showing the stale, no-longer-active workstream forever.
+#[test]
+fn apply_workstream_activation_changed_none_clears_active_workstream() {
+    let mut app = ReplApp::new("demo", "u");
+    app.active_workstream = Some(WorkstreamSummary {
+        id: "a1".into(),
+        name: "Token rotation".into(),
+    });
+
+    apply(
+        &mut app,
+        ReplEvent::WorkstreamActivationChanged {
+            new_active_id: None,
+            prior_id: Some("a1".into()),
+        },
+    );
+
+    assert!(
+        app.active_workstream.is_none(),
+        "deactivation must clear active_workstream, not leave the stale summary in place"
+    );
 }
 
 #[test]

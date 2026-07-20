@@ -50,6 +50,16 @@ pub enum EngineError {
         status: reqwest::StatusCode,
     },
 
+    /// The daemon closed an SSE stream cleanly (no transport error, no
+    /// non-2xx status) before this client observed a terminal event
+    /// (`SessionDone`/`SessionCancelled`) — and every reconnect attempt
+    /// (bounded by `SESSION_STREAM_MAX_RECONNECTS`) hit the same premature
+    /// close. Distinct from [`Self::Status`]/[`Self::Transport`]: nothing
+    /// about the individual HTTP request failed, only the STREAM never
+    /// reached a terminal state.
+    #[error("event stream for {url} closed repeatedly with no terminal session event observed")]
+    StreamClosed { url: String },
+
     /// The daemon's `POST /rpc` response body didn't have the shape this
     /// client expected (e.g. `session.create`'s result missing an `id`
     /// field) — a daemon/client version-skew symptom, not a transport

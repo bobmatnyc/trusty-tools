@@ -98,7 +98,35 @@ pub(super) async fn run_workstream_subscription(
                         // (HIGH finding: silently skipping this arm left
                         // `active_workstream`/the `"workstream"` picker
                         // stale indefinitely).
-                        state.refresh_workstream_cache().await;
+                        //
+                        // Use the return value (Slice 6, #3418): it only
+                        // clears `EngineState::active_workstream` (this
+                        // client's OWN cache, used by `/workstream list`'s
+                        // marker and `subscribe_workstream_events`'s next
+                        // `current_id`) — the shared `ReplApp::active_workstream`
+                        // the STATUS LINE actually renders from lives entirely
+                        // on the `trusty-tui` side and is populated ONLY by
+                        // `ReplEvent::WorkstreamUpdated`. Discarding this
+                        // return value (as the code did before this fix) left
+                        // the status line showing a stale workstream name
+                        // forever after every activation change — a
+                        // `WorkstreamUpdated` was never actually sent, despite
+                        // `trusty-tui`'s reducer being written to expect one
+                        // as this event's follow-up.
+                        let refreshed = state.refresh_workstream_cache().await;
+                        if let Some(ws) = refreshed {
+                            let _ = tx.send(ReplEvent::WorkstreamUpdated(ws));
+                        }
+                        // Push the status line's Workstream segment in step
+                        // with the cache — `statusline_segments()` reads the
+                        // SAME `active_workstream` mutex `refresh_workstream_cache`
+                        // just wrote, so this is `[Workstream{..}]` when
+                        // `refreshed` was `Some` above and `[]` (collapsing
+                        // the segment away, not leaving it stale) when the
+                        // daemon reports no active workstream — covers BOTH
+                        // the `Some(new_id)` and `None` (deactivation) arms
+                        // below in one place.
+                        let _ = tx.send(ReplEvent::StatuslineUpdate(state.statusline_segments()));
                         match new_active_id {
                             Some(new_id) => {
                                 let _ = tx.send(ReplEvent::WorkstreamActivationChanged {
@@ -116,17 +144,24 @@ pub(super) async fn run_workstream_subscription(
                                 // (`trusty_tui::event`) now carries
                                 // `new_active_id: Option<String>`, so this
                                 // state is representable structurally rather
-                                // than as free text. The cache refresh above
-                                // is what actually clears the stale
-                                // indicator (`active_workstream` -> `None`,
-                                // the `"workstream"` picker's active marker
-                                // gone). Stay connected to `current_id`'s
-                                // stream rather than reconnecting anywhere:
-                                // deactivation is not closure (DOC-48 §4.4),
-                                // and `crate::workstreams::sse`'s
-                                // `classify()` still forwards a LATER
-                                // activation naming `current_id` as its
-                                // `prior_id` to this same connection.
+                                // than as free text — `ReplEvent::WorkstreamUpdated`
+                                // cannot represent "no active workstream" (its
+                                // payload is a concrete `WorkstreamSummary`,
+                                // not `Option`), which is exactly why this
+                                // event exists: `trusty-tui`'s reducer clears
+                                // `ReplApp::active_workstream` directly on
+                                // `new_active_id: None`, rather than waiting
+                                // for a `WorkstreamUpdated` that will never
+                                // come (see `refreshed` above — `None` here
+                                // too, since the daemon reports no active
+                                // workstream). Stay connected to
+                                // `current_id`'s stream rather than
+                                // reconnecting anywhere: deactivation is not
+                                // closure (DOC-48 §4.4), and
+                                // `crate::workstreams::sse`'s `classify()`
+                                // still forwards a LATER activation naming
+                                // `current_id` as its `prior_id` to this same
+                                // connection.
                                 let _ = tx.send(ReplEvent::WorkstreamActivationChanged {
                                     new_active_id: None,
                                     prior_id,

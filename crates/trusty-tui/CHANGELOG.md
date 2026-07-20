@@ -20,6 +20,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`WorkstreamActivationChanged { new_active_id: None }` now clears `ReplApp::active_workstream` (Slice 6, closes #3418, part of epic #3411).** The reducer previously treated this event as an unconditional no-op for every `new_active_id` value, on the assumption that a follow-up `WorkstreamUpdated` always supplies the display name. That assumption doesn't hold for deactivation: `WorkstreamUpdated`'s payload is a concrete `WorkstreamSummary`, so it can never represent "no active workstream" — a deactivation left the status line showing the stale, no-longer-active workstream indefinitely. The `Some(new_id)` case is unchanged (still a deliberate no-op pending the engine's `WorkstreamUpdated`).
+
 - **`ReplEvent::WorkstreamActivationChanged.new_active_id` is now `Option<String>` (closes #3452, part of epic #3411).** The field was non-optional `String`, but the daemon legitimately publishes a `None` activation target when the active workstream is deactivated with no replacement (DOC-48 §4.2/§4.3) — mirroring `crate::events::Event::WorkstreamActivationChanged` in `trusty-code`, which already declares this field as `Option<String>`. The non-optional shape forced `trusty-code`'s Slice 3 consumer to fall back to a free-text `StatusMessage` for that case (PR #3436); this closes the gap found in that review, while `trusty-tui` still has essentially one consumer.
 
 ### Added

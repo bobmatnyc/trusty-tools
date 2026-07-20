@@ -96,12 +96,27 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         ReplEvent::ClearScrollback => app.clear_scrollback(),
         ReplEvent::StatuslineUpdate(segments) => app.statusline = segments,
         ReplEvent::WorkstreamUpdated(ws) => app.active_workstream = Some(ws),
-        ReplEvent::WorkstreamActivationChanged { .. } => {
-            // Intentional no-op: per `TuiEngine::subscribe_workstream_events`,
-            // the engine follows this with a `WorkstreamUpdated` carrying the
-            // full summary once it re-fetches — that's what actually changes
-            // the displayed workstream. This event alone names an id with no
-            // display name to show yet.
+        ReplEvent::WorkstreamActivationChanged { new_active_id, .. } => {
+            if new_active_id.is_none() {
+                // The workstream was deactivated with no replacement active
+                // (DOC-48 §4.2/§4.3, a real daemon-published state — see this
+                // variant's own doc comment). `WorkstreamUpdated`'s payload
+                // is a concrete `WorkstreamSummary`, so it structurally
+                // CANNOT represent "no active workstream" — there is no
+                // follow-up `WorkstreamUpdated` to wait for here, unlike the
+                // `Some(new_id)` case below. This is the only place the
+                // indicator gets cleared; skipping it (as a prior revision
+                // did, treating this whole variant as an unconditional
+                // no-op) left the status line showing a stale workstream
+                // name forever after a deactivation.
+                app.active_workstream = None;
+            }
+            // A `Some(new_id)` activation: per
+            // `TuiEngine::subscribe_workstream_events`'s contract, the
+            // engine follows this with a `WorkstreamUpdated` carrying the
+            // full re-fetched summary — that event, not this one, is what
+            // sets the displayed name (this event alone names an id with no
+            // display name to show yet).
         }
         ReplEvent::ConnectionLost { reason } => {
             app.push_status(format!("Connection lost: {reason}"))

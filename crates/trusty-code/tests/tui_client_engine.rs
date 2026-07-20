@@ -300,6 +300,63 @@ async fn handle_input_streams_assistant_output_and_tool_invocation() {
     );
 }
 
+/// Regression test for epic #3411's deferred Slice 3 review item: once
+/// `pump_session_events` exhausts every reconnect attempt (`GET
+/// /sessions/{id}/events` closing cleanly with no data, over and over)
+/// without ever observing a terminal `SessionDone`/`SessionCancelled` event,
+/// `handle_input` must return `Err` (not silently `Ok(true)`) AND the TUI
+/// must already have received a VISIBLE `done: true, is_error: true`
+/// `AssistantOutput` — not just a trail of `ConnectionLost`s that never clear
+/// `ReplApp::busy`. That combination is what rules out the "TUI looks alive
+/// with a stuck spinner and no error text" silent stall the review flagged.
+/// Takes ~10s of real wall-clock time
+/// (`SESSION_STREAM_MAX_RECONNECTS` reconnects at the fixed
+/// `RECONNECT_BACKOFF`, neither test-overridable) — hermetic-but-slow beats
+/// mocking away the exact timing this test asserts on.
+#[tokio::test]
+async fn handle_input_surfaces_visible_error_after_exhausting_reconnects() {
+    let server = MockServer::start().await;
+    mount_common(&server).await;
+    // Every open of GET /sessions/{id}/events closes immediately with no
+    // body — the "clean-but-premature close" case that used to `return
+    // Ok(())` silently once reconnects ran out (`pump_session_events`'s
+    // `Ok(Ok(None))` arm, before this fix).
+    Mock::given(method("GET"))
+        .and(path(format!("/sessions/{SESSION_ID}/events")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("", "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let engine = CodeEngine::with_daemon_url(reqwest::Client::new(), server.uri(), None);
+    let (tx, mut rx) = unbounded_channel();
+    engine.setup(tx.clone()).await.expect("setup");
+    while rx.try_recv().is_ok() {} // drain setup's own events
+
+    let result = engine.handle_input("hello".to_string(), tx).await;
+    assert!(
+        result.is_err(),
+        "handle_input must return Err once every reconnect attempt is exhausted with no \
+         terminal session event ever observed, not Ok(true)"
+    );
+
+    let mut saw_terminal_error = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let ReplEvent::AssistantOutput {
+            done: true,
+            is_error: true,
+            ..
+        } = ev
+        {
+            saw_terminal_error = true;
+        }
+    }
+    assert!(
+        saw_terminal_error,
+        "expected a done:true, is_error:true AssistantOutput before handle_input returned Err \
+         — otherwise the TUI stalls silently (busy stays true, no error text rendered)"
+    );
+}
+
 /// `cancel_session` must call the daemon's `session.cancel` RPC — per the
 /// thin-client axiom (DOC-39 §2.1 C-2), client-side render-stop alone is
 /// never acceptable.
@@ -359,11 +416,20 @@ async fn subscribe_workstream_events_emits_activation_changed_with_wire_field_na
         .await
         .expect("subscribe_workstream_events");
 
-    let event = tokio::time::timeout(Duration::from_secs(5), async {
+    // Collect every event up through the first `WorkstreamActivationChanged`
+    // (rather than skipping straight to it) — this fix also pushes
+    // `WorkstreamUpdated`/`StatuslineUpdate` from the cache refresh that
+    // precedes it (DOC-50 §5.3, Slice 6), and this test asserts on those
+    // too, not just the activation-changed event itself.
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut seen = Vec::new();
         loop {
             match rx.recv().await {
-                Some(ev @ ReplEvent::WorkstreamActivationChanged { .. }) => return ev,
-                Some(_) => continue,
+                Some(ev @ ReplEvent::WorkstreamActivationChanged { .. }) => {
+                    seen.push(ev);
+                    return seen;
+                }
+                Some(ev) => seen.push(ev),
                 None => panic!("channel closed before observing WorkstreamActivationChanged"),
             }
         }
@@ -371,7 +437,11 @@ async fn subscribe_workstream_events_emits_activation_changed_with_wire_field_na
     .await
     .expect("timed out waiting for WorkstreamActivationChanged");
 
-    match event {
+    let activation = events
+        .iter()
+        .find(|e| matches!(e, ReplEvent::WorkstreamActivationChanged { .. }))
+        .expect("collected events must include WorkstreamActivationChanged");
+    match activation {
         ReplEvent::WorkstreamActivationChanged {
             new_active_id,
             prior_id,
@@ -381,6 +451,25 @@ async fn subscribe_workstream_events_emits_activation_changed_with_wire_field_na
         }
         other => panic!("unexpected {other:?}"),
     }
+
+    // The SAME cache refresh that produced the activation-changed event must
+    // ALSO have pushed the status line's Workstream segment (DOC-50 §5.3's
+    // "SSE-driven status-line display") — not just the structured event a
+    // future picker/command layer consumes.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ReplEvent::WorkstreamUpdated(_))),
+        "expected a WorkstreamUpdated alongside the activation change; got {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ReplEvent::StatuslineUpdate(segs)
+                if segs.iter().any(|s| matches!(s, trusty_tui::StatuslineSegment::Workstream { .. }))
+        )),
+        "expected a StatuslineUpdate carrying a Workstream segment; got {events:?}"
+    );
 
     engine.shutdown().await.expect("shutdown");
 }

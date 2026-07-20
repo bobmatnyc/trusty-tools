@@ -187,6 +187,14 @@ impl TuiEngine for CodeEngine {
 
         if let Some(ws) = self.state.refresh_workstream_cache().await {
             let _ = tx.send(ReplEvent::WorkstreamUpdated(ws));
+            // Populate the status line's Workstream segment on first render
+            // (DOC-50 §5.3, Slice 6) — without this, the TUI would show a
+            // blank statusline until the background SSE subscription (which
+            // only starts after `setup` returns, see `run.rs::run`) happens
+            // to observe an activation change.
+            let _ = tx.send(ReplEvent::StatuslineUpdate(
+                self.state.statusline_segments(),
+            ));
         }
 
         let _ = tx.send(ReplEvent::StatusMessage(format!(
