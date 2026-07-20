@@ -94,6 +94,22 @@ pub(super) struct HealthResponse {
     /// daemons with reconcile disabled via `TRUSTY_NO_BOOT_RECONCILE=1` omit it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) boot_reconcile: Option<ReconcileSummary>,
+    /// Count of registered indexes whose file watcher was refused because
+    /// their root was detected as a network-mounted filesystem (issue
+    /// #3408).
+    ///
+    /// Why: inotify/FSEvents cannot observe writes made by another host onto
+    /// a shared EFS/NFS/SMB mount — an OS-level limitation. Starting the
+    /// watcher anyway would leave the daemon reporting healthy while the
+    /// watcher silently never fires for cross-host changes. This field is
+    /// the machine-readable signal that lets an operator/monitor catch that
+    /// condition without tailing logs. A non-zero value means those indexes
+    /// must be kept in sync via `POST /indexes/:id/index-file` and
+    /// `POST /indexes/:id/remove-file` instead (the supported
+    /// network-mount pattern — see the operator docs).
+    /// What: `WatcherManager::network_degraded_count()` at poll time.
+    /// Test: `health_surfaces_watcher_network_degraded_count`.
+    pub(super) indexes_watcher_network_degraded: usize,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38).
@@ -353,16 +369,27 @@ pub(super) async fn health_handler(
         })
         .unwrap_or(None);
 
+    // Issue #3408: count indexes whose watcher was refused because their root
+    // is network-mounted (EFS/NFS/SMB/CIFS) — inotify/FSEvents cannot observe
+    // another host's writes there, so starting the watcher would silently
+    // never fire. Cheap: just the degraded map's length under its own lock.
+    let indexes_watcher_network_degraded = state.watcher_manager.network_degraded_count().await;
+
     // Issue #1870: honest top-level status. `"ok"` used to be unconditional,
     // so a total silent search outage (all-lanes-Failed corpus) still read as
     // healthy. Downgrade to `"degraded"` when at least one registered index has
     // a failed lane so a simple `status != "ok"` gate catches it. The healthy
     // path is unchanged (`indexes_corpus_failed == 0` → `"ok"`).
-    let overall_status = if warmboot_summary.indexes_corpus_failed > 0 {
-        "degraded"
-    } else {
-        "ok"
-    };
+    // Issue #3408: also downgrade when a watcher was refused for a
+    // network-mounted root — the daemon is not silently broken, but it is
+    // running with a real capability gap that the same `status != "ok"`
+    // monitors should catch.
+    let overall_status =
+        if warmboot_summary.indexes_corpus_failed > 0 || indexes_watcher_network_degraded > 0 {
+            "degraded"
+        } else {
+            "ok"
+        };
 
     Json(HealthResponse {
         status: overall_status,
@@ -389,6 +416,7 @@ pub(super) async fn health_handler(
         indexes_component_catch_up_in_progress,
         warmboot_summary,
         boot_reconcile,
+        indexes_watcher_network_degraded,
     })
 }
 

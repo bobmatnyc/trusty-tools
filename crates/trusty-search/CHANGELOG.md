@@ -7,6 +7,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **Network-mount detection for the file watcher** ([#3408](https://github.com/bobmatnyc/trusty-tools/issues/3408)):
+  the daemon now detects when a registered index's root is a network-mounted
+  filesystem (EFS/NFS/SMB/CIFS — via `statfs` on macOS/Linux) and refuses to
+  start the file watcher for that index instead of silently starting one that
+  can never observe another host's writes (inotify/FSEvents are local-host-only
+  kernel mechanisms — an OS-level limitation, not a bug). The condition is
+  surfaced on `GET /health` (`indexes_watcher_network_degraded`) and
+  `GET /indexes/:id/status` (`watcher.network_mount_degraded` +
+  `watcher.degraded_reason`), naming `POST /indexes/:id/index-file` and
+  `POST /indexes/:id/remove-file` as the actionable next step. Detection is
+  conservative (fails open to "local") so it never blocks a legitimate local
+  watcher. Also officially documents those two endpoints (and their `index_file`
+  / `remove_file` MCP equivalents) as the supported incremental-indexing path
+  for network-mounted and build/serve-split deployments, with a worked example —
+  see `README.md` and `CLAUDE.md`'s endpoint catalogue.
+
 ## [0.35.0] — 2026-07-19
 
 ### Security

@@ -19,6 +19,7 @@ pub mod lazy_loader;
 pub(crate) mod lazy_restore;
 pub mod mcp_descriptor;
 pub mod metrics;
+pub mod network_fs;
 pub mod orphan_reaper;
 pub mod persistence;
 pub mod persistence_loader;

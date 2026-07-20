@@ -176,6 +176,17 @@ pub(super) async fn index_status_handler(
         .corpus_arc()
         .and_then(|c| c.chunk_count().ok())
         .unwrap_or_else(|| indexer.chunk_count());
+    // Issue #3408: surface the watcher's live/degraded state per-index. A
+    // network-mounted root never gets a live watcher (inotify/FSEvents can't
+    // observe another host's writes there); `network_mount_degraded` plus
+    // `degraded_reason` name the actionable per-file endpoints so an operator
+    // inspecting one index (rather than polling all of `/health`) sees why
+    // saves aren't triggering incremental indexing.
+    let watcher_active = state.watcher_manager.is_watching(&index_id).await;
+    let watcher_degraded_reason = state
+        .watcher_manager
+        .network_degraded_reason(&index_id)
+        .await;
     Ok(Json(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
@@ -205,6 +216,12 @@ pub(super) async fn index_status_handler(
         "last_walk_files_seen": walk_diag.last_walk_files_seen,
         "last_walk_files_skipped": walk_diag.last_walk_files_skipped,
         "last_walk_error": walk_diag.last_walk_error,
+        // Issue #3408: per-index watcher liveness + network-mount degradation.
+        "watcher": {
+            "active": watcher_active,
+            "network_mount_degraded": watcher_degraded_reason.is_some(),
+            "degraded_reason": watcher_degraded_reason,
+        },
     })))
 }
 

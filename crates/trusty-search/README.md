@@ -579,6 +579,32 @@ fields that let operators diagnose why a reindex produced zero chunks:
 These fields are populated every time a reindex task runs. On a healthy index
 with chunks you will see `last_walk_error: null` and `last_walk_files_seen > 0`.
 
+## Network-mounted deployments (EFS/NFS/SMB) — issue #3408
+
+**`POST /indexes/:id/index-file` / `POST /indexes/:id/remove-file` (and the
+equivalent `index_file` / `remove_file` MCP tools) are the officially
+supported, stability-committed way to keep an index in sync when its root
+lives on a network mount (EFS/NFS/SMB/CIFS) or in a build/serve-split
+deployment** (an indexer box writes to shared storage; one or more serving
+boxes only read + query it).
+
+The native file watcher cannot be used there: inotify (Linux) and FSEvents
+(macOS) are local-host kernel mechanisms that cannot observe a write made by a
+*different* host onto a shared mount — this is an OS-level limitation, not a
+bug in this crate. As of issue #3408 the daemon detects a network-mounted
+index root at watcher-start time and refuses to start the watcher for that
+index (rather than starting it and silently never firing), surfacing the
+condition on `GET /health` (`indexes_watcher_network_degraded`) and
+`GET /indexes/:id/status` (`watcher.network_mount_degraded` +
+`watcher.degraded_reason`) so it is visible without tailing logs.
+
+Drive an index on a network mount by calling `index-file`/`remove-file`
+(directly, or via the MCP tools) from whatever process already knows what
+changed on your side — `git diff` on pull, a CI job's own change manifest, or
+a local-side build hook. See [CLAUDE.md](./CLAUDE.md)'s endpoint catalogue
+("Supported network-mount pattern" under `POST /indexes/:id/remove-file`) for
+the full request/response shapes and a worked example script.
+
 ## Stack
 
 | Component       | Choice                                              |
@@ -702,6 +728,14 @@ To fix:
 The same TCC restriction can affect Linux systemd deployments on mount points
 that require specific permissions — grant the service user read access to the
 data directory.
+
+**Watcher never fires / saves aren't picked up on a network mount (EFS/NFS/SMB)**
+
+This is expected — see [Network-mounted deployments](#network-mounted-deployments-efsnfssmb--issue-3408)
+above. Check `GET /health`'s `indexes_watcher_network_degraded` or
+`GET /indexes/:id/status`'s `watcher` field; a network-mounted root never gets
+a live watcher by design. Drive updates via `POST /indexes/:id/index-file` /
+`POST /indexes/:id/remove-file` instead.
 
 ## Architecture and HTTP API
 
