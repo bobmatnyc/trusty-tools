@@ -187,6 +187,46 @@ pub(super) fn coreml_init_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Resolve which fastembed model variant is the embedder's *default*, from
+/// the process environment.
+///
+/// Why: issue #3486 / #3493 P0 — the previous unconditional default,
+/// `AllMiniLML6V2Q` (INT8, dynamically quantised), is both slower and less
+/// accurate than the non-quantized fp32 variant on the CPU EP that this
+/// model actually runs on (CoreML's `GetCapability` rejects the INT8 op set
+/// outright, so the CoreML EP contributes nothing regardless of platform —
+/// confirmed by the #3486 CoreML/fp16 experiment): ~2.1x slower
+/// (`MatMulInteger`/`DynamicQuantizeLinear` dequant-requant ops are
+/// themselves expensive on CPU) and measurably less accurate (0.9897 mean
+/// cosine similarity vs a genuine `sentence-transformers` reference, vs
+/// 0.999999+ for fp32 — see that experiment's correctness gate). `Q` is kept
+/// available as an explicit opt-in for operators who need the smaller
+/// on-disk/in-memory footprint (~23MB vs ~90MB) more than they need speed or
+/// accuracy.
+/// What: `TRUSTY_EMBEDDER_MODEL=int8` / `=quantized` / `=q` (case-
+/// insensitive, trimmed) selects the previous INT8 default
+/// (`EmbeddingModel::AllMiniLML6V2Q`); anything else, including unset,
+/// selects the new default, `EmbeddingModel::AllMiniLML6V2` (fp32) —
+/// fastembed's own natively-shipped non-quantized variant. fp16 was
+/// deliberately not chosen: the CPU EP this model runs on has no native fp16
+/// compute path, and the #3486 experiment's fp16 arm required a fragile
+/// hand-built ORT-optimizer conversion pipeline that fastembed does not ship
+/// or support loading natively.
+/// Test: `resolve_default_embedding_model_defaults_to_fp32`,
+/// `resolve_default_embedding_model_int8_opt_in`,
+/// `resolve_default_embedding_model_ignores_unknown` in `mod.rs`.
+pub(super) fn resolve_default_embedding_model() -> EmbeddingModel {
+    match std::env::var("TRUSTY_EMBEDDER_MODEL")
+        .ok()
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("int8") | Some("quantized") | Some("q") => EmbeddingModel::AllMiniLML6V2Q,
+        _ => EmbeddingModel::AllMiniLML6V2,
+    }
+}
+
 /// Outcome of a single execution-provider init attempt, used to decide
 /// whether to fall back to CPU and whether to poison [`COREML_KNOWN_BAD`].
 ///
@@ -522,7 +562,21 @@ impl FastEmbedder {
                     .map(|v| v.eq_ignore_ascii_case("gpu"))
                     .unwrap_or(false);
 
-                let (q_opts, q_provider) = Self::init_options(EmbeddingModel::AllMiniLML6V2Q);
+                // Default is the non-quantized fp32 model (issue #3486 /
+                // #3493 P0 — see `resolve_default_embedding_model`'s doc for
+                // the throughput + accuracy data); INT8 remains available via
+                // `TRUSTY_EMBEDDER_MODEL=int8`. Whichever model is NOT
+                // selected as the primary becomes the last-resort fallback if
+                // the primary fails to initialise on CPU too, preserving the
+                // pre-existing two-model robustness net.
+                let primary_model = resolve_default_embedding_model();
+                let fallback_model = if primary_model == EmbeddingModel::AllMiniLML6V2Q {
+                    EmbeddingModel::AllMiniLML6V2
+                } else {
+                    EmbeddingModel::AllMiniLML6V2Q
+                };
+
+                let (q_opts, q_provider) = Self::init_options(primary_model.clone());
                 let (m, provider) = match Self::try_new_bounded(q_opts, q_provider) {
                     Ok(m) => (m, q_provider),
                     Err(q_err) => {
@@ -546,19 +600,19 @@ impl FastEmbedder {
                             // any worker thread reads it.
                             unsafe { std::env::set_var("TRUSTY_DEVICE", "cpu") };
                             let (cpu_opts, cpu_provider) =
-                                Self::init_options(EmbeddingModel::AllMiniLML6V2Q);
+                                Self::init_options(primary_model.clone());
                             match TextEmbedding::try_new(cpu_opts) {
                                 Ok(m) => (m, cpu_provider),
                                 Err(cpu_err) => {
                                     tracing::warn!(
-                                        "AllMiniLML6V2Q init failed on CPU ({cpu_err:#}), \
-                                         falling back to AllMiniLML6V2"
+                                        "{primary_model:?} init failed on CPU ({cpu_err:#}), \
+                                         falling back to {fallback_model:?}"
                                     );
                                     let (fb_opts, fb_provider) =
-                                        Self::init_options(EmbeddingModel::AllMiniLML6V2);
-                                    let m = TextEmbedding::try_new(fb_opts).context(
-                                        "failed to initialise fastembed (tried CUDA→CPU on AllMiniLML6V2Q, then AllMiniLML6V2)",
-                                    )?;
+                                        Self::init_options(fallback_model.clone());
+                                    let m = TextEmbedding::try_new(fb_opts).context(format!(
+                                        "failed to initialise fastembed (tried CUDA→CPU on {primary_model:?}, then {fallback_model:?})"
+                                    ))?;
                                     (m, fb_provider)
                                 }
                             }
@@ -569,13 +623,12 @@ impl FastEmbedder {
                             ));
                         } else {
                             tracing::warn!(
-                                "AllMiniLML6V2Q init failed ({q_err:#}), falling back to AllMiniLML6V2"
+                                "{primary_model:?} init failed ({q_err:#}), falling back to {fallback_model:?}"
                             );
-                            let (fb_opts, fb_provider) =
-                                Self::init_options(EmbeddingModel::AllMiniLML6V2);
-                            let m = TextEmbedding::try_new(fb_opts).context(
-                                "failed to initialise fastembed (tried AllMiniLML6V2Q and AllMiniLML6V2)",
-                            )?;
+                            let (fb_opts, fb_provider) = Self::init_options(fallback_model.clone());
+                            let m = TextEmbedding::try_new(fb_opts).context(format!(
+                                "failed to initialise fastembed (tried {primary_model:?} and {fallback_model:?})"
+                            ))?;
                             (m, fb_provider)
                         }
                     }
