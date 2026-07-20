@@ -74,6 +74,7 @@ pub(super) async fn load_or_create_user_profile()
             email: None,
             preferred_model: None,
             timezone: None,
+            location: None,
             created_at: chrono::Utc::now().to_rfc3339(),
         };
         return Ok(Some(p));
@@ -125,11 +126,19 @@ async fn conduct_user_interview() -> Result<crate::identity::user_profile::UserP
     let tz = tz.trim().to_string();
     let timezone = if tz.is_empty() { None } else { Some(tz) };
 
+    eprint!("Location (e.g. New York, NY, USA — optional, Enter to skip): ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    let mut loc = String::new();
+    reader.read_line(&mut loc).await?;
+    let loc = loc.trim().to_string();
+    let location = if loc.is_empty() { None } else { Some(loc) };
+
     Ok(UserProfile {
         name,
         email,
         preferred_model: None,
         timezone,
+        location,
         created_at: chrono::Utc::now().to_rfc3339(),
     })
 }

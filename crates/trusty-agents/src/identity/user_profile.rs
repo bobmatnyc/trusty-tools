@@ -117,15 +117,18 @@ impl UserProfile {
     /// transparently sees whichever tier supplied the value, with no
     /// separate file-parsing logic needed.
     /// What: reads `TAGENT_USER_NAME` (required — `None` overall when absent
-    /// or blank), `TAGENT_USER_EMAIL` (optional), and `TAGENT_USER_TIMEZONE`
+    /// or blank), `TAGENT_USER_EMAIL` (optional), `TAGENT_USER_TIMEZONE`
     /// (optional, falling back to the POSIX `TZ` var when unset — a
     /// widely-set convention that's an unambiguous stand-in when the
-    /// TAGENT-specific var isn't present). `preferred_model` is always
-    /// `None` (no env var maps to it; users needing that use `/model`).
+    /// TAGENT-specific var isn't present), and `TAGENT_USER_LOCATION`
+    /// (optional, free-text — mirrors `_NAME`/`_EMAIL`/`_TIMEZONE`, no
+    /// derivation from timezone or any other source). `preferred_model` is
+    /// always `None` (no env var maps to it; users needing that use
+    /// `/model`).
     /// Test: `from_env_reads_name_email_timezone`,
     /// `from_env_falls_back_to_tz_for_timezone`,
     /// `from_env_returns_none_when_name_absent`,
-    /// `from_env_treats_blank_name_as_absent`.
+    /// `from_env_treats_blank_name_as_absent`, `from_env_reads_location`.
     pub fn from_env() -> Option<Self> {
         let name = std::env::var("TAGENT_USER_NAME")
             .ok()
@@ -138,11 +141,15 @@ impl UserProfile {
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| std::env::var("TZ").ok().filter(|s| !s.is_empty()));
+        let location = std::env::var("TAGENT_USER_LOCATION")
+            .ok()
+            .filter(|s| !s.is_empty());
         Some(Self {
             name,
             email,
             preferred_model: None,
             timezone,
+            location,
             created_at: chrono::Utc::now().to_rfc3339(),
         })
     }
@@ -161,6 +168,7 @@ mod tests {
             email: Some("ada@example.com".to_string()),
             preferred_model: None,
             timezone: Some("UTC".to_string()),
+            location: None,
             created_at: "2026-04-25T00:00:00Z".to_string(),
         };
         profile.save_to(&path).unwrap();
@@ -168,8 +176,30 @@ mod tests {
         assert_eq!(loaded.name, "Ada");
         assert_eq!(loaded.email.as_deref(), Some("ada@example.com"));
         assert_eq!(loaded.timezone.as_deref(), Some("UTC"));
+        assert_eq!(loaded.location, None);
         assert_eq!(loaded.created_at, "2026-04-25T00:00:00Z");
         assert!(loaded.is_complete());
+    }
+
+    /// Why: `location` round-trips through TOML like every other optional
+    /// field, and a profile saved WITHOUT a location must not synthesize a
+    /// placeholder on load (#3052 follow-up: user-supplied only).
+    /// Test: itself.
+    #[test]
+    fn profile_round_trip_through_toml_with_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("user.toml");
+        let profile = UserProfile {
+            name: "Ada".to_string(),
+            email: None,
+            preferred_model: None,
+            timezone: None,
+            location: Some("New York, NY, USA".to_string()),
+            created_at: "2026-04-25T00:00:00Z".to_string(),
+        };
+        profile.save_to(&path).unwrap();
+        let loaded = UserProfile::load_from(&path).unwrap();
+        assert_eq!(loaded.location.as_deref(), Some("New York, NY, USA"));
     }
 
     #[test]
@@ -196,6 +226,7 @@ mod tests {
             std::env::remove_var("TAGENT_USER_NAME");
             std::env::remove_var("TAGENT_USER_EMAIL");
             std::env::remove_var("TAGENT_USER_TIMEZONE");
+            std::env::remove_var("TAGENT_USER_LOCATION");
             std::env::remove_var("TZ");
         }
     }
@@ -258,6 +289,24 @@ mod tests {
         }
         let p = UserProfile::from_env().expect("expected a profile from env");
         assert_eq!(p.timezone.as_deref(), Some("UTC"));
+        clear_profile_env();
+    }
+
+    /// Why: `TAGENT_USER_LOCATION` mirrors `_NAME`/`_EMAIL`/`_TIMEZONE` —
+    /// plain env passthrough, no derivation from timezone or anything else.
+    /// Test: itself.
+    #[test]
+    fn from_env_reads_location() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_profile_env();
+        unsafe {
+            std::env::set_var("TAGENT_USER_NAME", "Masa");
+            std::env::set_var("TAGENT_USER_LOCATION", "New York, NY, USA");
+        }
+        let p = UserProfile::from_env().expect("expected a profile from env");
+        assert_eq!(p.location.as_deref(), Some("New York, NY, USA"));
         clear_profile_env();
     }
 

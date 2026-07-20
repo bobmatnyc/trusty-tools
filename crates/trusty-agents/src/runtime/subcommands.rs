@@ -315,6 +315,8 @@ pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Resul
             email: Option<String>,
             #[arg(long)]
             timezone: Option<String>,
+            #[arg(long)]
+            location: Option<String>,
         },
     }
 
@@ -328,11 +330,12 @@ pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Resul
                 println!("name:     {}", p.name);
                 println!("email:    {}", p.email.as_deref().unwrap_or("(not set)"));
                 println!("timezone: {}", p.timezone.as_deref().unwrap_or("(not set)"));
+                println!("location: {}", p.location.as_deref().unwrap_or("(not set)"));
                 println!("saved at: {}", UserProfile::profile_path().display());
             }
             None => println!(
                 "No profile set. Run `tagent` interactively (first-run interview), set \
-                 TAGENT_USER_NAME/_EMAIL/_TIMEZONE in .env.local, or run \
+                 TAGENT_USER_NAME/_EMAIL/_TIMEZONE/_LOCATION in .env.local, or run \
                  `tagent config profile set --name <name>`."
             ),
         },
@@ -340,6 +343,7 @@ pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Resul
             name,
             email,
             timezone,
+            location,
         } => {
             let mut profile = UserProfile::load().unwrap_or_default();
             if let Some(name) = name {
@@ -350,6 +354,9 @@ pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Resul
             }
             if timezone.is_some() {
                 profile.timezone = timezone;
+            }
+            if location.is_some() {
+                profile.location = location;
             }
             if profile.created_at.is_empty() {
                 profile.created_at = chrono::Utc::now().to_rfc3339();

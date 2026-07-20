@@ -8,8 +8,10 @@
 //! What: `SessionOverrides`, `resolve_overridden_credentials`,
 //! `resolve_agent_config`, `resolve_ctrl_agent_config`,
 //! `apply_credential_routing`, `build_deployment_footer`,
+//! `render_user_datetime`, `render_user_context_block`,
 //! `build_user_context_prefix`, and `recall_project_memories`.
-//! Test: `apply_credential_routing_*`, `build_deployment_footer_*`, and
+//! Test: `apply_credential_routing_*`, `build_deployment_footer_*`,
+//! `render_user_datetime_*`, `render_user_context_block_*`, and
 //! `resolve_agent_config_*` cases in `ctrl::tests`.
 
 use std::path::{Path, PathBuf};
@@ -112,8 +114,98 @@ pub(crate) fn resolve_overridden_credentials(
     }
 }
 
-/// Build the `## User Context` block that prefixes the system prompt for both
-/// `run_pm_task_with_history` and `run_pm_task_with_persona`.
+/// Render `at` (a UTC instant) in `tz_name`'s IANA zone, with an explicit
+/// day-of-week (#3052 follow-up).
+///
+/// Why: Two `tagent --plain` runs minutes apart greeted the user with "hope
+/// your Sunday's going well" and then "happy Monday!" — the model has no
+/// reliable date awareness and was guessing. `chrono::Local::now()` (the
+/// prior implementation) also silently used the machine's local timezone
+/// rather than the user's configured one, which is wrong for a remote/SSH
+/// session. Taking `at` as a parameter (instead of calling `Utc::now()`
+/// internally) keeps this pure and testable against a fixed instant.
+/// What: Parses `tz_name` via `chrono-tz`'s IANA database; on success,
+/// renders `"<Weekday>, <D> <Month> <Year>, <H>:<MM> <AM/PM> (<Zone>)"`. When
+/// `tz_name` is `None` or fails to parse, falls back to UTC and says so
+/// explicitly in the parenthetical rather than silently using the machine's
+/// local clock.
+/// Test: `render_user_datetime_formats_in_named_timezone_with_weekday`,
+/// `render_user_datetime_falls_back_to_utc_when_timezone_missing`,
+/// `render_user_datetime_falls_back_to_utc_when_timezone_invalid`.
+pub(crate) fn render_user_datetime(
+    at: chrono::DateTime<chrono::Utc>,
+    tz_name: Option<&str>,
+) -> String {
+    const FMT: &str = "%A, %-d %B %Y, %-I:%M %p";
+    match tz_name.map(|s| (s, s.parse::<chrono_tz::Tz>())) {
+        Some((_, Ok(tz))) => {
+            let local = at.with_timezone(&tz);
+            format!("Current date/time: {} ({})", local.format(FMT), tz)
+        }
+        Some((raw, Err(_))) => {
+            format!(
+                "Current date/time: {} (UTC — timezone \"{raw}\" not recognized)",
+                at.format(FMT)
+            )
+        }
+        None => format!(
+            "Current date/time: {} (UTC — no timezone configured)",
+            at.format(FMT)
+        ),
+    }
+}
+
+/// Render the `## User Context` block: user profile fields plus a fresh
+/// tz-aware date/time line (#3052 follow-up).
+///
+/// Why: Split out of `build_user_context_prefix` so `ctrl_chat_turn`'s
+/// system-prompt assembly (which appends context AFTER the base prompt,
+/// rather than prefixing it) can reuse the exact same block instead of
+/// hand-rolling a second, drifted copy — the original defect this whole
+/// helper exists to prevent. Note: agent/model/provider self-identification
+/// is deliberately NOT part of this block — that's handled by dedicated
+/// self-inspection tools, not a literal injected into the prompt.
+/// What: Loads `UserProfile` fresh (so a `config profile set` mid-session
+/// takes effect on the very next turn); when a profile with a non-empty name
+/// exists, emits `user_name`/optional `email`/optional `timezone`/optional
+/// `location` lines (each omitted when unset — no placeholders, no
+/// guessing); otherwise emits `user_name = "(unknown)"`. Always appends a
+/// freshly-computed `render_user_datetime` line, regardless of profile
+/// state.
+/// Test: `render_user_context_block_includes_known_user_fields`,
+/// `render_user_context_block_omits_location_when_unset`,
+/// `render_user_context_block_unknown_user_still_gets_datetime`.
+pub(crate) fn render_user_context_block() -> String {
+    use crate::identity::user_profile::UserProfile;
+    let profile = UserProfile::load();
+    let now = chrono::Utc::now();
+
+    let mut block = String::from("## User Context\n");
+    match profile.as_ref().filter(|p| !p.name.trim().is_empty()) {
+        Some(p) => {
+            block.push_str(&format!("user_name = \"{}\"\n", p.name));
+            if let Some(email) = p.email.as_deref().filter(|s| !s.trim().is_empty()) {
+                block.push_str(&format!("email = \"{email}\"\n"));
+            }
+            if let Some(tz) = p.timezone.as_deref().filter(|s| !s.trim().is_empty()) {
+                block.push_str(&format!("timezone = \"{tz}\"\n"));
+            }
+            if let Some(loc) = p.location.as_deref().filter(|s| !s.trim().is_empty()) {
+                block.push_str(&format!("location = \"{loc}\"\n"));
+            }
+            block.push_str(&render_user_datetime(now, p.timezone.as_deref()));
+        }
+        None => {
+            block.push_str("user_name = \"(unknown)\"\n");
+            block.push_str(&render_user_datetime(now, None));
+        }
+    }
+    block.push('\n');
+    block
+}
+
+/// Build the `## User Context` block that prefixes the system prompt for
+/// both `run_pm_task_with_history` and `run_pm_task_with_persona`.
 ///
 /// Why: The two PM dispatch paths used to hand-roll an identical block to
 /// inject the user's name, timezone, and current local date/time so the LLM
@@ -121,30 +213,14 @@ pub(crate) fn resolve_overridden_credentials(
 /// copies had drifted in their unknown-user branch (one omitted the
 /// `user_name = "(unknown)"` line). Extracting one helper closes the
 /// divergence and gives every future caller the same context format.
-/// What: Loads `UserProfile`, formats `chrono::Local::now()` as
-/// `YYYY-MM-DD HH:MM:SS TZ`, prepends a `## User Context` block, and returns
-/// the combined string with `base_content` appended after a blank line.
+/// What: Delegates the block rendering to `render_user_context_block` and
+/// appends `base_content` after a blank line.
 /// Test: Indirectly via the PM/persona dispatch paths; absence of profile
 /// should still produce a `user_name = "(unknown)"` line and a current
-/// date/time line.
+/// date/time line. `render_user_context_block_*` cover the block content
+/// directly.
 pub(crate) fn build_user_context_prefix(base_content: &str) -> String {
-    use crate::identity::user_profile::UserProfile;
-    let profile = UserProfile::load();
-    let now_local = chrono::Local::now();
-    let now_str = now_local.format("%Y-%m-%d %H:%M:%S %Z").to_string();
-    match profile {
-        Some(ref p) if !p.name.trim().is_empty() => format!(
-            "## User Context\nuser_name = \"{}\"\ntimezone = \"{}\"\nCurrent date and time: {}\n\n{}",
-            p.name,
-            p.timezone.as_deref().unwrap_or("UTC"),
-            now_str,
-            base_content
-        ),
-        _ => format!(
-            "## User Context\nuser_name = \"(unknown)\"\nCurrent date and time: {}\n\n{}",
-            now_str, base_content
-        ),
-    }
+    format!("{}\n{}", render_user_context_block(), base_content)
 }
 
 /// Best-effort semantic recall over the project's embedded memory store (#275).

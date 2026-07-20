@@ -295,13 +295,13 @@ pub async fn run_pm_task_with_persona(
         };
 
     let system_prompt: String = {
-        let base = build_user_context_prefix(&persona_cfg.system_prompt.content);
         let runner_label = match persona_cfg.agent.runner {
             crate::agents::RunnerKind::Subprocess => "subprocess",
             crate::agents::RunnerKind::Inline => "inline",
             crate::agents::RunnerKind::ClaudeCode => "claude-code",
             crate::agents::RunnerKind::InProcess => "in-process",
         };
+        let base = build_user_context_prefix(&persona_cfg.system_prompt.content);
         let base = crate::agents::prompt_builder::SystemPromptBuilder::new(base)
             .with_agent_context(persona_cfg.agent.model.as_str(), runner_label)
             .build();
