@@ -313,6 +313,14 @@ async fn handle_input_streams_assistant_output_and_tool_invocation() {
 /// (`SESSION_STREAM_MAX_RECONNECTS` reconnects at the fixed
 /// `RECONNECT_BACKOFF`, neither test-overridable) — hermetic-but-slow beats
 /// mocking away the exact timing this test asserts on.
+///
+/// `handle_input` is wrapped in a 30s `tokio::time::timeout` (well above the
+/// real ~10s) — code-critic finding on PR #3482: this test's ENTIRE purpose
+/// is guarding against an un-exhaustible reconnect loop, so if that bug (or
+/// any regression like it) ever comes back, the un-timed-out `.await` would
+/// hang this test binary forever — exactly the failure mode a CI runner
+/// needs a manual kill to recover from, wrong for a test whose job is to
+/// catch this. The timeout turns "hangs forever" into "fails deterministically."
 #[tokio::test]
 async fn handle_input_surfaces_visible_error_after_exhausting_reconnects() {
     let server = MockServer::start().await;
@@ -332,7 +340,15 @@ async fn handle_input_surfaces_visible_error_after_exhausting_reconnects() {
     engine.setup(tx.clone()).await.expect("setup");
     while rx.try_recv().is_ok() {} // drain setup's own events
 
-    let result = engine.handle_input("hello".to_string(), tx).await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        engine.handle_input("hello".to_string(), tx),
+    )
+    .await
+    .expect(
+        "handle_input must not hang — an un-exhaustible reconnect loop must fail this test \
+         deterministically, not hang the test binary forever",
+    );
     assert!(
         result.is_err(),
         "handle_input must return Err once every reconnect attempt is exhausted with no \
@@ -501,6 +517,45 @@ async fn subscribe_workstream_events_refreshes_cache_on_deactivation_with_no_rep
         )
         .mount(&server)
         .await;
+    // `mount_common`'s `workstream.list` mock always reports WS_1 active —
+    // fine for `setup()`'s own call, but this test's whole point is the
+    // SECOND call (triggered by the SSE deactivation event's cache refresh)
+    // observing a genuinely deactivated daemon. Override it with two
+    // higher-priority (lower number = checked first, wiremock-rs) mocks:
+    // the FIRST `workstream.list` call gets the original WS_1-active
+    // response (`up_to_n_times(1)`); once that's exhausted, every
+    // subsequent call falls through to the `active_workstream_id: null`
+    // response — the real shape a client would see once the daemon
+    // actually deactivated.
+    Mock::given(method("POST"))
+        .and(path("/rpc"))
+        .and(RpcMethod("workstream.list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "active_workstream_id": WS_1,
+                "workstreams": [{"id": WS_1, "name": "Feature X"}],
+            },
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/rpc"))
+        .and(RpcMethod("workstream.list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "active_workstream_id": null,
+                "workstreams": [{"id": WS_1, "name": "Feature X"}],
+            },
+        })))
+        .with_priority(2)
+        .mount(&server)
+        .await;
 
     let engine = CodeEngine::with_daemon_url(reqwest::Client::new(), server.uri(), None);
     let (tx, mut rx) = unbounded_channel();
@@ -533,25 +588,61 @@ async fn subscribe_workstream_events_refreshes_cache_on_deactivation_with_no_rep
 
     // Half 2 of the fix: the engine must not go silent — a structured
     // `WorkstreamActivationChanged { new_active_id: None, .. }` must report
-    // the deactivation.
-    let saw_deactivation_event = tokio::time::timeout(Duration::from_secs(5), async {
+    // the deactivation. Collect every event up through it (rather than
+    // discarding non-matching ones) so Half 3 below can also assert on the
+    // `StatuslineUpdate` this same cache refresh sends — which, per
+    // `run_workstream_subscription`, is sent BEFORE the activation-changed
+    // event, so a "hunt and discard" loop that only looked for the latter
+    // would have already thrown the `StatuslineUpdate` away.
+    let events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut seen = Vec::new();
         loop {
             match rx.recv().await {
-                Some(ReplEvent::WorkstreamActivationChanged {
-                    new_active_id: None,
-                    prior_id,
-                }) => return prior_id,
-                Some(_) => continue,
+                Some(ev @ ReplEvent::WorkstreamActivationChanged { .. }) => {
+                    seen.push(ev);
+                    return seen;
+                }
+                Some(ev) => seen.push(ev),
                 None => panic!("channel closed before observing the deactivation event"),
             }
         }
     })
     .await
     .expect("timed out waiting for the deactivation event");
-    assert_eq!(
-        saw_deactivation_event.as_deref(),
-        Some(WS_1),
-        "expected WorkstreamActivationChanged{{new_active_id: None, prior_id: Some(WS_1)}}"
+
+    let activation = events
+        .iter()
+        .find(|e| matches!(e, ReplEvent::WorkstreamActivationChanged { .. }))
+        .expect("collected events must include WorkstreamActivationChanged");
+    match activation {
+        ReplEvent::WorkstreamActivationChanged {
+            new_active_id: None,
+            prior_id,
+        } => {
+            assert_eq!(
+                prior_id.as_deref(),
+                Some(WS_1),
+                "expected WorkstreamActivationChanged{{new_active_id: None, prior_id: Some(WS_1)}}"
+            );
+        }
+        other => panic!("expected new_active_id: None; got {other:?}"),
+    }
+
+    // Half 3 (code-critic finding on PR #3482, closing the asymmetric
+    // coverage vs. `subscribe_workstream_events_emits_activation_changed_with_wire_field_names`,
+    // which asserts the non-empty `StatuslineUpdate` for an activation): the
+    // SAME cache refresh must ALSO clear the status line's `Workstream`
+    // segment — an EMPTY segment list, not a stale one — so a regression
+    // that broke only the deactivation -> `StatuslineUpdate` wiring (wrong
+    // ordering vs. the `active_workstream` mutex write, sending before
+    // `refresh_workstream_cache` actually commits, etc.) would fail this
+    // test instead of passing every other green assertion here.
+    assert!(
+        events.iter().any(
+            |e| matches!(e, ReplEvent::StatuslineUpdate(segs) if segs.is_empty())
+        ),
+        "expected a StatuslineUpdate with an empty segment list clearing the Workstream segment \
+         on deactivation; got {events:?}"
     );
 
     engine.shutdown().await.expect("shutdown");
