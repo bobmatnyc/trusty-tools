@@ -8,6 +8,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Header brand mark — placeholder diamond replaced with the canonical
+  Foundry robot mark.** `AppHeader.svelte` rendered a literal `◆` diamond
+  glyph to the left of the "Trusty Code" wordmark — a placeholder, not the
+  brand identity (reported by Bob: the header logo was wrong). It now renders
+  the canonical Foundry / Trusty Assistant robot mark, vendored as
+  `ui/src/lib/icons/RobotIcon.svelte` from the design-system source
+  (`docs/design/UI/design-system/icons/RobotIcon.svelte`, refs #3486/#3495),
+  used in its `mono` variant at 18px and colored via the existing
+  `text-trusty-primary` header token (through `currentColor`) so it themes in
+  light/dark. Scope is the mark only — the wordmark, window title, and layout
+  are unchanged.
+
 ### Added
 
 - **CI token drift-check (refs #3486):** a new `scripts/check_token_drift.mjs`
