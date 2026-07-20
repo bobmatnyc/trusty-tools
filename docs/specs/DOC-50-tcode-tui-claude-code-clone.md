@@ -14,13 +14,13 @@ spec_refs:
     anchor: SPEC-SLD-02~draft
 ---
 
-# DOC-49 — trusty-code Interactive TUI: Claude Code Clone over Shared REPL Layer
+# DOC-50 — trusty-code Interactive TUI: Claude Code Clone over Shared REPL Layer
 
 **Status:** Draft
 **Subsystem:** trusty-code — interactive terminal UI (TUI) thin client; shared ratatui REPL layer (extraction from trusty-agents)
 **Owner:** Engineering (trusty-code)
 **Last-updated:** 2026-07-20
-**Spec ID:** `SPEC-TTUI-01~draft` … `SPEC-TTUI-09~draft` (DOC-49)
+**Spec ID:** `SPEC-TTUI-01~draft` … `SPEC-TTUI-09~draft` (DOC-50)
 **Builds on:**
 - [`docs/specs/trusty-code-harness-ui.md`](./trusty-code-harness-ui.md) (DOC-39, merged) — [`SPEC-TCUI-01~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-01~draft) §1 and [`SPEC-TCUI-09~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-09~draft) §2.1 establish the **layer priority (API → CLI → TUI → Web)** and **thin-client axiom**: "The UI communicates with the daemon. All UI services talk to the daemon; the daemon provides all functionality." This spec is the TUI implementation of that constraint.
 - [`docs/specs/DOC-48-tcode-workstreams.md`](./DOC-48-tcode-workstreams.md) (merged) — [`SPEC-WS-08~draft`](./DOC-48-tcode-workstreams.md#SPEC-WS-08~draft) §8 establishes workstream phasing. This spec's TUI must surface the active workstream (§4B below) and participate in workstream activation events (DOC-48 §5.3).
