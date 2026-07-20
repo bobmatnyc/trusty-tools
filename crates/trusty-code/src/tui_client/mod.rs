@@ -13,9 +13,12 @@
 
 pub mod discovery;
 pub mod engine;
+mod engine_state;
 pub mod error;
 pub mod rpc;
+mod session_events;
 pub mod sse;
+mod workstream_subscription;
 
 pub use engine::CodeEngine;
 pub use error::EngineError;
