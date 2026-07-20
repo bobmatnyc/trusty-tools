@@ -57,6 +57,54 @@ pub trait VectorStore: Send + Sync {
     async fn remove(&self, id: &str) -> Result<()>;
     async fn len(&self) -> Result<usize>;
 
+    /// Predicate-scoped nearest-neighbour search (issue #3401).
+    ///
+    /// Why: a caller-supplied path/repo filter must not lose recall to
+    /// `top_k` truncation. For an approximate index that means the predicate
+    /// has to be evaluated DURING traversal, not after — a chunk id ranked
+    /// far outside a raw-similarity `top_k` window by cosine distance alone
+    /// can still be the closest (or only) match once scoped to a repo, and no
+    /// over-fetch factor can guarantee catching it in general.
+    ///
+    /// Takes the filter as plain data (`path_prefix` / `repos`) rather than a
+    /// `dyn Fn` closure: `UsearchStore`'s override needs to call
+    /// `usearch::Index::filtered_search`'s synchronous `Fn(Key) -> bool`
+    /// callback from inside an `#[async_trait]` method, and a `&dyn Fn(&str)
+    /// -> bool` parameter threaded through `async_trait`'s generated
+    /// lifetime elision ties the callback's `&str` argument lifetime to the
+    /// parameter's own — plain borrowed data sidesteps that entirely, and it
+    /// is all either side actually needs (see [`path_match::matches`]).
+    /// What: default implementation is a best-effort fallback for backends
+    /// that cannot push a predicate into traversal — it over-fetches
+    /// (`top_k * 50`, capped) via plain [`Self::search`] and filters
+    /// client-side. This CAN still miss a match ranked beyond the over-fetch
+    /// window; it exists only so the trait stays total for mock/test stores
+    /// that never carry a real path filter. [`super::usearch_impl`]'s
+    /// `UsearchStore` overrides this with genuine predicate-pushed traversal
+    /// via `usearch::Index::filtered_search`, which is the only
+    /// implementation this crate actually relies on for correctness.
+    /// Test: `UsearchStore` — `test_filtered_search_finds_match_ranked_below_top_k`.
+    async fn search_filtered(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        path_prefix: Option<&str>,
+        repos: &[String],
+    ) -> Result<Vec<VectorHit>> {
+        let overfetch = top_k.saturating_mul(50).max(top_k).min(100_000);
+        let hits = self.search(query, overfetch).await?;
+        let mut out = Vec::with_capacity(top_k.min(hits.len()));
+        for hit in hits {
+            if super::path_match::matches(hit.chunk_id.as_str(), path_prefix, repos) {
+                out.push(hit);
+                if out.len() >= top_k {
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Bulk-upsert many `(chunk_id, embedding)` pairs.
     ///
     /// Why: per-chunk `upsert` acquires three write locks (`id_to_key`,

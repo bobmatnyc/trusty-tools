@@ -24,6 +24,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   / `remove_file` MCP equivalents) as the supported incremental-indexing path
   for network-mounted and build/serve-split deployments, with a worked example —
   see `README.md` and `CLAUDE.md`'s endpoint catalogue.
+- Server-side `path_prefix` / `repos` search scoping, applied during candidate
+  selection BEFORE `top_k` truncation in every retrieval lane (closes #3401).
+  Lets consumers scope a query to a repo/path subtree within the single
+  unified index instead of building a separate physical index per repo.
+  **Recall guarantee:** the vector/HNSW lane ships the fully recall-safe
+  design directly (no over-fetch approximation) — the filter predicate is
+  pushed INTO the HNSW graph traversal itself via
+  `usearch::Index::filtered_search` (already available in the pinned usearch
+  2.25), so a chunk matching the filter is found regardless of how it ranks
+  by raw, unscoped similarity. BM25/lexical and KG-expansion hits are
+  filtered on the candidate id (which always encodes the file path) before
+  fusion/truncation, for the same guarantee. Surfaced on `SearchQuery`
+  (HTTP `/indexes/:id/search`, the fan-out `POST /search`'s
+  `GlobalSearchRequest`) and the MCP `search` / `search_lexical` /
+  `search_semantic` / `search_kg` / `search_all` tool schemas. Composes with
+  `exclude_archived` and the branch fields (`branch`/`branch_files`/`branch_boost`).
+  `SearchQuery` now also rejects unknown fields (`deny_unknown_fields`) — a
+  silently-ignored misspelled filter field would otherwise return too much
+  data, the exact correctness trap that motivated this issue.
 
 ## [0.35.0] — 2026-07-19
 

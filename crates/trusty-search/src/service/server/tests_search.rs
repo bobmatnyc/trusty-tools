@@ -51,6 +51,8 @@ async fn search_handler_rejects_empty_query() {
                 mode: crate::core::indexer::SearchMode::Code,
                 exclude_archived: false,
                 refine_query: None,
+                path_prefix: None,
+                repos: Vec::new(),
             }),
         )
         .await;
@@ -228,6 +230,8 @@ async fn last_queried_cache_rate_limits_disk_writes() {
         mode: crate::core::indexer::SearchMode::Code,
         exclude_archived: false,
         refine_query: None,
+        path_prefix: None,
+        repos: Vec::new(),
     };
     let _ = search_handler(
         axum::extract::State(Arc::clone(&state)),
@@ -309,6 +313,8 @@ async fn search_handler_meta_includes_stale_index_root_field() {
             mode: crate::core::indexer::SearchMode::Code,
             exclude_archived: false,
             refine_query: None,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await;
@@ -396,6 +402,8 @@ async fn test_global_search_surfaces_cold_indexes_skipped() {
             routing_threshold: None,
             max_fanout_concurrency: None,
             serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await;

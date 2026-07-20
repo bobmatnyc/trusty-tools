@@ -14,6 +14,7 @@
 pub(crate) mod kg;
 pub(crate) mod lanes;
 pub(crate) mod materialize;
+pub(crate) mod path_filter;
 
 #[cfg(test)]
 #[path = "lanes_tests.rs"]
@@ -196,20 +197,45 @@ impl CodeIndexer {
         // 2) Run lanes (HNSW + BM25), then inject entity-exact-match.
         let want = query.top_k.saturating_mul(HNSW_OVERSAMPLE).max(query.top_k);
         let bm25_fut = self.bm25_search(&query.text, want);
+        // Issue #3401: when a path/repo filter is active, the vector lane
+        // pushes the predicate into the HNSW traversal itself (see
+        // `vector_search_scoped` / `VectorStore::search_filtered`) rather
+        // than fetching raw-similarity top candidates and filtering after —
+        // the latter would silently lose recall for a chunk that only ranks
+        // highly once scoped to the filtered repo/path.
         let hnsw_results = match &embedding {
-            Some(v) => self.vector_search(v, want).await?,
+            Some(v) => self.vector_search_scoped(v, want, query).await?,
             None => Vec::new(),
         };
         let mut bm25_results = bm25_fut.await?;
+        // Issue #3401: retain in-scope BM25 hits BEFORE RRF fuse / MMR rerank
+        // (both of which truncate their working set to `want`). Without this,
+        // a query whose lexical lane returns `want` non-matching hits (a
+        // heavily-matched but out-of-scope filler, say) would crowd the
+        // correctly-found (predicate-pushed) vector-lane candidate out of the
+        // `want`-bounded fusion/MMR stages before `apply_score_adjustments`'s
+        // authoritative retain ever runs. Checking the id string (rather than
+        // fetching each candidate's `RawChunk`) is safe here — see the
+        // `path_filter` module docs for why a chunk id always begins with its
+        // literal file path.
+        if path_filter::is_active(query) {
+            bm25_results.retain(|(id, _)| path_filter::matches(id, query));
+        }
         self.inject_entity_exact_match(&intent, &query.text, beta, &mut bm25_results)
             .await;
+        if path_filter::is_active(query) {
+            bm25_results.retain(|(id, _)| path_filter::matches(id, query));
+        }
 
         // 2a) Issue #75: for Definition intent, run grep as a third RRF lane.
-        let grep_lane: Vec<(String, f32)> = if matches!(intent, QueryIntent::Definition) {
+        let mut grep_lane: Vec<(String, f32)> = if matches!(intent, QueryIntent::Definition) {
             self.grep_fallback_search(&query.text, want).await
         } else {
             Vec::new()
         };
+        if path_filter::is_active(query) {
+            grep_lane.retain(|(id, _)| path_filter::matches(id, query));
+        }
 
         // 3) RRF fuse, then MMR diversity pass.
         let fused_raw = rrf_fuse(&hnsw_results, &bm25_results, alpha, beta, RRF_K, want);
@@ -218,7 +244,11 @@ impl CodeIndexer {
         // 3a) Issue #75: empty-result fallback — scan chunk corpus for literal
         // substring match.
         let fused_raw = if fused_raw.is_empty() {
-            self.grep_fallback_search(&query.text, want).await
+            let mut fallback = self.grep_fallback_search(&query.text, want).await;
+            if path_filter::is_active(query) {
+                fallback.retain(|(id, _)| path_filter::matches(id, query));
+            }
+            fallback
         } else {
             fused_raw
         };
@@ -256,7 +286,7 @@ impl CodeIndexer {
             .apply_score_adjustments(
                 all,
                 &intent,
-                &query.text,
+                query,
                 branch_set.as_ref(),
                 branch_boost,
                 effective_mode,
@@ -364,20 +394,33 @@ impl CodeIndexer {
     /// (2) Issue #72: the mode-aware `doc_score_penalty` matrix must fire
     /// BEFORE `take(top_k)` so prose chunks can't crowd source matches out of
     /// the result list. (3) Issues #117/#122: struct/function definition boost.
+    /// (4) Issue #3401: the path/repo filter is hard-applied here too — this
+    /// is the single choke point every lane's candidates (BM25, HNSW, grep,
+    /// KG-expanded) flow through before `materialize_search_results`'s
+    /// `take(query.top_k)`, so filtering here (against the authoritative
+    /// `RawChunk::file`, already fetched below for the other adjustments)
+    /// guarantees no non-matching chunk can occupy a `top_k` slot — and,
+    /// since it runs before that truncation, no matching chunk can be lost
+    /// to it either. This complements (does not replace) the vector lane's
+    /// own predicate-pushed retrieval (`vector_search_scoped`): that step is
+    /// what lets a path-scoped match reach this point at all when it would
+    /// otherwise rank outside the raw-similarity oversample window.
     /// What: adjusts every candidate's score in a single pass and re-sorts
     /// before truncation.
     /// Test: `test_definition_demotes_markdown_below_source`,
     /// `test_kg_results_survive_top_k_truncation`,
-    /// `test_struct_definition_boost_surfaces_struct_over_usage`.
+    /// `test_struct_definition_boost_surfaces_struct_over_usage`,
+    /// `test_path_prefix_filter_survives_top_k_truncation` (issue #3401).
     async fn apply_score_adjustments(
         &self,
         candidates: Vec<(String, f32)>,
         intent: &QueryIntent,
-        query_text: &str,
+        query: &SearchQuery,
         branch_files: Option<&HashSet<String>>,
         branch_boost: f32,
         effective_mode: super::SearchMode,
     ) -> Vec<(String, f32)> {
+        let query_text = query.text.as_str();
         let demote_docs = matches!(intent, QueryIntent::Definition);
         // Issue #117: for Definition-intent queries, boost chunks that are the
         // declaration of a type whose `function_name` matches a literal query
@@ -389,6 +432,26 @@ impl CodeIndexer {
         };
         let candidate_ids: Vec<String> = candidates.iter().map(|(id, _)| id.clone()).collect();
         let chunks = self.fetch_chunks_for_ids(&candidate_ids).await;
+
+        // Issue #3401: hard path/repo filter against the real file path,
+        // applied strictly before the sort/return below (and therefore
+        // strictly before the final `top_k` truncation in
+        // `materialize_search_results`). A candidate whose chunk failed to
+        // resolve (race with a concurrent removal) is dropped rather than
+        // kept — the existing materialize step would have skipped it anyway.
+        let candidates: Vec<(String, f32)> = if path_filter::is_active(query) {
+            candidates
+                .into_iter()
+                .filter(|(id, _)| {
+                    chunks
+                        .get(id)
+                        .is_some_and(|raw| path_filter::matches(&raw.file, query))
+                })
+                .collect()
+        } else {
+            candidates
+        };
+
         let mut adjusted: Vec<(String, f32)> = candidates
             .into_iter()
             .map(|(id, score)| {

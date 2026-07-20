@@ -26,6 +26,8 @@ fn make_branch_query(text: &str, files: Vec<String>, boost: f32) -> SearchQuery 
         exclude_archived: false,
         stage: None,
         refine_query: None,
+        path_prefix: None,
+        repos: Vec::new(),
     }
 }
 
@@ -192,6 +194,8 @@ async fn test_no_boost_when_branch_files_absent() {
         exclude_archived: false,
         stage: None,
         refine_query: None,
+        path_prefix: None,
+        repos: Vec::new(),
     };
     let results = idx.search(&q).await.unwrap();
     assert!(!results.is_empty());

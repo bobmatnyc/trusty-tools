@@ -424,6 +424,8 @@ async fn search_for_context(
         exclude_archived: false,
         stage: None,
         refine_query: None,
+        path_prefix: None,
+        repos: Vec::new(),
     };
     let indexer = handle.indexer.read().await;
     let results = indexer.search(&q).await.map_err(|e| e.to_string())?;

@@ -71,6 +71,15 @@ pub struct GlobalSearchRequest {
     /// Takes precedence over `max_fanout_concurrency`.
     #[serde(default)]
     pub serial: bool,
+
+    /// Path/repo scoping forwarded to every per-index search (issue #3401).
+    /// See `SearchQuery::path_prefix` / `SearchQuery::repos` for the
+    /// pre-truncation guarantee; identical semantics here, just applied
+    /// per-index before this handler's own cross-index RRF fusion.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 fn default_global_top_k() -> usize {
@@ -251,6 +260,9 @@ pub(super) async fn global_search_handler(
         // lexical when the semantic lane isn't ready (issue #109 Phase 1).
         stage: None,
         refine_query: None,
+        // Issue #3401: forward path/repo scoping to every per-index search.
+        path_prefix: req.path_prefix.clone(),
+        repos: req.repos.clone(),
     };
 
     // Run the per-index searches with *bounded* concurrency (issue #2845).

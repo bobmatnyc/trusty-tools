@@ -102,6 +102,69 @@ impl VectorStore for UsearchStore {
         Ok(hits)
     }
 
+    /// Predicate-pushed HNSW traversal (issue #3401). See
+    /// [`VectorStore::search_filtered`] for why this must happen DURING
+    /// traversal rather than as a post-hoc filter, and for why the filter is
+    /// plain data (`path_prefix` / `repos`) rather than a `dyn Fn` closure.
+    ///
+    /// Why: `usearch::Index::filtered_search` takes a `Fn(Key) -> bool`
+    /// closure evaluated by the underlying C++ search itself, so it keeps
+    /// expanding the graph until `top_k` matches pass the predicate (or the
+    /// graph is exhausted) — genuinely no different, recall-wise, from an
+    /// unfiltered search over the subgraph the predicate admits. The closure
+    /// only has the `u64` HNSW key, so it resolves each candidate key back to
+    /// its chunk id via `key_to_id` and checks it against `path_prefix` /
+    /// `repos` via [`super::path_match::matches`].
+    /// What: holds `index` and `key_to_id` under READ locks for the duration
+    /// of the (synchronous) `filtered_search` FFI call — safe to hold both
+    /// simultaneously because no code path in this store acquires them as
+    /// writes together (see `upsert`/`upsert_batch`, which take them
+    /// sequentially, never nested) — then maps `(key, dist)` matches back to
+    /// `VectorHit`s exactly like [`Self::search`].
+    /// Test: `test_filtered_search_finds_match_ranked_below_top_k`,
+    /// `test_filtered_search_excludes_non_matching_keys`.
+    async fn search_filtered(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        path_prefix: Option<&str>,
+        repos: &[String],
+    ) -> Result<Vec<VectorHit>> {
+        if query.len() != self.dim {
+            return Err(anyhow!(
+                "query dim mismatch: got {}, expected {}",
+                query.len(),
+                self.dim
+            ));
+        }
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+
+        let index = self.index.read().await;
+        let key_to_id = self.key_to_id.read().await;
+        let filter = |key: usearch::Key| {
+            key_to_id
+                .get(&key)
+                .is_some_and(|id| super::path_match::matches(id.as_str(), path_prefix, repos))
+        };
+        let matches = index
+            .filtered_search(query, top_k, filter)
+            .map_err(|e| anyhow!("usearch filtered_search failed: {e}"))?;
+
+        let mut hits = Vec::with_capacity(matches.keys.len());
+        for (key, dist) in matches.keys.iter().zip(matches.distances.iter()) {
+            if let Some(chunk_id) = key_to_id.get(key) {
+                let score = 1.0 - *dist;
+                hits.push(VectorHit {
+                    chunk_id: chunk_id.clone(),
+                    score,
+                });
+            }
+        }
+        Ok(hits)
+    }
+
     async fn remove(&self, id: &str) -> Result<()> {
         // Promote view → mutable on first write. No-op when already mutable.
         self.ensure_mutable().await?;

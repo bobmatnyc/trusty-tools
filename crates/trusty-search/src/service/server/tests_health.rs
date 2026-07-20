@@ -278,6 +278,8 @@ async fn global_search_fans_out_and_merges() {
             routing_threshold: None,
             max_fanout_concurrency: None,
             serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await
@@ -338,6 +340,8 @@ async fn global_search_empty_registry_returns_empty_results() {
             routing_threshold: None,
             max_fanout_concurrency: None,
             serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await
@@ -389,6 +393,8 @@ async fn global_search_restricts_to_named_indexes() {
             routing_threshold: None,
             max_fanout_concurrency: None,
             serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
         }),
     )
     .await
@@ -519,6 +525,8 @@ fn routing_mode_from_request_resolves_strategy() {
             routing_threshold: t,
             max_fanout_concurrency: None,
             serial: false,
+            path_prefix: None,
+            repos: Vec::new(),
         }
     };
     assert!(matches!(

@@ -17,7 +17,8 @@ use anyhow::{Context, Result};
 use crate::core::classifier::QueryIntent;
 use crate::core::entity::EdgeKind;
 
-use super::super::{hash_query, CodeIndexer};
+use super::super::{hash_query, CodeIndexer, SearchQuery};
+use super::path_filter;
 
 /// Bound on the ensure-then-read retry loop in [`CodeIndexer::bm25_search`] /
 /// [`CodeIndexer::grep_fallback_search`] (issue #2846 review).
@@ -281,6 +282,45 @@ impl CodeIndexer {
             return Ok(Vec::new());
         };
         let hits = store.search(embedding, want).await?;
+        Ok(hits.into_iter().map(|h| (h.chunk_id, h.score)).collect())
+    }
+
+    /// Path/repo-scoped HNSW lane (issue #3401).
+    ///
+    /// Why: a naive over-fetch-then-filter cannot guarantee recall for an
+    /// approximate-nearest-neighbour index — a chunk that genuinely matches
+    /// the path/repo filter can rank arbitrarily far outside the raw-cosine-
+    /// similarity `want` window HNSW would otherwise explore, and no amount
+    /// of `want` inflation removes that risk in general. Instead, when a
+    /// filter is active, this pushes the predicate INTO the HNSW traversal
+    /// itself via `VectorStore::search_filtered` (usearch's
+    /// `Index::filtered_search`, which evaluates the predicate during graph
+    /// exploration and keeps expanding until `want` matching candidates are
+    /// found or the graph is exhausted) — no recall loss, and no latency
+    /// tradeoff to calibrate.
+    /// What: delegates to plain `store.search` when no filter is active
+    /// (identical behaviour/cost to today); otherwise builds a predicate
+    /// over the chunk id (see `path_filter` module docs for why testing the
+    /// id is safe here) and calls `store.search_filtered`.
+    /// Test: `test_vector_search_scoped_recovers_filtered_match_below_top_k`
+    /// in `indexer::tests`; `UsearchStore` predicate-pushdown itself is
+    /// covered by `store::tests::test_filtered_search_finds_match_ranked_below_top_k`.
+    pub(crate) async fn vector_search_scoped(
+        &self,
+        embedding: &[f32],
+        want: usize,
+        query: &SearchQuery,
+    ) -> Result<Vec<(String, f32)>> {
+        let Some(store) = &self.store else {
+            return Ok(Vec::new());
+        };
+        if !path_filter::is_active(query) {
+            let hits = store.search(embedding, want).await?;
+            return Ok(hits.into_iter().map(|h| (h.chunk_id, h.score)).collect());
+        }
+        let hits = store
+            .search_filtered(embedding, want, query.path_prefix.as_deref(), &query.repos)
+            .await?;
         Ok(hits.into_iter().map(|h| (h.chunk_id, h.score)).collect())
     }
 
