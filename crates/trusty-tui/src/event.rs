@@ -19,6 +19,7 @@
 //! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 `ReplEvent` deliverable (§5, Slice 1).
 //! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — per-variant slice ownership (Slices 5/6/8/9).
 
+use crate::model::StatuslineSegment;
 use serde::{Deserialize, Serialize};
 
 /// Every event that can flow through the shared TUI's event channel.
@@ -101,8 +102,8 @@ pub enum ReplEvent {
     ClearScrollback,
     /// Engine-supplied statusline segments replacing the current set
     /// (session id, model, project, workstream, …). See
-    /// [`StatuslineSegment`]; full segment taxonomy lands in Slice 1.5
-    /// (#3413).
+    /// [`StatuslineSegment`] (`crate::model`) for the full, Slice-1.5
+    /// segment taxonomy.
     StatuslineUpdate(Vec<StatuslineSegment>),
     /// The active workstream's summary changed (initial load or refetch
     /// after an activation change).
@@ -178,62 +179,6 @@ pub struct KeyModifiers {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
-}
-
-/// One labeled segment of the status line (e.g. `("model", "sonnet-5")`).
-///
-/// Why: DOC-50 §3.2 (Slice 1.5) requires the statusline to be engine-driven,
-/// not hardcoded per product (tagent's `status.rs` today hardcodes
-/// OpenRouter pricing and tm/claude-mpm session counts — exactly the
-/// divergence Slice 1.5 removes). This type is the wire shape Slice 1
-/// commits to so `ReplEvent::StatuslineUpdate` has a stable payload before
-/// Slice 1.5 builds the full segment taxonomy and rendering behavior.
-/// What: a flat `label`/`value` pair; ordering in the containing `Vec` is
-/// render order. Deliberately minimal — populated in full by Slice 1.5
-/// (#3413).
-///
-/// **Provisional shape.** DOC-50 §3.2 specifies the Slice-1.5 deliverable as
-/// an ENUM (one variant per segment kind — session id, model, workstream,
-/// project, connection state, …), not this flat struct. This struct is a
-/// zero-consumer placeholder only; Slice 1.5's implementer should treat the
-/// wire/type shape as unlocked and free to replace with the spec's enum
-/// design rather than extend this struct.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatuslineSegment {
-    pub label: String,
-    pub value: String,
-}
-
-/// One selectable row in an engine-supplied picker (model, agent,
-/// workstream, …).
-///
-/// Why: DOC-50 §3.3 requires picker data sources to be engine-provided
-/// rather than hardcoded lists (tagent's model/provider pickers today are
-/// hardcoded in `pickers.rs`). This is the item shape the picker widget
-/// (Slice 4+) will render; the data-source trait it comes from is a Slice
-/// 1.5 concern (#3413).
-/// What: `id` is what gets sent back to the engine on selection; `label` is
-/// the display text (may differ, e.g. a friendly name over a UUID).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PickerItem {
-    pub id: String,
-    pub label: String,
-}
-
-/// One entry in an engine-supplied slash-command registry.
-///
-/// Why: DOC-50 §5 Slice 7 splits slash commands into client-side built-ins
-/// (`/help`, `/clear`, `/quit`) and engine-routed commands (`/model`,
-/// `/agent`, `/workstream`). `/help` needs to enumerate both, so the
-/// registry needs one common descriptor shape regardless of which side
-/// handles the command.
-/// What: `name` is the command without its leading `/` (e.g. `"workstream"`);
-/// `summary` is the one-line help text `/help` renders. The full
-/// `SlashCommandRegistry` trait this feeds lands in Slice 1.5 (#3413).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommandDescriptor {
-    pub name: String,
-    pub summary: String,
 }
 
 /// A minimal summary of a workstream (DOC-48 §2.1), enough for the status
@@ -343,32 +288,19 @@ mod tests {
         assert!(!m.ctrl && !m.alt && !m.shift);
     }
 
-    /// `StatuslineSegment`/`PickerItem`/`CommandDescriptor` are the wire
-    /// shapes Slice 1.5 builds on; a (de)serialization round-trip is the
-    /// cheapest guarantee that later HTTP-transported engines (CodeEngine)
-    /// can carry them without a custom `Serialize` impl.
+    /// `WorkstreamSummary` is the wire shape `ReplEvent::WorkstreamUpdated`
+    /// carries; a (de)serialization round-trip is the cheapest guarantee
+    /// that later HTTP-transported engines (CodeEngine) can carry it
+    /// without a custom `Serialize` impl. (`StatuslineSegment`/`PickerItem`/
+    /// `CommandDescriptor` round-trip tests moved to `crate::model` — Slice
+    /// 1.5 relocated those types there.)
     #[test]
-    fn shared_stub_types_round_trip_through_json() {
-        let seg = StatuslineSegment {
-            label: "model".to_string(),
-            value: "sonnet-5".to_string(),
+    fn workstream_summary_round_trips_through_json() {
+        let ws = WorkstreamSummary {
+            id: "a1b2c3d4".to_string(),
+            name: "Token rotation".to_string(),
         };
-        let json = serde_json::to_string(&seg).expect("serialize");
-        let back: StatuslineSegment = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(seg, back);
-
-        let item = PickerItem {
-            id: "opus".to_string(),
-            label: "Claude Opus".to_string(),
-        };
-        let json = serde_json::to_string(&item).expect("serialize");
-        assert_eq!(item, serde_json::from_str(&json).expect("deserialize"));
-
-        let cmd = CommandDescriptor {
-            name: "workstream".to_string(),
-            summary: "List or activate a workstream".to_string(),
-        };
-        let json = serde_json::to_string(&cmd).expect("serialize");
-        assert_eq!(cmd, serde_json::from_str(&json).expect("deserialize"));
+        let json = serde_json::to_string(&ws).expect("serialize");
+        assert_eq!(ws, serde_json::from_str(&json).expect("deserialize"));
     }
 }

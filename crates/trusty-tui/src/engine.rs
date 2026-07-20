@@ -10,13 +10,23 @@
 //!
 //! What: this module defines only the trait — no event loop, no rendering.
 //! The event loop that drives `handle_input`/`setup`/`shutdown` lands in
-//! Slice 2 (#3414).
+//! Slice 2 (#3414). Slice 1.5 (#3413) adds two data-supply accessors,
+//! `commands` and `picker`, so the shared crate can render slash-command
+//! help and inline pickers from engine-supplied data instead of hardcoded
+//! per-product lists (DOC-50 §3.2) — both default to "nothing supplied" so
+//! no existing/future `TuiEngine` implementor breaks by not overriding
+//! them. Statusline segments do NOT get a parallel accessor here: Slice 1's
+//! `ReplEvent::StatuslineUpdate` (pushed from `setup`/
+//! `subscribe_workstream_events`) already is the engine-supply mechanism
+//! for those; adding a second, pull-based path would just give the shared
+//! event loop two sources of truth to reconcile.
 //!
 //! # Spec References
 //! - [`SPEC-TTUI-02~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-02~draft) — architecture, the engine-adapter seam.
-//! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 trait shape.
+//! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — Slice 1 trait shape; §3.2, Slice 1.5 generalization layer.
 
 use crate::event::ReplEvent;
+use crate::model::{CommandDescriptor, PickerRequest};
 use anyhow::Result;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -114,6 +124,48 @@ pub trait TuiEngine: Send + Sync {
         Ok(())
     }
 
+    /// Domain slash-command entries this engine contributes (e.g. `/model`,
+    /// `/workstream` for `AgentEngine`/`CodeEngine` respectively).
+    ///
+    /// Why: DOC-50 §6 Q4 (mixed routing) splits slash commands into
+    /// client-side built-ins (`/help`, `/clear`, `/quit` — owned by
+    /// `trusty-tui` itself, never listed here) and engine-routed domain
+    /// commands. This is how `/help` (Slice 7) learns about the latter
+    /// without the shared crate hardcoding tagent's or tcode's command set
+    /// (replacing tagent's `SLASH_COMMANDS` array,
+    /// `crates/trusty-agents/src/repl/tui/helpers.rs:156-181`).
+    /// What: returns every [`CommandDescriptor`] this engine handles via
+    /// `handle_input`. Entries should use [`crate::model::CommandRouting::Engine`]
+    /// (the shared crate does not currently validate this, but a
+    /// `BuiltIn`-routed entry here would never be dispatched — built-ins are
+    /// intercepted before `handle_input` is called). Default: empty, for
+    /// engines/test doubles with no domain commands.
+    /// Test: `commands_defaults_to_empty` (this module).
+    fn commands(&self) -> Vec<CommandDescriptor> {
+        Vec::new()
+    }
+
+    /// Look up an engine-supplied picker by name (e.g. `"model"`,
+    /// `"provider"`, `"workstream"`) — the data source behind DOC-50 §3.2's
+    /// picker generalization.
+    ///
+    /// Why: generalizes tagent's hardcoded `PickerKind::{Model,Provider}`
+    /// (`crates/trusty-agents/src/repl/tui/types.rs:28-35`), where the
+    /// items and the Enter-dispatch command are both baked into the REPL
+    /// itself. Here, the engine names the picker, supplies its items, and
+    /// supplies the dispatch command — see [`PickerRequest`] for the full
+    /// contract the shared event loop (Slice 4/7) builds on.
+    /// What: `name` identifies which picker was requested (e.g. via a
+    /// `/model` invocation reaching `handle_input`, which — instead of
+    /// answering inline — can have the shared router call this first).
+    /// Returns `None` when the engine has no picker under that name.
+    /// Default: always `None`, for engines with no pickers yet.
+    /// Test: `picker_defaults_to_none` (this module).
+    fn picker(&self, name: &str) -> Option<PickerRequest> {
+        let _ = name;
+        None
+    }
+
     /// Graceful shutdown — close any open backend connections.
     ///
     /// Why: mirrors the original `ReplHandler` contract in
@@ -124,5 +176,98 @@ pub trait TuiEngine: Send + Sync {
     /// Test: see `handle_input`.
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::CommandRouting;
+
+    /// A minimal `TuiEngine` implementing only the two required methods —
+    /// stands in for a test double or an MVP engine that hasn't grown
+    /// domain commands/pickers yet.
+    struct BareEngine;
+
+    #[async_trait::async_trait]
+    impl TuiEngine for BareEngine {
+        async fn handle_input(
+            &self,
+            _line: String,
+            _tx: UnboundedSender<ReplEvent>,
+        ) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn setup(&self, _tx: UnboundedSender<ReplEvent>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An engine that overrides `commands`/`picker` — stands in for
+    /// `AgentEngine`/`CodeEngine` once Slice 10/3 land, proving the trait
+    /// defaults are genuinely overridable (not accidentally `sealed` or
+    /// `final` via the macro expansion).
+    struct RichEngine;
+
+    #[async_trait::async_trait]
+    impl TuiEngine for RichEngine {
+        async fn handle_input(
+            &self,
+            _line: String,
+            _tx: UnboundedSender<ReplEvent>,
+        ) -> Result<bool> {
+            Ok(true)
+        }
+
+        async fn setup(&self, _tx: UnboundedSender<ReplEvent>) -> Result<()> {
+            Ok(())
+        }
+
+        fn commands(&self) -> Vec<CommandDescriptor> {
+            vec![CommandDescriptor {
+                name: "workstream".to_string(),
+                summary: "List or activate a workstream".to_string(),
+                routing: CommandRouting::Engine,
+                args_hint: Some("activate <id>".to_string()),
+            }]
+        }
+
+        fn picker(&self, name: &str) -> Option<PickerRequest> {
+            (name == "model").then(|| PickerRequest {
+                title: "Select a model".to_string(),
+                items: Vec::new(),
+                dispatch_command: "/model".to_string(),
+            })
+        }
+    }
+
+    /// An engine that implements only the required methods must still
+    /// compile and yield "nothing supplied" for both new accessors — the
+    /// whole point of giving them default bodies (existing/future
+    /// implementors don't break).
+    #[test]
+    fn commands_and_picker_default_to_nothing_supplied() {
+        let engine = BareEngine;
+        assert!(engine.commands().is_empty());
+        assert!(engine.picker("model").is_none());
+        assert!(engine.picker("anything").is_none());
+    }
+
+    /// An engine that DOES override `commands`/`picker` must have its
+    /// overrides take effect (not silently fall back to the trait default).
+    #[test]
+    fn commands_and_picker_overrides_take_effect() {
+        let engine = RichEngine;
+
+        let commands = engine.commands();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].name, "workstream");
+        assert_eq!(commands[0].routing, CommandRouting::Engine);
+
+        let picker = engine.picker("model").expect("model picker present");
+        assert_eq!(picker.title, "Select a model");
+        assert_eq!(picker.dispatch_command, "/model");
+        assert!(engine.picker("provider").is_none());
     }
 }
