@@ -37,6 +37,27 @@ use crate::workstreams::SharedWorkstreamStore;
 use super::executor::{TaskRunParams, spawn_task_run};
 use super::mock_llm::build_llm_client;
 
+/// Default top-level/PM agent name used when `task.run`'s `agent_name` param
+/// is omitted (#3437).
+///
+/// Why: #3437 — every GUI-initiated run omits `agent_name` (no agent-roster
+/// endpoint exists yet for the GUI to pick from), so [`task_run`]'s default
+/// MUST resolve against a real agent in every resolution tier (disk then
+/// embedded, see `agents::resolve_agent`) or 100% of daemon-default runs fail
+/// agent resolution before a single turn executes — exactly the failure mode
+/// #3437 traced. A shared `pub` const (referenced from both this call site
+/// and `assets::tests::default_task_run_agent_resolves_against_default_agents`)
+/// is the drift-guard: the literal here and the embedded roster entry it must
+/// resolve against can never independently rot out of sync the way two
+/// separately-typed `"pm"` string literals could.
+/// What: `"pm"` — must have a matching `EmbeddedAgent` entry in
+/// [`crate::assets::DEFAULT_AGENTS`] (see `assets/agents/pm.md`).
+/// Test: `task::protocol::tests::task_run_creates_session_when_none_given`
+/// (exercises the default through a real `task_run` call);
+/// `assets::tests::default_task_run_agent_resolves_against_default_agents`
+/// (pins that the literal resolves against the embedded roster).
+pub const DEFAULT_TASK_RUN_AGENT_NAME: &str = "pm";
+
 /// Register `task.run` onto `router`.
 ///
 /// Why: the one place that wires the method, mirroring
@@ -224,7 +245,9 @@ async fn task_run(
             .map_err(|e| RpcError::invalid_argument(format!("task.run: {e}")))?,
         None => binding,
     };
-    let agent_name = p.agent_name.unwrap_or_else(|| "pm".to_string());
+    let agent_name = p
+        .agent_name
+        .unwrap_or_else(|| DEFAULT_TASK_RUN_AGENT_NAME.to_string());
 
     let session_id = match &p.session_id {
         Some(id) => {

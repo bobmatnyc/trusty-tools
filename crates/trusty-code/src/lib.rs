@@ -153,15 +153,16 @@ pub mod rbac;
 pub mod llm;
 
 /// Embedded default agents & skills (#2895; roster expanded to 31 agents in
-/// Slice E3, #2958).
+/// Slice E3, #2958; `pm` added as a 4th tcode-own default for #3437).
 ///
 /// Why: A fresh project has no `.claude/agents/` or `.claude/skills/` yet;
 /// bundling a working default set at compile time (mirroring, not sharing,
 /// `trusty-mpm`'s embed pattern) gives every project a usable harness before
 /// any project-level config exists. Disk-based config always wins when present.
-/// What: `EmbeddedAgent`/`DEFAULT_AGENTS` (31 dispatchable tcode agents: the
-/// original 3, authored as Markdown+frontmatter as of #2897 Slice C, plus 28
-/// coding-relevant tm agents bundled and wired in as of Slice E, #2958);
+/// What: `EmbeddedAgent`/`DEFAULT_AGENTS` (32 dispatchable tcode agents: the
+/// original 4 (`engineer`/`qa-agent`/`code-reviewer`/`pm`), authored as
+/// Markdown+frontmatter as of #2897 Slice C, plus 28 coding-relevant tm
+/// agents bundled and wired in as of Slice E, #2958);
 /// `EmbeddedSkill`/`DEFAULT_SKILLS` (trusty-mpm's universal skill set, minus
 /// the `tm-*` orchestration skills).
 /// Test: `assets::tests::*`.

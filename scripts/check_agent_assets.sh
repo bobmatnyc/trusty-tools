@@ -34,11 +34,12 @@
 #      FAIL so a human reconciles the tcode copy on purpose (re-apply the
 #      tools: restriction / read-only prose rewrite against the new upstream
 #      content) rather than the deviation silently going stale.
-#   Three tcode-only files (engineer.md, qa-agent.md, code-reviewer.md — tcode's
-#   pre-existing defaults, never sourced from trusty-mpm; tcode's own
+#   Four tcode-only files (engineer.md, qa-agent.md, code-reviewer.md, pm.md —
+#   tcode's own defaults, never sourced from trusty-mpm; tcode's own
 #   `engineer.md` deliberately does NOT track trusty-mpm's `engineer.md`,
 #   which is excluded from the roster specifically to avoid the name
-#   collision) are skipped entirely.
+#   collision; `pm.md` was added for #3437 as tcode's own orchestrator
+#   default and has no trusty-mpm counterpart to track) are skipped entirely.
 #   Any other tcode `.md` file not in the parity set, the deviated set, or the
 #   tcode-only exclude list is flagged as "new roster file unaccounted" — add
 #   it to TCODE_ONLY (if genuinely tcode's own) or verify its trusty-mpm
@@ -89,8 +90,8 @@ TCODE_DIR="crates/trusty-code/src/assets/agents"
 MPM_DIR="crates/trusty-mpm/src/assets/agents"
 PINS="scripts/agent-asset-pins.tsv"
 
-# tcode's own pre-existing defaults — never sourced from trusty-mpm.
-TCODE_ONLY="engineer.md qa-agent.md code-reviewer.md"
+# tcode's own defaults — never sourced from trusty-mpm.
+TCODE_ONLY="engineer.md qa-agent.md code-reviewer.md pm.md"
 
 # The 4 files with a Bob-approved deliberate deviation from byte-parity
 # (Slice E3, PR #3041). Pinned by trusty-mpm SOURCE hash, not byte-compared.

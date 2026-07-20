@@ -714,7 +714,7 @@ fn drain_transcript(transcript: &SharedTranscript) -> Vec<TurnRecord> {
 /// What: Returns a `RunReport` with an empty diff, the (likely empty) transcript,
 /// zero usage, and `ExitCode::ConfigError`; the error text rides in the task line
 /// of the human form via a synthesized note.
-/// Test: `run_task::tests::missing_pm_config_is_config_error`.
+/// Test: `run_task::tests::missing_agent_config_is_config_error`.
 fn config_error_report(
     params: &RunTaskParams,
     transcript: &SharedTranscript,

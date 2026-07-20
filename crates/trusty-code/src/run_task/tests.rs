@@ -501,17 +501,65 @@ async fn no_changes_yields_no_changes_exit() {
     assert!(report.diff.trim().is_empty(), "diff must be empty");
 }
 
-/// A missing PM config is a configuration error (no panic, distinct exit code).
+/// An agent name with NEITHER a disk config NOR an embedded default is a
+/// configuration error (no panic, distinct exit code).
 ///
 /// Why: Bad configuration must produce a faithful `ConfigError`, not a crash.
-/// What: Point the params at an agents dir with no `pm.md`; assert
-/// exit=ConfigError.
+/// This is the regression pin `missing_pm_config_is_config_error` used to
+/// cover with `agent: "pm"` before #3437 added an embedded `pm` default —
+/// `"pm"` now ALWAYS resolves (see
+/// `missing_disk_pm_config_falls_back_to_embedded_pm` below), so the
+/// still-valid "unresolvable agent is a config error" case is exercised here
+/// with an agent name that is genuinely absent from both disk and
+/// [`crate::assets::DEFAULT_AGENTS`].
+/// What: Point the params at an empty agents dir with agent name
+/// `"totally-not-a-real-agent"`; assert exit=ConfigError.
 /// Test: this test.
 #[tokio::test]
-async fn missing_pm_config_is_config_error() {
+async fn missing_agent_config_is_config_error() {
     let empty_agents = tempfile::tempdir().expect("agents tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
     let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("unused")]));
+
+    let report = execute_run_task(
+        RunTaskParams {
+            agent: "totally-not-a-real-agent".into(),
+            task: "anything".into(),
+            project: project.path().to_path_buf(),
+            agents_dir: empty_agents.path().to_path_buf(),
+            engineer_model: None,
+            deadline_secs: None,
+        },
+        llm,
+    )
+    .await;
+
+    assert_eq!(
+        report.exit,
+        ExitCode::ConfigError,
+        "an agent name absent from both disk and the embedded roster must be a config error"
+    );
+}
+
+/// `agent: "pm"` with NO disk `pm.md` now resolves via the embedded default
+/// (#3437) instead of failing agent resolution.
+///
+/// Why: this is the acceptance test for #3437 at the `run_task` level — the
+/// exact call shape (`agent: "pm"`, empty `agents_dir`) that used to hit
+/// `ConfigError` before the embedded `pm` agent existed must now actually
+/// run the PM loop and reach a normal exit code.
+/// What: Same empty-agents-dir shape as `missing_agent_config_is_config_error`,
+/// but `agent: "pm"` with a scripted `[PM stop]` response; asserts the run
+/// reaches `ExitCode::NoChanges` (the PM concluded without delegating), not
+/// `ConfigError`.
+/// Test: this test.
+#[tokio::test]
+async fn missing_disk_pm_config_falls_back_to_embedded_pm() {
+    let empty_agents = tempfile::tempdir().expect("agents tempdir");
+    let project = tempfile::tempdir().expect("project tempdir");
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "pm: nothing to do",
+    )]));
 
     let report = execute_run_task(
         RunTaskParams {
@@ -528,8 +576,9 @@ async fn missing_pm_config_is_config_error() {
 
     assert_eq!(
         report.exit,
-        ExitCode::ConfigError,
-        "missing pm.md must be a config error"
+        ExitCode::NoChanges,
+        "'pm' with no disk config must resolve via the embedded default (#3437) and run, \
+         not fail with ConfigError; report: {report:?}"
     );
 }
 
