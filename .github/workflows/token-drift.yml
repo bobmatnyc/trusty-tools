@@ -1,16 +1,17 @@
 # Design-token drift gate for the trusty-tools workspace (epic #3486).
 #
 # Foundry v2 design tokens (docs/design/UI/design-system/tokens.css) are the
-# canonical hex source. Adopted UIs hand-transcribe that hex into Tailwind's
-# `--color-*: R G B` RGB-triple convention in their own `src/app.css`, so
-# nothing previously stopped the two from silently drifting apart. This job
-# re-derives each enforced crate's expected values from the canonical source
-# and fails with a per-token diff on any mismatch.
+# canonical hex source. Adopted UIs consume it two ways: Tailwind crates
+# (trusty-agents, trusty-code-gui, trusty-mpm-gui) hand-transcribe the hex
+# into Tailwind's `--color-*: R G B` RGB-triple convention; plain-CSS crates
+# (trusty-console, trusty-analyze, trusty-search, trusty-memory) keep the
+# canonical `--trusty-*` names with `#hex` values verbatim. Nothing previously
+# stopped either from silently drifting apart. This job re-derives each
+# enforced crate's expected values from the canonical source and fails with a
+# per-token diff on any mismatch.
 #
-# Only trusty-agents and trusty-code-gui are enforced right now; the 5
-# pre-Foundry crates (trusty-search, trusty-memory, trusty-mpm-gui,
-# trusty-console, trusty-analyze) are allowlisted pending their own migration
-# issues (#3487/#3488/#3489/#3490) — see scripts/check_token_drift.mjs.
+# All 7 UI crates are enforced (epic #3486); the allowlist is empty. Both
+# comparison modes ("rgb-triple" and "hex") live in scripts/check_token_drift.mjs.
 #
 # Pure Node script, zero dependencies — no pnpm install / lockfile needed, so
 # this runs as its own lightweight job (matches line-cap.yml / test-pointers.yml's
@@ -37,7 +38,7 @@ concurrency:
 
 jobs:
   token-drift:
-    name: Foundry token drift check (trusty-agents, trusty-code-gui)
+    name: Foundry token drift check (all 7 UI crates)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

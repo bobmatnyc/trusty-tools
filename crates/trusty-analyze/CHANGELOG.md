@@ -11,6 +11,7 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ### Changed
 
+- **UI tokens now CI-enforced against the canonical Foundry source** (refs [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): flipped from the `scripts/check_token_drift.mjs` allowlist to ENFORCED. The `token-drift` CI job now compares `ui/src/lib/styles/tokens.css`'s plain-CSS `--trusty-*: #hex` values directly to `docs/design/UI/design-system/tokens.css` on every push/PR (light `[data-theme="light"]`, dark `:root, [data-theme="dark"]`; the crate-local alias layer is ignored), so a hand-edit that drifts this crate's palette from canonical fails the build.
 - **UI design tokens migrated to Foundry v2** ([#3490](https://github.com/bobmatnyc/trusty-tools/issues/3490),
   epic [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): the dashboard's
   `tokens.css` now sources its light/dark palette from the canonical Foundry
