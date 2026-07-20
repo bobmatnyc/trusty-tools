@@ -11,7 +11,7 @@
   // "unbound", per the issue's own design note).
   //
   // What: A controlled modal — `open` is owned by the parent
-  // (`NewWorkstreamForm.svelte`), not this component's own state, matching
+  // (`StartWorkingForm.svelte`), not this component's own state, matching
   // Svelte's usual controlled-dialog shape. An `$effect` keyed on `open`
   // fetches the roster (via [`fetchProjectRoster`]) only while visible —
   // mirrors every other poller/fetcher's `AbortController`-per-lifetime

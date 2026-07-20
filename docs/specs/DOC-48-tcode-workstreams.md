@@ -19,7 +19,7 @@ spec_refs:
 **Status:** Draft (Rev 2)
 **Subsystem:** trusty-code — workstream persistence, session lifecycle, RPC/REST/CLI surfaces
 **Owner:** Engineering (trusty-code)
-**Last-updated:** 2026-07-19 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths; Rev 6: §8 Phase C+ — workstream-first GUI creation flow, issue #3365; Rev 7: §9 Q1–Q3 resolutions — prompt-text inference, registered project_slug, no auto-transition)
+**Last-updated:** 2026-07-20 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths; Rev 6: §8 Phase C+ — workstream-first GUI creation flow, issue #3365; Rev 7: §9 Q1–Q3 resolutions — prompt-text inference, registered project_slug, no auto-transition; Rev 8: §8 Phase C++ — implicit workstream inference + monitoring reframe, issue #3384)
 **Spec ID:** `SPEC-WS-01~draft` … `SPEC-WS-08~draft`, `SPEC-WS-09~resolved` (DOC-48)
 **Builds on:**
 - [`docs/specs/trusty-code-harness-ui.md`](./trusty-code-harness-ui.md) (DOC-39, merged) — [`SPEC-TCUI-08~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-08~draft) §4B defines the Workstream domain object as a NEW prerequisite: "an infinite thread with state `active · idle · closed`… resumable across daemon restarts." This spec is the Phase 2+ implementation of that domain object and its persistence layer.
@@ -546,6 +546,73 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
       The GUI never surfaces "session"/"unbound" wording for this path.
 - [x] Q1–Q3 (§9, workstream name inference, project_slug sourcing, idle-to-active
       timeout) all RESOLVED — Bob decisions recorded 2026-07-19.
+
+### Phase C++ (issue #3384) — Implicit workstream inference + monitoring reframe
+
+Bob, after test-driving the Phase C+ flow above: *"We shouldn't need to
+'create' a workstream, it should be inferred. Just pick a project and start
+working."* And, separately: *"'SESSION MONITOR — no active session to
+monitor' — this doesn't make sense in the workstream context."*
+
+- [x] **No creation ceremony at all.** `NewWorkstreamForm.svelte` renamed
+      `StartWorkingForm.svelte` — the dedicated "NEW WORKSTREAM" section
+      header/button is GONE. The flow is: pick a project (same
+      `ProjectPickerModal`, unchanged) or skip it, type the task, press
+      **go**. The create → run → activate orchestration above (mint ->
+      `task.run{workstream_id}` -> `activate{force:true}` LAST ->
+      `pendingWorkstreamId` retry-reuse) is **byte-for-byte unchanged** —
+      only the surrounding UI framing that made it look like a distinct
+      management action is gone. **Q1 (§9) status update (rebased onto
+      #3399's resolution, 2026-07-20):** Q1 is now RESOLVED at the spec
+      level — Bob's direction is real first-turn prompt-derived naming,
+      explicitly citing this ticket's implicit-inference framing as the
+      reason (§9 Q1: "aligns with the implicit-workstream-inference
+      direction in #3384/#3392"). Prompt-derived naming is NOT implemented
+      by this PR — `inferWorkstreamName`'s date-based default is
+      unchanged and is the explicitly-kept bootstrap fallback the
+      resolution names, not a violation of it. Implementing real
+      prompt-text inference remains a follow-up, now with a resolved
+      target to build toward rather than an open question, and is now
+      higher-value than when Q1 was still open: the operator never types a
+      workstream name under any circumstance.
+- [x] **Renaming/closing/switching an EXISTING workstream is untouched** —
+      `WorkstreamSwitcher.svelte` (Phase C above, issue #3300) is unchanged
+      by this ticket. Power users still have full control; only the
+      NEW-workstream creation path lost its ceremony.
+- [x] **Monitoring reframed around the active workstream.**
+      `SessionMonitor.svelte` renamed `WorkstreamActivity.svelte` and
+      re-scoped: polls `GET /workstreams` first to find the active
+      workstream, then picks a session from among ONLY that workstream's own
+      `session_ids` (`pickActiveSessionInWorkstream`,
+      `crates/trusty-code-gui/ui/src/lib/session-status.ts`) — never a
+      session bound to a different (or no) workstream, closing a real
+      correctness gap the prior daemon-wide `pickActiveSession` heuristic
+      had (it could show an unrelated, more-recently-created session as if
+      it belonged to the active workstream). Empty state:
+      **"no active workstream — pick a project to start"** (verbatim from
+      the issue), never "session". A real active workstream with nothing
+      bound yet gets its own "no activity yet" sub-state.
+- [x] **Live-activity nudge via §5.3's SSE aggregation route.**
+      `WorkstreamActivity.svelte` subscribes to `GET /workstreams/{id}/events`
+      (the SAME route `WorkstreamSwitcher.svelte` already consumes) and
+      treats ANY received frame as a signal to refresh its REST poll
+      immediately — the poll stays authoritative, SSE only narrows the gap
+      between ticks, identical to the switcher's own documented pattern.
+      This is additive to §5.3, not a change to its wire shape or fan-out
+      semantics.
+- [x] **Sweep of remaining user-facing "session" vocabulary across the GUI**
+      (`StatusBar.svelte`, `SearchTab.svelte`, `ServiceNav.svelte`,
+      `WorkstreamRail.svelte`) — labels/empty-states/error strings only.
+      **Judgment call, recorded not silently made:** none of those four
+      components' underlying data sources were re-architected to be
+      workstream-scoped in this pass (only `WorkstreamActivity.svelte` was)
+      — e.g. `StatusBar.svelte`'s "workstream: …" segment still reflects
+      RAW session status via the same daemon-wide `pickActiveSession`, just
+      relabeled text. Re-architecting every poller to be workstream-scoped
+      is a larger undertaking than this ticket's vocabulary-sweep ask;
+      `WorkstreamActivity.svelte`'s reframing is the one place this ticket
+      also changed the underlying selection logic, because that was the
+      component Bob explicitly called out as broken.
 
 ---
 

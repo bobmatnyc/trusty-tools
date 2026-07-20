@@ -102,7 +102,7 @@ describe('SearchTab (DOC-39 §4.7, 10d)', () => {
 
     await waitFor(() => target.textContent?.includes('nothing to audit yet') ?? false);
 
-    expect(target.textContent).toContain('no active session');
+    expect(target.textContent).toContain('no active workstream');
     expect(noInputRendered()).toBe(true);
     // No search-audit fetch should ever be attempted with no active session.
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('search-audit'))).toBe(false);
@@ -284,7 +284,7 @@ describe('SearchTab (DOC-39 §4.7, 10d)', () => {
 
     await waitFor(() => target.textContent?.includes('nothing to audit yet') ?? false);
 
-    expect(target.textContent).toContain('no active session');
+    expect(target.textContent).toContain('no active workstream');
     expect(noInputRendered()).toBe(true);
   });
 
@@ -348,7 +348,7 @@ describe('SearchTab (DOC-39 §4.7, 10d)', () => {
       expect(target.textContent).toContain('audit unavailable');
       expect(auditCalls).toBe(1);
 
-      // Advance past POLL_MS (5000ms, matching StatusBar.svelte/SessionMonitor.svelte)
+      // Advance past POLL_MS (5000ms, matching StatusBar.svelte/WorkstreamActivity.svelte)
       // to trigger poll #2, which now succeeds.
       await vi.advanceTimersByTimeAsync(5000);
       expect(auditCalls).toBe(2);

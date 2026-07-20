@@ -10,6 +10,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **SSE subscription churn in `WorkstreamActivity.svelte` and
+  `WorkstreamSwitcher.svelte` (code-critic PR #3392 review, HIGH).** The
+  `GET /workstreams/{id}/events` subscription `$effect` in both components
+  read the active workstream id through a `$state` object (`activeWorkstream`/
+  `list`) that the poll `refresh()` reassigns to a freshly-parsed object
+  every tick — Svelte 5 invalidates on reference inequality, so the
+  `EventSource` was closing and reopening on EVERY poll tick while a
+  workstream was active (~360 reconnects/active-half-hour), dropping any
+  event landing in the close→reopen gap and needlessly loading the daemon.
+  Both effects now read a `$derived` PRIMITIVE (`activeWorkstreamId`)
+  instead, which Svelte 5 only re-runs a dependent for when the VALUE
+  actually changes. `WorkstreamSwitcher.svelte`'s instance of this bug
+  predates this PR (issue #3300/PR #3356) — fixed here as a carried-in fix
+  once the pattern was identified. New reactivity tests in both
+  `WorkstreamActivity.test.ts` and `WorkstreamSwitcher.test.ts` stub a fake
+  `EventSource` and assert exactly one construction across several
+  same-active-id poll ticks (using fake timers; jsdom has no real
+  `EventSource` to exercise directly).
+- **Activation-fails-after-successful-run left `WorkstreamActivity.svelte`
+  claiming "no active workstream" while the task was actually running
+  (code-critic PR #3392 review, MEDIUM).** Fixed two ways: `StartWorkingForm.svelte`
+  now retries a failed activation ONCE (`activateWithRetry`) before
+  surfacing a warning, closing the common transient-failure case silently;
+  and a new cross-module store (`lib/pending-workstream.svelte.ts`) records
+  the minted-and-run workstream's id/name so `WorkstreamActivity.svelte` can
+  fall back to displaying it when the daemon's real active-workstream
+  pointer is absent, cleared once activation eventually succeeds.
 - **`DEFAULT_DAEMON_URL` moved from `http://127.0.0.1:7881` to
   `http://127.0.0.1:7882`, in lockstep with `trusty-code`'s
   `serve::DEFAULT_HTTP_PORT` (closes #3364).** The old port collided with
@@ -24,6 +51,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   port that the initial #3364 fix missed; it is now 7882 too, with
   `ui/src/lib/api-config.test.ts` parsing `trusty-code/src/serve/mod.rs`
   directly to assert the two stay in sync.
+
+### Changed
+
+- **Implicit workstream inference — no creation ceremony (closes #3384,
+  DOC-48 §8 Phase C++, DOC-39 §7A/§6.2 amendment).** Bob, after test-driving
+  the workstream-first flow below: *"We shouldn't need to 'create' a
+  workstream, it should be inferred. Just pick a project and start
+  working."* `NewWorkstreamForm.svelte` renamed `StartWorkingForm.svelte` —
+  the dedicated "new workstream" section header and "create workstream"
+  button are gone; the card now reads "start working" and the submit button
+  reads "go". The success message drops the "workstream created — session
+  <id>" ceremony text (and the internal session id it exposed) for a plain
+  "started". The underlying create → run → activate orchestration (issue
+  #3365/PR #3375, incl. the code-critic HIGH fix that made activation the
+  LAST step and added `pendingWorkstreamId` retry-reuse) is byte-for-byte
+  unchanged — only the UI framing that made minting look like a distinct
+  management action is gone. Renaming/closing/switching an existing
+  workstream (`WorkstreamSwitcher.svelte`, issue #3300) is untouched.
+- **Monitoring reframed around the active workstream (same issue).** Bob:
+  *"'SESSION MONITOR — no active session to monitor' — this doesn't make
+  sense in the workstream context."* `SessionMonitor.svelte` renamed
+  `WorkstreamActivity.svelte` (header: "workstream activity") and re-scoped:
+  polls `GET /workstreams` to find the ACTIVE workstream, then selects a
+  session from among ONLY that workstream's own bound `session_ids`
+  (`pickActiveSessionInWorkstream`, `lib/session-status.ts`) — never a
+  session belonging to a different (or no) workstream, closing a real
+  correctness gap the prior daemon-wide `pickActiveSession` heuristic had.
+  Empty state: **"no active workstream — pick a project to start"**
+  (verbatim from the issue); a real active workstream with nothing bound yet
+  renders its own "no activity yet" sub-state. Also subscribes to
+  `GET /workstreams/{id}/events` (DOC-48 §5.3's SSE aggregation route, issue
+  #3343) as a latency nudge on top of the existing REST poll, mirroring
+  `WorkstreamSwitcher.svelte`'s identical pattern over the same route — the
+  poll stays authoritative.
+- **Session vocabulary swept from remaining user-facing GUI text.**
+  `StatusBar.svelte` ("no active session" -> "no active workstream", "no
+  project bound to this session" -> "no project bound yet", the trailing
+  "session &lt;id&gt;" chip -> "id &lt;id&gt;"), `SearchTab.svelte` ("no
+  active session — nothing to audit yet" -> "no active workstream — nothing
+  to audit yet"), `ServiceNav.svelte` (the Workstream tab's live-dot tooltip
+  "session running" -> "workstream active"), `WorkstreamRail.svelte`
+  ("start one from the Workstream tab" -> "start working from the
+  Workstream tab"). Internal type/variable names (`SessionSummary`,
+  `pickActiveSession`, `GET /sessions`, etc.) and API surfaces are
+  unchanged — only user-facing labels/empty-states/error strings moved.
+  Judgment call: `StatusBar.svelte`/`SearchTab.svelte`/`WorkstreamRail.svelte`
+  keep their existing daemon-wide (not workstream-scoped) session-selection
+  logic — only `WorkstreamActivity.svelte`'s underlying data source was
+  re-architected, since that was the component Bob specifically called out.
 
 ### Added
 

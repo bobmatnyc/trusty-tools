@@ -1,7 +1,7 @@
 /** @type {import('tailwindcss').Config} */
 // Why: Foundry retheme (issue #3153, docs/design/UI/design-system/). Every
 // `trusty-*`/`status-*` color token used across the components
-// (App/StatusBar/HealthPanel/SessionMonitor/SearchTab/CreateSessionForm)
+// (App/StatusBar/HealthPanel/WorkstreamActivity/SearchTab/StartWorkingForm)
 // resolves to a CSS custom property rather than a hardcoded hex literal —
 // the actual light/dark VALUES live in `src/app.css`'s `:root` block (light
 // default) and its `[data-theme='dark']` override. This keeps the

@@ -13,7 +13,7 @@
   // (`GET /sessions/{id}/search-audit`, PR #3107) backed by an
   // always-retained, 200-record-capped `SessionEntry.search_audit` list, so
   // this slice replaces the gap notice with real rows polled the same way
-  // `StatusBar.svelte`/`SessionMonitor.svelte` poll their own REST routes —
+  // `StatusBar.svelte`/`WorkstreamActivity.svelte` poll their own REST routes —
   // still a thin REST client, never an SSE consumer.
   //
   // What: Polls `GET /sessions` to pick the active session
@@ -21,7 +21,7 @@
   // session, every `POLL_MS` — identical `$effect`/`AbortController`/
   // `setInterval` shape to the sibling components. A `404` on the audit
   // fetch (session vanished between the two calls in the same `refresh()`)
-  // is treated as `no-session`, same as `SessionMonitor.svelte`'s handling
+  // is treated as `no-session`, same as `WorkstreamActivity.svelte`'s handling
   // of its own chained fetches. A non-200 or top-level-malformed body
   // degrades to an `audit unavailable` row rather than throwing — the
   // fetched body's shape is verified with `parseSearchAuditResponse`
@@ -41,7 +41,7 @@
   // both variants onto the shared six columns without fabricating fields
   // neither carries. A second, local `now` tick (no network call) redisplays
   // each row's age every second via `transcript.ts::formatElapsed`, same
-  // pattern as `SessionMonitor.svelte`.
+  // pattern as `WorkstreamActivity.svelte`.
   //
   // Test: `SearchTab.test.ts` covers the four connection phases, the
   // populated/empty/partially-valid/malformed audit states, a poll-recovery
@@ -61,7 +61,7 @@
   } from '../lib/session-status';
   import { formatElapsed } from '../lib/transcript';
 
-  const POLL_MS = 5000; // matches StatusBar.svelte / SessionMonitor.svelte poll cadence
+  const POLL_MS = 5000; // matches StatusBar.svelte / WorkstreamActivity.svelte poll cadence
   const TICK_MS = 1000; // local age-redisplay tick only — no network call
 
   type Phase = 'connecting' | 'daemon-unreachable' | 'no-session' | 'active';
@@ -122,7 +122,7 @@
       const res = await fetch(`${base}/sessions/${active.id}/search-audit`, { signal });
       if (res.status === 404) {
         // Reachable daemon, just-listed session vanished mid-poll — same
-        // partial-case handling as SessionMonitor.svelte's chained fetches.
+        // partial-case handling as WorkstreamActivity.svelte's chained fetches.
         if (!signal.aborted) {
           phase = 'no-session';
           session = null;
@@ -161,7 +161,7 @@
 
   $effect(() => {
     // One controller for the whole mounted lifetime — same shape as
-    // StatusBar.svelte/SessionMonitor.svelte: aborting once on teardown both
+    // StatusBar.svelte/WorkstreamActivity.svelte: aborting once on teardown both
     // cancels any in-flight request and flips every `signal.aborted` guard
     // inside `refresh()`.
     const controller = new AbortController();
@@ -177,7 +177,7 @@
     // Independent of the network poll: a pure local redisplay tick so each
     // row's "age" column advances smoothly without waiting on POLL_MS. No
     // fetch, no AbortController needed — clearing the interval is the whole
-    // teardown (mirrors SessionMonitor.svelte's elapsed-time tick).
+    // teardown (mirrors WorkstreamActivity.svelte's elapsed-time tick).
     const timer = setInterval(() => {
       now = Date.now();
     }, TICK_MS);
@@ -205,7 +205,7 @@
     {:else if phase === 'no-session'}
       <p class="flex items-center gap-1.5 text-xs text-trusty-text-muted">
         <span class="h-1.5 w-1.5 rounded-full bg-status-neutral"></span>
-        no active session — nothing to audit yet
+        no active workstream — nothing to audit yet
       </p>
     {:else if session}
       <div class="overflow-x-auto">

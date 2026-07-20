@@ -1,4 +1,4 @@
-// Why: `SessionMonitor.svelte` (DOC-39 §4.6, the 8b Phase-1 card, refs
+// Why: `WorkstreamActivity.svelte` (DOC-39 §4.6, the 8b Phase-1 card, refs
 // #2983) needs two pure, testable pieces of derivation over
 // `GET /sessions/{id}/transcript` and `Session.created_at`: which turns to
 // show in a bounded "recent activity" tail, and a human-readable elapsed
@@ -30,7 +30,7 @@ export interface TurnRecord {
 
 /** Mirrors `crate::session::transcript::TranscriptRecord` (wire fields
  * only — `usage`/`goals` are typed `unknown`/`unknown[]` since
- * `SessionMonitor` doesn't render them). */
+ * `WorkstreamActivity` doesn't render them). */
 export interface TranscriptRecord {
   session_id: string;
   turns: TurnRecord[];
@@ -115,7 +115,7 @@ function turnToTailEntry(turn: TurnRecord): TranscriptTailEntry {
  * Select the trailing `n` turns for the monitor card's "recent activity"
  * list, reduced to `TranscriptTailEntry`.
  *
- * Why: `SessionMonitor` renders a bounded, glanceable activity feed, not
+ * Why: `WorkstreamActivity` renders a bounded, glanceable activity feed, not
  * the full transcript — this is the one derivation step between the raw
  * `TranscriptRecord.turns` array and that rendering.
  * What: returns `turns.slice(-n)` (so ordering is preserved: oldest of the

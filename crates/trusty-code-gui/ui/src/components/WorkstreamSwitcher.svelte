@@ -12,7 +12,7 @@
   //
   // What: Polls `GET /workstreams` every `POLL_MS` (the same
   // `$effect`/`AbortController`/`setInterval` shape `StatusBar.svelte`/
-  // `SessionMonitor.svelte` already establish — one controller for the
+  // `WorkstreamActivity.svelte` already establish — one controller for the
   // whole mounted lifetime, `signal.aborted` re-checked after every
   // `await`). A second `$effect` opens an `EventSource` on
   // `/workstreams/{active_id}/events` whenever the polled
@@ -40,11 +40,11 @@
   // rather than silently retrying with `force: true` (an explicit switch is
   // never silent, and DOC-48's own wording for this issue's scope is
   // "surface it, offer refresh"). Rename swaps a row into an inline
-  // text-input edit (no `window.prompt()` — see `SessionMonitor.svelte`'s
+  // text-input edit (no `window.prompt()` — see `WorkstreamActivity.svelte`'s
   // identical rationale); allowed on a closed row too, matching the
   // backend's `rename_closed_workstream_succeeds` contract (§4.4: closure
   // only rejects new session bindings, never label edits). Close requires
-  // the same two-step in-row confirm `SessionMonitor.svelte`'s cancel action
+  // the same two-step in-row confirm `WorkstreamActivity.svelte`'s cancel action
   // already establishes (no `window.confirm()`). `resetRowState()` clears
   // every armed rename/close/conflict control at EVERY open-state
   // transition (code-critic PR #3356 review, HIGH) — both `toggleOpen()`
@@ -150,12 +150,25 @@
     };
   });
 
-  // Re-subscribes only when the ACTIVE id itself changes (Svelte 5 tracks
-  // the primitive value read below, not every `list` refresh) — see the Why
-  // block above for why this is a latency optimization over polling, not
-  // the authoritative source.
+  // Re-subscribes ONLY when the ACTIVE id itself changes (code-critic PR
+  // #3392 review, HIGH — carried-in fix for a pre-existing bug from issue
+  // #3300/PR #3356, identified and fixed alongside the identical pattern in
+  // `WorkstreamActivity.svelte`, issue #3384). `refresh()` reassigns `list`
+  // to a FRESHLY-PARSED object on every poll tick — Svelte 5 invalidates on
+  // reference inequality of the `$state` source itself, so an effect
+  // reading `list?.active_workstream_id` directly re-ran (closing +
+  // reopening the `EventSource`) on EVERY poll tick, not only when the
+  // active id actually changed: ~360 reconnects/active-half-hour, dropping
+  // any event landing in the close->reopen gap, and needlessly loading the
+  // daemon — directly contradicting this comment's own original claim.
+  // `activeWorkstreamId` below is a `$derived` PRIMITIVE; Svelte 5
+  // suppresses a dependent's re-run when a `$derived` recomputes to the
+  // SAME primitive value, so the effect now only re-runs when the id
+  // itself actually changes.
+  let activeWorkstreamId = $derived(list?.active_workstream_id ?? null);
+
   $effect(() => {
-    const activeId = list?.active_workstream_id ?? null;
+    const activeId = activeWorkstreamId;
     if (!activeId || typeof EventSource === 'undefined') return;
 
     let source: EventSource | null = null;
