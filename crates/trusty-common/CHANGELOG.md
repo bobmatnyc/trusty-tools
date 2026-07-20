@@ -25,6 +25,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   replaced by the `default_ort_intra_threads()` function — the only
   consumer was this crate's own resolver, so no downstream crate references
   it.
+- **Performance / accuracy:** `FastEmbedder`'s default embedding model is now
+  `EmbeddingModel::AllMiniLML6V2` (fp32, fastembed's own natively-shipped
+  non-quantized variant), replacing the previous default,
+  `AllMiniLML6V2Q` (INT8, dynamically quantised). INT8 was measured to be
+  both ~2.1× slower (its dequant/requant ops are themselves expensive on the
+  CPU EP this model actually runs on — CoreML rejects the INT8 op set
+  outright) and less accurate (0.9897 mean cosine similarity vs a genuine
+  `sentence-transformers` reference, vs 1.000000 for fp32 — see issues
+  #3486 / #3493 P0). INT8 remains available via
+  `TRUSTY_EMBEDDER_MODEL=int8` (or `quantized` / `q`) for operators who need
+  the smaller ~23MB on-disk footprint (fp32 is ~87MB) more than speed or
+  accuracy; the existing two-model fallback-on-init-failure safety net is
+  preserved, just parameterised by the resolved default instead of
+  hardcoded. `EMBED_DIM`, `RequireStaticInputShapes`, and all existing batch
+  caps are unchanged.
 
 ## [0.23.5] — 2026-07-20
 

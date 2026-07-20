@@ -14,9 +14,14 @@ use async_trait::async_trait;
 
 /// Output dimension of the all-MiniLM-L6-v2 model.
 ///
-/// Note: we now load the INT8-quantised variant (`AllMiniLML6V2Q`) which
-/// produces identical 384-dim vectors but runs ~3-4× faster on CPU ONNX
-/// and ships as a ~22MB file (vs 86MB for the f32 model).
+/// Note: both `EmbeddingModel::AllMiniLML6V2` (fp32, the default — see
+/// `fast_embedder::resolve_default_embedding_model`) and the INT8-quantised
+/// `AllMiniLML6V2Q` (opt-in via `TRUSTY_EMBEDDER_MODEL=int8`, ~23MB vs ~90MB
+/// on disk) produce identical 384-dim vectors. Despite the smaller on-disk
+/// footprint, INT8 is measurably *slower* on the CPU EP this model actually
+/// runs on (~2.1× — its dequant/requant ops are themselves expensive) and
+/// less accurate (~0.99 vs ~1.0 mean cosine similarity against a genuine
+/// `sentence-transformers` reference) — see issues #3486 / #3493 P0.
 pub const EMBED_DIM: usize = 384;
 
 /// Default LRU cache capacity. Picked to be large enough to keep the
