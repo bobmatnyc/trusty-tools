@@ -91,6 +91,18 @@
 //!   generalized to [`Self::status_prefix`] (defaulted from `label`) and a
 //!   generic [`crate::widgets::input_composer`] hint string respectively.
 //!
+//! Deliberately **DIVERGES** from tagent (Slice 5, DOC-50 §5 — an intentional
+//! improvement per spec, not an oversight or a parity gap):
+//! - **Ctrl-C cancels the in-flight request** (see [`reduce::apply_key`]'s
+//!   `'c'` arm, staging [`Self::pending_cancel`] for `crate::run::run`'s
+//!   dispatch step to relay as a real `TuiEngine::cancel_session` RPC).
+//!   Tagent's actual Ctrl-c (`crates/trusty-agents/src/repl/tui/keys.rs`)
+//!   only clears the input buffer — tagent's cancel trigger is Up-arrow
+//!   while `thinking`. DOC-50 §5 Slice 5 specifies Ctrl-C as the cancel key
+//!   (the conventional terminal interrupt), which this crate implements as
+//!   written; Up-arrow-while-busy ALSO still signals cancel here (ported
+//!   faithfully from tagent, see above), so both triggers work.
+//!
 //! # Spec References
 //! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.2, the generalization layer.
 //! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4): `ReplApp` state.
@@ -250,6 +262,17 @@ pub struct ReplApp {
     /// non-blank line into an empty input buffer — direct port of tagent's
     /// `last_bash_block` (`crates/trusty-agents/src/repl/tui/types.rs`).
     pub last_bash_block: Option<String>,
+    /// The generation number of the turn currently considered "live" —
+    /// mirrors `crate::run::dispatch_pending`'s `AtomicU64` counter, updated
+    /// via [`TuiModel::set_current_generation`] on the SAME serial
+    /// event-loop task that owns that counter (never from a spawned task).
+    /// A `ReplEvent::TurnFinished { generation }` whose `generation` no
+    /// longer matches this field is a stale signal from a superseded turn
+    /// and is ignored — see that variant's doc comment for the TOCTOU race
+    /// this by-construction design closes (the comparison happens here, in
+    /// the reducer, serially — never as a spawned task's load-then-branch
+    /// against the shared counter).
+    pub current_generation: u64,
 }
 
 impl ReplApp {
@@ -295,6 +318,7 @@ impl ReplApp {
             pending_cancel: false,
             last_prompt: String::new(),
             last_bash_block: None,
+            current_generation: 0,
         }
     }
 
@@ -429,6 +453,22 @@ impl ReplApp {
     /// `busy` before any streamed chunk arrives (not on the first
     /// `AssistantOutput` chunk) closes the pre-first-token latency window —
     /// see the module doc comment's disclosure list.
+    ///
+    /// **A second turn cannot start while one is in flight**: if
+    /// [`Self::busy`] is already `true`, this whole function (routing
+    /// included) is a no-op — DOC-50 §5 Slice 5's "blocks user input until
+    /// cancel completes" requirement, made literal rather than reasoned
+    /// away. This is the authoritative guard (not just a UI nicety at the
+    /// call site): without it, a second `handle_input` task starts while the
+    /// first is still streaming, and with `streaming_idx` shared per-app
+    /// rather than per-task, the second task's chunks splice into the first
+    /// task's (now orphaned) chat entry — a real corruption bug this guard
+    /// closes at the source. Callers that want to preserve the user's typed
+    /// text when busy (the Enter-key path, [`reduce::apply_key`]) must check
+    /// `!app.busy` themselves BEFORE consuming the input buffer, since by
+    /// the time this function is reached the line is already taken out of
+    /// `input_buf` and would otherwise be silently lost, not just silently
+    /// ignored.
     /// What: [`crate::commands::BuiltIn::Clear`] reuses
     /// [`Self::clear_scrollback`] (the same effect
     /// `ReplEvent::ClearScrollback` produces); [`crate::commands::BuiltIn::Quit`]
@@ -438,8 +478,13 @@ impl ReplApp {
     /// Test: [`crate::commands::tests::submit_line_builtin_clear_clears_scrollback`],
     /// [`crate::commands::tests::submit_line_builtin_quit_sets_quit`],
     /// [`crate::commands::tests::submit_line_builtin_help_lists_commands`],
-    /// [`crate::commands::tests::submit_line_forwards_non_builtin_and_marks_busy`].
+    /// [`crate::commands::tests::submit_line_forwards_non_builtin_and_marks_busy`],
+    /// [`reduce::tests::apply_enter_is_noop_while_busy_and_preserves_buffer`],
+    /// [`reduce::tests::apply_submit_event_is_noop_while_busy`].
     pub(crate) fn submit_line(&mut self, line: String) {
+        if self.busy {
+            return;
+        }
         self.remember_input(&line);
         self.last_prompt = line.clone();
         self.push_user(line.clone());
@@ -587,5 +632,48 @@ impl ReplApp {
 impl TuiModel for ReplApp {
     fn should_quit(&self) -> bool {
         self.quit
+    }
+
+    /// Drain [`Self::pending_submit`] — see [`crate::run::dispatch_pending`]
+    /// (private to `crate::run`, called from [`crate::run::run`]) for the
+    /// caller that reads this after every `apply` call.
+    fn take_pending_submit(&mut self) -> Option<String> {
+        self.pending_submit.take()
+    }
+
+    /// Drain-and-clear [`Self::pending_cancel`].
+    fn take_pending_cancel(&mut self) -> bool {
+        std::mem::replace(&mut self.pending_cancel, false)
+    }
+
+    /// Reset the in-flight-request UI state the moment a cancel is
+    /// dispatched (before the `TuiEngine::cancel_session` RPC even starts) —
+    /// direct parity with tagent's real cancel path, which resets
+    /// `thinking`/`busy_since` synchronously ahead of `h.abort()`
+    /// (`crates/trusty-agents/src/repl/tui/events.rs::process_event`). See
+    /// [`crate::run::TuiModel::on_cancelled`]'s doc comment for why this is
+    /// synchronous rather than waiting on the RPC.
+    /// What: clears [`Self::busy`] and abandons the in-progress streaming
+    /// entry index (a future response starts a fresh chat entry rather than
+    /// appending to one no more chunks will ever arrive for), then pushes a
+    /// "cancelled" status line.
+    /// Test: [`reduce::tests::apply_ctrl_c_signals_pending_cancel`] covers
+    /// the reducer half; `crate::run::tests` covers this method being
+    /// invoked from the dispatch step.
+    fn on_cancelled(&mut self) {
+        self.busy = false;
+        self.streaming_idx = None;
+        self.push_status("cancelled");
+    }
+
+    /// Record `generation` into [`Self::current_generation`] — see
+    /// [`crate::run::TuiModel::set_current_generation`]'s doc comment for
+    /// why this is called only from `dispatch_pending` on the serial
+    /// event-loop task, and [`ReplEvent::TurnFinished`]'s doc comment for
+    /// the race this by-construction design closes.
+    /// Test: [`reduce::tests::apply_turn_finished_with_stale_generation_is_ignored`],
+    /// [`reduce::tests::apply_turn_finished_clears_busy_and_streaming_idx_without_touching_chat`].
+    fn set_current_generation(&mut self, generation: u64) {
+        self.current_generation = generation;
     }
 }

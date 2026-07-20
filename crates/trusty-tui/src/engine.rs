@@ -69,6 +69,23 @@ pub trait TuiEngine: Send + Sync {
     /// as [`ReplEvent`] values. Returns `Ok(true)` to keep the REPL running,
     /// `Ok(false)` to quit; an `Err` is surfaced to the user as an error
     /// event by the caller, not propagated as a panic.
+    ///
+    /// **Contract on `tx`'s lifetime (DOC-50 §5 Slice 5's dispatch layer,
+    /// `crate::run::dispatch_pending`):** `tx` is a private, per-call channel
+    /// — do not retain a clone of it (e.g. inside a detached background
+    /// task) past this call's return. The shared dispatch layer awaits that
+    /// channel's forwarder to fully drain immediately after this future
+    /// resolves, as part of detecting whether a terminal signal
+    /// (`AssistantOutput { done: true, .. }` or the quit path) was ever
+    /// produced; a clone kept alive beyond the call would stall that
+    /// detection. This does not restrict implementations from spawning their
+    /// OWN background work — only from smuggling `tx` itself into anything
+    /// outliving the call. Note also that **not every `Ok(true)` needs to
+    /// send a terminal `AssistantOutput`** (e.g. a `/workstream list` that
+    /// only pushes `StatusMessage`/`WorkstreamUpdated`) — the dispatch layer
+    /// detects that gap and synthesizes `ReplEvent::TurnFinished` itself, so
+    /// implementations are NOT required to send a synthetic empty
+    /// `AssistantOutput { done: true, .. }` just to clear `busy`.
     /// Test: exercised via a mock `TuiEngine` in Slice 2+ integration tests
     /// (`crates/trusty-tui/tests/`); no runtime behavior to unit-test yet in
     /// Slice 1.

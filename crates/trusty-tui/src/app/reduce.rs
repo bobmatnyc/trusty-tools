@@ -1,21 +1,22 @@
 //! [`apply`] — the `ReplApp` half of [`crate::run::event_loop`]'s
 //! `apply: FnMut(&mut M, ReplEvent)` contract.
 //!
-//! Why: DOC-50 §5 Slice 5 ("Event dispatch and line editing") is scoped as
-//! its own future slice, but [`crate::run::event_loop`] (already on main
-//! since Slice 2) needs *some* `apply` closure to be renderable at all — a
-//! product cannot demonstrate the Slice 4 widgets against real key input
-//! without one. This module provides the generic core: character
-//! insertion/deletion, cursor movement, history recall, and scroll. Where a
-//! binding has a REAL tagent precedent (Up/Down, Ctrl-E), this module ports
-//! that exact production behavior — verified against tagent's actual
-//! `crates/trusty-agents/src/repl/tui/keys.rs`, not its doc comments, which
-//! in at least one case (Up-arrow) misattribute production behavior to a
-//! dead-code helper. See [`crate::app`]'s module doc comment for the full
-//! disclosed-differences list. Tagent-specific extras (pickers,
-//! slash-completion, cost/token tracking) stay behind per the
-//! generalization mandate; full line-editing polish (Ctrl-w word-delete,
-//! kill-ring, etc.) remains Slice 5's to design.
+//! Why: Slice 4 (already on main) needed *some* `apply` closure so the
+//! widgets could be demonstrated against real key input before DOC-50 §5
+//! Slice 5 ("Event dispatch and line editing") landed as its own slice — it
+//! shipped the generic core: character insertion/deletion, cursor movement,
+//! history recall, and scroll. Slice 5 (this revision) completes the keymap
+//! to full parity with tagent's actual `crates/trusty-agents/src/repl/tui/keys.rs`
+//! (not its doc comments, which in at least one case — Up-arrow —
+//! misattribute production behavior to a dead-code helper) and wires
+//! [`ReplApp::pending_submit`]/[`ReplApp::pending_cancel`] through to
+//! `TuiEngine::handle_input`/`cancel_session` in [`crate::run::run`]. See
+//! [`crate::app`]'s module doc comment for the full disclosed-differences
+//! list. Tagent-specific extras (pickers, slash-completion, cost/token
+//! tracking) stay behind per the generalization mandate; line-editing
+//! features tagent's own `keys.rs` never had either (Ctrl-w word-delete, a
+//! kill-ring, word-motion) are deliberately NOT invented here — full parity
+//! means matching tagent, not exceeding it.
 //!
 //! What: `apply` cannot reach the event channel or the engine — it only has
 //! `&mut ReplApp` — so anything that would normally need to call
@@ -23,10 +24,14 @@
 //! `ReplApp` ([`ReplApp::pending_submit`], [`ReplApp::pending_cancel`]) for
 //! the caller to drain after `apply` returns, mirroring tagent's own
 //! `pending_picker_selection`/`pending_cancel` precedent
-//! (`crates/trusty-agents/src/repl/tui/types.rs`).
+//! (`crates/trusty-agents/src/repl/tui/types.rs`). [`crate::run::run`]'s
+//! dispatch step is the actual drain point — see that module for the
+//! `engine.handle_input`/`engine.cancel_session` wiring and the
+//! `ReplEvent::Quit` round-trip an engine's `Ok(false)` needs to reach
+//! `ReplApp::quit`, since a spawned task can't reach `&mut ReplApp` directly.
 //!
 //! # Spec References
-//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 4 deliverable (§5, Slice 4): wire `ReplApp` to `ReplEvent`.
+//! - [`SPEC-TTUI-05~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-05~draft) — Slice 5 deliverable (§5, Slice 5): line-editor keymap + Ctrl-C daemon cancel.
 
 use super::ReplApp;
 use crate::event::{KeyCode, KeyInput, ReplEvent};
@@ -56,6 +61,23 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         ReplEvent::Scroll(delta) => app.scroll(delta),
         ReplEvent::Submit(line) => app.submit_line(line),
         ReplEvent::Cancel => app.pending_cancel = true,
+        ReplEvent::Quit => app.quit = true,
+        // `crate::run::dispatch_pending`'s completion safety net (see
+        // `ReplEvent::TurnFinished`'s doc comment for the stuck-`busy`
+        // deadlock this closes). Applied ONLY if `generation` still matches
+        // `app.current_generation` — a stale signal from a turn that was
+        // since cancelled/superseded is a no-op, by construction (this
+        // compare runs serially in the reducer, never as a spawned task's
+        // load-then-branch against the shared counter — see that variant's
+        // doc comment for the TOCTOU race this closes). When applied, it
+        // touches ONLY these two fields, never `chat`, so it can never push
+        // a stray blank entry.
+        ReplEvent::TurnFinished { generation } => {
+            if generation == app.current_generation {
+                app.busy = false;
+                app.streaming_idx = None;
+            }
+        }
         ReplEvent::AssistantOutput {
             chunk,
             done,
@@ -160,7 +182,13 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
                 app.cursor_pos = 0;
             }
             'c' => app.pending_cancel = true,
-            'd' => app.quit = true,
+            // Direct port of tagent's real `KeyCode::Char('d')` arm
+            // (`crates/trusty-agents/src/repl/tui/keys.rs`): Ctrl-D only
+            // quits on an EMPTY input buffer (the readline EOF convention);
+            // with text still in the buffer it's a no-op in tagent too (no
+            // forward-delete fallback), so this stays a plain guard rather
+            // than growing new behavior tagent doesn't have.
+            'd' if app.input_buf.is_empty() => app.quit = true,
             _ => {}
         },
         KeyCode::Char(c) => app.insert_char(c),
@@ -179,8 +207,18 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll(-PAGE_SCROLL),
         KeyCode::PageDown => app.scroll(PAGE_SCROLL),
+        // Gated on `!app.busy` BEFORE `take_input()` runs (not just inside
+        // `submit_line`, which also guards): while a turn is in flight, the
+        // typed line stays in `input_buf` untouched rather than being taken
+        // out and then silently dropped by `submit_line`'s own guard — DOC-50
+        // §5 Slice 5's "blocks user input until cancel completes", made
+        // literal so a second turn genuinely cannot start (see
+        // `ReplApp::submit_line`'s doc comment for the corruption bug this
+        // closes).
         KeyCode::Enter => {
-            if let Some(line) = app.take_input() {
+            if !app.busy
+                && let Some(line) = app.take_input()
+            {
                 app.submit_line(line);
             }
         }

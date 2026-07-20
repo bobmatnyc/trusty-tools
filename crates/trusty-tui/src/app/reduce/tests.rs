@@ -77,6 +77,46 @@ fn apply_submit_event_mirrors_enter() {
     assert_eq!(app.chat[0].text, "/model opus-4");
 }
 
+/// DOC-50 §5 Slice 5's "blocks user input until cancel completes", made
+/// literal: while a turn is in flight (`busy == true`), Enter must not start
+/// a second turn — and must leave the typed text sitting in `input_buf`
+/// rather than consuming it and dropping it via `submit_line`'s own guard.
+/// This is the direct fix for the double-submit corruption a code-review
+/// pass caught on PR #3477 (task B's chunks splicing into task A's orphaned
+/// `streaming_idx` entry).
+#[test]
+fn apply_enter_is_noop_while_busy_and_preserves_buffer() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    for c in "explain Y".chars() {
+        apply(&mut app, key(KeyCode::Char(c)));
+    }
+    let chat_len_before = app.chat.len();
+    apply(&mut app, key(KeyCode::Enter));
+    assert_eq!(
+        app.input_buf, "explain Y",
+        "typed text must survive a blocked Enter, not be discarded"
+    );
+    assert!(app.pending_submit.is_none(), "must not stage a second turn");
+    assert_eq!(
+        app.chat.len(),
+        chat_len_before,
+        "must not echo a second user line while busy"
+    );
+}
+
+/// Same guard, exercised via the synthesized `ReplEvent::Submit` path
+/// (e.g. a future picker confirmation) rather than the Enter key — proves
+/// the guard lives in `submit_line` itself, not just the Enter call site.
+#[test]
+fn apply_submit_event_is_noop_while_busy() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    apply(&mut app, ReplEvent::Submit("/model opus-4".to_string()));
+    assert!(app.pending_submit.is_none());
+    assert!(app.chat.is_empty(), "must not echo while busy");
+}
+
 /// Direct port of tagent's `repl_app_up_arrow_recalls_last_prompt`
 /// (`crates/trusty-agents/src/repl/tui/tests_input.rs`).
 #[test]
@@ -232,12 +272,94 @@ fn apply_ctrl_c_signals_pending_cancel() {
     assert!(app.pending_cancel);
 }
 
+/// Direct port of tagent's real `KeyCode::Char('d')` arm: Ctrl-D only quits
+/// on an EMPTY input buffer (the readline EOF convention).
 #[test]
-fn apply_ctrl_d_signals_quit() {
+fn apply_ctrl_d_signals_quit_when_input_empty() {
     let mut app = ReplApp::new("demo", "u");
     assert!(!app.should_quit());
     apply(&mut app, ctrl_key('d'));
     assert!(app.should_quit());
+}
+
+/// Direct port of tagent's real `KeyCode::Char('d')` arm: with text still in
+/// the buffer, Ctrl-D is a no-op (tagent has no forward-delete fallback) —
+/// pins the gap this slice's audit found and fixed (an earlier revision
+/// quit unconditionally, losing unsaved input on a stray Ctrl-D).
+#[test]
+fn apply_ctrl_d_is_noop_when_input_nonempty() {
+    let mut app = ReplApp::new("demo", "u");
+    app.set_input("still typing".to_string());
+    apply(&mut app, ctrl_key('d'));
+    assert!(!app.should_quit());
+    assert_eq!(app.input_buf, "still typing");
+}
+
+/// `ReplEvent::Quit` (synthesized by `crate::run::run`'s dispatch step when
+/// `TuiEngine::handle_input` returns `Ok(false)`) must set `ReplApp::quit`
+/// exactly like Ctrl-D does — the two are independent triggers for the same
+/// state.
+#[test]
+fn apply_quit_event_signals_quit() {
+    let mut app = ReplApp::new("demo", "u");
+    assert!(!app.should_quit());
+    apply(&mut app, ReplEvent::Quit);
+    assert!(app.should_quit());
+}
+
+/// `ReplEvent::TurnFinished` (the `dispatch_pending` stuck-`busy` safety net)
+/// must clear `busy`/`streaming_idx` and touch NOTHING else — in particular
+/// it must never push a chat entry, which is exactly why it exists instead
+/// of reusing an empty `AssistantOutput { done: true, .. }` — PROVIDED its
+/// `generation` matches `app.current_generation` (the live turn).
+#[test]
+fn apply_turn_finished_clears_busy_and_streaming_idx_without_touching_chat() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    app.streaming_idx = Some(0);
+    app.current_generation = 1;
+    app.push_status("unrelated"); // pre-existing chat content must survive
+    let chat_before = app.chat.len();
+
+    apply(&mut app, ReplEvent::TurnFinished { generation: 1 });
+
+    assert!(!app.busy);
+    assert!(app.streaming_idx.is_none());
+    assert_eq!(
+        app.chat.len(),
+        chat_before,
+        "must not push/alter any chat entry"
+    );
+}
+
+/// The TOCTOU-race fix (PR #3477, final re-review round): a `TurnFinished`
+/// whose `generation` is STALE relative to `app.current_generation` (a
+/// newer turn is now live — e.g. the old turn was cancelled and the user
+/// already resubmitted) must be a complete no-op. Without this guard, a
+/// terminal signal that raced a cancel+resubmit could clear `busy`/
+/// `streaming_idx` out from under a genuinely in-flight NEWER turn,
+/// reintroducing the streaming-splice corruption class this whole PR
+/// closes. This is a deterministic reducer-level test — the point of the
+/// by-construction fix is that this comparison is the reducer's own logic,
+/// not a live cross-thread race that would need reproducing.
+#[test]
+fn apply_turn_finished_with_stale_generation_is_ignored() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    app.streaming_idx = Some(0);
+    app.current_generation = 2; // a newer turn is now live
+
+    apply(&mut app, ReplEvent::TurnFinished { generation: 1 }); // stale
+
+    assert!(
+        app.busy,
+        "a stale TurnFinished must not clear busy for a newer in-flight turn"
+    );
+    assert_eq!(
+        app.streaming_idx,
+        Some(0),
+        "a stale TurnFinished must not reset streaming_idx either"
+    );
 }
 
 #[test]
