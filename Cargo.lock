@@ -11558,6 +11558,7 @@ dependencies = [
  "tracing-test",
  "trusty-common",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

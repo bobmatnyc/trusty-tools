@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use tracing::{debug, warn};
 
+use crate::api::auth::oauth::resolve_client_creds_for_profile;
 use crate::api::auth::{OAuthManager, StoredToken, TokenStorage};
 
 /// Request body variants understood by [`BaseClient::send_with_retry`].
@@ -72,28 +73,31 @@ pub struct RawResponse {
 ///
 /// Why: One handle per process; `Arc<TokenStorage>` because tools may run
 /// concurrently and we don't want to re-read the file each call.
-/// What: Holds an `Option<OAuthManager>` — `None` when env credentials are
-/// missing (read-only token mode: requests still work until the token
-/// expires).
+/// What: Holds an `OAuthManager` — the OAuth CLIENT it refreshes with is no
+/// longer fixed at construction time (issue #3518): `get_access_token` /
+/// `send_with_retry` each resolve the ACTING profile's own client via
+/// [`resolve_client_creds_for_profile`] before calling `refresh`, falling
+/// back to read-only token mode (return the stale access token, no error)
+/// only when neither a per-profile nor the global client resolves for that
+/// profile.
 /// Test: Smoke test asserts construction succeeds with no env vars.
 pub struct BaseClient {
     http: reqwest::Client,
     pub(crate) storage: Arc<TokenStorage>,
-    oauth: Option<OAuthManager>,
+    oauth: OAuthManager,
 }
 
 impl BaseClient {
-    /// Construct with default token storage and optional refresh manager.
+    /// Construct with default token storage and refresh manager.
     pub fn new() -> Result<Self> {
         let storage = Arc::new(TokenStorage::new());
-        let oauth = OAuthManager::from_env()?;
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent("trusty-gworkspace/0.1")
                 .build()
                 .context("build reqwest client")?,
             storage,
-            oauth,
+            oauth: OAuthManager::new(),
         })
     }
 
@@ -102,21 +106,22 @@ impl BaseClient {
         &self.storage
     }
 
-    /// Test-only constructor with injectable storage and no refresh manager.
+    /// Test-only constructor with injectable storage.
     ///
     /// Why: `services::accounts`' account-management tools (`set_default_account`,
     /// `remove_account`) only ever touch `TokenStorage`, never the network, so
     /// their tests need a `BaseClient` backed by a temp `TokenStorage` without
     /// touching `~/.gworkspace-mcp` or real OAuth credentials.
-    /// What: Builds a plain `reqwest::Client`; `oauth` is always `None` since
-    /// nothing exercised by those tests calls `get_access_token`'s refresh path.
+    /// What: Builds a plain `reqwest::Client` and a stock `OAuthManager`
+    /// (never invoked over the network by those tests, since nothing they
+    /// exercise calls `get_access_token`'s refresh path).
     /// Test: exercised by `services::accounts::tests`.
     #[cfg(test)]
     pub(crate) fn for_test(storage: TokenStorage) -> Self {
         Self {
             http: reqwest::Client::new(),
             storage: Arc::new(storage),
-            oauth: None,
+            oauth: OAuthManager::new(),
         }
     }
 
@@ -145,19 +150,32 @@ impl BaseClient {
     }
 
     /// Return an access token, refreshing if expired and possible.
+    ///
+    /// Why: A refresh is only possible when SOME OAuth client resolves for
+    /// this profile — its own per-profile client, or (issue #3518) the
+    /// global fallback. Checking that up front (rather than letting
+    /// `OAuthManager::refresh` fail) keeps the existing graceful
+    /// read-only-token degradation distinct from a genuine HTTP/refresh
+    /// failure, which must still propagate as an error.
+    /// What: Resolves credentials for `profile` via
+    /// `resolve_client_creds_for_profile`; on success, refreshes and returns
+    /// the new access token (any HTTP/refresh error propagates). When no
+    /// client resolves at all, warns and returns the stale access token
+    /// instead of failing the call.
     pub async fn get_access_token(&self, account: Option<&str>) -> Result<String> {
         let (profile, stored) = self.resolve_stored(account)?;
         if !stored.token.is_expired() {
             return Ok(stored.token.access_token);
         }
-        if let Some(oauth) = &self.oauth {
+        if resolve_client_creds_for_profile(&profile).is_ok() {
             debug!(profile = %profile, "refreshing expired token");
-            let new = oauth.refresh(&self.storage, &profile).await?;
+            let new = self.oauth.refresh(&self.storage, &profile).await?;
             return Ok(new.access_token);
         }
         warn!(
             profile = %profile,
-            "token expired and refresh disabled (no GOOGLE_OAUTH_CLIENT_ID/SECRET); returning stale token"
+            "token expired and refresh disabled (no OAuth client credentials for this profile); \
+             returning stale token"
         );
         Ok(stored.token.access_token)
     }
@@ -188,8 +206,10 @@ impl BaseClient {
             .with_context(|| format!("{method} {url}"))?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             warn!(url = %url, "401 received — forcing refresh and retrying once");
-            if let (Some(oauth), Ok((profile, _))) = (&self.oauth, self.resolve_stored(account)) {
-                let new = oauth.refresh(&self.storage, &profile).await?;
+            if let Ok((profile, _)) = self.resolve_stored(account)
+                && resolve_client_creds_for_profile(&profile).is_ok()
+            {
+                let new = self.oauth.refresh(&self.storage, &profile).await?;
                 let retry = body.apply(
                     self.http
                         .request(method.clone(), url)

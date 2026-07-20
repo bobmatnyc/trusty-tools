@@ -15,13 +15,17 @@
 use anyhow::Result;
 
 use crate::api::auth::TokenStorage;
+use crate::api::auth::oauth::profile_client_source;
 
 /// Print all stored profiles as an aligned table.
 ///
 /// Why: The primary discovery command — shows which `account` values the MCP
-/// tools accept and which one is the default.
+/// tools accept, which one is the default, and (issue #3518) which OAuth
+/// client each profile authorizes/refreshes with, so a per-profile-client
+/// misconfiguration is diagnosable from this one command.
 /// What: Loads via [`TokenStorage::list_accounts`] and prints one row per
-/// profile; prints a hint when empty.
+/// profile (name, email, default marker, client source); prints a hint when
+/// empty.
 /// Test: Output is cosmetic; the underlying listing is covered by storage
 /// round-trip tests.
 pub fn list(storage: &TokenStorage) -> Result<()> {
@@ -30,10 +34,11 @@ pub fn list(storage: &TokenStorage) -> Result<()> {
         println!("No accounts found. Run `trusty-gworkspace-mcp setup` to authorize one.");
         return Ok(());
     }
-    println!("{:<24} {:<32} DEFAULT", "PROFILE", "EMAIL");
+    println!("{:<24} {:<32} {:<8} CLIENT", "PROFILE", "EMAIL", "DEFAULT");
     for (name, email, is_default) in rows {
+        let client = profile_client_source(&name).label();
         println!(
-            "{:<24} {:<32} {}",
+            "{:<24} {:<32} {:<8} {client}",
             name,
             email.unwrap_or_else(|| "-".to_string()),
             if is_default { "*" } else { "" }

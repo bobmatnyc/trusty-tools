@@ -14,11 +14,13 @@
 pub mod accounts;
 pub mod doctor;
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::api::auth::TokenStorage;
-use crate::api::auth::oauth::{DefaultMode, flow, run_consent};
+use crate::api::auth::oauth::{DefaultMode, flow, persist_profile_client, run_consent};
 
 /// `trusty-gworkspace-mcp` — Google Workspace MCP server + onboarding CLI.
 ///
@@ -71,6 +73,14 @@ pub enum Command {
         /// context (the loopback callback still captures the redirect).
         #[arg(long = "no-browser", visible_alias = "print-url")]
         no_browser: bool,
+        /// Authorize this profile against a SPECIFIC OAuth client instead of
+        /// the shared global one (issue #3518). Path to a JSON file — flat
+        /// `{"client_id","client_secret"}` or Google's downloaded
+        /// `installed`/`web` shape. Persisted to
+        /// `~/.gworkspace-mcp/clients/<profile>.json` (0600) and reused on
+        /// every future refresh for this profile.
+        #[arg(long = "oauth-client", value_name = "PATH")]
+        oauth_client: Option<PathBuf>,
     },
     /// Check OAuth client credentials and token state.
     Doctor,
@@ -117,8 +127,17 @@ pub async fn dispatch(command: Command) -> Result<()> {
             no_default,
             make_default,
             no_browser,
+            oauth_client,
         } => {
             let profile = flow::effective_profile(profile.as_deref());
+            if let Some(path) = &oauth_client {
+                let target = persist_profile_client(&profile, path)?;
+                println!(
+                    "Using OAuth client from {} for profile '{profile}' (persisted to {}).",
+                    path.display(),
+                    target.display()
+                );
+            }
             let mode = if no_default {
                 DefaultMode::Never
             } else if make_default {
@@ -174,7 +193,13 @@ mod tests {
             Cli::try_parse_from(["gworkspace-mcp", "setup", "--profile", "work"]).expect("setup");
         assert!(matches!(
             setup.command,
-            Some(Command::Setup { profile: Some(p), no_default: false, make_default: false, no_browser: false }) if p == "work"
+            Some(Command::Setup {
+                profile: Some(p),
+                no_default: false,
+                make_default: false,
+                no_browser: false,
+                oauth_client: None,
+            }) if p == "work"
         ));
 
         let doctor = Cli::try_parse_from(["gworkspace-mcp", "doctor"]).expect("doctor");
@@ -213,6 +238,7 @@ mod tests {
                 no_default: true,
                 make_default: false,
                 no_browser: false,
+                oauth_client: None,
             })
         ));
     }
@@ -228,6 +254,7 @@ mod tests {
                 no_default: false,
                 make_default: true,
                 no_browser: false,
+                oauth_client: None,
             })
         ));
     }
@@ -264,5 +291,25 @@ mod tests {
             result.is_err(),
             "--no-default and --make-default must conflict"
         );
+    }
+
+    #[test]
+    fn setup_oauth_client_flag_parses() {
+        let cli = Cli::try_parse_from([
+            "gworkspace-mcp",
+            "setup",
+            "--profile",
+            "work",
+            "--oauth-client",
+            "/tmp/client.json",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Setup {
+                oauth_client: Some(p),
+                ..
+            }) if p.as_path() == std::path::Path::new("/tmp/client.json")
+        ));
     }
 }

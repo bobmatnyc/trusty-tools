@@ -41,3 +41,8 @@ serial_test = { workspace = true }
 # [workspace.dependencies]; pinned locally, matching the existing
 # trusty-git-analytics precedent.
 tracing-test = "0.2"
+# wiremock: async HTTP mock server for the OAuthManager::refresh tests
+# (issue #3518) — asserts the exact client_id/secret sent to the token
+# endpoint without hitting Google, matching the trusty-channels /
+# trusty-git-analytics precedent.
+wiremock = { workspace = true }

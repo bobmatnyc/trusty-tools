@@ -12,7 +12,11 @@
 pub mod manager;
 pub mod models;
 pub mod oauth;
+pub mod perms;
 pub mod storage;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use manager::OAuthManager;
 pub use models::{OAuthToken, StoredToken, TokenMetadata};

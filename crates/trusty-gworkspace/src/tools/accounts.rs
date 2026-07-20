@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 pub(super) fn append(tools: &mut Vec<Value>) {
     tools.push(tool(
         "list_accounts",
-        "List configured Google Workspace account profiles available on this machine.",
+        "List configured Google Workspace account profiles available on this machine, including \
+         which OAuth client each one uses (\"global\" or a per-profile client path).",
         json!({ "account": account_schema() }),
         &[],
     ));
@@ -69,6 +70,10 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             "timeout_secs": {
                 "type": "integer",
                 "description": "How long to wait for the user to complete browser consent, in seconds (clamped to 10-90; default 60).",
+            },
+            "oauth_client_path": {
+                "type": "string",
+                "description": "Optional path to a JSON file holding THIS profile's own OAuth client (flat {client_id,client_secret}, or Google's downloaded installed/web shape). When given, this profile authorizes and refreshes with that client instead of the shared global one — never pass raw client_id/secret values here, only a file path.",
             },
         }),
         &[],
