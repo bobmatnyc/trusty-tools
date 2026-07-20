@@ -105,6 +105,11 @@ globset = { workspace = true }
 # task startup.
 trusty-common = { workspace = true, features = ["catchup", "mcp", "stdio-mcp-client", "axum-server", "inference-client", "config-cli", "bedrock-client", "search-index"] }
 
+# `tui_client::CodeEngine` (#3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3): the
+# shared engine-adapter trait + event vocabulary (`TuiEngine`/`ReplEvent`)
+# both `tcode tui` and tagent's REPL implement against.
+trusty-tui = { workspace = true }
+
 # `tcode serve --http`: POST /rpc + GET /health over axum (#2053). Per
 # CLAUDE.md, axum stays feature-gated in *library* crates
 # (`trusty-common`'s `axum-server` flag); trusty-code is a binary crate that
@@ -140,3 +145,8 @@ tokio = { workspace = true }
 # HTTP router test-only helper (`tower::util::ServiceExt::oneshot`) for
 # driving the `tcode serve --http` axum router without a real socket (#2053).
 tower = { workspace = true }
+# `tests/tui_client_engine.rs` (#3415): a hermetic mock HTTP daemon for
+# `CodeEngine`, mirroring `trusty-channels/tests/client_http.rs`'s pattern —
+# a real bound socket so `reqwest` (SSE included) drives it exactly like a
+# real `tcode serve --http` daemon, without spawning the real binary.
+wiremock = { workspace = true }

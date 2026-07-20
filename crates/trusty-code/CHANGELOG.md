@@ -8,6 +8,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`tui_client::CodeEngine` — `trusty-tui` engine adapter for `tcode tui`
+  (issue #3415, DOC-50 §3.3/§3.4, epic #3411 Slice 3).** A thin
+  `trusty_tui::TuiEngine` implementation driving a long-lived
+  `tcode serve --http` daemon over pooled HTTP + SSE: daemon discovery
+  (`TCODE_DAEMON_URL` env var → the `http_addr` discovery file → a
+  `/health` liveness ping), `session.create`/`task.run` for chat turns
+  streamed back via `GET /sessions/{id}/events`, `session.cancel` on
+  cancellation (never a client-side-only stop), and a long-lived
+  `GET /workstreams/{id}/events` subscription translating
+  `WorkstreamActivationChanged` into `ReplEvent`s. `crate::serve::discovery`
+  adds the daemon-side write half of the discovery file (`http_addr` under
+  `resolve_data_dir("trusty-code")`), following the same convention
+  `trusty-memory`/`trusty-search` already use rather than inventing a new
+  JSON-shaped one.
+
 ### Fixed
 
 - **Every daemon-default task run (including every GUI-initiated run) failed

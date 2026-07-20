@@ -33,6 +33,7 @@
 //!
 //! Test: `serve::tests::*`.
 
+pub mod discovery;
 pub mod http;
 pub mod methods;
 pub mod rest;
