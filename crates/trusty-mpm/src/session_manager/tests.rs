@@ -1038,10 +1038,9 @@ async fn manager_answer_decision() {
 #[tokio::test]
 async fn spawn_session_tmux_cwd_is_workspace() {
     use crate::session_manager::record::ManagedSessionId;
-    use tempfile::TempDir;
 
-    let store_dir = TempDir::new().unwrap();
-    let workspace_root = TempDir::new().unwrap();
+    let store_dir = crate::test_support::hermetic_temp_dir();
+    let workspace_root = crate::test_support::hermetic_temp_dir();
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(store_dir.path(), fake.clone())
         .await

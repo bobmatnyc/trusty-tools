@@ -18,9 +18,13 @@
 //! `hermetic_temp_dir()` call) and best-effort removes `tm-test-*`
 //! directories older than a day, bounding leak growth without a background
 //! daemon.
-//! Test: `test_support::tests` below; see also the TMPDIR-pollution proof in
-//! the #3382 PR description (`TMPDIR=$HOME/... cargo test -p trusty-mpm
-//! provisioner` deposits nothing under that tree).
+//! Test: `test_support::tests` below, including regression coverage for a
+//! degenerate-`$HOME` false positive (`HOME=/tmp` or `HOME=/`, as seen in
+//! root-container / OpenShift-style environments) that an earlier revision
+//! of [`guard_against_project_tree`] panicked on unconditionally; see also
+//! the TMPDIR-pollution proof in the #3382 PR description
+//! (`TMPDIR=$HOME/... cargo test -p trusty-mpm provisioner` deposits nothing
+//! under that tree).
 
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -70,6 +74,26 @@ fn real_system_tmp() -> PathBuf {
     }
 }
 
+/// Whether `home` is a "meaningful" (non-degenerate) containment boundary
+/// relative to `candidate` — more than one path component, and not
+/// identical to `candidate` itself.
+///
+/// Why: shared by [`guard_against_project_tree`] AND its own test suite
+/// (`tests::hermetic_temp_dir_is_prefixed_and_outside_home`) so both apply
+/// the EXACT same degenerate-`$HOME` exclusion — a code reviewer reproduced
+/// a real crash by running the compiled test binary with `HOME=/tmp` (or
+/// `HOME=/`): every real system temp path trivially "starts with" `/`, and
+/// `/tmp` trivially equals `HOME=/tmp`, so a naive `Path::starts_with` check
+/// panicked on EVERY [`hermetic_temp_dir`] call in that environment —
+/// strictly worse than the pre-fix behavior, not defense in depth. Having
+/// the assertion logic live in one place prevents the test suite's own
+/// containment check from drifting out of sync with the production check and
+/// reintroducing the same false positive from the other direction.
+/// What: `home.components().count() > 1 && home != candidate`.
+fn is_meaningful_home_boundary(home: &Path, candidate: &Path) -> bool {
+    home.components().count() > 1 && home != candidate
+}
+
 /// Panic loudly if `root` resolves inside the user's home directory.
 ///
 /// Why: defense in depth. [`real_system_tmp`]'s hardcoded `/tmp` never trips
@@ -78,18 +102,22 @@ fn real_system_tmp() -> PathBuf {
 /// unexpected), a hermetic root that lands inside `$HOME` — where every
 /// observed project tree lives — must fail the test run loudly rather than
 /// silently littering it, per #3382.
-/// What: compares `root` against `$HOME` with `Path::starts_with`; no-ops if
-/// `$HOME` is unset.
-/// Test: [`tests::guard_panics_on_home_relative_root`].
+/// What: compares `root` against `$HOME` with `Path::starts_with`, but ONLY
+/// when [`is_meaningful_home_boundary`] says `$HOME` is non-degenerate
+/// relative to `root`. No-ops if `$HOME` is unset.
+/// Test: [`tests::guard_panics_on_genuine_home_containment`],
+/// [`tests::guard_does_not_panic_when_home_is_tmp`],
+/// [`tests::guard_does_not_panic_when_home_is_root`].
 fn guard_against_project_tree(root: &Path) {
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        if !home.as_os_str().is_empty() && root.starts_with(&home) {
-            panic!(
-                "hermetic test temp root {root:?} resolves inside $HOME ({home:?}) — \
-                 refusing to risk littering a project tree (see #3382)"
-            );
-        }
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let home = PathBuf::from(home);
+    if is_meaningful_home_boundary(&home, root) && root.starts_with(&home) {
+        panic!(
+            "hermetic test temp root {root:?} resolves inside $HOME ({home:?}) — \
+             refusing to risk littering a project tree (see #3382)"
+        );
     }
 }
 
@@ -183,20 +211,80 @@ mod tests {
             name.starts_with(TEST_DIR_PREFIX),
             "expected {name:?} to start with {TEST_DIR_PREFIX:?}"
         );
+        // Same degenerate-HOME exclusion as `guard_against_project_tree`
+        // (compared against the ROOT, not the leaf `dir.path()` — otherwise
+        // this assertion reintroduces the exact false positive it's meant to
+        // catch: `dir.path()` is always a child of, never equal to, the
+        // root, so a naive `home != dir.path()` check is never degenerate).
         if let Some(home) = std::env::var_os("HOME") {
-            assert!(
-                !dir.path().starts_with(PathBuf::from(home)),
-                "hermetic dir must never resolve inside $HOME: {:?}",
-                dir.path()
-            );
+            let home = PathBuf::from(home);
+            if is_meaningful_home_boundary(&home, &real_system_tmp()) {
+                assert!(
+                    !dir.path().starts_with(&home),
+                    "hermetic dir must never resolve inside $HOME: {:?}",
+                    dir.path()
+                );
+            }
         }
     }
 
+    /// Serializes tests that mutate `$HOME` and restores the prior value on
+    /// drop (including on panic-driven unwind, via `#[should_panic]` tests) —
+    /// mirrors `core::workspace_scan::tests::clear_env`'s env-mutation
+    /// pattern. `guard_against_project_tree` reads `$HOME` directly, so
+    /// concurrent mutation from another test in this process would make
+    /// these tests flaky without serialization.
+    struct HomeOverride {
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for HomeOverride {
+        fn drop(&mut self) {
+            // SAFETY: serialised by `_lock`, held for this guard's lifetime.
+            match self.prev.take() {
+                Some(v) => unsafe { std::env::set_var("HOME", v) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    fn override_home(value: &str) -> HomeOverride {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialised by `lock`, held until the returned guard drops.
+        unsafe { std::env::set_var("HOME", value) };
+        HomeOverride { prev, _lock: lock }
+    }
+
+    /// The genuine positive case: a real per-user home (e.g. `/Users/x`,
+    /// `/home/x`) containing the candidate root must still panic.
     #[test]
     #[should_panic(expected = "resolves inside $HOME")]
-    fn guard_panics_on_home_relative_root() {
-        let home = std::env::var_os("HOME").expect("HOME must be set to run this test");
-        guard_against_project_tree(&PathBuf::from(home).join("trusty-mpm-projects"));
+    fn guard_panics_on_genuine_home_containment() {
+        let _home = override_home("/Users/test-user");
+        guard_against_project_tree(&PathBuf::from("/Users/test-user/trusty-mpm-projects"));
+    }
+
+    /// Regression for the false-positive a code reviewer reproduced: with
+    /// `HOME=/tmp` (root-container / OpenShift-style environments),
+    /// `real_system_tmp()`'s `/tmp` trivially equals `$HOME`, so a naive
+    /// `starts_with` check panicked on EVERY `hermetic_temp_dir()` call —
+    /// strictly worse than the pre-fix behavior. Must be a no-op.
+    #[test]
+    fn guard_does_not_panic_when_home_is_tmp() {
+        let _home = override_home("/tmp");
+        guard_against_project_tree(&PathBuf::from("/tmp"));
+    }
+
+    /// Regression for the same false-positive with `HOME=/`: every absolute
+    /// path trivially "starts with" `/`, so a naive check panicked on every
+    /// `hermetic_temp_dir()` call. Must be a no-op.
+    #[test]
+    fn guard_does_not_panic_when_home_is_root() {
+        let _home = override_home("/");
+        guard_against_project_tree(&PathBuf::from("/tmp"));
     }
 
     #[test]

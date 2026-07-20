@@ -242,9 +242,18 @@ pub mod slack;
 /// let a polluted sandbox environment variable deposit test scaffolding
 /// directly into a real project tree (`~/trusty-mpm-projects`, ~167MB / 50
 /// directories over ~24h — see #3382). Centralizing the fix in one module
-/// means every test site gets the hermetic behavior and the leak-sweep for
-/// free, and clippy's `disallowed-methods` config (`crates/trusty-mpm/clippy.toml`)
-/// blocks new bare `TempDir::new()` call sites from creeping back in.
+/// means every converted test site gets the hermetic behavior and the
+/// leak-sweep for free. No clippy `disallowed-methods` lint currently blocks
+/// new bare `TempDir::new()` call sites: the crate has ~768 other bare
+/// `TempDir::new()` call sites across ~105 files unrelated to this issue, and
+/// enabling that lint crate-wide under `-D warnings` fails on all of them —
+/// disproportionate to land here. Regression prevention for NEW call sites
+/// therefore relies on code review (and this doc comment); the leak-sweep in
+/// [`test_support::sweep_stale_test_dirs`] only mitigates the *symptom* of an
+/// already-leaked directory, it does not prevent a new bare `TempDir::new()`
+/// from honoring a polluted `TMPDIR`. See #3390 for the tracked follow-up
+/// converting the remaining highest-risk sites (real git clone/init under a
+/// bare `TempDir::new()`) crate-wide.
 /// What: [`test_support::hermetic_temp_dir`] is the one replacement for
 /// `TempDir::new()` in trusty-mpm's test code.
 /// Test: `test_support::tests`.
