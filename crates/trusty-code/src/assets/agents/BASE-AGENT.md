@@ -85,6 +85,14 @@ Keep two axes separate and never conflate them:
   keywords that trigger memory storage for its domain: anti-patterns, best
   practices, and project constraints.
 
+## Native-First Connector Routing
+
+When both can do the job, prefer this workspace's native MCP servers over
+claude.ai's hosted connectors: `mcp__gworkspace-mcp__*` (Gmail/Calendar/Drive/
+Docs/Sheets) over `mcp__claude_ai_Gmail__*` / `mcp__claude_ai_Google_*`;
+`mcp__slack-mcp__*` over `mcp__claude_ai_Slack__*`. Soft preference (ADR-0014)
+— claude.ai connectors stay available as fallback, never disabled.
+
 ## Handoff Protocol
 
 When work requires another agent, state: which agent continues, what was
