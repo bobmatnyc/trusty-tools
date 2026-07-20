@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Trusty Agents three-unit mark</title>
+  <rect width="64" height="64" rx="13" fill="#201612"/>
+  <rect x="5" y="25" width="22" height="24" rx="5" fill="#8A5A2B"/>
+  <rect x="37" y="25" width="22" height="24" rx="5" fill="#B7410E"/>
+  <rect x="17" y="16" width="30" height="36" rx="6" fill="#D97742"/>
+  <path d="M32 16v-7" stroke="#E9B98A" stroke-width="2"/>
+  <rect x="29.5" y="5" width="5" height="5" rx="1" fill="#D97742"/>
+  <rect x="22" y="28" width="5" height="5" rx="1" fill="#201612"/>
+  <rect x="37" y="28" width="5" height="5" rx="1" fill="#201612"/>
+  <path d="M25 42h14" stroke="#201612" stroke-width="2.5"/>
+</svg>
