@@ -48,6 +48,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   unresolvable at runtime. Fixed to match the resolver's actual
   whole-catalog-replacement behavior (MEDIUM).
 
+### Fixed
+
+- **`CodeEngine`'s workstream-event SSE loop no longer stalls silently or loops forever (Slice 6, closes #3418, part of epic #3411).**
+  - `pump_session_events` reset its reconnect-attempt counter on every merely-successful TRANSPORT-level reconnect, before the inner loop ever observed whether the STREAM made progress. Against a daemon that accepts the connection but closes the stream immediately with no data every time, that made the retry budget un-exhaustible: the function looped forever and `handle_input` never returned. The counter now only resets on genuine progress (an actual data payload), so `SESSION_STREAM_MAX_RECONNECTS` is a real bound again.
+  - Every exhaustion path in `pump_session_events` (a non-2xx status, a transport error, a clean-but-premature stream close, an idle timeout) now sends a `done: true, is_error: true` `AssistantOutput` before returning, instead of some paths (the clean-close case) silently returning `Ok(())` — indistinguishable from a genuinely successful turn. This is the epic #3411 deferred Slice 3 review item: a terminal SSE failure now surfaces a visible error in the TUI rather than a stalled spinner with no error text.
+  - `run_workstream_subscription` discarded `refresh_workstream_cache`'s return value, so it never actually sent `ReplEvent::WorkstreamUpdated` after an activation change — only `EngineState`'s own internal cache was refreshed, not `ReplApp::active_workstream` (which the status line renders from). It now forwards the refreshed summary as `WorkstreamUpdated`, and also pushes the status line's `Workstream` segment via `ReplEvent::StatuslineUpdate` (`EngineState::statusline_segments`), clearing it (an empty segment list) on deactivation.
+
 ### Changed
 
 - **`fs.list_projects` / `GET /projects` re-sourced from trusty-mpm's shared
