@@ -106,6 +106,7 @@
   // reactivity fix (code-critic PR #3392 review, HIGH), the auto-scroll-
   // with-lock behavior (issue #3446), and cancel; `App.test.ts` pins that
   // this component mounts inside `.body`.
+  import { resolveActiveWorkstreamId, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
   import { apiBase } from '../lib/api-config';
   import {
     pickActiveSessionInWorkstream,
@@ -114,7 +115,6 @@
     type SessionListResponse,
   } from '../lib/session-status';
   import { formatElapsed, selectChatEntries, type TranscriptRecord } from '../lib/transcript';
-  import { pendingWorkstream } from '../lib/pending-workstream.svelte';
   import { fetchWorkstreams, workstreamLabel, type Workstream } from '../lib/workstreams';
 
   const POLL_MS = 5000; // matches StatusBar.svelte's poll cadence
@@ -191,13 +191,16 @@
     // MEDIUM — see `lib/pending-workstream.svelte.ts`'s own docs for why:
     // an activation failure after a successful task-run must not make this
     // card claim "no active workstream" while that task is actually
-    // running). Only trusted when it names a workstream that genuinely
-    // exists in THIS response — a stale/foreign id is silently ignored,
-    // never invented data.
-    const active =
-      list.workstreams.find((w) => w.id === list.active_workstream_id) ??
-      list.workstreams.find((w) => w.id === pendingWorkstream.id) ??
-      null;
+    // running). The resolution rule (real pointer first, pending marker
+    // only when it names a listed workstream) now lives in
+    // `lib/active-workstream.svelte.ts::resolveActiveWorkstreamId` so this
+    // poller and `WorkstreamSwitcher.svelte`'s apply the IDENTICAL rule
+    // before publishing to the shared active-workstream store (code-critic
+    // PR #3460 review, HIGH 2 — `StartWorkingForm` watches that store to
+    // re-target chat continuation on any active-workstream change).
+    const resolvedId = resolveActiveWorkstreamId(list);
+    setActiveWorkstreamId(resolvedId);
+    const active = list.workstreams.find((w) => w.id === resolvedId) ?? null;
     if (!active) {
       phase = 'no-workstream';
       activeWorkstream = null;
@@ -205,12 +208,18 @@
       transcript = null;
       error = null;
       cancelPhase = 'idle';
+      userScrolledUp = false;
       return;
     }
     if (activeWorkstream?.id !== active.id) {
       // The active workstream changed under us — drop any pending confirm
-      // rather than let it apply to a session under a different workstream.
+      // rather than let it apply to a session under a different workstream,
+      // and release the scroll lock (code-critic PR #3460 review, MEDIUM 3):
+      // a "scrolled up to read backlog" position in the OLD workstream's
+      // stream is meaningless in the new one and would otherwise leave the
+      // fresh stream stuck mid-scroll instead of pinned to its newest turn.
       cancelPhase = 'idle';
+      userScrolledUp = false;
     }
     activeWorkstream = active;
     phase = 'ready';
@@ -242,9 +251,16 @@
       transcript = null;
       error = null;
       cancelPhase = 'idle';
+      userScrolledUp = false;
       return;
     }
-    if (session?.id !== boundSession.id) cancelPhase = 'idle';
+    if (session?.id !== boundSession.id) {
+      // Same rule as the workstream-change reset above (code-critic PR
+      // #3460 review, MEDIUM 3): a scroll-lock captured against one
+      // session's stream must not survive into a different session's.
+      cancelPhase = 'idle';
+      userScrolledUp = false;
+    }
 
     try {
       const res = await fetch(`${base}/sessions/${boundSession.id}`, { signal });
@@ -255,6 +271,7 @@
           transcript = null;
           error = null;
           cancelPhase = 'idle';
+          userScrolledUp = false;
         }
         return;
       }
@@ -279,6 +296,7 @@
           transcript = null;
           error = null;
           cancelPhase = 'idle';
+          userScrolledUp = false;
         }
         return;
       }

@@ -20,8 +20,13 @@
 // after a successful create reuses the same workstream id on retry), the
 // carried-over Enter/Shift+Enter keyboard behavior (issue #3132), project-
 // selection PERSISTENCE across a successful submit (issue #3447 bug 1), and
-// chat continuation's session-reuse-first/mint-fallback sequence plus its
-// reset-on-project-change rule (issue #3446).
+// chat continuation (issue #3446): the session-reuse-first sequence, the
+// rejected-reuse DISAMBIGUATION probe (code-critic PR #3460 review, HIGH 1
+// — verified-terminal falls back visibly, still-running BLOCKS instead of
+// forking an orphan, unverifiable refuses to mint blind), the reset-on-
+// project-change rule, and the re-target-on-active-workstream-change rule
+// (code-critic PR #3460 review, HIGH 2 — including the store-catch-up
+// non-reset case).
 // What: Mounts the real component with `fetch` stubbed to answer
 // `GET /projects`, `POST /workstreams`, `POST /workstreams/{id}/activate`,
 // and `POST /tasks` by URL/method — mirrors this file's own predecessors'
@@ -33,8 +38,9 @@
 // across tests in the same file otherwise).
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mount, unmount } from 'svelte';
+import { flushSync, mount, unmount } from 'svelte';
 import StartWorkingForm from './StartWorkingForm.svelte';
+import { setActiveWorkstreamId } from '../lib/active-workstream.svelte';
 import { clearPendingWorkstream, pendingWorkstream } from '../lib/pending-workstream.svelte';
 import { selectProject } from '../lib/selected-project.svelte';
 
@@ -105,11 +111,13 @@ beforeEach(() => {
   target = document.createElement('div');
   document.body.appendChild(target);
   // The pending-workstream fallback marker (code-critic PR #3392 review,
-  // MEDIUM) and the shared project selection (issue #3447) are both
-  // MODULE-level stores shared across every test in this file — reset both
+  // MEDIUM), the shared project selection (issue #3447), and the shared
+  // active-workstream id (code-critic PR #3460 review, HIGH 2) are all
+  // MODULE-level stores shared across every test in this file — reset them
   // so one test's mint/selection never leaks into the next.
   clearPendingWorkstream();
   selectProject(null);
+  setActiveWorkstreamId(null);
 });
 
 afterEach(() => {
@@ -119,6 +127,7 @@ afterEach(() => {
   }
   target.remove();
   selectProject(null);
+  setActiveWorkstreamId(null);
   vi.unstubAllGlobals();
 });
 
@@ -642,7 +651,7 @@ describe('StartWorkingForm project-selection persistence + chat continuation (is
     });
   });
 
-  it('issue #3446: when the session-reuse call fails (terminal session), the fallback mints a fresh session under the SAME workstream — still no second POST /workstreams', async () => {
+  it('issue #3446 + code-critic PR #3460 HIGH 1: a reuse rejection whose session is VERIFIED terminal falls back to a fresh session under the SAME workstream, with a visible notice — still no second POST /workstreams', async () => {
     const callLog: string[] = [];
     let nonReuseCallCount = 0;
     vi.stubGlobal(
@@ -657,10 +666,18 @@ describe('StartWorkingForm project-selection persistence + chat continuation (is
         if (url.endsWith('/activate') && method === 'POST') {
           return { ok: true, status: 200, json: async () => ({}) } as Response;
         }
+        if (url.endsWith('/sessions/sess-abc12345') && method === 'GET') {
+          // The disambiguation probe — the session genuinely ended.
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ id: 'sess-abc12345', status: 'cancelled' }),
+          } as Response;
+        }
         if (url.endsWith('/tasks') && method === 'POST') {
           const body = JSON.parse(init!.body as string) as { session_id?: string };
           if (body.session_id) {
-            // The reuse attempt — the session is already terminal.
+            // The reuse attempt — rejected (daemon does not say which cause).
             return {
               ok: false,
               status: 409,
@@ -689,10 +706,221 @@ describe('StartWorkingForm project-selection persistence + chat continuation (is
     await waitFor(() => callLog.filter((c) => c === 'POST /tasks').length === 3);
 
     // Call order: mint's /tasks, then the second submit's reuse attempt
-    // (fails), then its fallback mint (succeeds) — never a second
-    // POST /workstreams.
+    // (rejected), then the verification probe, then the fallback mint —
+    // never a second POST /workstreams.
     expect(callLog.filter((c) => c === 'POST /workstreams')).toHaveLength(1);
+    expect(callLog).toContain('GET /sessions/sess-abc12345');
     expect(nonReuseCallCount).toBe(2);
+    // The fallback mint is VISIBLE, not silent (HIGH 1's minimum bar).
+    await waitFor(() => target.textContent?.includes('previous session ended (cancelled)') ?? false);
+  });
+
+  it('code-critic PR #3460 HIGH 1: a reuse rejection whose session is still RUNNING blocks the submit — no fallback mint, no orphaned concurrent session', async () => {
+    const callLog: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        callLog.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/sessions/sess-abc12345') && method === 'GET') {
+          // The disambiguation probe — the first task is STILL RUNNING
+          // (task.run is 202-then-background; a quick follow-up hits this
+          // routinely, not exotically).
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ id: 'sess-abc12345', status: 'running' }),
+          } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          const body = JSON.parse(init!.body as string) as { session_id?: string };
+          if (body.session_id) {
+            // Same undifferentiated rejection the daemon sends for
+            // "already has a task running".
+            return {
+              ok: false,
+              status: 409,
+              json: async () => ({ error: { message: 'session sess-abc12345 already has a task running' } }),
+            } as Response;
+          }
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'first message';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    taskField().value = 'quick follow-up';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('still running') ?? false);
+
+    // Exactly TWO POST /tasks total (the mint + the rejected reuse) — the
+    // fallback mint must NOT have fired, and no second workstream either.
+    expect(callLog.filter((c) => c === 'POST /tasks')).toHaveLength(2);
+    expect(callLog.filter((c) => c === 'POST /workstreams')).toHaveLength(1);
+    // The task text is preserved for a later retry, and the form re-enables.
+    expect(taskField().value).toBe('quick follow-up');
+    await waitFor(() => !submitButton().disabled);
+  });
+
+  it('code-critic PR #3460 HIGH 1: an UNVERIFIABLE probe (network failure) refuses to mint blind — error surfaced, no fallback mint', async () => {
+    const callLog: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        callLog.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/sessions/sess-abc12345') && method === 'GET') {
+          throw new TypeError('Failed to fetch');
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          const body = JSON.parse(init!.body as string) as { session_id?: string };
+          if (body.session_id) {
+            return {
+              ok: false,
+              status: 409,
+              json: async () => ({ error: { message: 'rejected' } }),
+            } as Response;
+          }
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'first message';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    taskField().value = 'follow-up';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('could not verify') ?? false);
+
+    expect(callLog.filter((c) => c === 'POST /tasks')).toHaveLength(2); // mint + rejected reuse only
+    expect(callLog.filter((c) => c === 'POST /workstreams')).toHaveLength(1);
+  });
+
+  it('code-critic PR #3460 HIGH 2: when the ACTIVE workstream changes (e.g. via the header switcher), the next submit targets the NEW workstream — not the old session, and no new POST /workstreams', async () => {
+    const callLog: string[] = [];
+    const taskBodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        callLog.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          taskBodies.push(JSON.parse(init!.body as string));
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'first message (in the minted workstream)';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    // The daemon's active workstream changes under the form — exactly what
+    // WorkstreamSwitcher/WorkstreamActivity publish after a header switch.
+    setActiveWorkstreamId('ws-OTHER');
+    flushSync();
+
+    taskField().value = 'follow-up after switching';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => taskBodies.length === 2);
+
+    // The follow-up runs under the workstream the operator switched TO —
+    // never session-A reuse, never a surprise third workstream.
+    expect(taskBodies[1]).toEqual({
+      task_description: 'follow-up after switching',
+      workstream_id: 'ws-OTHER',
+    });
+    expect(callLog.filter((c) => c === 'POST /workstreams')).toHaveLength(1);
+  });
+
+  it('code-critic PR #3460 HIGH 2: the store merely catching up to the workstream this form itself just minted does NOT reset continuation', async () => {
+    const taskBodies: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          taskBodies.push(JSON.parse(init!.body as string));
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'first message';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    // A poll tick lands, reporting the workstream this form just minted and
+    // activated — that is the store CATCHING UP, not a switch.
+    setActiveWorkstreamId('ws-abc123');
+    flushSync();
+
+    taskField().value = 'second message';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => taskBodies.length === 2);
+
+    // Continuation survived: session reuse, not a workstream-targeted mint.
+    expect(taskBodies[1]).toEqual({
+      task_description: 'second message',
+      session_id: 'sess-abc12345',
+    });
   });
 
   it('issue #3447 regression: pick a project, submit, submit again — both tasks carry the same project + workstream/session, and the selection stays shown', async () => {

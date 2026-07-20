@@ -21,6 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
 import WorkstreamActivity from './WorkstreamActivity.svelte';
+import { activeWorkstreamState, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
 import { clearPendingWorkstream, setPendingWorkstream } from '../lib/pending-workstream.svelte';
 import type { Workstream } from '../lib/workstreams';
 
@@ -131,10 +132,12 @@ function fakeDaemon(opts: {
 beforeEach(() => {
   target = document.createElement('div');
   document.body.appendChild(target);
-  // The pending-workstream fallback marker is a MODULE-level store shared
-  // across every test in this file — reset it so one test's fallback value
-  // never leaks into the next.
+  // The pending-workstream fallback marker and the shared active-workstream
+  // id (code-critic PR #3460 review, HIGH 2 — this component is one of its
+  // two writers) are MODULE-level stores shared across every test in this
+  // file — reset them so one test's value never leaks into the next.
   clearPendingWorkstream();
+  setActiveWorkstreamId(null);
 });
 
 afterEach(() => {
@@ -324,6 +327,44 @@ describe('WorkstreamActivity transcript-404 reset (PR #3028 regression, carried 
     // Must not be stuck showing the raw HTTP error or a stale Cancel button.
     expect(target.textContent).not.toContain('HTTP 404');
     expect(target.querySelectorAll('button').length).toBe(0);
+  });
+});
+
+describe('WorkstreamActivity publishes the resolved active id to the shared store (code-critic PR #3460 review, HIGH 2)', () => {
+  it('writes the real active id after a poll', async () => {
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-1',
+        workstreams: [ws('ws-1', 'my workstream', [])],
+        sessions: [],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => activeWorkstreamState.id === 'ws-1');
+  });
+
+  it('writes the RESOLVED id (pending fallback) when the daemon reports no real pointer, and null when nothing resolves', async () => {
+    setPendingWorkstream('ws-pending', 'pending name');
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: null,
+        workstreams: [ws('ws-pending', 'pending name', [])],
+        sessions: [],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => activeWorkstreamState.id === 'ws-pending');
+
+    // Remount against an empty daemon: nothing resolves -> null published.
+    unmount(instance!);
+    instance = null;
+    clearPendingWorkstream();
+    vi.stubGlobal('fetch', fakeDaemon({ activeWorkstreamId: null, workstreams: [], sessions: [] }));
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => activeWorkstreamState.id === null);
   });
 });
 

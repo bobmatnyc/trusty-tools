@@ -30,13 +30,46 @@
   // is the HONEST implementation: `lastSessionId` (set once a task-run
   // succeeds, mint or continuation) is tried FIRST via `session_id` on every
   // subsequent submit — genuinely resuming the same session/transcript when
-  // the daemon allows it. Only when that reuse attempt fails (terminal
-  // session, or one still running) does the form fall back to minting a
-  // FRESH session under the SAME already-active workstream
-  // (`continuationWorkstreamId`, explicit `workstream_id`, no `session_id`)
-  // — still zero additional `POST /workstreams` calls either way, so "stay
-  // in the same workstream" holds regardless of which of the two paths a
-  // given follow-up takes.
+  // the daemon allows it.
+  //
+  // **A rejected reuse is disambiguated before any fallback (code-critic PR
+  // #3460 review, HIGH 1).** `begin_execution` returns the SAME
+  // invalid-argument rejection for "session is terminal" and "session
+  // already has a task running" — and since `task.run` is 202-then-
+  // background, a quick follow-up while the first task still runs is
+  // ROUTINE, not exotic. Blindly treating every rejection as "reuse failed,
+  // mint a fresh session under the same workstream" would therefore fork a
+  // SECOND concurrent session for the routine case: the still-running old
+  // session becomes an invisible orphan (this pane shows only the newest
+  // bound session), uncancelable from the UI, doubling LLM spend, with two
+  // agents possibly writing the same tree. So on rejection the form probes
+  // `GET /sessions/{id}` first: a `running` status BLOCKS the submit with a
+  // visible "still running" message (wait, or cancel from the activity
+  // pane) instead of forking; a terminal status (or a 404 — the session
+  // vanished) falls back to minting a FRESH session under the SAME
+  // already-active workstream (`continuationWorkstreamId`, explicit
+  // `workstream_id`, no second `POST /workstreams`) with a VISIBLE notice
+  // that a fresh session was started; an unverifiable probe (network
+  // failure, malformed body) refuses to mint blind and surfaces the error —
+  // never an orphan by default.
+  //
+  // **Continuation also re-targets when the daemon's ACTIVE workstream
+  // changes for any reason (code-critic PR #3460 review, HIGH 2).** The
+  // header's `WorkstreamSwitcher` switches workstreams without touching the
+  // selected-project store, so a project-change-only reset left the
+  // sequence "converse in A -> switch to B -> type" silently appending to
+  // the now-hidden workstream A. Both workstream pollers
+  // (`WorkstreamActivity`/`WorkstreamSwitcher`) now publish the daemon's
+  // RESOLVED active id to `lib/active-workstream.svelte.ts` (one shared
+  // resolution rule — see that module's docs); the `$effect` below watches
+  // it and, on any genuine change to an id this conversation isn't already
+  // targeting, drops `lastSessionId` and ADOPTS the new id as
+  // `continuationWorkstreamId` — so the next submit runs a fresh session
+  // under the workstream the operator just switched TO (ambient targeting,
+  // Bob's "subsequent submits target the ACTIVE workstream"), rather than
+  // continuing hidden-A or minting a surprise third workstream. Adoption
+  // happens only on an OBSERVED change, never on mount: the first message
+  // of a fresh form still mints implicitly (issue #3384's flow, unchanged).
   //
   // **Project-selection persistence + chat continuation are ONE state
   // model (issue #3447 bug 1, solved together per the coordinator's own
@@ -72,6 +105,7 @@
   // second `POST /workstreams`, `session_id` reuse tried first, project
   // carried forward). `lib/new-workstream.test.ts` covers the pure
   // gating/body-construction/name-inference logic.
+  import { activeWorkstreamState } from '../lib/active-workstream.svelte';
   import { apiBase } from '../lib/api-config';
   import {
     bindingLabel,
@@ -109,8 +143,10 @@
   // Chat-continuation state (issue #3446) — set once the FIRST task-run in
   // this conversation succeeds (mint path) and updated on every subsequent
   // successful submit (continuation path); NEVER cleared on success — only
-  // when the selected project changes (see the `$effect` below), since
-  // that is the one event that honestly invalidates "the same conversation."
+  // when the selected project changes (reset to null: next submit mints)
+  // or the daemon's active workstream changes (re-targeted to the new
+  // active id — code-critic PR #3460 review, HIGH 2); see the two
+  // `$effect`s below.
   let lastSessionId = $state<string | null>(null);
   let continuationWorkstreamId = $state<string | null>(null);
 
@@ -165,6 +201,47 @@
       clearPendingWorkstream();
     }
     previousProjectPath = currentPath;
+  });
+
+  /**
+   * Re-target chat continuation whenever the daemon's ACTIVE workstream
+   * changes for any reason (code-critic PR #3460 review, HIGH 2).
+   *
+   * Why: see the module doc's HIGH-2 section — `WorkstreamSwitcher` never
+   * touches the selected-project store, so without this a switch left the
+   * input bar targeting the previous workstream's session.
+   * What: watches the shared `activeWorkstreamState.id` (published by both
+   * workstream pollers, one shared resolution rule — `lib/
+   * active-workstream.svelte.ts`). On an OBSERVED change (never the mount-
+   * time initial read — the first message of a fresh form still mints
+   * implicitly, issue #3384's flow) to an id this conversation is not
+   * already targeting: drop `lastSessionId`, ADOPT the new id as
+   * `continuationWorkstreamId` (`null` when nothing is active — the next
+   * submit then mints), and clear the mint-retry ids (a retry-reuse mint
+   * held for the OLD workstream would be equally stale). Deliberately does
+   * NOT clear `pending-workstream.svelte.ts`'s marker: unlike the project-
+   * change effect above (where the operator is abandoning the conversation
+   * wholesale), the resolved id arriving here may itself COME from that
+   * marker (the activation-failed fallback), and the marker's owner
+   * (`WorkstreamActivity`) still needs it. The "already targeting" guard
+   * also makes this a no-op when the store merely catches up to a
+   * workstream this form itself just minted and activated.
+   * Test: `StartWorkingForm.test.ts`.
+   */
+  let previousActiveWorkstreamId: string | null | undefined = undefined;
+  $effect(() => {
+    const currentId = activeWorkstreamState.id;
+    if (
+      previousActiveWorkstreamId !== undefined &&
+      previousActiveWorkstreamId !== currentId &&
+      currentId !== continuationWorkstreamId
+    ) {
+      lastSessionId = null;
+      continuationWorkstreamId = currentId;
+      pendingWorkstreamId = null;
+      pendingWorkstreamName = null;
+    }
+    previousActiveWorkstreamId = currentId;
   });
 
   /**
@@ -243,46 +320,109 @@
 
   /**
    * The chat-continuation submit path (issue #3446): try to resume
-   * `lastSessionId` as a follow-up turn; on failure (the session is
-   * terminal, or still has a task running), mint a fresh session under the
-   * SAME already-active workstream instead — never a second `POST
-   * /workstreams`.
+   * `lastSessionId` as a follow-up turn; when there is no session to
+   * resume (or the one there was is verified TERMINAL/vanished), run a
+   * fresh session under the SAME already-active workstream instead —
+   * never a second `POST /workstreams`.
    *
    * Why: see the module doc's "Chat continuation" section for the full
-   * investigation of what the daemon supports. This function is the
-   * client-side expression of it: attempt the cheap, genuinely-continuous
-   * path first (same session, new turn, same transcript — the daemon's
-   * `SessionRegistry::begin_execution` resume mechanism), and only fall
-   * back to minting when the daemon tells us reuse isn't possible right
-   * now.
-   * What: returns `true` on success (either sub-path) after updating
-   * `lastSessionId` to whatever session id the SUCCESSFUL call actually
-   * ran against, `false` on failure (with `submitError` already set).
+   * investigation of what the daemon supports, and its HIGH-1 section
+   * (code-critic PR #3460 review) for why a rejected reuse MUST be
+   * disambiguated before any fallback: the daemon returns the same
+   * invalid-argument rejection for "terminal" and "still running", and
+   * blindly minting on the latter forks a second concurrent session while
+   * orphaning the running one.
+   * What: three stages —
+   * 1. Reuse (only when `lastSessionId` is set): `POST /tasks{session_id}`.
+   *    `202` -> done (a genuine follow-up turn in the same session).
+   * 2. Disambiguation probe on rejection: `GET /sessions/{lastSessionId}`.
+   *    `status === "running"` -> BLOCK with a visible "still running"
+   *    message, no mint. Terminal status or `404` -> proceed to stage 3
+   *    with a visible fresh-session notice. Probe unreachable/malformed ->
+   *    refuse to mint blind, surface the error, no mint.
+   * 3. Workstream-targeted run: `POST /tasks{workstream_id:
+   *    continuationWorkstreamId}` — also entered DIRECTLY (skipping 1–2)
+   *    when `lastSessionId` is null but a continuation workstream is set,
+   *    i.e. after the active workstream changed under this form (HIGH 2 —
+   *    ambient targeting of the workstream the operator switched to).
+   * Returns `true` on success after updating `lastSessionId` to whatever
+   * session the SUCCESSFUL call actually ran against, `false` on failure
+   * (with `submitError` already set).
    * Test: `StartWorkingForm.test.ts`.
    */
   async function submitContinuation(base: string, signal: AbortSignal): Promise<boolean> {
-    const reuseBody = buildRunTaskBody(task, selectedProjectState.project, null, lastSessionId);
-    const reuseRes = await fetch(`${base}/tasks`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(reuseBody),
-      signal,
-    });
-    if (signal.aborted) return false;
+    let fallbackNotice: string | null = null;
 
-    if (reuseRes.status === 202) {
-      const created: unknown = await reuseRes.json().catch(() => null);
+    if (lastSessionId) {
+      const reuseBody = buildRunTaskBody(task, selectedProjectState.project, null, lastSessionId);
+      const reuseRes = await fetch(`${base}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reuseBody),
+        signal,
+      });
       if (signal.aborted) return false;
-      lastSessionId = extractTaskSessionId(created) ?? lastSessionId;
-      return true;
+
+      if (reuseRes.status === 202) {
+        const created: unknown = await reuseRes.json().catch(() => null);
+        if (signal.aborted) return false;
+        lastSessionId = extractTaskSessionId(created) ?? lastSessionId;
+        return true;
+      }
+
+      // Reuse rejected — disambiguate BEFORE any fallback (code-critic PR
+      // #3460 review, HIGH 1; see the doc above).
+      const reuseError = await errorMessage(reuseRes);
+      if (signal.aborted) return false;
+
+      let probedStatus: string | null = null;
+      let sessionVanished = false;
+      try {
+        const probe = await fetch(`${base}/sessions/${lastSessionId}`, { signal });
+        if (signal.aborted) return false;
+        if (probe.status === 404) {
+          sessionVanished = true;
+        } else if (probe.ok) {
+          const detail = (await probe.json().catch(() => null)) as { status?: unknown } | null;
+          if (typeof detail?.status === 'string') probedStatus = detail.status;
+        }
+      } catch {
+        // Probe unreachable — handled below as "could not verify".
+      }
+      if (signal.aborted) return false;
+
+      if (probedStatus === 'running') {
+        submitError =
+          'a task is still running in this conversation — wait for it to finish (or cancel it above) before sending a follow-up';
+        return false;
+      }
+      if (!sessionVanished && probedStatus === null) {
+        // Could not verify the session's real state — refusing to mint
+        // blind: if it IS still running, a mint here would orphan it.
+        submitError = `${reuseError} — could not verify the session's status, so no new session was started; retry in a moment`;
+        return false;
+      }
+      if (!continuationWorkstreamId) {
+        submitError = reuseError;
+        return false;
+      }
+      // Verified terminal (or vanished): a fresh session under the same
+      // workstream is honest — and the operator gets told (the critic's
+      // "at minimum surface a visible warning when a fallback mint
+      // occurs"; here it is the designed path, verified safe first).
+      fallbackNotice = sessionVanished
+        ? 'previous session no longer exists — started a fresh one in this workstream'
+        : `previous session ended (${probedStatus}) — started a fresh one in this workstream`;
+      // The old session is verified unusable — drop it now so a future
+      // submit never re-attempts (and re-probes) it even if the fallback
+      // response below carries no session id.
+      lastSessionId = null;
     }
 
-    // Reuse failed — the session is terminal or still running. Fall back to
-    // a FRESH session under the same workstream (still no new
-    // `POST /workstreams`), since `continuationWorkstreamId` is only ever
-    // set alongside `lastSessionId`.
     if (!continuationWorkstreamId) {
-      submitError = await errorMessage(reuseRes);
+      // Unreachable via [`submit`]'s dispatch guard, but kept as a real
+      // error rather than a silent no-op if that invariant ever breaks.
+      submitError = 'no active workstream to continue';
       return false;
     }
 
@@ -303,6 +443,7 @@
     if (signal.aborted) return false;
     const newId = extractTaskSessionId(created);
     if (newId) lastSessionId = newId;
+    if (fallbackNotice) successMessage = `started (${fallbackNotice})`;
     return true;
   }
 
@@ -427,9 +568,14 @@
       const base = await apiBase();
       if (controller.signal.aborted) return;
 
-      const ok = lastSessionId
-        ? await submitContinuation(base, controller.signal)
-        : await submitFirstMessage(base, controller.signal);
+      // Continuation applies whenever this conversation already targets a
+      // session OR a workstream (the latter alone after the active
+      // workstream changed under the form — HIGH 2's re-target adoption);
+      // only a form with neither mints a brand-new workstream.
+      const ok =
+        lastSessionId || continuationWorkstreamId
+          ? await submitContinuation(base, controller.signal)
+          : await submitFirstMessage(base, controller.signal);
       if (controller.signal.aborted) return;
       if (!ok) return;
 
