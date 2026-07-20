@@ -35,7 +35,7 @@ builds must be behaviorally identical:
 
 ## Daemon connection
 
-Default base URL: `http://127.0.0.1:7881`, matching
+Default base URL: `http://127.0.0.1:7882`, matching
 `trusty_code::serve::DEFAULT_HTTP_PORT` (`crates/trusty-code/src/serve/mod.rs`).
 Override with the `TRUSTY_CODE_URL` environment variable (Tauri mode) or the
 `trusty-code.daemonUrl` `localStorage` key (web mode).

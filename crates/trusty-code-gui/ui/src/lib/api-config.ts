@@ -10,8 +10,12 @@
 // the stored value.
 
 /// Default tcode daemon HTTP endpoint — matches
-/// `trusty_code::serve::DEFAULT_HTTP_PORT` (7881).
-export const DEFAULT_DAEMON_URL = 'http://127.0.0.1:7881';
+/// `trusty_code::serve::DEFAULT_HTTP_PORT` (7882). This is a second,
+/// manually-maintained copy of that port (alongside the Rust-side
+/// `trusty-code-gui/src/state.rs::DEFAULT_DAEMON_URL`, which is pinned to
+/// the Rust constant by a test) — it moves in lockstep with both; see
+/// `api-config.test.ts`'s `default_daemon_url` test (#3364).
+export const DEFAULT_DAEMON_URL = 'http://127.0.0.1:7882';
 
 /** True when running inside the Tauri desktop runtime (v2 internals present). */
 export const isTauri = (): boolean =>

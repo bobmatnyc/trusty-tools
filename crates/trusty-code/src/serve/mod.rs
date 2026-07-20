@@ -63,13 +63,25 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// Why: the trusty-* family reserves a block of fixed local ports so
 /// operators/tooling can find a daemon without a discovery file
 /// (`trusty-memory` 7070, `trusty-search` 7878, `trusty-analyze` 7879,
-/// `trusty-review` 7880). `7881` is the next free port in that sequence.
+/// `trusty-mpm` daemon 7880, `trusty-review` 7891, `trusty-embedderd`
+/// `--http` mode 7890). This constant previously reused `7881`, which turned
+/// out to collide with `trusty-mpm`'s supervisor metrics listener
+/// (`trusty_mpm::supervisor::config::DEFAULT_METRICS_ADDR`,
+/// `crates/trusty-mpm/src/supervisor/config.rs`) — the two defaults were
+/// picked independently and nothing pinned them apart, so a fresh install
+/// with both `tm supervisor` and `tcode serve` running answered `/health` on
+/// `tcode`'s port with the supervisor's generic `{"status":"ok"}`, masking a
+/// real 404 for every other route (#3364). `7882` is verified free against
+/// the full known-sibling table in
+/// `docs/architecture/port-assignments.md` and matches the session-local
+/// workaround used to confirm the fix (`tcode serve --http --port 7882`).
 /// Pass `--port 0` to bind an OS-assigned ephemeral port instead (e.g. for
 /// tests or running multiple instances side by side); the real bound port
 /// is always logged to stderr regardless of which is used.
-/// What: `7881`.
-/// Test: `default_http_port_is_documented_value`.
-pub const DEFAULT_HTTP_PORT: u16 = 7881;
+/// What: `7882`.
+/// Test: `default_http_port_is_documented_value`,
+/// `default_http_port_does_not_collide_with_known_siblings`.
+pub const DEFAULT_HTTP_PORT: u16 = 7882;
 
 /// Assemble the router (+ its session registry) with every method this
 /// build of `tcode` knows about, scoped to `project`.
@@ -325,12 +337,86 @@ mod tests {
         assert!(resp.result.expect("result")["entries"].is_array());
     }
 
-    /// `DEFAULT_HTTP_PORT` must stay the documented value (7881) so a
+    /// `DEFAULT_HTTP_PORT` must stay the documented value (7882) so a
     /// change is a deliberate edit to both the constant and its doc comment,
     /// not an accidental drift.
     #[test]
     fn default_http_port_is_documented_value() {
-        assert_eq!(DEFAULT_HTTP_PORT, 7881);
+        assert_eq!(DEFAULT_HTTP_PORT, 7882);
+    }
+
+    /// Cross-crate port-uniqueness contract (#3364).
+    ///
+    /// Why: `DEFAULT_HTTP_PORT` previously reused `7881`, silently colliding
+    /// with `trusty-mpm`'s supervisor metrics listener
+    /// (`DEFAULT_METRICS_ADDR`, `crates/trusty-mpm/src/supervisor/config.rs`)
+    /// — the supervisor's generic `/health` masked the collision until a real
+    /// `tcode` route 404'd. This mirrors the `default_port_does_not_collide_
+    /// with_known_siblings` guard already used by `trusty-console` and
+    /// `trusty-review` so a future edit here that reintroduces a collision
+    /// fails this test instead of shipping a crash-loop.
+    /// What: asserts `DEFAULT_HTTP_PORT` is absent from the known-sibling
+    /// ports list.
+    /// Test: this is the test.
+    #[test]
+    fn default_http_port_does_not_collide_with_known_siblings() {
+        // (binary, port, source-of-truth pointer)
+        let known_siblings: &[(&str, u16, &str)] = &[
+            (
+                "trusty-memory",
+                7070,
+                "trusty-memory/src/http_server.rs::DEFAULT_HTTP_PORT",
+            ),
+            (
+                "trusty-search",
+                7878,
+                "trusty-search/src/service/constants.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-analyze",
+                7879,
+                "trusty-analyze/src/service/events.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-mpm",
+                7880,
+                "trusty-mpm/src/core/discovery.rs::DEFAULT_DAEMON_ADDR",
+            ),
+            (
+                // #3364: the collision that motivated this guard — trusty-mpm's
+                // supervisor metrics listener, deployed via launchd and never
+                // moved (unlike this crate's daemon default).
+                "trusty-mpm-supervisor",
+                7881,
+                "trusty-mpm/src/supervisor/config.rs::DEFAULT_METRICS_ADDR",
+            ),
+            (
+                "trusty-console",
+                7788,
+                "trusty-console/src/lib.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-embedderd",
+                7890,
+                "trusty-embedderd/src/lib.rs::Args::http_addr (--http default_value, manual/dev-run only)",
+            ),
+            (
+                "trusty-review",
+                7891,
+                "trusty-review/src/service/mod.rs::DEFAULT_PORT",
+            ),
+            (
+                "trusty-agents",
+                8080,
+                "trusty-agents/src/runtime/mode_dispatch.rs (--port default 8080)",
+            ),
+        ];
+        for (binary, port, source) in known_siblings {
+            assert_ne!(
+                DEFAULT_HTTP_PORT, *port,
+                "trusty-code DEFAULT_HTTP_PORT {DEFAULT_HTTP_PORT} collides with {binary}'s {port} ({source})"
+            );
+        }
     }
 
     /// The daemon must ASSEMBLE with no project bound — `build_router` took a

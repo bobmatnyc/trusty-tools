@@ -1,0 +1,32 @@
+# Framework-guaranteed-conventions floor guard (issue #3374).
+#
+# Enforces that framework-guaranteed conventions (attribution footer,
+# proportional-documentation policy, ticket-attribution convention) stay in
+# the non-overridable BASE_PM.md floor and that the dead, never-consumed
+# `assets/instructions/CLAUDE.md` stub does not reappear.
+#
+# Pure grep/file-existence check — no Rust toolchain or build needed, so this
+# is fast and runs as its own lightweight job (matches line-cap.yml's shape).
+name: Instruction floor guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches line-cap.yml).
+concurrency:
+  group: instruction-floor-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  instruction-floor-guard:
+    name: BASE_PM floor carries the guaranteed conventions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Guard the instruction floor (#3374)
+        run: bash scripts/check_instruction_floor.sh

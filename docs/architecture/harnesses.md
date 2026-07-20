@@ -503,6 +503,9 @@ the full decision record.
 
 ## References
 
+- [Workspace Port Assignments](port-assignments.md) — the cross-cutting
+  inventory of every daemon's default loopback port; consult before adding a
+  new one (#3364)
 - [ADR-0004](../adr/0004-three-harnesses-shared-event-driven-common.md) — records
   the three-harness + event-driven + shared-trusty-common decisions
 - `crates/trusty-code/src/main.rs` — Phase 0 CLI surface (lines 1-107)

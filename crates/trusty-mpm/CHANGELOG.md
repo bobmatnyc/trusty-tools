@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **Framework-guaranteed conventions delivered only via user-editable channels** ([#3374](https://github.com/bobmatnyc/trusty-tools/issues/3374)): the commit/PR attribution footer, the proportional-documentation policy, and the ticket-attribution-at-change-site convention are now stated in the non-overridable `BASE_PM.md` floor — the one channel `resolve_pm_prompt` appends unconditionally in every override branch. Previously the proportional-documentation and ticket-attribution conventions lived only in the bundled `documentation-style` skill (user-editable; the deployer skips re-syncing a locally modified skill) and were guaranteed nowhere; the attribution footer was duplicated across three non-floor locations including a dead, never-consumed `assets/instructions/CLAUDE.md` stub. That dead asset (and its `CLAUDE_STUB` constant, `bundle_all.rs` `SeedOnce` registration, and `paths.rs` `claude_stub()` accessor) has been removed. `assets/skills/documentation-style.md` and the seeded project `CLAUDE.md` stub now point back to `BASE_PM.md` as the source of truth. A new CI guard (`scripts/check_instruction_floor.sh` + `.github/workflows/instruction-floor-guard.yml`) mechanically enforces that the floor keeps carrying these conventions and that the dead asset never reappears.
+
 ### Changed
 
 - `tm doctor`'s `skill_staleness` check now escalates to `Fail` (instead of `Warn`) when a **conventions-bearing** bundled skill has drifted from its bundled source — `documentation-style`, `tm-pr-workflow`, or `tm-git-file-tracking`, the small allowlist of skills whose text is the sole carrier of a framework-guaranteed rule (e.g. the commit/PR attribution footer). Ordinary skill drift stays `Warn` as before; the escalated message names the drifted skill(s) and points at `tm install` to restore the bundled version. This hardens the exact silent-drift path behind the PR #2825 attribution bypass (issue [#2825](https://github.com/bobmatnyc/trusty-tools/issues/2825)) without blocking session start — the escalation is a doctor signal only.
