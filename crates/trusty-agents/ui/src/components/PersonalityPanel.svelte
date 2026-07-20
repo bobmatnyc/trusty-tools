@@ -3,7 +3,7 @@
    * Why: #3061 introduced this panel as a minimal prose editor bound
    * directly to a SINGLE hardcoded personalization overlay
    * (`~/.trusty-agents/agents/my-assistant.md`, DOC-41 §2.5.1's `extends:`
-   * mechanism). #3224 (Trusty Assistant agent roster, epic #3052)
+   * mechanism). #3224 (Trusty Agents agent roster, epic #3052)
    * generalizes it to edit ANY overlay the user has created, plus a
    * "+ New agent" flow (name + pasted instructions + optional display name
    * + base to extend) — the roster's natural host for customizing an agent,
@@ -336,7 +336,7 @@ context it should always remember. This text is appended after the base
         <p class="max-w-sm text-xs text-foundry-light-muted dark:text-foundry-text/60">
           Editing a personalization overlay reads and writes files under
           <code class="font-mono">~/.trusty-agents/agents/</code> directly, which
-          is only available in the Trusty Assistant desktop app — not this
+          is only available in the Trusty Agents desktop app — not this
           browser preview.
         </p>
       </div>

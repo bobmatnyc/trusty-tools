@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Why: #3223 (Trusty Assistant agent roster, epic #3052) — the GUI needs a
+   * Why: #3223 (Trusty Agents agent roster, epic #3052) — the GUI needs a
    * visible way to pick WHICH named agent (the base assistant, a bundled
    * catalog agent, or a user's personalization overlay) answers the current
    * chat, and to see at a glance who's currently active. A compact dropdown

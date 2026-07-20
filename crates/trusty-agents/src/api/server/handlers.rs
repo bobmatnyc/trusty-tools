@@ -40,7 +40,7 @@ pub struct TaskRequest {
     pub task_file: Option<String>,
     /// #151 phase-4: when set, dispatch to a single sub-agent instead of a
     /// full workflow (via `trusty-agents --direct <agent>`) for
-    /// `IntentClass::Implementation`. #3223 (Trusty Assistant agent roster,
+    /// `IntentClass::Implementation`. #3223 (Trusty Agents agent roster,
     /// epic #3052) additionally threads this into the in-process
     /// Conversational/Research path (see [`agent_override`] and
     /// `submit_task`), so the same field selects the active persona for
@@ -290,7 +290,7 @@ pub(super) async fn submit_task(
         classify_intent(&req.task)
     };
 
-    // #3223 (Trusty Assistant agent roster, epic #3052): CTRL management
+    // #3223 (Trusty Agents agent roster, epic #3052): CTRL management
     // commands ("add project …", "list projects", …) must always run
     // through the full CTRL session (`run_pm_task_with_session`) regardless
     // of the roster's active agent — that's the only dispatch path wired to

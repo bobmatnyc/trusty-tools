@@ -29,6 +29,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Product rename: "Trusty Assistant" → "Trusty Agents":** the last
+  remaining "Trusty Assistant" product-name references in the desktop UI
+  (macOS dock label / `productName` and window `title` in
+  `ui/src-tauri/tauri.conf.json`, the page `<title>`/meta description in
+  `ui/index.html`, the Tauri capabilities description, the visible
+  "desktop app only" copy in `PersonalityPanel.svelte`, `ui/README.md`'s
+  heading, the Playwright smoke-test describe block, and descriptive code
+  comments) now consistently read "Trusty Agents", matching the header/
+  sidebar wordmark and app branding already in place.
+
 - **Canonical Foundry icon set (#3486):** `ActionIcon`, `RobotIcon`, and
   `LogoMark` — previously only defined inline in this crate's
   `ui/src/lib/icons/` — now have a documented canonical source at

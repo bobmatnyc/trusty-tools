@@ -110,7 +110,7 @@ pub async fn run_pm_task_with_persona(
 
     let sid = session_id.unwrap_or_default();
 
-    // #3223/#3224 (Trusty Assistant agent roster, epic #3052): resolve
+    // #3223/#3224 (Trusty Agents agent roster, epic #3052): resolve
     // through the canonical `AgentConfig::by_name_async` loader instead of
     // the hand-rolled project/$HOME `.toml`-only lookup this function used
     // to do inline. `by_name_async` walks the SAME tier order the old code

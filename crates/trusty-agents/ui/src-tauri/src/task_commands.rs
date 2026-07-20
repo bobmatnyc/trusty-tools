@@ -73,7 +73,7 @@ struct SubmitResponse {
 /// What: Submits the task, emits `task-progress` every 1.5s with a short
 /// "running…" tick, then emits `task-complete` (with the full PmResponse
 /// JSON) or `task-error` on failure. Returns the final narrative string.
-/// #3223 (Trusty Assistant agent roster, epic #3052): `agent`, when set,
+/// #3223 (Trusty Agents agent roster, epic #3052): `agent`, when set,
 /// is forwarded as the request body's `agent` field — the same field the
 /// `--direct <agent>` subprocess dispatch path already used — so the GUI's
 /// roster selection determines which persona answers.
