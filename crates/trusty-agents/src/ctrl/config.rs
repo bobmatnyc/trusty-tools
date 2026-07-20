@@ -114,6 +114,14 @@ pub(crate) fn resolve_overridden_credentials(
     }
 }
 
+/// (see AgentIdentity below)
+pub(crate) struct AgentIdentity<'a> {
+    pub agent_name: &'a str,
+    pub model: &'a str,
+    pub runner: &'a str,
+    pub provider: &'a str,
+}
+
 /// Render `at` (a UTC instant) in `tz_name`'s IANA zone, with an explicit
 /// day-of-week (#3052 follow-up).
 ///
@@ -175,7 +183,7 @@ pub(crate) fn render_user_datetime(
 /// Test: `render_user_context_block_includes_known_user_fields`,
 /// `render_user_context_block_omits_location_when_unset`,
 /// `render_user_context_block_unknown_user_still_gets_datetime`.
-pub(crate) fn render_user_context_block() -> String {
+pub(crate) fn render_user_context_block(identity: &AgentIdentity<'_>) -> String {
     use crate::identity::user_profile::UserProfile;
     let profile = UserProfile::load();
     let now = chrono::Utc::now();
@@ -201,6 +209,11 @@ pub(crate) fn render_user_context_block() -> String {
         }
     }
     block.push('\n');
+    block.push_str(&format!(
+        "\nYou are running as agent '{}' on model {} via {} (runner: {}, trusty-agents v{}).\n",
+        identity.agent_name, identity.model, identity.provider, identity.runner,
+        crate::build_info::VERSION,
+    ));
     block
 }
 
@@ -219,8 +232,8 @@ pub(crate) fn render_user_context_block() -> String {
 /// should still produce a `user_name = "(unknown)"` line and a current
 /// date/time line. `render_user_context_block_*` cover the block content
 /// directly.
-pub(crate) fn build_user_context_prefix(base_content: &str) -> String {
-    format!("{}\n{}", render_user_context_block(), base_content)
+pub(crate) fn build_user_context_prefix(base_content: &str, identity: &AgentIdentity<'_>) -> String {
+    format!("{}\n{}", render_user_context_block(identity), base_content)
 }
 
 /// Best-effort semantic recall over the project's embedded memory store (#275).
