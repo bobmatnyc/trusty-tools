@@ -45,6 +45,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   wired into CI as the `token-drift` workflow. Fails with a per-token diff if
   the two silently diverge; run locally via `pnpm run check:tokens`. No
   drift was found in this crate — every value already matched canonical.
+  Guards against a zero-comparison false-green (an ENFORCED entry with an
+  emptied `mappings`/`passthrough` previously reported "matches canonical"
+  regardless of the file's real contents — caught by code-critic review) and
+  ships `scripts/check_token_drift.test.mjs`, a `node:test` regression suite
+  covering drift detection, missing-block/missing-token parse failures, and
+  the zero-comparison guard, run in CI ahead of the real check.
 
 ### Fixed
 

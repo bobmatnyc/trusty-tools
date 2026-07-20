@@ -18,6 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the gap `lib/theme.test.ts` left open — that test only checks internal
   light/dark self-consistency, not agreement with canonical. No drift was
   found in this crate — every value already matched canonical.
+  Guards against a zero-comparison false-green (an ENFORCED entry with an
+  emptied `mappings`/`passthrough` previously reported "matches canonical"
+  regardless of the file's real contents — caught by code-critic review) and
+  ships `scripts/check_token_drift.test.mjs`, a `node:test` regression suite
+  covering drift detection, missing-block/missing-token parse failures, and
+  the zero-comparison guard, run in CI ahead of the real check.
 
 - **Agents + Skills management tabs (issue #3449).** Two new nav tabs —
   `AgentsTab.svelte` (replacing the prior per-session-roster stub) and the

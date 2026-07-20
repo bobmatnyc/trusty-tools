@@ -15,6 +15,12 @@
 # Pure Node script, zero dependencies — no pnpm install / lockfile needed, so
 # this runs as its own lightweight job (matches line-cap.yml / test-pointers.yml's
 # checkout style).
+#
+# scripts/check_token_drift.test.mjs is a `node:test` regression suite for
+# the checker itself (drift detection, missing-block/missing-token parse
+# failures, and the zero-comparison guard — see that file's header for why).
+# It runs BEFORE the real check: if the checker's own logic is broken, its
+# verdict on the real crates isn't trustworthy either.
 name: Token drift
 
 on:
@@ -40,6 +46,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+
+      - name: Run check_token_drift.mjs regression tests
+        run: node --test scripts/check_token_drift.test.mjs
 
       - name: Check adopted-UI tokens against canonical Foundry source
         run: node scripts/check_token_drift.mjs

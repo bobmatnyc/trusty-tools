@@ -208,24 +208,31 @@ function normalizeColorString(raw) {
 // Canonical source parsing
 // ---------------------------------------------------------------------------
 
-function parseCanonical(tokensCssPath) {
-  const source = readFileSync(tokensCssPath, "utf8");
+// Pure — takes canonical CSS source text directly (no file I/O), so tests
+// can exercise the real parsing/matching logic against small inline
+// fixtures instead of the actual tokens.css.
+function parseCanonicalFromSource(source, sourceLabel = TOKENS_CSS_PATH) {
   const lightBlock = extractBlock(
     source,
     /:root\s*\{([\s\S]*?)\n\}/,
     ":root (light)",
-    tokensCssPath,
+    sourceLabel,
   );
   const darkBlock = extractBlock(
     source,
     /\[data-theme=(['"])dark\1\][^{]*\{([\s\S]*?)\n\}/,
     "[data-theme='dark'] (dark)",
-    tokensCssPath,
+    sourceLabel,
   );
   return {
     light: parseDeclarations(lightBlock),
     dark: parseDeclarations(darkBlock),
   };
+}
+
+function parseCanonical(tokensCssPath) {
+  const source = readFileSync(tokensCssPath, "utf8");
+  return parseCanonicalFromSource(source, tokensCssPath);
 }
 
 function canonicalRgbTriple(canonicalMap, token, ctx) {
@@ -249,8 +256,18 @@ function canonicalRgbTriple(canonicalMap, token, ctx) {
 // Crate parsing + diffing
 // ---------------------------------------------------------------------------
 
+// `crate.file` is relative-to-REPO_ROOT for every real ENFORCED entry; tests
+// pass an absolute path to a temp fixture instead, so resolve conditionally
+// rather than blindly `path.join`-ing (path.join does NOT treat a second
+// absolute segment as a root reset).
+function resolveCrateFilePath(crate) {
+  return path.isAbsolute(crate.file)
+    ? crate.file
+    : path.join(REPO_ROOT, crate.file);
+}
+
 function parseCrate(crate) {
-  const filePath = path.join(REPO_ROOT, crate.file);
+  const filePath = resolveCrateFilePath(crate);
   const source = readFileSync(filePath, "utf8");
   const lightBlock = extractBlock(
     source,
@@ -271,9 +288,28 @@ function parseCrate(crate) {
   };
 }
 
-function checkCrate(crate, canonical) {
+// `parsedOverride`, when supplied, is used instead of reading+parsing
+// `crate.file` from disk — lets tests exercise the real comparison logic
+// against synthetic {light, dark} declaration maps without touching the
+// filesystem at all.
+function checkCrate(crate, canonical, parsedOverride) {
+  // Invariant: a crate with zero comparisons configured is not "verified
+  // clean" — it's unverified. Without this guard, an ENFORCED entry whose
+  // `mappings`/`passthrough` were accidentally (or maliciously) emptied out
+  // would silently report "OK ... matches canonical" and exit 0 regardless
+  // of what the crate's app.css actually contains — the exact false-green
+  // this whole script exists to prevent. Every other failure path here
+  // throws loudly on a structural problem; a vacuously-true pass must too.
+  const tokenCount = crate.mappings.length + crate.passthrough.length;
+  if (tokenCount === 0) {
+    throw new Error(
+      `mappings+passthrough is empty — refusing to report a pass with ` +
+        `zero comparisons`,
+    );
+  }
+
   const diffs = [];
-  const parsed = parseCrate(crate);
+  const parsed = parsedOverride ?? parseCrate(crate);
 
   for (const theme of ["light", "dark"]) {
     const canonicalMap = canonical[theme];
@@ -407,4 +443,29 @@ function main() {
   console.log("All enforced crates match the canonical token source.");
 }
 
-main();
+// Only run the CLI when executed directly (`node check_token_drift.mjs`),
+// not when imported by scripts/check_token_drift.test.mjs — an import must
+// not have the side effect of running the full check and calling
+// `process.exit()`.
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
+  main();
+}
+
+export {
+  ENFORCED,
+  ALLOWLIST,
+  REPO_ROOT,
+  TOKENS_CSS_PATH,
+  hexToRgbTriple,
+  rgbTripleToHex,
+  normalizeTriple,
+  normalizeColorString,
+  parseDeclarations,
+  extractBlock,
+  parseCanonical,
+  parseCanonicalFromSource,
+  parseCrate,
+  checkCrate,
+  main,
+};
