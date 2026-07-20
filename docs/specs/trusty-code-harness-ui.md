@@ -524,11 +524,22 @@ scrolling up is never yanked back down mid-read.
 to `Running` for a genuine follow-up turn in the SAME session/transcript — this was
 already true of the daemon before this pass, just unused by the GUI. A second submit
 from the docked bar now tries that reuse path FIRST (never re-mints a workstream for a
-follow-up); only when the daemon rejects the reuse (the session is `Cancelled`/`Failed`/
-`DeadlineExceeded` — permanently terminal — or a task is already running in it) does the
-client fall back to minting a fresh session under the SAME already-active workstream
-(`workstream_id`, no second `POST /workstreams`). This is the honest reading of what the
-daemon supports today — it is NOT the §4A infinite-thread virtualization/compaction
+follow-up). A rejected reuse MUST be disambiguated before any fallback (code-critic PR
+#3460 review, HIGH 1): `begin_execution` returns the same invalid-argument rejection for
+"session is terminal" and "session already has a task running", and since `task.run` is
+202-then-background, a quick follow-up while the first task still runs is ROUTINE — a
+blind fallback there would fork a second concurrent session and orphan the running one.
+The client therefore probes `GET /sessions/{id}` on rejection: `running` BLOCKS the
+submit with a visible "still running" message (no mint); a verified-terminal status
+(`Cancelled`/`Failed`/`DeadlineExceeded`) or a 404 falls back to a fresh session under
+the SAME already-active workstream (`workstream_id`, no second `POST /workstreams`) with
+a visible fresh-session notice; an unverifiable probe refuses to mint blind and surfaces
+the error. Continuation also re-targets when the daemon's ACTIVE workstream changes for
+any reason (HIGH 2): both workstream pollers publish the resolved active id to a shared
+store (`lib/active-workstream.svelte.ts`, one shared resolution rule), and an observed
+change adopts the new id — the next submit runs a fresh session under the workstream the
+operator switched TO, never the hidden previous one. This is the honest reading of what
+the daemon supports today — it is NOT the §4A infinite-thread virtualization/compaction
 machinery, which remains unbuilt.
 
 **Requirement — project selection persists, and is one state model with continuation.**
@@ -556,11 +567,18 @@ own scroll region — the pane never scrolls as a whole document.
 **AC-6.10** The turn stream renders every turn untruncated (no bounded tail/preview) and
 auto-scrolls to the newest turn unless the operator has scrolled up.
 **AC-6.11** A second submit in the same workstream tries `session_id` reuse before
-minting; a rejection falls back to a fresh session under the SAME workstream, never a
-second `POST /workstreams`.
+minting; a rejection is disambiguated via `GET /sessions/{id}` before any fallback — a
+`running` session BLOCKS the submit visibly (never forks a concurrent session), a
+verified-terminal/vanished session falls back to a fresh session under the SAME
+workstream with a visible notice, and an unverifiable probe refuses to mint. Never a
+second `POST /workstreams` on any of these paths.
 **AC-6.12** A successful submit MUST NOT reset the selected project. Changing the
 selected project MUST reset continuation state (§AC-6.11's `session_id`) so the next
 submit starts fresh.
+**AC-6.14** When the daemon's active workstream changes for any reason (header switcher
+included), continuation MUST re-target: the next submit runs under the NEW active
+workstream, never the previous conversation's session or workstream. Both workstream
+pollers publish one shared, identically-resolved active id for this purpose.
 **AC-6.13** The rail's Project view is a primary, always-visible picker (registry roster,
 `fs_only` banner per §5.8.1, "local only" marker per issue #3435) — the modal is
 secondary, reachable from the input bar.
@@ -1623,6 +1641,16 @@ This is carried forward verbatim because it is the one piece of the visual syste
 
 ## Changelog
 
+- **2026-07-19** — **Code-critic PR #3460 review fixes (same-day, before merge).**
+  Amends §4.6.2: AC-6.11 now requires the rejected-reuse disambiguation probe (HIGH 1 —
+  `begin_execution` rejects "terminal" and "still running" identically; a still-running
+  session BLOCKS the follow-up visibly instead of forking an orphaned concurrent
+  session; verified-terminal falls back visibly; unverifiable refuses to mint blind);
+  adds AC-6.14 (HIGH 2 — continuation re-targets on ANY active-workstream change, incl.
+  the header switcher, via one shared resolved-active-id store both pollers publish).
+  MEDIUM fixes in the same pass: the activity stream's scroll-lock resets on
+  workstream/session change (same places the cancel confirm resets), and the
+  still-running rejection path gained its regression test.
 - **2026-07-19** — **Chat-shaped main pane + project-selection persistence + rail
   project picker** (issues #3446, #3447). Adds **§4.6.2** (`SPEC-TCUI-06~draft`
   addendum, AC-6.9–AC-6.13): the Workstream tab's pane fixes into a TUI-style layout —
