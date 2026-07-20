@@ -274,14 +274,25 @@ mod tests {
         }
     }
 
-    /// An engine that implements only the required methods must still
-    /// compile and yield "nothing supplied" for both new accessors — the
-    /// whole point of giving them default bodies (existing/future
-    /// implementors don't break).
+    /// An engine that implements only the required methods (no `commands`
+    /// override) must still compile and yield an empty command list — the
+    /// whole point of giving `commands()` a default body (existing/future
+    /// implementors don't break, and "supply nothing" is silent rather than
+    /// a panic or an error). Cited by the `commands()` doc comment's
+    /// `Test:` pointer.
     #[test]
-    fn commands_and_picker_default_to_nothing_supplied() {
+    fn commands_defaults_to_empty() {
         let engine = BareEngine;
         assert!(engine.commands().is_empty());
+    }
+
+    /// An engine that implements only the required methods (no `picker`
+    /// override) must still compile and yield `None` for any picker name —
+    /// same "nothing supplied, no panic" contract as `commands()`. Cited by
+    /// the `picker()` doc comment's `Test:` pointer.
+    #[test]
+    fn picker_defaults_to_none() {
+        let engine = BareEngine;
         assert!(engine.picker("model").is_none());
         assert!(engine.picker("anything").is_none());
     }
