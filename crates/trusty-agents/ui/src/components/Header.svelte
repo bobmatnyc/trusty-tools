@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Why (#3220 — Trusty Assistant header consolidation, epic #3052): the
+   * Why (#3220 — Trusty Agents header consolidation, epic #3052): the
    * app previously spread its "single source of orientation" state across
    * three places — a bare logo+theme-toggle Header, a separate `<nav>` tab
    * bar inside App.svelte's `<main>`, and a floating Desktop/Web pill

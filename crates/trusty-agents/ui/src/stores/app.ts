@@ -84,7 +84,7 @@ export const projects = writable<Project[]>([
 export const activeProjectId = writable<string>('ctrl');
 
 /**
- * Why (#3223 — Trusty Assistant agent roster, epic #3052; regression fix
+ * Why (#3223 — Trusty Agents agent roster, epic #3052; regression fix
  * flagged by code-critic on PR #3279): the roster's "active agent" is a
  * second, independent selection axis alongside `activeProjectId` — which
  * conversation thread/working directory vs. which persona voice answers.

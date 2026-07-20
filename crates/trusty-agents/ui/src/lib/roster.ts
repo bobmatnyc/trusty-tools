@@ -1,4 +1,4 @@
-// Agent roster helpers (#3223, #3224 — Trusty Assistant agent roster, epic
+// Agent roster helpers (#3223, #3224 — Trusty Agents agent roster, epic
 // #3052).
 //
 // Why: The roster needs to merge two independent data sources — the

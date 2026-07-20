@@ -101,7 +101,7 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // without waiting for external resources that may stall in headless mode.
 const GOTO_OPTS = { waitUntil: 'domcontentloaded' };
 
-test.describe('Trusty Assistant web UI smoke tests', () => {
+test.describe('Trusty Agents web UI smoke tests', () => {
 
   test('page loads and shows non-blank content', async ({ page }) => {
     // Why: Svelte renders the spinner into #app synchronously at parse time.

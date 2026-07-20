@@ -1,4 +1,4 @@
-# Trusty Assistant desktop UI
+# Trusty Agents desktop UI
 
 A Tauri 2 + Svelte 4 chat interface for [trusty-agents](../) (`tagent`). Lets you:
 
