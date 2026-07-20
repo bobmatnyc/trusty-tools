@@ -108,9 +108,23 @@ daemon.
   ```json
   { "status": "ok", "version": "0.1.0", "indexes": 3 }
   ```
-  - `status`: always `"ok"` when the daemon is up.
+  - `status`: `"ok"` normally; `"degraded"` when at least one registered index
+    has a failed search lane (issue #1870) OR at least one index's file
+    watcher was refused because its root is network-mounted (issue #3408 —
+    see `indexes_watcher_network_degraded` below).
   - `version`: `CARGO_PKG_VERSION` of the running binary.
   - `indexes`: number of indexes currently registered in the in-memory registry.
+  - `indexes_watcher_network_degraded` (issue #3408): count of registered
+    indexes whose file watcher was refused because `root_path` was detected as
+    a network-mounted filesystem (NFS/EFS/SMB/CIFS). inotify/FSEvents cannot
+    observe writes made by a *different* host onto a shared network mount —
+    an OS-level limitation, not a bug — so starting the watcher there would
+    leave the daemon reporting healthy while silently never reacting to
+    cross-host changes. A non-zero count means those indexes must be kept in
+    sync via `POST /indexes/:id/index-file` / `POST /indexes/:id/remove-file`
+    instead — see "Supported network-mount pattern" under
+    `POST /indexes/:id/remove-file` below. Per-index detail (which index, and
+    the actionable message) is on `GET /indexes/:id/status`'s `watcher` field.
 
 ##### `GET /indexes`
 
@@ -158,9 +172,20 @@ Per-index stats.
   {
     "index_id": "my-project",
     "root_path": "/Users/me/code/my-project",
-    "chunk_count": 14823
+    "chunk_count": 14823,
+    "watcher": {
+      "active": true,
+      "network_mount_degraded": false,
+      "degraded_reason": null
+    }
   }
   ```
+  - `watcher` (issue #3408): `active` is whether a live OS-level watcher is
+    currently running for this index. `network_mount_degraded` is `true` when
+    the watcher was refused because `root_path` was detected as
+    network-mounted; `degraded_reason` then carries the full actionable
+    message (names the `index-file`/`remove-file` endpoints). Both are
+    `false`/`null` for a normal local-disk index.
 - **Response 404**: unknown `index_id`.
 
 ##### `POST /indexes/:id/search`
@@ -266,6 +291,71 @@ Remove a file (and all its chunks) from the index.
   ```json
   { "index_id": "my-project", "path": "src/auth.rs", "removed_chunks": 4 }
   ```
+
+###### Supported network-mount pattern (EFS/NFS/SMB) — issue #3408
+
+**`POST /indexes/:id/index-file` and `POST /indexes/:id/remove-file` are the
+officially supported, stability-committed incremental-indexing path for
+network-mounted (EFS/NFS/SMB/CIFS) and build/serve-split deployments.** This
+is not a fallback or a workaround — it is the correct integration point
+whenever the index root is not a local disk local to the daemon's host.
+
+Why this is necessary (rather than just a suggestion): the native file watcher
+(`service/watcher.rs`, backed by `notify`'s inotify/FSEvents) is a *local-host
+kernel notification* mechanism. It cannot observe a write made by a
+*different* host onto a shared network mount — this is a limitation of
+inotify/FSEvents themselves, not something this crate can fix by retrying or
+reconfiguring the debouncer. A build box that writes to a shared EFS/NFS mount
+will never wake a serving box's inotify watch. As of issue #3408 the daemon
+detects a network-mounted index root (via `statfs` — see
+`service/network_fs.rs`) and refuses to start the watcher for that index
+rather than silently reporting healthy while never reacting to changes; see
+`indexes_watcher_network_degraded` (`GET /health`) and the `watcher` field
+(`GET /indexes/:id/status`) above.
+
+Equivalent MCP tools: `index_file` (`{ index_id, path, content }`) and
+`remove_file` (`{ index_id, path }`) — see "MCP Tools" below.
+
+**Worked example — a build box pushes to shared storage; each consumer (e.g. a
+CI job, a git post-merge hook, or a small sidecar poller) detects its own
+changes and drives the daemon directly:**
+
+```bash
+#!/usr/bin/env bash
+# Run after `git pull` (or any local mutation of the network-mounted root),
+# from a process that has its own view of what changed — e.g. `git diff`
+# against the previous HEAD, an fswatch on the LOCAL side of a build step, or
+# a CI job's own manifest of touched files. Do NOT rely on the daemon's
+# watcher to discover these — see the "why" above.
+set -euo pipefail
+INDEX_ID="my-project"
+DAEMON="http://127.0.0.1:$(trusty-search port)"
+
+git diff --name-status "$PREV_HEAD" HEAD | while read -r status path; do
+  case "$status" in
+    D)
+      curl -sf -X POST "$DAEMON/indexes/$INDEX_ID/remove-file" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -n --arg path "$path" '{path: $path}')"
+      ;;
+    A|M)
+      content=$(jq -Rs . < "$path")
+      curl -sf -X POST "$DAEMON/indexes/$INDEX_ID/index-file" \
+        -H 'Content-Type: application/json' \
+        -d "$(jq -n --arg path "$path" --argjson content "$content" \
+              '{path: $path, content: $content}')"
+      ;;
+  esac
+done
+```
+
+Note: `index_file` triggers a full `rebuild_symbol_graph` per call
+(`core/indexer/ingest/mod.rs`) — fine for a handful of files per push. There is
+currently no HTTP/MCP-exposed batch variant (the internal
+`index_files_batch_no_rebuild` fast path is only used by the full-reindex
+pipeline); a consumer that needs to apply a LARGE batch of per-file changes at
+once (e.g. after pulling hundreds of commits) should prefer
+`POST /indexes/:id/reindex` over looping many single-file `index-file` calls.
 
 ##### `POST /indexes/:id/reindex`
 

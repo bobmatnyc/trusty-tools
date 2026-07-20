@@ -47,6 +47,51 @@ async fn health_handler_reports_indexes_and_uptime() {
     assert_eq!(resp.embedder, "initializing");
 }
 
+/// Issue #3408 — a network-mounted index root must surface through
+/// `/health`: `indexes_watcher_network_degraded` counts it and the top-level
+/// `status` flips to `"degraded"`, mirroring the existing
+/// `indexes_corpus_failed` degraded-signal convention (issue #1870). Uses
+/// `WatcherManager::spawn_for_index_with_mount_kind` to inject
+/// `MountKind::Network` directly rather than requiring a real NFS/CIFS/SMB
+/// mount in CI.
+#[tokio::test]
+async fn health_surfaces_watcher_network_degraded_count() {
+    use crate::core::{
+        indexer::CodeIndexer,
+        registry::{IndexHandle, IndexId, IndexRegistry},
+    };
+    use crate::service::network_fs::MountKind;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let id = IndexId::new("net-mount-test");
+    let handle = registry.register(IndexHandle::bare(
+        id.clone(),
+        Arc::new(RwLock::new(CodeIndexer::new(
+            "net-mount-test",
+            "/tmp/net-mount-test",
+        ))),
+        "/tmp/net-mount-test".into(),
+    ));
+    let state = Arc::new(SearchAppState::new(registry));
+
+    state
+        .watcher_manager
+        .spawn_for_index_with_mount_kind(&handle, MountKind::Network)
+        .await;
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    assert_eq!(
+        resp.indexes_watcher_network_degraded, 1,
+        "the network-mount refusal must be counted on /health"
+    );
+    assert_eq!(
+        resp.status, "degraded",
+        "top-level status must flip to degraded, matching the indexes_corpus_failed convention"
+    );
+}
+
 /// Issue #128 — `GET /indexes/{id}/graph` exports the full SymbolGraph.
 /// With a registered index holding inter-calling functions, the response
 /// must carry node/edge lists, a `stats` block, a `generated_at` stamp,
