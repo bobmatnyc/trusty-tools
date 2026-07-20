@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.36.1] — 2026-07-20
+
+### Changed
+
+- Rebuild against `trusty-common` 0.23.6 / `trusty-embedderd` 0.3.9 to pick up the
+  two embedding-performance fixes ([#3500](https://github.com/bobmatnyc/trusty-tools/pull/3500),
+  [#3511](https://github.com/bobmatnyc/trusty-tools/pull/3511); refs #3486 / #3493):
+  platform-conditional ORT intra-op thread default and a non-quantized (fp32)
+  default embedding model. `trusty-search` bundles the `trusty-embedderd` binary,
+  so this republish is what carries the faster/more-accurate embedder into the
+  single-install `cargo install trusty-search`. `TRUSTY_ORT_INTRA_THREADS` and
+  `TRUSTY_EMBEDDER_MODEL=int8` remain available to restore prior behaviour.
+
 ### Changed
 
 - **UI tokens now CI-enforced against the canonical Foundry source** (refs [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): flipped from the `scripts/check_token_drift.mjs` allowlist to ENFORCED. The `token-drift` CI job now compares `ui/src/lib/styles/tokens.css`'s plain-CSS `--trusty-*: #hex` values directly to `docs/design/UI/design-system/tokens.css` on every push/PR (light `:root`, dark `[data-theme='dark']`), so a hand-edit that drifts this crate's palette from canonical fails the build.
