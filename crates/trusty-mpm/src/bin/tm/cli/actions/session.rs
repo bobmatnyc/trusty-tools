@@ -188,8 +188,25 @@ pub(crate) enum SessionAction {
     /// By default, decommissioned tombstone sessions are hidden (#1809); `--all`
     /// opts in to seeing every state.
     /// Test: `cli_parses_session_ls`, `cli_parses_session_ls_source_id`,
-    /// `cli_parses_session_ls_current`, `cli_parses_session_ls_all`.
+    /// `cli_parses_session_ls_current`, `cli_parses_session_ls_all`,
+    /// `cli_parses_session_ls_terms_*`.
     Ls {
+        /// Sort keyword and/or filter term(s).
+        ///
+        /// Grammar: `tm sessions ls [recent|alpha] [filter-word...]`. If the
+        /// FIRST word case-insensitively equals `recent` or `alpha`, it selects
+        /// the sort order (`recent` = most-recently-active first, the default;
+        /// `alpha` = alphabetical by session name) and every remaining word
+        /// (joined with a single space) becomes a case-insensitive substring
+        /// filter matched against the id, name, project (source_id), state, and
+        /// task columns. If the first word is NOT one of those two keywords,
+        /// the sort stays `recent` and ALL words become the filter term.
+        /// Examples: `tm sessions ls`, `tm sessions ls alpha`,
+        /// `tm sessions ls recent api`, `tm sessions ls api` (same as
+        /// `recent api`), `tm sessions ls alpha api`. No effect on `--json`
+        /// output (raw daemon response is always complete, matching `--all`).
+        #[arg(value_name = "SORT|FILTER", num_args = 0..)]
+        terms: Vec<String>,
         /// Output as JSON instead of a table.
         #[arg(long)]
         json: bool,

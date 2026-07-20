@@ -86,7 +86,10 @@ pub(crate) enum PickerDecision {
 /// [`run_tty_picker`] agnostic to its caller.
 /// What: `source_id` filters the daemon session list (`None` = every managed
 /// session); `repo_url` is the launch-new target (`None` disables launch-new with
-/// an actionable hint instead of attaching to the wrong project).
+/// an actionable hint instead of attaching to the wrong project). `sort`/`term`
+/// (#3483) are the `tm ls` inline sort-keyword + filter grammar
+/// ([`parse_ls_terms`]) re-applied on every re-fetch inside [`run_tty_picker`]'s
+/// loop so the picker's ordering/filtering never drifts from the initial menu.
 /// Test: constructed by `guided::try_show_picker` and [`run_ls_connector`];
 /// behavior is covered by the picker's e2e path.
 pub(crate) struct PickerScope {
@@ -94,13 +97,20 @@ pub(crate) struct PickerScope {
     pub(crate) source_id: Option<String>,
     /// Git-root path used as the launch-new target, or `None` to disable it.
     pub(crate) repo_url: Option<String>,
+    /// Sort order re-applied after every re-fetch (#3483).
+    pub(crate) sort: SessionSortArg,
+    /// Case-insensitive substring filter re-applied after every re-fetch
+    /// (#3483); `None` shows every (live) session.
+    pub(crate) term: Option<String>,
 }
 
 impl PickerScope {
     /// Build a single-project scope (bare `tm` guided default).
     ///
     /// Why: the guided default always knows both the project slug and the git
-    /// root, so both fields are always populated.
+    /// root, so both fields are always populated. It predates (and is out of
+    /// scope for) the `tm ls` sort/filter grammar, so `sort`/`term` are always
+    /// the no-op defaults here.
     /// What: returns a scope filtered to `source_id` with `repo_url` as the
     /// launch target.
     /// Test: exercised by `guided::try_show_picker`.
@@ -108,6 +118,8 @@ impl PickerScope {
         Self {
             source_id: Some(source_id.to_string()),
             repo_url: Some(repo_url.to_string()),
+            sort: SessionSortArg::Recent,
+            term: None,
         }
     }
 }
@@ -155,6 +167,156 @@ pub(crate) fn parse_scoped_sessions(
         filter_live_sessions(fetched)
     };
     Ok(sessions)
+}
+
+/// Sort order for the `tm ls` / `tm sessions ls` table and picker (#3483).
+///
+/// Why: the repo owner asked for selectable recent/alpha ordering expressed as
+/// an inline positional keyword (`tm ls recent|alpha …`), NOT a `--sort` flag —
+/// see [`parse_ls_terms`] for the grammar that produces this value.
+/// What: `Recent` (the default) orders by most-recently-active first; `Alpha`
+/// orders case-insensitively by session name.
+/// Test: `sort_sessions_recent_orders_by_last_activity`,
+/// `sort_sessions_alpha_orders_by_name_case_insensitive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SessionSortArg {
+    /// Most-recently-active session first (falls back to `created_at` when
+    /// `last_activity_at` is absent; a session with neither sorts last).
+    #[default]
+    Recent,
+    /// Alphabetical by session `name`, case-insensitive.
+    Alpha,
+}
+
+/// Resolve `tm ls`'s / `tm sessions ls`'s positional `terms` into a sort mode
+/// and an optional filter substring.
+///
+/// Why (PM correction): sort/filter must be bare positional words, not
+/// `--sort`/`--filter` flags — mirroring the `tm ticket <issue> [system]`
+/// precedent (a positional keyword with a default) rather than introducing a
+/// new flag convention.
+/// What: grammar — if the FIRST word case-insensitively equals `recent` or
+/// `alpha`, it is consumed as the sort keyword and every remaining word
+/// (joined with a single space) becomes the filter (`None` if none remain).
+/// Otherwise the sort defaults to [`SessionSortArg::Recent`] and EVERY word
+/// (joined with a single space) is the filter. No words at all → `(Recent,
+/// None)`, i.e. bare `tm ls` is unchanged. This means a filter term that
+/// happens to equal a sort keyword (e.g. filtering for the literal substring
+/// "alpha") is reachable by prefixing the OTHER keyword: `tm ls recent alpha`
+/// sorts by recency and filters for "alpha".
+/// Test: `parse_ls_terms_empty_defaults_recent_no_filter`,
+/// `parse_ls_terms_recent_keyword_only`, `parse_ls_terms_alpha_keyword_only`,
+/// `parse_ls_terms_keyword_case_insensitive`,
+/// `parse_ls_terms_recent_with_filter`, `parse_ls_terms_alpha_with_filter`,
+/// `parse_ls_terms_non_keyword_first_word_is_filter`,
+/// `parse_ls_terms_multi_word_filter_without_keyword_joins_with_space`,
+/// `parse_ls_terms_keyword_then_filter_equal_to_other_keyword`.
+pub(crate) fn parse_ls_terms(terms: &[String]) -> (SessionSortArg, Option<String>) {
+    match terms.split_first() {
+        None => (SessionSortArg::Recent, None),
+        Some((first, rest)) if first.eq_ignore_ascii_case("recent") => {
+            (SessionSortArg::Recent, join_non_empty(rest))
+        }
+        Some((first, rest)) if first.eq_ignore_ascii_case("alpha") => {
+            (SessionSortArg::Alpha, join_non_empty(rest))
+        }
+        Some(_) => (SessionSortArg::Recent, join_non_empty(terms)),
+    }
+}
+
+/// Join `words` with a single space, or `None` when empty.
+fn join_non_empty(words: &[String]) -> Option<String> {
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+/// Case-insensitive substring filter over a session's visible identifying
+/// columns (#3483).
+///
+/// Why: the operator scans `id`, `name`, the project slug, `state`, and `task`
+/// on the rendered table/picker — the filter should match anything they can
+/// actually see, not an internal-only field.
+/// What: keeps a session when `term` (lowercased) is a substring of ANY of:
+/// `id`, `name`, `source_id` (project), `state`, `task`. A `None`/absent field
+/// is simply skipped. `term = None` is a no-op (returns `sessions` unchanged).
+/// Test: `filter_sessions_by_term_matches_name`,
+/// `filter_sessions_by_term_matches_task`,
+/// `filter_sessions_by_term_matches_source_id`,
+/// `filter_sessions_by_term_is_case_insensitive`,
+/// `filter_sessions_by_term_no_match_returns_empty`,
+/// `filter_sessions_by_term_none_is_noop`.
+pub(crate) fn filter_sessions_by_term(
+    sessions: Vec<ManagedSessionSummary>,
+    term: Option<&str>,
+) -> Vec<ManagedSessionSummary> {
+    let Some(term) = term else {
+        return sessions;
+    };
+    let needle = term.to_lowercase();
+    sessions
+        .into_iter()
+        .filter(|s| session_matches_term(s, &needle))
+        .collect()
+}
+
+/// Pure predicate backing [`filter_sessions_by_term`]; `needle_lower` must
+/// already be lowercased.
+fn session_matches_term(s: &ManagedSessionSummary, needle_lower: &str) -> bool {
+    [
+        Some(s.id.as_str()),
+        Some(s.name.as_str()),
+        s.source_id.as_deref(),
+        Some(s.state.as_str()),
+        s.task.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|field| field.to_lowercase().contains(needle_lower))
+}
+
+/// Sort `sessions` in place per [`SessionSortArg`] (#3483).
+///
+/// Why: shared by the static table (`tm ls` / `tm sessions ls`) and the
+/// interactive picker so both views order sessions identically.
+/// What: `Recent` sorts descending by [`recency_key`] (most recent first);
+/// `Alpha` sorts ascending, case-insensitively, by `name`. Both use the
+/// stable `sort_by`, so equal keys preserve the daemon's original relative
+/// order.
+/// Test: `sort_sessions_recent_orders_by_last_activity`,
+/// `sort_sessions_recent_falls_back_to_created_at`,
+/// `sort_sessions_alpha_orders_by_name_case_insensitive`.
+pub(crate) fn sort_sessions(sessions: &mut [ManagedSessionSummary], sort: SessionSortArg) {
+    match sort {
+        SessionSortArg::Recent => {
+            sessions.sort_by(|a, b| recency_key(b).cmp(recency_key(a)));
+        }
+        SessionSortArg::Alpha => {
+            sessions.sort_by_key(|s| s.name.to_lowercase());
+        }
+    }
+}
+
+/// Best-available recency signal for a session (#3483).
+///
+/// Why: `last_activity_at` reflects actual usage (the daemon updates it on
+/// every interaction), which is the signal an operator scanning `tm ls`
+/// actually wants — a session touched five minutes ago should outrank one
+/// merely CREATED first. `created_at` is the fallback for legacy/additive
+/// records that predate the activity timestamp; a session with neither sorts
+/// last (empty string is the lexicographic minimum).
+/// What: RFC 3339 timestamps compare correctly as plain strings because the
+/// daemon always emits them in the same normalized (UTC, fixed-precision)
+/// form.
+/// Test: covered indirectly by `sort_sessions_recent_orders_by_last_activity`
+/// and `sort_sessions_recent_falls_back_to_created_at`.
+fn recency_key(s: &ManagedSessionSummary) -> &str {
+    s.last_activity_at
+        .as_deref()
+        .or(s.created_at.as_deref())
+        .unwrap_or("")
 }
 
 /// Fetch and filter managed sessions in one call — the shared picker fetch path.
@@ -469,7 +631,11 @@ pub(crate) async fn run_tty_picker(
 
         // Detached or session ended — re-fetch the list before redisplaying.
         // #1809: the shared fetch path applies the same live-only tombstone filter.
+        // Issue TBD: re-apply the scope's filter/sort so the redisplayed menu
+        // never drifts from the one the operator picked against.
         sessions = fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await?;
+        sessions = filter_sessions_by_term(sessions, scope.term.as_deref());
+        sort_sessions(&mut sessions, scope.sort);
     }
     Ok(())
 }
@@ -510,6 +676,7 @@ pub(crate) fn should_show_picker(
 /// project only when it is a GitHub-backed git checkout.
 /// Test: parse tests `cli_parses_ls_*` and the gate tests
 /// `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_ls_connector(
     client: &reqwest::Client,
     url: &str,
@@ -517,6 +684,8 @@ pub(crate) async fn run_ls_connector(
     source_id: Option<String>,
     current: bool,
     all: bool,
+    sort: SessionSortArg,
+    term: Option<String>,
 ) -> anyhow::Result<()> {
     // `--current` derives the source_id from the cwd git remote, exactly like
     // `tm session ls --current`. `--source-id` and `--current` are mutually
@@ -532,9 +701,12 @@ pub(crate) async fn run_ls_connector(
 
     // Cheap pre-gate: `--json`, `--all`, or any non-interactive stream never
     // fetches for the picker — delegate straight to the static renderer, which
-    // owns the raw `--json` passthrough and the `--all` tombstone sort.
+    // owns the raw `--json` passthrough and the `--all` tombstone sort. `sort`/
+    // `term` ride along (the static renderer applies them; `--json` ignores
+    // them, matching `--all`'s existing "no effect on --json" precedent).
     if json || all || !stdin_tty || !stdout_tty {
-        return super::managed::session_ls(client, url, json, sid.as_deref(), all).await;
+        return super::managed::session_ls(client, url, json, sid.as_deref(), all, sort, term)
+            .await;
     }
 
     // Interactive stream: fetch the live sessions once. On any fetch error
@@ -543,9 +715,20 @@ pub(crate) async fn run_ls_connector(
     let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false).await {
         Ok(s) => s,
         Err(_) => {
-            return super::managed::session_ls(client, url, false, sid.as_deref(), false).await;
+            return super::managed::session_ls(
+                client,
+                url,
+                false,
+                sid.as_deref(),
+                false,
+                sort,
+                term,
+            )
+            .await;
         }
     };
+    let mut sessions = filter_sessions_by_term(sessions, term.as_deref());
+    sort_sessions(&mut sessions, sort);
 
     if !should_show_picker(stdin_tty, stdout_tty, json, all, sessions.len()) {
         // 0 sessions on a TTY: print the static "no managed sessions" line rather
@@ -563,6 +746,8 @@ pub(crate) async fn run_ls_connector(
     let scope = PickerScope {
         source_id: sid,
         repo_url,
+        sort,
+        term,
     };
     run_tty_picker(client, url, &scope, sessions).await
 }

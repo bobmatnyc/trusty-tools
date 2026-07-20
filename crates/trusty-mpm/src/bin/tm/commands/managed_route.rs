@@ -388,6 +388,7 @@ mod tests {
         ));
         assert!(matches!(
             to_command(&SessionAction::Ls {
+                terms: vec![],
                 json: false,
                 source_id: None,
                 current: false,

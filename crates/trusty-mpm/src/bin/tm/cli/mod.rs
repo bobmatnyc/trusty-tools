@@ -790,9 +790,25 @@ pub(crate) enum Command {
     /// static table. `--source-id`/`--current`/`--all` mirror `tm sessions ls`.
     /// Test: `cli_parses_ls_connector_bare`, `cli_parses_ls_projects`,
     /// `cli_parses_ls_projects_short`, `cli_parses_ls_json`, `cli_parses_ls_current`,
-    /// `cli_ls_source_id_and_current_conflict`.
+    /// `cli_ls_source_id_and_current_conflict`, `cli_parses_ls_terms_*`.
     #[command(name = "ls")]
     Ls {
+        /// Sort keyword and/or filter term(s) (session mode only; ignored with
+        /// `--projects`).
+        ///
+        /// Grammar: `tm ls [recent|alpha] [filter-word...]`. If the FIRST word
+        /// case-insensitively equals `recent` or `alpha`, it selects the sort
+        /// order (`recent` = most-recently-active first, the default; `alpha` =
+        /// alphabetical by session name) and every remaining word (joined with a
+        /// single space) becomes a case-insensitive substring filter matched
+        /// against the id, name, project (source_id), state, and task columns.
+        /// If the first word is NOT one of those two keywords, the sort stays
+        /// `recent` and ALL words become the filter term. Examples: `tm ls`,
+        /// `tm ls alpha`, `tm ls recent api`, `tm ls api` (same as
+        /// `recent api`), `tm ls alpha api`. No effect on `--json` output (raw
+        /// daemon response is always complete, matching `--all`).
+        #[arg(value_name = "SORT|FILTER", num_args = 0..)]
+        terms: Vec<String>,
         /// Show the repo-alias / project registry instead of managed sessions.
         ///
         /// Why (#2311): preserves the pre-connector top-level `tm ls` behavior —
