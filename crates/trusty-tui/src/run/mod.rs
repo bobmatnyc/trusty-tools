@@ -407,17 +407,35 @@ type Generation = Arc<std::sync::atomic::AtomicU64>;
 /// What: no special handling needed for the mismatched-generation branch
 /// beyond "don't forward" — silently dropping is the correct, documented
 /// behavior (rendering stale output from an already-cancelled turn would be
-/// the bug, not the silence).
+/// the bug, not the silence). `saw_terminal` is flipped to `true` whenever a
+/// relayed (generation still matching) event is `AssistantOutput { done:
+/// true, .. }` or `Quit` — [`dispatch_pending`]'s completion step reads it,
+/// after this function has fully drained, to detect a `handle_input` that
+/// returned `Ok(true)` without ever producing a terminal signal (see
+/// `ReplEvent::TurnFinished`'s doc comment for the stuck-`busy` deadlock
+/// that gap causes). A message dropped for generation mismatch does NOT set
+/// `saw_terminal` — that turn was already superseded/cancelled, and
+/// `TuiModel::on_cancelled` already reset `busy` for it independently.
 /// Test: [`tests::forward_while_current_generation_drops_stale_generation_message`],
-/// [`tests::forward_while_current_generation_forwards_matching_generation_message`].
+/// [`tests::forward_while_current_generation_forwards_matching_generation_message`],
+/// [`tests::forward_while_current_generation_flags_terminal_assistant_output`],
+/// [`tests::forward_while_current_generation_flags_quit`],
+/// [`tests::forward_while_current_generation_does_not_flag_non_terminal_events`].
 async fn forward_while_current_generation(
     mut turn_rx: UnboundedReceiver<ReplEvent>,
     real_tx: UnboundedSender<ReplEvent>,
     generation: Generation,
     my_gen: u64,
+    saw_terminal: Arc<AtomicBool>,
 ) {
     while let Some(ev) = turn_rx.recv().await {
         if generation.load(Ordering::SeqCst) == my_gen {
+            if matches!(
+                &ev,
+                ReplEvent::AssistantOutput { done: true, .. } | ReplEvent::Quit
+            ) {
+                saw_terminal.store(true, Ordering::SeqCst);
+            }
             let _ = real_tx.send(ev);
         }
     }
@@ -481,12 +499,40 @@ async fn forward_while_current_generation(
 /// relays go through the SAME generation-tagged `turn_tx`, so a stale
 /// `Quit`/error from an already-cancelled turn is dropped exactly like a
 /// stale `AssistantOutput` chunk would be.
+///
+/// **Stuck-`busy` safety net (post-review fix, PR #3477):** `ReplApp::busy`
+/// is cleared ONLY by a terminal `AssistantOutput { done: true, .. }`/`Quit`
+/// reaching the reducer — but `handle_input` returning `Ok(true)` is NOT a
+/// guarantee one was ever sent (three real `CodeEngine` paths legitimately
+/// return `Ok(true)` having pushed only a `StatusMessage`/`WorkstreamUpdated`:
+/// `/workstream list`/`activate`, a reconnect-exhausted event pump, and a
+/// daemon-initiated session cancellation). Combined with FIX 1's busy-gating,
+/// that left `busy` stuck forever — input permanently bricked. The fix:
+/// after `handle_input` resolves (`Ok`/`Err`, any branch), the completion
+/// code drops its `turn_tx` clone and awaits the forwarder's `JoinHandle` —
+/// this is the synchronization point that guarantees `saw_terminal`
+/// reflects everything the engine actually sent, not a racy snapshot taken
+/// the instant `handle_input`'s future resolves. If `saw_terminal` is still
+/// `false` AND `generation` still equals `my_gen` (this turn was not
+/// superseded/cancelled in the meantime — if it was, `on_cancelled` already
+/// handled `busy` independently, and a stale top-up here must NOT clear
+/// `busy` for whatever NEWER turn might already be in flight), a
+/// `ReplEvent::TurnFinished` is sent directly on the real `tx` — see that
+/// variant's doc comment for why it is a dedicated variant rather than a
+/// reused empty `AssistantOutput { done: true, .. }` (the latter would push
+/// a stray blank chat entry via that event's `None`-`streaming_idx` branch).
+/// Net invariant: every `handle_input` completion path — `Ok(true)` with a
+/// done chunk, `Ok(true)` with none, `Ok(false)`, and `Err` — deterministically
+/// leaves `busy == false` once no task is in flight.
 /// Test: [`tests::dispatch_pending_submit_reaches_handle_input`],
 /// [`tests::dispatch_pending_cancel_reaches_cancel_session`],
 /// [`tests::dispatch_pending_cancel_aborts_genuinely_in_flight_submit_task`],
 /// [`tests::dispatch_pending_noop_when_nothing_pending`],
 /// [`tests::forward_while_current_generation_drops_stale_generation_message`],
-/// [`tests::dispatch_pending_second_submit_while_busy_does_not_start_second_task`].
+/// [`tests::dispatch_pending_second_submit_while_busy_does_not_start_second_task`],
+/// [`tests::dispatch_pending_ok_true_with_no_terminal_output_still_clears_busy`],
+/// [`tests::dispatch_pending_ok_true_with_only_status_message_still_clears_busy`],
+/// [`tests::dispatch_pending_err_clears_busy_and_surfaces_visible_error`].
 fn dispatch_pending<E, M>(
     model: &mut M,
     engine: &Arc<E>,
@@ -527,27 +573,57 @@ fn dispatch_pending<E, M>(
         let (turn_tx, turn_rx) = mpsc::unbounded_channel::<ReplEvent>();
         let real_tx = tx.clone();
         let forwarder_generation = Arc::clone(generation);
-        tokio::spawn(forward_while_current_generation(
+        let saw_terminal = Arc::new(AtomicBool::new(false));
+        let forwarder_saw_terminal = Arc::clone(&saw_terminal);
+        let forwarder_handle = tokio::spawn(forward_while_current_generation(
             turn_rx,
             real_tx,
             forwarder_generation,
             my_gen,
+            forwarder_saw_terminal,
         ));
 
         let engine = Arc::clone(engine);
+        let completion_tx = tx.clone();
+        let completion_generation = Arc::clone(generation);
         let handle = tokio::spawn(async move {
-            match engine.handle_input(line, turn_tx.clone()).await {
+            let result = engine.handle_input(line, turn_tx.clone()).await;
+            match &result {
                 Ok(true) => {}
                 Ok(false) => {
                     let _ = turn_tx.send(ReplEvent::Quit);
                 }
                 Err(e) => {
+                    // Surface the error as a visible chat entry (also
+                    // clears `busy` via `done: true` — see
+                    // `apply_assistant_output`) rather than leaving the
+                    // failure silent.
                     let _ = turn_tx.send(ReplEvent::AssistantOutput {
                         chunk: format!("error: {e:#}"),
                         done: true,
                         is_error: true,
                     });
                 }
+            }
+            // Drop our own `turn_tx` clone BEFORE awaiting the forwarder:
+            // its channel only closes (and `forward_while_current_generation`
+            // only returns) once every sender clone — including the one
+            // `engine.handle_input` held, already dropped when its future
+            // resolved above — is gone. Awaiting first would deadlock.
+            drop(turn_tx);
+            let _ = forwarder_handle.await;
+            // Safety net: `handle_input` returning `Ok(true)` is not a
+            // guarantee a terminal signal was ever sent (see this
+            // function's doc comment for the real `CodeEngine` paths that
+            // don't). Top one up so `busy` cannot stay stuck forever — but
+            // only if THIS turn is still the live one; if it was cancelled
+            // and superseded by a newer submit in the meantime,
+            // `on_cancelled` already reset `busy` for the old turn and this
+            // must not clobber whatever the NEW turn's state is.
+            if !saw_terminal.load(Ordering::SeqCst)
+                && completion_generation.load(Ordering::SeqCst) == my_gen
+            {
+                let _ = completion_tx.send(ReplEvent::TurnFinished);
             }
         });
         let mut slot = current_task.lock().unwrap();

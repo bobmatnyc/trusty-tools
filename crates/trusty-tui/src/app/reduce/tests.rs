@@ -307,6 +307,29 @@ fn apply_quit_event_signals_quit() {
     assert!(app.should_quit());
 }
 
+/// `ReplEvent::TurnFinished` (the `dispatch_pending` stuck-`busy` safety net)
+/// must clear `busy`/`streaming_idx` and touch NOTHING else — in particular
+/// it must never push a chat entry, which is exactly why it exists instead
+/// of reusing an empty `AssistantOutput { done: true, .. }`.
+#[test]
+fn apply_turn_finished_clears_busy_and_streaming_idx_without_touching_chat() {
+    let mut app = ReplApp::new("demo", "u");
+    app.busy = true;
+    app.streaming_idx = Some(0);
+    app.push_status("unrelated"); // pre-existing chat content must survive
+    let chat_before = app.chat.len();
+
+    apply(&mut app, ReplEvent::TurnFinished);
+
+    assert!(!app.busy);
+    assert!(app.streaming_idx.is_none());
+    assert_eq!(
+        app.chat.len(),
+        chat_before,
+        "must not push/alter any chat entry"
+    );
+}
+
 #[test]
 fn apply_page_up_and_down_scroll_by_page() {
     let mut app = ReplApp::new("demo", "u");

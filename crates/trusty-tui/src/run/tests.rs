@@ -306,7 +306,7 @@ async fn run_type_checks(engine: Arc<NoopEngine>) -> anyhow::Result<()> {
 // this path at all).
 // ─────────────────────────────────────────────────────────────────────────
 
-use crate::app::{ReplApp, apply as app_apply};
+use crate::app::{ChatRole, ReplApp, apply as app_apply};
 use crate::event::{KeyCode, KeyInput, KeyModifiers};
 use std::sync::atomic::AtomicU64;
 use tokio::sync::Notify;
@@ -342,6 +342,15 @@ struct MockEngine {
     /// proven the task was truly interrupted mid-flight, not merely
     /// unpolled.
     completed: AtomicBool,
+    /// When set, `handle_input` sends only a `StatusMessage` (no
+    /// `AssistantOutput`/`Quit` at all) and returns `Ok(true)` — the real
+    /// `/workstream list` shape (`crates/trusty-code/src/tui_client/
+    /// engine_state.rs::handle_workstream_command`) that originally left
+    /// `busy` stuck forever.
+    send_status_only: AtomicBool,
+    /// When set, `handle_input` sends nothing at all and returns `Err(...)`
+    /// — exercises the error-completion path.
+    returns_err: AtomicBool,
 }
 
 #[async_trait]
@@ -361,6 +370,12 @@ impl TuiEngine for MockEngine {
             self.chunk_sent.store(true, Ordering::SeqCst);
             notify.notified().await;
             self.completed.store(true, Ordering::SeqCst);
+        }
+        if self.returns_err.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("mock engine failure"));
+        }
+        if self.send_status_only.load(Ordering::SeqCst) {
+            let _ = tx.send(ReplEvent::StatusMessage("workstreams: a, b, c".to_string()));
         }
         Ok(!self.handle_input_returns_quit.load(Ordering::SeqCst))
     }
@@ -614,7 +629,7 @@ async fn forward_while_current_generation_drops_stale_generation_message() {
     generation.store(6, Ordering::SeqCst);
     drop(turn_tx); // no more messages; the forwarder runs to completion
 
-    forward_while_current_generation(turn_rx, real_tx, generation, 5).await;
+    forward_while_current_generation(turn_rx, real_tx, generation, 5, no_terminal_flag()).await;
 
     assert!(
         real_rx.try_recv().is_err(),
@@ -640,7 +655,7 @@ async fn forward_while_current_generation_forwards_matching_generation_message()
         .unwrap();
     drop(turn_tx);
 
-    forward_while_current_generation(turn_rx, real_tx, generation, 1).await;
+    forward_while_current_generation(turn_rx, real_tx, generation, 1, no_terminal_flag()).await;
 
     let ev = real_rx
         .try_recv()
@@ -653,6 +668,85 @@ async fn forward_while_current_generation_forwards_matching_generation_message()
             is_error: false,
         }
     );
+}
+
+/// Shorthand for a fresh, unset `saw_terminal` flag — most forwarder tests
+/// don't care about it.
+fn no_terminal_flag() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
+/// The stuck-`busy` fix's load-bearing signal: relaying a terminal
+/// `AssistantOutput { done: true, .. }` must flip `saw_terminal`.
+#[tokio::test]
+async fn forward_while_current_generation_flags_terminal_assistant_output() {
+    let (turn_tx, turn_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let (real_tx, _real_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let generation: Generation = Arc::new(AtomicU64::new(1));
+    let saw_terminal = Arc::new(AtomicBool::new(false));
+
+    turn_tx
+        .send(ReplEvent::AssistantOutput {
+            chunk: "done".to_string(),
+            done: true,
+            is_error: false,
+        })
+        .unwrap();
+    drop(turn_tx);
+
+    forward_while_current_generation(turn_rx, real_tx, generation, 1, Arc::clone(&saw_terminal))
+        .await;
+
+    assert!(saw_terminal.load(Ordering::SeqCst));
+}
+
+/// `Quit` also counts as a terminal signal.
+#[tokio::test]
+async fn forward_while_current_generation_flags_quit() {
+    let (turn_tx, turn_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let (real_tx, _real_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let generation: Generation = Arc::new(AtomicU64::new(1));
+    let saw_terminal = Arc::new(AtomicBool::new(false));
+
+    turn_tx.send(ReplEvent::Quit).unwrap();
+    drop(turn_tx);
+
+    forward_while_current_generation(turn_rx, real_tx, generation, 1, Arc::clone(&saw_terminal))
+        .await;
+
+    assert!(saw_terminal.load(Ordering::SeqCst));
+}
+
+/// Non-terminal events (`StatusMessage`, a non-`done` `AssistantOutput`
+/// chunk) must NOT flip `saw_terminal` — this is exactly the `/workstream
+/// list` shape (`StatusMessage`/`WorkstreamUpdated` only) that originally
+/// left `busy` stuck.
+#[tokio::test]
+async fn forward_while_current_generation_does_not_flag_non_terminal_events() {
+    let (turn_tx, turn_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let (real_tx, mut real_rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let generation: Generation = Arc::new(AtomicU64::new(1));
+    let saw_terminal = Arc::new(AtomicBool::new(false));
+
+    turn_tx
+        .send(ReplEvent::StatusMessage("workstream list: ...".to_string()))
+        .unwrap();
+    turn_tx
+        .send(ReplEvent::AssistantOutput {
+            chunk: "still streaming".to_string(),
+            done: false,
+            is_error: false,
+        })
+        .unwrap();
+    drop(turn_tx);
+
+    forward_while_current_generation(turn_rx, real_tx, generation, 1, Arc::clone(&saw_terminal))
+        .await;
+
+    assert!(!saw_terminal.load(Ordering::SeqCst));
+    // Both messages still forward normally — only the flag is unaffected.
+    assert!(real_rx.try_recv().is_ok());
+    assert!(real_rx.try_recv().is_ok());
 }
 
 /// FIX 1 (busy-gating) at the dispatch layer: while a turn is in flight, a
@@ -693,5 +787,111 @@ async fn dispatch_pending_second_submit_while_busy_does_not_start_second_task() 
         engine.handle_input_calls.load(Ordering::SeqCst),
         1,
         "a second submit while busy must never reach handle_input"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stuck-`busy` deadlock regression tests (re-review fix on PR #3477): FIX 1
+// (busy-gating) means the ONLY way out of a stuck `busy = true` is a
+// terminal signal reaching the reducer. These drive the REAL channel
+// end-to-end through the REAL reducer (`app_apply`) — the gap the review
+// found in the original `dispatch_pending_*` tests, which only asserted on
+// `handle_input_calls`/`pending_submit`, never on `busy` actually clearing.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Drain `rx` to close (all sender clones dropped) through the REAL reducer,
+/// bounded so a regression that reintroduces the deadlock fails the test
+/// instead of hanging CI forever.
+async fn drain_all_and_apply(app: &mut ReplApp, mut rx: UnboundedReceiver<ReplEvent>) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(ev) = rx.recv().await {
+            app_apply(app, ev);
+        }
+    })
+    .await
+    .expect("channel must close — a stuck task would hang this instead");
+}
+
+/// The exact bug the re-review found: `handle_input` returns `Ok(true)`
+/// having sent ZERO events at all (the real `/workstream list`/`activate`
+/// shape, `crates/trusty-code/src/tui_client/engine_state.rs::
+/// handle_workstream_command`, which only pushes `StatusMessage`/
+/// `WorkstreamUpdated` for other command variants — this is the minimal
+/// repro: nothing at all). Before the fix, `busy` stayed `true` forever and
+/// `ReplApp::submit_line`'s FIX 1 guard meant the user could never submit
+/// again.
+#[tokio::test]
+async fn dispatch_pending_ok_true_with_no_terminal_output_still_clears_busy() {
+    let engine = Arc::new(MockEngine::default());
+    let mut app = ReplApp::new("demo", "u");
+    let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+
+    app_apply(&mut app, ReplEvent::Submit("do a thing".to_string()));
+    assert!(app.busy, "submit must mark busy");
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
+    drop(tx);
+
+    drain_all_and_apply(&mut app, rx).await;
+
+    assert!(
+        !app.busy,
+        "busy must clear even when handle_input sends zero events"
+    );
+}
+
+/// The `/workstream list` shape more precisely: `Ok(true)` with only a
+/// `StatusMessage` (no `AssistantOutput`/`Quit` ever produced).
+#[tokio::test]
+async fn dispatch_pending_ok_true_with_only_status_message_still_clears_busy() {
+    let engine = Arc::new(MockEngine {
+        send_status_only: AtomicBool::new(true),
+        ..Default::default()
+    });
+    let mut app = ReplApp::new("demo", "u");
+    let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+
+    app_apply(&mut app, ReplEvent::Submit("/workstream list".to_string()));
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
+    drop(tx);
+
+    drain_all_and_apply(&mut app, rx).await;
+
+    assert!(
+        !app.busy,
+        "busy must clear when handle_input only ever sends a StatusMessage"
+    );
+}
+
+/// The `Err(e)` completion path: must ALSO clear `busy` (not just the
+/// `Ok(true)`-with-no-terminal path) AND surface a visible error rather than
+/// failing silently — a silent error that also locks input is the same
+/// class of bug.
+#[tokio::test]
+async fn dispatch_pending_err_clears_busy_and_surfaces_visible_error() {
+    let engine = Arc::new(MockEngine {
+        returns_err: AtomicBool::new(true),
+        ..Default::default()
+    });
+    let mut app = ReplApp::new("demo", "u");
+    let (tx, rx) = mpsc::unbounded_channel::<ReplEvent>();
+    let current_task: CurrentTask = Arc::new(StdMutex::new(None));
+    let generation = new_generation();
+
+    app_apply(&mut app, ReplEvent::Submit("boom".to_string()));
+    dispatch_pending(&mut app, &engine, &tx, &current_task, &generation);
+    drop(tx);
+
+    drain_all_and_apply(&mut app, rx).await;
+
+    assert!(!app.busy, "busy must clear on engine error");
+    assert!(
+        app.chat
+            .iter()
+            .any(|line| line.role == ChatRole::Error && line.text.contains("mock engine failure")),
+        "the error must be surfaced as a visible chat entry, not silently swallowed"
     );
 }

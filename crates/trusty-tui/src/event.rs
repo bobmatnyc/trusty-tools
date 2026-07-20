@@ -72,6 +72,32 @@ pub enum ReplEvent {
     /// quit" can reach the model only by pushing an event back onto the
     /// shared channel, same as every other engine-originated signal here.
     Quit,
+    /// A submitted turn's `TuiEngine::handle_input` call has returned, and
+    /// `crate::run::dispatch_pending` determined no terminal signal
+    /// (`AssistantOutput { done: true, .. }` or `Quit`) was ever relayed for
+    /// it — synthesized as a safety net, never by a key press or a
+    /// `TuiEngine` implementation directly.
+    ///
+    /// Why: `ReplApp::busy` is cleared ONLY by a terminal
+    /// `AssistantOutput`/`Quit` reaching the reducer — but three real,
+    /// spec-required `CodeEngine` paths return `Ok(true)` from
+    /// `handle_input` without ever sending one (`/workstream list`/
+    /// `activate`, which only push `StatusMessage`/`WorkstreamUpdated`; a
+    /// reconnect-exhausted `pump_session_events` return; a daemon-initiated
+    /// `SessionCancelled` that only pushes a `StatusMessage`). Combined with
+    /// Slice 5's busy-gating (`ReplApp::submit_line` refuses a second turn
+    /// while `busy`), any such path left `busy` stuck `true` forever —
+    /// input permanently bricked, recoverable only by the accident of
+    /// Ctrl-C's `on_cancelled` reset. This variant is the fix: a dedicated,
+    /// minimal reset that touches ONLY `busy`/`streaming_idx`, deliberately
+    /// NOT reusing an empty `AssistantOutput { done: true, .. }` for this
+    /// (that would push a stray blank chat entry via the `None`-
+    /// `streaming_idx` branch of `apply_assistant_output` — corrupting
+    /// scrollback to fix a different bug).
+    /// What: engine implementations should never construct this directly;
+    /// it exists purely as `crate::run::dispatch_pending`'s per-turn
+    /// completion safety net (see that function's doc comment).
+    TurnFinished,
 
     // ── Engine-origin (produced by `TuiEngine` implementations) ────────
     /// A chunk of streamed assistant output. `done` marks the final chunk of
@@ -281,6 +307,14 @@ mod tests {
     fn quit_is_a_distinct_unit_variant() {
         assert_eq!(ReplEvent::Quit, ReplEvent::Quit);
         assert_ne!(ReplEvent::Quit, ReplEvent::Cancel);
+    }
+
+    /// `TurnFinished` (the `dispatch_pending` completion safety net) is a
+    /// distinct unit variant, same as `Quit`/`ClearScrollback` above.
+    #[test]
+    fn turn_finished_is_a_distinct_unit_variant() {
+        assert_eq!(ReplEvent::TurnFinished, ReplEvent::TurnFinished);
+        assert_ne!(ReplEvent::TurnFinished, ReplEvent::Quit);
     }
 
     /// `WorkstreamActivationChanged`'s field is named `new_active_id` to

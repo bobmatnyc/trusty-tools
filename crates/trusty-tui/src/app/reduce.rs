@@ -62,6 +62,14 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
         ReplEvent::Submit(line) => app.submit_line(line),
         ReplEvent::Cancel => app.pending_cancel = true,
         ReplEvent::Quit => app.quit = true,
+        // `crate::run::dispatch_pending`'s completion safety net (see
+        // `ReplEvent::TurnFinished`'s doc comment for the stuck-`busy`
+        // deadlock this closes) — deliberately touches ONLY these two
+        // fields, never `chat`, so it can never push a stray blank entry.
+        ReplEvent::TurnFinished => {
+            app.busy = false;
+            app.streaming_idx = None;
+        }
         ReplEvent::AssistantOutput {
             chunk,
             done,
