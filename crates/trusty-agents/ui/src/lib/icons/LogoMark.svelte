@@ -15,7 +15,7 @@
 </script>
 
 <span class="inline-flex items-center gap-2 text-foundry-text font-display">
-  <RobotIcon {size} variant="mono" color="#B7410E" />
+  <RobotIcon {size} variant="mono" color="var(--color-primary)" />
   <span class="text-sm">
     <span class="font-normal">Trusty </span><span class="font-semibold">Assistant</span>
   </span>

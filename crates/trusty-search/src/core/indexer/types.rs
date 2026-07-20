@@ -116,7 +116,16 @@ pub enum SearchStage {
 }
 
 /// Query parameters for hybrid search.
+///
+/// `deny_unknown_fields` (issue #3401): a misspelled or unimplemented filter
+/// field (e.g. `path_prefx`) must be rejected, not silently dropped — for a
+/// *filter*, "unknown field ignored" means "returns too much data," which is
+/// a correctness trap, not a harmless typo. The reporter of #3401 proved the
+/// prior absence of path filtering by observing 21 candidate field names all
+/// return HTTP 200 with an identical result set; `deny_unknown_fields` turns
+/// that failure mode into an explicit 4xx.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchQuery {
     pub text: String,
     #[serde(default = "default_top_k")]
@@ -149,6 +158,36 @@ pub struct SearchQuery {
     /// Optional refining query for `search_kg` (issue #147).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refine_query: Option<String>,
+
+    /// Restrict results to chunks whose file path starts with this prefix
+    /// (issue #3401), matched at a path-segment boundary — `"foo"` does NOT
+    /// also match a sibling `"foobar"` directory. Accepts either the
+    /// root-relative form chunks are stored in, or the absolute form
+    /// `CodeChunk::file` returns in results (normalized internally against
+    /// the index's `root_path`), so a prefix copied from a prior result
+    /// works without the caller having to know which form to use.
+    ///
+    /// Applied during candidate selection — BEFORE `top_k` truncation — in
+    /// every retrieval lane: BM25 (`Bm25Index::score_query_all_with_filter`,
+    /// evaluated ahead of its own internal truncate, not after),
+    /// grep-fallback (evaluated ahead of its early-exit cutoff), HNSW/vector
+    /// (`lanes::vector_search_scoped`, predicate-pushed into HNSW traversal
+    /// itself so a path-scoped match ranked far outside the raw-similarity
+    /// oversample window is still found), and KG expansion — never as a
+    /// post-hoc filter over an already-truncated result set. See
+    /// `CodeIndexer::apply_score_adjustments` for the authoritative,
+    /// pre-truncation choke point every lane's candidates flow through.
+    /// Composes with `repos` via AND, and independently with
+    /// `exclude_archived` / the branch fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+
+    /// Restrict results to chunks whose file path names one of these repos as
+    /// a path segment (matches a leading `"{repo}/"` or an embedded
+    /// `"/{repo}/"`) — issue #3401. Same pre-truncation guarantee as
+    /// `path_prefix`; composes with it via AND.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
 }
 
 impl SearchQuery {
@@ -178,6 +217,8 @@ impl Default for SearchQuery {
             exclude_archived: false,
             stage: None,
             refine_query: None,
+            path_prefix: None,
+            repos: Vec::new(),
         }
     }
 }

@@ -53,7 +53,7 @@
   class="sticky top-0 z-20 flex h-[52px] w-full shrink-0 items-center justify-between border-b border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-4"
 >
   <div class="flex items-center gap-3 min-w-0">
-    <RobotIcon size={26} variant="mono" color="#B7410E" />
+    <RobotIcon size={26} variant="mono" color="var(--color-primary)" />
     <span class="font-display text-sm font-bold tracking-wide text-foundry-light-text dark:text-foundry-text">
       TRUSTY AGENTS
     </span>

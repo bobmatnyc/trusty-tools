@@ -41,7 +41,9 @@ pub fn tool_descriptors() -> Value {
                     "exclude_archived": { "type": "boolean", "default": false },
                     "branch_files":     { "type": "array", "items": { "type": "string" } },
                     "branch_boost":     { "type": "number" },
-                    "branch":           { "type": "string" }
+                    "branch":           { "type": "string" },
+                    "path_prefix":      { "type": "string", "description": "Restrict results to chunks whose file path starts with this prefix, applied before top_k truncation (issue #3401)." },
+                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "apply_archive_downrank" },
@@ -61,7 +63,9 @@ pub fn tool_descriptors() -> Value {
                     "query":            { "type": "string", "description": "Conceptual query — meaning, not literal text" },
                     "top_k":            { "type": "integer", "default": 10 },
                     "mode":             { "type": "string", "enum": ["code", "text", "data"], "default": "code" },
-                    "exclude_archived": { "type": "boolean", "default": false }
+                    "exclude_archived": { "type": "boolean", "default": false },
+                    "path_prefix":      { "type": "string", "description": "Restrict results to chunks whose file path starts with this prefix, applied before top_k truncation (issue #3401)." },
+                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "code that handles JWT verification" },
@@ -80,7 +84,9 @@ pub fn tool_descriptors() -> Value {
                     "query":         { "type": "string", "description": "Seed: a symbol name or chunk_id from a previous result" },
                     "top_k":         { "type": "integer", "default": 10 },
                     "mode":          { "type": "string", "enum": ["code", "text", "data"], "default": "code" },
-                    "refine_query":  { "type": "string", "description": "Optional: rerank and filter expanded KG neighbours by cosine similarity to this natural-language description. Neighbours below the 0.4 cosine threshold are dropped. Omit to use default KG expansion without filtering." }
+                    "refine_query":  { "type": "string", "description": "Optional: rerank and filter expanded KG neighbours by cosine similarity to this natural-language description. Neighbours below the 0.4 cosine threshold are dropped. Omit to use default KG expansion without filtering." },
+                    "path_prefix":   { "type": "string", "description": "Restrict results to chunks whose file path starts with this prefix, applied before top_k truncation (issue #3401)." },
+                    "repos":         { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "validate_token" },
@@ -105,7 +111,9 @@ pub fn tool_descriptors() -> Value {
                     "branch_boost":     { "type": "number" },
                     "branch":           { "type": "string" },
                     "serial":           { "type": "boolean", "default": false, "description": "Legacy fan-out only (issue #2845): force per-index searches to run one at a time instead of the bounded-concurrency default. Safety valve for memory/CPU-constrained hosts." },
-                    "max_fanout_concurrency": { "type": "integer", "description": "Legacy fan-out only (issue #2845): cap how many per-index searches run concurrently for this call, overriding the daemon default. Ignored when `serial` is true." }
+                    "max_fanout_concurrency": { "type": "integer", "description": "Legacy fan-out only (issue #2845): cap how many per-index searches run concurrently for this call, overriding the daemon default. Ignored when `serial` is true." },
+                    "path_prefix":      { "type": "string", "description": "Restrict results to chunks whose file path starts with this prefix, applied before top_k truncation (issue #3401)." },
+                    "repos":            { "type": "array", "items": { "type": "string" }, "description": "Restrict results to chunks whose file path names one of these repos as a path segment (issue #3401)." }
                 },
                 "examples": [
                     { "index_id": "trusty-tools", "query": "AuthValidator that handles refresh tokens" },
@@ -147,6 +155,15 @@ pub fn tool_descriptors() -> Value {
                     "branch": {
                         "type": "string",
                         "description": "Branch name; daemon will compute branch_files via git if branch_files is absent."
+                    },
+                    "path_prefix": {
+                        "type": "string",
+                        "description": "Restrict results to chunks whose file path starts with this prefix, matched at a path-segment boundary (\"foo\" will not also match a sibling \"foobar\" directory). Accepts either a root-relative path or the absolute form seen in a prior result's `file` field. Applied during candidate selection in every retrieval lane (BM25, vector, grep, KG) BEFORE top_k truncation, so a scoped match is never lost to the cutoff (issue #3401). Composes with `repos` (AND)."
+                    },
+                    "repos": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Restrict results to chunks whose file path names one of these repos as a path segment. Same pre-truncation guarantee as `path_prefix` (issue #3401)."
                     }
                 }
             }

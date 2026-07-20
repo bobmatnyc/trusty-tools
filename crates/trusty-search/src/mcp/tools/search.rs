@@ -74,6 +74,14 @@ pub(super) async fn dispatch_search_tool(
             if let Some(n) = args.get("max_fanout_concurrency").and_then(Value::as_u64) {
                 body["max_fanout_concurrency"] = Value::from(n);
             }
+            // Issue #3401: forward optional path/repo scoping to every
+            // per-index search in the fan-out.
+            if let Some(pp) = args.get("path_prefix").and_then(Value::as_str) {
+                body["path_prefix"] = Value::String(pp.to_string());
+            }
+            if let Some(repos) = args.get("repos") {
+                body["repos"] = repos.clone();
+            }
             Some(server.post("/search", &body).await)
         }
         "search" => {
@@ -122,6 +130,15 @@ pub(super) async fn dispatch_search_tool(
                     // downranking them.
                     if let Some(ea) = args.get("exclude_archived").and_then(Value::as_bool) {
                         b["exclude_archived"] = Value::Bool(ea);
+                    }
+                    // Issue #3401: forward optional path/repo scoping —
+                    // applied server-side BEFORE top_k truncation in every
+                    // retrieval lane.
+                    if let Some(pp) = args.get("path_prefix").and_then(Value::as_str) {
+                        b["path_prefix"] = Value::String(pp.to_string());
+                    }
+                    if let Some(repos) = args.get("repos") {
+                        b["repos"] = repos.clone();
                     }
                     b
                 }
@@ -308,6 +325,14 @@ impl McpServer {
         // `expand_with_kg` only reads it when the graph stage is active.
         if let Some(rq) = args.get("refine_query").and_then(Value::as_str) {
             body["refine_query"] = Value::String(rq.to_string());
+        }
+        // Issue #3401: forward optional path/repo scoping — applied
+        // server-side BEFORE top_k truncation in every retrieval lane.
+        if let Some(pp) = args.get("path_prefix").and_then(Value::as_str) {
+            body["path_prefix"] = Value::String(pp.to_string());
+        }
+        if let Some(repos) = args.get("repos") {
+            body["repos"] = repos.clone();
         }
 
         let resp = self

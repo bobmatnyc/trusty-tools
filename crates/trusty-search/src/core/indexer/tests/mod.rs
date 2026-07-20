@@ -99,5 +99,6 @@ fn make_indexer_with_corpus(redb_path: &std::path::Path) -> CodeIndexer {
 
 mod branch_and_corpus;
 mod eviction_kg_paths;
+mod path_filter_search;
 mod persistence_and_search;
 mod ranking_and_modes;

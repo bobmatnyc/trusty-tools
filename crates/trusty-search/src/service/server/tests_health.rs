@@ -7,6 +7,26 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 
+/// Shared base for `GlobalSearchRequest` test literals — every field except
+/// `query` / `top_k` at its neutral no-op value. Keeps each test's `Json(...)`
+/// body down to the one or two fields it's actually exercising, via struct-
+/// update syntax, rather than repeating all eleven fields per call site.
+fn base_global_search_request(query: &str, top_k: usize) -> GlobalSearchRequest {
+    GlobalSearchRequest {
+        query: query.to_string(),
+        top_k,
+        full_content: false,
+        indexes: None,
+        routing: None,
+        routing_n: None,
+        routing_threshold: None,
+        max_fanout_concurrency: None,
+        serial: false,
+        path_prefix: None,
+        repos: Vec::new(),
+    }
+}
+
 /// Why: `/health` is consumed by external probes (open-mpm,
 /// `ensure_daemon_running`) — the contract `{ status, version, indexes,
 /// uptime_secs }` must remain stable.
@@ -266,22 +286,10 @@ async fn global_search_fans_out_and_merges() {
     }
 
     let state = Arc::new(SearchAppState::new(registry));
-    let Json(value) = global_search_handler(
-        State(state),
-        Json(GlobalSearchRequest {
-            query: "alpha".into(),
-            top_k: 10,
-            full_content: false,
-            indexes: None,
-            routing: None,
-            routing_n: None,
-            routing_threshold: None,
-            max_fanout_concurrency: None,
-            serial: false,
-        }),
-    )
-    .await
-    .expect("handler ok");
+    let Json(value) =
+        global_search_handler(State(state), Json(base_global_search_request("alpha", 10)))
+            .await
+            .expect("handler ok");
 
     let total = value["total_indexes"].as_u64().expect("total_indexes");
     assert_eq!(total, 2, "both indexes counted");
@@ -328,17 +336,7 @@ async fn global_search_empty_registry_returns_empty_results() {
     let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
     let Json(value) = global_search_handler(
         State(state),
-        Json(GlobalSearchRequest {
-            query: "anything".into(),
-            top_k: 5,
-            full_content: false,
-            indexes: None,
-            routing: None,
-            routing_n: None,
-            routing_threshold: None,
-            max_fanout_concurrency: None,
-            serial: false,
-        }),
+        Json(base_global_search_request("anything", 5)),
     )
     .await
     .expect("handler ok");
@@ -380,15 +378,8 @@ async fn global_search_restricts_to_named_indexes() {
     let Json(value) = global_search_handler(
         State(state),
         Json(GlobalSearchRequest {
-            query: "alpha".into(),
-            top_k: 10,
-            full_content: false,
             indexes: Some(vec!["proj-a".into(), "proj-c".into()]),
-            routing: None,
-            routing_n: None,
-            routing_threshold: None,
-            max_fanout_concurrency: None,
-            serial: false,
+            ..base_global_search_request("alpha", 10)
         }),
     )
     .await
@@ -510,15 +501,10 @@ fn routing_threshold_keeps_neutral_indexes() {
 fn routing_mode_from_request_resolves_strategy() {
     let base = |routing: Option<&str>, n: Option<usize>, t: Option<f32>| -> GlobalSearchRequest {
         GlobalSearchRequest {
-            query: "x".into(),
-            top_k: 1,
-            full_content: false,
-            indexes: None,
             routing: routing.map(|s| s.to_string()),
             routing_n: n,
             routing_threshold: t,
-            max_fanout_concurrency: None,
-            serial: false,
+            ..base_global_search_request("x", 1)
         }
     };
     assert!(matches!(

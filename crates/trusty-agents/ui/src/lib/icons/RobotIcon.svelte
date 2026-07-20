@@ -13,11 +13,23 @@
    * Test: Render <RobotIcon /> with each variant and visually confirm the
    * antenna dot, eyes, and `>_` mouth render at 32px without clipping.
    */
+  // Why (#3387): default reads the Foundry accent token (app.css's
+  // --color-primary, itself light/dark-reactive via the .dark class) rather
+  // than a hardcoded hex, so the icon's own color now inverts with theme
+  // like every other accent in the app. CSS custom properties resolve
+  // correctly when set via SVG presentation attributes (stroke/fill) in all
+  // engines this Tauri app targets. `bgFill`/`stroke`/`dotFill` for the
+  // 'full'/'badge' variants are left as fixed literals — see the two lines
+  // below — since neither variant is used anywhere in this crate today
+  // (only 'mono' is; see Header.svelte, LogoMark.svelte), so there is no
+  // rendered light/dark behavior to fix and no way to visually verify a
+  // token choice for them.
   export let size: number = 32;
-  export let color: string = '#B7410E';
+  export let color: string = 'var(--color-primary)';
   export let variant: 'full' | 'mono' | 'badge' = 'full';
 
-  // Derived presentation tokens per variant.
+  // Derived presentation tokens per variant. #2B1C12 / #FFFFFF: intentionally
+  // fixed (not theme tokens) — unused 'full'/'badge' variants, see comment above.
   $: bgFill = variant === 'full' ? '#2B1C12' : variant === 'badge' ? color : 'none';
   $: stroke = variant === 'badge' ? '#FFFFFF' : color;
   $: dotFill = variant === 'badge' ? '#FFFFFF' : color;

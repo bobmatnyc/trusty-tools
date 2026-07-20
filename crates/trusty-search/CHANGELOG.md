@@ -24,6 +24,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   / `remove_file` MCP equivalents) as the supported incremental-indexing path
   for network-mounted and build/serve-split deployments, with a worked example —
   see `README.md` and `CLAUDE.md`'s endpoint catalogue.
+- Server-side `path_prefix` / `repos` search scoping, applied during candidate
+  selection BEFORE `top_k` truncation in every retrieval lane — vector/HNSW,
+  BM25/lexical, grep-fallback, and KG expansion (closes #3401). Lets
+  consumers scope a query to a repo/path subtree within the single unified
+  index instead of building a separate physical index per repo.
+  **Recall guarantee:** the vector/HNSW lane pushes the filter predicate
+  directly INTO HNSW graph traversal via `usearch::Index::filtered_search`
+  (already available in the pinned usearch 2.25) — no over-fetch
+  approximation, though a highly selective filter does mean real added
+  traversal latency, since the search visits more of the graph to find
+  `top_k` passing candidates. BM25 gets a new `Bm25Index::
+  score_query_all_with_filter` (trusty-common, additive — existing callers
+  are unaffected) that evaluates the filter before its internal `top_k`
+  truncate, not after; grep-fallback evaluates it before its early-exit
+  cutoff. `path_prefix` matches at a path-segment boundary (so `"foo"`
+  cannot also match a sibling `"foobar"` directory) and is normalized
+  against the index's `root_path`, so a caller can pass either the
+  root-relative or the absolute form (`CodeChunk::file` in results is always
+  absolute). Surfaced on `SearchQuery` (HTTP `/indexes/:id/search`) and the
+  fan-out `POST /search`'s `GlobalSearchRequest` — both now reject unknown
+  fields (`deny_unknown_fields`), and the MCP `search` / `search_lexical` /
+  `search_semantic` / `search_kg` / `search_all` tool schemas. Composes with
+  `exclude_archived` and the branch fields (`branch`/`branch_files`/`branch_boost`).
 
 ## [0.35.0] — 2026-07-19
 

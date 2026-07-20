@@ -191,10 +191,16 @@
 </div>
 
 <style>
-  /* Why: Alternate-row striping for recap tables; using nth-child avoids
-     plumbing extra Tailwind classes per row. Test: Inspect a recap message
-     and verify even rows have a faint teal tint. */
+  /* Why (#3387): was an unsanctioned raw `rgb(20 184 166 / 0.04)` teal-500
+     literal with no token relationship (audit finding B2). Now reads
+     --trusty-surface-hover (app.css), the DS's own sanctioned hover/tint
+     token — same rust-derived hue family as the rest of the app, and
+     correctly light/dark-reactive. Alternate-row striping itself (nth-child)
+     is kept as-is; the DS's "no zebra-striped tables" guardrail is a
+     structural change out of scope for this token-layer pass — flagged as a
+     follow-up, not fixed here.
+     Test: Inspect a recap message and verify even rows have a faint tint. */
   tbody tr.recap-row:nth-child(even) {
-    background-color: rgb(20 184 166 / 0.04);
+    background-color: var(--trusty-surface-hover);
   }
 </style>
