@@ -29,6 +29,19 @@ pub struct ApiServer {
     /// Tempdir containing the bundled `.trusty-agents/` config. Held so it lives
     /// as long as the server child does.
     _root: TempDir,
+    /// Isolated `$HOME` for the child process. Held so it lives as long as
+    /// the server does.
+    ///
+    /// Why (issue #3429 code-critic HIGH follow-up): `runtime::startup::
+    /// run_startup_init` now unconditionally deploys the bundled agent
+    /// roster to `$HOME/.trusty-agents/agents/` before the `--api` mode
+    /// check even runs. Without this override the spawned child inherited
+    /// whatever `$HOME` the `cargo test` process itself ran under — on a
+    /// real dev machine, that's the developer's actual home directory —
+    /// so every `cargo test -p trusty-agents --test api_e2e` run was
+    /// writing ~30 real files into it. Never referenced after construction;
+    /// kept alive purely so the tempdir isn't cleaned up mid-run.
+    _home: TempDir,
     port: u16,
     child: Option<Child>,
     base_url: String,
@@ -49,12 +62,16 @@ impl ApiServer {
         let src_cfg = manifest.join(".trusty-agents");
         let dst_cfg = root.path().join(".trusty-agents");
         copy_dir_recursive(&src_cfg, &dst_cfg).context("copy .trusty-agents")?;
+        // Isolated `$HOME` — see the `_home` field doc for why this is
+        // required, not optional.
+        let home = tempfile::tempdir().context("create isolated HOME tempdir")?;
 
         let port = pick_free_port().context("pick free port")?;
         let binary = PathBuf::from(env!("CARGO_BIN_EXE_tagent"));
 
         let child = Command::new(&binary)
             .current_dir(root.path())
+            .env("HOME", home.path())
             .arg("--api")
             .arg("--port")
             .arg(port.to_string())
@@ -68,6 +85,7 @@ impl ApiServer {
         let base_url = format!("http://127.0.0.1:{port}");
         let server = Self {
             _root: root,
+            _home: home,
             port,
             child: Some(child),
             base_url,

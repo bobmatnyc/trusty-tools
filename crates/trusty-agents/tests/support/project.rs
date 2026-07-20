@@ -27,6 +27,19 @@ use tokio::process::Command;
 pub struct Project {
     pub root: TempDir,
     pub binary: PathBuf,
+    /// Isolated `$HOME` every spawned child is pinned to.
+    ///
+    /// Why (issue #3429 code-critic HIGH follow-up): `runtime::startup::
+    /// run_startup_init` now unconditionally deploys the bundled agent
+    /// roster to `$HOME/.trusty-agents/agents/` before either `--workflow`
+    /// or `inspect` mode even runs. Without pinning `$HOME` here, every
+    /// `run_task`/`run_inspect` call inherited the real `cargo test`
+    /// process's `$HOME` — on a developer machine, that's the actual home
+    /// directory — so every `cargo test -p trusty-agents --test
+    /// cli_project` run was writing ~30 real files into it. Never read
+    /// directly outside this module; kept alive so the tempdir isn't
+    /// cleaned up mid-run.
+    home: TempDir,
 }
 
 /// Parsed result of running the binary in workflow mode.
@@ -58,7 +71,8 @@ impl Project {
         let dst_cfg = root.path().join(".trusty-agents");
         copy_dir_recursive(&src_cfg, &dst_cfg).expect("copy .trusty-agents");
         let binary = PathBuf::from(env!("CARGO_BIN_EXE_tagent"));
-        Self { root, binary }
+        let home = tempfile::tempdir().expect("create isolated HOME tempdir");
+        Self { root, binary, home }
     }
 
     /// Run the binary in workflow mode against this tempdir.
@@ -78,6 +92,7 @@ impl Project {
         std::fs::create_dir_all(&out_dir).ok();
         let mut child = Command::new(&self.binary)
             .current_dir(self.root.path())
+            .env("HOME", self.home.path())
             .arg("--workflow")
             .arg(workflow)
             .arg("--task")
@@ -124,6 +139,7 @@ impl Project {
     pub async fn run_inspect(&self, task: &str) -> Result<Value> {
         let output = Command::new(&self.binary)
             .current_dir(self.root.path())
+            .env("HOME", self.home.path())
             .arg("inspect")
             .arg("--task")
             .arg(task)
