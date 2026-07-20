@@ -263,6 +263,76 @@ async fn dispatch_forward_opens_picker_without_calling_engine() {
     );
 }
 
+/// Regression test for the HIGH finding from the PR #3476 review round:
+/// drives the REAL production sequence — `submit_line` first (which
+/// unconditionally sets `busy = true` for any `Route::Forward` line,
+/// including a bare `/model`, since it can't know in advance whether a
+/// picker will end up opening), THEN `dispatch_forward` — and asserts
+/// `busy` is cleared once the picker actually opens. The earlier
+/// `dispatch_forward_opens_picker_without_calling_engine` test constructed
+/// `app` fresh and never went through `submit_line`, so `busy` was already
+/// `false` and the assertion couldn't have caught `busy` being left stuck
+/// `true` — exactly why this needs its own test, not just a stronger
+/// assertion bolted onto the old one.
+#[tokio::test]
+async fn dispatch_forward_clears_busy_set_by_submit_line_when_opening_picker() {
+    let mut app = ReplApp::new("demo", "u");
+    let engine = MockEngine::with_picker("model");
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    app.submit_line("/model".to_string());
+    assert!(app.busy, "submit_line must mark a Route::Forward line busy");
+
+    let line = app.pending_submit.take().expect("must have staged /model");
+    dispatch_forward(&mut app, line, &engine, &tx)
+        .await
+        .expect("dispatch_forward must not error");
+
+    assert!(
+        !app.busy,
+        "opening a picker must clear busy — nothing will ever send \
+         AssistantOutput to clear it while the picker sits open"
+    );
+    assert!(app.active_picker.is_some(), "picker must still be staged");
+}
+
+/// Companion to the above: with `busy` correctly cleared, an Up-arrow while
+/// the picker is open must NOT signal `pending_cancel` — `apply_up`
+/// (`crate::app::reduce`) only fires the cancel-in-flight signal when
+/// `busy` is true, so a stuck `busy` would have caused a spurious
+/// `engine.cancel_session()` the next time a picker-open Up arrow was
+/// drained.
+#[tokio::test]
+async fn dispatch_forward_prevents_spurious_cancel_from_up_arrow_while_picker_open() {
+    use crate::app::apply;
+    use crate::event::{KeyCode, KeyInput, KeyModifiers, ReplEvent};
+
+    let mut app = ReplApp::new("demo", "u");
+    let engine = MockEngine::with_picker("model");
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    app.submit_line("/model".to_string());
+    let line = app.pending_submit.take().expect("must have staged /model");
+    dispatch_forward(&mut app, line, &engine, &tx)
+        .await
+        .expect("dispatch_forward must not error");
+    assert!(!app.busy);
+
+    apply(
+        &mut app,
+        ReplEvent::Key(KeyInput {
+            code: KeyCode::Up,
+            modifiers: KeyModifiers::default(),
+        }),
+    );
+
+    assert!(
+        !app.pending_cancel,
+        "Up-arrow while the picker is open (busy already cleared) must \
+         not signal a spurious cancel"
+    );
+}
+
 /// No matching picker: `dispatch_forward` calls `engine.handle_input`,
 /// which the mock proves by sending a `StatusMessage` onto `tx`.
 #[tokio::test]

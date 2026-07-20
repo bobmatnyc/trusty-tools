@@ -247,12 +247,27 @@ pub fn compose_selection(request: &PickerRequest, selected: &PickerItem) -> Stri
 /// `app`, or await the engine call) in one place, so callers don't have to
 /// re-derive the "which one am I supposed to do" branch themselves.
 /// What: on [`Forward::OpenPicker`], stages the picker on `app` (via
-/// [`crate::app::ReplApp::open_picker`]) and returns `Ok(true)` — the
-/// engine is never touched. On [`Forward::ToEngine`], forwards verbatim to
+/// [`crate::app::ReplApp::open_picker`]), clears [`crate::app::ReplApp::busy`],
+/// and returns `Ok(true)` — the engine is never touched. Clearing `busy`
+/// here (not in [`crate::app::ReplApp::submit_line`]) matters: `submit_line`
+/// unconditionally sets `busy = true` for every `Route::Forward` line
+/// because it can't know in advance whether this function will end up
+/// opening a picker instead of actually calling `handle_input` — this arm
+/// is the one place that knows the round-trip to the engine never
+/// happened. Leaving `busy` set would strand the input composer's busy
+/// spinner for as long as the picker stays open (nothing else clears it —
+/// `busy` is only ever reset by an `AssistantOutput` event, which never
+/// arrives on this path) and would spuriously gate `apply_up`'s
+/// busy-triggered `pending_cancel` (`crate::app::reduce::apply_up`), firing
+/// an unwanted `engine.cancel_session()` the next time a picker-open Up
+/// arrow is drained. On [`Forward::ToEngine`], forwards verbatim to
 /// `engine.handle_input`, returning its `Result<bool>` unchanged (per
-/// `TuiEngine::handle_input`'s own contract: `Ok(false)` means quit).
+/// `TuiEngine::handle_input`'s own contract: `Ok(false)` means quit) —
+/// `busy` is left as `submit_line` set it, since the engine call is the
+/// thing `busy` is meant to track.
 /// Test: [`tests::dispatch_forward_opens_picker_without_calling_engine`],
-/// [`tests::dispatch_forward_calls_engine_when_no_picker_matches`].
+/// [`tests::dispatch_forward_calls_engine_when_no_picker_matches`],
+/// [`tests::dispatch_forward_clears_busy_set_by_submit_line_when_opening_picker`].
 pub async fn dispatch_forward(
     app: &mut ReplApp,
     line: String,
@@ -262,6 +277,7 @@ pub async fn dispatch_forward(
     match resolve_forward(&line, engine) {
         Forward::OpenPicker(request) => {
             app.open_picker(request);
+            app.busy = false;
             Ok(true)
         }
         Forward::ToEngine(line) => engine.handle_input(line, tx.clone()).await,
