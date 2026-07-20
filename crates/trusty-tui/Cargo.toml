@@ -23,3 +23,18 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+tracing = { workspace = true }
+# Slice 2 (#3414, DOC-50 §5 Slice 2 / Q2): the terminal layer. Deliberately
+# NOT `{ workspace = true }` — the workspace-wide `ratatui`/`crossterm`
+# pins (0.29/0.28, see root `Cargo.toml`) stay put for every other crate
+# (trusty-agents, trusty-mpm, trusty-common) until Slice 10 migrates
+# tagent. This crate alone adopts ratatui 0.30 now because it clears a
+# vulnerable transitive `lru` (#2886); crossterm 0.29 is 0.30's matching
+# minimum. Two ratatui majors coexist in the workspace dependency graph by
+# design during the migration window — see the Slice 2 PR report for the
+# 0.29→0.30 API-breakage spike Slices 4/10 will need.
+ratatui = "0.30"
+crossterm = "0.29"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
