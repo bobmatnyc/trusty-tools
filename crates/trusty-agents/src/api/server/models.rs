@@ -73,29 +73,33 @@ pub struct ModelsCatalogResponse {
 /// (seven keyed/AWS-chain providers plus Local, #3247), but
 /// `crate::llm::adapter::adapter_for_model` — the code path actual chat turns
 /// run through — only resolves OpenRouter (the default fallback), Anthropic
-/// (direct, when `ANTHROPIC_API_KEY` is set), and Bedrock (`bedrock/` prefix)
-/// to a working adapter today. OpenAI/Fireworks/Together/AtlasCloud DO fall
-/// through a branch in that dispatch — but only as far as the OpenRouter
-/// endpoint, which then receives each provider's bare (un-prefixed) model-id
-/// slug. OpenRouter doesn't recognize those bare slugs as its own routes, so
-/// the call fails: the gap is a model-ID / endpoint mismatch, not a missing
-/// branch. The registry's `local` entry has a DIFFERENT gap: its `local/`
-/// slug prefix isn't recognized by `adapter_for_model` at all (only the
-/// separate `ollama/` prefix is, via `OllamaAdapter` — see the synthetic
-/// `local` object's own `reachable_today`, always `true`, below), so it falls
-/// all the way to `GenericAdapter` instead. Surfacing this distinction keeps
-/// the picker honest instead of implying every registry entry is immediately
-/// usable.
-/// What: `true` for OpenRouter, Bedrock, Anthropic; `false` for the
-/// providers whose legacy dispatch falls through to OpenRouter with an
-/// unresolvable model-id slug. Flip an entry to `true` here once its legacy
-/// dispatch branch resolves to the correct provider-native endpoint (tracked
-/// by #2410); this function is the one place that needs to change.
+/// (direct, when `ANTHROPIC_API_KEY` is set), Bedrock (`bedrock/` prefix),
+/// and — as of #2410 Step 3 — Fireworks (`fireworks/` prefix, via the new
+/// `FireworksAdapter`) to a working adapter today. OpenAI/Together/AtlasCloud
+/// still fall through a branch in that dispatch — but only as far as the
+/// OpenRouter endpoint, which then receives each provider's bare
+/// (un-prefixed) model-id slug. OpenRouter doesn't recognize those bare
+/// slugs as its own routes, so the call fails: the gap is a model-ID /
+/// endpoint mismatch, not a missing branch. The registry's `local` entry has
+/// a DIFFERENT gap: its `local/` slug prefix isn't recognized by
+/// `adapter_for_model` at all (only the separate `ollama/` prefix is, via
+/// `OllamaAdapter` — see the synthetic `local` object's own
+/// `reachable_today`, always `true`, below), so it falls all the way to
+/// `GenericAdapter` instead. Surfacing this distinction keeps the picker
+/// honest instead of implying every registry entry is immediately usable.
+/// What: `true` for OpenRouter, Bedrock, Anthropic, Fireworks; `false` for
+/// the remaining providers whose legacy dispatch falls through to OpenRouter
+/// with an unresolvable model-id slug. Flip an entry to `true` here once its
+/// legacy dispatch branch resolves to the correct provider-native endpoint
+/// (tracked by #2410); this function is the one place that needs to change.
 /// Test: `super::tests::models::reachable_today_matches_documented_set`.
 fn reachable_today(id: ProviderId) -> bool {
     matches!(
         id,
-        ProviderId::OpenRouter | ProviderId::Bedrock | ProviderId::Anthropic
+        ProviderId::OpenRouter
+            | ProviderId::Bedrock
+            | ProviderId::Anthropic
+            | ProviderId::Fireworks
     )
 }
 

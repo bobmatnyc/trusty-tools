@@ -55,6 +55,10 @@ pub enum AuthSource {
     /// (env vars, `~/.aws/credentials`, instance metadata, etc.). Used
     /// exclusively by `BedrockAdapter`.
     Bedrock,
+    /// `FIREWORKS_API_KEY` — direct `api.fireworks.ai` access via
+    /// `FireworksAdapter` (#2410 epic #2400, Step 3). Resolved through the
+    /// same shared 3-tier resolver every other keyed provider uses.
+    Fireworks,
 }
 
 impl std::fmt::Display for AuthSource {
@@ -64,6 +68,7 @@ impl std::fmt::Display for AuthSource {
             Self::AnthropicApiKey => write!(f, "anthropic-api-key"),
             Self::OpenRouter => write!(f, "openrouter"),
             Self::Bedrock => write!(f, "aws-bedrock"),
+            Self::Fireworks => write!(f, "fireworks-api-key"),
         }
     }
 }
@@ -103,6 +108,10 @@ pub enum Provider {
     /// instead of an OpenAI-compatible HTTP request. Activated when the
     /// model string starts with `bedrock/`.
     Bedrock,
+    /// Direct `api.fireworks.ai` — OpenAI-compatible wire format, own base
+    /// URL and credential. Activated when the model string starts with
+    /// `fireworks/` (#2410, epic #2400, Step 3).
+    Fireworks,
 }
 
 /// Centralizes all model-provider-specific behavior for the chat loop.
@@ -205,8 +214,11 @@ pub fn openrouter_endpoint() -> ApiEndpoint {
 /// `vendor/model` or loose `claude-...`/`gpt-...`) keeps callers from
 /// knowing the concrete adapter types.
 /// What: Heuristic substring match — Anthropic first (most common), then
-/// OpenAI / o-series, else `GenericAdapter` as a safe default.
-/// Test: `adapter_for_model_routes_anthropic`, `adapter_for_model_routes_openai`.
+/// OpenAI / o-series, else `GenericAdapter` as a safe default. `bedrock/`,
+/// `ollama/`, and `fireworks/` prefixes are checked first and always win
+/// regardless of what the remainder of the model id looks like.
+/// Test: `adapter_for_model_routes_anthropic`, `adapter_for_model_routes_openai`,
+/// `adapter_for_model_routes_fireworks`.
 pub fn adapter_for_model(model: &str) -> Box<dyn ModelAdapter> {
     // Bedrock prefix takes precedence — the model id after `bedrock/` may
     // contain `anthropic` (e.g. `bedrock/anthropic.claude-3-5-haiku-...`),
@@ -221,6 +233,17 @@ pub fn adapter_for_model(model: &str) -> Box<dyn ModelAdapter> {
     if model.starts_with("ollama/") {
         let id = model.strip_prefix("ollama/").unwrap_or(model).to_string();
         return Box::new(OllamaAdapter { model_id: id });
+    }
+    // Fireworks prefix routes to api.fireworks.ai directly (#2410, epic
+    // #2400, Step 3) instead of falling through to OpenRouter with an
+    // unresolvable bare model id. OpenAI-compatible wire format, own
+    // credential (`FIREWORKS_API_KEY`).
+    if model.starts_with("fireworks/") {
+        let id = model
+            .strip_prefix("fireworks/")
+            .unwrap_or(model)
+            .to_string();
+        return Box::new(FireworksAdapter { model_id: id });
     }
     let m = model.to_ascii_lowercase();
     if m.contains("claude") || m.contains("anthropic") {
@@ -272,5 +295,35 @@ pub struct OllamaAdapter {
 #[derive(Debug)]
 pub struct BedrockAdapter {
     /// The raw Bedrock model id (everything after `bedrock/`).
+    pub model_id: String,
+}
+
+/// Direct Fireworks AI adapter (OpenAI-compatible endpoint, own credential).
+///
+/// Why: #2410 (epic #2400) Step 3 — before this adapter existed, a
+/// `fireworks/*` model fell through every heuristic in `adapter_for_model`
+/// to `GenericAdapter`, whose `api_endpoint` is unconditionally OpenRouter's.
+/// The request then carried a Fireworks-native model id (e.g.
+/// `accounts/fireworks/models/llama-v3p1-8b-instruct`) to OpenRouter, which
+/// doesn't recognize it — an unreachable provider, not merely an unlisted
+/// one. This adapter gives `fireworks/*` its own endpoint and credential the
+/// same way `OllamaAdapter`/`BedrockAdapter` already do for their prefixes.
+/// What: Activated by `adapter_for_model("fireworks/<model>")`. The prefix
+/// is stripped to the provider-native model id (Fireworks serves bare
+/// `accounts/fireworks/models/*` slugs). OpenAI-compatible wire format
+/// (tool_choice/usage shapes match `OpenAiAdapter`); no prompt-caching
+/// support (matches the `trusty_common::inference` capability registry seed
+/// for this provider — `detailed_usage_accounting = false`,
+/// `prompt_caching = false`).
+/// Test: `adapter_for_model_routes_fireworks`, `fireworks_adapter_strips_prefix`,
+/// `fireworks_tool_choice_shapes`, `fireworks_parse_usage_shape`,
+/// `fireworks_inject_cache_control_is_noop`,
+/// `fireworks_api_endpoint_resolves_key_from_store_when_env_absent`,
+/// `fireworks_api_endpoint_env_beats_store`,
+/// `fireworks_api_endpoint_base_url_override`.
+#[derive(Debug)]
+pub struct FireworksAdapter {
+    /// The provider-native Fireworks model id (everything after the
+    /// `fireworks/` routing prefix).
     pub model_id: String,
 }
