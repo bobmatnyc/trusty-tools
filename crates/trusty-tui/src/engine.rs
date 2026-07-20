@@ -140,6 +140,15 @@ pub trait TuiEngine: Send + Sync {
     /// `BuiltIn`-routed entry here would never be dispatched — built-ins are
     /// intercepted before `handle_input` is called). Default: empty, for
     /// engines/test doubles with no domain commands.
+    ///
+    /// **Sync constraint:** this method is deliberately synchronous (no
+    /// network I/O on the calling path) so `/help` can render instantly.
+    /// A network-backed implementor (Slice 3's HTTP `CodeEngine`) therefore
+    /// CANNOT fetch its command list on demand here — it must pre-fetch the
+    /// daemon's command table during `async setup()` and cache it (e.g. in
+    /// an `Arc<Mutex<Vec<CommandDescriptor>>>` or similar), then have this
+    /// method serve from that cache. Returning a stale/empty list here is
+    /// preferable to blocking `/help` on a request.
     /// Test: `commands_defaults_to_empty` (this module).
     fn commands(&self) -> Vec<CommandDescriptor> {
         Vec::new()
@@ -160,6 +169,29 @@ pub trait TuiEngine: Send + Sync {
     /// answering inline — can have the shared router call this first).
     /// Returns `None` when the engine has no picker under that name.
     /// Default: always `None`, for engines with no pickers yet.
+    ///
+    /// **Naming convention (not type-enforced):** a command's name doubles
+    /// as its picker name — a bare `/model` (no args) reaching
+    /// `handle_input` is expected to trigger `picker("model")`, `/provider`
+    /// triggers `picker("provider")`, and so on. On confirmation, the
+    /// shared event loop (Slice 4/5) composes
+    /// `"{PickerRequest::dispatch_command} {selected.id}"` (e.g.
+    /// `"/model opus-4"`) and resubmits it as `ReplEvent::Submit`, which is
+    /// what actually performs the selection — `picker()` itself only
+    /// supplies the list, it never applies a selection. Nothing in the type
+    /// system links a `CommandDescriptor.name` to a `picker()` name or a
+    /// `PickerRequest.dispatch_command`; an engine implementing both must
+    /// keep them in lockstep by convention (mirrors tagent's existing
+    /// `PickerKind::Model` → `"/model <selected>"` pairing,
+    /// `crates/trusty-agents/src/repl/tui/types.rs:28-35`).
+    ///
+    /// **Sync constraint:** same as [`Self::commands`] — this method is
+    /// synchronous, so a network-backed implementor (Slice 3's
+    /// `CodeEngine`) cannot fetch items on demand here. Pre-fetch during
+    /// `async setup()` (or on first use of a given picker name, cached
+    /// after) and serve from that cache; a `handle_input` invocation that
+    /// needs fresh data should refresh the cache there, not inside
+    /// `picker()`.
     /// Test: `picker_defaults_to_none` (this module).
     fn picker(&self, name: &str) -> Option<PickerRequest> {
         let _ = name;

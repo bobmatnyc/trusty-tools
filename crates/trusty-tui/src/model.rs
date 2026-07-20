@@ -73,6 +73,17 @@ pub enum StatuslineSegment {
     /// Deferred to Phase 2 per DOC-50 Q9 (no daemon API yet to source real
     /// cost from) — this variant exists so the wire shape doesn't need a
     /// breaking change once that API lands; no engine populates it yet.
+    ///
+    /// **Multi-cost case:** `Cost` carries a single string, not a label +
+    /// value pair, so an engine that wants to show more than one cost
+    /// figure at once (tagent shows both the current session's cost and
+    /// the day's running total, `status.rs`'s `session_cost`/`daily_cost`)
+    /// bakes the distinction into the string itself and emits multiple
+    /// `Cost` segments — e.g. `Cost("$0.0034 session")` and
+    /// `Cost("$0.0145 today")` — matching tagent's existing `"{cost}
+    /// session"` / `"{cost} today"` suffix convention
+    /// (`crates/trusty-agents/src/repl/tui/status.rs`'s `format_cost_value`
+    /// call sites) rather than inventing a new labeled-cost shape here.
     Cost(String),
     /// Escape hatch for an engine-specific segment that doesn't warrant a
     /// first-class variant (e.g. tagent's `TM: N sessions` / `MPM: N
