@@ -116,16 +116,36 @@ use tools::write_file::WriteFileTool;
 use tools::{ToolRegistry, delegate::DelegateToAgentTool, shell_exec::ShellExecTool};
 use workflow::WorkflowEngine;
 
-/// Handle `trusty-agents agents <subcommand>` (#167).
+/// Handle `trusty-agents agents <subcommand>` (#167, `deploy` added by
+/// #3405/#3406 follow-up).
 ///
 /// Why: Exposes the discovery results to operators. Without this, there's
 /// no way to verify which agents were picked up from which directory.
-/// What: Currently supports `agents list`. Prints discovered agents with
-/// their source and capability tags in the format described in the issue.
-/// Test: Covered manually; unit-tested via `AgentRegistry::list`.
+/// `deploy` gives an explicit, re-runnable repair path for the automatic
+/// first-run deploy in `runtime::startup::run_startup_init` — useful when a
+/// user deletes `~/.trusty-agents/agents/` or wants to confirm the bundled
+/// roster landed without waiting for the next interactive startup.
+/// What: `list` (default) prints discovered agents with their source and
+/// capability tags. `deploy` writes any bundled agent files missing from
+/// `$HOME/.trusty-agents/agents/`, reporting how many were newly written
+/// (idempotent — a repeat run reports 0).
+/// Test: Covered manually; unit-tested via `AgentRegistry::list` and
+/// `agents::bundled::deploy_bundled_agents`'s own tests.
 pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
     let sub = args.first().map(String::as_str).unwrap_or("list");
     match sub {
+        "deploy" => {
+            let written = agents::bundled::ensure_bundled_agents_deployed()
+                .context("failed to deploy bundled agents to $HOME/.trusty-agents/agents")?;
+            if written > 0 {
+                println!("Deployed {written} bundled agent file(s) to ~/.trusty-agents/agents/.");
+            } else {
+                println!(
+                    "Bundled agents already present in ~/.trusty-agents/agents/ — nothing to deploy."
+                );
+            }
+            Ok(())
+        }
         "list" => {
             let reg = agents::registry::AgentRegistry::load(&agents::registry::agent_search_paths(
                 &default_bundled_config_dir(),
@@ -168,11 +188,11 @@ pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
         other => {
             // #366: Surface a "did you mean?" hint for typos like
             // `agents lst` -> `agents list`.
-            let known = &["list"];
+            let known = &["list", "deploy"];
             if let Some(s) = cli::did_you_mean(other, known, 2) {
                 eprintln!("tagent agents: unknown subcommand '{other}'. Did you mean '{s}'?");
             } else {
-                eprintln!("tagent agents: unknown subcommand '{other}'. Try: list");
+                eprintln!("tagent agents: unknown subcommand '{other}'. Try: list, deploy");
             }
             bail!("unknown agents subcommand: {other}");
         }

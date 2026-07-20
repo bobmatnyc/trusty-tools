@@ -66,6 +66,19 @@ fn run_piped(
 /// isolated cwd and before spawning — lets a test seed fixture files (e.g. a
 /// minimal `assistant.toml`) into the isolated project without touching the
 /// real crate-root `.trusty-agents/`.
+///
+/// Also pins `$HOME` to a fresh, isolated tempdir by default (issue #3406
+/// follow-up). Why: since `runtime::startup::run_startup_init` now
+/// unconditionally deploys the bundled agent roster to
+/// `$HOME/.trusty-agents/agents/` (`agents::bundled::
+/// ensure_bundled_agents_deployed`), every test in this file that spawned the
+/// real binary WITHOUT overriding `HOME` was writing ~30 real files into the
+/// developer machine's actual `$HOME/.trusty-agents/agents/` on every
+/// `cargo test` run — the exact kind of test-time side effect on the host
+/// this harness must never cause. A caller that needs to observe/assert
+/// against `HOME` (e.g. the bundled-deploy and profile-env tests below)
+/// still can: an explicit `("HOME", ...)` in `extra_env` is applied AFTER
+/// this default and wins.
 fn run_piped_with_setup(
     extra_args: &[&str],
     extra_env: &[(&str, &str)],
@@ -74,6 +87,10 @@ fn run_piped_with_setup(
 ) -> (bool, String, String) {
     let isolated_cwd = tempfile::tempdir().expect("create isolated tempdir for tagent cwd");
     setup(isolated_cwd.path());
+    // Kept alive for the whole function body (dropped only after the child
+    // has exited and output is captured) so `$HOME` stays valid throughout.
+    let default_isolated_home =
+        tempfile::tempdir().expect("create isolated tempdir for tagent $HOME");
 
     let mut cmd = Command::new(BIN);
     cmd.args(extra_args)
@@ -81,6 +98,7 @@ fn run_piped_with_setup(
         // Deterministic: skip the interactive first-run profile interview,
         // which would otherwise consume lines meant for the REPL loop.
         .env("TAGENT_NONINTERACTIVE", "1")
+        .env("HOME", default_isolated_home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -220,6 +238,166 @@ fn plain_cli_defaults_active_agent_to_assistant_not_ctrl() {
     assert!(
         !stdout.contains("agent=ctrl"),
         "default agent must not be ctrl; got:\n{stdout}"
+    );
+}
+
+/// Same as [`run_piped_with_setup`] but does NOT force
+/// `TAGENT_NONINTERACTIVE=1` — used only by the profile-resolution test
+/// below, which must exercise the REAL `load_or_create_user_profile`
+/// precedence (saved `user.toml` -> env -> interactive interview) rather
+/// than short-circuiting straight to the noninteractive placeholder.
+///
+/// Also defaults `$HOME` to a fresh isolated tempdir (same rationale as
+/// [`run_piped_with_setup`] — never let a spawned-binary test touch the real
+/// developer machine's `$HOME`); an explicit `("HOME", ...)` in `extra_env`
+/// is applied after and wins.
+fn run_piped_no_forced_noninteractive(
+    extra_args: &[&str],
+    extra_env: &[(&str, &str)],
+    stdin_input: &str,
+) -> (bool, String, String) {
+    let isolated_cwd = tempfile::tempdir().expect("create isolated tempdir for tagent cwd");
+    let default_isolated_home =
+        tempfile::tempdir().expect("create isolated tempdir for tagent $HOME");
+
+    let mut cmd = Command::new(BIN);
+    cmd.args(extra_args)
+        .current_dir(isolated_cwd.path())
+        .env("HOME", default_isolated_home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+
+    let mut child = cmd.spawn().expect("spawn tagent");
+    {
+        let mut stdin = child.stdin.take().expect("child stdin was piped");
+        stdin
+            .write_all(stdin_input.as_bytes())
+            .expect("write stdin");
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = child.wait_with_output();
+        let _ = tx.send(out);
+    });
+    let out = rx
+        .recv_timeout(WAIT_TIMEOUT)
+        .unwrap_or_else(|_| {
+            panic!("tagent did not exit within {WAIT_TIMEOUT:?} (hang regression?)")
+        })
+        .expect("wait_with_output failed");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).to_string(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+/// Why (#3406 follow-up — owner directive: "I don't want to have to set the
+/// credential. You have them, use them.", extended to the user profile): a
+/// user with `TAGENT_USER_NAME`/`_EMAIL`/`_TIMEZONE` resolvable from the
+/// environment (a `.env.local`, in production — here injected directly as
+/// process env, which is the tier `UserProfile::from_env` actually reads)
+/// must NEVER see the blocking interactive first-run interview, even though
+/// `TAGENT_NONINTERACTIVE` is deliberately NOT set here (proving the skip is
+/// real, not just falling through to the noninteractive placeholder). Uses
+/// an isolated `$HOME` with no pre-existing `user.toml` so the env tier is
+/// actually exercised, not short-circuited by the "already saved" tier.
+/// What: asserts stderr shows the env-resolution note (not the interactive
+/// "First-run setup" prompt text) and that the resolved profile was
+/// persisted to the isolated `$HOME/.trusty-agents/user.toml` with the
+/// expected fields.
+/// Test: itself.
+#[test]
+fn profile_resolves_from_env_without_interactive_prompt() {
+    let isolated_home = tempfile::tempdir().expect("isolated HOME for profile-env test");
+    let home_str = isolated_home
+        .path()
+        .to_str()
+        .expect("tempdir path is valid UTF-8")
+        .to_string();
+
+    let (success, _stdout, stderr) = run_piped_no_forced_noninteractive(
+        &["--plain"],
+        &[
+            ("HOME", home_str.as_str()),
+            ("TAGENT_USER_NAME", "Ada"),
+            ("TAGENT_USER_EMAIL", "ada@example.com"),
+            ("TAGENT_USER_TIMEZONE", "UTC"),
+        ],
+        "/quit\n",
+    );
+    assert!(success, "should exit 0 on /quit; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("resolved profile for Ada from the environment"),
+        "expected the env-resolution note in stderr; got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("First-run setup"),
+        "the interactive interview must NOT run when the env resolves a profile; got:\n{stderr}"
+    );
+
+    let saved = isolated_home
+        .path()
+        .join(".trusty-agents")
+        .join("user.toml");
+    let contents = std::fs::read_to_string(&saved)
+        .unwrap_or_else(|e| panic!("expected profile saved to {}: {e}", saved.display()));
+    assert!(contents.contains("Ada"), "got:\n{contents}");
+    assert!(contents.contains("ada@example.com"), "got:\n{contents}");
+    assert!(contents.contains("UTC"), "got:\n{contents}");
+}
+
+/// Why (#3405/#3406 — GAP1 live regression): the owner's clean-shell repro
+/// was `tagent --plain` run from `~` with NO project-tier
+/// `.trusty-agents/agents/` at all — `agent 'assistant' not found: failed to
+/// read agent config ~/.trusty-agents/agents/assistant.toml`, silently
+/// falling back to `ctrl`. This drives the REAL compiled binary with BOTH
+/// the isolated CWD (no project tier — already the harness default) AND an
+/// isolated `$HOME` that starts completely empty (no
+/// `~/.trusty-agents/agents/` either), proving `runtime::startup::
+/// run_startup_init`'s bundled-agent deploy
+/// (`agents::bundled::ensure_bundled_agents_deployed`) populates the `$HOME`
+/// fallback tier and the plain CLI's default `/switch assistant` resolves
+/// the REAL bundled assistant persona — not a test fixture — without ever
+/// touching the developer machine's actual `$HOME`.
+/// What: asserts the startup banner shows `Switched to: assistant` (not a
+/// degrade to ctrl) and that the bundled `assistant/agent.toml` actually
+/// landed on disk under the isolated `$HOME`.
+/// Test: itself.
+#[test]
+fn plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier() {
+    let isolated_home = tempfile::tempdir().expect("isolated HOME for bundled-deploy test");
+    let home_str = isolated_home
+        .path()
+        .to_str()
+        .expect("tempdir path is valid UTF-8")
+        .to_string();
+
+    let (success, stdout, stderr) =
+        run_piped(&["--plain"], &[("HOME", home_str.as_str())], "/quit\n");
+    assert!(success, "should exit 0 on /quit; stderr:\n{stderr}");
+    assert!(
+        stdout.contains("Switched to: assistant"),
+        "expected the plain CLI to default-switch to the bundled assistant persona \
+         deployed to $HOME/.trusty-agents/agents/; got stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("agent=ctrl"),
+        "must not silently degrade to ctrl when no project-tier agents exist; got:\n{stdout}"
+    );
+    assert!(
+        isolated_home
+            .path()
+            .join(".trusty-agents")
+            .join("agents")
+            .join("assistant")
+            .join("agent.toml")
+            .is_file(),
+        "bundled assistant/agent.toml should have been deployed to the isolated $HOME"
     );
 }
 

@@ -85,6 +85,53 @@ impl UserProfile {
     pub fn is_complete(&self) -> bool {
         !self.name.trim().is_empty()
     }
+
+    /// Zero-config profile capture from the process environment (issue
+    /// #3406 follow-up — owner directive: "I don't want to have to set the
+    /// credential. You have them, use them.", extended to the profile).
+    ///
+    /// Why: the first-run interactive interview
+    /// (`ctrl::repl::profile::conduct_user_interview`) blocks on stdin every
+    /// time `~/.trusty-agents/user.toml` is missing or incomplete — annoying
+    /// for a user who already has these values in a `.env.local` (project OR
+    /// the user-global `$HOME/.env.local` tier). By the time
+    /// `load_or_create_user_profile` calls this, `runtime::startup::
+    /// run_startup_init` has already merged BOTH `.env.local` tiers into the
+    /// process env via `trusty_common::inference::credentials::
+    /// load_env_local_once` (precedence: process env > project `.env.local`
+    /// > user `$HOME/.env.local`) — so a plain `std::env::var` read here
+    /// transparently sees whichever tier supplied the value, with no
+    /// separate file-parsing logic needed.
+    /// What: reads `TAGENT_USER_NAME` (required — `None` overall when absent
+    /// or blank), `TAGENT_USER_EMAIL` (optional), and `TAGENT_USER_TIMEZONE`
+    /// (optional, falling back to the POSIX `TZ` var when unset — a
+    /// widely-set convention that's an unambiguous stand-in when the
+    /// TAGENT-specific var isn't present). `preferred_model` is always
+    /// `None` (no env var maps to it; users needing that use `/model`).
+    /// Test: `from_env_reads_name_email_timezone`,
+    /// `from_env_falls_back_to_tz_for_timezone`,
+    /// `from_env_returns_none_when_name_absent`,
+    /// `from_env_treats_blank_name_as_absent`.
+    pub fn from_env() -> Option<Self> {
+        let name = std::env::var("TAGENT_USER_NAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())?;
+        let email = std::env::var("TAGENT_USER_EMAIL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let timezone = std::env::var("TAGENT_USER_TIMEZONE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("TZ").ok().filter(|s| !s.is_empty()));
+        Some(Self {
+            name,
+            email,
+            preferred_model: None,
+            timezone,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -126,5 +173,105 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.toml");
         assert!(UserProfile::load_from(&path).is_none());
+    }
+
+    /// Clears every var `from_env` reads. Callers must hold
+    /// `crate::test_env::ENV_LOCK` for the whole test body.
+    fn clear_profile_env() {
+        unsafe {
+            std::env::remove_var("TAGENT_USER_NAME");
+            std::env::remove_var("TAGENT_USER_EMAIL");
+            std::env::remove_var("TAGENT_USER_TIMEZONE");
+            std::env::remove_var("TZ");
+        }
+    }
+
+    /// Why: the core zero-config contract — all three vars set must produce
+    /// a matching, immediately-complete profile.
+    /// Test: itself.
+    #[test]
+    fn from_env_reads_name_email_timezone() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_profile_env();
+        unsafe {
+            std::env::set_var("TAGENT_USER_NAME", "Masa");
+            std::env::set_var("TAGENT_USER_EMAIL", "masa@matsuoka.com");
+            std::env::set_var("TAGENT_USER_TIMEZONE", "America/New_York");
+        }
+        let p = UserProfile::from_env().expect("expected a profile from env");
+        assert_eq!(p.name, "Masa");
+        assert_eq!(p.email.as_deref(), Some("masa@matsuoka.com"));
+        assert_eq!(p.timezone.as_deref(), Some("America/New_York"));
+        assert!(p.is_complete());
+        clear_profile_env();
+    }
+
+    /// Why: `TAGENT_USER_TIMEZONE` is the primary var, but a bare `TZ` (a
+    /// widely-set POSIX convention) is an unambiguous fallback when only
+    /// that is present — avoids forcing a redundant var for users who
+    /// already export `TZ`.
+    /// Test: itself.
+    #[test]
+    fn from_env_falls_back_to_tz_for_timezone() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_profile_env();
+        unsafe {
+            std::env::set_var("TAGENT_USER_NAME", "Masa");
+            std::env::set_var("TZ", "America/New_York");
+        }
+        let p = UserProfile::from_env().expect("expected a profile from env");
+        assert_eq!(p.timezone.as_deref(), Some("America/New_York"));
+        clear_profile_env();
+    }
+
+    /// Why: `TAGENT_USER_TIMEZONE`, when present, must win over a bare `TZ`
+    /// — the TAGENT-specific var is the more deliberate signal.
+    /// Test: itself.
+    #[test]
+    fn from_env_prefers_tagent_timezone_over_tz() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_profile_env();
+        unsafe {
+            std::env::set_var("TAGENT_USER_NAME", "Masa");
+            std::env::set_var("TAGENT_USER_TIMEZONE", "UTC");
+            std::env::set_var("TZ", "America/New_York");
+        }
+        let p = UserProfile::from_env().expect("expected a profile from env");
+        assert_eq!(p.timezone.as_deref(), Some("UTC"));
+        clear_profile_env();
+    }
+
+    /// Why: no name means no profile — the interactive interview must still
+    /// run rather than silently creating a nameless profile.
+    /// Test: itself.
+    #[test]
+    fn from_env_returns_none_when_name_absent() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_profile_env();
+        assert!(UserProfile::from_env().is_none());
+    }
+
+    /// Why: a `TAGENT_USER_NAME` set to whitespace-only is effectively
+    /// absent, not a valid (blank) name.
+    /// Test: itself.
+    #[test]
+    fn from_env_treats_blank_name_as_absent() {
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_profile_env();
+        unsafe {
+            std::env::set_var("TAGENT_USER_NAME", "   ");
+        }
+        assert!(UserProfile::from_env().is_none());
+        clear_profile_env();
     }
 }

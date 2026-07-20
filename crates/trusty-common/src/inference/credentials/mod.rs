@@ -32,7 +32,7 @@ mod resolver;
 
 pub use dotenv::{
     env_local_value, find_workspace_env_local, load_env_from_path, load_env_local_once,
-    read_var_from_env_local,
+    read_var_from_env_local, user_env_local_path,
 };
 pub use file_store::FileKeyStore;
 #[cfg(feature = "keyring-store")]

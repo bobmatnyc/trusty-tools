@@ -241,8 +241,25 @@ fn resolve_endpoint_agent(repl: &crate::repl::TrustyAgentsRepl) -> (String, Stri
 /// configured" even though dispatch would resolve and use it fine. Routes
 /// through the same `pick_credentials` resolver the TUI's own startup
 /// banner uses (`repl/run.rs`), which checks env → `.env.local` → the store.
-fn resolved_credential_label(runner: RunnerKind) -> &'static str {
-    crate::llm::credentials::pick_credentials(Some(runner))
-        .map(|c| c.label())
-        .unwrap_or("none")
+///
+/// Issue #3406 follow-up: a bare `credential=none` was confusing when the
+/// secure store demonstrably HAD a key — just for a provider (e.g.
+/// `fireworks`) ctrl/PM's own LLM calls don't route through. When
+/// `pick_credentials` finds nothing but
+/// [`crate::llm::credentials::other_configured_providers`] names one, the
+/// label now says so explicitly instead of a bare "none".
+fn resolved_credential_label(runner: RunnerKind) -> String {
+    if let Some(c) = crate::llm::credentials::pick_credentials(Some(runner)) {
+        return c.label().to_string();
+    }
+    let other = crate::llm::credentials::other_configured_providers();
+    if other.is_empty() {
+        "none".to_string()
+    } else {
+        format!(
+            "none (configured: {} — not usable for this agent's model; need one of \
+             openrouter/anthropic/claude-code)",
+            other.join(", ")
+        )
+    }
 }

@@ -288,48 +288,92 @@ pub(super) struct Cli {
     pub(super) rest: Vec<String>,
 }
 
-/// Print a prominent onboarding banner when no API credential is configured.
+/// Print a prominent onboarding banner when no API credential resolves via
+/// ANY tier (env, project `.env.local`, user `$HOME/.env.local`, or the
+/// secure store).
 ///
 /// Why: New users who clone the repo and run `om` without configuring a key
 /// get confusing LLM errors. Surfacing setup instructions before the REPL
 /// opens is friendlier and self-service. OpenRouter is recommended because
 /// it's free-tier, supports many models, and is already the deployment
 /// fallback.
-/// What: Checks for any of the three supported credential env vars; when
-/// none are set, prints a boxed banner to stderr with setup steps and the
-/// OpenRouter sign-up URL. Non-fatal — the REPL still opens so CLI-only
-/// subcommands (memory search, skills list) keep working.
-/// Test: Manual — unset all three env vars and run `cargo run`. Banner should
-/// appear once on stderr; setting any one of the three suppresses it.
+///
+/// Issue #3406 follow-up (confirmed live): the previous implementation
+/// checked ONLY raw `std::env::var` for the three credential names — so a
+/// key configured via `tagent config keys set <provider>` (the secure store)
+/// or a project/user `.env.local` produced a FALSE "no API key found" banner
+/// even though real dispatch (`llm::credentials::pick_credentials`, which
+/// this now matches) would resolve and use it fine. This is the exact bug
+/// the owner's clean-shell repro hit: `openrouter` was configured via the
+/// secure store, `tagent config keys list` correctly reported it, yet the
+/// startup banner still claimed no key existed.
+/// What: Consults the same 3-tier resolver
+/// (`trusty_common::inference::credentials::resolve_key`) `pick_credentials`
+/// uses for the three provider names this binary's own LLM calls route
+/// through (`openrouter`, `anthropic`, `claude-code`); when at least one
+/// resolves, no banner prints. When none resolve, prints a boxed banner
+/// listing every location actually checked (env var names, the project
+/// `.env.local` path when one is in scope, the user `$HOME/.env.local` path,
+/// and the secure store) plus BOTH remediation options — a project/user
+/// `.env.local` line AND `tagent config keys set <provider>` (the durable,
+/// works-from-any-directory option `.env.local` alone cannot offer from
+/// `$HOME`). Non-fatal — the REPL still opens so CLI-only subcommands
+/// (memory search, skills list) keep working.
+/// Test: `banner_suppressed_when_store_configures_a_key`,
+/// `banner_fires_when_nothing_resolves` (tests module below) exercise the
+/// resolve-tier gate via `pick_credentials`'s own store-backed tests, since
+/// this function's stderr output itself is not asserted (manual/live-verify
+/// per the module docs above).
 pub(super) fn check_credentials_and_warn() {
-    let has_claude_code = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    let has_anthropic = std::env::var("ANTHROPIC_API_KEY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    let has_openrouter = std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
+    // #3406 follow-up: match the SAME resolver real dispatch uses instead of
+    // a raw env-var read, so a store- or `.env.local`-only credential is
+    // correctly recognized.
+    let has_claude_code =
+        trusty_common::inference::credentials::resolve_key("claude-code").is_some();
+    let has_anthropic = trusty_common::inference::credentials::resolve_key("anthropic").is_some();
+    let has_openrouter = trusty_common::inference::credentials::resolve_key("openrouter").is_some();
 
     if has_claude_code || has_anthropic || has_openrouter {
         return;
     }
+
+    let project_env_local = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| trusty_common::inference::credentials::find_workspace_env_local(&cwd));
+    let user_env_local = dirs::home_dir()
+        .and_then(|h| trusty_common::inference::credentials::user_env_local_path(&h));
 
     eprintln!();
     eprintln!("┌─────────────────────────────────────────────────────────────────┐");
     eprintln!("│  ⚡  No API key found — trusty-agents needs a key to talk to an LLM  │");
     eprintln!("├─────────────────────────────────────────────────────────────────┤");
     eprintln!("│                                                                 │");
+    eprintln!("│  Checked (none resolved):                                       │");
+    eprintln!("│    env: OPENROUTER_API_KEY / ANTHROPIC_API_KEY /                │");
+    eprintln!("│         CLAUDE_CODE_OAUTH_TOKEN                                  │");
+    match &project_env_local {
+        Some(p) => eprintln!("│    project .env.local: {}", p.display()),
+        None => eprintln!("│    project .env.local: none found above this directory          │"),
+    }
+    match &user_env_local {
+        Some(p) => eprintln!("│    user .env.local: {}", p.display()),
+        None => eprintln!("│    user ~/.env.local: not present                                │"),
+    }
+    eprintln!("│    secure store (`tagent config keys list`): empty              │");
+    eprintln!("│                                                                 │");
+    eprintln!("│  Durable option — works from ANY directory:                     │");
+    eprintln!("│    tagent config keys set openrouter                            │");
+    eprintln!("│                                                                 │");
     eprintln!("│  Quickest option — get a free OpenRouter key (5 min):           │");
     eprintln!("│    https://openrouter.ai/keys                                   │");
     eprintln!("│                                                                 │");
-    eprintln!("│  Then create .env.local in your project root:                   │");
-    eprintln!("│    echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> .env.local         │");
+    eprintln!("│  Or drop it in ~/.env.local (works from any directory) or a     │");
+    eprintln!("│  project .env.local (project-scoped only):                      │");
+    eprintln!("│    echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> ~/.env.local       │");
     eprintln!("│                                                                 │");
     eprintln!("│  Or use Claude Code OAuth (if you have Claude Code installed):  │");
     eprintln!("│    claude setup-token   # copies token to clipboard             │");
-    eprintln!("│    echo 'CLAUDE_CODE_OAUTH_TOKEN=...' >> .env.local             │");
+    eprintln!("│    tagent config keys set claude-code                           │");
     eprintln!("│                                                                 │");
     eprintln!("│  Restart trusty-agents after adding the key. (REPL continues below)  │");
     eprintln!("└─────────────────────────────────────────────────────────────────┘");

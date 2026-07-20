@@ -26,6 +26,21 @@
 //! [`find_workspace_env_local`] and [`load_env_from_path`] are the hermetic
 //! cores used by the resolver's precedence tests, which must not depend on
 //! `OnceLock`'s once-only semantics or the real repo's `.env.local`.
+//!
+//! Issue #3406 follow-up (trusty-agents "unusable outside a project
+//! directory"): [`load_env_local_once`] previously only ever searched
+//! upward from the cwd for a PROJECT-scoped `.env.local`. A binary launched
+//! from `$HOME` (or any directory with no project/workspace ancestor at
+//! all — the common case for a globally `cargo install`ed tool) found
+//! nothing, even when the user had deliberately set up a personal,
+//! machine-wide credential file. [`load_env_local_once`] now ALSO loads
+//! `$HOME/.env.local` as a fourth tier, loaded strictly AFTER the project
+//! tier — since `dotenvy::from_path` never overrides an already-set var,
+//! this gives the full precedence: process env > project `.env.local` >
+//! user `$HOME/.env.local` > secure store (the store tier is the
+//! resolver's, not this module's). [`user_env_local_path`] is the hermetic
+//! core (HOME is injected, not read from the real environment) so the
+//! precedence is unit-testable without `OnceLock`'s once-only semantics.
 //! Test: `dotenv_tests` (sibling file).
 
 use std::path::{Path, PathBuf};
@@ -222,17 +237,45 @@ pub fn load_env_from_path(path: &Path) -> bool {
     dotenvy::from_path(path).is_ok()
 }
 
+/// `$HOME/.env.local` path, when it exists — the hermetic core for the
+/// user-global tier.
+///
+/// Why: separated from [`load_env_local_once`] so the tier is unit-testable
+/// with an injected `home` directory, without depending on `OnceLock`'s
+/// once-only semantics or the real `$HOME`.
+/// What: `Some(home.join(".env.local"))` when that path is a file, else
+/// `None`. Pure — never touches the process environment.
+/// Test: `dotenv_tests::user_env_local_path_finds_file`,
+/// `dotenv_tests::user_env_local_path_absent_is_none`.
+pub fn user_env_local_path(home: &Path) -> Option<PathBuf> {
+    let candidate = home.join(".env.local");
+    candidate.is_file().then_some(candidate)
+}
+
 /// Idempotent, cwd-upward-search `.env.local` loader for production use.
 ///
 /// Why: the resolver calls this once before checking `std::env::var` so a
 /// developer's `.env.local` (at the repo root, or any ancestor of cwd) is
 /// picked up regardless of which subdirectory a binary was launched from —
 /// the same problem `trusty-agents` fixed ad hoc for itself in #250.
+///
+/// Issue #3406 follow-up: a binary launched from OUTSIDE any project/
+/// workspace tree at all (e.g. `tagent` run from `$HOME` — no ancestor ever
+/// has a `.git`/workspace `Cargo.toml` boundary to search within) previously
+/// had NO `.env.local` tier whatsoever. This now ALSO loads
+/// `$HOME/.env.local` as a fourth precedence tier, loaded strictly AFTER the
+/// project tier so the documented precedence holds: process env > project
+/// `.env.local` (searched upward from cwd) > user `$HOME/.env.local` >
+/// secure store (the resolver's tier, not this module's) — `dotenvy` never
+/// overrides an already-set var, so loading the user tier second is what
+/// gives the project tier priority for free, exactly like the project-tier
+/// vs. process-env precedence already worked.
 /// What: on first call, searches upward from the current working directory
 /// via [`find_workspace_env_local`] and loads the first hit (if any) via
-/// `dotenvy::from_path`. Subsequent calls are a no-op `OnceLock` check.
-/// Errors (missing file, malformed file) are swallowed — a missing
-/// `.env.local` is the common case (production/CI), not a failure.
+/// `dotenvy::from_path`, then does the same for [`user_env_local_path`].
+/// Subsequent calls are a no-op `OnceLock` check. Errors (missing file,
+/// malformed file) are swallowed — a missing `.env.local` is the common case
+/// (production/CI), not a failure.
 /// Test: exercised indirectly via `resolver::resolve_key`'s production path;
 /// the once-only + cwd-search behaviour itself is not independently unit
 /// tested because `OnceLock` fires exactly once per test binary — see
@@ -242,6 +285,11 @@ pub fn load_env_local_once() {
     LOADED.get_or_init(|| {
         if let Ok(cwd) = std::env::current_dir()
             && let Some(path) = find_workspace_env_local(&cwd)
+        {
+            let _ = dotenvy::from_path(&path);
+        }
+        if let Some(home) = dirs::home_dir()
+            && let Some(path) = user_env_local_path(&home)
         {
             let _ = dotenvy::from_path(&path);
         }
@@ -782,6 +830,102 @@ mod tests {
         assert_eq!(std::env::var(var).unwrap(), "already-set");
         unsafe {
             std::env::remove_var(var);
+        }
+    }
+
+    /// Why: the user-global tier's hermetic core must find `$HOME/.env.local`
+    /// when it exists — the building block [`load_env_local_once`]'s new
+    /// fourth tier depends on (issue #3406 follow-up).
+    /// Test: itself.
+    #[test]
+    fn user_env_local_path_finds_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env.local"), "X=1\n").unwrap();
+        assert_eq!(
+            user_env_local_path(tmp.path()),
+            Some(tmp.path().join(".env.local"))
+        );
+    }
+
+    /// Why: an absent `$HOME/.env.local` must resolve to `None`, not a
+    /// phantom path — `load_env_local_once` skips the `dotenvy::from_path`
+    /// call entirely in that case.
+    /// Test: itself.
+    #[test]
+    fn user_env_local_path_absent_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(user_env_local_path(tmp.path()), None);
+    }
+
+    /// Why: issue #3406 follow-up's whole point — a project `.env.local`
+    /// must still win over a user `$HOME/.env.local` when both bind the same
+    /// variable, matching the documented precedence (process env > project
+    /// `.env.local` > user `$HOME/.env.local` > secure store). Drives the
+    /// exact two `dotenvy::from_path` calls `load_env_local_once` makes, in
+    /// the same order (project tier first), against the hermetic
+    /// `load_env_from_path` core rather than the `OnceLock`-guarded
+    /// production function — the same pattern
+    /// `dotenv_loaded_value_beats_store` uses for the store-precedence leg.
+    /// What: writes `OPENROUTER_API_KEY=from-project` to a project
+    /// `.env.local` and `OPENROUTER_API_KEY=from-user` to a separate "user"
+    /// `.env.local`, loads the project one first (as `load_env_local_once`
+    /// does), then the user one, and asserts the process env still reads
+    /// `from-project` — `dotenvy` never overrides an already-set var, so
+    /// load ORDER is what implements the precedence.
+    /// Test: itself.
+    #[test]
+    #[serial(dotenv_credential_env)]
+    fn project_env_local_beats_user_env_local() {
+        // SAFETY: see `load_env_from_path_sets_new_var`.
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+        let project_tmp = tempfile::TempDir::new().unwrap();
+        let project_env = project_tmp.path().join(".env.local");
+        std::fs::write(&project_env, "OPENROUTER_API_KEY=from-project\n").unwrap();
+
+        let user_tmp = tempfile::TempDir::new().unwrap();
+        let user_env = user_env_local_path(user_tmp.path());
+        // Not yet written — `user_env_local_path` should report absent.
+        assert_eq!(user_env, None);
+        let user_env_path = user_tmp.path().join(".env.local");
+        std::fs::write(&user_env_path, "OPENROUTER_API_KEY=from-user\n").unwrap();
+        assert_eq!(
+            user_env_local_path(user_tmp.path()),
+            Some(user_env_path.clone())
+        );
+
+        // Load order mirrors `load_env_local_once`: project tier first.
+        assert!(load_env_from_path(&project_env));
+        assert!(load_env_from_path(&user_env_path));
+
+        assert_eq!(std::env::var("OPENROUTER_API_KEY").unwrap(), "from-project");
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
+
+    /// Why: when NO project `.env.local` is in scope at all (the exact
+    /// clean-shell scenario — `tagent` launched from `$HOME`, no ancestor
+    /// `.git`/workspace boundary), the user tier must still supply the
+    /// value — this is the actual bug fix, not just the precedence-ordering
+    /// leg above.
+    /// Test: itself.
+    #[test]
+    #[serial(dotenv_credential_env)]
+    fn user_env_local_supplies_value_when_no_project_tier() {
+        // SAFETY: see `load_env_from_path_sets_new_var`.
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+        let user_tmp = tempfile::TempDir::new().unwrap();
+        let user_env_path = user_tmp.path().join(".env.local");
+        std::fs::write(&user_env_path, "OPENROUTER_API_KEY=from-user\n").unwrap();
+
+        assert!(load_env_from_path(&user_env_path));
+        assert_eq!(std::env::var("OPENROUTER_API_KEY").unwrap(), "from-user");
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
         }
     }
 }
