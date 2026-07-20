@@ -76,7 +76,7 @@
    * all browsers when used inside d3-generated nodes, and we want re-render on
    * theme change. Resolve var(--grade-*) to literal hex via getComputedStyle.
    * What: Returns the current theme's hex for each grade letter.
-   * Test: setTheme('light'), call gradeColors().A — expect Latte green hex.
+   * Test: setTheme('light'), call gradeColors().A — expect Foundry v2 success (green) hex.
    */
   function gradeColors() {
     const cs = getComputedStyle(document.documentElement);

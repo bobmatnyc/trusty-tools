@@ -9,6 +9,17 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **UI design tokens migrated to Foundry v2** ([#3490](https://github.com/bobmatnyc/trusty-tools/issues/3490),
+  epic [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): the dashboard's
+  `tokens.css` now sources its light/dark palette from the canonical Foundry
+  v2 ("rust-on-paper") design tokens instead of Catppuccin Mocha/Latte. The
+  crate's existing component-facing alias names (`--bg`, `--border`,
+  `--text`, `--grade-*`, etc.) and light/dark activation mechanism
+  (`[data-theme]` on `<html>`) are unchanged — only the underlying color
+  values moved.
+
 ### Security
 
 - **Router-wide same-origin (CSRF) write guard** ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)):
