@@ -473,7 +473,12 @@ pub(crate) enum Command {
         /// Address the daemon HTTP API binds to.
         #[arg(long, env = "TRUSTY_MPM_ADDR", default_value = DEFAULT_ADDR)]
         addr: SocketAddr,
-        /// Also expose the daemon on the Tailscale interface for remote access.
+        /// DEPRECATED (issue #3330, ADR-0011 loopback-only doctrine): the
+        /// daemon's secondary Tailscale listener has been removed —
+        /// non-loopback ingress is exclusively `trusty-console`'s job (its
+        /// own `--tailscale`/Funnel modes). The flag is kept in clap so old
+        /// invocations get an actionable error at startup instead of a
+        /// silently-ignored flag; `run_daemon` refuses to start when set.
         #[arg(long, env = "TRUSTY_MPM_TAILSCALE")]
         tailscale: bool,
         /// Run as an MCP server over stdio instead of the HTTP daemon.

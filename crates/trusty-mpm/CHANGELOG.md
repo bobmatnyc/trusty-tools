@@ -27,7 +27,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (`daemon::api::origin_guard::guard_router`), method-gated and fail-open on a
   missing `Origin`. The `coordinator_chat` handler keeps its own finer-grained
   origin check and `/rpc` keeps its loopback `ConnectInfo` gate (belt and
-  braces); the secondary Tailscale listener trusts its own bind address.
+  braces).
+
+### Removed
+
+- **`tm daemon --tailscale`'s secondary listener, under ADR-0011's
+  loopback-only doctrine** (closes
+  [#3330](https://github.com/bobmatnyc/trusty-tools/issues/3330), part of epic
+  [#3328](https://github.com/bobmatnyc/trusty-tools/issues/3328)): the daemon
+  no longer binds a second, non-loopback listener for Tailscale exposure —
+  `trusty-console` is the sole supported non-loopback HTTP surface, via its own
+  `--tailscale`/Funnel modes. Chosen approach: **hard deprecation**, not a
+  clap-level removal — the `--tailscale` flag is still parsed so old
+  invocations (scripts, launchd plists) get an actionable startup error
+  ("use trusty-console --tailscale; see ADR-0011") instead of a silently
+  ignored flag or a generic clap parse failure. `spawn_secondary_listener`
+  and `get_tailscale_ip` were removed from `daemon/mod.rs` and
+  `commands/daemon_run.rs`; the router-wide write guard (#3304) now always
+  trusts only the loopback default (there is no longer a second bind address
+  to additionally trust). The daemon lock file no longer carries the optional
+  `tailscale_addr` field (`daemon::lock::write_lock` dropped that parameter).
 
 ### Added
 

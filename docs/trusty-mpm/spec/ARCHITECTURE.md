@@ -168,9 +168,12 @@ Three layers guarantee one daemon per host:
    guard prevents that fallback from silently spawning a traffic-splitting second
    daemon.
 
-After bind, `lock::write_lock` records `pid`/`addr`/optional `tailscale_addr`/
-`started_at`. A shutdown task traps **SIGINT and SIGTERM** and removes the lock so
-a `tm restart` (pkill → SIGTERM) never leaks a stale lock (`tm.rs:3209-3218`).
+After bind, `lock::write_lock` records `pid`/`addr`/`started_at`. A shutdown task
+traps **SIGINT and SIGTERM** and removes the lock so a `tm restart` (pkill →
+SIGTERM) never leaks a stale lock (`tm.rs:3209-3218`). Per ADR-0011's
+loopback-only doctrine (issue #3330), the daemon binds loopback only — there is
+no secondary (Tailscale) listener; non-loopback ingress is exclusively
+`trusty-console`'s job.
 
 ### 4.2 Session entry paths
 

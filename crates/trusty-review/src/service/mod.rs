@@ -29,7 +29,6 @@ use axum::{
     Router,
     routing::{get, post},
 };
-use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
 use crate::service::handlers::{handle_health, handle_review, handle_status};
@@ -93,18 +92,47 @@ pub(crate) fn write_addr_to_path(path: &std::path::Path, addr: &str) -> std::io:
 /// Build the axum router for trusty-review.
 ///
 /// Why: separating router construction from `serve` lets tests call
-/// `build_router(state).oneshot(request)` without binding a socket.
+/// `build_router(state).oneshot(request)` without binding a socket. Delegates
+/// to [`build_router_with_self_origins`] with a loopback-only allowlist so
+/// existing callers/tests are unchanged.
 /// What: registers GET /health, GET /status, POST /review, and
-/// POST /pr/github/webhook; attaches a tracing layer.
+/// POST /pr/github/webhook.
 /// Test: `router_builds_without_panic`, `health_returns_ok_json`.
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    build_router_with_self_origins(state, trusty_common::server::SelfOrigins::default())
+}
+
+/// Build the router, additionally trusting the given bind-derived, non-loopback
+/// self-origins for the router-wide same-origin write guard (#3304, #3332).
+///
+/// Why: trusty-review was missed by #3317's guard rollout (issue #3332) — its
+/// destructive `POST /review` route sat behind permissive CORS with no
+/// same-origin defence. This is the guarded entry point; `build_router`
+/// delegates here with a loopback-only allowlist. `serve` passes its resolved
+/// bind address so a non-loopback bind trusts itself (#3269), mirroring the
+/// `trusty-analyze` adoption pattern (`service/routes.rs::build_router_with_self_origins`).
+///
+/// The GitHub webhook route (`POST /pr/github/webhook`) is HMAC-verified
+/// (`X-Hub-Signature-256`), not browser-driven — GitHub sends no `Origin`
+/// header, so the guard's fail-open-on-missing-Origin behaviour keeps webhook
+/// delivery working unchanged.
+/// What: identical router to `build_router`, except the final middleware is
+/// `trusty_common::server::with_guarded_middleware` (guard + standard
+/// CORS/trace/compression stack), applied AFTER every route registration so
+/// no route is left unguarded (the #3268 `route_layer` lesson).
+/// Test: `service::guard_tests` (cross-origin `POST /review` → 403; loopback /
+/// missing-Origin → allowed; webhook-no-Origin → allowed; GET read unaffected).
+pub fn build_router_with_self_origins(
+    state: AppState,
+    self_origins: trusty_common::server::SelfOrigins,
+) -> Router {
+    let router = Router::new()
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
         .route("/review", post(handle_review))
         .route("/pr/github/webhook", post(handle_github_webhook))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state);
+    trusty_common::server::with_guarded_middleware(router, self_origins)
 }
 
 /// Bind the axum server and run until SIGTERM/SIGINT.
@@ -177,7 +205,10 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
     // Clone the shutdown sender before consuming `state` into the router.
     // After axum::serve returns (shutdown), we broadcast to all outcome-poll tasks.
     let shutdown_tx = Arc::clone(&state.shutdown_tx);
-    let app = build_router(state);
+    // #3332: trust the resolved bind address as a self-origin (non-loopback
+    // binds only; `from_bind_addrs` drops loopback) for the write guard.
+    let self_origins = trusty_common::server::SelfOrigins::from_bind_addrs(&[actual]);
+    let app = build_router_with_self_origins(state, self_origins);
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await?;
@@ -197,6 +228,12 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
+// Router-wide same-origin write guard tests (#3332) live in a sibling file to
+// keep this file well under the 500-line cap.
+
+#[cfg(test)]
+#[path = "guard_tests.rs"]
+mod guard_tests;
 
 #[cfg(test)]
 mod tests {

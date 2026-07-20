@@ -7,6 +7,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **Adopted the shared router-wide same-origin write guard**
+  (closes [#3332](https://github.com/bobmatnyc/trusty-tools/issues/3332),
+  part of epic [#3328](https://github.com/bobmatnyc/trusty-tools/issues/3328)):
+  trusty-review was missed by #3317's guard rollout across
+  search/memory/analyze/mpm, leaving the destructive `POST /review` route
+  behind permissive CORS with no CSRF defence. `build_router` now applies
+  `trusty_common::server::with_guarded_middleware` (router-wide, applied
+  after all route registration) with a loopback-only allowlist by default;
+  `serve` passes `SelfOrigins::from_bind_addrs` for its resolved bind
+  address so a non-loopback bind still trusts itself. The GitHub webhook
+  route (`POST /pr/github/webhook`, HMAC-verified via
+  `X-Hub-Signature-256`) is unaffected: GitHub sends no `Origin` header, and
+  the guard fails open on a missing `Origin`, so webhook delivery keeps
+  working unchanged.
+
 ### Added
 
 - **Known-sibling port guard extended to `trusty-mpm`'s supervisor metrics
