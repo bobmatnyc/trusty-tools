@@ -20,13 +20,17 @@ use crate::agents::md_loader::{project_embedded_md, project_embedded_md_with_ext
 /// Why: A typo in either the `.md` frontmatter or the table entry would
 /// silently break `agents::load_all_agents`'s embedded-fallback at runtime
 /// instead of failing fast in CI. This is also the acceptance test for Slice
-/// E3 (#2958): every one of the 31 entries must actually compose (a `Composed`
+/// E3 (#2958): every one of the 32 entries must actually compose (a `Composed`
 /// variant that panics here rather than resolving would otherwise only be
 /// caught at runtime by `load_embedded_default_agents`'s log-and-skip path).
 /// Test: this test.
 #[test]
 fn default_agents_parse_and_names_match() {
-    assert_eq!(DEFAULT_AGENTS.len(), 31, "3 originals + 28 roster agents");
+    assert_eq!(
+        DEFAULT_AGENTS.len(),
+        32,
+        "4 originals (engineer, qa-agent, code-reviewer, pm) + 28 roster agents"
+    );
     for agent in DEFAULT_AGENTS {
         let cfg = match agent {
             EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md),
@@ -138,32 +142,32 @@ fn default_agents_field_identical_to_retired_toml() {
 }
 
 /// The embedded fallback still fires when the disk `.claude/agents` dir is
-/// empty, and yields the full 31-agent roster with the original 3 defaults
-/// intact as the first three entries — proving Slice E3's roster expansion
-/// did not disturb the original fallback wiring `.md` (#2897 Slice C)
-/// established.
+/// empty, and yields the full 32-agent roster with the original 4 defaults
+/// intact as the first four entries — proving Slice E3's roster expansion
+/// (and #3437's `pm` addition) did not disturb the original fallback wiring
+/// `.md` (#2897 Slice C) established.
 ///
 /// Why: #2897 Slice C's non-breaking claim rests on this: a fresh project
 /// with no `.claude/agents/` must still boot with `engineer`/`qa-agent`/
-/// `code-reviewer` available, exactly as it did when the defaults were TOML
-/// — Slice E3 only ADDS the 28 roster agents after them, never replaces or
-/// reorders the original 3.
+/// `code-reviewer`/`pm` available, exactly as it did when the defaults were
+/// TOML — Slice E3 only ADDS the 28 roster agents after them, never replaces
+/// or reorders the originals.
 /// What: calls `crate::agents::load_all_agents` on a nonexistent directory;
-/// asserts the returned names' first three entries are exactly
-/// `["engineer", "qa-agent", "code-reviewer"]` and the full 31-name list
-/// matches `crate::assets::DEFAULT_AGENTS`'s declared order with no
+/// asserts the returned names' first four entries are exactly
+/// `["engineer", "qa-agent", "code-reviewer", "pm"]` and the full 32-name
+/// list matches `crate::assets::DEFAULT_AGENTS`'s declared order with no
 /// duplicates.
 /// Test: this test.
 #[test]
-fn embedded_fallback_still_fires_and_yields_31_agents_with_original_3_intact() {
+fn embedded_fallback_still_fires_and_yields_32_agents_with_original_4_intact() {
     let agents = crate::agents::load_all_agents(std::path::Path::new("/nonexistent/agents/dir"));
     let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
 
-    assert_eq!(names.len(), 31, "31-agent roster: 3 originals + 28 roster");
+    assert_eq!(names.len(), 32, "32-agent roster: 4 originals + 28 roster");
     assert_eq!(
-        &names[..3],
-        &["engineer", "qa-agent", "code-reviewer"],
-        "the original 3 defaults must remain first and intact"
+        &names[..4],
+        &["engineer", "qa-agent", "code-reviewer", "pm"],
+        "the original 4 defaults must remain first and intact"
     );
 
     let expected: Vec<&str> = DEFAULT_AGENTS.iter().map(|a| a.name()).collect();
@@ -186,7 +190,7 @@ fn embedded_fallback_still_fires_and_yields_31_agents_with_original_3_intact() {
 /// `BASE-*` entry leaking into the dispatchable roster would let a caller
 /// invoke a template fragment (no concrete role, designed to be composed
 /// into a leaf agent, not run standalone) as if it were a real agent.
-/// What: asserts none of the 31 `DEFAULT_AGENTS` names matches any of the 5
+/// What: asserts none of the 32 `DEFAULT_AGENTS` names matches any of the 5
 /// base template names (case-insensitive, since the source table keys them
 /// `BASE-QA.md` while `extends:` references use `base-qa`).
 /// Test: this test.
@@ -209,7 +213,7 @@ fn base_templates_are_never_dispatchable() {
     }
 }
 
-/// No two entries in the 31-agent `DEFAULT_AGENTS` roster share a dispatch
+/// No two entries in the 32-agent `DEFAULT_AGENTS` roster share a dispatch
 /// name — in particular, trusty-mpm's own `engineer` agent (excluded from
 /// the roster upstream specifically because it collides with tcode's
 /// `engineer` default) does not sneak back in under any composed entry.
@@ -219,13 +223,13 @@ fn base_templates_are_never_dispatchable() {
 /// default)" — this test is the regression pin for that exclusion, and a
 /// general guard against any future roster addition silently shadowing an
 /// existing dispatch name.
-/// What: collects all 31 names, dedupes, asserts the length is unchanged;
+/// What: collects all 32 names, dedupes, asserts the length is unchanged;
 /// separately asserts `"engineer"` appears exactly once.
 /// Test: this test.
 #[test]
-fn no_name_collisions_across_the_31_agent_roster() {
+fn no_name_collisions_across_the_32_agent_roster() {
     let names: Vec<&str> = DEFAULT_AGENTS.iter().map(|a| a.name()).collect();
-    assert_eq!(names.len(), 31);
+    assert_eq!(names.len(), 32);
 
     let mut deduped = names.clone();
     deduped.sort_unstable();
@@ -233,7 +237,7 @@ fn no_name_collisions_across_the_31_agent_roster() {
     assert_eq!(
         deduped.len(),
         names.len(),
-        "no name collisions across the 31-agent roster: {names:?}"
+        "no name collisions across the 32-agent roster: {names:?}"
     );
 
     assert_eq!(
@@ -344,6 +348,108 @@ fn every_composed_roster_name_resolves_in_embedded_tm_agent_sources() {
             );
         }
     }
+}
+
+/// `task::protocol::DEFAULT_TASK_RUN_AGENT_NAME` (the literal `task.run`
+/// falls back to when `agent_name` is omitted) resolves against the embedded
+/// roster via the SAME resolver the daemon uses (#3437's drift guard).
+///
+/// Why: #3437's root cause was exactly this pairing silently drifting apart —
+/// `task/protocol.rs` defaulted an omitted `agent_name` to `"pm"` while
+/// neither disk nor [`DEFAULT_AGENTS`] had a `pm` entry, so every
+/// daemon-default (including every GUI-initiated, agent-name-omitting) run
+/// failed agent resolution before a single turn executed. Referencing the
+/// shared [`crate::task::protocol::DEFAULT_TASK_RUN_AGENT_NAME`] const from
+/// both this test and the `task_run` call site (rather than two independent
+/// `"pm"` string literals, one here and one there) means a future rename of
+/// either side is a compile-time rename, not a silent divergence a test could
+/// miss.
+/// What: calls `crate::agents::resolve_agent` — the exact function
+/// `task::executor::run_and_record`'s `pm_config` resolution uses — with a
+/// nonexistent disk dir and `DEFAULT_TASK_RUN_AGENT_NAME`, and asserts it
+/// resolves `Ok` to an `AgentConfig` named `"pm"`.
+/// Test: this test.
+#[test]
+fn default_task_run_agent_resolves_against_default_agents() {
+    let cfg = crate::agents::resolve_agent(
+        std::path::Path::new("/nonexistent/agents/dir"),
+        crate::task::protocol::DEFAULT_TASK_RUN_AGENT_NAME,
+    )
+    .unwrap_or_else(|e| {
+        panic!(
+            "task.run's default agent_name '{}' must resolve against the embedded \
+             roster (disk-then-embedded, `agents::resolve_agent`) — it did not: {e}",
+            crate::task::protocol::DEFAULT_TASK_RUN_AGENT_NAME
+        )
+    });
+    assert_eq!(cfg.agent.name, "pm");
+}
+
+/// Every embedded default agent's resolved model slug (`agent.model`, when
+/// set) is either a real concrete provider slug already, or one of the three
+/// short Claude aliases (`opus`/`sonnet`/`haiku`) that
+/// `provider::routing::resolve_model` now normalizes to a concrete slug
+/// (#3438) — never a bare alias that would reach a provider unnormalized.
+///
+/// Why: #3438 traced `"API error 400: \"opus is not a valid model ID\""` to a
+/// roster agent's bare `model: sonnet`/`opus`/`haiku` frontmatter value (the
+/// `claude` CLI's own shorthand, composed for some roster agents from
+/// `resource_tier` via `trusty_agents_common::agents::builder::tier_to_model`)
+/// reaching `llm::client::OpenAiCompatClient`'s wire request unnormalized.
+/// The runtime fix (`provider::routing::normalize_model_alias`, applied
+/// inside `resolve_model`) makes every CALL SITE safe; this test is the
+/// static acceptance check that every embedded agent's declared model is
+/// something that fix actually knows how to handle — an agent with a model
+/// string that ISN'T one of the three known aliases and doesn't look like a
+/// real `vendor/model` slug would silently mean `normalize_model_alias`
+/// leaves an invalid string untouched.
+/// What: composes every [`DEFAULT_AGENTS`] entry (same dual-path projection
+/// as `default_agents_parse_and_names_match`), and for every agent whose
+/// `agent.model` is `Some`, asserts the value is one of the three known
+/// aliases OR contains a `/` (the `vendor/model` shape every real slug in
+/// this codebase uses — `anthropic/claude-sonnet-4-5`, `openai/gpt-4o-mini`,
+/// `bedrock/us.anthropic.claude-sonnet-4-6`, etc.). Also asserts the new
+/// `pm` agent specifically resolves through
+/// `provider::routing::resolve_model` to a valid concrete slug (not a bare
+/// alias) end-to-end, closing the loop #3438 asked for on the agent #3437
+/// adds.
+/// Test: this test.
+#[test]
+fn every_embedded_agent_model_normalizes_to_a_valid_slug() {
+    const KNOWN_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
+
+    for agent in DEFAULT_AGENTS {
+        let cfg = match agent {
+            EmbeddedAgent::Direct { name, md } => project_embedded_md(name, md),
+            EmbeddedAgent::Composed { name } => project_embedded_md_with_extends(name)
+                .unwrap_or_else(|e| panic!("roster agent '{name}' failed to compose: {e}")),
+        };
+        if let Some(model) = cfg.agent.model.as_deref() {
+            let is_known_alias = KNOWN_ALIASES.contains(&model.to_ascii_lowercase().as_str());
+            let looks_like_a_real_slug = model.contains('/');
+            assert!(
+                is_known_alias || looks_like_a_real_slug,
+                "embedded agent '{}' has model '{model}', which is neither a known \
+                 short alias ({KNOWN_ALIASES:?}) normalize_model_alias maps, nor a \
+                 vendor/model-shaped slug — it would reach a provider unnormalized",
+                agent.name()
+            );
+        }
+    }
+
+    // The new `pm` agent (#3437) specifically: its declared `model: sonnet`
+    // must resolve, end-to-end through `resolve_model`, to a concrete slug —
+    // not the bare alias — closing #3438 for the exact agent #3437 adds.
+    let pm_cfg = project_embedded_md("pm", PM_MD);
+    let resolved = crate::provider::resolve_model(&pm_cfg, None);
+    assert!(
+        resolved.contains('/'),
+        "pm agent's model must resolve to a concrete vendor/model slug, got '{resolved}'"
+    );
+    assert_ne!(
+        resolved, "sonnet",
+        "pm's model must not resolve to the bare alias"
+    );
 }
 
 /// Every embedded skill name is unique and non-empty.

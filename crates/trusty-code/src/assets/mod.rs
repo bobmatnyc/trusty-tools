@@ -9,12 +9,12 @@
 //! disk-based `.claude/agents/` and `.claude/skills/` always take precedence
 //! when present (see `agents::load_all_agents` and
 //! `skills::discover_skill_metadata`'s embedded-fallback branches).
-//! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the 31-agent dispatchable
-//! roster (Slice E3, #2958): tcode's own 3 defaults (`engineer`, `qa-agent`,
-//! `code-reviewer`, no `extends:` chain — projected via
-//! `agents::md_loader::project_embedded_md`) plus the 28 coding-relevant tm
-//! agents Bob selected in #2958 (`extends:`-chained through the 5 `BASE-*`
-//! templates — projected via
+//! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the 32-agent dispatchable
+//! roster (Slice E3, #2958, plus `pm` added for #3437): tcode's own 4
+//! defaults (`engineer`, `qa-agent`, `code-reviewer`, `pm`, no `extends:`
+//! chain — projected via `agents::md_loader::project_embedded_md`) plus the
+//! 28 coding-relevant tm agents Bob selected in #2958 (`extends:`-chained
+//! through the 5 `BASE-*` templates — projected via
 //! `agents::md_loader::project_embedded_md_with_extends`, which resolves
 //! against [`EMBEDDED_TM_AGENT_SOURCES`]). Authored as Markdown+frontmatter
 //! (`.md`) as of #2897 Slice C (previously native TOML; Slice D subsequently
@@ -161,24 +161,33 @@ pub struct EmbeddedSkill {
 const ENGINEER_MD: &str = include_str!("agents/engineer.md");
 const QA_AGENT_MD: &str = include_str!("agents/qa-agent.md");
 const CODE_REVIEWER_MD: &str = include_str!("agents/code-reviewer.md");
+const PM_MD: &str = include_str!("agents/pm.md");
 
-/// The 31-agent dispatchable default roster, embedded at compile time
-/// (Slice E3, #2958): tcode's original 3 defaults plus the 28
-/// coding-relevant tm roster agents. The 5 `BASE-*` extends templates in
-/// [`EMBEDDED_TM_AGENT_SOURCES`] are deliberately NOT entries here — they are
-/// extends-sources only, never dispatchable — and trusty-mpm's own
-/// `engineer` agent is excluded from the roster upstream (#2958's roster
-/// decision) precisely because it would collide with tcode's `engineer`
-/// below; `assets::tests::no_name_collisions_across_the_31_agent_roster`
-/// pins that no collision exists in the final table.
+/// The 32-agent dispatchable default roster, embedded at compile time
+/// (Slice E3, #2958, plus `pm` added for #3437): tcode's original 3
+/// defaults plus `pm` plus the 28 coding-relevant tm roster agents. The 5
+/// `BASE-*` extends templates in [`EMBEDDED_TM_AGENT_SOURCES`] are
+/// deliberately NOT entries here — they are extends-sources only, never
+/// dispatchable — and trusty-mpm's own `engineer` agent is excluded from the
+/// roster upstream (#2958's roster decision) precisely because it would
+/// collide with tcode's `engineer` below;
+/// `assets::tests::no_name_collisions_across_the_32_agent_roster` pins that
+/// no collision exists in the final table.
 ///
 /// Why: gives `agents::load_all_agents`'s embedded-fallback branch a fixed,
 /// ordered table to parse when the disk `.claude/agents/` directory is empty
-/// or absent.
+/// or absent. `pm` specifically fixes #3437: `task::protocol::task_run`
+/// defaults an omitted `agent_name` to the literal `"pm"`
+/// (`task/protocol.rs`), which resolved against NEITHER a disk
+/// `~/.claude/agents/pm.md` NOR this table before #3437 — so every
+/// daemon-default (including every GUI-initiated, agent-name-omitting) run
+/// failed agent resolution before a single turn executed.
 /// What: `engineer` (general implementation, full read/write tool set),
 /// `qa-agent` (verification — read/inspect/run only, no `write_file`/`edit`,
 /// hands bugs back to the engineer rather than fixing them), `code-reviewer`
-/// (adversarial, read-only review, no `bash`) — all three [`EmbeddedAgent::Direct`].
+/// (adversarial, read-only review, no `bash`), `pm` (orchestrator/default —
+/// delegates when `delegate_to_agent` is available, executes directly
+/// otherwise; see `assets/agents/pm.md`) — all four [`EmbeddedAgent::Direct`].
 /// Then the 28 [`EmbeddedAgent::Composed`] roster agents, alphabetical,
 /// matching [`EMBEDDED_TM_AGENT_SOURCES`]'s roster ordering. Four of them
 /// (`qa`, `code-critic`, `code-analyzer`, `web-qa`) carry a tcode-only
@@ -186,9 +195,11 @@ const CODE_REVIEWER_MD: &str = include_str!("agents/code-reviewer.md");
 /// "Tools-restriction deviation" doc section above.
 /// Test: `assets::tests::default_agents_parse_and_names_match`,
 /// `assets::tests::base_templates_are_never_dispatchable`,
-/// `assets::tests::no_name_collisions_across_the_31_agent_roster`,
+/// `assets::tests::no_name_collisions_across_the_32_agent_roster`,
 /// `assets::tests::restricted_reviewer_agents_carry_read_only_tools`,
-/// `assets::tests::documentation_and_research_remain_unrestricted`.
+/// `assets::tests::documentation_and_research_remain_unrestricted`,
+/// `assets::tests::default_task_run_agent_resolves_against_default_agents`,
+/// `assets::tests::every_embedded_agent_model_normalizes_to_a_valid_slug`.
 pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     EmbeddedAgent::Direct {
         name: "engineer",
@@ -201,6 +212,10 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     EmbeddedAgent::Direct {
         name: "code-reviewer",
         md: CODE_REVIEWER_MD,
+    },
+    EmbeddedAgent::Direct {
+        name: "pm",
+        md: PM_MD,
     },
     EmbeddedAgent::Composed { name: "api-qa" },
     EmbeddedAgent::Composed {

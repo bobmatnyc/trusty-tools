@@ -93,6 +93,39 @@ pub fn resolve_deadline_secs(cli_override: Option<u64>) -> u64 {
     DEFAULT_RUN_DEADLINE_SECS
 }
 
+/// Short Claude model aliases (`opus`/`sonnet`/`haiku`) mapped to a concrete,
+/// provider-valid OpenRouter slug (#3438).
+///
+/// Why: these three bare words are the `claude` CLI's own `--model` shorthand
+/// (see `trusty_agents_common::agents::builder::tier_to_model`, which composes
+/// them from an agent's `resource_tier`, and every embedded roster agent's
+/// `.md` frontmatter — e.g. `assets/agents/python-engineer.md`'s
+/// `model: sonnet`) — valid input for the `claude` subprocess trusty-agents
+/// spawns, but NOT a real OpenRouter/Anthropic-API model id. trusty-code talks
+/// to providers directly (`llm::client::OpenAiCompatClient`), so a bare alias
+/// reaching the wire produces `API error 400: "opus is not a valid model ID"`
+/// verbatim — the exact failure #3438 traced. [`resolve_model`] is the single
+/// funnel every call site resolves its final slug through
+/// (`runner::in_process::InProcessAgentRunner::run_pipeline`,
+/// `task::executor`, `run_task::execute_run_task`), so normalising here fixes
+/// every path at once rather than patching each `.md` file or call site
+/// individually.
+/// What: Case-insensitive exact match on the trimmed slug; anything else
+/// (an already-concrete slug, a routed `bedrock/`/`fireworks/`/etc. prefix, an
+/// unrecognised alias) passes through unchanged — [`resolve_model`] never
+/// errors on an unmapped model, it just doesn't rewrite it.
+/// Test: `routing::tests::normalize_model_alias_maps_short_aliases`,
+/// `routing::tests::normalize_model_alias_passes_through_concrete_slugs`,
+/// `assets::tests::every_embedded_agent_model_normalizes_to_a_valid_slug`.
+fn normalize_model_alias(model: &str) -> &str {
+    match model.trim().to_ascii_lowercase().as_str() {
+        "opus" => "anthropic/claude-opus-4.5",
+        "sonnet" => "anthropic/claude-sonnet-4.5",
+        "haiku" => "anthropic/claude-haiku-4.5",
+        _ => model,
+    }
+}
+
 /// Resolve the model slug for an invocation.
 ///
 /// Why: Centralises the precedence so per-call overrides, per-agent config, and
@@ -101,24 +134,28 @@ pub fn resolve_deadline_secs(cli_override: Option<u64>) -> u64 {
 /// (1) `run_context.model` (per-call override),
 /// (2) `agent_config.agent.model`,
 /// (3) `agent_config.llm.model_override`,
-/// else (4) [`DEFAULT_MODEL`].
-/// Test: `routing::tests::resolve_model_*` cover every tier.
+/// else (4) [`DEFAULT_MODEL`] — each candidate passed through
+/// [`normalize_model_alias`] (#3438) so a bare `opus`/`sonnet`/`haiku` alias
+/// never reaches a provider as-is.
+/// Test: `routing::tests::resolve_model_*` cover every tier;
+/// `routing::tests::resolve_model_normalizes_short_alias_from_agent_config`
+/// and `resolve_model_normalizes_short_alias_from_run_context` cover #3438.
 pub fn resolve_model(agent_config: &AgentConfig, run_context: Option<&RunContext>) -> String {
     // 1. Per-call override wins.
     if let Some(ctx) = run_context
         && let Some(model) = non_empty(ctx.model.as_deref())
     {
-        return model.to_string();
+        return normalize_model_alias(model).to_string();
     }
 
     // 2. Agent-level model.
     if let Some(model) = non_empty(agent_config.agent.model.as_deref()) {
-        return model.to_string();
+        return normalize_model_alias(model).to_string();
     }
 
     // 3. `[llm].model_override` (lower precedence than `[agent].model`).
     if let Some(model) = non_empty(agent_config.llm.model_override.as_deref()) {
-        return model.to_string();
+        return normalize_model_alias(model).to_string();
     }
 
     // 4. Built-in default.
@@ -290,6 +327,94 @@ mod tests {
     fn resolve_model_falls_back_to_default() {
         let config = cfg(None, None);
         assert_eq!(resolve_model(&config, None), DEFAULT_MODEL);
+    }
+
+    // ── #3438: short-alias normalization ────────────────────────────────────
+
+    /// `normalize_model_alias` maps all three short Claude aliases to a
+    /// concrete OpenRouter slug, case-insensitively and trimmed.
+    ///
+    /// Why: `opus`/`sonnet`/`haiku` are the `claude` CLI's own shorthand
+    /// (`trusty_agents_common::agents::builder::tier_to_model`'s output and
+    /// every composed roster agent's `.md` `model:` field), not valid
+    /// OpenRouter/API model ids — this is the exact substitution that fixes
+    /// the `"opus is not a valid model ID"` 400 (#3438).
+    /// What: Each of the three aliases, plus an uppercase/padded variant,
+    /// resolves to its mapped concrete slug.
+    /// Test: this test.
+    #[test]
+    fn normalize_model_alias_maps_short_aliases() {
+        assert_eq!(normalize_model_alias("opus"), "anthropic/claude-opus-4.5");
+        assert_eq!(
+            normalize_model_alias("sonnet"),
+            "anthropic/claude-sonnet-4.5"
+        );
+        assert_eq!(normalize_model_alias("haiku"), "anthropic/claude-haiku-4.5");
+        assert_eq!(
+            normalize_model_alias("  Opus  "),
+            "anthropic/claude-opus-4.5",
+            "must be case-insensitive and trim surrounding whitespace"
+        );
+    }
+
+    /// An already-concrete slug (or any string that isn't one of the three
+    /// bare aliases) passes through [`normalize_model_alias`] unchanged.
+    ///
+    /// Why: The normalizer must not mangle a valid `vendor/model` slug, a
+    /// routed `bedrock/`/`fireworks/`/`together/`/`atlascloud/` prefix, or an
+    /// unrecognised model string — it only rewrites the three known aliases.
+    /// What: A realistic OpenRouter slug and an arbitrary unknown string both
+    /// round-trip unchanged.
+    /// Test: this test.
+    #[test]
+    fn normalize_model_alias_passes_through_concrete_slugs() {
+        assert_eq!(
+            normalize_model_alias("anthropic/claude-sonnet-4-5"),
+            "anthropic/claude-sonnet-4-5"
+        );
+        assert_eq!(
+            normalize_model_alias("bedrock/us.anthropic.claude-opus-4-6"),
+            "bedrock/us.anthropic.claude-opus-4-6"
+        );
+        assert_eq!(
+            normalize_model_alias("some-vendor/unheard-of-model"),
+            "some-vendor/unheard-of-model"
+        );
+    }
+
+    /// [`resolve_model`] normalizes a bare alias sourced from `[agent].model`
+    /// (the tier-composed or `.md`-frontmatter case #3438 actually hit).
+    ///
+    /// Why: Regression guard at the public `resolve_model` seam, not just the
+    /// private helper — this is what every real call site invokes.
+    /// What: `agent.model = "opus"` resolves to the concrete slug, not the
+    /// bare alias.
+    /// Test: this test.
+    #[test]
+    fn resolve_model_normalizes_short_alias_from_agent_config() {
+        let config = cfg(Some("opus"), None);
+        assert_eq!(resolve_model(&config, None), "anthropic/claude-opus-4.5");
+    }
+
+    /// [`resolve_model`] normalizes a bare alias sourced from a per-call
+    /// `RunContext.model` override too.
+    ///
+    /// Why: The highest-precedence tier must not bypass normalization — a
+    /// caller pinning `RunContext.model = "sonnet"` must still reach the
+    /// provider with a valid concrete id.
+    /// What: `RunContext.model = "sonnet"` resolves to the concrete slug.
+    /// Test: this test.
+    #[test]
+    fn resolve_model_normalizes_short_alias_from_run_context() {
+        let config = cfg(Some("anthropic/claude-haiku-4-5"), None);
+        let ctx = RunContext {
+            model: Some("sonnet".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_model(&config, Some(&ctx)),
+            "anthropic/claude-sonnet-4.5"
+        );
     }
 
     /// Empty / whitespace strings are treated as absent at each tier.

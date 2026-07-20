@@ -10,6 +10,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Every daemon-default task run (including every GUI-initiated run) failed
+  instantly with "unknown agent 'pm'" (closes #3437).** `task.run` defaults an
+  omitted `agent_name` to the literal `"pm"`, but no embedded `pm` agent
+  existed in `assets::DEFAULT_AGENTS` and no disk `~/.claude/agents/pm.md`
+  existed either — 100% of daemon-default runs failed agent resolution before
+  a single turn executed. Added an embedded `pm` orchestrator/default agent
+  (`assets/agents/pm.md`, tcode's 4th self-contained default alongside
+  `engineer`/`qa-agent`/`code-reviewer`) plus a drift guard
+  (`task::protocol::DEFAULT_TASK_RUN_AGENT_NAME`, referenced from both the
+  `task.run` default and a dedicated test) so the default literal can never
+  again point at a name the embedded roster doesn't carry.
+- **LLM calls failed with `API error 400: "opus is not a valid model ID"` on
+  daemon task runs (closes #3438).** Several embedded agents' `.md`
+  frontmatter (and any `resource_tier`-composed agent) declares its model as
+  a bare Claude CLI alias (`opus`/`sonnet`/`haiku`) rather than a concrete
+  provider slug; `provider::routing::resolve_model` — the single function
+  every call site resolves its final model slug through — now normalizes
+  these three known aliases to a concrete OpenRouter slug
+  (`provider::routing::normalize_model_alias`) before returning, so no bare
+  alias ever reaches a provider unnormalized regardless of which tier
+  (`RunContext` override, `[agent].model`, `[llm].model_override`) it came
+  from.
 - **`serve::DEFAULT_HTTP_PORT` moved from 7881 to 7882 (closes #3364).** The
   old default silently collided with `trusty-mpm`'s supervisor metrics
   listener (`DEFAULT_METRICS_ADDR`, also 7881) — the supervisor's generic
