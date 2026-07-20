@@ -83,6 +83,108 @@ fn repl_app_picker_esc_dismisses() {
     assert!(a.pending_picker_selection.is_none());
 }
 
+/// Why (#3403): `handle_picker_key` only understands Up/Down/Enter/Esc; every
+/// other key used to hit its `_ => {}` catch-all and vanish with zero effect
+/// — the `/model`/`/provider` sibling of the #3325 `app.choices` swallow bug.
+/// This test drives the picker through `handle_key` (the real dispatch entry
+/// point, not `handle_picker_key` directly) so it exercises the dismiss-and-
+/// fall-through routing added in `handle_key`. Against the pre-fix code
+/// (`handle_key` unconditionally returning `handle_picker_key(app, key)`
+/// whenever `app.picker.is_some()`), this fails: the picker stays `Some` and
+/// `input_buf` stays empty.
+/// What: Open a `/model` picker, send a printable `Char('x')` via
+/// `handle_key`, assert the picker is dismissed AND `'x'` landed in
+/// `input_buf` — the keystroke was neither swallowed nor discarded.
+/// Test: `repl_app_picker_printable_key_dismisses_and_inserts` (this test).
+#[test]
+fn repl_app_picker_printable_key_dismisses_and_inserts() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    a.picker = Some(PickerState {
+        items: vec!["anthropic/claude-haiku-4-5".into()],
+        selected: 0,
+        title: "Select Model".into(),
+        kind: PickerKind::Model,
+    });
+    let submitted = handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+    );
+    assert!(
+        submitted.is_none(),
+        "a single char must not submit the line"
+    );
+    assert!(
+        a.picker.is_none(),
+        "a printable key must dismiss the picker, not leave it capturing input"
+    );
+    assert_eq!(
+        a.input_buf, "x",
+        "the keystroke that dismissed the picker must land in input_buf, not vanish"
+    );
+}
+
+/// Why (#3403): Backspace is another non-nav key the old `_ => {}` catch-all
+/// swallowed. Confirms the dismiss-and-fall-through path also covers editing
+/// keys, not just `Char`.
+/// What: Open a picker with pre-populated `input_buf`, send Backspace,
+/// assert the picker is dismissed and the last character was removed (i.e.
+/// Backspace reached the normal input editor instead of being eaten).
+/// Test: `repl_app_picker_backspace_dismisses_and_edits` (this test).
+#[test]
+fn repl_app_picker_backspace_dismisses_and_edits() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    a.set_input("hi".into());
+    a.picker = Some(PickerState {
+        items: vec!["anthropic/claude-haiku-4-5".into()],
+        selected: 0,
+        title: "Select Model".into(),
+        kind: PickerKind::Model,
+    });
+    handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+    );
+    assert!(a.picker.is_none(), "Backspace must dismiss the picker");
+    assert_eq!(
+        a.input_buf, "h",
+        "Backspace must reach the input editor, not be swallowed"
+    );
+}
+
+/// Why (#3403 regression guard): Up/Down/Enter/Esc must keep navigating the
+/// `/model`/`/provider` picker exactly as before through `handle_key` (not
+/// just `handle_picker_key` directly, which the pre-existing tests already
+/// cover) — the fix must not regress the working navigation path while
+/// closing the printable-key swallow hole.
+/// What: Drive a 2-item picker through `handle_key` with Down then Enter,
+/// assert the pending selection is set and the picker is closed.
+/// Test: `repl_app_picker_nav_keys_still_work_via_handle_key` (this test).
+#[test]
+fn repl_app_picker_nav_keys_still_work_via_handle_key() {
+    let mut a = ReplApp::new("ctrl".into(), "u".into());
+    a.picker = Some(PickerState {
+        items: vec![
+            "anthropic/claude-haiku-4-5".into(),
+            "anthropic/claude-sonnet-4-6".into(),
+        ],
+        selected: 0,
+        title: "Select Model".into(),
+        kind: PickerKind::Model,
+    });
+    handle_key(&mut a, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        a.picker.as_ref().unwrap().selected,
+        1,
+        "Down must still navigate the picker via handle_key"
+    );
+    handle_key(&mut a, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(a.picker.is_none());
+    assert_eq!(
+        a.pending_picker_selection,
+        Some((PickerKind::Model, "anthropic/claude-sonnet-4-6".into()))
+    );
+}
+
 /// Why bug fix (#switch-popup): `/switch` (no arg) populates the inline
 /// flat-list picker with `choices_context = Some("switch")`. Pressing
 /// Enter on a selection must NOT insert the persona name into the input
@@ -294,13 +396,18 @@ fn slash_completions_does_not_stomp_context_picker() {
     assert_eq!(a.input_buf, "x", "the typed char must land in the editor");
 }
 
-/// Why: When the picker is open, ALL keys must be intercepted — typing a
-/// regular character must NOT leak through to the input editor.
-/// What: With picker open, sending KeyCode::Char('x') leaves input_buf
-/// empty. With picker closed, the same key inserts into the buffer.
+/// Why (#3403 — supersedes the original "modal swallows all keys" pin):
+/// This test used to assert the picker modal swallowed every non-nav key
+/// with zero effect, which is exactly the bug reported live and tracked as
+/// #3403 (the `app.picker` sibling of #3325's `app.choices` swallow). The
+/// modal now only intercepts Up/Down/Enter/Esc; a printable char dismisses
+/// it and lands in the input editor, same as when no picker is open.
+/// What: With picker open, sending `KeyCode::Char('x')` dismisses the picker
+/// AND inserts `'x'` into `input_buf`. With picker closed, the same key
+/// still inserts into the buffer (unchanged baseline).
 /// Test: Two parallel cases.
 #[test]
-fn handle_key_modal_gates_input_editor() {
+fn handle_key_modal_dismisses_and_inserts_on_char() {
     let mut a = ReplApp::new("ctrl".into(), "u".into());
     a.picker = Some(PickerState {
         items: vec!["x".into()],
@@ -313,10 +420,15 @@ fn handle_key_modal_gates_input_editor() {
         KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
     );
     assert_eq!(r, None);
-    assert!(a.input_buf.is_empty(), "modal must swallow chars");
+    assert!(a.picker.is_none(), "a printable key must dismiss the modal");
+    assert_eq!(
+        a.input_buf, "x",
+        "the keystroke that dismissed the modal must land in input_buf"
+    );
 
-    // Close picker → same key inserts.
-    a.picker = None;
+    // Picker already closed → same key still inserts (baseline unchanged).
+    a.input_buf.clear();
+    a.cursor_pos = 0;
     handle_key(
         &mut a,
         KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),

@@ -139,9 +139,11 @@ pub struct ReplApp {
     pub session_start: std::time::Instant,
     /// Active picker overlay (model/provider). `None` when no picker is open.
     ///
-    /// Why: When `Some`, `handle_key` routes ALL key events to the picker
+    /// Why: When `Some`, `handle_key` routes Up/Down/Enter/Esc to the picker
     /// modal handler so navigation/dismiss don't accidentally edit the input
-    /// buffer underneath.
+    /// buffer underneath. Any other key dismisses the picker and falls
+    /// through to normal input editing (#3403) rather than being silently
+    /// swallowed.
     /// What: Carries items, selection index, title, and kind.
     /// Test: `repl_app_picker_*`.
     pub picker: Option<PickerState>,
