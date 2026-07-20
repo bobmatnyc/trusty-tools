@@ -105,6 +105,8 @@ pub enum ExtractError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{path} is {size} bytes, over the {cap} byte office-document cap")]
+    TooLarge { path: String, size: u64, cap: u64 },
     #[error("pdf extraction failed: {0}")]
     Pdf(String),
     #[error("docx extraction failed: {0}")]
@@ -128,11 +130,19 @@ pub struct Extracted {
 /// Extract text from `path` based on its extension.
 ///
 /// Why: the single entry point both the reindex/ingest batch reader and the
-/// watcher call instead of `read_to_string` for [`EXTRACT_EXTS`] files.
+/// watcher call instead of `read_to_string` for [`EXTRACT_EXTS`] files. The
+/// [`MAX_OFFICE_FILE_BYTES`] check here is deliberately redundant with the
+/// walker's `should_skip_path` size gate (issue #3367): the walker is the
+/// primary defense for the ingest/watch paths, but this function is a public
+/// library entry point any future caller could reach directly, and a
+/// malformed/oversized document handed straight to a vulnerable parser is
+/// exactly the DoS blast radius this cap exists to bound — the extraction
+/// module must not depend on every caller remembering to gate it upstream.
 /// What: dispatches to the per-format submodule, then enforces
 /// [`MAX_EXTRACTED_TEXT_BYTES`] on the result.
 /// Test: `test_dispatch_unsupported_extension_errors`,
-/// `test_extract_text_truncates_oversized_output`, plus each submodule's own
+/// `test_extract_text_truncates_oversized_output`,
+/// `test_extract_text_rejects_oversized_input`, plus each submodule's own
 /// tests for format-specific correctness.
 pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
     let ext = path
@@ -140,6 +150,24 @@ pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+    if !is_extractable_ext(&ext) {
+        return Err(ExtractError::UnsupportedExtension(ext));
+    }
+
+    let size = std::fs::metadata(path)
+        .map_err(|source| ExtractError::Io {
+            path: path.display().to_string(),
+            source,
+        })?
+        .len();
+    if size > MAX_OFFICE_FILE_BYTES {
+        return Err(ExtractError::TooLarge {
+            path: path.display().to_string(),
+            size,
+            cap: MAX_OFFICE_FILE_BYTES,
+        });
+    }
+
     let mut extracted = match ext.as_str() {
         "pdf" => pdf::extract(path)?,
         "docx" => docx::extract(path)?,
@@ -289,6 +317,24 @@ mod tests {
         assert!(
             extracted.text.starts_with("xxx"),
             "truncation must keep the leading content"
+        );
+    }
+
+    #[test]
+    fn test_extract_text_rejects_oversized_input() {
+        // Defense in depth (issue #3367): extract_text must reject an
+        // over-cap file itself, not merely rely on the walker's
+        // should_skip_path gate — a future caller could reach this function
+        // without going through the walker at all.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("huge.pdf");
+        let oversized = vec![0u8; (MAX_OFFICE_FILE_BYTES + 1) as usize];
+        std::fs::write(&path, &oversized).unwrap();
+
+        let err = extract_text(&path).expect_err("oversized input must be rejected");
+        assert!(
+            matches!(err, ExtractError::TooLarge { cap, .. } if cap == MAX_OFFICE_FILE_BYTES),
+            "expected TooLarge error, got: {err}"
         );
     }
 

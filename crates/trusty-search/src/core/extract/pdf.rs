@@ -171,6 +171,71 @@ mod tests {
         );
     }
 
+    /// Regression test for RUSTSEC-2026-0187 (issue #3367): a PDF page object
+    /// carrying a pathologically deeply nested array used to send lopdf's
+    /// recursive-descent object parser into a stack overflow (an
+    /// uncatchable process abort, not a normal panic). lopdf 0.42+ enforces
+    /// `MAX_NESTING_DEPTH = 100` and fails the parse cleanly instead. This
+    /// test does not assert the specific Ok/Err outcome — a pre-patch lopdf
+    /// would abort the whole test process rather than return any Result at
+    /// all, so simply completing and returning is the regression signal.
+    /// Runs on a background thread with a bounded join so a reintroduced
+    /// unbounded-recursion regression fails the test instead of hanging CI.
+    #[test]
+    fn test_deeply_nested_pdf_objects_rejected_cleanly() {
+        let depth = 5_000;
+        let nested_array: String = "[".repeat(depth) + &"]".repeat(depth);
+
+        let mut buf: Vec<u8> = Vec::new();
+        let mut offsets: Vec<usize> = Vec::with_capacity(4);
+        buf.extend_from_slice(b"%PDF-1.4\n");
+        offsets.push(buf.len());
+        buf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets.push(buf.len());
+        buf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        offsets.push(buf.len());
+        buf.extend_from_slice(
+            format!(
+                "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] \
+                  /Contents 4 0 R /Deep {nested_array} >>\nendobj\n"
+            )
+            .as_bytes(),
+        );
+        offsets.push(buf.len());
+        buf.extend_from_slice(b"4 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\n");
+
+        let xref_start = buf.len();
+        let mut xref = String::from("xref\n0 5\n0000000000 65535 f \n");
+        for off in &offsets {
+            xref.push_str(&format!("{off:010} 00000 n \n"));
+        }
+        buf.extend_from_slice(xref.as_bytes());
+        write!(
+            buf,
+            "trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF"
+        )
+        .unwrap();
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("deep.pdf");
+        std::fs::write(&path, &buf).unwrap();
+
+        // Bounded join: a regression to unbounded recursion would hang or
+        // abort the process rather than merely take long, so a generous
+        // wall-clock bound is enough to turn "the fix regressed" into a
+        // deterministic test failure rather than a stuck CI job.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = extract(&path);
+            let _ = tx.send(result.is_ok());
+        });
+        let completed = rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(
+            completed.is_ok(),
+            "deeply nested PDF object parsing must complete (Ok or Err), not hang"
+        );
+    }
+
     #[test]
     fn test_corrupt_pdf_errors() {
         let tmp = tempfile::tempdir().expect("tempdir");

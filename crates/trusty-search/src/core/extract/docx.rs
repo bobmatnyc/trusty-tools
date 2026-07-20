@@ -122,10 +122,14 @@ fn paragraphs_from_document_xml(xml: &str) -> Result<String, ExtractError> {
             Ok(Event::Start(e)) if e.local_name().as_ref() == b"t" => in_text = true,
             Ok(Event::End(e)) if e.local_name().as_ref() == b"t" => in_text = false,
             Ok(Event::Text(t)) if in_text => {
-                para.push_str(
-                    &t.unescape()
-                        .map_err(|e| ExtractError::Docx(e.to_string()))?,
-                );
+                // quick-xml 0.41 removed `BytesText::unescape()` (dependency
+                // bump for RUSTSEC-2026-0194/0195, issue #3367): decode the
+                // raw bytes first, then unescape XML entities via the
+                // free-function equivalent.
+                let decoded = t.decode().map_err(|e| ExtractError::Docx(e.to_string()))?;
+                let unescaped = quick_xml::escape::unescape(&decoded)
+                    .map_err(|e| ExtractError::Docx(e.to_string()))?;
+                para.push_str(&unescaped);
             }
             Ok(Event::End(e)) if e.local_name().as_ref() == b"p" => {
                 out.push_str(para.trim_end());
@@ -261,6 +265,32 @@ mod tests {
         assert!(
             result.is_err(),
             "a zip without word/document.xml must error"
+        );
+    }
+
+    /// Regression test for RUSTSEC-2026-0194 (issue #3367): pre-patch
+    /// quick-xml checked start-tag attributes for duplicate names in
+    /// quadratic time, so a tag with a large number of attributes (duplicate
+    /// or not) could pin CPU well within the existing size caps. Bounded
+    /// join turns a reintroduced quadratic-time regression into a
+    /// deterministic test failure instead of a slow/hung CI job.
+    #[test]
+    fn test_pathological_attribute_count_does_not_hang() {
+        let n = 20_000;
+        let attrs: String = (0..n).map(|i| format!(r#" a{i}="v""#)).collect();
+        let xml = format!(
+            r#"<w:document {NS}><w:body><w:p><w:r><w:t{attrs}>hi</w:t></w:r></w:p></w:body></w:document>"#
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = paragraphs_from_document_xml(&xml);
+            let _ = tx.send(result.is_ok());
+        });
+        let completed = rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(
+            completed.is_ok(),
+            "a tag with many attributes must parse (Ok or Err) in bounded time, not hang"
         );
     }
 

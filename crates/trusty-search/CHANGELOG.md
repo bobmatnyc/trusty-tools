@@ -9,6 +9,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **Document-extraction DoS advisories fixed** ([#3367](https://github.com/bobmatnyc/trusty-tools/issues/3367)):
+  bumped `pdf-extract` 0.9 → 0.12 and `calamine` 0.26 → 0.36 (both now pull
+  patched `lopdf` ≥0.42 / `quick-xml` ≥0.41) to close RUSTSEC-2026-0187
+  (`lopdf` stack-overflow DoS via deeply nested PDF objects, CVSS 7.5) and
+  RUSTSEC-2026-0194/0195 (`quick-xml` DoS, CVSS 7.5 each), reachable via the
+  default-on native pdf/docx/xlsx text extraction added in #2932. Also adds a
+  self-defending file-size cap directly in `core::extract::extract_text`
+  (independent of the walker's existing gate) and regression tests covering
+  pathological deeply-nested/high-attribute-count inputs for all three
+  formats.
 - **Router-wide same-origin (CSRF) write guard** ([#3304](https://github.com/bobmatnyc/trusty-tools/issues/3304)):
   destructive write routes (`POST /admin/stop`, `POST /indexes`,
   `DELETE /indexes/{id}`, `POST /upgrade`, reindex) are now guarded against

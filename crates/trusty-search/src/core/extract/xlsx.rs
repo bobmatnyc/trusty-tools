@@ -213,6 +213,60 @@ mod tests {
         assert!(rev_pos < costs_pos);
     }
 
+    /// Regression test for RUSTSEC-2026-0194/0195 (issue #3367): calamine
+    /// parses sheet XML with quick-xml internally. A cell element carrying a
+    /// pathologically large number of attributes used to be quadratic-time
+    /// (0194) / unbounded-allocation (0195) in the vulnerable quick-xml
+    /// versions. Bounded join turns a reintroduced hang into a deterministic
+    /// test failure instead of a stuck CI job; the result is not asserted
+    /// Ok/Err since either is an acceptable "handled cleanly" outcome.
+    #[test]
+    fn test_pathological_cell_attribute_count_does_not_hang() {
+        let n = 20_000;
+        let attrs: String = (0..n).map(|i| format!(r#" a{i}="v""#)).collect();
+        let sheet_xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"{attrs}><is><t>x</t></is></c></row></sheetData></worksheet>"#
+        );
+
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut zip = zip::ZipWriter::new(cursor);
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#;
+            let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+            let workbook_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+            let workbook_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+
+            zip.start_file("[Content_Types].xml", opts).unwrap();
+            zip.write_all(content_types.as_bytes()).unwrap();
+            zip.start_file("_rels/.rels", opts).unwrap();
+            zip.write_all(root_rels.as_bytes()).unwrap();
+            zip.start_file("xl/workbook.xml", opts).unwrap();
+            zip.write_all(workbook_xml.as_bytes()).unwrap();
+            zip.start_file("xl/_rels/workbook.xml.rels", opts).unwrap();
+            zip.write_all(workbook_rels.as_bytes()).unwrap();
+            zip.start_file("xl/worksheets/sheet1.xml", opts).unwrap();
+            zip.write_all(sheet_xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("pathological.xlsx");
+        std::fs::write(&path, buf).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = extract(&path);
+            let _ = tx.send(result.is_ok());
+        });
+        let completed = rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(
+            completed.is_ok(),
+            "a cell with many attributes must parse (Ok or Err) in bounded time, not hang"
+        );
+    }
+
     #[test]
     fn test_not_a_workbook_errors() {
         let tmp = tempfile::tempdir().expect("tempdir");
