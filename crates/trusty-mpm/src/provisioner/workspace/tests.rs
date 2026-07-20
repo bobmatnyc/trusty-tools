@@ -38,7 +38,7 @@ fn repo_slug_extraction() {
 
 #[test]
 fn provisioner_isolation_path() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -56,7 +56,7 @@ fn provisioner_isolation_path() {
 fn provisioner_path_not_in_existing_project() {
     // The workspace must NOT be inside any real project dir.
     // We simulate this by checking the path is inside workspace_root (a tempdir).
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -72,7 +72,7 @@ fn provisioner_path_not_in_existing_project() {
 
 #[test]
 fn provisioner_uses_session_id_subdir() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -90,7 +90,7 @@ fn provision_in_uses_explicit_project_dir() {
     // The #1220 path: caller supplies a pre-resolved `<owner>/<repo>` project
     // dir. #1935: the session worktree nests under the project dir's shared
     // `.base/.worktrees/<session-id>/`, not directly under the project dir.
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
     let project_dir = root.path().join("bobmatnyc").join("trusty-tools");
@@ -132,7 +132,7 @@ fn provision_in_uses_explicit_project_dir() {
 /// Test: this function IS the test.
 #[test]
 fn provision_reuses_base_checkout_across_sessions() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let prov = make_provisioner(&root);
     let project_dir = root.path().join("owner").join("repo");
 
@@ -171,7 +171,7 @@ fn provision_reuses_base_checkout_across_sessions() {
 
 #[test]
 fn provisioner_records_repo_url_and_branch() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -206,7 +206,7 @@ fn provisioner_records_repo_url_and_branch() {
 /// Test: this is the test.
 #[test]
 fn blank_git_ref_omits_branch_flag() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     // Use FakeGitBackend via make_provisioner so we can read its call log.
     // make_provisioner returns a provisioner whose backend is a FakeGitBackend
     // but we cannot access it post-move. We build explicitly here so we can
@@ -243,7 +243,7 @@ fn blank_git_ref_omits_branch_flag() {
 /// Test: this is the test.
 #[test]
 fn provision_writes_task_md() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
     let task = "Fix the authentication bug in the login flow";
@@ -267,7 +267,7 @@ fn provision_writes_task_md() {
 /// Test: this is the test.
 #[test]
 fn provision_skips_task_md_when_empty() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -370,14 +370,14 @@ fn make_local_bare_origin(scratch: &TempDir) -> Option<PathBuf> {
 /// Test: this function IS the test.
 #[test]
 fn ensure_base_checkout_recovers_from_concurrent_race() {
-    let scratch = TempDir::new().unwrap();
+    let scratch = crate::test_support::hermetic_temp_dir();
     let Some(bare_origin) = make_local_bare_origin(&scratch) else {
         eprintln!("ensure_base_checkout_recovers_from_concurrent_race: git unavailable, skipping");
         return;
     };
     let repo_url = format!("file://{}", bare_origin.display());
 
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let base_dir = root.path().join("project").join(".base");
 
     let handles: Vec<_> = (0..4)
@@ -431,7 +431,7 @@ fn ensure_base_checkout_recovers_from_concurrent_race() {
 /// Test: this function IS the test.
 #[test]
 fn ensure_base_checkout_rejects_stale_non_bare_directory() {
-    let scratch = TempDir::new().unwrap();
+    let scratch = crate::test_support::hermetic_temp_dir();
     let Some(bare_origin) = make_local_bare_origin(&scratch) else {
         eprintln!(
             "ensure_base_checkout_rejects_stale_non_bare_directory: git unavailable, skipping"
@@ -440,7 +440,7 @@ fn ensure_base_checkout_rejects_stale_non_bare_directory() {
     };
     let repo_url = format!("file://{}", bare_origin.display());
 
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let base_dir = root.path().join("project").join(".base");
     std::fs::create_dir_all(&base_dir).unwrap();
     std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
@@ -491,7 +491,7 @@ fn ensure_base_checkout_rejects_stale_non_bare_directory() {
 /// Test: this function IS the test.
 #[test]
 fn fake_ensure_base_checkout_rejects_stale_non_bare_directory() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let base_dir = root.path().join("project").join(".base");
     std::fs::create_dir_all(&base_dir).unwrap();
     // A lone HEAD file with no `config bare = true` marker is the fake's
@@ -524,7 +524,7 @@ fn fake_ensure_base_checkout_rejects_stale_non_bare_directory() {
 /// Test: this function IS the test.
 #[test]
 fn fake_ensure_base_checkout_is_idempotent_on_valid_base() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let base_dir = root.path().join("project").join(".base");
     let fake = FakeGitBackend::new();
 
@@ -561,7 +561,7 @@ fn fake_ensure_base_checkout_is_idempotent_on_valid_base() {
 /// Test: this function IS the test.
 #[test]
 fn base_checkout_lock_recovers_stale_lock_marker() {
-    let root = TempDir::new().unwrap();
+    let root = crate::test_support::hermetic_temp_dir();
     let lock_path = root.path().join(".base.lock");
     std::fs::write(&lock_path, b"").unwrap();
 

@@ -11,8 +11,6 @@
 //! metadata, and branch ref are all gone.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
-use tempfile::TempDir;
-
 use super::decommission::WORKTREE_SENTINEL_FILE;
 use super::manager::SessionManager;
 use super::record::{ManagedSessionId, ManagedSessionState};
@@ -41,14 +39,14 @@ use super::tests::FakeTmuxDriver;
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_decommission_removes_real_git_worktree() {
-    let dir = TempDir::new().unwrap();
+    let dir = crate::test_support::hermetic_temp_dir();
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(dir.path(), fake)
         .await
         .expect("manager");
 
     // ── Real git base clone: init + one empty commit (needed for `worktree add`) ──
-    let base_dir = TempDir::new().unwrap();
+    let base_dir = crate::test_support::hermetic_temp_dir();
     let base = base_dir.path().to_path_buf();
     let git_init_ok = std::process::Command::new("git")
         .arg("init")
@@ -138,7 +136,7 @@ async fn manager_decommission_removes_real_git_worktree() {
 
     // The managed root is irrelevant for the unowned/worktree branch, but the
     // API requires one — point it at an unrelated temp dir.
-    let managed_root = TempDir::new().unwrap();
+    let managed_root = crate::test_support::hermetic_temp_dir();
     let (tombstone, workspace_removed) = mgr
         .decommission_with_root(&record.id, managed_root.path())
         .await

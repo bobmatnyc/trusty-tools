@@ -134,6 +134,26 @@ fn leaf_dirs(root: &Path, depth: usize) -> Vec<PathBuf> {
     frontier
 }
 
+/// Return true if `path` carries the `.trusty-mpm-worktree` sentinel marker.
+///
+/// Why: #3382's aggravator — this scanner walks the new root at a fixed depth
+/// with no content validation, so any directory that happens to match the
+/// `<owner>/<repo>/<id>` shape (e.g. a leaked mktemp test scaffold with the
+/// same nesting — the observed litter, `<tmp>/origin/.base`, matches it
+/// exactly) would read as a "discovered workspace" if this scanner is ever
+/// wired to a caller. Requiring the sentinel closes that gap: it is written
+/// by `WorkspaceProvisioner` at the root of every SM-created workspace (see
+/// `provisioner::workspace::finalize_worktree` /
+/// `session_manager::decommission::WORKTREE_SENTINEL_FILE`), so a directory
+/// missing it was never provisioned by trusty-mpm regardless of how closely
+/// its shape matches.
+/// What: `path.join(WORKTREE_SENTINEL_FILE).is_file()`.
+/// Test: `new_root_leaf_without_marker_is_excluded`.
+fn has_worktree_marker(path: &Path) -> bool {
+    path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE)
+        .is_file()
+}
+
 /// Scan BOTH workspace roots and return the union of discovered workspaces.
 ///
 /// Why: the heart of AC5 — guarantee that sessions under the OLD
@@ -143,9 +163,14 @@ fn leaf_dirs(root: &Path, depth: usize) -> Vec<PathBuf> {
 /// What: resolves both roots via [`discovered_roots`], walks the old root at the
 /// `<project>/<id>` depth (2) and the new root at the `<owner>/<repo>/<id>` depth
 /// (3), tags each discovered leaf with its [`WorkspaceEra`], and returns the
-/// combined list. Missing roots contribute nothing (no error). Read-only.
+/// combined list. New-root leaves are additionally required to carry the
+/// `.trusty-mpm-worktree` sentinel (see [`has_worktree_marker`], #3382) before
+/// being reported — old-root leaves are NOT marker-gated, deliberately: the
+/// sentinel postdates the pre-#1220 layout, and old-root discovery exists
+/// specifically so pre-sentinel sessions are never silently lost (this
+/// module's core Why). Missing roots contribute nothing (no error). Read-only.
 /// Test: `dual_root_scan_finds_both_eras`, `old_root_only`, `new_root_only`,
-/// `absent_roots_yield_empty`.
+/// `absent_roots_yield_empty`, `new_root_leaf_without_marker_is_excluded`.
 pub fn scan_workspaces(
     config: &TrustyToolsConfig,
     home: Option<&Path>,
@@ -164,6 +189,9 @@ pub fn scan_workspaces(
 
     if new_root.is_dir() {
         for path in leaf_dirs(&new_root, 3) {
+            if !has_worktree_marker(&path) {
+                continue;
+            }
             found.push(DiscoveredWorkspace {
                 path,
                 era: WorkspaceEra::New,
@@ -186,6 +214,16 @@ mod tests {
         }
         std::fs::create_dir_all(&p).unwrap();
         p
+    }
+
+    /// Write the `.trusty-mpm-worktree` sentinel into `leaf`, mirroring what
+    /// `WorkspaceProvisioner` writes into every real new-root workspace.
+    fn write_marker(leaf: &Path) {
+        std::fs::write(
+            leaf.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+            b"",
+        )
+        .unwrap();
     }
 
     /// A config whose NEW root is an explicit path inside the temp home, so the
@@ -228,6 +266,7 @@ mod tests {
             new_root_dir.path(),
             &["bobmatnyc", "trusty-tools", "sess-new-1"],
         );
+        write_marker(&new_leaf);
 
         let found = scan_workspaces(&cfg, Some(home.path()));
         let paths: Vec<&PathBuf> = found.iter().map(|w| &w.path).collect();
@@ -276,11 +315,31 @@ mod tests {
         let new_root_dir = tempfile::TempDir::new().unwrap();
         let cfg = config_with_new_root(new_root_dir.path());
         let new_leaf = mkdirs(new_root_dir.path(), &["acme", "widget", "sess-9"]);
+        write_marker(&new_leaf);
 
         let found = scan_workspaces(&cfg, Some(home.path()));
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].path, new_leaf);
         assert_eq!(found[0].era, WorkspaceEra::New);
+    }
+
+    /// Why: #3382's aggravator — a new-root leaf whose shape matches
+    /// `<owner>/<repo>/<id>` but lacks the `.trusty-mpm-worktree` sentinel
+    /// (e.g. leaked mktemp test litter) must NOT be reported as a discovered
+    /// workspace.
+    /// Test: itself.
+    #[test]
+    fn new_root_leaf_without_marker_is_excluded() {
+        let _g = clear_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let new_root_dir = tempfile::TempDir::new().unwrap();
+        let cfg = config_with_new_root(new_root_dir.path());
+        // Same shape as a real workspace leaf, but no sentinel written —
+        // simulates leaked litter (#3382) that happens to match the depth.
+        mkdirs(new_root_dir.path(), &["tmpXXXXXX", "origin", ".base"]);
+
+        let found = scan_workspaces(&cfg, Some(home.path()));
+        assert!(found.is_empty(), "{found:?}");
     }
 
     /// Why: absent roots must yield an empty result, never an error or panic.
