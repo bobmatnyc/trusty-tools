@@ -106,7 +106,7 @@ use ratatui::style::Color;
 use ratatui::text::Line;
 
 use crate::event::WorkstreamSummary;
-use crate::model::{CommandDescriptor, StatuslineSegment};
+use crate::model::{CommandDescriptor, PickerRequest, StatuslineSegment};
 use crate::run::TuiModel;
 use crate::text::{strip_interior_blank_lines, trim_surrounding_blank_lines};
 
@@ -204,6 +204,14 @@ pub struct ReplApp {
     /// Slash commands shown in the banner's "Commands" section, sourced from
     /// [`crate::engine::TuiEngine::commands`] plus any client-side built-ins.
     pub commands: Vec<CommandDescriptor>,
+    /// An inline picker currently open for selection (DOC-50 §3.2/§6 Q6),
+    /// staged by [`crate::commands::dispatch_forward`] when a bare `/name`
+    /// submission matches `TuiEngine::picker(name)`. `None` when no picker
+    /// is open. The picker WIDGET itself (navigation/rendering) is a
+    /// follow-up slice's concern (DOC-50 §5 Slice 7's deliverable scopes
+    /// "routing correctness", not the visual overlay); this field is the
+    /// data half of that contract.
+    pub active_picker: Option<PickerRequest>,
     /// Whether a response is currently streaming in. Drives the input
     /// composer's placeholder text.
     pub busy: bool,
@@ -277,6 +285,7 @@ impl ReplApp {
             recent_activity: Vec::new(),
             banner_art: Vec::new(),
             commands: Vec::new(),
+            active_picker: None,
             busy: false,
             streaming_idx: None,
             statusline: Vec::new(),
@@ -369,25 +378,86 @@ impl ReplApp {
         self.scroll_offset = 0;
     }
 
+    /// Open an inline picker (DOC-50 §3.2/§6 Q6), staged by
+    /// [`crate::commands::dispatch_forward`] for a bare command matching
+    /// `TuiEngine::picker(name)`.
+    pub fn open_picker(&mut self, request: PickerRequest) {
+        self.active_picker = Some(request);
+    }
+
+    /// Close the active picker without a selection (e.g. Esc). No-op if
+    /// none is open.
+    pub fn close_picker(&mut self) {
+        self.active_picker = None;
+    }
+
+    /// Confirm the picker item at `index`, closing the picker and returning
+    /// the composed `"{dispatch_command} {selected.id}"` line
+    /// ([`crate::commands::compose_selection`]) to resubmit — mirrors
+    /// [`crate::model::PickerRequest`]'s documented contract. Returns `None`
+    /// (leaving the picker untouched) when no picker is open or `index` is
+    /// out of range, so a stale/invalid confirmation is a no-op rather than
+    /// a panic.
+    /// Test: [`crate::commands::tests::confirm_picker_selection_composes_and_closes`],
+    /// [`crate::commands::tests::confirm_picker_selection_out_of_range_is_noop`].
+    pub fn confirm_picker_selection(&mut self, index: usize) -> Option<String> {
+        let request = self.active_picker.as_ref()?;
+        let selected = request.items.get(index)?;
+        let composed = crate::commands::compose_selection(request, selected);
+        self.active_picker = None;
+        Some(composed)
+    }
+
     /// Push the current input onto history (with adjacent-duplicate dedup),
-    /// record it as [`Self::last_prompt`] (Up-arrow recall), mark the app
-    /// [`Self::busy`], echo it to the scrollback, and stage it in
-    /// [`Self::pending_submit`].
+    /// record it as [`Self::last_prompt`] (Up-arrow recall), echo it to the
+    /// scrollback, then route it (DOC-50 §5 Slice 7, §6 Q4): a recognized
+    /// built-in command ([`crate::commands::route`]) is applied inline and
+    /// never reaches an engine; anything else marks the app [`Self::busy`]
+    /// and stages it in [`Self::pending_submit`] for the caller to forward.
     ///
     /// Why: shared by the Enter-key path and a synthesized
-    /// `ReplEvent::Submit` (e.g. a future picker confirmation) so both go
-    /// through one echo+stage code path rather than duplicating it — see
-    /// [`reduce`]. Setting `busy` here (not on the first streamed
-    /// `AssistantOutput` chunk) closes the pre-first-token latency window
-    /// where tagent's `[thinking...]` indicator is already lit but this
-    /// crate's used to still show the idle placeholder — see the module doc
-    /// comment's disclosure list.
+    /// `ReplEvent::Submit` (e.g. a picker confirmation, DOC-50 §3.2/§6 Q6)
+    /// so both go through one echo+route code path rather than duplicating
+    /// it — see [`reduce`]. Routing lives here rather than in `reduce`'s
+    /// `apply` because [`crate::commands::route`] is pure and needs no
+    /// `TuiEngine` handle (`apply` has none — see that module's doc
+    /// comment), so both submission paths get built-in short-circuiting for
+    /// free. `busy`/`pending_submit` are set ONLY for the non-built-in
+    /// (`Route::Forward`) case — a built-in never calls
+    /// `TuiEngine::handle_input`, so there is nothing to wait on and no
+    /// `AssistantOutput` will ever arrive to clear `busy` again. Setting
+    /// `busy` before any streamed chunk arrives (not on the first
+    /// `AssistantOutput` chunk) closes the pre-first-token latency window —
+    /// see the module doc comment's disclosure list.
+    /// What: [`crate::commands::BuiltIn::Clear`] reuses
+    /// [`Self::clear_scrollback`] (the same effect
+    /// `ReplEvent::ClearScrollback` produces); [`crate::commands::BuiltIn::Quit`]
+    /// sets [`Self::quit`]; [`crate::commands::BuiltIn::Help`] renders
+    /// [`crate::commands::render_help`] (built-ins + [`Self::commands`]) as
+    /// a status line.
+    /// Test: [`crate::commands::tests::submit_line_builtin_clear_clears_scrollback`],
+    /// [`crate::commands::tests::submit_line_builtin_quit_sets_quit`],
+    /// [`crate::commands::tests::submit_line_builtin_help_lists_commands`],
+    /// [`crate::commands::tests::submit_line_forwards_non_builtin_and_marks_busy`].
     pub(crate) fn submit_line(&mut self, line: String) {
         self.remember_input(&line);
         self.last_prompt = line.clone();
-        self.busy = true;
         self.push_user(line.clone());
-        self.pending_submit = Some(line);
+        match crate::commands::route(&line) {
+            crate::commands::Route::BuiltIn(crate::commands::BuiltIn::Clear) => {
+                self.clear_scrollback();
+            }
+            crate::commands::Route::BuiltIn(crate::commands::BuiltIn::Quit) => {
+                self.quit = true;
+            }
+            crate::commands::Route::BuiltIn(crate::commands::BuiltIn::Help) => {
+                self.push_status(crate::commands::render_help(&self.commands));
+            }
+            crate::commands::Route::Forward(forwarded) => {
+                self.busy = true;
+                self.pending_submit = Some(forwarded);
+            }
+        }
     }
 
     /// Push a line onto `history`, deduping an immediate repeat.
