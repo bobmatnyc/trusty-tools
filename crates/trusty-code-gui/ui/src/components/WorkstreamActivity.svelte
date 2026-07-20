@@ -38,6 +38,20 @@
   // with no task yet) renders its OWN honest sub-empty-state ("no activity
   // yet") rather than falling through to a stray unrelated session.
   //
+  // **Falls back to the just-minted, not-yet-active workstream when the
+  // daemon reports no real active pointer** (code-critic PR #3392 review,
+  // MEDIUM). `StartWorkingForm.svelte` mints a workstream and runs the
+  // first task BEFORE activating it (deliberately — see that component's
+  // own docs); if activation then fails, the daemon's real
+  // `active_workstream_id` stays whatever it was before, and this card used
+  // to show "no active workstream — pick a project to start" WHILE the
+  // operator's just-accepted task was actually running — a narrow repeat of
+  // the exact complaint issue #3384 was filed over. `refresh()` now falls
+  // back to `pending-workstream.svelte.ts`'s shared marker (see that
+  // module's own docs) when the real pointer is absent, but ONLY when it
+  // names a workstream that genuinely exists in the CURRENT `GET
+  // /workstreams` response — never invented data.
+  //
   // What: Two REST polls per tick, chained: `GET /workstreams` (this card's
   // OWN poll — every component that needs workstream state polls
   // independently, the established house convention) to find the active
@@ -64,11 +78,13 @@
   // tick — all carried over unchanged from `SessionMonitor.svelte`.
   //
   // Test: `lib/session-status.test.ts::pickActiveSessionInWorkstream`
-  // covers the scoping rule; `lib/transcript.test.ts` covers the pure
-  // tail/elapsed helpers; `WorkstreamActivity.test.ts` covers the four
-  // phases (incl. the bound-session-vs-empty-workstream sub-states), the
-  // SSE-triggers-refresh wiring, and cancel; `App.test.ts` pins that this
-  // component mounts inside `.body`.
+  // covers the scoping rule; `lib/pending-workstream.test.ts` covers the
+  // fallback marker's own read/write contract; `lib/transcript.test.ts`
+  // covers the pure tail/elapsed helpers; `WorkstreamActivity.test.ts`
+  // covers the four phases (incl. the bound-session-vs-empty-workstream
+  // sub-states and the pending-workstream fallback), the SSE-subscription
+  // reactivity fix (code-critic PR #3392 review, HIGH), and cancel;
+  // `App.test.ts` pins that this component mounts inside `.body`.
   import { apiBase } from '../lib/api-config';
   import {
     pickActiveSessionInWorkstream,
@@ -77,6 +93,7 @@
     type SessionListResponse,
   } from '../lib/session-status';
   import { formatElapsed, selectTranscriptTail, type TranscriptRecord } from '../lib/transcript';
+  import { pendingWorkstream } from '../lib/pending-workstream.svelte';
   import { fetchWorkstreams, workstreamLabel, type Workstream } from '../lib/workstreams';
 
   const POLL_MS = 5000; // matches StatusBar.svelte's poll cadence
@@ -129,7 +146,18 @@
     }
     if (signal.aborted) return;
 
-    const active = list.workstreams.find((w) => w.id === list.active_workstream_id) ?? null;
+    // Fallback to the just-minted, not-yet-active workstream when the
+    // daemon reports no real active pointer (code-critic PR #3392 review,
+    // MEDIUM — see `lib/pending-workstream.svelte.ts`'s own docs for why:
+    // an activation failure after a successful task-run must not make this
+    // card claim "no active workstream" while that task is actually
+    // running). Only trusted when it names a workstream that genuinely
+    // exists in THIS response — a stale/foreign id is silently ignored,
+    // never invented data.
+    const active =
+      list.workstreams.find((w) => w.id === list.active_workstream_id) ??
+      list.workstreams.find((w) => w.id === pendingWorkstream.id) ??
+      null;
     if (!active) {
       phase = 'no-workstream';
       activeWorkstream = null;
@@ -272,8 +300,23 @@
     return () => clearInterval(timer);
   });
 
-  // Live-activity nudge (issue #3384) — re-subscribes only when the ACTIVE
-  // WORKSTREAM's id itself changes, mirroring `WorkstreamSwitcher.svelte`'s
+  // Re-subscribes ONLY when the ACTIVE id itself changes (code-critic PR
+  // #3392 review, HIGH — Svelte 5 tracks reference equality of the `$state`
+  // object read inside the effect, not deep-equality of its fields; since
+  // `refresh()` reassigns `activeWorkstream` to a FRESHLY-PARSED object on
+  // every poll tick even when the active id is unchanged, an effect that
+  // reads `activeWorkstream?.id` directly re-runs (close + reopen the
+  // `EventSource`) on every tick — ~360 reconnects/active-half-hour,
+  // dropping any event landing in the close->reopen gap, and needlessly
+  // loading the daemon. `activeWorkstreamId` below is a `$derived` PRIMITIVE
+  // — Svelte 5 suppresses a dependent's re-run when a `$derived` recomputes
+  // to the SAME primitive value, so the effect only re-runs when the id
+  // itself actually changes. `WorkstreamSwitcher.svelte` carries the
+  // identical fix for the identical pre-existing bug (issue #3356) in the
+  // same review pass.
+  let activeWorkstreamId = $derived(activeWorkstream?.id ?? null);
+
+  // Live-activity nudge (issue #3384), mirroring `WorkstreamSwitcher.svelte`'s
   // identical SSE pattern over the SAME route. Any received frame (see the
   // Why block above for why this component does not need to inspect
   // payloads) triggers an immediate `refresh()` — a latency optimization
@@ -281,7 +324,7 @@
   // (falls back to polling alone) when `EventSource` is unavailable or no
   // workstream is active.
   $effect(() => {
-    const id = activeWorkstream?.id ?? null;
+    const id = activeWorkstreamId;
     if (!id || typeof EventSource === 'undefined') return;
 
     let source: EventSource | null = null;

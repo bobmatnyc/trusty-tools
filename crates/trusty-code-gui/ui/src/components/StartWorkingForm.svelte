@@ -30,6 +30,21 @@
   // power users; this component only ever mints (or reuses a pending) NEW
   // one, never manages an existing one.
   //
+  // **Activation retries once, and falls back to a shared pending-workstream
+  // marker on failure (code-critic PR #3392 review, MEDIUM).** A failed
+  // activation after a successful task-run used to leave
+  // `WorkstreamActivity.svelte` showing "no active workstream — pick a
+  // project to start" WHILE the operator's just-accepted task was actually
+  // running — a narrow repeat of the exact complaint issue #3384 was filed
+  // over, just triggered by a different cause. Two changes close this:
+  // `activateWithRetry` below retries the activation call ONCE before
+  // giving up (closing the common transient-failure case silently), and
+  // `lib/pending-workstream.svelte.ts` (a small cross-module Svelte 5 rune
+  // store) records the minted workstream's id/name so
+  // `WorkstreamActivity.svelte` can fall back to showing IT when the
+  // daemon's real active-workstream pointer is absent — never invented
+  // data, always an id this form itself just confirmed the daemon created.
+  //
   // **Projectless <-> unbound-session mapping (design call, carried over
   // from issue #3365).** The modal's "start chatting without a project"
   // option maps to a workstream whose first (and so far only) session has NO
@@ -72,7 +87,12 @@
     type ProjectSelection,
     type SubmitPhase,
   } from '../lib/new-workstream';
+  import { clearPendingWorkstream, setPendingWorkstream } from '../lib/pending-workstream.svelte';
   import ProjectPickerModal from './ProjectPickerModal.svelte';
+
+  /** Delay between the two `activateWithRetry` attempts — see that
+   * function's own doc for why a single retry, not unbounded. */
+  const ACTIVATE_RETRY_DELAY_MS = 250;
 
   let selectedProject = $state<ProjectSelection | null>(null);
   let pickerOpen = $state(false);
@@ -134,6 +154,53 @@
   async function errorMessage(res: Response): Promise<string> {
     const body = (await res.json().catch(() => null)) as { error?: { message?: string } } | null;
     return body?.error?.message ?? `HTTP ${res.status}`;
+  }
+
+  /**
+   * Activate `workstreamId`, retrying ONCE on failure before giving up
+   * (code-critic PR #3392 review, MEDIUM).
+   *
+   * Why: most activation failures at this point are transient — a momentary
+   * race with another client's own activate call, a blip — so a single
+   * retry silently closes the common case before ever falling back to
+   * `pending-workstream.svelte.ts`'s cross-module store or surfacing a
+   * warning to the operator. Deliberately bounded at one retry, not
+   * unbounded: a genuinely broken daemon connection must still surface
+   * promptly, not hang the (already-completed, from the operator's
+   * perspective) submit flow.
+   * What: two attempts, `ACTIVATE_RETRY_DELAY_MS` apart. Returns `null` on
+   * success (either attempt); a caller-facing warning string if BOTH fail.
+   * `signal` aborts the wait AND the fetch identically to every other call
+   * in [`submit`].
+   * Test: `StartWorkingForm.test.ts`.
+   */
+  async function activateWithRetry(
+    base: string,
+    workstreamId: string,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    let lastWarning: string | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, ACTIVATE_RETRY_DELAY_MS));
+        if (signal.aborted) return null;
+      }
+      try {
+        const actRes = await fetch(`${base}/workstreams/${workstreamId}/activate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ force: true }),
+          signal,
+        });
+        if (signal.aborted) return null;
+        if (actRes.ok) return null;
+        lastWarning = `could not activate the new workstream (HTTP ${actRes.status})`;
+      } catch (e) {
+        if (signal.aborted) return null;
+        lastWarning = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return lastWarning;
   }
 
   /**
@@ -207,6 +274,12 @@
         pendingWorkstreamId = newId;
         pendingWorkstreamName = workstreamName;
       }
+      // Record the fallback marker (code-critic PR #3392 review, MEDIUM)
+      // whether this attempt just minted the workstream or is reusing one
+      // from a prior create-succeeded-but-run-failed attempt — either way
+      // `WorkstreamActivity.svelte` needs it available BEFORE the task-run
+      // below, in case activation ultimately fails again.
+      setPendingWorkstream(workstreamId, workstreamName ?? inferWorkstreamName(selectedProject));
 
       const body = buildRunTaskBody(task, selectedProject, workstreamId);
       const res = await fetch(`${base}/tasks`, {
@@ -226,24 +299,16 @@
         return;
       }
 
-      // Task run succeeded — NOW activate (best-effort, deliberately last;
-      // see the doc above for why this is not the second step).
-      let activationWarning: string | null = null;
-      try {
-        const actRes = await fetch(`${base}/workstreams/${workstreamId}/activate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ force: true }),
-          signal: controller.signal,
-        });
-        if (controller.signal.aborted) return;
-        if (!actRes.ok) {
-          activationWarning = `could not activate the new workstream (HTTP ${actRes.status})`;
-        }
-      } catch (e) {
-        if (controller.signal.aborted) return;
-        activationWarning = e instanceof Error ? e.message : String(e);
-      }
+      // Task run succeeded — NOW activate, with one retry (best-effort,
+      // deliberately last; see the doc above for why this is not the second
+      // step, and `activateWithRetry`'s own doc for the retry-once fix).
+      const activationWarning = await activateWithRetry(base, workstreamId, controller.signal);
+      if (controller.signal.aborted) return;
+      // Activation succeeded (either attempt) — the daemon's real active
+      // pointer will reflect this workstream on the next poll, so the
+      // fallback marker is no longer needed. Left SET on failure — that is
+      // exactly the case `pending-workstream.svelte.ts` exists to cover.
+      if (!activationWarning) clearPendingWorkstream();
 
       // The response body (`{session_id, status, mode, binding}`) carries no
       // information this form still displays — issue #3384 drops the

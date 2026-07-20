@@ -10,6 +10,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **SSE subscription churn in `WorkstreamActivity.svelte` and
+  `WorkstreamSwitcher.svelte` (code-critic PR #3392 review, HIGH).** The
+  `GET /workstreams/{id}/events` subscription `$effect` in both components
+  read the active workstream id through a `$state` object (`activeWorkstream`/
+  `list`) that the poll `refresh()` reassigns to a freshly-parsed object
+  every tick — Svelte 5 invalidates on reference inequality, so the
+  `EventSource` was closing and reopening on EVERY poll tick while a
+  workstream was active (~360 reconnects/active-half-hour), dropping any
+  event landing in the close→reopen gap and needlessly loading the daemon.
+  Both effects now read a `$derived` PRIMITIVE (`activeWorkstreamId`)
+  instead, which Svelte 5 only re-runs a dependent for when the VALUE
+  actually changes. `WorkstreamSwitcher.svelte`'s instance of this bug
+  predates this PR (issue #3300/PR #3356) — fixed here as a carried-in fix
+  once the pattern was identified. New reactivity tests in both
+  `WorkstreamActivity.test.ts` and `WorkstreamSwitcher.test.ts` stub a fake
+  `EventSource` and assert exactly one construction across several
+  same-active-id poll ticks (using fake timers; jsdom has no real
+  `EventSource` to exercise directly).
+- **Activation-fails-after-successful-run left `WorkstreamActivity.svelte`
+  claiming "no active workstream" while the task was actually running
+  (code-critic PR #3392 review, MEDIUM).** Fixed two ways: `StartWorkingForm.svelte`
+  now retries a failed activation ONCE (`activateWithRetry`) before
+  surfacing a warning, closing the common transient-failure case silently;
+  and a new cross-module store (`lib/pending-workstream.svelte.ts`) records
+  the minted-and-run workstream's id/name so `WorkstreamActivity.svelte` can
+  fall back to displaying it when the daemon's real active-workstream
+  pointer is absent, cleared once activation eventually succeeds.
 - **`DEFAULT_DAEMON_URL` moved from `http://127.0.0.1:7881` to
   `http://127.0.0.1:7882`, in lockstep with `trusty-code`'s
   `serve::DEFAULT_HTTP_PORT` (closes #3364).** The old port collided with

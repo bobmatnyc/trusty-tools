@@ -24,6 +24,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
 import StartWorkingForm from './StartWorkingForm.svelte';
+import { clearPendingWorkstream, pendingWorkstream } from '../lib/pending-workstream.svelte';
 
 let target: HTMLDivElement;
 let instance: Record<string, unknown> | null = null;
@@ -90,6 +91,10 @@ function fullSuccessFetch(opts?: { tasksBody?: unknown; callLog?: string[] }) {
 beforeEach(() => {
   target = document.createElement('div');
   document.body.appendChild(target);
+  // The pending-workstream fallback marker (code-critic PR #3392 review,
+  // MEDIUM) is a MODULE-level store shared across every test in this file
+  // — reset it so one test's mint never leaks into the next.
+  clearPendingWorkstream();
 });
 
 afterEach(() => {
@@ -442,7 +447,8 @@ describe('StartWorkingForm submit sequence', () => {
     ]);
   });
 
-  it('an activation failure does not block the task run — success still reported (best-effort activation)', async () => {
+  it('an activation failure retries ONCE, then does not block the task run — success still reported, but the pending-workstream fallback marker stays set (code-critic PR #3392 review, MEDIUM)', async () => {
+    let activateCallCount = 0;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -452,6 +458,7 @@ describe('StartWorkingForm submit sequence', () => {
           return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
         }
         if (url.endsWith('/activate') && method === 'POST') {
+          activateCallCount += 1;
           return { ok: false, status: 409, json: async () => ({ error: { message: 'conflict' } }) } as Response;
         }
         if (url.endsWith('/tasks') && method === 'POST') {
@@ -472,6 +479,83 @@ describe('StartWorkingForm submit sequence', () => {
     expect(target.textContent).toContain('started');
     expect(target.textContent).toContain('could not activate');
     expect(taskField().value).toBe(''); // still cleared — the sequence still succeeded overall
+    expect(activateCallCount).toBe(2); // exactly one retry, not unbounded
+    // The fallback marker stays SET on a genuine (both-attempts) failure —
+    // `WorkstreamActivity.svelte` needs it to still be there.
+    expect(pendingWorkstream.id).toBe('ws-abc123');
+    expect(pendingWorkstream.name).toBeTruthy();
+  });
+
+  it('an activation failure that succeeds on the retry surfaces no warning and clears the pending-workstream marker', async () => {
+    let activateCallCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          activateCallCount += 1;
+          if (activateCallCount === 1) {
+            return { ok: false, status: 409, json: async () => ({ error: { message: 'conflict' } }) } as Response;
+          }
+          return { ok: true, status: 200, json: async () => ({ active_id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    expect(activateCallCount).toBe(2);
+    expect(target.textContent).not.toContain('could not activate');
+    // Activation ultimately succeeded — the fallback marker is no longer
+    // needed; the daemon's real active pointer takes over on the next poll.
+    expect(pendingWorkstream.id).toBeNull();
+    expect(pendingWorkstream.name).toBeNull();
+  });
+
+  it('sets the pending-workstream fallback marker as soon as the workstream is minted, BEFORE the task-run resolves', async () => {
+    let capturedDuringTaskRun: { id: string | null; name: string | null } | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          capturedDuringTaskRun = { id: pendingWorkstream.id, name: pendingWorkstream.name };
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    expect(capturedDuringTaskRun).toEqual({ id: 'ws-abc123', name: expect.any(String) });
   });
 });
 

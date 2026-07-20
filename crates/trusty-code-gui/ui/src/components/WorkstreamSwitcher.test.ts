@@ -400,3 +400,59 @@ describe('WorkstreamSwitcher out-of-order refresh guard (code-critic MEDIUM 1)',
     }
   });
 });
+
+// code-critic PR #3392 review, HIGH: the SSE-subscription `$effect` used to
+// read `list?.active_workstream_id` directly. `refresh()` reassigns `list`
+// to a FRESHLY-PARSED object on every poll tick even when the active id is
+// unchanged — Svelte 5 invalidates a dependent on reference inequality of
+// the `$state` value read, so the effect re-ran (closing + reopening the
+// `EventSource`) on EVERY poll tick, not only when the active id actually
+// changed. Fixed by routing the effect through `activeWorkstreamId`, a
+// `$derived` PRIMITIVE (Svelte 5 suppresses a dependent's re-run when a
+// `$derived` recomputes to the SAME primitive value). jsdom has no real
+// `EventSource`, so this stubs a minimal fake on `globalThis` and counts
+// constructions across several same-active-id poll ticks.
+describe('WorkstreamSwitcher SSE subscription reactivity (code-critic PR #3392 review, HIGH)', () => {
+  class FakeEventSource {
+    static instances: FakeEventSource[] = [];
+    url: string;
+    onmessage: ((e: MessageEvent) => void) | null = null;
+    constructor(url: string) {
+      this.url = url;
+      FakeEventSource.instances.push(this);
+    }
+    close() {
+      /* no-op */
+    }
+  }
+
+  it('does not reopen the EventSource on repeated poll ticks that report the SAME active workstream id', async () => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.useFakeTimers();
+    try {
+      const { fetchMock } = fakeDaemon([ws('ws-stable', 'Token rotation', 'idle')], 'ws-stable');
+      vi.stubGlobal('fetch', fetchMock);
+
+      instance = mount(WorkstreamSwitcher, { target }) as unknown as Record<string, unknown>;
+
+      // Flush the initial mount tick and let the SSE effect's own async IIFE
+      // (apiBase() -> new EventSource()) settle.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(FakeEventSource.instances.length).toBe(1);
+
+      // Three more poll ticks (POLL_MS = 5000), each returning a BRAND NEW
+      // `list` object with the identical active id — the exact
+      // reassign-a-fresh-object-every-tick shape that triggered the bug.
+      for (let i = 0; i < 3; i += 1) {
+        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      expect(FakeEventSource.instances.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

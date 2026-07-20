@@ -8,9 +8,11 @@
 // active workstream's activity even when it is the most recently created
 // session overall (the regression the old daemon-wide `pickActiveSession`
 // heuristic was exposed to), the "workstream active but nothing bound yet"
-// sub-empty-state, cancel's two-step confirm, and the transcript-404-reset
+// sub-empty-state, cancel's two-step confirm, the transcript-404-reset
 // regression PR #3028's code-critic review originally pinned (still
-// exercised here, just through the new two-poll chain).
+// exercised here, just through the new two-poll chain), the SSE-subscription
+// reactivity fix (code-critic PR #3392 review, HIGH), and the
+// pending-workstream fallback (code-critic PR #3392 review, MEDIUM).
 // What: A small in-memory fake daemon backs a stubbed global `fetch`,
 // mirroring `WorkstreamSwitcher.test.ts`'s `fakeDaemon` shape — extended to
 // also answer `GET /sessions`, `GET /sessions/{id}`,
@@ -19,6 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
 import WorkstreamActivity from './WorkstreamActivity.svelte';
+import { clearPendingWorkstream, setPendingWorkstream } from '../lib/pending-workstream.svelte';
 import type { Workstream } from '../lib/workstreams';
 
 let target: HTMLDivElement;
@@ -126,6 +129,10 @@ function fakeDaemon(opts: {
 beforeEach(() => {
   target = document.createElement('div');
   document.body.appendChild(target);
+  // The pending-workstream fallback marker is a MODULE-level store shared
+  // across every test in this file — reset it so one test's fallback value
+  // never leaks into the next.
+  clearPendingWorkstream();
 });
 
 afterEach(() => {
@@ -179,6 +186,60 @@ describe('WorkstreamActivity phases', () => {
     await waitFor(() => target.textContent?.includes('no activity yet') ?? false);
     expect(target.textContent).toContain('acme-api — 2026-07-20');
     expect(target.textContent).toContain('no activity yet');
+  });
+});
+
+describe('WorkstreamActivity pending-workstream fallback (code-critic PR #3392 review, MEDIUM)', () => {
+  it('falls back to the pending (not-yet-active) workstream when the daemon reports no active pointer, instead of the empty state', async () => {
+    setPendingWorkstream('ws-pending', 'ship the feature — 2026-07-20');
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        // No real active pointer — mirrors an activation that failed after a
+        // successful task-run.
+        activeWorkstreamId: null,
+        workstreams: [ws('ws-pending', 'ship the feature — 2026-07-20', ['bound-session'])],
+        sessions: [session('bound-session', 'running', '2026-07-20T14:00:00Z', 'ship the feature')],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
+    expect(target.textContent).not.toContain('no active workstream — pick a project to start');
+    expect(target.textContent).toContain('ship the feature — 2026-07-20');
+    expect(target.textContent).toContain('running');
+  });
+
+  it('ignores a stale pending-workstream id that no longer exists in the current workstreams list', async () => {
+    setPendingWorkstream('ws-vanished', 'a workstream that no longer exists');
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({ activeWorkstreamId: null, workstreams: [], sessions: [] }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes('no active workstream') ?? false);
+    expect(target.textContent).toContain('no active workstream — pick a project to start');
+    expect(target.textContent).not.toContain('a workstream that no longer exists');
+  });
+
+  it('prefers the REAL active pointer over the pending marker when both are present', async () => {
+    setPendingWorkstream('ws-pending', 'stale pending name');
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-real-active',
+        workstreams: [
+          ws('ws-pending', 'stale pending name', []),
+          ws('ws-real-active', 'the actually active workstream', []),
+        ],
+        sessions: [],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes('the actually active workstream') ?? false);
+    expect(target.textContent).not.toContain('stale pending name');
   });
 });
 
@@ -250,5 +311,67 @@ describe('WorkstreamActivity transcript-404 reset (PR #3028 regression, carried 
     // Must not be stuck showing the raw HTTP error or a stale Cancel button.
     expect(target.textContent).not.toContain('HTTP 404');
     expect(target.querySelectorAll('button').length).toBe(0);
+  });
+});
+
+// code-critic PR #3392 review, HIGH: the SSE-subscription `$effect` used to
+// read `activeWorkstream?.id` directly. `refresh()` reassigns `activeWorkstream`
+// to a FRESHLY-PARSED object on every poll tick even when the active id is
+// unchanged — Svelte 5 invalidates a dependent on reference inequality of the
+// `$state` value read, so the effect re-ran (closing + reopening the
+// `EventSource`) on EVERY tick, not only when the id actually changed. Fixed
+// by routing the effect through `activeWorkstreamId`, a `$derived` PRIMITIVE
+// (Svelte 5 suppresses a dependent's re-run when a `$derived` recomputes to
+// the SAME primitive value). jsdom has no real `EventSource`, so this stubs a
+// minimal fake on `globalThis` and counts constructions across several
+// same-active-id poll ticks (fake timers advance past POLL_MS repeatedly).
+describe('WorkstreamActivity SSE subscription reactivity (code-critic PR #3392 review, HIGH)', () => {
+  class FakeEventSource {
+    static instances: FakeEventSource[] = [];
+    url: string;
+    onmessage: ((e: MessageEvent) => void) | null = null;
+    constructor(url: string) {
+      this.url = url;
+      FakeEventSource.instances.push(this);
+    }
+    close() {
+      /* no-op */
+    }
+  }
+
+  it('does not reopen the EventSource on repeated poll ticks that report the SAME active workstream id', async () => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        'fetch',
+        fakeDaemon({
+          activeWorkstreamId: 'ws-stable',
+          workstreams: [ws('ws-stable', 'my workstream', [])],
+          sessions: [],
+        }),
+      );
+
+      instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+      // Flush the initial mount tick (poll #1) and let the SSE effect's own
+      // async IIFE (apiBase() -> new EventSource()) settle.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(FakeEventSource.instances.length).toBe(1);
+
+      // Three more poll ticks (POLL_MS = 5000), each returning a BRAND NEW
+      // `activeWorkstream` object with the identical id — the exact
+      // reassign-a-fresh-object-every-tick shape that triggered the bug.
+      for (let i = 0; i < 3; i += 1) {
+        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      expect(FakeEventSource.instances.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
