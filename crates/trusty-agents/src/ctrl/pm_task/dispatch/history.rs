@@ -23,9 +23,8 @@ use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
 use super::super::super::config::{
-    AgentIdentity, SessionOverrides, apply_credential_routing, build_deployment_footer,
-    build_user_context_prefix, recall_project_memories, resolve_agent_config,
-    resolve_overridden_credentials,
+    SessionOverrides, apply_credential_routing, build_deployment_footer, build_user_context_prefix,
+    recall_project_memories, resolve_agent_config, resolve_overridden_credentials,
 };
 use super::super::super::handlers::{
     AddProjectTool, CreateDirTool, ListProjectsTool, MoveFileTool, RemoveProjectTool,
@@ -140,13 +139,7 @@ pub async fn run_pm_task_with_history(
 
     // Build augmented system prompt with optional user profile context.
     let system_prompt: String = {
-        let identity = AgentIdentity {
-            agent_name: &pm_cfg.agent.name,
-            model: &pm_cfg.agent.model,
-            runner: &format!("{:?}", pm_cfg.agent.runner),
-            provider: creds.label(),
-        };
-        let base = build_user_context_prefix(&pm_cfg.system_prompt.content, &identity);
+        let base = build_user_context_prefix(&pm_cfg.system_prompt.content);
 
         let runner_label = match pm_cfg.agent.runner {
             crate::agents::RunnerKind::Subprocess => "subprocess",

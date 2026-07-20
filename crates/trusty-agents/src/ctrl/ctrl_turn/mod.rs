@@ -205,32 +205,8 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
     }
 
     {
-        // #3052 follow-up: routes through the SAME `render_user_context_block`
-        // helper `run_pm_task_with_history`/`run_pm_task_with_persona` use, so
-        // ctrl's user/date-time context can never drift from theirs
-        // (previously this was a hand-rolled second copy — see git history).
-        // Loads `UserProfile` fresh from disk (not the REPL-startup-time
-        // `ctrl.user_profile` snapshot) so a mid-session `tagent config
-        // profile set` takes effect on the very next turn, and — critically —
-        // recomputes the current date/time fresh on EVERY call, since
-        // `build_ctrl_turn_system_prompt` runs once per chat turn. This is
-        // the fix for the motivating defect: a session that hand-rolled the
-        // timestamp once at REPL startup could greet the user with "hope
-        // your Sunday's going well" and then "happy Monday!" minutes later,
-        // once the wall clock crossed midnight, because the value was never
-        // refreshed after being computed the first time.
-        let runner_debug = format!("{:?}", agent_cfg.agent.runner);
-        let provider_label = crate::llm::credentials::pick_credentials(Some(agent_cfg.agent.runner))
-            .map(|c| c.label())
-            .unwrap_or("none");
-        let identity = super::config::AgentIdentity {
-            agent_name: &agent_cfg.agent.name,
-            model: &agent_cfg.agent.model,
-            runner: &runner_debug,
-            provider: provider_label,
-        };
         system_prompt.push_str("\n\n");
-        system_prompt.push_str(&super::config::render_user_context_block(&identity));
+        system_prompt.push_str(&super::config::render_user_context_block());
     }
 
     if !is_ctrl_persona {
