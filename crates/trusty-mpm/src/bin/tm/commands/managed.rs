@@ -93,15 +93,22 @@ pub(crate) fn filter_live_sessions(
 /// path always returns the raw daemon response unfiltered.
 /// The source_id filter is passed straight through as a query parameter rather
 /// than doing client-side filtering so callers get the daemon's authoritative view.
+/// `sort`/`term` (#3483 — the `tm ls [recent|alpha] [filter]` inline
+/// grammar) apply ONLY to the table path; `--json` stays a raw, unfiltered,
+/// unsorted passthrough, matching `--all`'s existing "no effect on --json"
+/// precedent.
 /// Test: HTTP path covered by the integration test; filter logic unit-tested by
 /// `ls_source_id_filter_selects_correct_slug`,
-/// `picker_filter_excludes_decommissioned_keeps_active`.
+/// `picker_filter_excludes_decommissioned_keeps_active`; sort/filter logic by
+/// `sort_sessions_*` / `filter_sessions_by_term_*` in `session_picker.rs`.
 pub(crate) async fn session_ls(
     client: &reqwest::Client,
     url: &str,
     json: bool,
     source_id: Option<&str>,
     all: bool,
+    sort: crate::commands::session_picker::SessionSortArg,
+    term: Option<String>,
 ) -> anyhow::Result<()> {
     // Fetch the response body ONCE via the shared fetch path. `--json` echoes
     // that raw text verbatim (byte-for-byte — preserving exact field
@@ -109,11 +116,15 @@ pub(crate) async fn session_ls(
     // rather than issuing a second GET.
     let raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id).await?;
     if json {
-        // Raw JSON passthrough is always unfiltered — scripts rely on byte-for-byte.
+        // Raw JSON passthrough is always unfiltered/unsorted — scripts rely on
+        // byte-for-byte.
         println!("{raw}");
         return Ok(());
     }
     let sessions = crate::commands::session_picker::parse_scoped_sessions(&raw, all)?;
+    let mut sessions =
+        crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_deref());
+    crate::commands::session_picker::sort_sessions(&mut sessions, sort);
     render_session_table(&sessions, source_id);
     Ok(())
 }
