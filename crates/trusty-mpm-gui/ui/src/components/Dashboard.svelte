@@ -41,7 +41,7 @@
         type="button"
         on:click={() => sidebarVisible.set(true)}
         aria-label="Show sidebar"
-        class="flex w-8 flex-none items-center justify-center border-r border-trusty-border-light opacity-60 hover:opacity-100 dark:border-trusty-border"
+        class="flex w-8 flex-none items-center justify-center border-r border-trusty-border opacity-60 hover:opacity-100"
       >
         <Menu size={16} />
       </button>
@@ -50,7 +50,7 @@
     <!-- Dismissable sidebar -->
     {#if $sidebarVisible}
       <aside
-        class="w-64 flex-none overflow-y-auto border-r border-trusty-border-light dark:border-trusty-border"
+        class="w-64 flex-none overflow-y-auto border-r border-trusty-border"
       >
         <SessionList />
       </aside>

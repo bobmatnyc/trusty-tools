@@ -185,17 +185,17 @@
       {#if msg.role === 'coordinator'}
         <div class="flex max-w-[80%] items-start gap-2 self-start">
           <span
-            class="mt-0.5 shrink-0 rounded-full bg-trusty-border-light p-1 text-trusty-primary dark:bg-trusty-border"
+            class="mt-0.5 shrink-0 rounded-full bg-trusty-border p-1 text-trusty-primary"
           >
             <Bot size={14} />
           </span>
           <div
-            class="rounded-lg bg-trusty-surface-light px-3 py-2 text-sm dark:bg-trusty-surface"
+            class="rounded-lg bg-trusty-surface px-3 py-2 text-sm"
           >
             <p class="whitespace-pre-wrap break-words">{msg.content}</p>
             {#if msg.command_output}
               <details
-                class="mt-2 rounded border border-trusty-border-light dark:border-trusty-border"
+                class="mt-2 rounded border border-trusty-border"
               >
                 <summary
                   class="cursor-pointer select-none px-2 py-1 text-xs opacity-70"
@@ -237,12 +237,12 @@
     {#if sending}
       <div class="flex items-center gap-2 self-start">
         <span
-          class="shrink-0 rounded-full bg-trusty-border-light p-1 text-trusty-primary dark:bg-trusty-border"
+          class="shrink-0 rounded-full bg-trusty-border p-1 text-trusty-primary"
         >
           <Bot size={14} />
         </span>
         <div
-          class="flex gap-1 rounded-lg bg-trusty-surface-light px-3 py-2.5 dark:bg-trusty-surface"
+          class="flex gap-1 rounded-lg bg-trusty-surface px-3 py-2.5"
         >
           <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-current opacity-40"></span>
           <span
@@ -260,14 +260,14 @@
 
   <!-- Input bar -->
   <div
-    class="flex items-end gap-2 border-t border-trusty-border-light bg-trusty-surface-light p-3 dark:border-trusty-border dark:bg-trusty-surface"
+    class="flex items-end gap-2 border-t border-trusty-border bg-trusty-surface p-3"
   >
     <textarea
       bind:value={draft}
       on:keydown={onKeydown}
       rows="1"
       placeholder="@session-name: message or just ask anything..."
-      class="max-h-32 min-h-[2.5rem] flex-1 resize-none rounded-md border border-trusty-border-light bg-white px-3 py-2 text-sm outline-none focus:border-trusty-primary dark:border-trusty-border dark:bg-trusty-surface"
+      class="max-h-32 min-h-[2.5rem] flex-1 resize-none rounded-md border border-trusty-border bg-trusty-card px-3 py-2 text-sm outline-none focus:border-trusty-primary"
     ></textarea>
     <button
       type="button"

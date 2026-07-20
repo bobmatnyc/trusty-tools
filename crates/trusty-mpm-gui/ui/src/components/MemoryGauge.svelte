@@ -16,7 +16,7 @@
 </script>
 
 <div
-  class="h-1 w-full overflow-hidden rounded-full bg-trusty-border-light dark:bg-trusty-border"
+  class="h-1 w-full overflow-hidden rounded-full bg-trusty-border"
   title={`memory ${clamped}%`}
 >
   <div

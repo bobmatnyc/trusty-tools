@@ -77,7 +77,7 @@
       {/if}
     </dl>
 
-    <div class="my-3 border-t border-trusty-border-light dark:border-trusty-border"></div>
+    <div class="my-3 border-t border-trusty-border"></div>
 
     <h3 class="text-xs font-semibold uppercase tracking-wide opacity-70">
       Circuit breakers
@@ -95,7 +95,7 @@
       </ul>
     {/if}
 
-    <div class="my-3 border-t border-trusty-border-light dark:border-trusty-border"></div>
+    <div class="my-3 border-t border-trusty-border"></div>
 
     <div class="min-h-[200px] flex-1">
       <EventFeed sessionId={session.id} />

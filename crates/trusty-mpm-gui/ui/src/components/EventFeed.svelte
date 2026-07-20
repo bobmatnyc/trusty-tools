@@ -53,7 +53,7 @@
       type="text"
       bind:value={filter}
       placeholder="filter…"
-      class="ml-auto w-40 rounded border border-trusty-border-light bg-transparent px-2 py-0.5 text-xs dark:border-trusty-border"
+      class="ml-auto w-40 rounded border border-trusty-border bg-transparent px-2 py-0.5 text-xs"
     />
   </div>
 
@@ -63,7 +63,7 @@
     {/if}
     {#each visible as event, i (i)}
       <div
-        class="flex items-center gap-2 border-b border-trusty-border-light/50 py-1 dark:border-trusty-border/50"
+        class="flex items-center gap-2 border-b border-trusty-border/50 py-1"
       >
         <span class="rounded bg-trusty-primary/15 px-1.5 py-0.5 text-trusty-primary">
           {event.event_type}

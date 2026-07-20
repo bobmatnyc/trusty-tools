@@ -21,7 +21,7 @@
 </script>
 
 <header
-  class="flex items-center gap-3 border-b border-trusty-border-light bg-trusty-surface-light px-4 py-2 dark:border-trusty-border dark:bg-trusty-surface"
+  class="flex items-center gap-3 border-b border-trusty-border bg-trusty-surface px-4 py-2"
 >
   <button
     type="button"

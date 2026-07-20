@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated the Svelte UI from its placeholder indigo/slate palette to Foundry v2 design tokens (closes #3488, part of epic #3486): `ui/src/app.css` now defines `--color-*` RGB-triple custom properties (light `:root` + `[data-theme='dark']`) sourced 1:1 from `docs/design/UI/design-system/tokens.css`, and `ui/tailwind.config.js` resolves every `trusty-*`/`status-*` color through `rgb(var(--color-*) / <alpha-value>)` instead of hardcoded hex literals — the same CSS-var bridge `crates/trusty-code-gui/ui` uses, keeping the crates in lockstep for a future `scripts/check_token_drift.mjs` enforcement flip. Dark-mode activation switched from a bare `<html class="dark">` to the `[data-theme='dark']` attribute (`ui/src/stores/theme.ts`); the existing manual `ThemeToggle` + `localStorage`-persisted preference is unchanged, only the DOM attribute it drives. All components dropped their `-light` token suffix + `dark:` variant pairs in favor of the single self-theming token each now resolves through.
+
 ### Security
 
 - Set an explicit Content-Security-Policy (`default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:7880; style-src 'self' 'unsafe-inline'`) in `tauri.conf.json`, replacing `"csp": null` (architecture-review tranche 0). Added a hand-authored `capabilities/default.json` (`core:default` only, scoped to the `main` window) so the app's ACL is explicit rather than implicit.

@@ -120,7 +120,7 @@
   <ul class="py-1">
     {#each files as path (path)}
       <li
-        class="flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-trusty-border-light/60 dark:hover:bg-trusty-border/60"
+        class="flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-trusty-border/60"
         title={path}
       >
         <svelte:component
