@@ -5,9 +5,20 @@ use crate::llm;
 
 use super::super::claude_cli::{filter_project_index_in_prompt, strip_cli_artifacts};
 use super::super::config::{
-    apply_credential_routing, build_deployment_footer, build_user_context_prefix,
+    AgentIdentity, apply_credential_routing, build_deployment_footer, build_user_context_prefix,
     render_user_context_block, render_user_datetime, resolve_agent_config,
 };
+
+/// Fixed identity used by tests that don't care about its specific values —
+/// only that SOME identity flows through into the rendered block.
+fn test_identity() -> AgentIdentity<'static> {
+    AgentIdentity {
+        agent_name: "assistant",
+        model: "claude-opus-4-6",
+        runner: "Subprocess",
+        provider: "openrouter",
+    }
+}
 
 /// Sandbox `$HOME` to a fresh tempdir for the duration of `f`, holding
 /// `crate::test_env::HOME_LOCK` so parallel tests never observe each other's
@@ -343,7 +354,8 @@ fn render_user_context_block_omits_location_when_unset() {
         };
         profile.save().expect("save profile");
 
-        let block = render_user_context_block();
+        let identity = test_identity();
+        let block = render_user_context_block(&identity);
         assert!(block.contains("user_name = \"Ada\""), "got: {block}");
         assert!(!block.contains("location"), "got: {block}");
     });
@@ -362,7 +374,8 @@ fn render_user_context_block_includes_location_when_set() {
         };
         profile.save().expect("save profile");
 
-        let block = render_user_context_block();
+        let identity = test_identity();
+        let block = render_user_context_block(&identity);
         assert!(
             block.contains("location = \"New York, NY, USA\""),
             "got: {block}"
@@ -374,16 +387,43 @@ fn render_user_context_block_includes_location_when_set() {
 fn render_user_context_block_unknown_user_still_gets_datetime() {
     with_sandboxed_home(|_home| {
         // No user.toml written — profile is absent.
-        let block = render_user_context_block();
+        let identity = test_identity();
+        let block = render_user_context_block(&identity);
         assert!(block.contains("user_name = \"(unknown)\""), "got: {block}");
         assert!(block.contains("Current date/time:"), "got: {block}");
+    });
+}
+
+/// Why: the motivating live-transcript defect — the assistant persona
+/// confidently claimed "Anthropic's API" while actually running
+/// `claude-opus-4-6` via OpenRouter. The self-identification sentence must
+/// name the exact agent/model/provider/runner passed in, regardless of
+/// whether a user profile exists.
+/// Test: itself.
+#[test]
+fn render_user_context_block_includes_self_identification() {
+    with_sandboxed_home(|_home| {
+        let identity = AgentIdentity {
+            agent_name: "assistant",
+            model: "claude-opus-4-6",
+            runner: "Subprocess",
+            provider: "openrouter",
+        };
+        let block = render_user_context_block(&identity);
+        assert!(
+            block.contains(
+                "You are running as agent 'assistant' on model claude-opus-4-6 via openrouter (runner: Subprocess"
+            ),
+            "got: {block}"
+        );
     });
 }
 
 #[test]
 fn build_user_context_prefix_appends_base_content_after_block() {
     with_sandboxed_home(|_home| {
-        let out = build_user_context_prefix("BASE PROMPT CONTENT");
+        let identity = test_identity();
+        let out = build_user_context_prefix("BASE PROMPT CONTENT", &identity);
         assert!(out.contains("## User Context"));
         assert!(out.contains("BASE PROMPT CONTENT"));
         assert!(
