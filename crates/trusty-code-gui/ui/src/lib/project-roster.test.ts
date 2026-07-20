@@ -40,6 +40,24 @@ describe('isProjectRoster', () => {
     expect(isProjectRoster({ entries: [{ name: 'x' }] })).toBe(false);
     expect(isProjectRoster({ entries: [{ name: 'x', path: '/x', owner: 7 }] })).toBe(false);
   });
+
+  it('issue #3435: accepts an entry with a boolean registered field, present or absent', () => {
+    expect(
+      isProjectRoster({ entries: [{ name: 'x', path: '/x', owner: null, registered: true }] }),
+    ).toBe(true);
+    expect(
+      isProjectRoster({ entries: [{ name: 'x', path: '/x', owner: null, registered: false }] }),
+    ).toBe(true);
+    // Backward compatibility: an older daemon predating this field must
+    // still validate.
+    expect(isProjectRoster({ entries: [{ name: 'x', path: '/x', owner: null }] })).toBe(true);
+  });
+
+  it('issue #3435: rejects an entry whose registered field is present but non-boolean', () => {
+    expect(
+      isProjectRoster({ entries: [{ name: 'x', path: '/x', owner: null, registered: 'yes' }] }),
+    ).toBe(false);
+  });
 });
 
 describe('fetchProjectRoster', () => {

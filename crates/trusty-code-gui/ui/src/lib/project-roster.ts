@@ -17,6 +17,14 @@
 // answered the socket, so the shape must be verified before it becomes
 // reactive state. [`projectCandidateLabel`] is the one-line display label
 // the modal's row buttons render.
+//
+// Update (issue #3435): the daemon now merges trusty-mpm's shared project
+// registry (primary) with this crate's filesystem scan (secondary,
+// local-only/unregistered candidates) before responding — `registered`
+// distinguishes the two. It is OPTIONAL here (not required) so this client
+// keeps working unchanged against an older daemon that predates the field —
+// additive-only wire evolution, per the daemon side's own backward-
+// compatibility goal.
 // Test: `project-roster.test.ts`.
 
 /** Mirrors `crate::fs_browse::roster::ProjectCandidate` field-for-field. */
@@ -24,6 +32,10 @@ export interface ProjectCandidate {
   name: string;
   path: string;
   owner: string | null;
+  /** Known to trusty-mpm's shared project registry (issue #3435). Optional
+   * for backward compatibility with a daemon predating this field; treat a
+   * missing value the same as `false` (unregistered/unknown). */
+  registered?: boolean;
 }
 
 /** Mirrors `crate::fs_browse::roster::ProjectRoster` field-for-field — the
@@ -40,8 +52,10 @@ export interface ProjectRoster {
  * proxy, a future daemon) flow into `roster.entries` and throw once the
  * modal iterates it.
  * What: structural check of every field the modal dereferences: `entries`
- * is an array whose members each carry string `name`/`path` and an
- * `owner` that is a string or `null`.
+ * is an array whose members each carry string `name`/`path`, an `owner`
+ * that is a string or `null`, and — if present at all — a boolean
+ * `registered` (absent is accepted, for an older daemon; present-but-wrong-
+ * typed is rejected, same strictness as every other field here).
  * Test: `project-roster.test.ts::isProjectRoster`.
  */
 export function isProjectRoster(body: unknown): body is ProjectRoster {
@@ -54,7 +68,8 @@ export function isProjectRoster(body: unknown): body is ProjectRoster {
     return (
       typeof c.name === 'string' &&
       typeof c.path === 'string' &&
-      (c.owner === null || typeof c.owner === 'string')
+      (c.owner === null || typeof c.owner === 'string') &&
+      (c.registered === undefined || typeof c.registered === 'boolean')
     );
   });
 }

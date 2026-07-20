@@ -8,6 +8,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`ProjectPickerModal` marks unregistered (local-only) roster rows
+  (issue #3435).** The daemon's `GET /projects` roster is now primarily
+  sourced from trusty-mpm's shared project registry; a row without a
+  registry match (e.g. a scratch checkout the operator never registered)
+  now shows a small "local only" label, following `new-workstream.ts::
+  bindingLabel`'s existing state-driven-label precedent. No change to row
+  selection/binding behavior.
+
 ### Fixed
 
 - **SSE subscription churn in `WorkstreamActivity.svelte` and

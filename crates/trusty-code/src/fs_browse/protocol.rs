@@ -108,23 +108,30 @@ async fn list_dir(params: Value, _ctx: ConnectionContext) -> Result<Value, RpcEr
 }
 
 /// `fs.list_projects() -> ProjectRoster` — the known-project roster for the
-/// GUI's workstream-first project-picker modal (issue #3365).
+/// GUI's workstream-first project-picker modal (issue #3365; re-sourced from
+/// trusty-mpm's shared project registry by issue #3435).
 ///
-/// Why: the modal's supported roster data source (see
-/// `crate::fs_browse::roster` module docs for the discovery heuristic and
-/// why this exists alongside, not instead of, `fs.list_dir`).
+/// Why: the modal's supported roster data source. As of #3435 this is no
+/// longer a pure filesystem scan — see `crate::fs_browse::mpm_registry`
+/// module docs for the registry-primary/fs-secondary merge policy and the
+/// mpm-daemon-unreachable degradation. `fs.list_dir` (this method's sibling)
+/// is untouched — it remains the manual browse-and-descend surface (7a), not
+/// re-sourced by this ticket.
 /// What: no params — `params` is ignored entirely (a caller passing `{}` or
 /// omitting params behaves identically, matching `fs.list_dir`'s tolerance
 /// for a no-argument call). Never returns a caller-facing error: an
-/// unreadable/missing scan root degrades to an empty roster (see
-/// `roster::list_projects`'s best-effort docs), so the only failure mode
-/// here is JSON serialization, which cannot fail for this struct shape in
-/// practice — kept as a `Result` only for symmetry with every other
-/// registered method and to surface a genuine bug rather than `unwrap`.
+/// unreachable mpm daemon degrades to the filesystem-only roster
+/// (`mpm_registry::merged_roster`'s docs), and an unreadable/missing scan
+/// root degrades further to an empty roster (`roster::list_projects`'s
+/// best-effort docs) — so the only failure mode here is JSON serialization,
+/// which cannot fail for this struct shape in practice — kept as a `Result`
+/// only for symmetry with every other registered method and to surface a
+/// genuine bug rather than `unwrap`.
 /// Test: `tests::list_projects_returns_entries_array`,
 /// `tests::register_wires_fs_list_projects`.
 async fn list_projects(_params: Value, _ctx: ConnectionContext) -> Result<Value, RpcError> {
-    serde_json::to_value(super::roster::list_projects())
+    let roster = super::mpm_registry::merged_roster().await;
+    serde_json::to_value(roster)
         .map_err(|e| RpcError::internal(format!("fs.list_projects: serializing roster: {e}")))
 }
 
@@ -307,10 +314,13 @@ mod tests {
 
     /// `fs.list_projects` must never error and must return an `entries`
     /// array — the response shape the picker modal dereferences. This runs
-    /// against the REAL developer/CI-runner home directory (the handler has
-    /// no injectable seam, unlike `roster::list_projects_in`, which carries
-    /// the real scan-behaviour coverage), so this only pins the wire shape,
-    /// not any particular content.
+    /// against the REAL developer/CI-runner home directory AND whatever real
+    /// mpm daemon (if any) happens to be reachable at the default loopback
+    /// URL (the handler has no injectable seam, unlike
+    /// `mpm_registry::merged_roster_with`, which carries the real
+    /// merge/degradation coverage), so this only pins the wire shape, not
+    /// any particular content — it must pass identically whether or not a
+    /// real mpm daemon is running locally.
     #[tokio::test]
     async fn list_projects_returns_entries_array() {
         let result = list_projects(Value::Null, test_ctx())

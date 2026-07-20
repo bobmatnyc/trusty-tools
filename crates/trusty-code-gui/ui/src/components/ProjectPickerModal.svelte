@@ -141,10 +141,20 @@
           <button
             type="button"
             title={entry.path}
-            class="block w-full truncate rounded-sm px-2 py-1.5 text-left font-mono text-xs text-trusty-text hover:bg-trusty-card"
+            class="flex w-full items-center justify-between gap-2 truncate rounded-sm px-2 py-1.5 text-left font-mono text-xs text-trusty-text hover:bg-trusty-card"
             onclick={() => pick(entry)}
           >
-            {projectCandidateLabel(entry)}
+            <span class="truncate">{projectCandidateLabel(entry)}</span>
+            {#if !entry.registered}
+              <!-- Issue #3435: the registry is now primary, so a row without
+                   it is a local-only, unregistered discovery — mirrors
+                   `new-workstream.ts::bindingLabel`'s existing precedent for
+                   a small state-driven label suffix (there: git repo vs.
+                   plain directory). -->
+              <span class="shrink-0 text-[10px] uppercase tracking-wide text-trusty-text-muted"
+                >local only</span
+              >
+            {/if}
           </button>
         {/each}
       {/if}

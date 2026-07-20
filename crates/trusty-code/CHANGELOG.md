@@ -8,6 +8,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`fs.list_projects` / `GET /projects` re-sourced from trusty-mpm's shared
+  project registry (issue #3435).** The project-picker roster's PRIMARY
+  source is now a loopback call to the mpm daemon's `GET /api/v1/projects`
+  (`http://127.0.0.1:7880`, overridable via `TRUSTY_MPM_URL`); the prior
+  filesystem scan (`fs_browse::roster`, issue #3365) is demoted to
+  SECONDARY — local-only/unregistered candidates (e.g. a `bakeoff-l1`
+  scratch checkout) still appear, never silently dropped, now flagged via a
+  new additive `registered: bool` field on each roster entry. An
+  unreachable mpm daemon degrades gracefully to the filesystem-only roster
+  rather than erroring. New module:
+  `crates/trusty-code/src/fs_browse/mpm_registry.rs`. Spec: DOC-39 §5.8.1.
+
 ### Fixed
 
 - **`serve::DEFAULT_HTTP_PORT` moved from 7881 to 7882 (closes #3364).** The

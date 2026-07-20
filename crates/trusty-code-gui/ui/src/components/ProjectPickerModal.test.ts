@@ -27,8 +27,13 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 
 const ROSTER = {
   entries: [
-    { name: 'trusty-tools', path: '/home/bob/trusty-mpm-projects/bobmatnyc/trusty-tools', owner: 'bobmatnyc' },
-    { name: 'acme-api', path: '/home/bob/acme-api', owner: null },
+    {
+      name: 'trusty-tools',
+      path: '/home/bob/trusty-mpm-projects/bobmatnyc/trusty-tools',
+      owner: 'bobmatnyc',
+      registered: true,
+    },
+    { name: 'acme-api', path: '/home/bob/acme-api', owner: null, registered: true },
   ],
 };
 
@@ -99,6 +104,42 @@ describe('ProjectPickerModal', () => {
       displayPath: 'acme-api',
       isGitRepo: true,
     });
+  });
+
+  it('issue #3435: an unregistered (local-only) roster entry is visually marked, a registered one is not', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          entries: [
+            {
+              name: 'trusty-tools',
+              path: '/home/bob/trusty-mpm-projects/bobmatnyc/trusty-tools',
+              owner: 'bobmatnyc',
+              registered: true,
+            },
+            {
+              name: 'bakeoff-l1',
+              path: '/home/bob/trusty-mpm-projects/bobmatnyc/bakeoff-l1',
+              owner: 'bobmatnyc',
+              registered: false,
+            },
+          ],
+        }),
+      }) as Response),
+    );
+
+    mountModal({ open: true, onSelect: vi.fn(), onClose: vi.fn() });
+    await waitFor(() => target.textContent?.includes('bakeoff-l1') ?? false);
+
+    const rows = Array.from(target.querySelectorAll('button'));
+    const registeredRow = rows.find((b) => b.textContent?.includes('bobmatnyc/trusty-tools'));
+    const unregisteredRow = rows.find((b) => b.textContent?.includes('bakeoff-l1'));
+
+    expect(registeredRow?.textContent).not.toContain('local only');
+    expect(unregisteredRow?.textContent).toContain('local only');
   });
 
   it('"start chatting without a project" calls onSelect(null)', async () => {

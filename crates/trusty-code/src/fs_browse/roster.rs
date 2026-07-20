@@ -13,6 +13,15 @@
 //! binding, not a multi-project registry), so this is a fresh, best-effort
 //! filesystem scan, deliberately narrow in scope (see `MAX_ENTRIES`).
 //!
+//! **Update (issue #3435):** trusty-mpm's shared project registry — a real
+//! cross-machine registry this crate does not own — is now the PRIMARY
+//! source for the roster the GUI actually renders; this module's scan has
+//! been demoted to the SECONDARY source (surfacing local-only, unregistered
+//! candidates the registry doesn't know about) plus the graceful-degradation
+//! fallback for when the mpm daemon is unreachable. See `super::mpm_registry`
+//! for the merge step and [`ProjectCandidate::registered`]. This module's own
+//! scan behavior and discovery heuristic below are otherwise unchanged.
+//!
 //! **Discovery heuristic.** This workspace's own convention — visible in the
 //! very checkout this crate lives in — is `~/trusty-mpm-projects/<owner>/
 //! <repo>` (an owner-scoped project root trusty-mpm's own tooling
@@ -54,9 +63,12 @@ use super::is_git_repo;
 /// the fallback case, a large home directory) must never turn a "small
 /// roster" call into a slow, huge response. 200 comfortably covers a
 /// realistic multi-owner project tree while staying obviously "small" per
-/// the issue's own requirement.
+/// the issue's own requirement. `pub(super)` (not private) so
+/// `super::mpm_registry`'s merge step (issue #3435) truncates the
+/// registry-augmented roster to the same cap rather than duplicating the
+/// magic number.
 /// Test: `tests::scan_is_capped_at_max_entries`.
-const MAX_ENTRIES: usize = 200;
+pub(super) const MAX_ENTRIES: usize = 200;
 
 /// One candidate project row — everything the picker needs to render and
 /// bind it without a further round-trip.
@@ -69,6 +81,11 @@ const MAX_ENTRIES: usize = 200;
 /// layout's owner segment when the scan found it that way, so the picker can
 /// disambiguate two repos that share a name under different owners; `None`
 /// on the home-directory fallback path, where there is no owner segment.
+/// `registered` (issue #3435) distinguishes a project known to trusty-mpm's
+/// shared project registry from one this crate found only by scanning the
+/// filesystem — a plain fs scan can never set it `true` on its own, so every
+/// candidate this module produces starts `false`; only
+/// `super::mpm_registry::merge` (the registry-primary merge step) flips it.
 /// Test: `tests::trusty_mpm_projects_layout_is_scanned_two_levels_deep`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ProjectCandidate {
@@ -80,6 +97,10 @@ pub struct ProjectCandidate {
     /// scan found this candidate that way; `None` on the home-directory
     /// fallback path.
     pub owner: Option<String>,
+    /// Whether this candidate is also known to trusty-mpm's shared project
+    /// registry (issue #3435). Always `false` from a bare filesystem scan —
+    /// see the struct docs.
+    pub registered: bool,
 }
 
 /// The `fs.list_projects` response body — everything the picker needs for
@@ -131,7 +152,12 @@ pub fn list_projects() -> ProjectRoster {
 /// `tests::non_git_directories_are_excluded`,
 /// `tests::scan_is_capped_at_max_entries`,
 /// `tests::empty_home_returns_empty_roster`.
-fn list_projects_in(home: &Path) -> ProjectRoster {
+///
+/// `pub(super)` (not private) so `super::mpm_registry`'s tests (issue #3435)
+/// can build a hermetic filesystem-only `ProjectRoster` against a tempdir
+/// `home`, the same seam this module's own tests already use, rather than
+/// hand-rolling a second scan helper.
+pub(super) fn list_projects_in(home: &Path) -> ProjectRoster {
     let mpm_root = home.join("trusty-mpm-projects");
     let mut entries = if mpm_root.is_dir() {
         scan_owner_layout(&mpm_root)
@@ -184,6 +210,7 @@ fn scan_owner_layout(mpm_root: &Path) -> Vec<ProjectCandidate> {
                 name: repo_name,
                 path: repo_path.display().to_string(),
                 owner: Some(owner_name.clone()),
+                registered: false,
             });
         }
     }
@@ -217,6 +244,7 @@ fn scan_flat_layout(home: &Path) -> Vec<ProjectCandidate> {
             name,
             path: path.display().to_string(),
             owner: None,
+            registered: false,
         });
     }
     out

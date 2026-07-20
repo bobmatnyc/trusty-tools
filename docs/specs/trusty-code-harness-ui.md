@@ -953,13 +953,32 @@ settle is **where it lands when it lands**: cloning a repo is filesystem-and-pro
 so it is `project.clone_from_url` on the daemon (§5.1 #11) — **never** a UI-side git
 operation, and never Tauri-native. Deferring it therefore costs nothing architecturally.
 
-### 5.8.1 Project roster — `GET /projects` (NEW, Phase C, issue #3365)
+### 5.8.1 Project roster — `GET /projects` (Phase C, issue #3365; re-sourced Phase C+++, issue #3435)
 
 The `ProjectPickerModal` (§7A's Phase C update above) needs a **flat, pre-resolved
 shortlist** to render directly — a browse-and-descend tree (§4.2.1/§5.8) is the wrong
 shape for a modal the operator expects to click through in one step, not navigate. This
 is the "supported roster data source" the modal's own predecessor (`CreateSessionForm`)
 recorded as a gap ("no pre-session roster endpoint exists yet").
+
+**Amendment (issue #3435) — source of truth changed, shape additive-only.** Bob's
+directive: *"for 'Projects' we should be using the shared (mpm) projects manager to list
+projects."* trusty-mpm's shared project registry (`~/.trusty-mpm/project-registry/
+projects.json`, surfaced over the mpm daemon's `GET /api/v1/projects`,
+`crates/trusty-mpm/src/daemon/managed_routes/project_registry_routes.rs`) is now the
+PRIMARY source for this roster, reached over a loopback HTTP call
+(`http://127.0.0.1:7880`, overridable via `TRUSTY_MPM_URL` — the same env var
+`trusty-mpm-gui` already reads) — see `crate::fs_browse::mpm_registry` module docs for
+the full survey/rationale (workspace loopback-HTTP precedent, ADR-0018). The filesystem
+scan documented below is DEMOTED to secondary: a locally-discovered candidate not
+resolvable to a registry entry still appears in the roster (never silently dropped —
+e.g. a `bakeoff-l1` scratch checkout), now flagged via the new `registered: bool` field
+(`false` for such candidates, `true` for a registry-backed one). If the mpm daemon is
+unreachable, the roster degrades to the plain filesystem scan (every entry
+`registered: false`) rather than erroring or returning an empty picker. The wire shape
+change is additive-only (`registered` is a new field on each entry) — no existing field
+changed meaning, so `GET /projects` stays backward-compatible for any client predating
+this amendment.
 
 **Naming divergence from §5.8 (documented, deliberate, consistent with an existing
 gap):** §5.8 specifies `project.list_dir` as a `project.*`-namespaced `POST /rpc` method;
@@ -983,19 +1002,23 @@ fs.list_projects()
             name: String,           // "trusty-tools"
             path: String,           // "/Users/bob/trusty-mpm-projects/bobmatnyc/trusty-tools"
             owner: Option<String>,  // "bobmatnyc" under the owner-scoped layout; None otherwise
+            registered: bool,       // NEW (#3435): known to trusty-mpm's shared project registry
         }
     ]
 }
 ```
 
-**Discovery heuristic (best-effort, never a caller-facing error):** when
+**Discovery heuristic (best-effort, never a caller-facing error) — now the SECONDARY
+source (issue #3435; PRIMARY is the mpm registry, see the amendment above):** when
 `~/trusty-mpm-projects` exists, scans it two levels deep — owner dirs, then their repo
 dirs — keeping only repo dirs that are git repos (`crate::fs_browse::is_git_repo`, the
 same discriminator §4.2.1's picker badge already uses). When it does not exist, falls
-back to a one-level scan of the home directory itself, git repos only. Capped at 200
-entries (a "quick pick" shortlist, not a paginated browser). An unreadable/missing scan
-root degrades to an empty (or partial) roster, mirroring §5.8's own best-effort
-per-entry philosophy — never a `500`.
+back to a one-level scan of the home directory itself, git repos only. The merged result
+(registry primary + fs-scan secondary) is capped at 200 entries (a "quick pick"
+shortlist, not a paginated browser). An unreadable/missing scan root degrades to an
+empty (or partial) roster, mirroring §5.8's own best-effort per-entry philosophy — never
+a `500`; likewise an unreachable mpm daemon degrades to the fs-only roster rather than a
+`500` or an empty picker.
 
 **Relationship to §5.8's `list_dir`/`GET /fs`:** additive, not a replacement. `GET /fs`
 still exists and is unchanged; a future manual "browse for another folder" affordance
@@ -1003,12 +1026,27 @@ inside the modal (not built in this ticket — see the non-goals list on issue #
 layer on top of it. The roster is the DEFAULT, fast path; arbitrary-directory browse
 remains available as an API for whenever a UI surface needs it again.
 
-**AC-20.4** `fs.list_projects` returns `entries` with `name`/`path`/`owner` for every
-discovered candidate — the minimum the modal renders.
+**Registry hygiene note (issue #3435, deferred):** no `tm project remove` verb exists
+yet, so a stale registry entry becomes user-visible in this roster if — and only if — a
+matching local checkout still exists under the owner-scoped layout (a stale entry with
+no local checkout is already absent, since a registry entry with no resolvable local
+path is skipped, never fabricated as a dead row). Filtering a live-but-stale entry whose
+checkout DOES still exist depends on a future `tm project remove` and is explicitly out
+of scope here.
+
+**AC-20.4** `fs.list_projects` returns `entries` with `name`/`path`/`owner`/`registered`
+for every candidate — the minimum the modal renders.
 **AC-20.5** The endpoint never returns a caller-facing error; an unreadable or missing
-scan root yields an empty roster.
+scan root yields an empty roster, and an unreachable mpm daemon degrades to the
+filesystem-only roster rather than erroring.
 **AC-20.6** `GET /projects` is loopback-only, matching every other route this daemon
-serves (ADR-0011) — no new bind surface.
+serves (ADR-0018, the loopback-only doctrine that amends ADR-0011) — no new bind surface;
+its one outbound call (to the mpm daemon's `GET /api/v1/projects`) is itself loopback-only
+for the same reason.
+**AC-20.7** (NEW, #3435) A locally-discovered candidate with no matching registry entry
+is never dropped from the roster — it appears with `registered: false`.
+**AC-20.8** (NEW, #3435) A registry entry with no resolvable local checkout on this
+machine is never fabricated into a roster row with a made-up path.
 
 ---
 
@@ -1483,6 +1521,15 @@ This is carried forward verbatim because it is the one piece of the visual syste
 
 ## Changelog
 
+- **2026-07-20** — **Shared project registry becomes the roster's source of truth**
+  (issue #3435). Amends **§5.8.1** (`SPEC-TCUI-05~draft`): `GET /projects`/
+  `fs.list_projects` is re-sourced from trusty-mpm's shared project registry
+  (PRIMARY, via a loopback call to the mpm daemon's `GET /api/v1/projects`), with the
+  prior filesystem scan demoted to SECONDARY (local-only/unregistered candidates,
+  plus the fallback when the mpm daemon is unreachable). Adds the `registered: bool`
+  field to each roster entry (additive-only wire change) and AC-20.7/AC-20.8. See
+  `crates/trusty-code/src/fs_browse/mpm_registry.rs` module docs for the full survey
+  and design rationale; DOC-48 §8 (Phase C+ roster bullet) carries a pointer note.
 - **2026-07-20** — **Implicit workstream inference + monitoring reframe** (issue #3384,
   Phase C+). Amends §7A (`SPEC-TCUI-10~draft`) to record Bob's follow-up direction after
   test-driving the Phase C flow: the explicit **NEW WORKSTREAM** entry-control ceremony is

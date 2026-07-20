@@ -19,7 +19,7 @@ spec_refs:
 **Status:** Draft (Rev 2)
 **Subsystem:** trusty-code — workstream persistence, session lifecycle, RPC/REST/CLI surfaces
 **Owner:** Engineering (trusty-code)
-**Last-updated:** 2026-07-20 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths; Rev 6: §8 Phase C+ — workstream-first GUI creation flow, issue #3365; Rev 7: §9 Q1–Q3 resolutions — prompt-text inference, registered project_slug, no auto-transition; Rev 8: §8 Phase C++ — implicit workstream inference + monitoring reframe, issue #3384)
+**Last-updated:** 2026-07-20 (Rev 2: activation-lock exclusivity model, single-project binding; Rev 5: unprefixed REST paths; Rev 6: §8 Phase C+ — workstream-first GUI creation flow, issue #3365; Rev 7: §9 Q1–Q3 resolutions — prompt-text inference, registered project_slug, no auto-transition; Rev 8: §8 Phase C++ — implicit workstream inference + monitoring reframe, issue #3384; Rev 9: §8 Phase C+ roster bullet note — project roster re-sourced from the shared mpm project registry, issue #3435, full spec in DOC-39 §5.8.1)
 **Spec ID:** `SPEC-WS-01~draft` … `SPEC-WS-08~draft`, `SPEC-WS-09~resolved` (DOC-48)
 **Builds on:**
 - [`docs/specs/trusty-code-harness-ui.md`](./trusty-code-harness-ui.md) (DOC-39, merged) — [`SPEC-TCUI-08~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-08~draft) §4B defines the Workstream domain object as a NEW prerequisite: "an infinite thread with state `active · idle · closed`… resumable across daemon restarts." This spec is the Phase 2+ implementation of that domain object and its persistence layer.
@@ -540,6 +540,13 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
       is a "quick pick" shortlist for the modal only; §2.3's "workstreams
       are daemon-scoped, project implicit via `ProjectBinding`" model is
       unchanged.
+      **Update (Rev 9, issue #3435):** the roster's PRIMARY source is now
+      trusty-mpm's shared project registry (a loopback call to the mpm
+      daemon's `GET /api/v1/projects`); this crate's filesystem scan above
+      is demoted to SECONDARY (local-only/unregistered candidates, plus the
+      degrade path when the mpm daemon is unreachable). Full spec: DOC-39
+      §5.8.1; implementation: `crates/trusty-code/src/fs_browse/
+      mpm_registry.rs`.
 - [x] **Projectless mapping.** The modal's "start chatting without a
       project" option maps onto the workstream's first session carrying no
       `project` binding — §4.1's existing optional-binding rule, unchanged.
