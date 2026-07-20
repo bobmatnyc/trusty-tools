@@ -205,18 +205,26 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// Helper: clear all three env vars before exercising precedence rules.
-    /// SAFETY: env-mutation tests below are guarded by `#[serial]` AND
-    /// `crate::test_env::ENV_LOCK` to prevent CI data races (#274). The
-    /// `#[serial]` attribute serializes against any other `#[serial]` test in
-    /// the binary; ENV_LOCK additionally serializes against the rest of the
-    /// crate's env-touching tests that don't use serial_test.
+    /// Helper: clear every registry-provider + ctrl/PM credential env var
+    /// before exercising precedence rules. SAFETY: env-mutation tests below
+    /// are guarded by `#[serial]` AND `crate::test_env::ENV_LOCK` to prevent
+    /// CI data races (#274). The `#[serial]` attribute serializes against any
+    /// other `#[serial]` test in the binary; ENV_LOCK additionally serializes
+    /// against the rest of the crate's env-touching tests that don't use
+    /// serial_test.
+    ///
+    /// #3464: forces the process-global `.env.local` `OnceLock` loader to
+    /// have already fired (via `force_env_local_loaded`) BEFORE clearing —
+    /// otherwise, on a machine/CI runner with a real `.env.local` (this
+    /// repo's own worktree layout resolves that search up to the shared main
+    /// checkout root), whichever test's `resolve_key` call happens to be the
+    /// very first in the process can have it fire mid-test, silently
+    /// re-populating a var this function just removed. Also clears every
+    /// registry provider's env var (not just the three `pick_credentials`
+    /// names), since `other_configured_providers()` checks all of them.
     fn clear_all() {
-        unsafe {
-            std::env::remove_var("OPENROUTER_API_KEY");
-            std::env::remove_var("ANTHROPIC_API_KEY");
-            std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
-        }
+        crate::test_env::force_env_local_loaded();
+        crate::test_env::clear_all_credential_env_vars();
     }
 
     /// Why: since #3248, `pick_credentials()` also consults the shared secure

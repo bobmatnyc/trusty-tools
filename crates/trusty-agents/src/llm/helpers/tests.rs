@@ -264,6 +264,10 @@ fn create_client_resolves_key_from_store_when_env_absent() {
     let _home_guard = crate::test_env::HOME_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    // #3464: force the `.env.local` `OnceLock` loader to have already fired
+    // BEFORE capturing/removing vars below — see
+    // `crate::test_env::force_env_local_loaded`'s docs.
+    crate::test_env::force_env_local_loaded();
 
     let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
     let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
@@ -329,6 +333,8 @@ fn create_client_env_beats_store() {
     let _home_guard = crate::test_env::HOME_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    // #3464: see `force_env_local_loaded`'s docs.
+    crate::test_env::force_env_local_loaded();
 
     let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
     let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
@@ -394,6 +400,8 @@ fn create_client_missing_everywhere_errors_clearly() {
     let _home_guard = crate::test_env::HOME_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    // #3464: see `force_env_local_loaded`'s docs.
+    crate::test_env::force_env_local_loaded();
 
     let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
     let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
