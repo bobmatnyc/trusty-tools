@@ -428,6 +428,10 @@ mod tests {
     /// Process-wide lock serialising tests that mutate [`HOME_OVERRIDE_ENV`] /
     /// [`SKIP_LAUNCHCTL_ENV`] (process-global env vars would otherwise race
     /// across parallel test threads — mirrors `ensure::ENV_TEST_LOCK`).
+    ///
+    /// Only referenced by the macOS-only tests below — cfg-gated so a non-macOS
+    /// CI run (where those tests don't exist) doesn't hit `-D dead_code`.
+    #[cfg(target_os = "macos")]
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Why: The template must contain the two placeholder tokens so fill_template
