@@ -17,12 +17,79 @@
 //! (it implements [`crate::run::TuiModel`]). [`reduce::apply`] is the
 //! `apply: FnMut(&mut M, ReplEvent)` reducer half of that contract; this
 //! module owns the state and its primitive mutators (`insert_char`,
-//! `backspace`, `push_user`, `scroll`, …), each a direct, behavior-preserving
-//! port of the corresponding tagent method. A product wiring `run()`
-//! (Slice 5+, tagent's eventual `AgentEngine`/tcode's `CodeEngine`) supplies
-//! its own product-specific fields (splash art, banner title, command table)
-//! via the public setters below rather than this crate special-casing either
-//! product.
+//! `backspace`, `push_user`, `scroll`, …). Most are direct ports; a few
+//! (`Up`/`Down`/Ctrl-E key handling) are ports of tagent's REAL production
+//! behavior rather than its dead-code helpers — see the disclosure list
+//! below, which spells out every point (not just those) where this module's
+//! behavior differs from tagent's, since Slice 10's cutover plans against
+//! exactly this list. A product wiring `run()` (Slice 5+, tagent's eventual
+//! `AgentEngine`/tcode's `CodeEngine`) supplies its own product-specific
+//! fields (splash art, banner title, command table) via the public setters
+//! below rather than this crate special-casing either product.
+//!
+//! ## Disclosed behavioral differences from tagent (DOC-50 §5 Slice 4)
+//!
+//! Ported **faithfully** (same production behavior, verified against
+//! tagent's actual `keys.rs`/`app.rs`, not just its doc comments — one round
+//! of review on this slice caught a doc/reality drift in tagent itself, see
+//! history below):
+//! - Up-arrow recalls [`Self::last_prompt`] (the single most recent
+//!   submission) and, when [`Self::busy`], ALSO sets
+//!   [`Self::pending_cancel`] — mirrors
+//!   `crates/trusty-agents/src/repl/tui/keys.rs`'s real `KeyCode::Up` arm,
+//!   not the multi-level `history_prev`/`history_next` `#[allow(dead_code)]`
+//!   helpers tagent's own doc comment (misleadingly) attributes to
+//!   production Up-handling.
+//! - Down-arrow calls [`Self::history_next`] — tagent's real `KeyCode::Down`
+//!   arm does exactly this, even though nothing (including this crate's Up
+//!   handler) ever sets `history_idx`, making it a functional no-op today in
+//!   both tagent and here. Ported for fidelity, not because it currently
+//!   does anything.
+//! - Ctrl-E, with an empty input buffer and a non-`None`
+//!   [`Self::last_bash_block`], pastes only that block's first non-blank
+//!   line (not the whole block) — matches
+//!   `crates/trusty-agents/src/repl/tui/keys.rs`'s `KeyCode::Char('e')` arm
+//!   exactly (the REPL input is single-line; pasting a multi-line block
+//!   would silently truncate at the first `\n` on submit).
+//! - The input composer's right-aligned `[thinking...]` label renders
+//!   whenever [`Self::busy`] is true, REGARDLESS of whether the input
+//!   buffer is empty — mirrors
+//!   `crates/trusty-agents/src/repl/tui/chat.rs::draw_input`. `busy` is set
+//!   `true` at submit time (not on the first streamed chunk), so the
+//!   pre-first-token latency window after Enter also shows the indicator.
+//!
+//! Deliberately **NOT** ported (Phase 2 / later-slice / no-shared-crate-
+//! formula scope — not oversights):
+//! - The three-row animated activity panel (spinner cycling, elapsed timer,
+//!   rust-rainbow shimmer, latest thinking-step echo —
+//!   `repl/tui/layout.rs::draw_activity`, `repl/tui/status.rs`'s
+//!   `SPINNER_FRAMES`/`rainbow_spans`/`hsl_to_rgb`). `busy: bool` is this
+//!   crate's entire generalization of tagent's two-field
+//!   `thinking: bool` + `busy_since: Option<Instant>` — there is no elapsed-
+//!   time derivation available here (no stored start `Instant`).
+//! - Inline token counters in the input row and ALL cost/usage tracking
+//!   (`tokens_in`/`tokens_out`, `daily_cost_start`, usage-file persistence,
+//!   the OpenRouter pricing formula) — DOC-50 Q9: no cost formula belongs in
+//!   the shared crate; cost is engine-supplied, pre-formatted, via
+//!   [`crate::model::StatuslineSegment::Cost`].
+//! - Model/provider pickers (`PickerState`/`PickerKind`) and the inline
+//!   LLM-offered/slash-completion choice list (`choices`/`choices_context`/
+//!   `update_slash_completions`) — Phase 2 (DOC-50 §5 Slice 7 and later);
+//!   [`crate::model::PickerItem`]/[`crate::model::PickerRequest`] exist
+//!   (Slice 1.5) but no widget consumes them yet.
+//! - `AgentScope`'s User/Project cyan/yellow semantic — replaced by a plain
+//!   [`Self::accent_color`] field with no "scope" concept; the engine
+//!   decides what it means and when to change it.
+//! - The shared `trusty_common::banner` splash art, tagent's hardcoded
+//!   banner title/identity text, and its fixed `/help`/`/connect`/`/clear`/
+//!   `/status` command list — all now engine-supplied fields
+//!   ([`Self::banner_art`], [`Self::banner_title`], [`Self::commands`],
+//!   [`Self::recent_activity`]) rather than constants (this crate must not
+//!   depend on `trusty_common`, see DOC-50 §2.2's dependency direction).
+//! - The literal `"[trusty-agents] "` status prefix and its exact idle-hint
+//!   copy (`"Ask ctrl anything, or /connect <path> for project work"`) —
+//!   generalized to [`Self::status_prefix`] (defaulted from `label`) and a
+//!   generic [`crate::widgets::input_composer`] hint string respectively.
 //!
 //! # Spec References
 //! - [`SPEC-TTUI-03~draft`](../../../docs/specs/DOC-50-tcode-tui-claude-code-clone.md#SPEC-TTUI-03~draft) — §3.2, the generalization layer.
@@ -163,6 +230,18 @@ pub struct ReplApp {
     /// call `TuiEngine::cancel_session` (thin-client axiom C-2 — cancellation
     /// is the backend's job, not just clearing local UI state).
     pub pending_cancel: bool,
+    /// The most recently submitted line, restored to `input_buf` on
+    /// Up-arrow. Direct port of tagent's `last_prompt` (single-level recall,
+    /// not the multi-level `history`/`history_idx` browser — see the module
+    /// doc comment's disclosure list for why Up uses this field and not
+    /// `history_prev`).
+    pub last_prompt: String,
+    /// The most recently seen executable-shell (bash/sh/zsh/fish) fenced
+    /// code block across all assistant messages, updated by
+    /// [`Self::update_last_bash_block`]. Ctrl-E pastes this block's first
+    /// non-blank line into an empty input buffer — direct port of tagent's
+    /// `last_bash_block` (`crates/trusty-agents/src/repl/tui/types.rs`).
+    pub last_bash_block: Option<String>,
 }
 
 impl ReplApp {
@@ -205,6 +284,8 @@ impl ReplApp {
             quit: false,
             pending_submit: None,
             pending_cancel: false,
+            last_prompt: String::new(),
+            last_bash_block: None,
         }
     }
 
@@ -239,6 +320,36 @@ impl ReplApp {
             text: collapsed,
         });
         self.scroll_offset = 0;
+        self.update_last_bash_block();
+    }
+
+    /// Rescan `self.chat` and refresh [`Self::last_bash_block`] with the
+    /// last executable-shell fenced block seen across all assistant
+    /// messages, newest-first. Direct port of tagent's
+    /// `ReplApp::update_last_bash_block`
+    /// (`crates/trusty-agents/src/repl/tui/app.rs`).
+    ///
+    /// Why: called after every chat mutation that could introduce or
+    /// obsolete a shell block ([`Self::push_assistant`], and the streaming
+    /// finalize path in [`reduce`]) so Ctrl-E's paste buffer never goes
+    /// stale relative to `chat`.
+    /// What: walks `chat` newest-to-oldest; the first [`ChatRole::Assistant`]
+    /// entry containing an executable shell fence wins (errors and user/
+    /// status entries are skipped — an error entry is never a paste source).
+    /// `None` when no assistant entry has one.
+    /// Test: [`reduce::tests::push_assistant_updates_last_bash_block`],
+    /// [`reduce::tests::push_assistant_skips_error_entries_for_bash_block`].
+    pub fn update_last_bash_block(&mut self) {
+        for entry in self.chat.iter().rev() {
+            if entry.role != ChatRole::Assistant {
+                continue;
+            }
+            if let Some(block) = crate::render::markdown::extract_last_shell_block(&entry.text) {
+                self.last_bash_block = Some(block);
+                return;
+            }
+        }
+        self.last_bash_block = None;
     }
 
     /// Append a status line (rendered with [`Self::status_prefix`]).
@@ -259,14 +370,22 @@ impl ReplApp {
     }
 
     /// Push the current input onto history (with adjacent-duplicate dedup),
-    /// echo it to the scrollback, and stage it in [`Self::pending_submit`].
+    /// record it as [`Self::last_prompt`] (Up-arrow recall), mark the app
+    /// [`Self::busy`], echo it to the scrollback, and stage it in
+    /// [`Self::pending_submit`].
     ///
     /// Why: shared by the Enter-key path and a synthesized
     /// `ReplEvent::Submit` (e.g. a future picker confirmation) so both go
     /// through one echo+stage code path rather than duplicating it — see
-    /// [`reduce`].
+    /// [`reduce`]. Setting `busy` here (not on the first streamed
+    /// `AssistantOutput` chunk) closes the pre-first-token latency window
+    /// where tagent's `[thinking...]` indicator is already lit but this
+    /// crate's used to still show the idle placeholder — see the module doc
+    /// comment's disclosure list.
     pub(crate) fn submit_line(&mut self, line: String) {
         self.remember_input(&line);
+        self.last_prompt = line.clone();
+        self.busy = true;
         self.push_user(line.clone());
         self.pending_submit = Some(line);
     }

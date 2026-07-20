@@ -6,12 +6,16 @@
 //! since Slice 2) needs *some* `apply` closure to be renderable at all — a
 //! product cannot demonstrate the Slice 4 widgets against real key input
 //! without one. This module provides the generic core: character
-//! insertion/deletion, cursor movement, history recall, and scroll —
-//! the same primitives tagent's `keys.rs`/`events.rs` already proved out,
-//! minus the tagent-specific extras (pickers, slash-completion, cost/token
-//! tracking) that stay behind per the generalization mandate. Full
-//! line-editing polish (Ctrl-w word-delete, kill-ring, etc.) remains Slice
-//! 5's to design.
+//! insertion/deletion, cursor movement, history recall, and scroll. Where a
+//! binding has a REAL tagent precedent (Up/Down, Ctrl-E), this module ports
+//! that exact production behavior — verified against tagent's actual
+//! `crates/trusty-agents/src/repl/tui/keys.rs`, not its doc comments, which
+//! in at least one case (Up-arrow) misattribute production behavior to a
+//! dead-code helper. See [`crate::app`]'s module doc comment for the full
+//! disclosed-differences list. Tagent-specific extras (pickers,
+//! slash-completion, cost/token tracking) stay behind per the
+//! generalization mandate; full line-editing polish (Ctrl-w word-delete,
+//! kill-ring, etc.) remains Slice 5's to design.
 //!
 //! What: `apply` cannot reach the event channel or the engine — it only has
 //! `&mut ReplApp` — so anything that would normally need to call
@@ -90,9 +94,13 @@ pub fn apply(app: &mut ReplApp, ev: ReplEvent) {
 /// the open entry, or open a new one" — reads as its own unit.
 /// What: mirrors [`ReplApp::push_assistant`]'s trim/collapse pass, but only
 /// on the *finished* text (trimming mid-stream would strip a blank line the
-/// next chunk was about to fill back in).
+/// next chunk was about to fill back in). Also refreshes
+/// [`ReplApp::last_bash_block`] on finalize, same as `push_assistant`
+/// (Ctrl-E's paste buffer must not go stale just because a response arrived
+/// via streaming instead of a single push).
 /// Test: [`tests::apply_assistant_output_streams_into_one_entry`],
-/// [`tests::apply_assistant_output_finalizes_as_error_role`].
+/// [`tests::apply_assistant_output_finalizes_as_error_role`],
+/// [`tests::apply_assistant_output_refreshes_last_bash_block_on_finalize`].
 fn apply_assistant_output(app: &mut ReplApp, chunk: String, done: bool, is_error: bool) {
     use crate::app::ChatRole;
 
@@ -122,6 +130,7 @@ fn apply_assistant_output(app: &mut ReplApp, chunk: String, done: bool, is_error
         if is_error {
             entry.role = ChatRole::Error;
         }
+        app.update_last_bash_block();
     }
 }
 
@@ -132,17 +141,20 @@ fn apply_assistant_output(app: &mut ReplApp, chunk: String, done: bool, is_error
 /// in spirit (though deliberately smaller — see the module doc comment for
 /// what's deferred to Slice 5).
 /// What: printable chars insert; Backspace/Left/Right/Home/End edit/move;
-/// Up/Down recall history; PageUp/PageDown scroll a page; Enter submits;
-/// Ctrl-a/e/u/c/d match the readline bindings DOC-50 §5 Slice 5 specifies.
-/// Any other key (Tab, Esc, Delete, `KeyCode::Other`) is a no-op — those are
-/// slash-completion/picker-navigation concerns this slice doesn't own.
+/// PageUp/PageDown scroll a page; Enter submits; Ctrl-a/u/c/d match the
+/// readline bindings DOC-50 §5 Slice 5 specifies. Up, Down, and Ctrl-E are
+/// direct ports of tagent's real `keys.rs` bindings rather than a Slice-5
+/// invention — see [`apply_up`] and [`apply_ctrl_e`] for why they're pulled
+/// into their own functions. Any other key (Tab, Esc, Delete,
+/// `KeyCode::Other`) is a no-op — those are slash-completion/picker-
+/// navigation concerns this slice doesn't own.
 /// Test: [`tests`] below, one per binding.
 fn apply_key(app: &mut ReplApp, key: KeyInput) {
     let ctrl = key.modifiers.ctrl;
     match key.code {
         KeyCode::Char(c) if ctrl => match c {
             'a' => app.cursor_pos = 0,
-            'e' => app.cursor_pos = app.input_buf.len(),
+            'e' => apply_ctrl_e(app),
             'u' => {
                 app.input_buf.clear();
                 app.cursor_pos = 0;
@@ -157,7 +169,13 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
         KeyCode::Right => app.cursor_right(),
         KeyCode::Home => app.cursor_pos = 0,
         KeyCode::End => app.cursor_pos = app.input_buf.len(),
-        KeyCode::Up => app.history_prev(),
+        KeyCode::Up => apply_up(app),
+        // Direct port of tagent's real `KeyCode::Down` arm
+        // (`crates/trusty-agents/src/repl/tui/keys.rs`), which calls
+        // `history_next()` even though nothing (including `apply_up` below)
+        // ever sets `history_idx` — a functional no-op today in tagent too.
+        // Kept for fidelity per `crate::app`'s disclosure list, not because
+        // it currently does anything observable.
         KeyCode::Down => app.history_next(),
         KeyCode::PageUp => app.scroll(-PAGE_SCROLL),
         KeyCode::PageDown => app.scroll(PAGE_SCROLL),
@@ -170,292 +188,62 @@ fn apply_key(app: &mut ReplApp, key: KeyInput) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::app::ReplApp;
-    use crate::event::{KeyModifiers, WorkstreamSummary};
-    use crate::model::StatuslineSegment;
-    use crate::run::TuiModel;
-
-    fn key(code: KeyCode) -> ReplEvent {
-        ReplEvent::Key(KeyInput {
-            code,
-            modifiers: KeyModifiers::default(),
-        })
+/// Up-arrow: recall [`ReplApp::last_prompt`], and — while
+/// [`ReplApp::busy`] — ALSO signal [`ReplApp::pending_cancel`].
+///
+/// Why: direct port of tagent's real `KeyCode::Up` arm
+/// (`crates/trusty-agents/src/repl/tui/keys.rs`): a busy in-flight request
+/// gets cancelled so the user can edit and resubmit, and the cancel signal
+/// fires independent of whether `last_prompt` happens to be set (matching
+/// tagent's unconditional `if app.thinking { app.pending_cancel = true; }`
+/// ahead of the recall). This is NOT the multi-level `history_prev` browser
+/// — see `crate::app`'s module doc comment for why that helper stays
+/// unwired, exactly as it is in tagent.
+/// What: no-ops the recall half when `last_prompt` is empty (nothing to
+/// recall); the cancel signal is unconditional on `busy`.
+/// Test: [`tests::apply_up_recalls_last_prompt_when_idle`],
+/// [`tests::apply_up_signals_cancel_and_recalls_when_busy`],
+/// [`tests::apply_up_signals_cancel_even_with_no_last_prompt`],
+/// [`tests::apply_up_is_noop_when_idle_and_no_last_prompt`].
+fn apply_up(app: &mut ReplApp) {
+    if app.busy {
+        app.pending_cancel = true;
     }
-
-    fn ctrl_key(c: char) -> ReplEvent {
-        ReplEvent::Key(KeyInput {
-            code: KeyCode::Char(c),
-            modifiers: KeyModifiers {
-                ctrl: true,
-                alt: false,
-                shift: false,
-            },
-        })
-    }
-
-    #[test]
-    fn apply_char_inserts_at_cursor() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(&mut app, key(KeyCode::Char('h')));
-        apply(&mut app, key(KeyCode::Char('i')));
-        assert_eq!(app.input_buf, "hi");
-        assert_eq!(app.cursor_pos, 2);
-    }
-
-    #[test]
-    fn apply_backspace_removes_last_char() {
-        let mut app = ReplApp::new("demo", "u");
-        app.insert_char('h');
-        app.insert_char('i');
-        apply(&mut app, key(KeyCode::Backspace));
-        assert_eq!(app.input_buf, "h");
-    }
-
-    #[test]
-    fn apply_enter_submits_and_echoes() {
-        let mut app = ReplApp::new("demo", "u");
-        for c in "hello".chars() {
-            apply(&mut app, key(KeyCode::Char(c)));
-        }
-        apply(&mut app, key(KeyCode::Enter));
-        assert!(app.input_buf.is_empty());
-        assert_eq!(app.pending_submit.take(), Some("hello".to_string()));
-        assert_eq!(app.chat.len(), 1);
-        assert_eq!(app.chat[0].text, "hello");
-        assert_eq!(app.history, vec!["hello".to_string()]);
-    }
-
-    #[test]
-    fn apply_enter_on_empty_input_is_noop() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(&mut app, key(KeyCode::Enter));
-        assert!(app.pending_submit.is_none());
-        assert!(app.chat.is_empty());
-    }
-
-    #[test]
-    fn apply_submit_event_mirrors_enter() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(&mut app, ReplEvent::Submit("/model opus-4".to_string()));
-        assert_eq!(app.pending_submit.take(), Some("/model opus-4".to_string()));
-        assert_eq!(app.chat[0].text, "/model opus-4");
-    }
-
-    #[test]
-    fn apply_up_down_recall_history() {
-        let mut app = ReplApp::new("demo", "u");
-        app.history = vec!["one".into(), "two".into(), "three".into()];
-        app.insert_char('x');
-        apply(&mut app, key(KeyCode::Up));
-        assert_eq!(app.input_buf, "three");
-        apply(&mut app, key(KeyCode::Up));
-        assert_eq!(app.input_buf, "two");
-        apply(&mut app, key(KeyCode::Down));
-        assert_eq!(app.input_buf, "three");
-        apply(&mut app, key(KeyCode::Down));
-        assert_eq!(app.input_buf, "x");
-    }
-
-    #[test]
-    fn apply_ctrl_a_e_u_move_and_clear() {
-        let mut app = ReplApp::new("demo", "u");
-        app.set_input("hello".to_string());
-        apply(&mut app, ctrl_key('a'));
-        assert_eq!(app.cursor_pos, 0);
-        apply(&mut app, ctrl_key('e'));
-        assert_eq!(app.cursor_pos, 5);
-        apply(&mut app, ctrl_key('u'));
-        assert_eq!(app.input_buf, "");
-        assert_eq!(app.cursor_pos, 0);
-    }
-
-    #[test]
-    fn apply_ctrl_c_signals_pending_cancel() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(&mut app, ctrl_key('c'));
-        assert!(app.pending_cancel);
-    }
-
-    #[test]
-    fn apply_ctrl_d_signals_quit() {
-        let mut app = ReplApp::new("demo", "u");
-        assert!(!app.should_quit());
-        apply(&mut app, ctrl_key('d'));
-        assert!(app.should_quit());
-    }
-
-    #[test]
-    fn apply_page_up_and_down_scroll_by_page() {
-        let mut app = ReplApp::new("demo", "u");
-        app.last_max_scroll
-            .store(100, std::sync::atomic::Ordering::Relaxed);
-        apply(&mut app, key(KeyCode::PageUp));
-        assert_eq!(app.scroll_offset, PAGE_SCROLL as usize);
-        apply(&mut app, key(KeyCode::PageDown));
-        assert_eq!(app.scroll_offset, 0);
-    }
-
-    #[test]
-    fn apply_scroll_event_delegates_to_scroll() {
-        let mut app = ReplApp::new("demo", "u");
-        app.last_max_scroll
-            .store(10, std::sync::atomic::Ordering::Relaxed);
-        apply(&mut app, ReplEvent::Scroll(-5));
-        assert_eq!(app.scroll_offset, 5);
-    }
-
-    #[test]
-    fn apply_cancel_event_signals_pending_cancel() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(&mut app, ReplEvent::Cancel);
-        assert!(app.pending_cancel);
-    }
-
-    #[test]
-    fn apply_assistant_output_streams_into_one_entry() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(
-            &mut app,
-            ReplEvent::AssistantOutput {
-                chunk: "Hel".into(),
-                done: false,
-                is_error: false,
-            },
-        );
-        assert!(app.busy);
-        assert_eq!(app.chat.len(), 1);
-        apply(
-            &mut app,
-            ReplEvent::AssistantOutput {
-                chunk: "lo".into(),
-                done: true,
-                is_error: false,
-            },
-        );
-        assert!(!app.busy);
-        assert_eq!(app.chat.len(), 1, "must accumulate into one entry");
-        assert_eq!(app.chat[0].text, "Hello");
-        assert!(app.streaming_idx.is_none());
-    }
-
-    #[test]
-    fn apply_assistant_output_finalizes_as_error_role() {
-        use crate::app::ChatRole;
-        let mut app = ReplApp::new("demo", "u");
-        apply(
-            &mut app,
-            ReplEvent::AssistantOutput {
-                chunk: "boom".into(),
-                done: true,
-                is_error: true,
-            },
-        );
-        assert_eq!(app.chat[0].role, ChatRole::Error);
-    }
-
-    #[test]
-    fn apply_tool_invocation_renders_start_and_result_as_status() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(
-            &mut app,
-            ReplEvent::ToolInvocation {
-                id: "call-1".into(),
-                tool_name: "git.checkout".into(),
-                args: serde_json::json!("main"),
-                result: None,
-            },
-        );
-        assert_eq!(app.chat[0].text, "[TOOL] git.checkout: \"main\"");
-        apply(
-            &mut app,
-            ReplEvent::ToolInvocation {
-                id: "call-1".into(),
-                tool_name: "git.checkout".into(),
-                args: serde_json::json!("main"),
-                result: Some("switched to main".into()),
-            },
-        );
-        assert_eq!(app.chat[1].text, "[RESULT] switched to main");
-    }
-
-    #[test]
-    fn apply_status_message_and_clear_scrollback() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(&mut app, ReplEvent::StatusMessage("hi".into()));
-        assert_eq!(app.chat.len(), 1);
-        apply(&mut app, ReplEvent::ClearScrollback);
-        assert!(app.chat.is_empty());
-    }
-
-    #[test]
-    fn apply_connection_lost_pushes_status() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(
-            &mut app,
-            ReplEvent::ConnectionLost {
-                reason: "timeout".into(),
-            },
-        );
-        assert_eq!(app.chat[0].text, "Connection lost: timeout");
-    }
-
-    #[test]
-    fn apply_statusline_update_replaces_segments() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(
-            &mut app,
-            ReplEvent::StatuslineUpdate(vec![StatuslineSegment::SessionId("s1".into())]),
-        );
-        assert_eq!(app.statusline.len(), 1);
-    }
-
-    #[test]
-    fn apply_workstream_updated_sets_active_workstream() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(
-            &mut app,
-            ReplEvent::WorkstreamUpdated(WorkstreamSummary {
-                id: "a1".into(),
-                name: "Token rotation".into(),
-            }),
-        );
-        assert_eq!(app.active_workstream.unwrap().name, "Token rotation");
-    }
-
-    #[test]
-    fn apply_workstream_activation_changed_is_a_deliberate_noop() {
-        let mut app = ReplApp::new("demo", "u");
-        apply(
-            &mut app,
-            ReplEvent::WorkstreamActivationChanged {
-                new_active_id: "a1".into(),
-                prior_id: None,
-            },
-        );
-        assert!(app.active_workstream.is_none());
-        assert!(app.chat.is_empty());
-    }
-
-    #[test]
-    fn apply_resize_is_a_noop() {
-        let mut app = ReplApp::new("demo", "u");
-        let before = app.clone();
-        apply(&mut app, ReplEvent::Resize(80, 24));
-        assert_eq!(app.chat.len(), before.chat.len());
-        assert_eq!(app.input_buf, before.input_buf);
-    }
-
-    /// Behavior-preserving port of tagent's
-    /// `push_assistant_trims_surrounding_blanks`
-    /// (`crates/trusty-agents/src/repl/tui/tests_state.rs`).
-    #[test]
-    fn push_assistant_trims_surrounding_blanks() {
-        let mut app = ReplApp::new("demo", "u");
-        app.push_assistant("\n\n2 + 2 = 4.\n\n   No tools needed.\n\n\n", false);
-        assert_eq!(app.chat.len(), 1);
-        assert_eq!(app.chat[0].text, "2 + 2 = 4.\n   No tools needed.");
+    if !app.last_prompt.is_empty() {
+        let lp = app.last_prompt.clone();
+        app.set_input(lp);
     }
 }
+
+/// Ctrl-E: with an empty input buffer and a cached
+/// [`ReplApp::last_bash_block`], paste that block's first non-blank line;
+/// otherwise (non-empty buffer, or no cached block) move the cursor to the
+/// end of the line.
+///
+/// Why: direct port of tagent's real `KeyCode::Char('e')` arm
+/// (`crates/trusty-agents/src/repl/tui/keys.rs`) — only the first line
+/// pastes because the REPL input is single-line; pasting a multi-line block
+/// verbatim would silently truncate at the first `\n` on submit.
+/// Test: [`tests::apply_ctrl_e_pastes_last_bash_block_when_input_empty`],
+/// [`tests::apply_ctrl_e_falls_back_to_end_of_line_when_input_nonempty`],
+/// [`tests::apply_ctrl_e_noop_when_no_block_and_input_empty`].
+fn apply_ctrl_e(app: &mut ReplApp) {
+    if app.input_buf.is_empty()
+        && let Some(block) = &app.last_bash_block
+    {
+        let first_line = block
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .to_string();
+        if !first_line.is_empty() {
+            app.input_buf = first_line;
+            app.cursor_pos = app.input_buf.len();
+            return;
+        }
+    }
+    app.cursor_pos = app.input_buf.len();
+}
+
+#[cfg(test)]
+mod tests;
