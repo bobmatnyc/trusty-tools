@@ -92,24 +92,29 @@ describe('App shell structure (DOC-39 §8.1, AC-18.1)', () => {
 });
 
 describe('Workstream tab (default activeTab) — DOC-39 §4.6/§4.2.1', () => {
-  it('WorkstreamActivity (8b card) renders inside .body by default', () => {
+  // Issue #3446 dropped `WorkstreamActivity`'s/`StartWorkingForm`'s card
+  // chrome (no more `<h2>` section headers — the pane is chat-shaped now,
+  // via `WorkstreamTab.svelte`), so these assertions look for each
+  // component's own distinctive content instead of a heading.
+  it('WorkstreamActivity renders inside .body by default (fetch stubbed to fail -> daemon-unreachable phase)', async () => {
     instance = mount(App, { target }) as unknown as Record<string, unknown>;
 
     const body = target.querySelector('.body');
-    const headings = Array.from(body?.querySelectorAll('h2') ?? []);
-
     expect(body).not.toBeNull();
-    expect(headings.some((h) => h.textContent === 'workstream activity')).toBe(true);
+    await waitFor(() => body?.textContent?.includes('daemon unreachable') ?? false);
   });
 
   it('StartWorkingForm (issue #3384 — no explicit creation ceremony) renders inside .body by default', () => {
     instance = mount(App, { target }) as unknown as Record<string, unknown>;
 
     const body = target.querySelector('.body');
-    const headings = Array.from(body?.querySelectorAll('h2') ?? []);
-
     expect(body).not.toBeNull();
-    expect(headings.some((h) => h.textContent === 'start working')).toBe(true);
+    expect(body?.querySelector('#start-working-task')).not.toBeNull();
+    expect(
+      Array.from(body?.querySelectorAll('button') ?? []).some(
+        (b) => b.textContent?.trim() === 'choose project',
+      ),
+    ).toBe(true);
   });
 });
 

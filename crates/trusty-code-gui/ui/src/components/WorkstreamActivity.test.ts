@@ -21,6 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
 import WorkstreamActivity from './WorkstreamActivity.svelte';
+import { activeWorkstreamState, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
 import { clearPendingWorkstream, setPendingWorkstream } from '../lib/pending-workstream.svelte';
 import type { Workstream } from '../lib/workstreams';
 
@@ -71,6 +72,7 @@ function fakeDaemon(opts: {
   workstreams: Workstream[];
   sessions: FakeSession[];
   transcript404For?: string;
+  transcriptFor?: Record<string, Array<{ role: string; text: string; tool_calls?: string[] }>>;
 }) {
   const cancelled = new Set<string>();
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -104,7 +106,8 @@ function fakeDaemon(opts: {
       if (transcriptMatch[1] === opts.transcript404For) {
         return { ok: false, status: 404, json: async () => ({}) } as Response;
       }
-      return { ok: true, status: 200, json: async () => ({ turns: [] }) } as Response;
+      const turns = opts.transcriptFor?.[transcriptMatch[1]] ?? [];
+      return { ok: true, status: 200, json: async () => ({ turns }) } as Response;
     }
     const cancelMatch = url.match(/\/sessions\/([^/]+)\/cancel$/);
     if (cancelMatch && method === 'POST') {
@@ -129,10 +132,12 @@ function fakeDaemon(opts: {
 beforeEach(() => {
   target = document.createElement('div');
   document.body.appendChild(target);
-  // The pending-workstream fallback marker is a MODULE-level store shared
-  // across every test in this file — reset it so one test's fallback value
-  // never leaks into the next.
+  // The pending-workstream fallback marker and the shared active-workstream
+  // id (code-critic PR #3460 review, HIGH 2 — this component is one of its
+  // two writers) are MODULE-level stores shared across every test in this
+  // file — reset them so one test's value never leaks into the next.
   clearPendingWorkstream();
+  setActiveWorkstreamId(null);
 });
 
 afterEach(() => {
@@ -164,12 +169,23 @@ describe('WorkstreamActivity phases', () => {
     expect(target.textContent).not.toContain('no active session');
   });
 
-  it('header reads "workstream activity", never "session monitor"', async () => {
-    vi.stubGlobal('fetch', fakeDaemon({ activeWorkstreamId: null, workstreams: [], sessions: [] }));
+  it('issue #3446: renders as a full-pane chat stream with no card chrome — no "session monitor" wording, no bounded header', async () => {
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-1',
+        workstreams: [ws('ws-1', 'acme-api — 2026-07-20', [])],
+        sessions: [],
+      }),
+    );
     instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
-    await waitFor(() => target.querySelector('h2') !== null);
+    await waitFor(() => target.textContent?.includes('acme-api — 2026-07-20') ?? false);
 
-    expect(target.querySelector('h2')?.textContent?.trim()).toBe('workstream activity');
+    // No h2 card-header chrome left — the pane fills its host directly.
+    expect(target.querySelector('h2')).toBeNull();
+    expect(target.textContent).not.toContain('session monitor');
+    // The root fills its host's height (WorkstreamTab hosts it as flex-1).
+    expect(target.querySelector('section')?.className).toContain('h-full');
   });
 
   it('a real active workstream with no bound sessions yet renders its own "no activity yet" sub-state', async () => {
@@ -311,6 +327,162 @@ describe('WorkstreamActivity transcript-404 reset (PR #3028 regression, carried 
     // Must not be stuck showing the raw HTTP error or a stale Cancel button.
     expect(target.textContent).not.toContain('HTTP 404');
     expect(target.querySelectorAll('button').length).toBe(0);
+  });
+});
+
+describe('WorkstreamActivity publishes the resolved active id to the shared store (code-critic PR #3460 review, HIGH 2)', () => {
+  it('writes the real active id after a poll', async () => {
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-1',
+        workstreams: [ws('ws-1', 'my workstream', [])],
+        sessions: [],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => activeWorkstreamState.id === 'ws-1');
+  });
+
+  it('writes the RESOLVED id (pending fallback) when the daemon reports no real pointer, and null when nothing resolves', async () => {
+    setPendingWorkstream('ws-pending', 'pending name');
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: null,
+        workstreams: [ws('ws-pending', 'pending name', [])],
+        sessions: [],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => activeWorkstreamState.id === 'ws-pending');
+
+    // Remount against an empty daemon: nothing resolves -> null published.
+    unmount(instance!);
+    instance = null;
+    clearPendingWorkstream();
+    vi.stubGlobal('fetch', fakeDaemon({ activeWorkstreamId: null, workstreams: [], sessions: [] }));
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+    await waitFor(() => activeWorkstreamState.id === null);
+  });
+});
+
+describe('WorkstreamActivity chat stream (issue #3446)', () => {
+  it('renders every turn, untruncated, oldest first (no more 5-line/160-char bound)', async () => {
+    const longText = 'x'.repeat(500);
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-1',
+        workstreams: [ws('ws-1', 'my workstream', ['bound-session'])],
+        sessions: [session('bound-session', 'running', '2026-07-20T14:00:00Z', 'ship the feature')],
+        transcriptFor: {
+          'bound-session': [
+            { role: 'user', text: 'first message' },
+            { role: 'assistant', text: '', tool_calls: ['grep', 'read_file'] },
+            { role: 'assistant', text: longText },
+          ],
+        },
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes(longText) ?? false);
+    expect(target.textContent).toContain('first message');
+    expect(target.textContent).toContain('ran: grep, read_file');
+    expect(target.textContent).toContain(longText);
+
+    // Oldest-first order: "first message" must precede the tool-only turn,
+    // which must precede the long final turn.
+    const text = target.textContent ?? '';
+    const iFirst = text.indexOf('first message');
+    const iTool = text.indexOf('ran: grep, read_file');
+    const iLong = text.indexOf(longText);
+    expect(iFirst).toBeGreaterThanOrEqual(0);
+    expect(iFirst).toBeLessThan(iTool);
+    expect(iTool).toBeLessThan(iLong);
+  });
+});
+
+describe('WorkstreamActivity auto-scroll with scroll-lock (issue #3446)', () => {
+  function streamEl(): HTMLDivElement {
+    return target.querySelector('.activity-stream') as HTMLDivElement;
+  }
+
+  /** jsdom hardcodes scrollHeight/clientHeight to 0 — stub them so the
+   * component's `onStreamScroll`/auto-scroll-effect distance math has real
+   * numbers to compare against. */
+  function stubLayout(el: HTMLDivElement, opts: { scrollHeight: number; clientHeight: number }) {
+    Object.defineProperty(el, 'scrollHeight', { value: opts.scrollHeight, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { value: opts.clientHeight, configurable: true });
+  }
+
+  it('scrolls to the bottom on new content when the operator has not scrolled up', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        'fetch',
+        fakeDaemon({
+          activeWorkstreamId: 'ws-1',
+          workstreams: [ws('ws-1', 'my workstream', ['bound-session'])],
+          sessions: [session('bound-session', 'running', '2026-07-20T14:00:00Z')],
+          transcriptFor: { 'bound-session': [{ role: 'user', text: 'hello' }] },
+        }),
+      );
+      instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(target.textContent).toContain('hello');
+
+      const el = streamEl();
+      stubLayout(el, { scrollHeight: 900, clientHeight: 200 });
+      el.scrollTop = 0;
+
+      // The next poll tick reassigns `transcript` to a freshly-parsed object
+      // (same content, new reference), which recomputes `chatEntries` and
+      // fires the auto-scroll effect — never scrolled up, so it pins to the
+      // bottom.
+      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(el.scrollTop).toBe(900);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not yank the view back down once the operator has scrolled up to read backlog', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        'fetch',
+        fakeDaemon({
+          activeWorkstreamId: 'ws-1',
+          workstreams: [ws('ws-1', 'my workstream', ['bound-session'])],
+          sessions: [session('bound-session', 'running', '2026-07-20T14:00:00Z')],
+          transcriptFor: { 'bound-session': [{ role: 'user', text: 'hello' }] },
+        }),
+      );
+      instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(target.textContent).toContain('hello');
+
+      const el = streamEl();
+      stubLayout(el, { scrollHeight: 900, clientHeight: 200 });
+      // Operator scrolls up, far from the bottom (well past the component's
+      // scroll-lock threshold).
+      el.scrollTop = 100;
+      el.dispatchEvent(new Event('scroll'));
+
+      // A poll tick lands (transcript reassigned, same content) — scrollTop
+      // must stay put, not get reset to the bottom underneath the operator.
+      await vi.advanceTimersByTimeAsync(5000);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(el.scrollTop).toBe(100);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

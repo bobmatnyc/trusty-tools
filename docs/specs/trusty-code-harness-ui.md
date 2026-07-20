@@ -492,6 +492,97 @@ when auditing and drops back out.
 **AC-6.7** Entering column mode is explicit; exiting restores the thread to full width.
 **AC-6.8** The navigator rail collapses to make room (PDF §6: `.wsrail.collapsed`).
 
+#### 4.6.2 Phase 1 GUI — the main pane is chat-shaped, TUI-style (issues #3446, #3447)
+
+**ID:** SPEC-TCUI-06~draft (addendum)
+**Status:** Draft
+
+> Bob, after test-driving the Phase C+ implicit-workstream flow (issue #3384): *"'Start
+> Working' should be at the bottom of the pane, and the workstream activity above it.
+> Refactor the main chat pane similar to a TUI. Chat at the bottom, enter as a button to
+> the right (or enter), and the stream builds up."*
+
+This is a **layout and interaction-shell amendment only** — it does not change §4.6's
+monitor lifecycle, §4.6.1's column-mode ruling, or §4A's infinite-thread requirements
+(virtualization, pagination, compaction markers remain **unbuilt**, Phase 2+; see §4A —
+this pass does not claim them). What it DOES settle, honestly scoped to what Phase 1's
+REST surface actually supports (§5.0):
+
+**Requirement — layout.** The Workstream tab's pane (`WorkstreamTab.svelte`) fixes two
+regions instead of stacking two independent cards: the turn stream
+(`WorkstreamActivity.svelte`) fills the pane and renders **every** turn, oldest-first,
+so new turns visually "build up" toward the bottom; the entry surface
+(`StartWorkingForm.svelte`) becomes a **persistent bottom-docked input bar** — textarea
+plus a send button to its right, Enter submits, Shift+Enter inserts a newline (carried
+over from issue #3132). An auto-scroll-with-lock behavior keeps the view pinned to the
+newest turn on every poll, EXCEPT once the operator has scrolled up to read backlog —
+scrolling up is never yanked back down mid-read.
+
+**Requirement — chat continuation (the one behavioral change, not merely layout).**
+`task.run`'s existing `session_id` parameter (§5.0; `SessionRegistry::begin_execution`,
+`crates/trusty-code/src/session/registry.rs`) already lets a `Finished` session resume
+to `Running` for a genuine follow-up turn in the SAME session/transcript — this was
+already true of the daemon before this pass, just unused by the GUI. A second submit
+from the docked bar now tries that reuse path FIRST (never re-mints a workstream for a
+follow-up). A rejected reuse MUST be disambiguated before any fallback (code-critic PR
+#3460 review, HIGH 1): `begin_execution` returns the same invalid-argument rejection for
+"session is terminal" and "session already has a task running", and since `task.run` is
+202-then-background, a quick follow-up while the first task still runs is ROUTINE — a
+blind fallback there would fork a second concurrent session and orphan the running one.
+The client therefore probes `GET /sessions/{id}` on rejection: `running` BLOCKS the
+submit with a visible "still running" message (no mint); a verified-terminal status
+(`Cancelled`/`Failed`/`DeadlineExceeded`) or a 404 falls back to a fresh session under
+the SAME already-active workstream (`workstream_id`, no second `POST /workstreams`) with
+a visible fresh-session notice; an unverifiable probe refuses to mint blind and surfaces
+the error. Continuation also re-targets when the daemon's ACTIVE workstream changes for
+any reason (HIGH 2): both workstream pollers publish the resolved active id to a shared
+store (`lib/active-workstream.svelte.ts`, one shared resolution rule), and an observed
+change adopts the new id — the next submit runs a fresh session under the workstream the
+operator switched TO, never the hidden previous one. This is the honest reading of what
+the daemon supports today — it is NOT the §4A infinite-thread virtualization/compaction
+machinery, which remains unbuilt.
+
+**Requirement — project selection persists, and is one state model with continuation.**
+A picked project is the active binding for every subsequent submit until the operator
+explicitly changes it — it is no longer reset to projectless after a successful submit
+(the prior bug, issue #3447). Because a session's project binding is immutable once set
+(§5.5), changing the selected project is exactly the event that invalidates chat
+continuation: it starts a fresh workstream on the next submit rather than attempting to
+reuse a session bound to a different project. Selection and continuation share one
+cross-module store for this reason (`lib/selected-project.svelte.ts`) — there is exactly
+one "currently selected project," regardless of which surface (the docked bar's picker
+modal, or the rail below) changed it.
+
+**Requirement — the project roster is primary in the left rail, not modal-only.** The
+`.wsrail` Project view (§8, `WorkstreamRail.svelte`) now renders the same registry-backed
+roster (§5.8.1) the picker modal already fetched, as a persistent, always-reachable list
+— not a stub handing off to a modal. Clicking a roster row (or the projectless row)
+selects it into the shared store above AND switches to the Workstream tab. The picker
+modal remains reachable from the docked bar's own "choose project" button as genuinely
+secondary access (quick reselection without leaving the input), not a duplicate primary
+surface.
+
+**AC-6.9** The docked input bar is `shrink-0`; the turn stream is `flex-1` and owns its
+own scroll region — the pane never scrolls as a whole document.
+**AC-6.10** The turn stream renders every turn untruncated (no bounded tail/preview) and
+auto-scrolls to the newest turn unless the operator has scrolled up.
+**AC-6.11** A second submit in the same workstream tries `session_id` reuse before
+minting; a rejection is disambiguated via `GET /sessions/{id}` before any fallback — a
+`running` session BLOCKS the submit visibly (never forks a concurrent session), a
+verified-terminal/vanished session falls back to a fresh session under the SAME
+workstream with a visible notice, and an unverifiable probe refuses to mint. Never a
+second `POST /workstreams` on any of these paths.
+**AC-6.12** A successful submit MUST NOT reset the selected project. Changing the
+selected project MUST reset continuation state (§AC-6.11's `session_id`) so the next
+submit starts fresh.
+**AC-6.14** When the daemon's active workstream changes for any reason (header switcher
+included), continuation MUST re-target: the next submit runs under the NEW active
+workstream, never the previous conversation's session or workstream. Both workstream
+pollers publish one shared, identically-resolved active id for this purpose.
+**AC-6.13** The rail's Project view is a primary, always-visible picker (registry roster,
+`fs_only` banner per §5.8.1, "local only" marker per issue #3435) — the modal is
+secondary, reachable from the input bar.
+
 ### 4.7 "Search" is two different things — keep them apart
 
 **Requirement.** Two distinct surfaces that must never merge:
@@ -1550,6 +1641,39 @@ This is carried forward verbatim because it is the one piece of the visual syste
 
 ## Changelog
 
+- **2026-07-19** — **Code-critic PR #3460 review fixes (same-day, before merge).**
+  Amends §4.6.2: AC-6.11 now requires the rejected-reuse disambiguation probe (HIGH 1 —
+  `begin_execution` rejects "terminal" and "still running" identically; a still-running
+  session BLOCKS the follow-up visibly instead of forking an orphaned concurrent
+  session; verified-terminal falls back visibly; unverifiable refuses to mint blind);
+  adds AC-6.14 (HIGH 2 — continuation re-targets on ANY active-workstream change, incl.
+  the header switcher, via one shared resolved-active-id store both pollers publish).
+  MEDIUM fixes in the same pass: the activity stream's scroll-lock resets on
+  workstream/session change (same places the cancel confirm resets), and the
+  still-running rejection path gained its regression test.
+- **2026-07-19** — **Chat-shaped main pane + project-selection persistence + rail
+  project picker** (issues #3446, #3447). Adds **§4.6.2** (`SPEC-TCUI-06~draft`
+  addendum, AC-6.9–AC-6.13): the Workstream tab's pane fixes into a TUI-style layout —
+  `WorkstreamActivity.svelte` fills the pane as a full, untruncated, auto-scrolling
+  (with scroll-lock) turn stream, `StartWorkingForm.svelte` becomes a persistent
+  bottom-docked input bar (textarea + send button, Enter/Shift+Enter carried over from
+  issue #3132). Adds **chat continuation**: a second submit in the same workstream now
+  tries `task.run`'s existing `session_id` reuse path first (a genuine follow-up turn in
+  the same session — `SessionRegistry::begin_execution` already supported this; it was
+  simply unused by the GUI before this pass) and falls back to minting a fresh session
+  under the SAME workstream only when the daemon rejects the reuse (terminal session, or
+  one still running) — never a second `POST /workstreams`. Fixes the bug where a picked
+  project reset to projectless after every successful submit (issue #3447 bug 1) by
+  promoting the selection to a shared cross-module store (`lib/selected-project.svelte.ts`)
+  that a successful submit no longer clears — solved as ONE state model with
+  continuation, since changing the selected project is the one honest trigger to reset
+  it (a session's project binding is immutable once set, §5.5). Makes `WorkstreamRail`'s
+  Project view a primary, always-visible picker over the §5.8.1 roster (registry-backed,
+  `fs_only` banner, "local only" marker) rather than a stub handing off to the picker
+  modal, which remains reachable from the input bar as secondary access. Also bumps the
+  app's root font-size 10% (rem-scale, `app.css`) per issue #3447 item 3. Explicitly
+  NOT in scope: §4A's infinite-thread virtualization/pagination/compaction-boundary
+  machinery, which remains unbuilt (Phase 2+).
 - **2026-07-20** — **Shared project registry becomes the roster's source of truth**
   (issue #3435). Amends **§5.8.1** (`SPEC-TCUI-05~draft`): `GET /projects`/
   `fs.list_projects` is re-sourced from trusty-mpm's shared project registry
