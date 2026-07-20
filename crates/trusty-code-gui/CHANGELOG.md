@@ -18,7 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   test, `default_daemon_url_matches_tcode_default_http_port`, pins this
   constant against `trusty_code::serve::DEFAULT_HTTP_PORT` directly (new
   dev-dependency on `trusty-code`) so the two cannot drift apart silently
-  again.
+  again. The web-mode fallback — `ui/src/lib/api-config.ts`'s own
+  `DEFAULT_DAEMON_URL`, used by `apiBase()` outside the Tauri webview (the
+  `pnpm dev` loop and any plain browser tab) — carried a THIRD copy of this
+  port that the initial #3364 fix missed; it is now 7882 too, with
+  `ui/src/lib/api-config.test.ts` parsing `trusty-code/src/serve/mod.rs`
+  directly to assert the two stay in sync.
 
 ### Added
 
