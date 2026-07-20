@@ -40,6 +40,9 @@ pub async fn handle_tool_call(state: &AppState, name: &str, args: Value) -> Valu
     let result: anyhow::Result<Value> = match name {
         // Accounts
         "list_accounts" => services::accounts::list_accounts(&state.client, args).await,
+        "set_default_account" => services::accounts::set_default_account(&state.client, args).await,
+        "remove_account" => services::accounts::remove_account(&state.client, args).await,
+        "add_account" => services::accounts::add_account(&state.client, args).await,
 
         // Calendar
         "manage_calendars" => services::calendar::manage_calendars(&state.client, args).await,

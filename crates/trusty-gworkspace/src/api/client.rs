@@ -102,6 +102,24 @@ impl BaseClient {
         &self.storage
     }
 
+    /// Test-only constructor with injectable storage and no refresh manager.
+    ///
+    /// Why: `services::accounts`' account-management tools (`set_default_account`,
+    /// `remove_account`) only ever touch `TokenStorage`, never the network, so
+    /// their tests need a `BaseClient` backed by a temp `TokenStorage` without
+    /// touching `~/.gworkspace-mcp` or real OAuth credentials.
+    /// What: Builds a plain `reqwest::Client`; `oauth` is always `None` since
+    /// nothing exercised by those tests calls `get_access_token`'s refresh path.
+    /// Test: exercised by `services::accounts::tests`.
+    #[cfg(test)]
+    pub(crate) fn for_test(storage: TokenStorage) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            storage: Arc::new(storage),
+            oauth: None,
+        }
+    }
+
     /// Resolve a stored token entry, preferring (in order):
     /// 1. The explicit `account` parameter
     /// 2. `GWORKSPACE_ACCOUNT` environment variable

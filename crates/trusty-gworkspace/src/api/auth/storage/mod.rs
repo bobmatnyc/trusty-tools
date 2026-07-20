@@ -8,14 +8,17 @@
 //! changing the override contract) when a project-level entry shadowing a
 //! profile is expired while the user-level entry it hides is still valid
 //! (issue #2946 — a stale worktree-local override otherwise silently wins
-//! and re-poisons `save()` on every re-auth).
+//! and re-poisons `save()` on every re-auth). [`TokenStorage::update`] guards
+//! every read-modify-write call site (refresh, consent persist, CLI
+//! `accounts default`/`accounts remove`) against concurrent writers losing
+//! each other's changes (issue #3502).
 //! Test: see integration test `tests/auth_models.rs`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use tracing::warn;
 
@@ -36,6 +39,17 @@ pub struct TokenStorage {
     user_path: PathBuf,
     project_path: Option<PathBuf>,
     warned_stale_shadows: Arc<Mutex<HashSet<String>>>,
+    /// In-process mutex serialising [`TokenStorage::update`] calls across
+    /// every clone of this `TokenStorage` within the current process.
+    ///
+    /// Why: The cross-process file lock alone still lets two threads in the
+    /// *same* process interleave a load-mutate-save cycle between the point
+    /// one thread releases the lock and the next acquires it, if they are
+    /// not also serialised in-process; a plain `Mutex` closes that window
+    /// cheaply without relying on the file lock's fairness semantics.
+    /// What: Held for the full duration of `update`'s critical section.
+    /// Test: `concurrent_updates_do_not_lose_writes`.
+    write_guard: Arc<Mutex<()>>,
 }
 
 impl TokenStorage {
@@ -64,6 +78,7 @@ impl TokenStorage {
             user_path,
             project_path,
             warned_stale_shadows: Arc::new(Mutex::new(HashSet::new())),
+            write_guard: Arc::new(Mutex::new(())),
         }
     }
 
@@ -73,6 +88,7 @@ impl TokenStorage {
             user_path: path,
             project_path: None,
             warned_stale_shadows: Arc::new(Mutex::new(HashSet::new())),
+            write_guard: Arc::new(Mutex::new(())),
         }
     }
 
@@ -221,6 +237,78 @@ impl TokenStorage {
         Ok(())
     }
 
+    /// The path `save()` actually writes to (project override if known, else
+    /// the user-level file) — also the file this process's writes must be
+    /// serialised against.
+    fn primary_path(&self) -> PathBuf {
+        self.project_path
+            .clone()
+            .unwrap_or_else(|| self.user_path.clone())
+    }
+
+    /// Sidecar lock file path for [`TokenStorage::update`]'s cross-process
+    /// lock — never contains token data itself.
+    fn lock_path(&self) -> PathBuf {
+        let target = self.primary_path();
+        let file_name = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "tokens.json".to_string());
+        target.with_file_name(format!("{file_name}.lock"))
+    }
+
+    /// Perform an atomic read-modify-write on the stored token map.
+    ///
+    /// Why: `OAuthManager::refresh` and the consent flow's `persist` (and the
+    /// CLI's `accounts default`/`accounts remove`) each used to do
+    /// `load()` -> mutate -> `save()` with no synchronization. Two concurrent
+    /// writers — different profiles refreshing at once, in the same or
+    /// different processes — could each `load()` the map before either
+    /// `save()`d, silently losing whichever write lost the race (issue
+    /// #3502). Centralising the whole cycle here, guarded by a lock, means
+    /// every call site gets the fix for free instead of re-deriving it.
+    /// What: Acquires an in-process mutex (serialises clones of this
+    /// `TokenStorage` within the current process) and, inside that, an
+    /// advisory exclusive lock on a sidecar `<path>.lock` file (serialises
+    /// across processes; blocks until acquired — contention here is brief:
+    /// one JSON parse + one JSON write). Reloads the map fresh under both
+    /// locks (never trusts a caller's possibly-stale copy), applies `f`, and
+    /// saves before releasing. Both locks release automatically on return
+    /// (including on error, via `?` and RAII guards) so a failure never
+    /// leaves the file locked.
+    /// Test: `concurrent_updates_do_not_lose_writes`.
+    pub fn update<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut HashMap<String, StoredToken>) -> Result<T>,
+    {
+        let _in_process_guard = self
+            .write_guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let lock_path = self.lock_path();
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| format!("open lock file {}", lock_path.display()))?;
+        let mut rw_lock = fd_lock::RwLock::new(lock_file);
+        let _file_guard = rw_lock
+            .write()
+            .with_context(|| format!("acquire lock on {}", lock_path.display()))?;
+
+        let mut tokens = self.load()?;
+        let result = f(&mut tokens)?;
+        self.save(&tokens)?;
+        Ok(result)
+    }
+
     /// Return the default profile token (is_default=true), or the first one,
     /// or the entry matching `DEFAULT_PROFILE`, else None.
     pub fn get_default(&self) -> Result<Option<StoredToken>> {
@@ -255,6 +343,106 @@ impl TokenStorage {
         out.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(out)
     }
+
+    /// Mark `name` as the default profile, clearing any other default.
+    ///
+    /// Why: Shared by the CLI (`accounts default`) and the `set_default_account`
+    /// MCP tool so both surfaces get the identical lock-guarded mutation
+    /// instead of each re-implementing load-mutate-save.
+    /// What: Errors if `name` is absent; otherwise unsets `is_default` on
+    /// every entry, sets it on `name`, and saves — all under [`Self::update`].
+    /// Test: `set_default_moves_flag`, `set_default_rejects_unknown` (via the
+    /// `cli::accounts` wrapper, which this backs).
+    pub fn set_default_profile(&self, name: &str) -> Result<()> {
+        self.update(|all| {
+            if !all.contains_key(name) {
+                return Err(anyhow!("no profile named '{name}'"));
+            }
+            for entry in all.values_mut() {
+                entry.metadata.is_default = false;
+            }
+            if let Some(entry) = all.get_mut(name) {
+                entry.metadata.is_default = true;
+            }
+            Ok(())
+        })
+    }
+
+    /// Remove `name`, reassigning the default if it was the one removed.
+    ///
+    /// Why: Shared by the CLI (`accounts remove`) and the `remove_account` MCP
+    /// tool. Removing the current default used to leave zero default entries,
+    /// silently breaking `BaseClient::resolve_stored`'s default-profile
+    /// fallback for every subsequent call with no explicit `account` (issue
+    /// #3502).
+    /// What: Errors if `name` is absent; otherwise removes it and, only when
+    /// it had `is_default = true` and other profiles remain, marks the
+    /// alphabetically-first remaining profile name as the new default. Saves
+    /// under [`Self::update`]. Returns [`RemoveOutcome`] naming the removed
+    /// profile and the reassigned default, if any.
+    /// Test: `remove_deletes_profile` (via `cli::accounts`),
+    /// `remove_default_reassigns_to_next_profile`,
+    /// `remove_default_leaves_none_when_last_profile`,
+    /// `remove_non_default_does_not_reassign`.
+    pub fn remove_profile(&self, name: &str) -> Result<RemoveOutcome> {
+        self.update(|all| remove_and_reassign_default(all, name))
+    }
+}
+
+/// Outcome of [`TokenStorage::remove_profile`]: which profile was removed,
+/// and — only when it had been the default — which remaining profile
+/// inherited that role.
+///
+/// Why: Both the CLI and the `remove_account` MCP tool need to report the
+/// reassignment (if any) to the user/caller rather than silently swapping
+/// which account subsequent default-scoped calls act against.
+/// What: `reassigned_default` is `None` when the removed profile was not the
+/// default, or when it was but no profiles remain.
+/// Test: see [`TokenStorage::remove_profile`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveOutcome {
+    pub removed: String,
+    pub reassigned_default: Option<String>,
+}
+
+/// Pure mutation: remove `name` from `all`, reassigning the default if it was
+/// the one removed.
+///
+/// Why: Isolated as a pure function (no I/O, no locking) so the exact
+/// reassignment rule is directly unit-testable against a plain `HashMap`,
+/// mirroring the `stale_shadow_warning` / `should_set_default` pattern
+/// elsewhere in this crate.
+/// What: Errors if `name` is absent. Otherwise removes it; if it was
+/// `is_default` and `all` is non-empty afterward, marks the
+/// alphabetically-first remaining key `is_default = true` and returns it as
+/// `reassigned_default`.
+/// Test: `remove_default_reassigns_to_next_profile`,
+/// `remove_default_leaves_none_when_last_profile`,
+/// `remove_non_default_does_not_reassign`.
+fn remove_and_reassign_default(
+    all: &mut HashMap<String, StoredToken>,
+    name: &str,
+) -> Result<RemoveOutcome> {
+    let removed = all
+        .remove(name)
+        .ok_or_else(|| anyhow!("no profile named '{name}'"))?;
+
+    let mut reassigned_default = None;
+    if removed.metadata.is_default {
+        let mut remaining: Vec<&String> = all.keys().collect();
+        remaining.sort();
+        if let Some(next) = remaining.first().map(|s| s.to_string()) {
+            if let Some(entry) = all.get_mut(&next) {
+                entry.metadata.is_default = true;
+            }
+            reassigned_default = Some(next);
+        }
+    }
+
+    Ok(RemoveOutcome {
+        removed: name.to_string(),
+        reassigned_default,
+    })
 }
 
 /// Structured detail of a stale project-level shadow, for the `tracing::warn!`
@@ -314,230 +502,4 @@ impl Default for TokenStorage {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[cfg(unix)]
-    fn save_restricts_permissions_on_unix() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!("gw-storage-perms-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("tokens.json");
-        let storage = TokenStorage::with_path(path.clone());
-
-        storage.save(&HashMap::new()).expect("save");
-
-        let mode = std::fs::metadata(&path)
-            .expect("metadata")
-            .permissions()
-            .mode();
-        assert_eq!(
-            mode & 0o777,
-            0o600,
-            "tokens.json must be owner-read/write only, got {:o}",
-            mode & 0o777
-        );
-    }
-
-    #[test]
-    fn save_still_round_trips_content() {
-        // Guards against the permissions change accidentally altering the
-        // byte-serde-compatible wire format.
-        let dir = std::env::temp_dir().join(format!("gw-storage-rt-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let storage = TokenStorage::with_path(dir.join("tokens.json"));
-
-        let mut tokens = HashMap::new();
-        tokens.insert(
-            "primary".to_string(),
-            StoredToken {
-                version: 1,
-                metadata: crate::api::auth::models::TokenMetadata {
-                    service_name: "primary".into(),
-                    provider: "google".into(),
-                    created_at: chrono::Utc::now(),
-                    last_refreshed: None,
-                    email: Some("user@example.com".into()),
-                    is_default: true,
-                },
-                token: crate::api::auth::models::OAuthToken {
-                    access_token: "a".into(),
-                    refresh_token: Some("r".into()),
-                    expires_at: chrono::Utc::now() + chrono::Duration::seconds(3600),
-                    scopes: vec!["openid".into()],
-                    token_type: "Bearer".into(),
-                },
-            },
-        );
-
-        storage.save(&tokens).expect("save");
-        let loaded = storage.load().expect("load");
-        assert_eq!(
-            loaded["primary"].metadata.email.as_deref(),
-            Some("user@example.com")
-        );
-        assert!(loaded["primary"].metadata.is_default);
-    }
-
-    /// Build a `StoredToken` expiring `expires_in_secs` from now (negative =
-    /// already expired) for the stale-shadow-warning tests below.
-    fn make_stored(expires_in_secs: i64) -> StoredToken {
-        StoredToken {
-            version: 1,
-            metadata: crate::api::auth::models::TokenMetadata {
-                service_name: "test".into(),
-                provider: "google".into(),
-                created_at: chrono::Utc::now(),
-                last_refreshed: None,
-                email: Some("user@example.com".into()),
-                is_default: false,
-            },
-            token: crate::api::auth::models::OAuthToken {
-                access_token: "a".into(),
-                refresh_token: Some("r".into()),
-                expires_at: chrono::Utc::now() + chrono::Duration::seconds(expires_in_secs),
-                scopes: vec!["openid".into()],
-                token_type: "Bearer".into(),
-            },
-        }
-    }
-
-    #[test]
-    fn warns_when_project_stale_and_user_fresh() {
-        let project = make_stored(-3600);
-        let user = make_stored(3600);
-        let info = stale_shadow_warning(
-            &project,
-            &user,
-            Path::new("/proj/.gworkspace-mcp/tokens.json"),
-            Path::new("/home/user/.gworkspace-mcp/tokens.json"),
-        )
-        .expect("must warn: project stale, user fresh");
-        assert_eq!(
-            info.project_path,
-            Path::new("/proj/.gworkspace-mcp/tokens.json")
-        );
-        assert_eq!(
-            info.user_path,
-            Path::new("/home/user/.gworkspace-mcp/tokens.json")
-        );
-        assert_eq!(info.project_expires_at, project.token.expires_at);
-        assert_eq!(info.user_expires_at, user.token.expires_at);
-    }
-
-    #[test]
-    fn no_warning_when_both_fresh() {
-        let project = make_stored(3600);
-        let user = make_stored(7200);
-        assert!(stale_shadow_warning(&project, &user, Path::new("p"), Path::new("u")).is_none());
-    }
-
-    #[test]
-    fn no_warning_when_both_stale() {
-        // Both stale is not the silent-shadow failure mode — the caller gets
-        // an expired token either way, so no extra signal is needed here.
-        let project = make_stored(-3600);
-        let user = make_stored(-7200);
-        assert!(stale_shadow_warning(&project, &user, Path::new("p"), Path::new("u")).is_none());
-    }
-
-    #[test]
-    fn no_warning_when_project_is_fresher() {
-        let project = make_stored(3600);
-        let user = make_stored(-3600);
-        assert!(stale_shadow_warning(&project, &user, Path::new("p"), Path::new("u")).is_none());
-    }
-
-    /// Build a two-tier temp `TokenStorage` (separate user/project dirs) with
-    /// a `work` profile present on both sides, and write the given
-    /// user/project token maps to disk. Shared by the precedence and
-    /// warn-capture tests below.
-    fn temp_shadowed_storage(
-        label: &str,
-        user_expires_in_secs: i64,
-        project_expires_in_secs: i64,
-    ) -> TokenStorage {
-        let dir = std::env::temp_dir().join(format!("gw-storage-{label}-{}", uuid::Uuid::new_v4()));
-        let user_dir = dir.join("user");
-        let project_dir = dir.join("project");
-        std::fs::create_dir_all(&user_dir).unwrap();
-        std::fs::create_dir_all(&project_dir).unwrap();
-        let user_path = user_dir.join("tokens.json");
-        let project_path = project_dir.join("tokens.json");
-
-        let mut user_tokens = HashMap::new();
-        user_tokens.insert("work".to_string(), make_stored(user_expires_in_secs));
-        std::fs::write(&user_path, serde_json::to_string(&user_tokens).unwrap()).unwrap();
-
-        let mut project_tokens = HashMap::new();
-        let mut project_stored = make_stored(project_expires_in_secs);
-        project_stored.token.access_token = "stale-access-token".into();
-        project_tokens.insert("work".to_string(), project_stored);
-        std::fs::write(
-            &project_path,
-            serde_json::to_string(&project_tokens).unwrap(),
-        )
-        .unwrap();
-
-        TokenStorage {
-            user_path,
-            project_path: Some(project_path),
-            warned_stale_shadows: Arc::new(Mutex::new(HashSet::new())),
-        }
-    }
-
-    #[test]
-    fn load_still_prefers_project_override_after_warning() {
-        // Regression guard for the precedence contract: this fix only adds a
-        // warning, it does not change which entry wins (see PR body) — a
-        // stale project override must still be served, just noisily.
-        let storage = temp_shadowed_storage("precedence", 3600, -3600);
-
-        let loaded = storage.load().unwrap();
-        assert_eq!(
-            loaded["work"].token.access_token, "stale-access-token",
-            "project override must still win per the documented contract \
-             (warn, don't change precedence)"
-        );
-    }
-
-    #[test]
-    #[tracing_test::traced_test]
-    fn load_warns_when_project_shadow_is_stale() {
-        let storage = temp_shadowed_storage("warns", 3600, -3600);
-
-        storage.load().unwrap();
-
-        assert!(logs_contain("work"));
-        assert!(logs_contain("STALE"));
-    }
-
-    #[test]
-    #[tracing_test::traced_test]
-    fn load_does_not_rewarn_on_second_load() {
-        // PR #2949 review (HIGH): load() sits on the per-request hot path —
-        // an unthrottled warn would repeat on every single MCP tool call.
-        // Two loads on the same TokenStorage must produce exactly one
-        // stale-shadow warning, not two.
-        let storage = temp_shadowed_storage("norewarn", 3600, -3600);
-
-        storage.load().unwrap();
-        storage.load().unwrap();
-
-        logs_assert(|lines: &[&str]| {
-            let count = lines
-                .iter()
-                .filter(|l| l.contains("STALE") && l.contains("work"))
-                .count();
-            if count == 1 {
-                Ok(())
-            } else {
-                Err(format!(
-                    "expected exactly 1 stale-shadow warning after two load() calls, found {count}"
-                ))
-            }
-        });
-    }
-}
+mod tests;
