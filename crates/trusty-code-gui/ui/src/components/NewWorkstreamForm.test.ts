@@ -5,15 +5,20 @@
 // real component (plus its `ProjectPickerModal` child) can: the submit
 // button's disabled/enabled states, the no-double-submit guard, the
 // picker-modal wiring (open -> pick a roster row / go projectless ->
-// "selected:" line updates), the three-call submit sequence
-// (create-workstream -> activate -> run-task) including its partial-failure
-// paths, and the carried-over Enter/Shift+Enter keyboard behavior (issue
-// #3132).
+// "selected:" line updates), the create -> run -> activate submit sequence
+// (code-critic PR #3375 review, HIGH — activation now fires ONLY after a
+// successful task-run, never before, and a task-run failure after a
+// successful create reuses the same workstream id on retry rather than
+// minting another), and the carried-over Enter/Shift+Enter keyboard
+// behavior (issue #3132).
 // What: Mounts the real component with `fetch` stubbed to answer
 // `GET /projects`, `POST /workstreams`, `POST /workstreams/{id}/activate`,
 // and `POST /tasks` by URL/method — mirrors
 // `CreateSessionForm.test.ts` (this file's predecessor)'s
-// stub-fetch-by-URL-suffix mounting pattern.
+// stub-fetch-by-URL-suffix mounting pattern. `fullSuccessFetch`'s optional
+// `callLog` records `{method, url}` per call, in order, so tests can assert
+// the CALL SEQUENCE itself (e.g. "no `/activate` call before `/tasks`
+// resolves"), not just which routes were eventually hit.
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
@@ -55,11 +60,15 @@ const ROSTER = {
 
 /** A `fetch` stub covering every route this component's full submit
  * sequence touches, all succeeding. Individual tests override specific
- * routes to exercise failure paths. */
-function fullSuccessFetch(capture?: { tasksBody: unknown }) {
+ * routes to exercise failure paths. `callLog`, when passed, records every
+ * call as `{method, url-suffix}` in the order `fetch` was invoked — used to
+ * assert call ORDER (e.g. `/activate` never precedes a successful
+ * `/tasks` call), not just which routes were eventually hit. */
+function fullSuccessFetch(opts?: { tasksBody?: unknown; callLog?: string[] }) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? 'GET';
+    opts?.callLog?.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
     if (url.includes('/projects')) {
       return { ok: true, status: 200, json: async () => ROSTER } as Response;
     }
@@ -70,7 +79,7 @@ function fullSuccessFetch(capture?: { tasksBody: unknown }) {
       return { ok: true, status: 200, json: async () => ({ active_id: 'ws-abc123' }) } as Response;
     }
     if (url.endsWith('/tasks') && method === 'POST') {
-      if (capture) capture.tasksBody = JSON.parse(init!.body as string);
+      if (opts) opts.tasksBody = JSON.parse(init!.body as string);
       return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
     }
     throw new Error(`unexpected fetch: ${method} ${url}`);
@@ -191,8 +200,8 @@ describe('NewWorkstreamForm submit sequence', () => {
   });
 
   it('forwards the selected project and the newly-created workstream_id in the POST /tasks body', async () => {
-    const capture = { tasksBody: null as unknown };
-    vi.stubGlobal('fetch', fullSuccessFetch(capture));
+    const opts: { tasksBody: unknown } = { tasksBody: null };
+    vi.stubGlobal('fetch', fullSuccessFetch(opts));
 
     instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
     openPickerButton().click();
@@ -209,11 +218,30 @@ describe('NewWorkstreamForm submit sequence', () => {
     submitButton().click();
     await waitFor(() => target.textContent?.includes('workstream created') ?? false);
 
-    expect(capture.tasksBody).toEqual({
+    expect(opts.tasksBody).toEqual({
       task_description: 'ship the feature',
       project: '/home/bob/acme-api',
       workstream_id: 'ws-abc123',
     });
+  });
+
+  it('calls create -> run -> activate in that order, never activating before a successful task-run', async () => {
+    const callLog: string[] = [];
+    vi.stubGlobal('fetch', fullSuccessFetch({ callLog }));
+
+    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+
+    expect(callLog).toEqual([
+      'POST /workstreams',
+      'POST /tasks',
+      'POST /workstreams/ws-abc123/activate',
+    ]);
   });
 
   it('disables submit while the sequence is in flight (no double submit)', async () => {
@@ -288,19 +316,25 @@ describe('NewWorkstreamForm submit sequence', () => {
     expect(submitButton().disabled).toBe(false); // re-enabled after failure
   });
 
-  it('surfaces a daemon error from POST /tasks after the workstream was already created', async () => {
+  it('surfaces a daemon error from POST /tasks after the workstream was already created — names the workstream, never activates, and a retry reuses it (code-critic PR #3375 review, HIGH)', async () => {
+    const callLog: string[] = [];
+    let taskCallCount = 0;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = init?.method ?? 'GET';
+        callLog.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
         if (url.endsWith('/workstreams') && method === 'POST') {
           return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
         }
         if (url.endsWith('/activate') && method === 'POST') {
+          // Must never be reached on either attempt below — activation is
+          // the LAST step, only after a successful task-run.
           return { ok: true, status: 200, json: async () => ({}) } as Response;
         }
         if (url.endsWith('/tasks') && method === 'POST') {
+          taskCallCount += 1;
           return {
             ok: false,
             status: 400,
@@ -321,6 +355,76 @@ describe('NewWorkstreamForm submit sequence', () => {
 
     expect(taskField().value).toBe('ship the feature'); // not cleared on error
     expect(submitButton().disabled).toBe(false); // re-enabled after failure
+    // The error names the already-created workstream (HIGH finding: the
+    // operator must know it exists, not just that the task failed).
+    expect(target.textContent).toContain('was created but not activated');
+    expect(callLog).toEqual(['POST /workstreams', 'POST /tasks']);
+    expect(callLog.some((c) => c.includes('/activate'))).toBe(false);
+
+    // Retry: must reuse the SAME workstream id — no second POST
+    // /workstreams — and must still never activate (task fails again here).
+    submitButton().click();
+    await waitFor(() => taskCallCount === 2);
+
+    expect(callLog.filter((c) => c === 'POST /workstreams')).toHaveLength(1);
+    expect(callLog.some((c) => c.includes('/activate'))).toBe(false);
+  });
+
+  it('a retry that succeeds reuses the same workstream_id in POST /tasks and activates exactly once', async () => {
+    const callLog: string[] = [];
+    const taskBodies: unknown[] = [];
+    let taskCallCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        callLog.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
+        if (url.endsWith('/workstreams') && method === 'POST') {
+          return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
+        }
+        if (url.endsWith('/activate') && method === 'POST') {
+          return { ok: true, status: 200, json: async () => ({}) } as Response;
+        }
+        if (url.endsWith('/tasks') && method === 'POST') {
+          taskCallCount += 1;
+          taskBodies.push(JSON.parse(init!.body as string));
+          if (taskCallCount === 1) {
+            return {
+              ok: false,
+              status: 400,
+              json: async () => ({ error: { message: 'transient failure' } }),
+            } as Response;
+          }
+          return { ok: true, status: 202, json: async () => ({ session_id: 'sess-abc12345' }) } as Response;
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }),
+    );
+
+    instance = mount(NewWorkstreamForm, { target }) as unknown as Record<string, unknown>;
+    taskField().value = 'ship the feature';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('was created but not activated') ?? false);
+
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('workstream created') ?? false);
+
+    // Exactly one workstream minted, reused by both /tasks calls; exactly
+    // one activation, and it happens only after the SECOND (successful)
+    // /tasks call.
+    expect(callLog.filter((c) => c === 'POST /workstreams')).toHaveLength(1);
+    expect(callLog.filter((c) => c.includes('/activate'))).toHaveLength(1);
+    expect(callLog.indexOf('POST /workstreams/ws-abc123/activate')).toBeGreaterThan(
+      callLog.lastIndexOf('POST /tasks'),
+    );
+    expect(taskBodies).toEqual([
+      { task_description: 'ship the feature', workstream_id: 'ws-abc123' },
+      { task_description: 'ship the feature', workstream_id: 'ws-abc123' },
+    ]);
   });
 
   it('an activation failure does not block the task run — success still reported (best-effort activation)', async () => {

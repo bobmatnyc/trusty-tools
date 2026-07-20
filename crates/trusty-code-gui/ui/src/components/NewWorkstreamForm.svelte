@@ -7,14 +7,36 @@
   // 7a folder picker + `POST /tasks`) with a workstream-first one: the
   // project picker moves into `ProjectPickerModal` (a roster, not a
   // browse-and-descend tree), and submitting now mints a WORKSTREAM first
-  // (`POST /workstreams`), activates it (`POST /workstreams/{id}/activate`,
-  // an explicit user action so `force: true` is appropriate — see the `submit`
-  // doc below), and only then runs the first task bound to it (`POST /tasks`
+  // (`POST /workstreams`), runs the first task bound to it (`POST /tasks`
   // with `workstream_id`, PR #3354's binding support, previously unused by
-  // any GUI caller) — "sessions are created under the hood," per the issue.
-  // `lib/new-workstream.ts` (renamed from `lib/create-session.ts`) carries
-  // every piece of pure gating/body-construction logic this component
-  // depends on.
+  // any GUI caller), and only THEN activates it (`POST
+  // /workstreams/{id}/activate` — see the `submit` doc below for why this
+  // is deliberately the LAST step, not the second one) — "sessions are
+  // created under the hood," per the issue. `lib/new-workstream.ts`
+  // (renamed from `lib/create-session.ts`) carries every piece of pure
+  // gating/body-construction logic this component depends on.
+  //
+  // **Create -> run -> activate, not create -> activate -> run
+  // (code-critic PR #3375 review, HIGH).** The original ordering activated
+  // the brand-new workstream (`force: true`, unconditionally deactivating
+  // whatever the operator — or another attached client — had active)
+  // BEFORE knowing whether `POST /tasks` would even succeed. A task-run
+  // failure after that point left an EMPTY, now-active workstream stranded
+  // in place of whatever was active before, with no restore and no mention
+  // of it in the error text. Activation was already documented as
+  // best-effort/non-gating (task.run's `workstream_id` binds by id alone,
+  // no activation precondition) — so deferring it to AFTER a successful
+  // task-run costs nothing and removes both the activation-steal-on-failure
+  // and the orphan-goes-active problems in one move.
+  //
+  // **Retry reuses the already-minted workstream (same review).** If
+  // `POST /workstreams` succeeds but `POST /tasks` then fails, the created
+  // (but not yet activated) workstream id is kept in `pendingWorkstreamId`
+  // rather than discarded — a retry binds the SAME workstream instead of
+  // minting a second one. Only a failure at the CREATE step itself (no id
+  // was ever minted) causes the next attempt to mint fresh. This prevents
+  // each retry-after-task-failure from compounding into another abandoned
+  // workstream.
   //
   // **Projectless <-> unbound-session mapping (design call, documented per
   // the issue).** The modal's "start chatting without a project" option
@@ -34,9 +56,11 @@
   // issue #3132's fix.
   // Test: `NewWorkstreamForm.test.ts` covers the form's disabled/enabled
   // submit states, the no-double-submit guard, Enter-vs-Shift+Enter
-  // keyboard behavior, the picker-modal wiring (open/select/clear), and the
-  // three-call submit sequence (create -> activate -> run) including its
-  // partial-failure paths. `lib/new-workstream.test.ts` covers the pure
+  // keyboard behavior, the picker-modal wiring (open/select/clear), the
+  // create -> run -> activate call ORDER (activation never fires before a
+  // successful task-run), the workstream-id-reuse-on-retry path (no second
+  // `POST /workstreams` after a task-run failure), and partial-failure
+  // paths. `lib/new-workstream.test.ts` covers the pure
   // gating/body-construction/name-inference logic.
   import { apiBase } from '../lib/api-config';
   import {
@@ -59,6 +83,15 @@
   let submitPhase = $state<SubmitPhase>('idle');
   let submitError = $state<string | null>(null);
   let successMessage = $state<string | null>(null);
+
+  // Set once `POST /workstreams` succeeds; cleared only once the WHOLE
+  // sequence (through a successful task-run) completes. A `POST /tasks`
+  // failure after a successful create leaves these set so the next
+  // `submit()` call reuses the same workstream instead of minting another
+  // (code-critic PR #3375 review, HIGH — see the module doc's "Retry
+  // reuses…" note).
+  let pendingWorkstreamId = $state<string | null>(null);
+  let pendingWorkstreamName = $state<string | null>(null);
 
   let submitController: AbortController | null = null;
 
@@ -108,25 +141,34 @@
   }
 
   /**
-   * The three-call create sequence: mint a workstream, activate it, then
-   * run the first task bound to it.
+   * The create sequence: mint (or reuse) a workstream, run the first task
+   * bound to it, and only THEN activate it.
    *
-   * Why: DOC-48 has no single "create + activate + run" verb (§5.1's
+   * Why: DOC-48 has no single "create + run + activate" verb (§5.1's
    * surface is three independent REST routes), so this is the client-side
-   * orchestration issue #3365 asks for. Activation is deliberately
-   * `force: true` and best-effort: the operator just took an explicit
-   * action to create a BRAND NEW workstream, so — unlike
+   * orchestration issue #3365 asks for. **Order is deliberate — create,
+   * then run, then activate LAST** (code-critic PR #3375 review, HIGH):
+   * activation is `force: true` (an explicit user action, so — unlike
    * `WorkstreamSwitcher`'s switch-between-EXISTING-workstreams flow, where
    * `force: false` and a surfaced `ActiveConflict` are correct because the
-   * target is ambiguous — there is no ambiguity here, and DOC-48 §6.1's
-   * "explicit switch, never silent" principle is already satisfied by the
-   * operator's own create action. A failed activation (e.g. a race with
-   * another client) does NOT abort the sequence: `task.run`'s
-   * `workstream_id` binds a session to a workstream by id alone, with no
-   * activation precondition, so the run below still produces a valid,
-   * workstream-bound session even if activation lost a race — the
-   * (non-fatal) activation outcome is folded into the success message
+   * target is ambiguous — there is no ambiguity here) and therefore
+   * UNCONDITIONALLY deactivates whatever the operator (or another attached
+   * client) had active. Firing that BEFORE the task-run is known to
+   * succeed would steal activation away for a workstream that might turn
+   * out to be empty forever (a task-run failure leaves it stranded, active,
+   * with nothing bound). Deferring activation to after a successful
+   * task-run costs nothing — `task.run`'s `workstream_id` binds a session
+   * to a workstream by id alone, with no activation precondition — and
+   * activation staying best-effort/non-fatal is unchanged: a failed
+   * activation here (e.g. a race with another client) does not undo the
+   * already-successful task-run; it is folded into the success message
    * instead.
+   *
+   * **Create-succeeded-but-run-failed keeps `pendingWorkstreamId` set**
+   * (does not `return` through the cleared-state path) so the NEXT
+   * `submit()` call reuses the same workstream id rather than minting a
+   * second one — see the module doc's "Retry reuses…" note. The error
+   * message names the workstream so the operator knows it already exists.
    * Test: `NewWorkstreamForm.test.ts`.
    */
   async function submit() {
@@ -141,25 +183,53 @@
       const base = await apiBase();
       if (controller.signal.aborted) return;
 
-      const wsRes = await fetch(`${base}/workstreams`, {
+      let workstreamId = pendingWorkstreamId;
+      let workstreamName = pendingWorkstreamName;
+      if (!workstreamId) {
+        workstreamName = inferWorkstreamName(selectedProject);
+        const wsRes = await fetch(`${base}/workstreams`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildCreateWorkstreamBody(workstreamName)),
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        if (wsRes.status !== 201) {
+          submitError = await errorMessage(wsRes);
+          return;
+        }
+        const wsCreated: unknown = await wsRes.json().catch(() => null);
+        if (controller.signal.aborted) return;
+        const newId = extractWorkstreamId(wsCreated);
+        if (!newId) {
+          submitError = 'workstream created but the daemon did not return an id';
+          return;
+        }
+        workstreamId = newId;
+        pendingWorkstreamId = newId;
+        pendingWorkstreamName = workstreamName;
+      }
+
+      const body = buildRunTaskBody(task, selectedProject, workstreamId);
+      const res = await fetch(`${base}/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildCreateWorkstreamBody(inferWorkstreamName(selectedProject))),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      if (wsRes.status !== 201) {
-        submitError = await errorMessage(wsRes);
-        return;
-      }
-      const wsCreated: unknown = await wsRes.json().catch(() => null);
-      if (controller.signal.aborted) return;
-      const workstreamId = extractWorkstreamId(wsCreated);
-      if (!workstreamId) {
-        submitError = 'workstream created but the daemon did not return an id';
+
+      if (res.status !== 202) {
+        // `pendingWorkstreamId`/`pendingWorkstreamName` deliberately stay
+        // set here — the workstream exists; a retry must reuse it, not
+        // mint another (code-critic PR #3375 review, HIGH).
+        const daemonMessage = await errorMessage(res);
+        submitError = `${daemonMessage} — workstream "${workstreamName}" was created but not activated; it will be reused if you retry.`;
         return;
       }
 
+      // Task run succeeded — NOW activate (best-effort, deliberately last;
+      // see the doc above for why this is not the second step).
       let activationWarning: string | null = null;
       try {
         const actRes = await fetch(`${base}/workstreams/${workstreamId}/activate`, {
@@ -177,20 +247,6 @@
         activationWarning = e instanceof Error ? e.message : String(e);
       }
 
-      const body = buildRunTaskBody(task, selectedProject, workstreamId);
-      const res = await fetch(`${base}/tasks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) return;
-
-      if (res.status !== 202) {
-        submitError = await errorMessage(res);
-        return;
-      }
-
       const created: unknown = await res.json().catch(() => null);
       if (controller.signal.aborted) return;
       const sessionId = extractTaskSessionId(created);
@@ -200,6 +256,8 @@
       successMessage = activationWarning ? `${base_message} (${activationWarning})` : base_message;
       task = '';
       selectedProject = null;
+      pendingWorkstreamId = null;
+      pendingWorkstreamName = null;
     } catch (e) {
       if (!controller.signal.aborted) {
         submitError = e instanceof Error ? e.message : String(e);

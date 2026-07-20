@@ -5,30 +5,38 @@
 // (`CreateSessionForm.svelte`/`lib/create-session.ts`, DOC-39 §4.2.1's 7a
 // folder picker) with a workstream-first one: pick a project (via
 // `ProjectPickerModal.svelte`, `lib/project-roster.ts`) or go projectless,
-// then submit mints a WORKSTREAM (`POST /workstreams`), activates it
-// (`POST /workstreams/{id}/activate`), and runs the first task bound to it
-// (`POST /tasks` with `workstream_id` — issue #3298/PR #3354's binding
-// support, previously unused by any GUI caller). This module carries that
+// then submit mints a WORKSTREAM (`POST /workstreams`), runs the first task
+// bound to it (`POST /tasks` with `workstream_id` — issue #3298/PR #3354's
+// binding support, previously unused by any GUI caller), and only THEN
+// activates it (`POST /workstreams/{id}/activate`). This module carries that
 // flow's pure, testable logic — gating/body-construction/name-inference —
 // the same split `session-status.ts`/`context-budget.ts` establish, renamed
 // from `create-session.ts` to match the concept it now serves.
 //
 // **Why three sequential calls, not one.** DOC-48 has no single "create +
-// activate + run" verb; each is its own REST route, matching the RPC
-// surface's own Phase 1A/1B shape (`workstream.create`, `.activate`,
-// `task.run`). `buildRunTaskBody`'s `workstream_id` is always passed
+// run + activate" verb; each is its own REST route, matching the RPC
+// surface's own Phase 1A/1B shape (`workstream.create`, `task.run`,
+// `.activate`). `buildRunTaskBody`'s `workstream_id` is always passed
 // EXPLICITLY (never left to DOC-48 §4.2's ambient active-workstream
 // default) — the ambient path is documented as "RPC layer supports it, UI
 // integration is Phase B+", and this ticket's job is exactly that UI
 // integration, so it binds explicitly rather than relying on activation
 // timing.
 //
-// **Activation is best-effort, not gating (see `NewWorkstreamForm.svelte`'s
-// own docs for the full sequencing).** A `workstream.activate` conflict
-// (DOC-48 §6.1's `ActiveConflict`) must not block the task run below —
-// `task.run`'s `workstream_id` binds a session to a workstream by id alone,
-// with no activation precondition (`task::protocol::task_run`'s docs), so a
-// failed activation still yields a fully valid, workstream-bound session.
+// **Activation is best-effort, LAST, and never re-mints on retry (see
+// `NewWorkstreamForm.svelte`'s own docs for the full sequencing and the
+// code-critic PR #3375 review that moved it here).** Activation is
+// deliberately the FINAL step, after a successful task-run — not the second
+// step — because `force: true` unconditionally deactivates whatever was
+// previously active, and firing that before knowing the task-run will even
+// succeed can strand an empty workstream as the new active one with no
+// restore path. `task.run`'s `workstream_id` binds a session to a
+// workstream by id alone, with no activation precondition
+// (`task::protocol::task_run`'s docs), so deferring activation costs
+// nothing and a failed activation still yields a fully valid,
+// workstream-bound session. A task-run failure AFTER a successful create
+// keeps the minted workstream id around for the next `submit()` call to
+// reuse, rather than minting a second (orphaned) workstream per retry.
 //
 // **Project selection has no manual browse in this flow.** The prior form's
 // `fs.list_dir`-backed folder browser (`DirListing`/`DirEntryInfo`/

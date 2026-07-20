@@ -516,13 +516,20 @@ This preserves DOC-40's "never silently multiplex" principle at the activation l
 
 - [x] **NEW WORKSTREAM replaces the session-first entry.** The GUI's create
       flow (`NewWorkstreamForm.svelte`, `crates/trusty-code-gui/ui/`) now
-      mints a workstream (`workstream.create`), activates it
-      (`workstream.activate{force: true}` — an explicit user action, so
+      mints a workstream (`workstream.create`), runs the first task
+      **explicitly bound** to it (`task.run{workstream_id}` — not via §4.2's
+      ambient default, see the Phase 1B note above), and only THEN activates
+      it (`workstream.activate{force: true}` — an explicit user action, so
       forcing is correct per §6.1's "explicit switch, never silent"
-      principle being already satisfied by the create action itself), and
-      only then runs the first task **explicitly bound** to it
-      (`task.run{workstream_id}`) — not via §4.2's ambient default (see the
-      Phase 1B note above).
+      principle being already satisfied by the create action itself).
+      **Activation is deliberately the LAST step, not the second one**
+      (code-critic PR #3375 review, HIGH): `force: true` unconditionally
+      deactivates whatever was previously active, so firing it before the
+      task-run is known to succeed could strand an empty, now-active
+      workstream with no restore path if the run then failed. A task-run
+      failure after a successful `workstream.create` keeps that workstream
+      id client-side for reuse on retry, rather than minting (and
+      abandoning) another on every retry.
 - [x] **Project-picker modal** (`ProjectPickerModal.svelte`) replaces the
       prior inline folder-browse picker for this flow. Backed by a new,
       NARROW roster endpoint (`fs.list_projects` / `GET /projects`,
