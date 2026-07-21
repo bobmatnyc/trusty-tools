@@ -215,3 +215,158 @@ fn fastembed_cache_dir_respects_env_override() {
         None => std::env::remove_var(key),
     }
 }
+
+// ── Python/MPS embedder checks (epic #3524 slice 5) ─────────────────────────
+
+/// Save/restore a single env var across a test body — same accepted
+/// env-manipulation-flakiness trade-off as `fastembed_cache_dir_respects_env_override`
+/// above.
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self { key, prev }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// Build a `VenvLayout` rooted at a fresh temp dir — none of its paths exist
+/// on disk until a test creates them, matching a never-bootstrapped venv.
+fn fake_layout(base: std::path::PathBuf) -> trusty_embedderd_py::VenvLayout {
+    let project_dir = base.join("project");
+    let venv_dir = base.join("venv");
+    let venv_python = venv_dir.join("bin").join("python");
+    trusty_embedderd_py::VenvLayout {
+        base,
+        project_dir,
+        venv_dir,
+        venv_python,
+    }
+}
+
+// `#[serial]` (bare — the crate-wide default lock, matching the convention
+// established elsewhere in this crate, e.g. `start/tests.rs`'s
+// `missing_binary_fails_fast_with_install_hint`): these three tests mutate
+// the process-global `TRUSTY_EMBEDDER` env var, which `doctor_pipeline.rs`'s
+// `PythonEmbedderCheck` tests also mutate — without `#[serial]` here, `cargo
+// test`'s default parallel threads race on the same env var across the two
+// files and can flip a "disabled" assertion into an "enabled" one (or vice
+// versa) depending on scheduling (caught by CI, PR #3560).
+use serial_test::serial;
+
+#[test]
+#[serial]
+fn python_embedder_enabled_true_only_for_python_value() {
+    let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "python");
+    assert!(python_embedder_enabled());
+}
+
+#[test]
+#[serial]
+fn python_embedder_enabled_false_when_unset() {
+    let _g = EnvVarGuard::remove("TRUSTY_EMBEDDER");
+    assert!(!python_embedder_enabled());
+}
+
+#[test]
+#[serial]
+fn python_embedder_enabled_false_for_other_values() {
+    let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "stdio");
+    assert!(!python_embedder_enabled());
+}
+
+#[test]
+fn check_python_venv_missing_reports_not_yet_bootstrapped() {
+    // Why: a brand-new install (no `.ready`, no venv python) must produce a
+    // "not yet bootstrapped" Warn — not an Error, since this is expected on
+    // first opt-in — and must never touch the filesystem beyond reading.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let layout = fake_layout(tmp.path().join("py-embedder").join("deadbeef"));
+
+    let r = check_python_venv(&layout);
+    assert!(r.is_warn(), "expected Warn, got {r:?}");
+    match r {
+        CheckResult::Warn(msg) => assert!(
+            msg.contains("not yet bootstrapped"),
+            "unexpected message: {msg}"
+        ),
+        other => panic!("expected Warn, got {other:?}"),
+    }
+}
+
+#[test]
+fn check_python_venv_ready_and_current_reports_ok() {
+    // Why: the happy path — venv python present AND `.ready` matches the
+    // CURRENT lockfile hash — must report Ok, not a false Warn.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let layout = fake_layout(tmp.path().join("py-embedder").join("deadbeef"));
+    std::fs::create_dir_all(layout.venv_python.parent().unwrap()).unwrap();
+    std::fs::write(&layout.venv_python, b"#!/bin/sh\n").unwrap();
+    std::fs::create_dir_all(&layout.base).unwrap();
+    let current_hash = trusty_embedderd_py::bootstrap::lockfile_hash();
+    std::fs::write(layout.base.join(".ready"), &current_hash).unwrap();
+
+    let r = check_python_venv(&layout);
+    assert!(!r.is_error(), "expected Ok/Warn, got Error: {r:?}");
+    match r {
+        CheckResult::Ok(msg) => assert!(msg.contains("ready"), "unexpected message: {msg}"),
+        other => panic!("expected Ok, got {other:?}"),
+    }
+}
+
+#[test]
+fn check_python_venv_stale_hash_reports_warn() {
+    // Why: a `.ready` sentinel that does NOT match the current lockfile hash
+    // (e.g. after a `uv.lock` update shipped in a new trusty-search release)
+    // must be treated as stale, not silently trusted.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let layout = fake_layout(tmp.path().join("py-embedder").join("deadbeef"));
+    std::fs::create_dir_all(layout.venv_python.parent().unwrap()).unwrap();
+    std::fs::write(&layout.venv_python, b"#!/bin/sh\n").unwrap();
+    std::fs::create_dir_all(&layout.base).unwrap();
+    std::fs::write(layout.base.join(".ready"), "0000000000000000-stale").unwrap();
+
+    let r = check_python_venv(&layout);
+    assert!(r.is_warn(), "expected Warn, got {r:?}");
+    match r {
+        CheckResult::Warn(msg) => assert!(
+            msg.contains("stale or corrupt"),
+            "unexpected message: {msg}"
+        ),
+        other => panic!("expected Warn, got {other:?}"),
+    }
+}
+
+#[test]
+fn check_python_venv_ready_file_without_venv_binary_reports_warn() {
+    // Why: a half-deleted venv (`.ready` present, but the venv python binary
+    // itself is gone) must not be trusted as "ready".
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let layout = fake_layout(tmp.path().join("py-embedder").join("deadbeef"));
+    std::fs::create_dir_all(&layout.base).unwrap();
+    let current_hash = trusty_embedderd_py::bootstrap::lockfile_hash();
+    std::fs::write(layout.base.join(".ready"), &current_hash).unwrap();
+    // Deliberately do NOT create layout.venv_python.
+
+    let r = check_python_venv(&layout);
+    assert!(r.is_warn(), "expected Warn, got {r:?}");
+}

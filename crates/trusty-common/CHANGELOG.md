@@ -30,6 +30,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   hardcoded `"AllMiniLML6V2Q"` string that predated the fp32-default flip
   (#3486 / #3493 P0).
 - `update::verify_installed_binary_at_path`: health-gates a binary at a KNOWN, CONCRETE path via `--version`, never resolving by name. Complements the existing name-based `verify_installed_binary` (which intentionally searches `$CARGO_HOME/bin`/`~/.cargo/bin` then `~/.local/bin` then `$PATH`) for callers that already know exactly where they just placed a binary — a name-based re-resolution afterward is shadowable by a stale earlier-priority/earlier-PATH copy of the same name (trusty-installer#3554).
+- **`EmbedderClient::last_reported_device()`** — a new default-`None` trait
+  method for a real (wire-reported) backend device readback, as opposed to
+  the build-features/env-predicted `ExecutionProvider` (epic #3524 slice 5,
+  issue #3493 P1). `StdioEmbedderClient` overrides it, capturing the optional
+  `device` field the Python/MPS sidecar now echoes in its response frames;
+  every other transport keeps the `None` default unchanged.
+- **`SupervisorHandle::has_given_up()`** — a new non-blocking readback of
+  whether `EmbedderSupervisor`'s supervision loop has permanently given up
+  respawning its sidecar (crossed `max_restarts` on either the crash-storm or
+  wedge-storm counter — see `should_give_up`), exposed via a second one-way
+  `watch` channel alongside the existing shutdown signal (PR #3560 review,
+  HIGH fix). Lets a caller (trusty-search's `FallbackEmbedderAdapter`)
+  observe the supervisor's actual give-up decision instead of reconstructing
+  an independent, faster-firing proxy at the request layer.
+
+### Fixed
+
+- **`EmbedderSupervisor` could silently stop supervising, and never give up,
+  after a wedge-triggered crash whose respawn attempt then failed** (CI
+  follow-up, PR [#3560](https://github.com/bobmatnyc/trusty-tools/pull/3560)):
+  `supervision_loop`'s top-of-loop check treated an empty `child_slot` as
+  unconditional proof of an explicit cooperative shutdown and returned
+  immediately. That is only true for the shutdown path — the `Unhealthy`
+  (wedge-kill) branch also empties `child_slot` before attempting a respawn,
+  and if that respawn itself failed, the next iteration saw the same empty
+  slot and silently exited without ever incrementing `consecutive_failures`
+  or reaching `should_give_up`/`gave_up_tx`. A daemon could end up with a
+  dead sidecar, no supervision, and no fallback signal ever firing. Added
+  `RestartTrigger::RespawnFailed` so an empty slot with no shutdown in flight
+  is now treated as one more crash-cycle instead of a silent early return.
 
 ## [0.23.7] — 2026-07-21
 

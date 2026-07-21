@@ -9,8 +9,16 @@ error framing WITHOUT importing torch (a stub encoder is enough).
 
 Wire contract (newline-framed, one JSON object per line):
   Request : {"jsonrpc":"2.0","method":"embed","params":{"texts":[...]},"id":<n>}
-  Success : {"jsonrpc":"2.0","result":{"embeddings":[[..384 f32..],..]},"id":<echo>}
+  Success : {"jsonrpc":"2.0","result":{"embeddings":[[..384 f32..],..],"device":"mps"},"id":<echo>}
   Error   : {"jsonrpc":"2.0","error":{"code":<i32>,"message":"..."},"id":<echo>}
+
+  The optional ``device`` key on a success ``result`` (epic #3524 slice 5,
+  issue #3493 P1) is a Python/MPS-sidecar-only extension: the ACTUAL torch
+  device (``"mps"`` / ``"cuda"`` / ``"cpu"``) the encoder resolved, read from
+  the encoder callable's ``device`` attribute (see ``model.build_encoder``).
+  The reference Rust ``trusty-embedderd`` never emits this key; the Rust
+  client (``StdioEmbedderClient``) treats it as optional (``#[serde(default)]``)
+  so parsing an older/reference frame without it is unaffected.
 
 Invariants honoured here:
   * echo the request ``id`` verbatim (the client correlates responses by id and
@@ -45,11 +53,19 @@ ERR_INTERNAL = -32603
 Encoder = Callable[[List[str]], List[List[float]]]
 
 
-def build_success(req_id: Any, embeddings: List[List[float]]) -> str:
-    """Serialize a success response frame (terminating newline included)."""
+def build_success(req_id: Any, embeddings: List[List[float]], device: Optional[str] = None) -> str:
+    """Serialize a success response frame (terminating newline included).
+
+    ``device`` (epic #3524 slice 5) is included as ``result.device`` when
+    given — see the module docstring's wire-contract note. Omitted entirely
+    when ``None`` so the frame shape matches the reference server exactly.
+    """
+    result: dict = {"embeddings": embeddings}
+    if device:
+        result["device"] = device
     return (
         json.dumps(
-            {"jsonrpc": JSONRPC_VERSION, "result": {"embeddings": embeddings}, "id": req_id},
+            {"jsonrpc": JSONRPC_VERSION, "result": result, "id": req_id},
             separators=(",", ":"),
         )
         + "\n"
@@ -114,6 +130,12 @@ def handle_frame(line: str, encoder: Encoder) -> Optional[str]:
             return build_success(req_id, [])
 
         embeddings = _sanitize(encoder(texts))
-        return build_success(req_id, embeddings)
+        # Epic #3524 slice 5: echo the encoder's actually-resolved device, if
+        # it set one (see `model.build_encoder`). `getattr` keeps this
+        # protocol layer working unchanged against any torch-free stub
+        # encoder (e.g. the conformance tests' `stub_encoder`) that never
+        # sets the attribute.
+        device = getattr(encoder, "device", None)
+        return build_success(req_id, embeddings, device)
     except Exception as exc:  # noqa: BLE001 — report as JSON-RPC error, never crash the loop
         return build_error(req_id, ERR_INTERNAL, f"internal error: {exc}")

@@ -74,4 +74,20 @@ pub trait EmbedderClient: Send + Sync {
     ///
     /// Test: `cargo test -p trusty-embedderd --test bit_identical -- --include-ignored`
     async fn embed_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, EmbedderError>;
+
+    /// The backend device/provider actually reported by the live process over
+    /// the wire on its most recent successful response, if the transport
+    /// carries that information (epic #3524 slice 5, issue #3493 P1).
+    ///
+    /// Why: most transports (HTTP, UDS, in-process) have no such readback and
+    /// the predicted `ExecutionProvider` remains the best available answer.
+    /// `StdioEmbedderClient` overrides this — the Python/MPS sidecar echoes
+    /// its actual `torch` device (`"mps"` / `"cuda"` / `"cpu"`) in every
+    /// response frame.
+    /// What: default `None`.
+    /// Test: `StdioEmbedderClient`'s override is covered by
+    /// `reader_task_captures_wire_device` in `stdio_tests.rs`.
+    fn last_reported_device(&self) -> Option<String> {
+        None
+    }
 }

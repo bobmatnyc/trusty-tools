@@ -259,6 +259,29 @@ impl Embedder for SwitchableEmbedder {
     fn provider(&self) -> ExecutionProvider {
         self.active.load().provider
     }
+
+    /// Real-readback passthrough (epic #3524 slice 5 + slice 6, issue #3493
+    /// P1).
+    ///
+    /// Why: `/health` (PR-2) reads `ActiveBackend::provider` for the common
+    /// case — a snapshot PREDICTION taken once at construction/swap time —
+    /// but the Python/MPS sidecar (via `LazySlotEmbedderAdapter`) can report
+    /// a live, wire-verified device on every successful embed
+    /// (`resolved_provider_label`, slice 5). Without this override,
+    /// `/health` would only ever see the trait-default `None` here — the
+    /// live backend's own override would never be reached through the
+    /// `SwitchableEmbedder` wrapper, silently discarding slice 5's real
+    /// readback.
+    /// What: forwards to the CURRENTLY installed backend's own
+    /// `resolved_provider_label()` — `None` when that backend doesn't
+    /// override it (the ort sidecar, in-process, remote, candle), in which
+    /// case the caller falls back to `provider()`'s prediction, exactly as
+    /// it would without `SwitchableEmbedder` in the way.
+    /// Test: `resolved_provider_label_forwards_to_active_backend` in this
+    /// module's `tests`.
+    fn resolved_provider_label(&self) -> Option<String> {
+        self.current().resolved_provider_label()
+    }
 }
 
 #[cfg(test)]
@@ -363,6 +386,53 @@ mod tests {
         // observing the call counter increment on a fresh embed call.
         sw.embed("probe").await.expect("embed must still work");
         assert_eq!(fake.calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// `FakeEmbedder` with a `resolved_provider_label()` override — stands in
+    /// for `LazySlotEmbedderAdapter`'s real wire-readback (epic #3524 slice
+    /// 5) without a real subprocess.
+    struct FakeEmbedderWithRealReadback {
+        label: &'static str,
+    }
+
+    #[async_trait]
+    impl Embedder for FakeEmbedderWithRealReadback {
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            unimplemented!()
+        }
+        async fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            unimplemented!()
+        }
+        fn dimension(&self) -> usize {
+            trusty_common::embedder::EMBED_DIM
+        }
+        fn resolved_provider_label(&self) -> Option<String> {
+            Some(self.label.to_string())
+        }
+    }
+
+    /// `resolved_provider_label()` must forward to the CURRENTLY installed
+    /// backend (epic #3524 slice 5 + slice 6, issue #3493 P1) — `None` when
+    /// the active backend doesn't override it, `Some` when it does, and it
+    /// must track a `swap_to` rather than sticking to the original backend.
+    #[tokio::test]
+    async fn resolved_provider_label_forwards_to_active_backend() {
+        let fake: Arc<dyn Embedder> = Arc::new(FakeEmbedder::new());
+        let sw = SwitchableEmbedder::new(fake, test_active(BackendKind::Ort));
+        assert_eq!(
+            sw.resolved_provider_label(),
+            None,
+            "the default FakeEmbedder has no real readback to report"
+        );
+
+        let fake_with_readback: Arc<dyn Embedder> =
+            Arc::new(FakeEmbedderWithRealReadback { label: "mps" });
+        sw.swap_to(fake_with_readback, test_active(BackendKind::Python));
+        assert_eq!(
+            sw.resolved_provider_label(),
+            Some("mps".to_string()),
+            "must forward the newly-installed backend's real readback after a swap"
+        );
     }
 
     /// Proves the wait-free-swap contract under load: many concurrent
