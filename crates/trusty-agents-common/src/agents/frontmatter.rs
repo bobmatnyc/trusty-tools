@@ -15,10 +15,14 @@
 //! value, and returns `Some((key, value))`; it returns `None` for blank lines,
 //! comment lines, and YAML fence markers (`---`). [`parse_list_value`] parses
 //! a frontmatter array-style scalar (e.g. `skills: [a, b]`) into its element
-//! list.
+//! list. [`validate_frontmatter`] (issue #3556) strict-parses a frontmatter
+//! block with `serde_yaml` — the check a real consumer applies, deliberately
+//! stricter than [`parse_kv_line`]'s own lenient grammar — so deploy time can
+//! catch a malformed/unparseable agent file before it ever loads at runtime.
 //! Test: `cargo test -p trusty-agents-common -- frontmatter` covers URL
 //! values, timestamp values, model-id values, normal key/value pairs,
-//! trailing whitespace, and malformed/comment/empty lines.
+//! trailing whitespace, malformed/comment/empty lines, and
+//! `validate_frontmatter`'s accept/reject cases.
 
 /// Parse one frontmatter line into a `(key, value)` pair.
 ///
@@ -81,6 +85,60 @@ fn strip_one_quote_pair(value: &str) -> &str {
         }
     }
     value
+}
+
+/// Strict-parse a document's YAML frontmatter block, the same way a real
+/// consumer does.
+///
+/// Why (issue #3556): trusty-mpm's own frontmatter reader ([`parse_kv_line`])
+/// is deliberately lenient — it splits on the first colon only, so it never
+/// notices when an emitted scalar contains a colon a strict YAML parser
+/// cannot represent unquoted. But `trusty-agents`' `.md` agent loader
+/// (`agents::registry::md_agent::parse_md_agent`) parses the same frontmatter
+/// block with `serde_yaml`, and rejects it with "mapping values are not
+/// allowed in this context". Nothing in the deploy pipeline caught that
+/// mismatch before this file landed in `.claude/agents/` — this function is
+/// the deploy-time check that closes the gap: [`crate::agents::deployer::deploy_agents_filtered`]
+/// calls it on every freshly composed agent before writing, and trusty-mpm's
+/// `core::deploy_validate` calls it on every already-deployed file so a
+/// stale broken copy is surfaced as an actionable gap instead of silently
+/// failing to load at `tagent` runtime.
+/// What: extracts the block between the opening and first closing `---`
+/// fence and strict-parses it with `serde_yaml`. Returns `Ok(())` when it
+/// parses as a YAML mapping; `Err(detail)` with a human-readable message
+/// (including `serde_yaml`'s own line/column) otherwise — including when the
+/// fences themselves are missing/unterminated. A genuinely EMPTY block (the
+/// closing fence immediately follows the opening one, e.g. a body-only
+/// document `merge_frontmatter` still wraps in `---\n---\n`) is valid — the
+/// closing-fence search first checks whether `rest` itself opens with `---`
+/// (as its own line or at EOF) before falling back to scanning for a later
+/// `"\n---"`, so an empty block is never misread as an unterminated one.
+/// Test: `validate_frontmatter_accepts_quoted_colon_description`,
+/// `validate_frontmatter_rejects_unquoted_colon_description`,
+/// `validate_frontmatter_rejects_missing_fence`,
+/// `validate_frontmatter_accepts_empty_block` in this file.
+pub fn validate_frontmatter(content: &str) -> Result<(), String> {
+    let trimmed = content.trim_start_matches(['\u{feff}']);
+    let Some(rest) = trimmed.strip_prefix("---") else {
+        return Err("missing opening `---` fence".to_string());
+    };
+    let rest = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+        .unwrap_or(rest);
+
+    let fm_str = if rest == "---" || rest.starts_with("---\n") || rest.starts_with("---\r\n") {
+        // The closing fence is the very next line — an empty frontmatter
+        // block, not an unterminated one.
+        ""
+    } else if let Some(end) = rest.find("\n---") {
+        &rest[..end]
+    } else {
+        return Err("missing closing `---` fence".to_string());
+    };
+    serde_yaml::from_str::<serde_yaml::Value>(fm_str)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Parse a frontmatter array-style scalar into its element list.
@@ -280,5 +338,51 @@ mod tests {
     #[test]
     fn parse_list_value_strips_quotes_per_element() {
         assert_eq!(parse_list_value(r#"["a", 'b']"#), vec!["a", "b"]);
+    }
+
+    // ── validate_frontmatter (issue #3556) ─────────────────────────────────
+
+    #[test]
+    fn validate_frontmatter_accepts_quoted_colon_description() {
+        // A description containing a colon, properly double-quoted, is valid
+        // YAML and must be accepted by the strict parser.
+        let doc = "---\nname: rust-engineer\ndescription: \"Rust specialist: memory-safe systems\"\n---\n\nBody.\n";
+        assert!(validate_frontmatter(doc).is_ok());
+    }
+
+    #[test]
+    fn validate_frontmatter_rejects_unquoted_colon_description() {
+        // This is the exact issue #3556 shape: an unquoted plain scalar
+        // containing ": " is invalid YAML ("mapping values are not allowed
+        // in this context") even though trusty-mpm's own lenient
+        // `parse_kv_line` tolerates it.
+        let doc = "---\nname: rust-engineer\ndescription: Rust specialist: memory-safe systems\n---\n\nBody.\n";
+        let err = validate_frontmatter(doc).expect_err("unquoted colon value must be rejected");
+        assert!(
+            !err.is_empty(),
+            "error message must be non-empty/actionable"
+        );
+    }
+
+    #[test]
+    fn validate_frontmatter_rejects_missing_fence() {
+        assert!(validate_frontmatter("no frontmatter here").is_err());
+        assert!(validate_frontmatter("---\nname: unterminated\n").is_err());
+    }
+
+    #[test]
+    fn validate_frontmatter_accepts_empty_block() {
+        // Regression: `merge_frontmatter` still wraps a body-only document
+        // (no fields at all — e.g. a source file with no leading `---`,
+        // which `split_frontmatter` treats as pure body) in `---\n---\n`.
+        // The closing fence then immediately follows the opening one, with
+        // NO `"\n---"` substring anywhere after it. The naive substring scan
+        // misread this as an unterminated block and rejected every such
+        // composition — a real regression caught by
+        // `trusty-mpm::core::session_assets` tests that deploy from a
+        // deliberately frontmatter-less fixture.
+        assert!(validate_frontmatter("---\n---\n\nBody only, no frontmatter.\n").is_ok());
+        // No trailing body at all, and no final newline after the closing fence.
+        assert!(validate_frontmatter("---\n---").is_ok());
     }
 }

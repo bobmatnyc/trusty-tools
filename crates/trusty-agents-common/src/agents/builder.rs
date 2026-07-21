@@ -478,10 +478,25 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
     });
 
     let fm = Frontmatter {
-        name: fields.remove("name"),
-        role: fields.remove("role"),
-        description: fields.remove("description"),
-        model: fields.remove("model"),
+        // #3556: `merge_frontmatter`/`render_scalar` now double-quotes and
+        // escapes any of these scalars that needed it on emit (mirroring the
+        // pre-existing `initialPrompt` treatment below); decode that escaping
+        // here so a compose -> deploy -> re-compose cycle round-trips the
+        // original value verbatim. `unescape_yaml_double_quoted` is a no-op
+        // for a value with no backslash escapes, so plain (unquoted-on-emit)
+        // values are unaffected.
+        name: fields
+            .remove("name")
+            .map(|v| unescape_yaml_double_quoted(&v)),
+        role: fields
+            .remove("role")
+            .map(|v| unescape_yaml_double_quoted(&v)),
+        description: fields
+            .remove("description")
+            .map(|v| unescape_yaml_double_quoted(&v)),
+        model: fields
+            .remove("model")
+            .map(|v| unescape_yaml_double_quoted(&v)),
         extends: fields.remove("extends"),
         // `parse_kv_line` lower-cases keys, so `initialPrompt` arrives as
         // `initialprompt`; match that normalised form. Decode the YAML
@@ -490,7 +505,9 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         initial_prompt: fields
             .remove("initialprompt")
             .map(|v| unescape_yaml_double_quoted(&v)),
-        resource_tier: fields.remove("resource_tier"),
+        resource_tier: fields
+            .remove("resource_tier")
+            .map(|v| unescape_yaml_double_quoted(&v)),
         skills: skills_block.or(inline_skills).unwrap_or_default(),
         max_tokens,
         tools,
@@ -514,17 +531,32 @@ fn first_line_len(s: &str) -> usize {
 
 /// Escape a string for emission inside a YAML double-quoted scalar.
 ///
-/// Why: `merge_frontmatter` wraps the `initialPrompt` value in double-quotes.
-/// A raw `"` or `\` in the value would otherwise terminate the quote early or
-/// be misread as an escape, producing malformed YAML. claude-mpm parity
-/// requires the emitted frontmatter always be parseable.
-/// What: replaces `\` with `\\` and `"` with `\"` (backslash first, so the
-/// quote-escape's own backslash is not doubled). The exact inverse of
-/// [`unescape_yaml_double_quoted`].
+/// Why: `merge_frontmatter` wraps the `initialPrompt` value — and, since
+/// issue #3556, any other scalar [`render_scalar`] decided needs quoting —
+/// in double-quotes. A raw `"` or `\` in the value would otherwise terminate
+/// the quote early or be misread as an escape, and a raw embedded newline
+/// would break the single-line frontmatter grammar entirely; either produces
+/// malformed YAML. claude-mpm parity requires the emitted frontmatter always
+/// be parseable.
+/// What: a single pass over `value`'s characters that escapes `\` → `\\`,
+/// `"` → `\"`, and a literal newline → the two-character sequence `\n` (so a
+/// multi-line description/model/etc. value still composes to one physical
+/// frontmatter line). Every other character passes through unchanged. The
+/// exact inverse of [`unescape_yaml_double_quoted`].
 /// Test: `initial_prompt_with_embedded_quote_round_trips`,
-/// `initial_prompt_with_backslash_round_trips` in builder_tests.rs.
+/// `initial_prompt_with_backslash_round_trips`,
+/// `description_with_embedded_newline_round_trips` in builder_tests.rs.
 fn escape_yaml_double_quoted(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Reverse [`escape_yaml_double_quoted`] on a parsed scalar value.
@@ -533,10 +565,12 @@ fn escape_yaml_double_quoted(value: &str) -> String {
 /// and `\\` escapes after [`parse_kv_line`] strips the single outer quote pair.
 /// Decoding them here makes a compose→deploy→re-compose round-trip yield the
 /// original `initialPrompt` string unchanged.
-/// What: collapses `\\` → `\` and `\"` → `"`; any other `\x` sequence (and a
+/// What: collapses `\\` → `\`, `\"` → `"`, and `\n` (the two-character
+/// escape sequence) → a literal newline; any other `\x` sequence (and a
 /// trailing lone `\`) is left verbatim so non-escaped backslashes survive.
 /// Test: `initial_prompt_with_embedded_quote_round_trips`,
-/// `initial_prompt_with_backslash_round_trips` in builder_tests.rs.
+/// `initial_prompt_with_backslash_round_trips`,
+/// `description_with_embedded_newline_round_trips` in builder_tests.rs.
 fn unescape_yaml_double_quoted(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
@@ -545,6 +579,7 @@ fn unescape_yaml_double_quoted(value: &str) -> String {
             match chars.next() {
                 Some('\\') => out.push('\\'),
                 Some('"') => out.push('"'),
+                Some('n') => out.push('\n'),
                 Some(other) => {
                     out.push('\\');
                     out.push(other);
@@ -556,6 +591,88 @@ fn unescape_yaml_double_quoted(value: &str) -> String {
         }
     }
     out
+}
+
+/// Whether a frontmatter scalar value requires YAML quoting to stay parseable
+/// by a strict YAML reader.
+///
+/// Why (issue #3556): `merge_frontmatter` used to emit every scalar field
+/// (`name`, `role`, `description`, `model`, `resource_tier`) as a bare plain
+/// scalar regardless of content, even though `parse_kv_line` had already
+/// stripped any quotes the SOURCE file used. `split_frontmatter`'s own
+/// lenient parser (first-colon-only split) tolerates a colon anywhere in the
+/// value, so a source template quoting `description: 'Rust 2024 edition
+/// specialist: memory-safe systems...'` composed to the exact same UNQUOTED
+/// `description: Rust 2024 edition specialist: memory-safe systems...` line
+/// regardless of the source's quoting style — invalid YAML a strict parser
+/// (`serde_yaml`, used by `trusty-agents::agents::registry::md_agent::parse_md_agent`)
+/// rejects with "mapping values are not allowed in this context". Because
+/// compose output was invariant to source quoting, re-provisioning alone
+/// could never have fixed the 11 affected agents — recomposing reproduced
+/// byte-identical broken output. Quoting-on-emit whenever a value is unsafe
+/// as a plain scalar fixes it at the one place all consumers share.
+/// What: `true` when `value` is empty, opens with a YAML indicator
+/// character, has leading/trailing whitespace, contains an embedded newline,
+/// is one of the YAML core-schema null tokens (`null`/`Null`/`NULL`/`~`,
+/// which would otherwise round-trip through `Option<String>` as `None`
+/// instead of the literal string), or contains a `": "` / trailing `:` / a
+/// mid-string `" #"` sequence a plain scalar cannot represent. The `" #"`
+/// check exists because a space followed by `#` starts a YAML comment
+/// ANYWHERE in a plain scalar, not just at the start of the line — the
+/// leading-character check above only catches `#` as the very first
+/// character, so a value like `Model context protocol #1 tool for
+/// delegating` silently truncated to `Model context protocol` at the first
+/// `" #"` with no error anywhere in the pipeline (code-critic review of
+/// #3556's PR #3565): `compose_agent` succeeds, `validate_frontmatter`
+/// accepts it (truncated-but-still-valid YAML is syntactically fine), and
+/// the real consumer (`trusty-agents`' `.md` loader) silently drops
+/// everything from the `#` onward. Same blind spot as the #3556 root cause
+/// (trusty-mpm's own lenient `parse_kv_line` only treats `#` as a comment
+/// marker at the start of the trimmed line, so it never notices either) —
+/// just a different trigger character.
+/// Test: `needs_quoting_true_for_colon_space`, `needs_quoting_true_for_empty`,
+/// `needs_quoting_false_for_plain_value`, `needs_quoting_true_for_mid_string_hash_comment`,
+/// `needs_quoting_true_for_embedded_newline`, `needs_quoting_true_for_null_tokens`,
+/// `needs_quoting_indicator_characters` (table-driven) in builder_tests.rs.
+fn needs_quoting(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    if matches!(value, "null" | "Null" | "NULL" | "~") {
+        return true;
+    }
+    let first = value.chars().next().expect("checked non-empty above");
+    if "!&*-?|>%@`\"'#,[]{}:".contains(first) {
+        return true;
+    }
+    if value.starts_with(' ') || value.ends_with(' ') {
+        return true;
+    }
+    if value.contains('\n') {
+        return true;
+    }
+    value.contains(": ") || value.ends_with(':') || value.contains(" #")
+}
+
+/// Render one frontmatter scalar value, quoting it when [`needs_quoting`]
+/// says a plain scalar would not survive a strict YAML parse.
+///
+/// Why: shared by every scalar field `merge_frontmatter` emits (`name`,
+/// `role`, `description`, `model`, `resource_tier`) so the quote-when-needed
+/// policy is applied uniformly rather than ad hoc per field (issue #3556).
+/// What: returns `value` unchanged when it is safe as a plain scalar;
+/// otherwise a double-quoted, escaped scalar via
+/// [`escape_yaml_double_quoted`] — the same quoting style `initialPrompt`
+/// already used, so `split_frontmatter`'s existing `unescape_yaml_double_quoted`
+/// decode (now applied to these fields too) round-trips it.
+/// Test: `compose_description_with_colon_is_quoted_and_strict_yaml_valid`,
+/// `compose_description_without_colon_is_unquoted` in builder_tests.rs.
+fn render_scalar(value: &str) -> String {
+    if needs_quoting(value) {
+        format!("\"{}\"", escape_yaml_double_quoted(value))
+    } else {
+        value.to_string()
+    }
 }
 
 /// Render a single merged frontmatter block from a resolved chain.
@@ -653,22 +770,22 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
 
     let mut out = String::from("---\n");
     if let Some(v) = &merged.name {
-        out.push_str(&format!("name: {v}\n"));
+        out.push_str(&format!("name: {}\n", render_scalar(v)));
     }
     if let Some(v) = &merged.role {
-        out.push_str(&format!("role: {v}\n"));
+        out.push_str(&format!("role: {}\n", render_scalar(v)));
     }
     if let Some(v) = &merged.description {
-        out.push_str(&format!("description: {v}\n"));
+        out.push_str(&format!("description: {}\n", render_scalar(v)));
     }
     if let Some(v) = &merged.model {
-        out.push_str(&format!("model: {v}\n"));
+        out.push_str(&format!("model: {}\n", render_scalar(v)));
     }
     if let Some(v) = &merged.max_tokens {
         out.push_str(&format!("max_tokens: {v}\n"));
     }
     if let Some(v) = &merged.resource_tier {
-        out.push_str(&format!("resource_tier: {v}\n"));
+        out.push_str(&format!("resource_tier: {}\n", render_scalar(v)));
     }
     if !merged.skills.is_empty() {
         // DOC-42: emit the flattened, unioned skill list so a deployed agent

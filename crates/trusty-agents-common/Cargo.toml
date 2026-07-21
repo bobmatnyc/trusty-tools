@@ -16,6 +16,12 @@ categories = ["development-tools", "asynchronous"]
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# agents::frontmatter::validate_frontmatter strict-parses composed/deployed
+# agent frontmatter with a real YAML parser (issue #3556) — trusty-mpm's own
+# `parse_kv_line` is deliberately lenient (first-colon-only split) and cannot
+# catch what a strict consumer (e.g. trusty-agents' `serde_yaml`-based
+# `parse_md_agent`) rejects.
+serde_yaml = { workspace = true }
 # Wave 1 (issue #862): session_registry.rs needs anyhow + chrono.
 anyhow = { workspace = true }
 chrono = { workspace = true }
