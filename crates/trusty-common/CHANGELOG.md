@@ -7,9 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.23.7] — 2026-07-21
+
+Publishes the `catchup::{pause, generate_catchup_json}` API to crates.io.
+This module was merged to main under PR [#3544](https://github.com/bobmatnyc/trusty-tools/pull/3544)
+without a corresponding version bump, so it landed in the `0.23.6` source tree
+but is absent from the `0.23.6` package already published on crates.io — the
+published `0.23.6` predates this module. That mismatch blocked publishing
+`trusty-mpm`, whose `core::catchup` re-exports these symbols. `0.23.7` exists
+solely to give the catchup API a real, publishable version.
+
 ### Added
 
-- **`catchup::generate_catchup_json` + `catchup::pause` module** ([#3543](https://github.com/bobmatnyc/trusty-tools/issues/3543)): a structured (JSON) sibling to `generate_catchup_context`'s markdown digest (`CatchupJson`/`PausedSessionJson`/`RecentMemoryJson`), plus a new `pause::write_pause_snapshot` writer that emits the exact session-snapshot section shape `session_finder` already parses, and a `git::capture_git_status` helper (branch/last-commit/uncommitted-summary) for its `## Git Context` section. Backs trusty-mpm's new `session_context_catchup` / `session_context_pause` MCP tools.
+- **`catchup::generate_catchup_json` + `catchup::pause` module** ([#3543](https://github.com/bobmatnyc/trusty-tools/issues/3543), [#3544](https://github.com/bobmatnyc/trusty-tools/pull/3544)): a structured (JSON) sibling to `generate_catchup_context`'s markdown digest (`CatchupJson`/`PausedSessionJson`/`RecentMemoryJson`), plus a new `pause::write_pause_snapshot` writer that emits the exact session-snapshot section shape `session_finder` already parses, and a `git::capture_git_status` helper (branch/last-commit/uncommitted-summary) for its `## Git Context` section. Backs trusty-mpm's new `session_context_catchup` / `session_context_pause` MCP tools.
 
 ## [0.23.6] — 2026-07-20
 
