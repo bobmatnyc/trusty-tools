@@ -5,7 +5,11 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.1.0] — 2026-07-20
+
+Initial release — opt-in Python/MPS embedding sidecar launcher for
+trusty-search (epic #3524, slices 2-4). **DEFAULT-OFF**: only active when
+`TRUSTY_EMBEDDER=python` selects it. Refs #3524, #3498, #3493.
 
 ### Fixed
 
@@ -59,15 +63,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   silently serving from a broken interpreter; if the rebuild itself fails, the
   error propagates so `commands/start/embedder.rs`'s existing
   fall-back-to-ort path fires.
-
----
-## [0.1.0] — 2026-07-20
-
-Initial release — opt-in Python/MPS embedding sidecar launcher for
-trusty-search (epic #3524, slices 2-4). **DEFAULT-OFF**: only active when
-`TRUSTY_EMBEDDER=python` selects it. Refs #3524, #3498, #3493.
-
-### Added
 
 - **Python sidecar module `trusty_embed_sidecar`** (slice 2): a hardened,
   production stdio JSON-RPC 2.0 server speaking the EXACT
