@@ -361,6 +361,109 @@ pub fn check_log_rotation() -> CheckResult {
     }
 }
 
+// ── Python/MPS sidecar checks (epic #3524 slice 5) ──────────────────────────
+
+/// Is the opt-in Python/MPS sidecar selected for this environment?
+///
+/// Why: the detailed checks below (`uv`, venv, launcher, device) are only
+/// meaningful when `TRUSTY_EMBEDDER=python` is set — otherwise they'd report
+/// spurious warnings about an embedder backend the operator never opted into.
+/// What: `TRUSTY_EMBEDDER == "python"`.
+/// Test: `python_embedder_enabled_*` in `tests.rs`.
+pub fn python_embedder_enabled() -> bool {
+    std::env::var("TRUSTY_EMBEDDER")
+        .map(|v| v == "python")
+        .unwrap_or(false)
+}
+
+/// Check `uv` presence + version (required to bootstrap the Python/MPS venv).
+pub fn check_python_uv() -> CheckResult {
+    match trusty_embedderd_py::bootstrap::locate_uv() {
+        Ok(path) => {
+            let version = std::process::Command::new(&path)
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "version unknown".to_string());
+            CheckResult::Ok(format!("uv: {} ({})", version, path.display()))
+        }
+        Err(e) => CheckResult::Error(format!(
+            "uv not found: {e:#} — required to bootstrap the Python/MPS embedder \
+             (TRUSTY_EMBEDDER=python); install uv or set TRUSTY_UV_BIN"
+        )),
+    }
+}
+
+/// Check venv presence + `.ready` sentinel + lockfile-hash-current state.
+///
+/// Why: mirrors (without duplicating the process-spawning parts of)
+/// `trusty_embedderd_py::bootstrap`'s private `is_ready()` — a doctor check
+/// must stay read-only and fast, never spawning `uv`/python itself.
+/// What: `Ok` when the venv python exists AND `.ready` matches the current
+/// lockfile hash; `Warn("not yet bootstrapped")` when neither the venv nor
+/// `.ready` exist yet (first run); `Warn("stale or corrupt")` for every other
+/// combination (a half-built venv, a hash mismatch after a lock update, or a
+/// `.ready` sentinel with no matching venv python).
+/// Test: `check_python_venv_*` in `tests.rs`.
+pub fn check_python_venv(layout: &trusty_embedderd_py::VenvLayout) -> CheckResult {
+    let want_hash = trusty_embedderd_py::bootstrap::lockfile_hash();
+    let ready_path = layout.base.join(".ready");
+    let ready_hash = std::fs::read_to_string(&ready_path).ok();
+    let hash_current = ready_hash.as_deref().map(str::trim) == Some(want_hash.as_str());
+    let venv_present = layout.venv_python.is_file();
+
+    if venv_present && hash_current {
+        CheckResult::Ok(format!(
+            "Python/MPS venv: ready at {} (lockfile hash {} current)",
+            layout.venv_dir.display(),
+            want_hash
+        ))
+    } else if !ready_path.exists() && !venv_present {
+        CheckResult::Warn(format!(
+            "Python/MPS venv: not yet bootstrapped ({}) — will build on the next \
+             `trusty-search start` with TRUSTY_EMBEDDER=python (one-time ~2-3 GB \
+             download); run `trusty-search doctor --fix` to bootstrap it now",
+            layout.venv_dir.display()
+        ))
+    } else {
+        CheckResult::Warn(format!(
+            "Python/MPS venv: stale or corrupt at {} (venv_present={venv_present}, \
+             lockfile_hash_current={hash_current}) — run `trusty-search doctor --fix` \
+             to rebuild it",
+            layout.venv_dir.display()
+        ))
+    }
+}
+
+/// Check that the `trusty-embedderd-py` launcher binary is discoverable.
+pub fn check_python_launcher() -> CheckResult {
+    match trusty_embedderd_py::locate_launcher_binary() {
+        Ok(p) => CheckResult::Ok(format!("trusty-embedderd-py launcher: {}", p.display())),
+        Err(e) => CheckResult::Error(format!("trusty-embedderd-py launcher not found: {e:#}")),
+    }
+}
+
+/// Informational note on which device would actually be selected.
+///
+/// Why (issue #3493 P1): the real device is resolved by `torch` INSIDE the
+/// sidecar at startup — there is no way for this Rust-only, torch-free
+/// doctor check to predict it honestly. Rather than guess (and risk another
+/// #3493-style wrong prediction), this reports the *requested* policy and
+/// points the operator at the real, wire-reported readback surfaced by
+/// `GET /health` once the daemon is running (see
+/// `crate::core::Embedder::resolved_provider_label` /
+/// `StdioEmbedderClient::last_reported_device`).
+pub fn check_python_device_note() -> CheckResult {
+    let requested = std::env::var("TRUSTY_DEVICE").unwrap_or_else(|_| "auto".to_string());
+    CheckResult::Ok(format!(
+        "Python/MPS device: requested='{requested}' (mps if available, else cuda, else cpu) \
+         — the actual device is resolved by torch at sidecar startup; check GET /health's \
+         embedder_info.provider once the daemon is running for the real readback"
+    ))
+}
+
 /// Remove a stale lock file and report the outcome.
 pub fn fix_stale_lock(data_dir: &std::path::Path) {
     let lock_path = data_dir.join("daemon.lock");

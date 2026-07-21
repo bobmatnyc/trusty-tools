@@ -88,6 +88,7 @@ use serde_json::Value;
 use super::PrepError;
 use super::settings::inject_mcp_server;
 use crate::core::mcp_config;
+use crate::core::spawn_disclaim::disclaimed_output;
 use crate::core::trusty_tools_config::managed_claude_config_dir;
 
 /// Basename of the git-excluded file native MCP server secrets are delivered
@@ -480,17 +481,28 @@ pub(super) fn route_mcp_secrets_to_env_local(
 /// guarantees nothing the child writes can reach our stdout regardless). Any
 /// non-zero exit — including "not ignored" (which is what a tracked file, or a
 /// file with no matching ignore rule, both report) and a hard error (not a repo,
-/// no `git` binary) — is treated as `false`. Never panics.
+/// no `git` binary) — is treated as `false`. Never panics. Spawns via
+/// [`disclaimed_output`] (issue #3580) rather than a raw `Command::new("git")`:
+/// this runs inside the daemon during MCP config injection into an arbitrary
+/// user repository, structurally identical to the tmux-hosted git spawns
+/// PR #3562 already disclaims — `disclaimed_output` mirrors
+/// `Command::new(program).args(args).output()`'s captured stdout/stderr and
+/// exit-status contract exactly, so this is a pure spawn-mechanism swap with
+/// no observable behavior change on non-macOS (or when the disclaim SPI is
+/// absent).
 /// Test: `inject_native_skips_secrets_when_env_local_is_tracked`,
 /// `is_env_local_actually_ignored_true_when_excluded`,
 /// `is_env_local_actually_ignored_false_when_tracked`.
 pub(super) fn is_env_local_actually_ignored(project_path: &Path) -> bool {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(project_path)
-        .args(["check-ignore", "-q", "--", ENV_LOCAL_FILENAME])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    let args = [
+        "-C".to_string(),
+        project_path.to_string_lossy().to_string(),
+        "check-ignore".to_string(),
+        "-q".to_string(),
+        "--".to_string(),
+        ENV_LOCAL_FILENAME.to_string(),
+    ];
+    disclaimed_output("git", &args).is_ok_and(|output| output.status.success())
 }
 
 /// Ensure `.env.local` is listed in the workspace's real `info/exclude` file.
@@ -514,16 +526,23 @@ pub(super) fn is_env_local_actually_ignored(project_path: &Path) -> bool {
 /// `project_path` is not a git repo, `git` is not on `PATH`, or the exclude
 /// file could not be created/written. The caller treats `Err` as "skip secret
 /// delivery entirely", never as license to write the secret file unexcluded.
+/// Spawns via [`disclaimed_output`] (issue #3580) rather than a raw
+/// `Command::new("git")` — see [`is_env_local_actually_ignored`]'s doc for why
+/// this call site is TCC-sensitive in the same way; same captured-output,
+/// same-error-handling contract, no observable behavior change.
 /// Test: `inject_native_env_local_is_git_excluded_and_unstaged`,
 /// `inject_native_secrets_skipped_outside_git_repo`,
 /// `ensure_env_local_git_excluded_is_idempotent`,
 /// `ensure_env_local_git_excluded_fails_outside_git_repo`.
 pub(super) fn ensure_env_local_git_excluded(project_path: &Path) -> Result<(), String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(project_path)
-        .args(["rev-parse", "--git-path", "info/exclude"])
-        .output()
+    let args = [
+        "-C".to_string(),
+        project_path.to_string_lossy().to_string(),
+        "rev-parse".to_string(),
+        "--git-path".to_string(),
+        "info/exclude".to_string(),
+    ];
+    let output = disclaimed_output("git", &args)
         .map_err(|e| format!("git rev-parse failed to spawn: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

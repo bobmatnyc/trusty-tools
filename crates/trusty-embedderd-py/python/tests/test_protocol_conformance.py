@@ -130,6 +130,36 @@ def test_serve_loop_end_to_end_over_pipes():
     assert responses[4]["error"]["code"] == ERR_METHOD_NOT_FOUND
 
 
+def stub_encoder_with_device(texts: List[str]) -> List[List[float]]:
+    """Same as `stub_encoder` but with a `.device` attribute set — stands in
+    for the real encoder `model.build_encoder` returns (epic #3524 slice 5,
+    issue #3493 P1)."""
+    return stub_encoder(texts)
+
+
+stub_encoder_with_device.device = "mps"  # type: ignore[attr-defined]
+
+
+def test_response_omits_device_when_encoder_has_none():
+    # Why: `stub_encoder` (like any torch-free callable, and like the
+    # reference Rust trusty-embedderd) never sets a `.device` attribute —
+    # `handle_frame` must not fabricate one, so the frame shape matches the
+    # reference server exactly (epic #3524 slice 5, issue #3493 P1).
+    resp = json.loads(handle_frame(_req(1, ["hello"]), stub_encoder))
+    assert "device" not in resp["result"]
+
+
+def test_response_includes_device_when_encoder_reports_one():
+    # Why: this is the actual behaviour `/health`'s real-provider readback
+    # depends on (epic #3524 slice 5, issue #3493 P1) — `handle_frame` must
+    # echo the encoder's `.device` attribute, if set, as `result.device`.
+    resp = json.loads(handle_frame(_req(2, ["hello"]), stub_encoder_with_device))
+    assert resp["result"]["device"] == "mps"
+    assert resp["id"] == 2
+    # embeddings themselves must be unaffected by the extra field.
+    assert len(resp["result"]["embeddings"]) == 1
+
+
 def test_device_and_batch_resolution_pure_helpers():
     # Pure helpers in model.py are import-safe without torch.
     from trusty_embed_sidecar.model import MPS_BATCH_CLAMP, resolve_batch_size, resolve_device

@@ -10,18 +10,26 @@
 //! source compatibility.
 //! What: [`deploy_agents`] composes every source agent, consults the
 //! [`AgentManifest`] to classify each target file, and writes only the files
-//! it safely may. It uses atomic write-temp-then-rename for both content files
-//! and the manifest. Corrupt manifests are detected and surfaced as errors
-//! rather than silently reset to empty. Returns a [`DeployResult`] summarising
-//! what happened.
+//! it safely may. Every freshly composed agent is strict-YAML-validated via
+//! [`crate::agents::frontmatter::validate_frontmatter`] (issue #3556) before
+//! it is written — a composition trusty-mpm's own lenient reader accepts but
+//! a strict consumer (e.g. `trusty-agents`' `serde_yaml`-based `.md` loader)
+//! would reject is treated like a compose failure: logged loudly, recorded in
+//! [`DeployResult::failed`], and skipped, never written to `target_dir`. It
+//! uses atomic write-temp-then-rename for both content files and the
+//! manifest. Corrupt manifests are detected and surfaced as errors rather
+//! than silently reset to empty. Returns a [`DeployResult`] summarising what
+//! happened.
 //! Test: `cargo test -p trusty-agents-common agents::deployer` covers a new
 //! deploy, a skipped user-modified file, an unchanged file, a user-owned file,
-//! atomic writes, and corrupt manifest detection.
+//! atomic writes, corrupt manifest detection, and (#3556) a stale-broken-copy
+//! refresh plus a strict-YAML-invalid composition being isolated and skipped.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use crate::agents::builder::{AgentBuildError, compose_agent, source_chain};
+use crate::agents::frontmatter::validate_frontmatter;
 use crate::agents::manifest::{
     AgentManifest, ManifestEntry, ManifestError, ManifestLoad, Origin, atomic_write, checksum,
 };
@@ -203,6 +211,29 @@ pub fn deploy_agents_filtered(
                 continue;
             }
         };
+
+        // Issue #3556: `compose_agent`'s success only means trusty-mpm's own
+        // LENIENT frontmatter reader could parse the result — it tolerates a
+        // colon anywhere in a scalar value, which a strict YAML consumer
+        // (`trusty-agents`' `serde_yaml`-based `.md` agent loader) rejects.
+        // Validate every freshly composed agent with the SAME strict parser
+        // real consumers use before it is ever written to `target_dir`, so a
+        // malformed composition is caught loudly here — naming the offending
+        // agent and the exact YAML problem — instead of silently landing in
+        // `.claude/agents/` and only failing at `tagent` runtime.
+        if let Err(detail) = validate_frontmatter(&composed) {
+            tracing::error!(
+                agent = %name,
+                file = %filename,
+                "composed agent frontmatter FAILED strict YAML validation — \
+                 skipping this agent, roster deploy continues for the rest of \
+                 the roster: {detail}"
+            );
+            result
+                .failed
+                .push(format!("{name}: invalid frontmatter YAML: {detail}"));
+            continue;
+        }
         let target_path = target_dir.join(&filename);
 
         // DOC-42: record declared skills for EVERY processed agent, before

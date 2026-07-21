@@ -29,6 +29,7 @@ use tokio::time::timeout;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
+use crate::rbac::ServiceTier;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
 /// Default per-call timeout (seconds) when the agent TOML omits `timeout_secs`.
@@ -85,6 +86,41 @@ pub struct PythonToolPlugin {
     pub schema: Value,
     pub timeout: Duration,
     pub restricted_tiers: Vec<String>,
+    /// `restricted_tiers` mapped to `ServiceTier` (#3236), computed once in
+    /// `from_config` so the hot `ToolExecutor::restricted_tiers` accessor can
+    /// return a plain slice reference rather than re-parsing on every call.
+    /// Kept as a separate field (instead of changing `restricted_tiers`'s
+    /// type) so the TOML-facing `Vec<String>` and `is_restricted_for_tier`
+    /// API are unchanged.
+    service_tier_guard: Vec<ServiceTier>,
+}
+
+/// Map `[[plugins.python]] restricted_tiers` TOML strings to `ServiceTier`
+/// (#3236).
+///
+/// Why: RBAC enforcement (`ToolRegistry::dispatch_for_user` /
+/// `filter_tools_for_user`) reads `ToolExecutor::restricted_tiers() ->
+/// &[ServiceTier]`, but the TOML author writes plain strings
+/// (`"read_only"`). This is the one place that conversion happens, and it
+/// fails CLOSED: an unrecognized tier name is a configuration error, not a
+/// silently-ignored no-op, because silently dropping it would make the tool
+/// LESS restricted than declared.
+/// What: Reuses `ServiceTier`'s `snake_case` `Deserialize` impl so the
+/// accepted spellings (`"all"`, `"analytics"`, `"read_only"`) stay in sync
+/// with the enum automatically. Returns `Err` naming the offending string on
+/// the first unrecognized entry.
+/// Test: `python_tool_plugin_from_config_maps_restricted_tiers_to_service_tiers`,
+/// `python_tool_plugin_from_config_rejects_unknown_tier_string`.
+fn parse_restricted_tiers(raw: &[String]) -> anyhow::Result<Vec<ServiceTier>> {
+    raw.iter()
+        .map(|t| {
+            serde_json::from_value(Value::String(t.clone())).map_err(|_| {
+                anyhow::anyhow!(
+                    "unrecognized RBAC tier '{t}' in restricted_tiers (expected one of: all, analytics, read_only)"
+                )
+            })
+        })
+        .collect()
 }
 
 impl PythonToolPlugin {
@@ -136,6 +172,14 @@ impl PythonToolPlugin {
 
         let timeout = Duration::from_secs(cfg.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
 
+        // #3236: fail CLOSED on a malformed tier name. Silently dropping an
+        // unrecognized entry would *widen* access (the tier would no longer
+        // be restricted), which is worse than not restricting at all because
+        // it looks enforced in the TOML while doing nothing. Refusing to
+        // load the plugin surfaces the typo immediately instead of quietly
+        // under-restricting in production.
+        let service_tier_guard = parse_restricted_tiers(&cfg.restricted_tiers)?;
+
         Ok(Self {
             name: cfg.name,
             description: cfg.description,
@@ -143,6 +187,7 @@ impl PythonToolPlugin {
             schema,
             timeout,
             restricted_tiers: cfg.restricted_tiers,
+            service_tier_guard,
         })
     }
 
@@ -332,6 +377,15 @@ impl ToolExecutor for PythonToolPlugin {
 
     async fn execute(&self, args: Value) -> ToolResult {
         PythonToolPlugin::execute(self, args).await
+    }
+
+    /// #3236: wires the plugin's own `restricted_tiers` field to the real
+    /// RBAC hook. Previously this used the trait default (`&[]`), so
+    /// `ToolRegistry::dispatch_for_user` / `filter_tools_for_user` always
+    /// treated a Python plugin as unrestricted regardless of its TOML
+    /// `restricted_tiers` declaration.
+    fn restricted_tiers(&self) -> &[ServiceTier] {
+        &self.service_tier_guard
     }
 }
 

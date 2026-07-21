@@ -161,4 +161,13 @@ def build_encoder(log=lambda _m: None) -> Callable[[List[str]], List[List[float]
         f"torch_import={t_import:.2f}s model_load={t_load:.2f}s warmup={t_warm:.2f}s "
         f"cold_total={t_import + t_load + t_warm:.2f}s"
     )
+    # Epic #3524 slice 5 / issue #3493 P1: attach the ACTUALLY-resolved device
+    # to the returned callable so `protocol.py` can echo it in every response
+    # frame. The Rust `/health` handler otherwise only has a build-features
+    # PREDICTION (`resolve_expected_provider()`) to go on, which is wrong for
+    # this sidecar — it guesses the ORT-flavoured `CoreML(ANE)` label while
+    # torch actually selected `mps`. A plain function attribute (rather than
+    # threading a `(encode, device)` tuple through every caller) keeps
+    # `Encoder` a simple `Callable[[List[str]], List[List[float]]]`.
+    encode.device = device  # type: ignore[attr-defined]
     return encode

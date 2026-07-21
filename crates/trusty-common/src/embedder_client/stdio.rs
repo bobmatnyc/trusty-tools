@@ -181,6 +181,12 @@ struct RpcResponse {
 #[derive(Debug, serde::Deserialize)]
 struct EmbedResult {
     embeddings: Vec<Vec<f32>>,
+    // Note: the optional `device` field the Python/MPS sidecar adds to this
+    // same JSON object (epic #3524 slice 5) is deliberately NOT a field here
+    // — `decode_response` never needs it (it only returns `embeddings` to the
+    // oneshot waiter). It is captured separately, via the lighter-weight
+    // `extract_response_device`, directly in `reader_task` — see that
+    // function's doc comment.
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -254,6 +260,11 @@ pub struct StdioEmbedderClient {
     /// before the monitor task's `send(true)` fires, that transition would be
     /// lost for any receiver subscribed afterward. Never read directly.
     _unhealthy_rx_keepalive: watch::Receiver<bool>,
+    /// Most recently observed real backend device from a successful response
+    /// frame's optional `device` field (epic #3524 slice 5, issue #3493 P1).
+    /// `None` until the first response carrying it arrives (the reference
+    /// `trusty-embedderd` never sends it — this stays `None` for that path).
+    last_device: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl StdioEmbedderClient {
@@ -272,9 +283,21 @@ impl StdioEmbedderClient {
         let inflight = Arc::new(Semaphore::new(embed_inflight()));
         let next_id = Arc::new(AtomicU64::new(1));
         let timeout = embed_call_timeout();
+        let last_device: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        // PR #3560 MEDIUM fix: not retained on the struct — only
+        // `spawn_reader_with_monitor`/`reader_task` need it, to short-circuit
+        // the device-field parse after the first successful frame. See
+        // `reader_task`'s `Ok(Ok(_))` arm for the full rationale.
+        let device_capture_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let (unhealthy_tx, unhealthy_rx_keepalive) =
-            spawn_reader_with_monitor(BufReader::new(stdout), Arc::clone(&pending), timeout);
+        let (unhealthy_tx, unhealthy_rx_keepalive) = spawn_reader_with_monitor(
+            BufReader::new(stdout),
+            Arc::clone(&pending),
+            timeout,
+            Arc::clone(&last_device),
+            device_capture_attempted,
+        );
 
         Self {
             stdin,
@@ -283,6 +306,7 @@ impl StdioEmbedderClient {
             next_id,
             unhealthy_tx,
             _unhealthy_rx_keepalive: unhealthy_rx_keepalive,
+            last_device,
         }
     }
 
@@ -325,6 +349,8 @@ fn spawn_reader_with_monitor<R>(
     reader: R,
     pending: PendingMap,
     timeout: Duration,
+    last_device: Arc<std::sync::Mutex<Option<String>>>,
+    device_capture_attempted: Arc<std::sync::atomic::AtomicBool>,
 ) -> (watch::Sender<bool>, watch::Receiver<bool>)
 where
     R: AsyncBufRead + Unpin + Send + 'static,
@@ -338,6 +364,8 @@ where
         timeout,
         Arc::clone(&timeout_tracker),
         unhealthy_tx.clone(),
+        last_device,
+        device_capture_attempted,
     ));
 
     let monitor_pending = pending;
@@ -412,6 +440,8 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
     timeout: Duration,
     timeout_tracker: Arc<TimeoutTracker>,
     unhealthy_tx: watch::Sender<bool>,
+    last_device: Arc<std::sync::Mutex<Option<String>>>,
+    device_capture_attempted: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut line = String::new();
 
@@ -535,6 +565,22 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
                 // proves the sidecar is still talking, so reset the
                 // consecutive-timeout wedge counter.
                 timeout_tracker.record_success();
+                // Epic #3524 slice 5 / issue #3493 P1: capture the real
+                // backend device from the FIRST successful response frame
+                // only (review finding, PR #3560 MEDIUM fix). The resolved
+                // device is set once at model build (`model.py` sets
+                // `encode.device` once) and never changes for the life of
+                // the process, so a frame's device — present or absent — is
+                // the same for every subsequent frame too. Re-parsing on
+                // every frame wasted a full JSON parse on this hot
+                // multi-flight path for the entire connection lifetime,
+                // including unconditionally on the Rust ort transport, which
+                // never carries the field at all.
+                if !device_capture_attempted.swap(true, Ordering::AcqRel)
+                    && let Some(device) = extract_response_device(line.trim())
+                {
+                    *last_device.lock().unwrap() = Some(device);
+                }
             }
         }
 
@@ -600,6 +646,32 @@ fn extract_response_id(line: &str) -> Option<u64> {
         serde_json::Value::Number(n) => n.as_u64(),
         _ => None,
     }
+}
+
+/// Extract the optional real backend `device` from a response frame's
+/// `result` object, without touching the (possibly large) `embeddings` array
+/// (epic #3524 slice 5, issue #3493 P1).
+///
+/// Why: only the Python/MPS sidecar's `protocol.py` emits this field —
+/// `result: {"embeddings": [...], "device": "mps"}`. The reference Rust
+/// `trusty-embedderd` omits it entirely, so this returns `None` on that path
+/// and callers keep using the predicted `ExecutionProvider`.
+/// What: a minimal, torch/embeddings-free deserialize; `None` on any parse
+/// failure, an error frame, or a missing/absent `device` field.
+/// Test: `extract_response_device_*` in `stdio_tests.rs`.
+fn extract_response_device(line: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct DeviceOnly {
+        #[serde(default)]
+        result: Option<DeviceField>,
+    }
+    #[derive(serde::Deserialize)]
+    struct DeviceField {
+        #[serde(default)]
+        device: Option<String>,
+    }
+    let parsed: DeviceOnly = serde_json::from_str(line).ok()?;
+    parsed.result?.device
 }
 
 /// Decode one JSON-RPC response frame. Extracted for unit-testing.
@@ -802,6 +874,12 @@ impl EmbedderClient for StdioEmbedderClient {
 
         tracing::debug!(n = sent, id, "StdioEmbedderClient: batch complete");
         result
+    }
+
+    /// Real-readback override (epic #3524 slice 5, issue #3493 P1) — see the
+    /// trait default's doc comment.
+    fn last_reported_device(&self) -> Option<String> {
+        self.last_device.lock().unwrap().clone()
     }
 }
 

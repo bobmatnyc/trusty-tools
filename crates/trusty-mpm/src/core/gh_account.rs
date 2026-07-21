@@ -31,7 +31,12 @@
 //! project to its configured `gh_user` — lives in the sibling [`enforce`]
 //! module (split out by #3070 to keep both files under the 500-SLOC cap);
 //! [`ensure_gh_account_for_project`] and [`GH_CONFIG_DIR_ENV`] are re-exported
-//! here so the public path is unchanged.
+//! here so the public path is unchanged. [`ensure_gh_account_in_dir`] (the
+//! explicit-directory core) and [`configured_account_pair`] (the shared
+//! "does enforcement apply here" decision) are also re-exported — #3312 wires
+//! them into the CLI's `gh_identity::resolve_project_aware` and the daemon's
+//! `git_identity::resolve_for_config_enforced`, the two real production call
+//! sites this enforcement previously never reached.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -327,7 +332,10 @@ const GH_ENFORCE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[path = "gh_account_enforce.rs"]
 mod enforce;
-pub use enforce::{GH_CONFIG_DIR_ENV, ensure_gh_account_for_project};
+pub use enforce::{
+    GH_CONFIG_DIR_ENV, configured_account_pair, ensure_gh_account_for_project,
+    ensure_gh_account_in_dir,
+};
 
 // ── #3025: spawn-time GH_TOKEN minting for a pinned `gh_account` ───────────
 //

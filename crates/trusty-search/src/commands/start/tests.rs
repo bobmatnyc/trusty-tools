@@ -636,6 +636,77 @@ fn lazy_adapter_python_reports_mps_provider() {
     );
 }
 
+/// Why (epic #3524 slice 5, issue #3493 P1): `resolved_provider_label()` must
+/// forward to `LazyEmbedderHandle::last_reported_device()` rather than the
+/// build-features prediction. This adapter is used for BOTH the default Rust
+/// ort arm and the opt-in Python arm, so the `None`-before-spawn case (this
+/// test) matters on both paths: `/health` must fall back to `provider()`'s
+/// prediction rather than reporting a stale value.
+/// What: a fresh (never-spawned) handle's `last_reported_device()` is `None`
+/// (proven directly by `lazy_handle_last_reported_device_reflects_client` in
+/// `embedder_supervisor::tests`); this test proves the adapter forwards that
+/// `None` through unchanged rather than substituting a wrong guess.
+/// Test: this test.
+#[test]
+fn lazy_python_adapter_reports_wire_device() {
+    use crate::core::Embedder as _;
+    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+    let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+        std::path::PathBuf::from("/nonexistent/trusty-embedderd-py"),
+        SupervisorConfig::default(),
+    ));
+    let adapter = LazySlotEmbedderAdapter {
+        handle,
+        is_python: true,
+    };
+    assert_eq!(
+        adapter.resolved_provider_label(),
+        None,
+        "before any spawn, resolved_provider_label() must be None so /health \
+         falls back to provider()'s prediction rather than reporting a stale \
+         or fabricated device"
+    );
+}
+
+/// Why (review finding, PR #3560 HIGH fix): `supervisor_gave_up()` must
+/// forward to `LazyEmbedderHandle::supervisor_gave_up()` rather than falling
+/// through to the trait-default `false` unconditionally — this is what lets
+/// `FallbackEmbedderAdapter` observe the REAL supervisor give-up ceiling
+/// instead of an independently-counted request-failure proxy.
+/// What: a fresh (never-spawned) handle's `supervisor_gave_up()` is `false`
+/// (proven directly by
+/// `lazy_handle_supervisor_gave_up_reflects_handle_state` in
+/// `embedder_supervisor::tests`); this test proves the adapter forwards that
+/// through unchanged rather than silently falling back to the trait default
+/// (which would look identical here but would NOT forward a real `true`
+/// after a spawn).
+/// Test: this test.
+#[test]
+fn lazy_python_adapter_reports_supervisor_gave_up_default_false() {
+    use crate::core::Embedder as _;
+    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+    let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+        std::path::PathBuf::from("/nonexistent/trusty-embedderd-py"),
+        SupervisorConfig::default(),
+    ));
+    let adapter = LazySlotEmbedderAdapter {
+        handle: handle.clone(),
+        is_python: true,
+    };
+    assert_eq!(
+        adapter.supervisor_gave_up(),
+        handle.supervisor_gave_up(),
+        "adapter must forward LazyEmbedderHandle::supervisor_gave_up() \
+         verbatim, not the trait-default false"
+    );
+    assert!(
+        !adapter.supervisor_gave_up(),
+        "before any spawn, supervisor_gave_up() must be false"
+    );
+}
+
 /// Why: issue #604 — the UDS-remote adapter shares the same defect/fix as
 /// the lazy adapter; `/health` must not report a stale `CPU` for a
 /// UDS-connected sidecar.

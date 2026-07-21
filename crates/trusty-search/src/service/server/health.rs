@@ -324,7 +324,22 @@ pub(super) async fn health_handler(
         let active = sw.active();
         Some(EmbedderInfo {
             dimension: sw.dimension(),
-            provider: active.provider.as_str().to_string(),
+            // Issue #3493 P1 (epic #3524 slice 5 + slice 6): prefer a REAL
+            // wire readback from the live embedder
+            // (`Embedder::resolved_provider_label`, forwarded by
+            // `SwitchableEmbedder` to whichever backend is currently
+            // installed) over `ActiveBackend::provider` — a snapshot
+            // PREDICTION taken once at construction/swap time (slice 6's
+            // `resolve_expected_python_provider`, itself already an
+            // improvement over the old ORT-oriented guess, but still not a
+            // live readback). Only the Python/MPS sidecar currently reports
+            // a real value (echoed in every response frame); every other
+            // backend, and the brief window before the first successful
+            // embed, falls back to the (now more accurate) prediction
+            // unchanged.
+            provider: sw
+                .resolved_provider_label()
+                .unwrap_or_else(|| active.provider.as_str().to_string()),
             quantized: active.quantized,
             model: active.model.clone(),
             backend: backend_kind_str(active.kind).to_string(),
@@ -334,7 +349,9 @@ pub(super) async fn health_handler(
             let dimension = e.dimension();
             EmbedderInfo {
                 dimension,
-                provider: e.provider().as_str().to_string(),
+                provider: e
+                    .resolved_provider_label()
+                    .unwrap_or_else(|| e.provider().as_str().to_string()),
                 // Best-effort fallback ONLY (no ActiveBackend to read yet):
                 // every backend this crate builds embeds at 384-dim
                 // regardless of quantization, so this predicate does not

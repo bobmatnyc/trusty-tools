@@ -22,6 +22,7 @@ pub mod config;
 pub mod direct;
 pub mod discovery;
 pub mod driver;
+mod google_scope;
 pub mod scope;
 
 use std::sync::Arc;
@@ -129,6 +130,27 @@ async fn build_endpoint(ep: &EndpointConfig) -> Result<Vec<Arc<dyn ToolExecutor>
     }
 
     let manifest = driver.discover().await?;
+
+    // #3577: zero tools from a manifest we successfully understood is a
+    // DIFFERENT condition from zero tools because the wire shape didn't
+    // parse (that case is a hard `Err` from `driver.discover()`, above,
+    // and never reaches this line). A well-formed manifest can still
+    // legitimately advertise nothing — a server mid-feature-rollout, for
+    // example — so this is a warning, not an error: it must be loud
+    // enough that an operator staring at "gworkspace contributed 0 tools"
+    // in the startup log has an immediate next step, without treating a
+    // genuinely-empty server as a hard startup failure.
+    if manifest.tools.is_empty() {
+        tracing::warn!(
+            endpoint = %ep.name,
+            "tool registry: endpoint '{}' discovery succeeded but advertised zero tools \
+             — verify the server implements the tools it's expected to, and that its \
+             rpc.discover response shape matches what this registry parses \
+             (see crates/trusty-agents/src/tools/registry/discovery.rs)",
+            ep.name,
+        );
+    }
+
     let patterns: Vec<ScopePattern> = ep
         .scopes
         .iter()

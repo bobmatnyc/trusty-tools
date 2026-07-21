@@ -21,6 +21,15 @@
 //! project-match precedence hermetically (no real `gh`/git needed); the
 //! underlying precedence chain itself is tested in
 //! `trusty_mpm::core::gh_identity`.
+//!
+//! #2081/#3312: when the resolved `GithubConfig` pairs a `config_dir` with an
+//! `account` (documented intent — see `account_with_config_dir_is_ok` in the
+//! library's `gh_identity` tests), [`resolve_project_aware`] also verifies
+//! (and self-heals) the ACTIVE account inside that isolated directory via
+//! [`trusty_mpm::core::gh_account::ensure_gh_account_in_dir`] before
+//! returning — this is the enforcement mechanism added in #2081 that had no
+//! production call site until #3312. A project with no `account` paired with
+//! its `config_dir` sees no behaviour change (enforcement never fires).
 
 use trusty_mpm::core::gh_identity::{GhEnv, GhIdentityError, select_github_config};
 use trusty_mpm::core::trusty_tools_config::TrustyToolsConfig;
@@ -60,7 +69,9 @@ fn resolve_gh_env_anyhow(
 /// pre-#2184 behaviour exactly.
 /// Test: `resolve_project_aware_project_binding_wins`,
 /// `resolve_project_aware_falls_back_to_global`,
-/// `resolve_project_aware_no_origin_uses_global`.
+/// `resolve_project_aware_no_origin_uses_global`,
+/// `resolve_project_aware_enforces_paired_account`,
+/// `resolve_project_aware_skips_enforcement_when_account_unset`.
 pub(crate) fn resolve_project_aware(
     config: &TrustyToolsConfig,
     origin_url: Option<&str>,
@@ -74,6 +85,16 @@ pub(crate) fn resolve_project_aware(
         })
         .and_then(|p| p.github.as_ref());
     let selected = select_github_config(project_github, config.github.as_ref());
+
+    // #2081/#3312: verify (and self-heal) the active account inside the
+    // resolved `config_dir` BEFORE this identity is used for any real `gh`
+    // call, when the project pairs `config_dir` with an explicit `account`.
+    // A project that never configures `account` alongside `config_dir` sees
+    // no behaviour change here.
+    if let Some((dir, account)) = trusty_mpm::core::gh_account::configured_account_pair(selected) {
+        trusty_mpm::core::gh_account::ensure_gh_account_in_dir(&account, &dir)?;
+    }
+
     resolve_gh_env_anyhow(selected)
 }
 
@@ -202,5 +223,176 @@ mod tests {
         let env =
             resolve_project_aware(&config, Some("https://github.com/someone/else")).expect("ok");
         assert!(env.is_empty());
+    }
+
+    // ── #2081/#3312: enforcement wiring ───────────────────────────────────
+    //
+    // A fake `gh` on `PATH` stands in for the real binary, mirroring
+    // `trusty_mpm::core::gh_account_enforce`'s test convention (and this
+    // workspace's established fake-binary-via-PATH pattern).
+
+    // Serialises PATH mutation across the tests below — cargo runs unit
+    // tests in parallel and env vars are process-global. Mirrors the
+    // established local-`static ENV_LOCK` convention already used elsewhere
+    // in this binary (e.g. `formatters::banner::source`,
+    // `commands::managed_root`) rather than depending on the library's
+    // `#[cfg(test)]`-gated (and therefore crate-external-invisible)
+    // `env_test_lock`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn fake_gh_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg(unix)]
+    fn write_fake_gh(bin_dir: &std::path::Path, initial: &str, switch_fails: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let switch_exit = if switch_fails { 1 } else { 0 };
+        let script = format!(
+            r#"#!/bin/sh
+STATE="$GH_CONFIG_DIR/.fake_active"
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
+  echo "github.com"
+  echo "  - Logged in to github.com account $ACTIVE (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "switch" ]; then
+  if [ {switch_exit} -ne 0 ]; then exit 1; fi
+  target=""
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--user" ]; then target="$a"; fi
+    prev="$a"
+  done
+  echo "$target" > "$STATE"
+  exit 0
+fi
+exit 1
+"#
+        );
+        let path = bin_dir.join("gh");
+        std::fs::write(&path, script).expect("write fake gh");
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat fake gh")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod fake gh");
+    }
+
+    #[cfg(unix)]
+    fn prepend_path(dir: &std::path::Path) -> Option<String> {
+        let prior = std::env::var("PATH").ok();
+        let new_path = match &prior {
+            Some(p) => format!("{}:{p}", dir.display()),
+            None => dir.display().to_string(),
+        };
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe { std::env::set_var("PATH", new_path) };
+        prior
+    }
+
+    #[cfg(unix)]
+    fn restore_path(prior: Option<String>) {
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe {
+            match prior {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    /// Why (#3312): a project whose resolved `github:` binding pairs
+    /// `config_dir` with `account` must have that account VERIFIED (and
+    /// corrected, since the fake `gh` here starts with the wrong account
+    /// active) before `resolve_project_aware` returns — proving the CLI path
+    /// (`tm ticket`/`tm issue`/`tm watch`, via `load_gh_env`) now actually
+    /// enforces #2081 rather than merely documenting it in config.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_project_aware_enforces_paired_account() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "wrong-account", false);
+        let prior_path = prepend_path(bin_dir.path());
+
+        let mut cfg = gh(&config_dir.path().display().to_string());
+        cfg.account = Some("bobmatnyc".to_string());
+        let config = TrustyToolsConfig {
+            github: Some(cfg),
+            ..Default::default()
+        };
+        let result = resolve_project_aware(&config, None);
+
+        restore_path(prior_path);
+        assert!(result.is_ok(), "expected self-heal to succeed: {result:?}");
+        let state = std::fs::read_to_string(config_dir.path().join(".fake_active"))
+            .expect("state file written by the fake gh's switch");
+        assert_eq!(state.trim(), "bobmatnyc");
+    }
+
+    /// Why (#3312): when the enforced switch itself fails (the expected
+    /// account was never logged in under this project's isolated
+    /// `GH_CONFIG_DIR`), `resolve_project_aware` — and therefore every `tm
+    /// ticket`/`tm issue`/`tm watch` invocation via `load_gh_env` — must
+    /// hard-fail rather than silently proceed with the wrong `gh` identity.
+    /// This is the causal proof: pre-#3312, NOTHING called this enforcement,
+    /// so this exact mismatched-account scenario would have resolved `Ok`
+    /// and every subsequent `gh` call in the command would have silently run
+    /// as the wrong account.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_project_aware_fails_closed_on_switch_failure() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "wrong-account", true);
+        let prior_path = prepend_path(bin_dir.path());
+
+        let mut cfg = gh(&config_dir.path().display().to_string());
+        cfg.account = Some("bobmatnyc".to_string());
+        let config = TrustyToolsConfig {
+            github: Some(cfg),
+            ..Default::default()
+        };
+        let result = resolve_project_aware(&config, None);
+
+        restore_path(prior_path);
+        let err = result.expect_err("mismatched account with a failed switch must be an Err");
+        assert!(err.to_string().contains("bobmatnyc"), "err: {err}");
+    }
+
+    /// Why (#3312): a project that pairs `config_dir` with NO `account` (the
+    /// pre-#3312, still-supported shape) must see NO enforcement at all —
+    /// proven by making any `gh` invocation fail, then asserting resolution
+    /// still succeeds (which is only possible if `gh` was never invoked).
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_project_aware_skips_enforcement_when_account_unset() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        // Every `gh` invocation fails; if enforcement fired anyway this
+        // would surface as an Err.
+        write_fake_gh(bin_dir.path(), "irrelevant", true);
+        let prior_path = prepend_path(bin_dir.path());
+
+        let config = TrustyToolsConfig {
+            github: Some(gh(&config_dir.path().display().to_string())),
+            ..Default::default()
+        };
+        let result = resolve_project_aware(&config, None);
+
+        restore_path(prior_path);
+        assert!(
+            result.is_ok(),
+            "no account paired with config_dir must skip enforcement entirely: {result:?}"
+        );
     }
 }

@@ -437,13 +437,27 @@ async fn build_eager_python_embedder() -> Result<(
                     launcher.display(),
                     config.idle_shutdown_secs,
                 );
+                // Slice 5 (epic #3524): the runtime fallback trips on the
+                // supervisor's OWN give-up signal
+                // (`Embedder::supervisor_gave_up`, forwarded from
+                // `LazyEmbedderHandle::supervisor_gave_up` →
+                // `SupervisorHandle::has_given_up`) rather than an
+                // independently-counted request-failure threshold — see
+                // `embedder_fallback.rs`'s module doc (review finding, PR
+                // #3560 HIGH fix) for the full rationale.
                 let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
                 let pid_slot = handle.app_pid_slot();
-                Ok((
+                let python_embedder: Arc<dyn crate::core::Embedder> =
                     Arc::new(LazySlotEmbedderAdapter {
-                        handle,
+                        handle: Arc::clone(&handle),
                         is_python: true,
-                    }),
+                    });
+                let fallback_adapter =
+                    super::embedder_fallback::FallbackEmbedderAdapter::new(python_embedder, || {
+                        build_ort_stdio_sidecar().map(|(embedder, _pid_slot)| embedder)
+                    });
+                Ok((
+                    Arc::new(fallback_adapter),
                     Some(pid_slot),
                     BackendKind::Python,
                 ))
@@ -854,6 +868,39 @@ impl crate::core::Embedder for LazySlotEmbedderAdapter {
         } else {
             trusty_common::embedder::resolve_expected_provider()
         }
+    }
+
+    /// Real-readback override (epic #3524 slice 5, issue #3493 P1).
+    ///
+    /// Why: `provider()` above PREDICTS via `resolve_expected_provider()` — a
+    /// pure function of build features/env with no notion of "this handle is
+    /// actually running the Python/MPS sidecar via torch". For the default
+    /// Rust ort sidecar that prediction is the best available answer (no
+    /// wire readback exists on that transport), but this same adapter type
+    /// is ALSO used for the opt-in `TRUSTY_EMBEDDER=python` arm, where it
+    /// actively lies: predicting the ORT-flavoured `CoreML(ANE)` guess while
+    /// torch actually selected `mps` (the exact #3493 P1 bug).
+    /// What: forwards to `LazyEmbedderHandle::last_reported_device()` — the
+    /// non-blocking readback of the live client's wire-reported device.
+    /// `None` before the first successful embed (nothing reported yet) or on
+    /// the Rust ort transport (which never sends the field), in which case
+    /// `/health` falls back to `provider()`'s prediction.
+    /// Test: `lazy_python_adapter_reports_wire_device` in `start/tests.rs`.
+    fn resolved_provider_label(&self) -> Option<String> {
+        self.handle.last_reported_device()
+    }
+
+    /// Real give-up-signal override (review finding, PR #3560 HIGH fix).
+    ///
+    /// Why: `FallbackEmbedderAdapter` needs the SAME supervisor's actual
+    /// give-up decision, not a proxy reconstructed at the request layer —
+    /// see `Embedder::supervisor_gave_up`'s trait-default doc comment for the
+    /// full rationale.
+    /// What: forwards to `LazyEmbedderHandle::supervisor_gave_up()`.
+    /// Test: `lazy_python_adapter_reports_supervisor_gave_up_default_false`
+    /// in `start/tests.rs`.
+    fn supervisor_gave_up(&self) -> bool {
+        self.handle.supervisor_gave_up()
     }
 }
 
