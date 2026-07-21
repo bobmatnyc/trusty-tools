@@ -5,6 +5,24 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Changed
+
+- **Graceful-Python embedder is now the DEFAULT on Apple Silicon (epic #3524
+  slice 6, PR 5/5 — the default flip).** `trusty-search start` with
+  `TRUSTY_EMBEDDER` unset/`auto` on aarch64 macOS now serves on the ort
+  stdio sidecar immediately while bootstrapping the python/MPS sidecar in
+  the background and hot-swapping to it once proven — previously this
+  required opting in via the now-retired `TRUSTY_PY_DEFAULT` ship-gate.
+  Validated by the epic #3524 slice 2-4 spike (numerically identical
+  results, ~2.4x faster end-to-end) and soaked per PR #3610 before this
+  flip. Every other platform (Linux, Intel mac, CUDA) is completely
+  unaffected — the flip is scoped to `cfg!(all(target_arch = "aarch64",
+  target_os = "macos"))` only. `TRUSTY_EMBEDDER=stdio` remains, and is now
+  the sole, permanent per-invocation escape hatch back to the unchanged ort
+  path on Apple Silicon.
+
 ## [0.37.2] — 2026-07-21
 
 Patch release closing unpublished source drift under the already-published

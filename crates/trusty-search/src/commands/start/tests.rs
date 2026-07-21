@@ -944,75 +944,98 @@ impl Drop for EnvGuard {
     }
 }
 
-// ── Graceful Apple-Silicon default resolution (epic #3524 slice 6, PR 3/5) ──
+// ── Graceful Apple-Silicon default resolution (epic #3524 slice 6, PR 5/5 —
+//    the default flip) ────────────────────────────────────────────────────
 
-use super::embedder::{resolve_default_embedder_mode_for, truthy_env, DefaultEmbedderMode};
+use super::embedder::{
+    is_forced_ort_override, resolve_default_embedder_mode_for, truthy_env, DefaultEmbedderMode,
+};
 
-/// Apple Silicon + the ship-gate flag enabled must resolve to the new
-/// background graceful path — the whole point of this PR.
+/// Apple Silicon with no user override must resolve to the graceful
+/// background python path — this is now the default (the whole point of
+/// this PR).
 #[test]
-fn resolve_default_embedder_mode_for_apple_silicon_with_flag_is_graceful() {
+fn resolve_default_embedder_mode_for_apple_silicon_no_override_is_graceful() {
     assert_eq!(
-        resolve_default_embedder_mode_for(true, true, false),
+        resolve_default_embedder_mode_for(true, false),
         DefaultEmbedderMode::GracefulPython
     );
 }
 
-/// Apple Silicon with the ship-gate flag OFF (this PR's shipped default —
-/// `TRUSTY_PY_DEFAULT` unset) must resolve to the unchanged ort path, proving
-/// this PR ships as a no-op for real users.
+/// Apple Silicon + `TRUSTY_EMBEDDER_PYTHON_EAGER` must still resolve to the
+/// graceful background path, NOT the eager blocking arm — Apple Silicon wins
+/// outright, since blocking startup for the eager path is strictly worse
+/// than the non-blocking graceful path already reaching the same sidecar.
 #[test]
-fn resolve_default_embedder_mode_for_apple_silicon_opted_out_is_ort() {
+fn resolve_default_embedder_mode_for_apple_silicon_eager_env_stays_graceful() {
     assert_eq!(
-        resolve_default_embedder_mode_for(true, false, false),
+        resolve_default_embedder_mode_for(true, true),
+        DefaultEmbedderMode::GracefulPython
+    );
+}
+
+/// Non-Apple-Silicon (Linux, Intel mac, etc.) with no override must resolve
+/// to the unchanged ort path — the flip is scoped to Apple Silicon only.
+#[test]
+fn resolve_default_embedder_mode_for_non_apple_silicon_is_ort() {
+    assert_eq!(
+        resolve_default_embedder_mode_for(false, false),
         DefaultEmbedderMode::Ort
     );
 }
 
-/// Apple Silicon + `TRUSTY_EMBEDDER_PYTHON_EAGER` (and the ship-gate flag
-/// OFF) must resolve to the existing eager blocking python arm, not the new
-/// background path.
+/// Non-Apple-Silicon (Linux/CUDA) + `TRUSTY_EMBEDDER_PYTHON_EAGER` must
+/// resolve to the eager blocking python arm — the eager escape hatch is not
+/// platform-gated, unlike the Apple-Silicon graceful default.
 #[test]
-fn resolve_default_embedder_mode_for_apple_silicon_eager_env_is_eager() {
+fn resolve_default_embedder_mode_for_non_apple_silicon_eager_env_is_eager() {
     assert_eq!(
-        resolve_default_embedder_mode_for(true, false, true),
+        resolve_default_embedder_mode_for(false, true),
         DefaultEmbedderMode::EagerPython
     );
 }
 
-/// The ship-gate flag wins outright over the eager env when both are set —
-/// there is no reason to run the slow blocking path when the background
-/// graceful path is available.
+/// `TRUSTY_EMBEDDER=stdio` is the permanent user escape hatch back to ort,
+/// including on Apple Silicon now that the graceful-Python path is the
+/// default there — `build_embedder_raw` dispatches it before
+/// `resolve_default_embedder_mode` is ever consulted (see
+/// `is_forced_ort_override`'s doc).
 #[test]
-fn resolve_default_embedder_mode_for_apple_silicon_flag_wins_over_eager_env() {
+fn is_forced_ort_override_stdio_true() {
+    assert!(is_forced_ort_override("stdio"));
+}
+
+/// Every other raw `TRUSTY_EMBEDDER` value (including unset/`auto`, which
+/// `build_embedder_raw` matches separately) must NOT be treated as the
+/// force-ort override.
+#[test]
+fn is_forced_ort_override_other_values_false() {
+    for value in ["", "auto", "python", "in-process", "local", "candle"] {
+        assert!(
+            !is_forced_ort_override(value),
+            "{value:?} must not be treated as the force-ort override"
+        );
+    }
+}
+
+/// Real-environment sanity check (epic #3524 slice 6, PR 5/5): on an actual
+/// Apple Silicon macOS host, with `TRUSTY_EMBEDDER_PYTHON_EAGER` unset, the
+/// real `resolve_default_embedder_mode()` wrapper — not just the pure
+/// [`resolve_default_embedder_mode_for`] — must resolve to
+/// `GracefulPython`. This exercises the actual `cfg!(target_arch =
+/// "aarch64", target_os = "macos")` platform check the wrapper reads,
+/// closing the gap the pure-function tests above intentionally leave open
+/// (they take `is_apple_silicon` as a param precisely so they don't depend
+/// on the build host). Only compiled/run on aarch64 macOS; CI's Linux
+/// runners never build this test.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[test]
+#[serial]
+fn resolve_default_embedder_mode_on_real_apple_silicon_host_is_graceful() {
+    let _g = EnvGuard::remove("TRUSTY_EMBEDDER_PYTHON_EAGER");
     assert_eq!(
-        resolve_default_embedder_mode_for(true, true, true),
+        super::embedder::resolve_default_embedder_mode(),
         DefaultEmbedderMode::GracefulPython
-    );
-}
-
-/// Non-Apple-Silicon (Linux, Intel mac, etc.) with NEITHER env var set must
-/// resolve to the unchanged ort path.
-#[test]
-fn resolve_default_embedder_mode_for_non_apple_silicon_is_ort() {
-    assert_eq!(
-        resolve_default_embedder_mode_for(false, false, false),
-        DefaultEmbedderMode::Ort
-    );
-}
-
-/// Non-Apple-Silicon (Linux/CUDA) resolution MUST return the ort path even
-/// when the ship-gate flag is enabled — `TRUSTY_PY_DEFAULT` only ever
-/// applies on Apple Silicon; a CUDA/Linux box never reaches the python
-/// bootstrap through this default-resolution path (`GracefulPython` is
-/// unreachable off Apple Silicon regardless of env), so `ensure_venv` /
-/// `uv` / torch are never invoked there.
-#[test]
-fn resolve_default_embedder_mode_for_non_apple_silicon_ignores_flag() {
-    assert_eq!(
-        resolve_default_embedder_mode_for(false, true, false),
-        DefaultEmbedderMode::Ort,
-        "GracefulPython must never be selected off Apple Silicon"
     );
 }
 

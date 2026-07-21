@@ -644,29 +644,33 @@ environment variable (issue #110 Phase 2):
 
 | `TRUSTY_EMBEDDER` value | Behaviour |
 |-------------------------|-----------|
-| unset / `auto`          | **Default, platform-aware (epic #3524 slice 6, PR 3/5).** Resolves via `resolve_default_embedder_mode()`: on Apple Silicon with `TRUSTY_PY_DEFAULT` enabled, serves on the ort stdio sidecar immediately while bootstrapping the python/MPS sidecar in the background and hot-swapping when ready (see "Graceful Apple-Silicon default" below); with `TRUSTY_EMBEDDER_PYTHON_EAGER` enabled, takes the eager blocking `python` path below (any platform); otherwise (the shipped default everywhere today, since `TRUSTY_PY_DEFAULT` defaults OFF) arms a `LazyEmbedderHandle` at boot (issue #315 — deferred spawn): `trusty-embedderd --stdio` is spawned on the **first embed request** (reindex, hybrid search, `context_inference`), not at daemon startup. |
-| `stdio`                 | **Permanent opt-out.** Always the plain ort stdio sidecar (identical to the unset/`auto` fallback above), even after `TRUSTY_PY_DEFAULT` ships on for real — never routed through the platform-aware resolution. `trusty-embedderd` is a **required runtime dependency** for this and the default ort path — binary discovery runs at boot and fails fast with an install hint if the binary is missing. **`cargo install trusty-search` installs `trusty-embedderd` automatically.** |
-| `python`                | **Opt-in Python/MPS sidecar (epic #3524).** Eagerly bootstraps a pinned `uv`-managed venv (torch + sentence-transformers) at `start`, then lazy-spawns `trusty-embedderd-py` speaking the exact same stdio JSON-RPC 2.0 protocol as the Rust sidecar. On Apple Silicon this embeds ~2.4x faster than the ort path with numerically identical (>=0.999 cosine) results. On ANY bootstrap or launcher-discovery failure, falls back to the Rust ort stdio sidecar so search never hard-fails — see "Python/MPS sidecar tuning" below. **Default-off**; requires `uv` installed (or `TRUSTY_UV_BIN` set) and ~3 GB free disk on first use. |
+| unset / `auto`          | **Default, platform-aware (epic #3524 slice 6, PR 5/5 — the default flip).** Resolves via `resolve_default_embedder_mode()`: **on Apple Silicon (aarch64 macOS), always** serves on the ort stdio sidecar immediately while bootstrapping the python/MPS sidecar in the background and hot-swapping when ready (see "Graceful Apple-Silicon default" below) — no ship-gate env var required; with `TRUSTY_EMBEDDER_PYTHON_EAGER` enabled on a non-Apple-Silicon host, takes the eager blocking `python` path below instead; otherwise (every other platform) arms a `LazyEmbedderHandle` at boot (issue #315 — deferred spawn): `trusty-embedderd --stdio` is spawned on the **first embed request** (reindex, hybrid search, `context_inference`), not at daemon startup. |
+| `stdio`                 | **Permanent user override back to ort — the escape hatch.** Always the plain ort stdio sidecar (identical to the unset/`auto` fallback on non-Apple-Silicon hosts), even on Apple Silicon where it is now the ONLY way to opt back out of the graceful-Python default — never routed through the platform-aware resolution (see `is_forced_ort_override`). `trusty-embedderd` is a **required runtime dependency** for this and the default ort path — binary discovery runs at boot and fails fast with an install hint if the binary is missing. **`cargo install trusty-search` installs `trusty-embedderd` automatically.** |
+| `python`                | **Explicit Python/MPS sidecar, eager/blocking, any platform (epic #3524).** Eagerly bootstraps a pinned `uv`-managed venv (torch + sentence-transformers) at `start`, then lazy-spawns `trusty-embedderd-py` speaking the exact same stdio JSON-RPC 2.0 protocol as the Rust sidecar. On Apple Silicon this embeds ~2.4x faster than the ort path with numerically identical (>=0.999 cosine) results — though on Apple Silicon the unset/`auto` default already reaches the same sidecar non-blocking, so this explicit value is mainly useful for testing the sidecar off Apple Silicon or forcing the eager/blocking startup path. On ANY bootstrap or launcher-discovery failure, falls back to the Rust ort stdio sidecar so search never hard-fails — see "Python/MPS sidecar tuning" below. Requires `uv` installed (or `TRUSTY_UV_BIN` set) and ~3 GB free disk on first use. |
 | `in-process` / `local`  | Explicit escape hatch — in-process ONNX embedding. Use for tests, debugging, or environments where the sidecar cannot be installed. **Never activated silently**: you must set this variable explicitly to use the in-process path. |
 | `http://…`              | HTTP remote — `POST /embed` to a manually-managed `trusty-embedderd` HTTP listener. |
 | `unix:/path/to/sock`    | UDS remote — JSON-RPC 2.0 to a manually-managed `trusty-embedderd --socket` listener. |
 | `candle`                | Candle Metal backend (requires `--features candle`). |
 
-### Graceful Apple-Silicon default (epic #3524 slice 6, PR 3/5)
+### Graceful Apple-Silicon default (epic #3524 slice 6, PR 5/5 — the default flip)
 
-On Apple Silicon, once ship-gated on, `trusty-search start` serves on the ort
+On Apple Silicon (aarch64 macOS), `trusty-search start` serves on the ort
 stdio sidecar immediately (zero HTTP-listener delay) while a detached
 background task bootstraps the python/MPS sidecar, proves it with one real
 readiness-probe embed call, and hot-swaps the running embedder over to it.
 On any bootstrap or probe failure the daemon stays permanently on ort for
 that daemon's lifetime and `/health`'s `embedder_bootstrap` reports
-`"failed"`. Ships **default OFF** in this PR — a later slice flips the
-default on after a soak period.
+`"failed"`. **This is now the default on Apple Silicon** — validated by the
+epic #3524 slice 2-4 spike (numerically identical results, ~2.4x faster) and
+soaked per PR #3610 before this flip. The prior ship-gate env var
+(`TRUSTY_PY_DEFAULT`) has been retired; `TRUSTY_EMBEDDER=stdio` is now the
+one documented, permanent way back to the unchanged ort behavior. Non-Apple-
+Silicon hosts are completely unaffected (unchanged ort default).
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `TRUSTY_PY_DEFAULT` | unset (off) | **Ship-gate.** Set to `1`/`true`/`yes`/`on` to enable the graceful background path on Apple Silicon for unset/`auto` `TRUSTY_EMBEDDER`. Unset/falsy leaves Apple-Silicon resolution completely unchanged (ort) — this is why the PR that introduces the mechanism ships with zero user-facing behavior change. Has no effect off Apple Silicon. |
-| `TRUSTY_EMBEDDER_PYTHON_EAGER` | unset (off) | Reaches the existing eager, blocking `python` arm (identical to explicit `TRUSTY_EMBEDDER=python`) via unset/`auto` instead of an explicit value. Not platform-gated. `TRUSTY_PY_DEFAULT` wins outright when both are set. |
+| `TRUSTY_EMBEDDER=stdio` | — | **User escape hatch.** Forces the unchanged ort stdio sidecar on any platform, including Apple Silicon — bypasses the platform-aware default resolution entirely (see `is_forced_ort_override`). |
+| `TRUSTY_EMBEDDER_PYTHON_EAGER` | unset (off) | Reaches the existing eager, blocking `python` arm (identical to explicit `TRUSTY_EMBEDDER=python`) via unset/`auto` instead of an explicit value. Not platform-gated, but only reachable off Apple Silicon — on Apple Silicon the graceful default wins outright (see `resolve_default_embedder_mode_for`'s precedence doc). |
 | `TRUSTY_PY_BOOTSTRAP_RETRIES` | `2` | Number of bootstrap→probe attempts the background orchestrator makes (linear backoff between attempts) before giving up and marking the bootstrap `Failed` while staying on ort. A malformed or `0` value falls back to the default. |
 
 ### Python/MPS sidecar tuning (`TRUSTY_EMBEDDER=python` path only)
