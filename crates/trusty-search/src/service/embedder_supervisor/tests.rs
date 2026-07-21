@@ -493,6 +493,66 @@ impl trusty_common::embedder_client::EmbedderClient for StubClient {
     }
 }
 
+/// Like `StubClient` but overrides `last_reported_device` — stands in for
+/// `StdioEmbedderClient` talking to the Python/MPS sidecar (epic #3524
+/// slice 5, issue #3493 P1) without needing a real subprocess.
+struct DeviceReportingStubClient;
+
+#[async_trait::async_trait]
+impl trusty_common::embedder_client::EmbedderClient for DeviceReportingStubClient {
+    async fn embed_batch(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, trusty_common::embedder_client::EmbedderError> {
+        Ok(texts.into_iter().map(|_| vec![0.0_f32; 384]).collect())
+    }
+
+    fn last_reported_device(&self) -> Option<String> {
+        Some("mps".to_string())
+    }
+}
+
+/// `LazyEmbedderHandle::last_reported_device()` must be `None` before any
+/// spawn, and must forward the live client's real readback once spawned.
+///
+/// Why: this is the non-blocking accessor `/health` uses (epic #3524 slice 5)
+/// — it must never panic or deadlock, and must correctly thread through a
+/// hand-seeded `SpawnedState` the same way the idle-shutdown tests do.
+/// What: construct a `LazyEmbedderHandle`, assert `None` pre-spawn, hand-seed
+/// `state` with a `DeviceReportingStubClient`, assert `Some("mps")`.
+/// Test: this test.
+#[tokio::test]
+async fn lazy_handle_last_reported_device_reflects_client() {
+    use tokio::sync::RwLock;
+
+    let handle = LazyEmbedderHandle::new(
+        PathBuf::from("/nonexistent/trusty-embedderd"),
+        SupervisorConfig::default(),
+    );
+    assert_eq!(
+        handle.last_reported_device(),
+        None,
+        "must be None before any spawn"
+    );
+
+    let client: Arc<dyn trusty_common::embedder_client::EmbedderClient> =
+        Arc::new(DeviceReportingStubClient);
+    let client_slot = Arc::new(RwLock::new(client));
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    *handle.state.lock().await = Some(SpawnedState {
+        client_slot,
+        supervisor_handle: None,
+        shutdown_tx,
+        pid_slot: Arc::new(AtomicU32::new(0)),
+    });
+
+    assert_eq!(
+        handle.last_reported_device(),
+        Some("mps".to_string()),
+        "must forward the live client's real device readback"
+    );
+}
+
 /// The idle watchdog must NOT evict the sidecar while a request is in flight,
 /// and MUST reclaim it once the request completes and the idle window is past.
 ///

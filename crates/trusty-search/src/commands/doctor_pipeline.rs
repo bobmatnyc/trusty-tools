@@ -17,9 +17,10 @@
 use super::daemon_utils::daemon_base_url;
 use super::doctor_checks::{
     check_daemon_running, check_data_dir, check_lock_file, check_log_rotation, check_model_cache,
-    check_port_reachable, doctor_data_dir, fetch_index_names, fetch_index_statuses,
-    print_index_breakdown, probe_daemon_health, read_daemon_port, summarize_indexes, CheckResult,
-    EmptyIndex,
+    check_port_reachable, check_python_device_note, check_python_launcher, check_python_uv,
+    check_python_venv, doctor_data_dir, fetch_index_names, fetch_index_statuses,
+    print_index_breakdown, probe_daemon_health, python_embedder_enabled, read_daemon_port,
+    summarize_indexes, CheckResult, EmptyIndex,
 };
 use async_trait::async_trait;
 use std::sync::Mutex;
@@ -205,6 +206,46 @@ impl DoctorCheck for LogRotationCheck {
     }
 }
 
+/// Python/MPS embedder sidecar check (epic #3524 slice 5).
+///
+/// Why: since the sidecar becomes the Apple-Silicon default, operators need
+/// a way to diagnose venv/uv/launcher state without tailing daemon logs —
+/// mirrors the existing `ModelCacheCheck` shape (a synchronous, read-only
+/// probe with no daemon dependency) rather than inventing a new pattern.
+/// What: no-ops with a single informational `Ok` when
+/// `TRUSTY_EMBEDDER=python` is not set; otherwise runs the four pure checks
+/// (`uv`, venv/`.ready`, launcher, device note) from `doctor_checks`.
+/// Test: `cargo test --workspace` — `check_python_venv_*` and
+/// `python_embedder_enabled_*` in `doctor_checks/tests.rs` cover the pure
+/// logic; this wrapper is exercised by the doctor integration tests.
+pub(crate) struct PythonEmbedderCheck;
+
+#[async_trait]
+impl DoctorCheck for PythonEmbedderCheck {
+    fn name(&self) -> &str {
+        "python_embedder"
+    }
+
+    async fn run(&self, _state: &DoctorState) -> Vec<CheckResult> {
+        if !python_embedder_enabled() {
+            return vec![CheckResult::Ok(
+                "Python/MPS embedder: not enabled (set TRUSTY_EMBEDDER=python to opt in)".into(),
+            )];
+        }
+
+        let mut results = vec![check_python_uv()];
+        match trusty_embedderd_py::resolve_layout() {
+            Ok(layout) => results.push(check_python_venv(&layout)),
+            Err(e) => results.push(CheckResult::Error(format!(
+                "Python/MPS embedder: could not resolve venv layout: {e:#}"
+            ))),
+        }
+        results.push(check_python_launcher());
+        results.push(check_python_device_note());
+        results
+    }
+}
+
 // ── Orchestrator ──────────────────────────────────────────────────────────
 
 fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
@@ -216,6 +257,7 @@ fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(IndexesCheck),
         Box::new(PortReachableCheck),
         Box::new(LogRotationCheck),
+        Box::new(PythonEmbedderCheck),
     ]
 }
 

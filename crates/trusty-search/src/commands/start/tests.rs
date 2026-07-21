@@ -636,6 +636,39 @@ fn lazy_adapter_python_reports_mps_provider() {
     );
 }
 
+/// Why (epic #3524 slice 5, issue #3493 P1): `resolved_provider_label()` must
+/// forward to `LazyEmbedderHandle::last_reported_device()` rather than the
+/// build-features prediction. This adapter is used for BOTH the default Rust
+/// ort arm and the opt-in Python arm, so the `None`-before-spawn case (this
+/// test) matters on both paths: `/health` must fall back to `provider()`'s
+/// prediction rather than reporting a stale value.
+/// What: a fresh (never-spawned) handle's `last_reported_device()` is `None`
+/// (proven directly by `lazy_handle_last_reported_device_reflects_client` in
+/// `embedder_supervisor::tests`); this test proves the adapter forwards that
+/// `None` through unchanged rather than substituting a wrong guess.
+/// Test: this test.
+#[test]
+fn lazy_python_adapter_reports_wire_device() {
+    use crate::core::Embedder as _;
+    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+    let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+        std::path::PathBuf::from("/nonexistent/trusty-embedderd-py"),
+        SupervisorConfig::default(),
+    ));
+    let adapter = LazySlotEmbedderAdapter {
+        handle,
+        is_python: true,
+    };
+    assert_eq!(
+        adapter.resolved_provider_label(),
+        None,
+        "before any spawn, resolved_provider_label() must be None so /health \
+         falls back to provider()'s prediction rather than reporting a stale \
+         or fabricated device"
+    );
+}
+
 /// Why: issue #604 — the UDS-remote adapter shares the same defect/fix as
 /// the lazy adapter; `/health` must not report a stale `CPU` for a
 /// UDS-connected sidecar.

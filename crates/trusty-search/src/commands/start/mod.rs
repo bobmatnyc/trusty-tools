@@ -18,6 +18,7 @@
 
 mod daemon;
 mod embedder;
+mod embedder_fallback;
 mod graceful_bootstrap;
 mod restore;
 

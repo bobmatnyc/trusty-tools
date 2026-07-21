@@ -126,6 +126,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   orchestrator and `/health` work can reach it without an `Any`-downcast.
   New workspace dependency: `arc-swap`.
 
+### Added
+
+- **Runtime fallback to the Rust ort sidecar + doctor/health readback for
+  the Python/MPS embedder (epic #3524 slice 5).** Bootstrap-time fallback
+  already existed (slices 2-4); this adds the missing runtime half: a new
+  `FallbackEmbedderAdapter` (`commands/start/embedder_fallback.rs`) wraps the
+  Python sidecar and latches (one-way, logged once at ERROR) to the Rust ort
+  path once the sidecar's own supervisor permanently gives up respawning it
+  (a real, non-blocking readback of the supervisor's own give-up decision,
+  not an independently-counted request-failure proxy) — so a wedged or
+  crash-looping Python sidecar degrades gracefully instead of failing every
+  subsequent search forever. `trusty-search doctor` gained a `python_embedder`
+  check (uv presence/version, venv + lockfile-hash-current `.ready` state,
+  launcher discoverability) with a `--fix` repair that re-runs the eager venv
+  bootstrap. `GET /health`'s `embedder_info.provider` now prefers a REAL
+  device readback from the live embedder (`Embedder::resolved_provider_label`)
+  over the build-features prediction when one is available — fixes the
+  sidecar reporting `CoreML(ANE)` while torch actually selected `mps` (issue
+  #3493 P1).
+
 ## [0.37.0] — 2026-07-20
 
 Minor release: opt-in Python/MPS embedding sidecar (`TRUSTY_EMBEDDER=python`),
