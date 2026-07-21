@@ -1,20 +1,28 @@
-//! `delegate_to_agent` tool — the PM's primary tool for dispatching to sub-agents.
+//! `delegate_to_agent` tool — dispatches a task to a named specialist agent,
+//! shared by every caller: `pm`, `ctrl`, and (since #3052 PR A) the
+//! black-boxed assistant-tier personas.
 //!
-//! Why: Keeps the delegation schema and its executor colocated so the PM's
-//! tool registry can register a single type that owns both. Pre-flight
-//! validation of `agent_name` against the on-disk agent config directory
-//! prevents the LLM from hallucinating sub-agent names (e.g. inventing
-//! `code-searcher` from the `search_code` native tool description, see #204)
-//! and crashing the subprocess runner with a confusing IO error.
+//! Why: Keeps the delegation schema and its executor colocated so every
+//! caller's tool registry can register a single type that owns both.
+//! Pre-flight validation of `agent_name` against the on-disk agent config
+//! directory prevents the LLM from hallucinating a specialist name (e.g.
+//! inventing `code-searcher` from the `search_code` native tool description,
+//! see #204) and crashing the subprocess runner with a confusing IO error.
 //! What: `DelegateToAgentTool` wraps an `AgentRunner` and (optionally) an
 //! agent config directory. `execute()` parses `{agent_name, task}`, validates
 //! the agent TOML exists, and hands off to the runner. On miss, returns a
-//! helpful error listing available agents and reminding the LLM that native
-//! tools are not agent names.
-//! Test: `unknown_agent_returns_helpful_error_with_available_list` builds a
-//! tool pointed at a tempdir containing `engineer.toml` only, calls
-//! `execute({"agent_name":"code-searcher",...})`, and asserts the error names
-//! the unknown agent and lists `engineer`.
+//! GENERIC error (#3052 PR A code-critic CRITICAL-2: no on-disk roster
+//! enumeration — the caller's own instructions, not this shared tool, are
+//! the source of truth for which specialist names are legitimate, and this
+//! tool's output must stay safe to surface from a black-boxed persona). The
+//! tool's schema `description` is likewise generic (CRITICAL-1: no hardcoded
+//! internal agent-name examples) — `pm` still knows its roster via its own
+//! system prompt's `{{available_agents}}` template substitution
+//! (`agents::registry::roster::inject_roster_into_prompt`), which is
+//! independent of this schema.
+//! Test: `unknown_agent_is_rejected_without_naming_the_agent_or_roster`
+//! asserts the error names the REJECTED agent but leaks no on-disk roster
+//! entry and no bundled agent filename/internal system name.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,13 +32,14 @@ use serde_json::{Value, json};
 
 use crate::tools::traits::{AgentRunner, ToolExecutor, ToolResult};
 
-/// Tool executor that delegates a task to a named sub-agent.
+/// Tool executor that delegates a task to a named specialist agent.
 pub struct DelegateToAgentTool {
     runner: Arc<dyn AgentRunner>,
     /// Directory holding `<agent>.toml` files. When `Some`, `execute()` will
     /// reject calls whose `agent_name` does not have a matching TOML, with a
-    /// helpful "available agents" listing. When `None` (legacy callers /
-    /// tests), validation is skipped and the runner is invoked directly.
+    /// generic error (#3052 PR A: no on-disk roster enumeration — see the
+    /// module docs). When `None` (legacy callers / tests), validation is
+    /// skipped and the runner is invoked directly.
     config_dir: Option<PathBuf>,
 }
 
@@ -57,41 +66,16 @@ impl DelegateToAgentTool {
     /// Why: When the LLM hallucinates an agent name (e.g. `code-searcher`
     /// from the `search_code` native tool, #204), spawning the subprocess
     /// fails with a generic IO error. Validating up front returns a
-    /// structured `ToolResult::err` listing available agents so the LLM can
-    /// self-correct on the next turn.
+    /// structured, GENERIC `ToolResult::err` so the LLM can self-correct on
+    /// the next turn by re-checking its OWN instructions for the specialists
+    /// legitimately available to it — this tool does not enumerate the
+    /// on-disk roster (#3052 PR A code-critic CRITICAL-2).
     /// What: Stores `dir`. Files matching `<dir>/<agent_name>.toml` are
     /// considered valid. Missing dir is treated like "no agents available".
-    /// Test: `unknown_agent_returns_helpful_error_with_available_list`.
+    /// Test: `unknown_agent_is_rejected_without_naming_the_agent_or_roster`.
     pub fn with_config_dir(mut self, dir: PathBuf) -> Self {
         self.config_dir = Some(dir);
         self
-    }
-
-    /// List the agent names discoverable in `config_dir`, if any.
-    ///
-    /// Why: Used to build the "available agents" hint in error messages so
-    /// the LLM gets immediate, structured feedback when it invents a name.
-    /// What: Reads `<config_dir>/*.toml` and returns each file stem. Returns
-    /// `None` when no `config_dir` was attached (validation disabled).
-    /// Test: Indirect via `unknown_agent_returns_helpful_error_with_available_list`.
-    fn available_agents(&self) -> Option<Vec<String>> {
-        let dir = self.config_dir.as_ref()?;
-        let entries = std::fs::read_dir(dir).ok()?;
-        let mut names: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) == Some("toml") {
-                    p.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        names.sort();
-        Some(names)
     }
 }
 
@@ -106,17 +90,17 @@ impl ToolExecutor for DelegateToAgentTool {
             "type": "function",
             "function": {
                 "name": "delegate_to_agent",
-                "description": "Delegate a task to a specialized sub-agent. Use this for any implementation work (writing code, running analysis, etc.). The sub-agent will be spawned as a subprocess and its result returned to you. NOTE: agent_name must be an actual sub-agent (e.g. 'engineer', 'python-engineer', 'qa-agent'); native tools like search_code, web_search, move_file, create_dir are NOT agent names — call them directly.",
+                "description": "Hand a task off to a specialist so it actually gets done. Use this for any implementation work (writing code, running analysis, etc.) rather than doing it yourself. The specialist runs independently and its result is returned to you. NOTE: agent_name must identify an actual specialist you know about (see your own instructions for which ones are available to you) — native tools like search_code, web_search, move_file, create_dir are NOT specialist names — call them directly instead.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "agent_name": {
                             "type": "string",
-                            "description": "Short name of the sub-agent (e.g. 'python-engineer'). Must match an existing agent TOML; native tools are not agent names."
+                            "description": "The specialist to hand this task to, by its internal name. Must be one of the specialists available to you (see your own instructions); native tools are not specialist names."
                         },
                         "task": {
                             "type": "string",
-                            "description": "Concrete task description for the sub-agent."
+                            "description": "Concrete task description for the specialist."
                         }
                     },
                     "required": ["agent_name", "task"],
@@ -137,21 +121,29 @@ impl ToolExecutor for DelegateToAgentTool {
         // Pre-flight validation (#204): if a config_dir was attached, verify
         // the agent TOML exists before spawning a subprocess. This converts a
         // generic "subprocess failed" IO error into a structured tool error
-        // the LLM can act on (with the actual list of valid agent names).
+        // the LLM can act on.
+        //
+        // #3052 PR A code-critic CRITICAL-2: the error message MUST NOT
+        // enumerate the on-disk agent roster — this tool is now reachable
+        // from black-boxed assistant-tier personas, and `delegate.rs` is
+        // shared by every caller (pm, ctrl, assistant, ...), so the message
+        // is sent straight back into whichever persona's turn is in
+        // progress. A generic "not recognized" response is enough for the
+        // LLM to self-correct (re-check its own instructions for the
+        // specialists actually available to it) without the tool itself
+        // dumping internal agent IDs/filenames into a black-boxed
+        // conversation. `available_agents()` is kept (used by tests only
+        // now) rather than deleted, since a future caller-gated surface
+        // (e.g. an internal-only diagnostic) may still want it.
         if let Some(dir) = &self.config_dir {
             let agent_toml = dir.join(format!("{agent_name}.toml"));
             if !agent_toml.exists() {
-                let available = self.available_agents().unwrap_or_default();
-                let available_str = if available.is_empty() {
-                    "(none discovered)".to_string()
-                } else {
-                    available.join(", ")
-                };
                 return ToolResult::err(format!(
-                    "Unknown agent '{agent_name}'. Available agents: {available_str}. \
-                     Note: native tools (search_code, web_search, move_file, create_dir, \
-                     memory_store, memory_recall, etc.) are NOT agent names — call them \
-                     directly as tools instead of via delegate_to_agent."
+                    "'{agent_name}' is not a recognized specialist. Check your own \
+                     instructions for the specialists available to you — native tools \
+                     (search_code, web_search, move_file, create_dir, memory_store, \
+                     memory_recall, etc.) are NOT specialist names; call them directly \
+                     as tools instead of via delegate_to_agent."
                 ));
             }
         }
@@ -202,24 +194,42 @@ mod tests {
         }
     }
 
-    /// Asserts that calling `delegate_to_agent` with an unknown agent name
-    /// (e.g. the hallucinated `code-searcher` from #204) returns a structured
-    /// error listing available agents and clarifying that native tools are
-    /// not agent names — and that the runner is NOT invoked.
+    /// #3052 PR A code-critic CRITICAL-2 regression guard: calling
+    /// `delegate_to_agent` with an unknown agent name (e.g. the hallucinated
+    /// `code-searcher` from #204) must return a GENERIC error — it must
+    /// echo back the caller's OWN rejected input, but it must NOT enumerate
+    /// the on-disk agent roster, name any bundled agent filename, or leak
+    /// any internal trusty-* system/daemon name. This tool is reachable
+    /// from black-boxed assistant-tier personas (`assistant`, `izzie`,
+    /// `cto-assistant`), so its own error text must be as safe to surface
+    /// to a user as the persona prompt that calls it — the seeded config
+    /// dir intentionally includes names spanning the full roster (workers,
+    /// meta/infra agents, and internal system terms) so this test would
+    /// catch a regression regardless of which category leaked.
     #[tokio::test]
-    async fn unknown_agent_returns_helpful_error_with_available_list() {
+    async fn unknown_agent_is_rejected_without_naming_the_agent_or_roster() {
         let tmp = tempfile::tempdir().unwrap();
-        // Seed two real agent TOMLs.
-        std::fs::write(
-            tmp.path().join("engineer.toml"),
-            "[agent]\nname = \"engineer\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            tmp.path().join("qa-agent.toml"),
-            "[agent]\nname = \"qa-agent\"\n",
-        )
-        .unwrap();
+        // Seed a realistic roster — worker + meta/infra agent names — so a
+        // regression that reintroduces roster enumeration is caught no
+        // matter which name it would have leaked.
+        for name in [
+            "engineer",
+            "python-engineer",
+            "qa-agent",
+            "research-agent",
+            "docs-agent",
+            "local-ops-agent",
+            "plan-agent",
+            "ctrl",
+            "pm",
+            "postmortem-agent",
+        ] {
+            std::fs::write(
+                tmp.path().join(format!("{name}.toml")),
+                format!("[agent]\nname = \"{name}\"\n"),
+            )
+            .unwrap();
+        }
 
         let runner = Arc::new(RecordingRunner {
             invoked: std::sync::Mutex::new(Vec::new()),
@@ -237,13 +247,34 @@ mod tests {
         assert!(result.is_error(), "must reject unknown agent");
         let msg = result.content();
         assert!(
-            msg.contains("Unknown agent 'code-searcher'"),
-            "error must name the unknown agent, got: {msg}"
+            msg.contains("code-searcher"),
+            "error may echo back the caller's own rejected input, got: {msg}"
         );
-        assert!(
-            msg.contains("engineer") && msg.contains("qa-agent"),
-            "error must list available agents, got: {msg}"
-        );
+        // No roster enumeration: none of the seeded agent names may leak,
+        // regardless of whether they're workers or meta/infra agents.
+        for leaked in [
+            "engineer",
+            "python-engineer",
+            "qa-agent",
+            "research-agent",
+            "docs-agent",
+            "local-ops-agent",
+            "plan-agent",
+            "ctrl",
+            "postmortem-agent",
+        ] {
+            assert!(
+                !msg.contains(leaked),
+                "error must NOT enumerate the on-disk roster (found '{leaked}'), got: {msg}"
+            );
+        }
+        // No internal system/daemon names either.
+        for leaked in ["trusty-mpm", "trusty-code", "tcode", "subprocess"] {
+            assert!(
+                !msg.to_lowercase().contains(&leaked.to_lowercase()),
+                "error must NOT leak internal system name '{leaked}', got: {msg}"
+            );
+        }
         assert!(
             msg.contains("native tools") && msg.contains("search_code"),
             "error must clarify native-vs-agent distinction, got: {msg}"

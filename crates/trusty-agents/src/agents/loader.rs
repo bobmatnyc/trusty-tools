@@ -415,6 +415,48 @@ impl AgentConfig {
         Ok((Self::from_toml_str(&raw, &path)?, false))
     }
 
+    /// Reject a root (non-`extends`) agent that omitted `[llm]`
+    /// `temperature`/`max_tokens` (#3052 PR A follow-up: per-key `[llm]`
+    /// extends inheritance).
+    ///
+    /// Why: `temperature`/`max_tokens` gained serde defaults (the UNSET
+    /// sentinel — `LlmParams::temperature_is_unset`/`max_tokens_is_unset`) so
+    /// an `extends` CHILD can omit them and inherit the base's value via
+    /// `extends::merge_extends`. That relaxation must not silently swallow a
+    /// root agent's forgotten `[llm]` block the way a plain serde-mandatory-
+    /// field error used to catch it — a root has no base to inherit from, so
+    /// a sentinel reaching `chat_with_tools_gated` would send `NaN`/`u32::MAX`
+    /// to the LLM provider. This restores that fail-fast guarantee for roots
+    /// while leaving children free to omit the fields.
+    /// What: When `cfg.agent.extends` is `None` and either sentinel is still
+    /// present, returns a descriptive error naming the file and field(s).
+    /// Test: `llm_required_fields_missing_on_root_agent_is_rejected`,
+    /// `llm_omitted_fields_allowed_on_extends_child`.
+    fn validate_llm_required_for_root(cfg: &AgentConfig, path: &Path) -> Result<()> {
+        if cfg.agent.extends.is_some() {
+            return Ok(());
+        }
+        let missing_temperature = cfg.llm.temperature_is_unset();
+        let missing_max_tokens = cfg.llm.max_tokens_is_unset();
+        if !missing_temperature && !missing_max_tokens {
+            return Ok(());
+        }
+        let fields = match (missing_temperature, missing_max_tokens) {
+            (true, true) => "temperature, max_tokens",
+            (true, false) => "temperature",
+            (false, true) => "max_tokens",
+            (false, false) => unreachable!("checked above"),
+        };
+        anyhow::bail!(
+            "agent '{}' declares no `extends` base but omits `[llm]` {} (in {}) — a root \
+             agent must declare its own sampling parameters; only an `extends` child may \
+             omit them to inherit the base's",
+            cfg.agent.name,
+            fields,
+            path.display()
+        );
+    }
+
     /// Shared parsing + adapter-resolution path used by both `load` and
     /// `by_name_async`.
     ///
@@ -429,6 +471,7 @@ impl AgentConfig {
     pub(super) fn from_toml_str(raw: &str, path: &Path) -> Result<Self> {
         let mut cfg: AgentConfig = toml::from_str(raw)
             .with_context(|| format!("failed to parse agent TOML {}", path.display()))?;
+        Self::validate_llm_required_for_root(&cfg, path)?;
         // #367: Substitute runtime context variables in the system prompt at
         // load time so every downstream consumer (prompt_builder, claude-code
         // runner, in-process runner, inspection) sees the resolved string.

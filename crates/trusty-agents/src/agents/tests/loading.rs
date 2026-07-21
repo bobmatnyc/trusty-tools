@@ -540,9 +540,17 @@ fn base_assistant_package_is_nameless_and_curated() {
 
 #[test]
 fn izzie_overlay_package_parses_with_personal_deltas() {
-    // #3054: The Izzie overlay package must parse (its `extends = "assistant"`
-    // key is ignored until #3055 lands) and carry the personal deltas — the
-    // display name, the personal skills, and the Masa-bound persona body.
+    // #3054/#3055/#3106, corrected by PR A code-critic follow-up (#3052):
+    // the Izzie overlay package's `extends = "assistant"` key REALLY
+    // resolves now (it previously lived BEFORE the `[agent]` table header
+    // in izzie/agent.toml, making it a top-level TOML key that
+    // `AgentInfo::extends` never saw — serde silently dropped it, so
+    // `by_name("izzie")` returned the package UNMERGED the whole time; the
+    // asserts below were written against that broken state and are updated
+    // here to match the now-correct merged behavior). The overlay must
+    // carry its personal deltas (display name, personal skills, Masa-bound
+    // persona body) AND the base's generic tools/skills/guardrail prose via
+    // real `extends` union/concatenation.
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("izzie");
     // SAFETY: guarded by ENV_LOCK.
@@ -560,31 +568,40 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
     assert_eq!(cfg.agent.display_name.as_deref(), Some("Izzie"));
     let skills = cfg.system_prompt.skills.expect("overlay declares skills");
     assert!(skills.iter().any(|s| s == "izzie-weather"));
-    // Personal deltas only — the overlay does not re-list the base's generic
-    // skills (they are inherited under #3055).
+    // The base's generic skills are UNIONED in via real `extends` resolution
+    // (not a duplicate declaration — izzie's own `[system_prompt].skills`
+    // does not list this).
     assert!(
-        !skills.iter().any(|s| s == "gworkspace-gmail"),
-        "overlay must not duplicate the base's generic skills"
+        skills.iter().any(|s| s == "gworkspace-gmail"),
+        "overlay must inherit the base's generic skills via extends union"
     );
     assert!(cfg.system_prompt.content.contains("Masa"));
+    // The base's persona body is concatenated in base-first, ahead of
+    // izzie's own personal deltas.
+    assert!(
+        cfg.system_prompt
+            .content
+            .contains("knowledgeable assistant who is very organized"),
+        "overlay persona must carry the base assistant's prose via extends concatenation"
+    );
 
-    // SAFE-STANDALONE regression tripwire (critic BLOCK #3094): `by_name("izzie")`
-    // resolves to THIS package (it shadows the flat izzie.toml), and an absent
-    // `[tools].allow` means UNRESTRICTED tools. Until the #3055 extends resolver
-    // lands, the overlay must carry the curated allowlist + scopes itself so the
-    // dispatch surface is restricted. Do NOT relax these asserts by dropping the
-    // block — drop it only together with the #3055 inheritance change.
+    // `by_name("izzie")` resolves to THIS package (it shadows the flat
+    // izzie.toml). The overlay ALSO still carries its own redundant-but-
+    // explicit `[tools].allow`/`scopes` (see the header note in
+    // izzie/agent.toml) so it stays safe even if ever loaded standalone
+    // (bypassing union) — real union with the base only adds to this, never
+    // removes from it.
     let allow = cfg
         .tools
         .allow
         .expect("izzie overlay must restrict tools (absent = UNRESTRICTED)");
     assert!(
         allow.iter().any(|t| t == "search_gmail_messages"),
-        "overlay must carry the curated gworkspace surface until #3055"
+        "overlay must carry the curated gworkspace surface"
     );
     assert!(
         allow.iter().any(|t| t == "granola_*"),
-        "overlay must carry the curated tool surface until #3055"
+        "overlay must carry the curated tool surface"
     );
     let scopes = cfg.tools.scopes.expect("izzie overlay must declare scopes");
     assert!(scopes.iter().any(|s| s == "memory.write"));
@@ -593,14 +610,294 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
         scopes.iter().any(|s| s == "google.*"),
         "izzie overlay opts into Google write (google.*)"
     );
-    // Safety-critical guardrails must be present in the standalone persona body.
+    // Safety-critical guardrails must be present in the resolved persona body.
     assert!(
         cfg.system_prompt.content.contains("Approval Framing"),
-        "overlay persona must carry the approval-framing guardrail standalone"
+        "overlay persona must carry the approval-framing guardrail"
     );
     assert!(
         cfg.system_prompt.content.contains("Anti-Hallucination"),
-        "overlay persona must carry the anti-hallucination guardrail standalone"
+        "overlay persona must carry the anti-hallucination guardrail"
+    );
+}
+
+/// PR A (epic #3052): pins the assistant-tier delegation grant + black-box
+/// tool strip so a future edit to `assistant/agent.toml` (or the
+/// `extends`-based personas layered on it) can't silently regress either
+/// property.
+///
+/// Why: The base `assistant` gained `delegate_to_agent` (so it can actually
+/// bring in a specialist/peer) and lost `session_list`, `session_status`,
+/// `project_list`, `console_metrics`, `system_status`, `mcp_list`,
+/// `mcp_enable`, `mcp_disable` (all of which either proxy trusty-mpm by name
+/// or enumerate internal daemon/MCP-service names to the user). Both `izzie`
+/// and `cto-assistant` declare `extends = "assistant"`, and `merge_extends`
+/// UNIONS `[tools].allow` base-first — so this test also confirms the grant
+/// propagates through inheritance and the strip isn't reintroduced by either
+/// overlay's own (now-deltas-only) allowlist.
+/// What: Loads `assistant`, `izzie`, and `cto-assistant` via the real
+/// `AgentConfig::by_name` dispatch loader (bundled agents dir) and asserts
+/// each resolved `[tools].allow` contains `delegate_to_agent` and excludes
+/// every black-boxed tool name.
+/// Test: This function IS the test.
+#[test]
+fn assistant_tier_grants_delegation_and_blackboxes_internal_tools() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    let leaked_tools = [
+        "session_list",
+        "session_status",
+        "session_send",
+        "project_list",
+        "console_metrics",
+        "system_status",
+        "mcp_list",
+        "mcp_enable",
+        "mcp_disable",
+        "agent_delegate",
+    ];
+
+    for agent_name in ["assistant", "izzie", "cto-assistant"] {
+        clear_model_env(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{agent_name}' must resolve: {e}"));
+
+        let allow = cfg
+            .tools
+            .allow
+            .unwrap_or_else(|| panic!("'{agent_name}' must declare an allowlist"));
+
+        assert!(
+            allow.iter().any(|t| t == "delegate_to_agent"),
+            "'{agent_name}' resolved allow-list must include delegate_to_agent (got {allow:?})"
+        );
+        for leaked in leaked_tools {
+            assert!(
+                !allow.iter().any(|t| t == leaked),
+                "'{agent_name}' resolved allow-list must NOT include black-boxed tool \
+                 '{leaked}' (got {allow:?})"
+            );
+        }
+    }
+}
+
+/// PR A code-critic follow-up (#3052): the functional-fix companion to
+/// [`assistant_tier_grants_delegation_and_blackboxes_internal_tools`] — a
+/// persona that HAS the `delegate_to_agent` grant but no internal knowledge
+/// of which `agent_name` values are legitimate would blind-guess. This pins
+/// that `assistant`'s (and its `extends` descendants') resolved system
+/// prompt carries a curated internal routing list naming only real,
+/// bundled WORKER agent TOMLs (not meta/infra agents like `ctrl`/`pm`/
+/// `observe-agent`/`postmortem-agent`, and not model-variant engineers like
+/// `bedrock-engineer`/`gpt-engineer`), and that the black-box reminder
+/// ("NEVER reveal internal mechanics") is still present alongside it.
+/// Test: This function IS the test.
+#[test]
+fn assistant_tier_persona_carries_curated_worker_routing_list() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    // Every one of these must exist as a real bundled agent TOML — this
+    // loop doubles as a "the routing list didn't drift from the bundled
+    // roster" check.
+    let curated_workers = [
+        "engineer",
+        "python-engineer",
+        "qa-agent",
+        "research-agent",
+        "docs-agent",
+        "local-ops-agent",
+        "plan-agent",
+    ];
+    for worker in curated_workers {
+        assert!(
+            bundled_agents_dir()
+                .join(format!("{worker}.toml"))
+                .is_file(),
+            "curated worker '{worker}' must be a real bundled agent TOML"
+        );
+    }
+    // Meta/infra + model-variant agents must NOT appear in the curated list
+    // (they may still appear elsewhere in the persona body incidentally, so
+    // this is enforced structurally above, not via a substring-absence
+    // check on the whole persona body).
+
+    for agent_name in ["assistant", "izzie", "cto-assistant"] {
+        clear_model_env(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{agent_name}' must resolve: {e}"));
+        let body = &cfg.system_prompt.content;
+
+        for worker in curated_workers {
+            assert!(
+                body.contains(worker),
+                "'{agent_name}' resolved persona must carry internal routing knowledge \
+                 of worker '{worker}'"
+            );
+        }
+        assert!(
+            body.contains("NEVER reveal internal mechanics"),
+            "'{agent_name}' resolved persona must still carry the black-box reminder \
+             alongside the routing list"
+        );
+    }
+}
+
+/// PR A follow-up (#3052): pins the resolved `[llm]` `temperature`/
+/// `max_tokens` for every bundled assistant-tier agent, proving the per-key
+/// `extends` inheritance fix (a) restores `cto-assistant`'s tuned sampling
+/// (the #469 regression) and (b) leaves `assistant`/`izzie` — which don't
+/// override either field — resolving to EXACTLY the base's values, unchanged
+/// from before this fix (no unintended drift for agents that inherit
+/// wholesale).
+/// What: Loads `assistant`, `izzie`, and `cto-assistant` via the real
+/// `AgentConfig::by_name` dispatch loader and asserts each resolved
+/// `(temperature, max_tokens)` pair.
+/// Test: This function IS the test.
+#[test]
+fn assistant_tier_llm_sampling_params_pin_per_key_extends_inheritance() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    // (agent name, expected temperature, expected max_tokens)
+    let cases: [(&str, f32, u32); 3] = [
+        // Base: declares its own values directly (not an extends child) —
+        // must be completely unaffected by the per-key merge change.
+        ("assistant", 0.7, 1024),
+        // izzie: extends "assistant" and declares a REDUNDANT [llm] block
+        // matching the base's values (see izzie/agent.toml's header note) —
+        // must resolve identically to the base, whether via its own
+        // declaration or via inheritance.
+        ("izzie", 0.7, 1024),
+        // cto-assistant: extends "assistant" and declares ONLY temperature/
+        // max_tokens as deltas — must resolve to ITS tuned values (#469),
+        // not the base's, restoring the pre-`extends`-conversion behavior.
+        ("cto-assistant", 0.3, 4096),
+    ];
+
+    for (agent_name, expected_temperature, expected_max_tokens) in cases {
+        clear_model_env(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{agent_name}' must resolve: {e}"));
+
+        assert_eq!(
+            cfg.llm.temperature, expected_temperature,
+            "'{agent_name}' resolved temperature mismatch"
+        );
+        assert_eq!(
+            cfg.llm.max_tokens, expected_max_tokens,
+            "'{agent_name}' resolved max_tokens mismatch"
+        );
+    }
+}
+
+/// PR A follow-up (#3052): a root (non-`extends`) agent TOML that omits
+/// `[llm]` `temperature`/`max_tokens` must be REJECTED at load time — the
+/// UNSET-sentinel serde defaults exist so an `extends` CHILD can omit them,
+/// not so a root agent can silently ship with `NaN`/`u32::MAX` sampling
+/// params reaching the LLM provider.
+/// Test: This function IS the test.
+#[test]
+fn llm_required_fields_missing_on_root_agent_is_rejected() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path();
+    std::fs::write(
+        dir.join("bad-root.toml"),
+        r#"
+[agent]
+name = "bad-root"
+role = "agent"
+model = "anthropic/claude-sonnet-4-6"
+description = "root agent missing llm fields"
+
+[llm]
+
+[system_prompt]
+content = "BODY"
+"#,
+    )
+    .expect("write bad-root.toml");
+
+    let err = AgentConfig::load(&dir.join("bad-root.toml"))
+        .expect_err("a root agent omitting [llm] temperature/max_tokens must fail to load");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("temperature") && msg.contains("max_tokens"),
+        "error should name both missing fields, got: {msg}"
+    );
+}
+
+/// PR A follow-up (#3052): the SAME omitted-`[llm]` shape that
+/// [`llm_required_fields_missing_on_root_agent_is_rejected`] rejects for a
+/// root agent must load cleanly — and inherit the base's values — for an
+/// `extends` child, exercised end-to-end through `AgentConfig::by_name`.
+/// Test: This function IS the test.
+#[test]
+fn llm_omitted_fields_allowed_on_extends_child() {
+    let _guard = ENV_LOCK.blocking_lock();
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path();
+    write_flat_toml_base(dir, "researcher", "BASE INSTRUCTIONS");
+    // write_flat_toml_base declares temperature = 0.0 / max_tokens = 1024.
+    std::fs::write(
+        dir.join("my-researcher.toml"),
+        r#"
+[agent]
+name = "my-researcher"
+role = "agent"
+model = ""
+description = ""
+extends = "researcher"
+
+[llm]
+
+[system_prompt]
+content = "CHILD PROSE"
+"#,
+    )
+    .expect("write child toml");
+
+    clear_model_env("my-researcher");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", dir);
+    }
+    let cfg = AgentConfig::by_name("my-researcher");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let cfg = cfg.expect("extends child omitting [llm] fields must still resolve");
+
+    assert_eq!(
+        cfg.llm.temperature, 0.0,
+        "must inherit the base's temperature"
+    );
+    assert_eq!(
+        cfg.llm.max_tokens, 1024,
+        "must inherit the base's max_tokens"
     );
 }
 

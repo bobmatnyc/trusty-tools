@@ -9,6 +9,145 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **`delegate_to_agent` no longer leaks internal agent names (PR A code-critic
+  fix, epic #3052):** granting `delegate_to_agent` to assistant-tier personas
+  (see below) exposed two leaks in the shared tool implementation
+  (`src/tools/delegate.rs`), sent to the LLM on every turn / every failed
+  delegation regardless of caller:
+  - The tool's schema `description` hardcoded concrete internal agent-name
+    examples (`'engineer', 'python-engineer', 'qa-agent'`) — generalized to
+    describe the parameter generically ("the specialist to hand this task
+    to"). `pm` is unaffected: it gets its roster via its own system prompt's
+    `{{available_agents}}` template substitution
+    (`agents::registry::roster::inject_roster_into_prompt`), independent of
+    this schema.
+  - An unknown `agent_name` returned "Unknown agent 'x'. Available agents:
+    &lt;full on-disk roster&gt;." — the roster enumeration is now dropped;
+    the error just names the caller's own rejected input ("'x' is not a
+    recognized specialist. Check your own instructions...") without
+    enumerating the config directory. The now-unused `available_agents()`
+    roster-listing helper was removed.
+  - **Functional companion fix:** the black-box strip left the assistant
+    with `delegate_to_agent` but no idea which `agent_name` values are
+    legitimate. `assistant/persona.md` gains a curated "Internal specialist
+    routing" list — `engineer`, `python-engineer`, `qa-agent`,
+    `research-agent`, `docs-agent`, `local-ops-agent`, `plan-agent` (the
+    general-purpose WORKER agents; excludes meta/infra agents `ctrl`/`pm`/
+    `observe-agent`/`postmortem-agent` and model-variant engineers
+    `bedrock-engineer`/`claude-code-engineer`/`code-agent`/`gpt-engineer`/
+    `gpt5-codex-engineer`) — marked explicitly as internal-only knowledge:
+    the assistant may use these names to decide who to call, but must refer
+    to the user only by role ("an engineer", "a QA specialist"), never by
+    the internal name. The same list + the full black-box "NEVER reveal
+    internal mechanics" section were ported into the two shadow-fallback
+    files (`izzie.toml`, `cto-assistant.toml`) that previously got the tool
+    grant + mcp-strip but not the black-box prose; `personal-assistant.toml`
+    (no `delegate_to_agent` grant, doesn't `extend` `assistant`) gets a
+    scope-note comment instead, documenting the deferral rather than leaving
+    it ambiguous.
+  - **Bug found + fixed along the way:** `izzie/agent.toml`'s
+    `extends = "assistant"` key was placed BEFORE the `[agent]` table
+    header, making it a top-level TOML key. `AgentConfig` has no top-level
+    `extends` field (only `AgentInfo::extends`) and doesn't
+    `deny_unknown_fields`, so serde silently dropped it — `izzie` never
+    actually inherited anything from the base (no prose concatenation, no
+    tool/skill union) despite every comment in the file claiming otherwise;
+    it "worked" only because izzie's own redundant declarations happened to
+    duplicate the base's values. Moved `extends` inside `[agent]`, where the
+    schema expects it — caught by a new pinning test that failed exactly
+    because the base's persona body (this PR's routing list) never reached
+    izzie's resolved content.
+  - New/updated tests: `unknown_agent_is_rejected_without_naming_the_agent_or_roster`
+    (`src/tools/delegate.rs`, invokes `DelegateToAgentTool::execute()` with a
+    bad name against a config dir seeded with a realistic worker + meta/infra
+    roster, asserts none of it leaks),
+    `assistant_tier_persona_carries_curated_worker_routing_list`
+    (`src/agents/tests/loading.rs`, resolves `assistant`/`izzie`/
+    `cto-assistant` and asserts the routing list + black-box reminder are
+    present), and `izzie_overlay_package_parses_with_personal_deltas`
+    corrected to assert the NOW-CORRECT real-inheritance behavior (it
+    previously asserted the absence of inheritance, which was the bug).
+
+### Changed
+
+- **Assistant delegates to specialists + peers; black-boxes internal tooling
+  (PR A, epic #3052):** the base `assistant` agent (and every persona built
+  on it — `izzie`, `cto-assistant`, `personal-assistant`) can now actually
+  get hands-on engineering/QA/research work done. `assistant/agent.toml`
+  gains `delegate_to_agent` in `[tools].allow` (native, in-process
+  tagent→tagent delegation via `src/tools/delegate.rs`, already wired into
+  persona dispatch by `filter_persona_tool_names` — only the grant was
+  missing). `izzie` and `cto-assistant` both declare `extends = "assistant"`
+  and inherit the grant automatically (`[tools].allow` is unioned base-first
+  by `crate::agents::extends::merge_extends`, #3055/#3106).
+  `assistant/persona.md` softens the old "redirect coding to engineering
+  agents" framing to "bring in the right specialist and relay the outcome",
+  adds a peer consult-and-relay capability (assistant instances may consult
+  each other and summarize the input, staying in control of the
+  conversation), and adds a BLACK-BOX rule: never say "tm", "tcode",
+  "trusty-mpm", "trusty-code", "PM session", "subprocess", "sub-agent", or
+  "subagent" to the user — describe outcomes via "a specialist" / "my team",
+  never internal mechanics or system/daemon names. `cto-assistant/agent.toml`
+  is refactored from a hand-forked full copy (`role = "assistant"`, no
+  `extends`) to `extends = "assistant"`, keeping only its Duetto-specific
+  deltas (CTO ops DB tools, ticketing, extra git tools, org/APEX/voice
+  skills, and its tuned `[llm]` sampling — see below) — it now also inherits
+  the base's black-box posture and full gworkspace surface.
+
+- **Per-key `[llm]` `extends` inheritance for `temperature`/`max_tokens`:**
+  `crate::agents::extends::merge_extends` previously inherited the entire
+  `[llm]` block wholesale from the base, discarding a child's declared
+  `temperature`/`max_tokens` even when explicitly set — a live regression
+  for `cto-assistant`'s conversion above (its #469 max_tokens bump, 1024 →
+  4096, for untruncated GFA reports/org tables, and its lower temperature,
+  0.3, for factual precision, would otherwise have silently reverted to the
+  base's conversational defaults). `temperature`/`max_tokens` are now the
+  only two `[llm]` fields resolved per-key: a child that declares one
+  overrides the base's, one it omits inherits the base's. This is enabled by
+  a new UNSET-sentinel serde default (`LlmParams::temperature`/`max_tokens`
+  — `NaN` / `u32::MAX`, never a realistic real-world value) plus a new
+  `AgentConfig::validate_llm_required_for_root` parse-time guard: a root
+  (non-`extends`) agent TOML must still declare real values (restoring the
+  fail-fast guarantee the old serde-mandatory-field requirement gave), while
+  an `extends` child may now legitimately omit either or both to inherit the
+  base's. `.md`-format `extends` children (which have no frontmatter path to
+  declare `temperature`/`max_tokens` at all) now correctly inherit the
+  base's values too, instead of always resolving to the `parse_md_agent`
+  stub defaults (0.2 / 8192) regardless of the base. Every other `[llm]`
+  field (`use_anthropic_direct`, `stop_sequences`, `max_turns`, ...) keeps
+  the pre-existing inherited-from-base-wholesale behavior — this is a
+  narrow, deliberate schema addition scoped to the two fields with no serde
+  default, not a general per-key `[llm]` merge. New tests:
+  `extends_llm_child_overrides_temperature_only`,
+  `extends_llm_child_overrides_max_tokens_only`,
+  `extends_llm_child_inherits_when_omitted`
+  (`crates/trusty-agents/src/agents/extends/tests.rs`),
+  `llm_required_fields_missing_on_root_agent_is_rejected`,
+  `llm_omitted_fields_allowed_on_extends_child`, and
+  `assistant_tier_llm_sampling_params_pin_per_key_extends_inheritance`
+  (`crates/trusty-agents/src/agents/tests/loading.rs`) — the last one pins
+  `cto-assistant` resolving to `(0.3, 4096)` and `assistant`/`izzie`
+  resolving to their unchanged `(0.7, 1024)`.
+
+### Security
+
+- **Assistant-tier tool black-box strip (PR A, epic #3052):** removed
+  `session_list`, `session_status`, `session_send`, `project_list`,
+  `console_metrics` (trusty-mpm proxied tools), `system_status` (enumerates
+  daemon names including "trusty-mpm"), `mcp_list`/`mcp_enable`/`mcp_disable`
+  (enumerate MCP service names), and `agent_delegate` (trusty-mpm's, distinct
+  from the native `delegate_to_agent`) from every assistant-tier
+  `[tools].allow` list (`assistant`, `izzie` (package + flat shadow),
+  `cto-assistant` (package + flat shadow), `personal-assistant`) so a
+  conversational assistant persona can no longer name-drop internal
+  trusty-* system/daemon architecture to the user. These tools remain
+  reachable to `pm`/`ctrl`/`research`/`observe` roles via their own scoping —
+  unaffected by this change. A pinning test
+  (`assistant_tier_grants_delegation_and_blackboxes_internal_tools`,
+  `crates/trusty-agents/src/agents/tests/loading.rs`) asserts the resolved
+  `[tools].allow` for `assistant`/`izzie`/`cto-assistant` includes
+  `delegate_to_agent` and excludes every black-boxed name.
+
 - **Loopback-only doctrine (#3329):** the HTTP API server (`--api`/`--serve`)
   now binds `127.0.0.1` by default instead of `0.0.0.0`. A non-loopback bind is
   an explicit opt-in via the new `--bind <addr>` flag, and the server **refuses
