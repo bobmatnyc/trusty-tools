@@ -141,3 +141,45 @@ export function formatElapsed(createdAt: string, now: number): string {
   }
   return `${seconds}s`;
 }
+
+// ---------------------------------------------------------------------------
+// Markdown transcript export (issue #3526)
+//
+// Why: a workstream that ran 48 min to DEADLINE_EXCEEDED with a runaway loop
+// left no way to pull the full transcript out for inspection. The DAEMON now
+// renders the transcript as Markdown at `GET /sessions/{id}/transcript.md`
+// (`crate::serve::rest::sessions::render_transcript_markdown`) — the single
+// source of truth for the format, so the same bytes a developer `curl`s in
+// local dev are what the GUI's "Download transcript" button saves. This module
+// therefore holds only the ONE pure, GUI-side piece the daemon can't own: the
+// timestamped download filename (the browser's local clock, not the daemon's).
+// The serialization itself is deliberately NOT duplicated here — a second TS
+// serializer would drift from the Rust one.
+// Test: `transcript.test.ts`.
+
+/** Zero-pad a positive integer to two digits (local helper for the
+ * `YYYYMMDD-HHMMSS` filename stamp). */
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/**
+ * Build the download filename: `transcript-<workstream>-<YYYYMMDD-HHMMSS>.md`.
+ *
+ * Why: the timestamp is derived from the passed-in export instant (never
+ * hardcoded), in LOCAL time so the operator who clicked "download" recognizes
+ * the moment. The workstream id is sanitized to `[A-Za-z0-9._-]` (collapsing
+ * any run of other characters to a single `-`) so the value is always a safe,
+ * predictable filename regardless of how the id is shaped.
+ * What: pure function of `(workstreamId, generatedAtMs)`.
+ * Test: `transcript.test.ts::transcriptFilename-*`.
+ */
+export function transcriptFilename(workstreamId: string, generatedAtMs: number): string {
+  const d = new Date(generatedAtMs);
+  const stamp =
+    `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}` +
+    `-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+  const safeId = workstreamId.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  const idPart = safeId.length > 0 ? safeId : 'workstream';
+  return `transcript-${idPart}-${stamp}.md`;
+}

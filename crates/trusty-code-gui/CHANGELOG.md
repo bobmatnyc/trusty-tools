@@ -8,6 +8,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Download workstream transcript as Markdown (closes #3526).** The active
+  workstream's chat pane header (`WorkstreamActivity.svelte`) gains a
+  `download transcript` button that saves the full run transcript — every
+  turn, including the tool-run lines (`` `AGENT` ran: write_files ``) that a
+  runaway-loop post-mortem needs — as a Markdown file named
+  `transcript-<workstream>-<YYYYMMDD-HHMMSS>.md`. The Markdown is rendered by
+  the DAEMON (`GET /sessions/{id}/transcript.md`, see the trusty-code
+  changelog), so the same document a developer can `curl` in local dev is
+  exactly what the button downloads — no second, drift-prone client-side
+  serializer. Motivating case: a workstream ran 48 min to
+  `deadline_exceeded` with a runaway loop and there was no way to pull the
+  transcript to inspect it.
+
 ### Fixed
 
 - **App / dock icon — stale "AI COMMANDER" placeholder replaced with the real

@@ -101,6 +101,18 @@ function fakeDaemon(opts: {
         }),
       } as Response;
     }
+    const markdownMatch = url.match(/\/sessions\/([^/]+)\/transcript\.md$/);
+    if (markdownMatch) {
+      // The daemon renders the transcript to Markdown (issue #3526); the fake
+      // returns a recognizable canned document so the download-wiring test can
+      // assert the bytes it fetched are what got saved.
+      const md = `# Workstream transcript — ${markdownMatch[1]}\n\n- \`PYTHON-ENGINEER\` ran: write_files\n`;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => md,
+      } as unknown as Response;
+    }
     const transcriptMatch = url.match(/\/sessions\/([^/]+)\/transcript$/);
     if (transcriptMatch) {
       if (transcriptMatch[1] === opts.transcript404For) {
@@ -402,6 +414,82 @@ describe('WorkstreamActivity chat stream (issue #3446)', () => {
     expect(iFirst).toBeGreaterThanOrEqual(0);
     expect(iFirst).toBeLessThan(iTool);
     expect(iTool).toBeLessThan(iLong);
+  });
+});
+
+describe('WorkstreamActivity download transcript (issue #3526)', () => {
+  it('fetches the daemon-rendered Markdown and triggers a download of it', async () => {
+    const createObjectURL = vi.fn(() => 'blob:mock-url');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL } as unknown as typeof URL);
+
+    let capturedBlob: Blob | undefined;
+    let capturedDownload: string | undefined;
+    const realCreate = document.createElement.bind(document);
+    const createSpy = vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      const el = realCreate(tag) as HTMLElement;
+      if (tag === 'a') {
+        // Capture the download filename and swallow the click so jsdom doesn't
+        // attempt a real navigation.
+        el.click = () => {
+          capturedDownload = (el as HTMLAnchorElement).download;
+        };
+      }
+      return el;
+    });
+    // Capture the Blob the component constructs, plus its Markdown payload —
+    // jsdom's Blob doesn't implement `.text()`, so read the constructor parts
+    // directly rather than round-tripping through the Blob.
+    let capturedMarkdown = '';
+    const RealBlob = globalThis.Blob;
+    vi.stubGlobal(
+      'Blob',
+      class extends RealBlob {
+        constructor(parts?: BlobPart[], options?: BlobPropertyBag) {
+          super(parts, options);
+          capturedBlob = this;
+          capturedMarkdown = (parts ?? []).map((p) => String(p)).join('');
+        }
+      },
+    );
+
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-1',
+        workstreams: [ws('ws-1', 'my workstream', ['bound-session'])],
+        sessions: [session('bound-session', 'running', '2026-07-20T14:00:00Z', 'ship the feature')],
+        transcriptFor: {
+          'bound-session': [
+            { role: 'pm', text: 'delegating' },
+            { role: 'python-engineer', text: '', tool_calls: ['write_files'] },
+          ],
+        },
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes('delegating') ?? false);
+
+    const downloadButton = Array.from(target.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'download transcript',
+    ) as HTMLButtonElement;
+    expect(downloadButton).toBeTruthy();
+
+    downloadButton.click();
+
+    // The download awaits an async fetch of the `.md` endpoint before building
+    // the Blob, so wait for the object-URL call rather than asserting inline.
+    await waitFor(() => createObjectURL.mock.calls.length > 0);
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledTimes(1);
+    expect(capturedDownload).toMatch(/^transcript-ws-1-\d{8}-\d{6}\.md$/);
+    expect(capturedBlob).toBeTruthy();
+    // The saved bytes are exactly what the daemon endpoint returned.
+    expect(capturedMarkdown).toContain('# Workstream transcript — bound-session');
+    expect(capturedMarkdown).toContain('- `PYTHON-ENGINEER` ran: write_files');
+
+    createSpy.mockRestore();
   });
 });
 

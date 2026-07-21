@@ -32,12 +32,18 @@ use std::sync::Arc;
 
 use axum::Router as AxumRouter;
 use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use crate::jsonrpc::Router;
+use crate::mode::HarnessMode;
+use crate::session::model::Session;
+use crate::session::transcript::TranscriptRecord;
 
-use super::{RestResult, respond};
+use super::{RestResult, call, respond, rpc_error_to_status, throwaway_ctx};
 
 /// Shared axum state for every route in this module: just the JSON-RPC
 /// router — every handler here is read-only and goes through
@@ -61,6 +67,7 @@ pub fn routes(router: Arc<Router>) -> AxumRouter {
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}", get(get_session))
         .route("/sessions/{id}/transcript", get(get_transcript))
+        .route("/sessions/{id}/transcript.md", get(get_transcript_markdown))
         .route("/sessions/{id}/readiness", get(get_readiness))
         .route("/sessions/{id}/goals", get(get_goals))
         .route("/sessions/{id}/budget", get(get_context_budget))
@@ -104,6 +111,197 @@ async fn get_transcript(State(state): State<SessionsState>, Path(id): Path<Strin
         json!({"session_id": id}),
     )
     .await
+}
+
+/// `GET /sessions/{id}/transcript.md` -> the full transcript rendered as a
+/// human-readable Markdown document (`text/markdown`).
+///
+/// Why: issue #3526 — a workstream that ran 48 min to `deadline_exceeded`
+/// with a runaway loop left no way to pull its transcript out for inspection.
+/// The GUI's "Download transcript" button needs Markdown; making the DAEMON
+/// render it (rather than only the GUI) also makes the transcript observable
+/// in local dev independent of the packaged app — a developer running the
+/// daemon can `curl http://127.0.0.1:7882/sessions/<id>/transcript.md` and
+/// read/watch a run directly. This is the single source of truth for the
+/// Markdown format (the GUI download just fetches these bytes), so the format
+/// can never drift between a Rust and a TypeScript serializer.
+/// What: fetches the same `session.get_transcript` record the JSON route
+/// serves PLUS `session.status` (for the header's task/project/mode/workstream
+/// context, none of which live on `TranscriptRecord`), renders
+/// [`render_transcript_markdown`], and returns it with a
+/// `text/markdown; charset=utf-8` content type. A `session_not_found` from
+/// either inner call maps to a real `404` via [`rpc_error_to_status`], exactly
+/// like the JSON route; the whole surface stays loopback-only because it adds
+/// no new bind — it rides `crate::serve::http::build_axum_router`'s existing
+/// listener (loopback-only doctrine, ADR-0011).
+/// Test: `tests::get_transcript_markdown_renders_turns_and_tool_calls`,
+/// `tests::get_transcript_markdown_missing_returns_404`.
+async fn get_transcript_markdown(
+    State(state): State<SessionsState>,
+    Path(id): Path<String>,
+) -> Response {
+    let ctx = throwaway_ctx();
+    let transcript_val = match call(
+        &state.router,
+        "session.get_transcript",
+        json!({"session_id": id}),
+        &ctx,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => return (rpc_error_to_status(&err), err.message).into_response(),
+    };
+    let session_val = match call(
+        &state.router,
+        "session.status",
+        json!({"session_id": id}),
+        &ctx,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => return (rpc_error_to_status(&err), err.message).into_response(),
+    };
+
+    let record: TranscriptRecord = match serde_json::from_value(transcript_val) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let session: Session = match serde_json::from_value(session_val) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    let markdown = render_transcript_markdown(&session, &record, Utc::now());
+    (
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        markdown,
+    )
+        .into_response()
+}
+
+/// Render a session's transcript as a readable Markdown document.
+///
+/// Why: the pure core of [`get_transcript_markdown`] (no I/O, no `Utc::now()`
+/// inside — `generated_at` is passed in) so the format is unit-testable
+/// directly. The tool-run lines are the WHOLE point for the motivating
+/// diagnostic case (issue #3526): each `TurnRecord.tool_calls` entry renders
+/// as its own ``- `ROLE` ran: <tool>`` bullet so a runaway loop (the same tool
+/// fired turn after turn) reads as a visibly repeated column, never a
+/// collapsed summary.
+/// What: a title, a metadata bullet list (session id, workstream id, project,
+/// task, mode, status, session-start ISO, export ISO, turn count, cost), a
+/// horizontal rule, then one `##` section per turn — prose verbatim, each tool
+/// call as its own ``- `ROLE` ran: <tool>`` bullet, a ``ran the test command``
+/// note when flagged, and `_(no output)_` for a turn with neither. Roles are
+/// upper-cased to match the live GUI pane's styling and the issue's example.
+/// Test: `tests::render_transcript_markdown_*`.
+fn render_transcript_markdown(
+    session: &Session,
+    record: &TranscriptRecord,
+    generated_at: DateTime<Utc>,
+) -> String {
+    let mut out = String::new();
+    let title = if session.task.trim().is_empty() {
+        record.session_id.clone()
+    } else {
+        session.task.clone()
+    };
+    out.push_str(&format!("# Workstream transcript — {title}\n\n"));
+    out.push_str(&format!("- **Session:** `{}`\n", record.session_id));
+    out.push_str(&format!(
+        "- **Workstream:** {}\n",
+        session
+            .workstream_id
+            .as_ref()
+            .map(|w| format!("`{w}`"))
+            .unwrap_or_else(|| "_(unbound)_".to_string())
+    ));
+    out.push_str(&format!(
+        "- **Project:** {}\n",
+        session
+            .project
+            .clone()
+            .unwrap_or_else(|| "_(none)_".to_string())
+    ));
+    out.push_str(&format!(
+        "- **Task:** {}\n",
+        if session.task.trim().is_empty() {
+            "_(none)_".to_string()
+        } else {
+            session.task.clone()
+        }
+    ));
+    out.push_str(&format!("- **Mode:** {}\n", mode_label(&session.mode)));
+    out.push_str(&format!(
+        "- **Status:** {}\n",
+        serde_json::to_value(session.status)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "unknown".to_string())
+    ));
+    out.push_str(&format!(
+        "- **Session started:** {}\n",
+        session.created_at.to_rfc3339()
+    ));
+    out.push_str(&format!("- **Exported:** {}\n", generated_at.to_rfc3339()));
+    out.push_str(&format!("- **Turns:** {}\n", record.turns.len()));
+    out.push_str(&format!(
+        "- **Cost (USD):** {}\n",
+        record
+            .cost_usd
+            .map(|c| format!("{c:.4}"))
+            .unwrap_or_else(|| "_(n/a)_".to_string())
+    ));
+    out.push_str("\n---\n\n");
+
+    if record.turns.is_empty() {
+        out.push_str("_No turns were recorded for this session._\n");
+        return out;
+    }
+
+    for (i, turn) in record.turns.iter().enumerate() {
+        let role_upper = turn.role.to_uppercase();
+        if turn.model.is_empty() {
+            out.push_str(&format!("## {}. {role_upper}\n\n", i + 1));
+        } else {
+            out.push_str(&format!("## {}. {role_upper} · {}\n\n", i + 1, turn.model));
+        }
+
+        let body = turn.text.trim();
+        let mut had_activity = false;
+        if !body.is_empty() {
+            out.push_str(&turn.text);
+            out.push_str("\n\n");
+            had_activity = true;
+        }
+        for tool in &turn.tool_calls {
+            out.push_str(&format!("- `{role_upper}` ran: {tool}\n"));
+            had_activity = true;
+        }
+        if turn.ran_test_command {
+            out.push_str(&format!("- `{role_upper}` ran the test command\n"));
+            had_activity = true;
+        }
+        if !turn.tool_calls.is_empty() || turn.ran_test_command {
+            out.push('\n');
+        }
+        if !had_activity {
+            out.push_str("_(no output)_\n\n");
+        }
+    }
+
+    out
+}
+
+/// Short label for an optional [`HarnessMode`] in the Markdown header —
+/// the serde string form, or `_(default)_` when unset.
+fn mode_label(mode: &Option<HarnessMode>) -> String {
+    match serde_json::to_value(mode) {
+        Ok(serde_json::Value::String(s)) => s,
+        _ => "_(default)_".to_string(),
+    }
 }
 
 /// `GET /sessions/{id}/readiness` -> `session.get_readiness`.
@@ -190,6 +388,11 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    async fn body_text(response: axum::response::Response) -> String {
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
     async fn get(app: &AxumRouter, uri: &str) -> axum::response::Response {
         app.clone()
             .oneshot(
@@ -268,6 +471,95 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["turns"].as_array().unwrap().len(), 0);
+    }
+
+    /// `GET /sessions/{id}/transcript.md` (issue #3526) must render the stored
+    /// transcript as `text/markdown`, preserving every turn's prose AND each
+    /// tool-run entry as its own bullet (the runaway-loop diagnostic the
+    /// endpoint exists for), under a header carrying the session id + task.
+    #[tokio::test]
+    async fn get_transcript_markdown_renders_turns_and_tool_calls() {
+        let (app, sessions) = app_and_registry().await;
+        let session = sessions.create(
+            "investigate the loop".to_string(),
+            None,
+            crate::binding::ProjectBinding::None,
+        );
+        sessions.set_run_outcome(
+            &session.id,
+            vec![
+                crate::run_task::TurnRecord {
+                    role: "pm".to_string(),
+                    model: "claude-sonnet".to_string(),
+                    text: "delegating to the engineer".to_string(),
+                    tool_calls: vec![],
+                    ran_test_command: false,
+                    usage: crate::perf::TokenUsage::default(),
+                },
+                crate::run_task::TurnRecord {
+                    role: "python-engineer".to_string(),
+                    model: "claude-sonnet".to_string(),
+                    text: String::new(),
+                    tool_calls: vec!["write_files".to_string(), "write_files".to_string()],
+                    ran_test_command: false,
+                    usage: crate::perf::TokenUsage::default(),
+                },
+            ],
+            crate::perf::TokenUsage::default(),
+            Some(0.25),
+        );
+
+        let resp = get(&app, &format!("/sessions/{}/transcript.md", session.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/markdown; charset=utf-8"
+        );
+        let md = body_text(resp).await;
+        assert!(
+            md.contains("# Workstream transcript — investigate the loop"),
+            "{md}"
+        );
+        assert!(
+            md.contains(&format!("- **Session:** `{}`", session.id)),
+            "{md}"
+        );
+        assert!(md.contains("- **Turns:** 2"), "{md}");
+        assert!(md.contains("delegating to the engineer"), "{md}");
+        // Each tool-run entry is its own bullet — a runaway loop stays visible.
+        assert!(
+            md.contains(
+                "- `PYTHON-ENGINEER` ran: write_files\n- `PYTHON-ENGINEER` ran: write_files"
+            ),
+            "{md}"
+        );
+    }
+
+    /// `GET /sessions/{id}/transcript.md` on an unknown id must 404 (same
+    /// mapping as the JSON route), not render an empty document.
+    #[tokio::test]
+    async fn get_transcript_markdown_missing_returns_404() {
+        let (app, _sessions) = app_and_registry().await;
+
+        let resp = get(&app, "/sessions/does-not-exist/transcript.md").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `GET /sessions/{id}/transcript.md` on a never-run session must still be
+    /// a 200 Markdown document (empty-turns note), not an error — mirrors the
+    /// JSON route's never-run behavior.
+    #[tokio::test]
+    async fn get_transcript_markdown_never_run_returns_200_empty_note() {
+        let (app, sessions) = app_and_registry().await;
+        let session = sessions.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        let resp = get(&app, &format!("/sessions/{}/transcript.md", session.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let md = body_text(resp).await;
+        assert!(
+            md.contains("_No turns were recorded for this session._"),
+            "{md}"
+        );
     }
 
     /// `GET /sessions/{id}/transcript` on an unknown id must 404.
