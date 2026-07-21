@@ -11645,7 +11645,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "0.19.28"
+version = "0.19.29"
 dependencies = [
  "anyhow",
  "async-trait",
