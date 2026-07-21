@@ -421,9 +421,10 @@ async fn build_embedder_raw() -> Result<(
 
         other => anyhow::bail!(
             "invalid TRUSTY_EMBEDDER value: {other:?}. \
-             Expected: unset (default stdio sidecar), 'auto', 'stdio', 'python' \
-             (opt-in Python/MPS sidecar), 'in-process', \
-             'http://...', or 'unix:/path/to/socket'"
+             Expected: unset or 'auto' (default: graceful hot-swap to the Python/MPS \
+             sidecar on Apple Silicon, plain ort sidecar elsewhere), 'stdio' (forces \
+             the plain ort sidecar permanently), 'python' (opt-in Python/MPS sidecar), \
+             'in-process', 'http://...', or 'unix:/path/to/socket'"
         ),
     }
 }
