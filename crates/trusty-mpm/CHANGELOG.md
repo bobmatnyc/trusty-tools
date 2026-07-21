@@ -7,6 +7,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.19.28] — 2026-07-20
+
 ### Added
 
 - **`tm ls` / `tm sessions ls` gain an inline sort + filter grammar** ([#3483](https://github.com/bobmatnyc/trusty-tools/issues/3483)): `tm ls [recent|alpha] [filter-word...]` — a bare `recent` or `alpha` first word selects the order (`recent`, the default, is most-recently-active first via `last_activity_at` falling back to `created_at`; `alpha` is case-insensitive by session name), and every remaining word (or all words, if the first isn't a sort keyword) becomes a case-insensitive substring filter matched against the id, name, project (`source_id`), state, and task columns. Expressed as positional words rather than `--sort`/`--filter` flags per the repo owner's design call; applies to both the static table and the interactive picker's ordering, with `--json` staying a raw, unsorted/unfiltered passthrough (matching `--all`'s existing "no effect on `--json`" precedent). Backward compatible: bare `tm ls` is unchanged.
