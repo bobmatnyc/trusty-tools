@@ -174,7 +174,9 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 /// loader after model resolution.
 /// Test: `extends_two_level_merge`, `extends_prose_base_first`,
 /// `extends_tools_union_dedup`, `extends_child_sets_display_name_over_none`,
-/// `extends_scalar_child_override`.
+/// `extends_scalar_child_override`, `extends_llm_child_overrides_temperature_only`,
+/// `extends_llm_child_overrides_max_tokens_only`,
+/// `extends_llm_child_inherits_when_omitted`.
 pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     let mut merged = base;
 
@@ -235,6 +237,31 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // explicit value here). See the TODO test placeholder in `tests.rs`
     // (`extends_does_not_inherit_user_authority`) for AUTH-2/#3075 to fill in.
 
+    // --- `[llm]` temperature/max_tokens: PER-KEY child-overrides-when-declared
+    // (#3052 PR A follow-up) ---
+    //
+    // Why: these are the only two `[llm]` fields with no serde default (every
+    // OTHER `[llm]` field already has its own `#[serde(default)]`/`Option`
+    // semantics and keeps the wholesale-inherit-from-base behavior below
+    // unchanged) — so "the child didn't declare it" is representable as an
+    // unambiguous UNSET sentinel (`LlmParams::temperature_is_unset`/
+    // `max_tokens_is_unset`, NaN / u32::MAX) rather than a heuristic. A root
+    // (non-`extends`) agent can never carry the sentinel — enforced by
+    // `AgentConfig::validate_llm_required_for_root` at parse time — so by the
+    // time any base reaches this merge it already carries real values, and a
+    // child either overrides both/either or inherits them from the base.
+    // What: child value wins when NOT the sentinel, else keep the base's
+    // (already-inherited-into-`merged`) value.
+    // Test: `extends_llm_child_overrides_temperature_only`,
+    // `extends_llm_child_overrides_max_tokens_only`,
+    // `extends_llm_child_inherits_when_omitted`.
+    if !child.llm.temperature_is_unset() {
+        merged.llm.temperature = child.llm.temperature;
+    }
+    if !child.llm.max_tokens_is_unset() {
+        merged.llm.max_tokens = child.llm.max_tokens;
+    }
+
     // --- List fields: union (dedup, base-first order) ---
     merged.tools.allowed = union_opt_vec(merged.tools.allowed, child.tools.allowed);
     merged.tools.allow = union_opt_vec(merged.tools.allow, child.tools.allow);
@@ -250,17 +277,25 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
 
     // --- Inherited-from-base-wholesale bundles ---
     //
-    // `llm.*`, `compress`, `runner_config`, `session`, `plugins`, and `rbac`
-    // are NOT in the §2.5 merge table and are intentionally inherited from the
-    // base as-is (a personalization overlay refines persona/tools/name, not the
-    // base's LLM sampling or runtime tuning). We deliberately do NOT warn that a
-    // child's values in these bundles are "dropped": `AgentConfig` has already
-    // collapsed each field's parse-time `Option`/default, so a `.md` child
-    // ALWAYS carries `llm.temperature = 0.2` / `max_tokens = 8192` (the
-    // `parse_md_agent` defaults) — a difference check against the base would
-    // fire on essentially every legitimate overlay (false positives), which is
-    // worse than silence. If a future need arises to let a child override these,
-    // it should be a deliberate schema addition, not a heuristic.
+    // The REST of `llm.*` (everything except `temperature`/`max_tokens`,
+    // handled per-key above), plus `compress`, `runner_config`, `session`,
+    // `plugins`, and `rbac`, are NOT in the §2.5 merge table and are
+    // intentionally inherited from the base as-is (a personalization overlay
+    // refines persona/tools/name/sampling, not the base's other runtime
+    // tuning). We deliberately do NOT warn that a child's values in these
+    // bundles are "dropped": `AgentConfig` has already collapsed each field's
+    // parse-time `Option`/default, so e.g. a `.md` child ALWAYS carries
+    // `enable_prompt_caching = true` / `max_turns = 20` (the `parse_md_agent`
+    // defaults) — a difference check against the base would fire on
+    // essentially every legitimate overlay (false positives), which is worse
+    // than silence. `temperature`/`max_tokens` were the one pair where this
+    // was a live problem (#469 regression on `cto-assistant`'s tuned
+    // sampling): they are the only two `[llm]` fields with no serde default,
+    // so "the child didn't declare it" is unambiguously representable — see
+    // the per-key block above. If a future need arises to let a child
+    // override one of the REMAINING bundle fields, it should be an equally
+    // deliberate schema addition (a real UNSET sentinel or an explicit
+    // `Option`), not a heuristic.
     merged
 }
 
