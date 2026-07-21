@@ -5,6 +5,20 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Added
+
+- **Response frames echo the actual resolved torch device** (epic #3524
+  slice 5, issue #3493 P1) — `build_encoder` now attaches the resolved device
+  (`"mps"` / `"cuda"` / `"cpu"`) to the returned encoder callable as a
+  `.device` attribute, and `protocol.handle_frame` echoes it as an optional
+  `result.device` field on every success frame when the encoder sets one.
+  Lets `trusty-search`'s `/health` report the real device instead of a
+  build-features prediction. Omitted entirely when the encoder has no
+  `.device` attribute, so the wire shape is unchanged for any torch-free
+  stub encoder (e.g. the protocol conformance tests).
+
 ## [0.1.0] — 2026-07-20
 
 Initial release — opt-in Python/MPS embedding sidecar launcher for
