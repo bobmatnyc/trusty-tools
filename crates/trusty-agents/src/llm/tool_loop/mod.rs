@@ -402,7 +402,23 @@ pub async fn chat_with_tools_gated(
         let mut results_by_id: std::collections::HashMap<String, (String, ToolResult)> =
             std::collections::HashMap::with_capacity(tool_calls.len());
         while let Some((id, name, result)) = futs.next().await {
-            tracing::debug!(tool = %name, is_error = result.is_error(), "tool result");
+            // #3555 delegate-resolve follow-up: previously this logged only
+            // `is_error` with no payload — a tool failure (e.g.
+            // `delegate_to_agent` rejecting an unresolved agent name, or a
+            // sub-agent spawn error) was completely invisible at any log
+            // level. Log the error content too so a failing tool call is
+            // diagnosable from `RUST_LOG=debug` alone, without needing to
+            // add ad-hoc prints at every call site.
+            if result.is_error() {
+                tracing::debug!(
+                    tool = %name,
+                    is_error = true,
+                    error = %result.content(),
+                    "tool result"
+                );
+            } else {
+                tracing::debug!(tool = %name, is_error = false, "tool result");
+            }
             if result.is_fatal() {
                 tracing::warn!(
                     tool = %name,

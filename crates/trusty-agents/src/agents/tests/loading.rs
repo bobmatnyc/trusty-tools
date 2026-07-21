@@ -1589,3 +1589,130 @@ fn all_bundled_agent_tomls_outside_the_specialist_allowlist_avoid_claude_code_ru
         dir.display()
     );
 }
+
+/// #3555 delegate-resolve follow-up: `agent_name_resolves` is the shared
+/// predicate `delegate_to_agent`'s pre-flight validation now uses instead of
+/// a single hand-rolled directory. These tests pin its three resolution
+/// tiers (directory package / flat toml / flat md) plus the negative cases,
+/// independent of any `AgentConfig` parsing so they don't need `ENV_LOCK`.
+mod agent_name_resolves_tests {
+    use crate::agents::{AgentConfig, agent_name_resolves};
+
+    #[test]
+    fn finds_flat_toml_in_secondary_dir() {
+        let empty_primary = tempfile::tempdir().unwrap();
+        let secondary = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secondary.path().join("engineer.toml"),
+            "[agent]\nname = \"engineer\"\n",
+        )
+        .unwrap();
+
+        let dirs = vec![
+            empty_primary.path().to_path_buf(),
+            secondary.path().to_path_buf(),
+        ];
+        assert!(
+            agent_name_resolves(&dirs, "engineer"),
+            "must find engineer.toml in the second candidate directory"
+        );
+    }
+
+    #[test]
+    fn finds_directory_package() {
+        // A real directory-package agent needs BOTH agent.toml AND
+        // persona.md (`load_agent_package` reads both, `?`-propagating if
+        // either is missing) — write both so this positive case matches the
+        // real resolver's requirements exactly.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("assistant")).unwrap();
+        std::fs::write(
+            dir.path().join("assistant").join("agent.toml"),
+            "[agent]\nname = \"assistant\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("assistant").join("persona.md"),
+            "persona body",
+        )
+        .unwrap();
+
+        let dirs = vec![dir.path().to_path_buf()];
+        assert!(agent_name_resolves(&dirs, "assistant"));
+    }
+
+    #[test]
+    fn finds_flat_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("izzie.md"),
+            "---\nname: izzie\nrole: assistant\n---\nbody",
+        )
+        .unwrap();
+
+        let dirs = vec![dir.path().to_path_buf()];
+        assert!(agent_name_resolves(&dirs, "izzie"));
+    }
+
+    #[test]
+    fn false_when_absent_everywhere() {
+        let primary = tempfile::tempdir().unwrap();
+        let secondary = tempfile::tempdir().unwrap();
+        let dirs = vec![primary.path().to_path_buf(), secondary.path().to_path_buf()];
+        assert!(!agent_name_resolves(&dirs, "nonexistent-agent"));
+    }
+
+    #[test]
+    fn false_for_traversal_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.toml"), "[agent]\nname = \"x\"\n").unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        assert!(!agent_name_resolves(&dirs, "../secret"));
+        assert!(!agent_name_resolves(&dirs, "..\\secret"));
+    }
+
+    #[test]
+    fn false_on_empty_dirs() {
+        assert!(!agent_name_resolves(&[], "engineer"));
+    }
+
+    /// #3555 MEDIUM follow-up (code-critic): a directory `<name>/` present
+    /// WITHOUT `agent.toml` inside it makes the REAL resolver
+    /// (`AgentConfig::by_name_in`, via `load_agent_package`'s `?`)
+    /// hard-abort the ENTIRE search the moment it hits that directory — it
+    /// does NOT fall through to a flat `<name>.toml` in a later directory.
+    /// `agent_name_resolves` must mirror that short-circuit exactly, or
+    /// validation would accept a name the actual spawn then hard-errors on.
+    /// This test proves BOTH sides agree in the same scenario.
+    #[test]
+    fn short_circuits_on_malformed_directory_package_matching_real_resolver() {
+        let malformed_primary = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(malformed_primary.path().join("engineer")).unwrap();
+        // Deliberately no agent.toml (or persona.md) inside engineer/.
+
+        let secondary_with_valid_flat = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secondary_with_valid_flat.path().join("engineer.toml"),
+            "[agent]\nname = \"engineer\"\n",
+        )
+        .unwrap();
+
+        let dirs = vec![
+            malformed_primary.path().to_path_buf(),
+            secondary_with_valid_flat.path().to_path_buf(),
+        ];
+
+        assert!(
+            !agent_name_resolves(&dirs, "engineer"),
+            "must short-circuit to false, matching the real resolver's hard-abort, \
+             even though a later dir has a valid flat engineer.toml"
+        );
+
+        // Sanity: the real resolver actually agrees — it hard-errors here
+        // too, rather than silently falling through to the flat file.
+        assert!(
+            AgentConfig::by_name_in(&dirs, "engineer").is_err(),
+            "sanity: the real resolver must also hard-abort in this scenario"
+        );
+    }
+}
