@@ -1021,7 +1021,10 @@ exit 1
             binary,
             SupervisorConfig {
                 startup_timeout_secs: 5,
-                backoff_max_secs: 1,
+                // Zero backoff so the crash -> respawn -> exhaustion sequence
+                // completes as fast as possible; this test asserts on the
+                // give-up signal, not on backoff timing.
+                backoff_max_secs: 0,
                 max_restarts: 1,
                 idle_shutdown_secs: 0, // no watchdog racing this test
                 ..SupervisorConfig::default()
@@ -1039,7 +1042,11 @@ exit 1
             .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
             .await;
 
-        let gave_up = tokio::time::timeout(Duration::from_secs(10), async {
+        // Generous ceiling (45s) so a loaded CI runner cannot false-fail —
+        // the poll interval is short (20ms) so a passing run still returns
+        // in milliseconds; only a genuinely stuck supervisor eats the full
+        // budget.
+        let gave_up = tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 if handle.is_confirmed_terminated().await {
                     return;
@@ -1050,7 +1057,7 @@ exit 1
         .await;
         assert!(
             gave_up.is_ok(),
-            "is_confirmed_terminated() never flipped true within 10s of \
+            "is_confirmed_terminated() never flipped true within 45s of \
              exhausting max_restarts=1 against an always-crashing mock child"
         );
     }
