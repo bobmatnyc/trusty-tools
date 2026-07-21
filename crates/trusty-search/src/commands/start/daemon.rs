@@ -372,16 +372,17 @@ pub async fn handle_start(
                 // handle without downcasting the trait object.
                 install_state.install_switchable_embedder(Arc::clone(&switchable));
                 install_state.install_embedder(Arc::clone(&embedder)).await;
-                // Epic #3524 slice 6 (PR 3/5): the graceful Apple-Silicon
-                // default arm serves on ort above and needs the python/MPS
-                // bootstrap to run in the background — spawn it now, right
-                // after both the switchable handle and the embedder slot are
-                // visible, so the orchestrator's eventual `swap_to` /
-                // `install_embedderd_pid_slot` calls race no in-progress
-                // install. Detached: never blocks the HTTP listener or the
-                // rest of this init task. No-op (never spawned) unless
-                // `TRUSTY_PY_DEFAULT` is enabled — this PR ships with the
-                // default OFF, so this branch does not run for real users yet.
+                // Epic #3524 slice 6 (PR 5/5 — the default flip): the
+                // graceful Apple-Silicon default arm serves on ort above and
+                // needs the python/MPS bootstrap to run in the background —
+                // spawn it now, right after both the switchable handle and
+                // the embedder slot are visible, so the orchestrator's
+                // eventual `swap_to` / `install_embedderd_pid_slot` calls
+                // race no in-progress install. Detached: never blocks the
+                // HTTP listener or the rest of this init task. No-op (never
+                // spawned) unless the platform is Apple Silicon (aarch64
+                // macOS) and the user did not force `TRUSTY_EMBEDDER=stdio`
+                // — see `resolve_default_embedder_mode_for`.
                 if needs_graceful_bootstrap {
                     tokio::spawn(run_graceful_python_bootstrap(
                         switchable,

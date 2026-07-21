@@ -77,34 +77,38 @@ pub(super) fn backend_respects_quantized_env(kind: BackendKind) -> bool {
 }
 
 /// Which arm `build_embedder_raw` should take for `TRUSTY_EMBEDDER` unset /
-/// `auto` (epic #3524 slice 6, PR 3/5).
+/// `auto` (epic #3524 slice 6, PR 5/5 — the default flip).
 ///
-/// Why: the unset/`auto` resolution needs to become platform-aware (Apple
-/// Silicon defaults to the graceful hot-swap path once ship-gated) without
-/// disturbing the explicit-value arms (`stdio`, `python`, `in-process`, …),
-/// which are unaffected by this enum and keep matching directly on the raw
-/// env string. Splitting resolution into its own pure function
-/// ([`resolve_default_embedder_mode_for`]) makes the platform/env precedence
-/// unit-testable without depending on the actual build target or process
-/// environment.
+/// Why: the unset/`auto` resolution is platform-aware (Apple Silicon defaults
+/// to the graceful hot-swap path) without disturbing the explicit-value arms
+/// (`stdio`, `python`, `in-process`, …), which are unaffected by this enum
+/// and keep matching directly on the raw env string. Splitting resolution
+/// into its own pure function ([`resolve_default_embedder_mode_for`]) makes
+/// the platform/env precedence unit-testable without depending on the actual
+/// build target or process environment.
 /// What: one variant per arm `build_embedder_raw`'s `"" | "auto"` match takes.
 /// Test: `resolve_default_embedder_mode_for_*` in `start/tests.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DefaultEmbedderMode {
     /// Build the ort stdio sidecar synchronously — unchanged pre-#3524
-    /// behavior. Selected on every non-Apple-Silicon host, and on Apple
-    /// Silicon whenever the graceful default is not ship-gated on
-    /// (`TRUSTY_PY_DEFAULT` unset/falsy).
+    /// behavior. Selected on every non-Apple-Silicon host. On Apple Silicon
+    /// this is reachable only via the explicit `TRUSTY_EMBEDDER=stdio`
+    /// escape hatch, which bypasses this resolution entirely (see
+    /// [`is_forced_ort_override`]).
     Ort,
-    /// Apple Silicon + `TRUSTY_PY_DEFAULT` enabled: serve on ort immediately,
-    /// bootstrap the python/MPS sidecar in the background, then hot-swap
-    /// (this PR's new arm). **Default OFF** — see `TRUSTY_PY_DEFAULT`'s doc.
+    /// Apple Silicon: serve on ort immediately, bootstrap the python/MPS
+    /// sidecar in the background, then hot-swap. **The default on Apple
+    /// Silicon (aarch64 macOS) as of epic #3524 slice 6 PR 5/5** — no
+    /// ship-gate env var required. `TRUSTY_EMBEDDER=stdio` still forces the
+    /// unchanged ort path.
     GracefulPython,
     /// `TRUSTY_EMBEDDER_PYTHON_EAGER` truthy: the existing eager, blocking
     /// `python` arm (identical to explicit `TRUSTY_EMBEDDER=python`) reached
     /// via unset/`auto` instead of an explicit value. Not gated to Apple
     /// Silicon — mirrors the explicit `python` arm, which has never been
-    /// platform-gated (useful for testing the sidecar on any host).
+    /// platform-gated (useful for testing the sidecar on any host). Only
+    /// reachable off Apple Silicon: on Apple Silicon `GracefulPython` wins
+    /// outright (see [`resolve_default_embedder_mode_for`]'s precedence doc).
     EagerPython,
 }
 
@@ -112,21 +116,22 @@ pub(super) enum DefaultEmbedderMode {
 /// testable without depending on `cfg!(target_arch/target_os)` or real
 /// process env vars.
 ///
-/// Precedence: Apple-Silicon + the ship-gate flag enabled wins outright
-/// (→ [`DefaultEmbedderMode::GracefulPython`]); otherwise an explicit
-/// `TRUSTY_EMBEDDER_PYTHON_EAGER` opt-in wins (→
-/// [`DefaultEmbedderMode::EagerPython`], any platform); otherwise the
-/// unchanged ort default (→ [`DefaultEmbedderMode::Ort`]).
+/// Precedence: Apple-Silicon wins outright (→
+/// [`DefaultEmbedderMode::GracefulPython`], the epic #3524 slice 6 PR 5/5
+/// default flip); otherwise an explicit `TRUSTY_EMBEDDER_PYTHON_EAGER`
+/// opt-in wins (→ [`DefaultEmbedderMode::EagerPython`], any platform);
+/// otherwise the unchanged ort default (→ [`DefaultEmbedderMode::Ort`]).
 ///
-/// Note: `TRUSTY_EMBEDDER=stdio` (the permanent opt-out) never reaches this
-/// function at all — `build_embedder_raw`'s match dispatches it straight to
-/// `build_ort_stdio_sidecar()` before this resolution is consulted.
+/// Note: `TRUSTY_EMBEDDER=stdio` (the permanent user escape hatch back to
+/// ort, including on Apple Silicon) never reaches this function at all —
+/// `build_embedder_raw`'s match dispatches it straight to
+/// `build_ort_stdio_sidecar()` before this resolution is consulted; see
+/// [`is_forced_ort_override`].
 pub(super) fn resolve_default_embedder_mode_for(
     is_apple_silicon: bool,
-    py_default_enabled: bool,
     eager_python: bool,
 ) -> DefaultEmbedderMode {
-    if is_apple_silicon && py_default_enabled {
+    if is_apple_silicon {
         return DefaultEmbedderMode::GracefulPython;
     }
     if eager_python {
@@ -136,27 +141,42 @@ pub(super) fn resolve_default_embedder_mode_for(
 }
 
 /// Resolve the `TRUSTY_EMBEDDER` unset/`auto` default, reading the real
-/// build target and process environment (epic #3524 slice 6, PR 3/5).
+/// build target and process environment (epic #3524 slice 6, PR 5/5).
 ///
 /// Why: on Apple Silicon a torch/MPS sidecar embeds ~2.4x faster than ort
-/// with numerically identical results (see the epic #3524 slice 2-4 spike);
-/// once soaked, this should become the transparent default with zero
-/// required user configuration. This PR wires the mechanism behind
-/// `TRUSTY_PY_DEFAULT` (default OFF) so it can ship and be verified without
-/// changing any real user's behavior — a later slice (PR-5) flips the
-/// default on after the soak.
+/// with numerically identical results (see the epic #3524 slice 2-4 spike,
+/// soaked per PR #3610). This is now the transparent default with zero
+/// required user configuration — the prior ship-gate (`TRUSTY_PY_DEFAULT`)
+/// has been retired now that the soak is complete; `TRUSTY_EMBEDDER=stdio`
+/// remains the permanent per-invocation override back to ort.
 /// What: `cfg!(all(target_arch = "aarch64", target_os = "macos"))` for the
-/// platform check, `TRUSTY_PY_DEFAULT` for the ship-gate, and
-/// `TRUSTY_EMBEDDER_PYTHON_EAGER` for the eager escape hatch — delegates the
-/// actual precedence to [`resolve_default_embedder_mode_for`].
+/// platform check and `TRUSTY_EMBEDDER_PYTHON_EAGER` for the eager escape
+/// hatch — delegates the actual precedence to
+/// [`resolve_default_embedder_mode_for`].
 /// Test: `resolve_default_embedder_mode_for_*` in `start/tests.rs` cover the
 /// pure precedence; this wrapper has no independent branches to test.
 pub(super) fn resolve_default_embedder_mode() -> DefaultEmbedderMode {
     resolve_default_embedder_mode_for(
         cfg!(all(target_arch = "aarch64", target_os = "macos")),
-        truthy_env("TRUSTY_PY_DEFAULT"),
         truthy_env("TRUSTY_EMBEDDER_PYTHON_EAGER"),
     )
+}
+
+/// Whether `TRUSTY_EMBEDDER`'s raw value is the permanent force-ort escape
+/// hatch that bypasses [`resolve_default_embedder_mode`] entirely (epic
+/// #3524 slice 6, PR 5/5 — the default flip).
+///
+/// Why: once Apple Silicon defaults to the graceful-Python path, operators
+/// need a documented, always-available way back to the unchanged ort
+/// behavior (e.g. to isolate a regression, or because the sidecar is
+/// unavailable in a given environment). `build_embedder_raw` already
+/// special-cases `"stdio"` ahead of the `"" | "auto"` resolution arm; this
+/// predicate names that behavior so it is unit-testable independent of the
+/// rest of the (async, I/O-performing) match.
+/// What: exact match on `"stdio"`.
+/// Test: `is_forced_ort_override_*` in `start/tests.rs`.
+pub(super) fn is_forced_ort_override(raw_env: &str) -> bool {
+    raw_env == "stdio"
 }
 
 /// Shared truthy-env-var parser: `1`/`true`/`yes`/`on` (case-insensitive,
@@ -200,13 +220,13 @@ pub(super) fn truthy_env(name: &str) -> bool {
 /// `uds_adapter_reports_resolved_provider`) is unaffected; `switchable.rs`
 /// unit tests cover the wrapper itself.
 ///
-/// The 4th return element (epic #3524 slice 6, PR 3/5) is `true` only when
-/// `build_embedder_raw` took the new [`DefaultEmbedderMode::GracefulPython`]
+/// The 4th return element (epic #3524 slice 6) is `true` only when
+/// `build_embedder_raw` took the [`DefaultEmbedderMode::GracefulPython`]
 /// arm — the signal `commands::start::daemon` uses to decide whether to
 /// spawn the background bootstrap→hot-swap orchestrator right after
-/// installing the returned `switchable` handle. Every pre-existing arm
-/// returns `false`, so this PR ships as a no-op for every caller that
-/// doesn't opt in via `TRUSTY_PY_DEFAULT`.
+/// installing the returned `switchable` handle. Every other arm returns
+/// `false`. As of PR 5/5 (the default flip) this is `true` for every Apple
+/// Silicon host that does not set `TRUSTY_EMBEDDER=stdio`.
 pub(super) async fn build_embedder() -> Result<(
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
@@ -302,15 +322,19 @@ async fn build_embedder_raw() -> Result<(
 
     match trusty_embedder_env.as_str() {
         // ── Explicit force-ort opt-out — the ONLY way to permanently pin
-        // the ort sidecar on Apple Silicon once TRUSTY_PY_DEFAULT ships on
-        // (epic #3524 slice 6, PR 3/5). Never routed through
-        // `resolve_default_embedder_mode` below.
-        "stdio" => build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort, false)),
+        // the ort sidecar on Apple Silicon now that the graceful-Python path
+        // is the default there (epic #3524 slice 6, PR 5/5). Never routed
+        // through `resolve_default_embedder_mode` below — see
+        // `is_forced_ort_override`.
+        s if is_forced_ort_override(s) => {
+            build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort, false))
+        }
 
         // ── unset / `auto` — platform-aware resolution (epic #3524 slice 6,
-        // PR 3/5). `resolve_default_embedder_mode` decides between the
-        // unchanged ort default, the new graceful-python background path, and
-        // the existing eager-blocking python path (reachable here only via
+        // PR 5/5). `resolve_default_embedder_mode` decides between the
+        // graceful-python background path (the Apple-Silicon default), the
+        // unchanged ort default (every other platform), and the existing
+        // eager-blocking python path (reachable here only via
         // `TRUSTY_EMBEDDER_PYTHON_EAGER`, mirroring explicit
         // `TRUSTY_EMBEDDER=python` below).
         "" | "auto" => match resolve_default_embedder_mode() {
@@ -321,31 +345,37 @@ async fn build_embedder_raw() -> Result<(
                 .await
                 .map(|(e, p, k)| (e, p, k, false)),
             DefaultEmbedderMode::GracefulPython => {
-                // Epic #3524 slice 6 (PR 3/5): serve on ort IMMEDIATELY — the
-                // exact same synchronous construction as the unchanged default
-                // path — while the caller (`build_embedder`) marks the
-                // resulting `ActiveBackend::bootstrap` `Bootstrapping` and
+                // Epic #3524 slice 6 (PR 5/5 — the default flip): serve on
+                // ort IMMEDIATELY — the exact same synchronous construction
+                // as the unchanged ort path — while the caller
+                // (`build_embedder`) marks the resulting
+                // `ActiveBackend::bootstrap` `Bootstrapping` and
                 // `commands::start::daemon` spawns the background
                 // bootstrap→hot-swap orchestrator right after installing it.
                 // Nothing here blocks the HTTP listener or startup.
                 tracing::info!(
-                    "embedder mode: graceful Apple-Silicon default (TRUSTY_PY_DEFAULT) — \
-                     serving on the ort stdio sidecar immediately while the python/MPS \
-                     sidecar bootstraps in the background; hot-swaps in when ready"
+                    "embedder mode: graceful Apple-Silicon default — serving on the ort \
+                     stdio sidecar immediately while the python/MPS sidecar bootstraps in \
+                     the background; hot-swaps in when ready (set TRUSTY_EMBEDDER=stdio to \
+                     force ort)"
                 );
                 build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort, true))
             }
         },
 
-        // ── Opt-in Python/MPS sidecar (epic #3524, slices 2-4) — DEFAULT-OFF ──
+        // ── Explicit `TRUSTY_EMBEDDER=python` (epic #3524, slices 2-4) ──────
         //
         // Why: on Apple Silicon a torch/MPS sentence-transformers sidecar
         // embeds ~2.4x faster than the Rust ort path with numerically
         // identical results (the spike measured 561 emb/s end-to-end through
-        // the real supervisor). Selection is strictly opt-in; default-on is a
-        // LATER slice. Reuses `LazyEmbedderHandle` / `EmbedderSupervisor` with
-        // ZERO changes to the supervisor/stdio/protocol wire code — the
-        // launcher speaks the exact same JSON-RPC 2.0 stdio protocol.
+        // the real supervisor). This explicit value takes the eager,
+        // blocking path on ANY platform (unlike the unset/`auto` default,
+        // which is Apple-Silicon-gated and non-blocking — see
+        // `DefaultEmbedderMode::GracefulPython`); useful for testing the
+        // sidecar off Apple Silicon. Reuses `LazyEmbedderHandle` /
+        // `EmbedderSupervisor` with ZERO changes to the supervisor/stdio/
+        // protocol wire code — the launcher speaks the exact same JSON-RPC
+        // 2.0 stdio protocol.
         //
         // Robustness: eager-bootstrap the venv here (at `start`). On ANY
         // bootstrap or launcher-discovery failure, log a loud actionable
@@ -391,9 +421,10 @@ async fn build_embedder_raw() -> Result<(
 
         other => anyhow::bail!(
             "invalid TRUSTY_EMBEDDER value: {other:?}. \
-             Expected: unset (default stdio sidecar), 'auto', 'stdio', 'python' \
-             (opt-in Python/MPS sidecar), 'in-process', \
-             'http://...', or 'unix:/path/to/socket'"
+             Expected: unset or 'auto' (default: graceful hot-swap to the Python/MPS \
+             sidecar on Apple Silicon, plain ort sidecar elsewhere), 'stdio' (forces \
+             the plain ort sidecar permanently), 'python' (opt-in Python/MPS sidecar), \
+             'in-process', 'http://...', or 'unix:/path/to/socket'"
         ),
     }
 }
