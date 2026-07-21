@@ -6,14 +6,11 @@
 # FAILS on any row whose file no longer has a finding (stale — prune
 # with: scripts/check_generation_artifacts.sh --update).
 #
-# Seeded 2026-07-21: the five known pre-existing instances
-# from issue #3499 (docs/design/UI/design-system/tokens.css:75 and its
-# two sibling token files; docs/specs/sessions-tui-interactive.md and
-# docs/specs/telui-telegram-ui.md at EOF), all dating to 3e25f6bc and
-# fixed upstream by PR #3578. New leaks introduced after this point are
-# NOT grandfathered — fix them for real.
-docs/design/UI/design-system-svelte/src/styles/tokens.css
-docs/design/UI/design-system/tokens.css
-docs/design/archive/gui-v1/tokens.css
-docs/specs/sessions-tui-interactive.md
-docs/specs/telui-telegram-ui.md
+# Seeded 2026-07-21 with five known pre-existing instances from issue #3499
+# (docs/design/UI/design-system/tokens.css:75 and its two sibling token
+# files; docs/specs/sessions-tui-interactive.md and
+# docs/specs/telui-telegram-ui.md at EOF), all dating to 3e25f6bc. PR #3578
+# fixed all five upstream on main before this gate's branch was rebased onto
+# it, so all five rows were pruned (`--update`) and the ratchet is now at its
+# floor: EMPTY. New leaks introduced after this point are NOT grandfathered
+# — fix them for real, don't add a row.
