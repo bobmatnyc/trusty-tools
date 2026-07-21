@@ -5,7 +5,12 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [0.24.0] — 2026-07-21
+## [0.24.1] — 2026-07-21
+
+Patch release closing unpublished source drift under the already-published
+0.24.0 (issue #3366 defect class): two commits landed on `main` *after*
+0.24.0 was published to crates.io (from `831103dd`) without a version bump,
+so the live 0.24.0 tarball does not contain them. This release carries both.
 
 ### Added
 
@@ -18,13 +23,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   permanently (`should_give_up`: exhausted `max_restarts` or a wedge-restart
   storm) — never on a clean exit, an intentional cooperative `shutdown()`,
   or an ordinary respawn. Gives callers (trusty-search's swap-back watchdog)
-  a DEFINITIVE "this supervised process is unrecoverably dead" signal instead
-  of inferring it from `child_pid_slot == 0`, which is also `0` during an
-  ordinary intentional shutdown and therefore ambiguous on its own.
+  a DEFINITIVE "this supervised process is unrecoverably dead" signal
+  instead of inferring it from `child_pid_slot == 0`, which is also `0`
+  during an ordinary intentional shutdown and therefore ambiguous on its
+  own.
   - Test: `supervisor_terminated_signal_fires_after_exhausting_max_restarts`
     (a real, always-crashing mock child with `max_restarts: 1`),
     `supervisor_terminated_signal_stays_false_on_intentional_shutdown` (a
     real cooperative `shutdown()` must never set it).
+- **`monitor::search_client::resolve_search_url` regression coverage (issue
+  #3545 follow-up, trusty-search PR #3602 review).** No production behavior
+  change in this crate — `resolve_search_url` already discovered a daemon
+  registered via `write_daemon_addr("trusty-search", …)`. The trusty-search
+  PR #3602 review found that trusty-search's CLI daemon-discovery fix had
+  stopped calling `write_daemon_addr` at all, silently starving this
+  resolver (and its trusty-search/trusty-installer consumers) of any
+  writer. trusty-search restored a writer for the default
+  (`TRUSTY_DATA_DIR`-unset) instance; this crate adds
+  `resolve_search_url_discovers_non_default_registered_address`, a
+  regression test pinning that `resolve_search_url` correctly picks up a
+  non-default-port address written that way, so a future regression here
+  fails loudly instead of silently breaking `trusty-search monitor
+  status`/`monitor indexes`/`monitor tui`'s `[r]` reindex hotkey.
+
+## [0.24.0] — 2026-07-21
+
+### Added
+
 - **`ExecutionProvider::Mps` + `resolve_expected_python_provider` (epic #3524
   slice 6, PR 2/5, refs #3530, #3493 P1)** — a new `Mps` variant on
   `embedder::ExecutionProvider` for the opt-in Python/MPS embedding sidecar
