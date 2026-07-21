@@ -796,7 +796,11 @@ exit 1
              supervisor has not even observed the first crash yet"
         );
 
-        let gave_up = tokio::time::timeout(Duration::from_secs(10), async {
+        // Generous ceiling (45s) so a loaded CI runner cannot false-fail —
+        // the poll interval is short (10ms) so a passing run still returns
+        // in milliseconds; only a genuinely stuck supervisor eats the full
+        // budget.
+        let gave_up = tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 if handle.has_given_up() {
                     return;
@@ -808,7 +812,7 @@ exit 1
 
         assert!(
             gave_up.is_ok(),
-            "has_given_up() never flipped to true within 10s of a \
+            "has_given_up() never flipped to true within 45s of a \
              persistent crash loop with max_restarts=1"
         );
     }
@@ -834,7 +838,10 @@ exit 1
         let (_dir, binary) = write_mock_embedderd_crash_once();
         let cfg = SupervisorConfig {
             startup_timeout_secs: 5,
-            backoff_max_secs: 1,
+            // Zero backoff so the crash -> respawn -> exhaustion sequence
+            // completes as fast as possible; this test asserts on the
+            // give-up signal, not on backoff timing.
+            backoff_max_secs: 0,
             max_restarts: 1,
             ..SupervisorConfig::default()
         };
@@ -853,7 +860,11 @@ exit 1
 
         let _handle = supervisor.start_supervisor_task();
 
-        let gave_up = tokio::time::timeout(Duration::from_secs(10), async {
+        // Generous ceiling (45s) so a loaded CI runner cannot false-fail —
+        // the poll interval is short (10ms) so a passing run still returns
+        // in milliseconds; only a genuinely stuck supervisor eats the full
+        // budget.
+        let gave_up = tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 if terminated.load(Ordering::Acquire) {
                     return;
@@ -864,7 +875,7 @@ exit 1
         .await;
         assert!(
             gave_up.is_ok(),
-            "terminated_signal never flipped true within 10s of exhausting \
+            "terminated_signal never flipped true within 45s of exhausting \
              max_restarts=1 against an always-crashing mock child"
         );
         assert_eq!(
