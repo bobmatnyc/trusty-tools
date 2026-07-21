@@ -403,6 +403,7 @@ pub mod upgrade;
 
 pub use upgrade::{
     is_launchd_supervised, perform_upgrade, upgrade_and_restart, verify_installed_binary,
+    verify_installed_binary_at_path,
 };
 
 // --- Tests ---

@@ -17,9 +17,10 @@
 use super::*;
 
 /// Build an `InstallOutcome` with the pre-#2566 default service state
-/// (not attempted — `service_ok: true`, empty detail), so tests that only
-/// care about the binary-install dimension don't have to repeat the two
-/// new fields at every call site.
+/// (not attempted — `service_ok: true`, empty detail) and the pre-#3554
+/// default shadow state (clear — `shadow_ok: true`, empty detail), so tests
+/// that only care about the binary-install dimension don't have to repeat
+/// those fields at every call site.
 fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
     InstallOutcome {
         member: member.to_owned(),
@@ -27,6 +28,8 @@ fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
         detail: detail.to_owned(),
         service_ok: true,
         service_detail: String::new(),
+        shadow_ok: true,
+        shadow_detail: String::new(),
     }
 }
 
@@ -70,6 +73,8 @@ fn report_all_ok_reflects_service_failure() {
         detail: "installed".to_owned(),
         service_ok: false,
         service_detail: "service bootstrap failed (non-fatal): boom".to_owned(),
+        shadow_ok: true,
+        shadow_detail: String::new(),
     }]);
     assert!(
         !failed.all_ok,
@@ -83,12 +88,48 @@ fn report_all_ok_reflects_service_failure() {
         detail: "installed".to_owned(),
         service_ok: true,
         service_detail: "launchd plist already present — left untouched".to_owned(),
+        shadow_ok: true,
+        shadow_detail: String::new(),
     }]);
     assert!(
         skipped.all_ok,
         "a skipped (not failed) service bootstrap must not flip all_ok"
     );
     assert_eq!(skipped.exit_code(), 0);
+}
+
+/// Why: #3554 — a just-installed binary that is provably PATH-shadowed by a
+/// stale copy is a genuine "looks installed, actually not live" failure; the
+/// report must not claim `all_ok: true` in that case, mirroring the
+/// service-bootstrap-failure precedent above.
+/// What: one member with `ok: true, shadow_ok: false` → `all_ok == false`
+/// and exit code 2; a `shadow_ok: true` (clear) member → `all_ok == true`.
+/// Test: this is the test.
+#[test]
+fn report_all_ok_reflects_shadow_failure() {
+    let shadowed = InstallReport::build(vec![InstallOutcome {
+        member: "trusty-mpm".to_owned(),
+        ok: true,
+        detail: "installed".to_owned(),
+        service_ok: true,
+        service_detail: String::new(),
+        shadow_ok: false,
+        shadow_detail: "PATH SHADOWED: installed trusty-mpm 0.19.29 to /x/.local/bin/tm, but \
+                         the shell resolves `tm` to /x/.cargo/bin/tm (0.19.26)"
+            .to_owned(),
+    }]);
+    assert!(
+        !shadowed.all_ok,
+        "a genuine PATH-shadow condition must flip all_ok to false"
+    );
+    assert_eq!(shadowed.exit_code(), 2);
+
+    let clear = InstallReport::build(vec![outcome("trusty-mpm", true, "installed")]);
+    assert!(
+        clear.all_ok,
+        "a clear (non-shadowed) install must not flip all_ok"
+    );
+    assert_eq!(clear.exit_code(), 0);
 }
 
 /// Why: #3527 — trusty-mpm's supervisor bootstrap must respect the SAME
@@ -194,6 +235,81 @@ fn cargo_bin_dir_from_env_falls_back() {
             assert!(p.ends_with(std::path::Path::new(".cargo").join("bin")));
         }
     }
+}
+
+// ── select_prebuilt_bin_path / cargo_fallback_bin_path (#3554 review — MEDIUM) ──
+//
+// These pin the exact glue that two of the three original #3554 bugs lived
+// in: picking the CONCRETE just-installed path rather than re-deriving it by
+// name. Extracted as pure functions specifically because `install_one` can't
+// be exercised in a unit test without a live network round-trip
+// (`download::try_install_prebuilt` hits GitHub Releases).
+
+/// Why: the common case — `paths` (as `download::try_install_prebuilt`
+/// actually returns them) already live under `install_dir`; the selector
+/// must pick the entry matching `binary` by exact file-name equality.
+/// What: three siblings under one dir; selecting `"tm"` returns exactly
+/// `install_dir.join("tm")`.
+/// Test: This is the test.
+#[test]
+fn select_prebuilt_bin_path_matches_by_filename() {
+    let install_dir = std::path::PathBuf::from("/home/x/.local/bin");
+    let paths = vec![
+        install_dir.join("trusty-search"),
+        install_dir.join("tm"),
+        install_dir.join("trusty-mpm"),
+    ];
+    assert_eq!(
+        select_prebuilt_bin_path(&paths, "tm", &install_dir),
+        install_dir.join("tm")
+    );
+}
+
+/// Why: `paths` not containing the requested binary at all must not panic —
+/// the defensive fallback must still resolve to a path INSIDE `install_dir`
+/// (never `None`, never a path elsewhere).
+/// What: `paths` has no entry named `tm`; selecting `tm` falls back to
+/// `install_dir.join("tm")`.
+/// Test: This is the test.
+#[test]
+fn select_prebuilt_bin_path_falls_back_when_no_match() {
+    let install_dir = std::path::PathBuf::from("/home/x/.local/bin");
+    let paths = vec![install_dir.join("trusty-search")];
+    assert_eq!(
+        select_prebuilt_bin_path(&paths, "tm", &install_dir),
+        install_dir.join("tm"),
+        "defensive fallback must still point inside install_dir"
+    );
+}
+
+/// Why: the selector matches by exact file-name EQUALITY, never substring —
+/// `tm` must not accidentally match `trusty-mpm` (a real sibling in the same
+/// tarball placement) just because one contains a similar sequence.
+/// What: `paths` contains only `trusty-mpm`; selecting `tm` must NOT return
+/// it — it falls back to `install_dir.join("tm")` instead.
+/// Test: This is the test.
+#[test]
+fn select_prebuilt_bin_path_does_not_substring_match() {
+    let install_dir = std::path::PathBuf::from("/home/x/.local/bin");
+    let paths = vec![install_dir.join("trusty-mpm")];
+    assert_eq!(
+        select_prebuilt_bin_path(&paths, "tm", &install_dir),
+        install_dir.join("tm"),
+        "must not substring-match trusty-mpm for binary name tm"
+    );
+}
+
+/// Why: the cargo-install fallback path must resolve to a concrete path
+/// ending in the requested binary name, regardless of which directory
+/// `cargo_bin_dir()` (or the `install_dir` fallback) resolves to on the test
+/// host.
+/// What: the returned path's file name is exactly `binary`.
+/// Test: This is the test.
+#[test]
+fn cargo_fallback_bin_path_joins_binary_onto_cargo_bin_dir() {
+    let install_dir = std::path::PathBuf::from("/home/x/.local/bin");
+    let p = cargo_fallback_bin_path("tm", &install_dir);
+    assert_eq!(p.file_name().and_then(|f| f.to_str()), Some("tm"));
 }
 
 /// Why: An unknown member must be a clean error (exit 3), not a silent skip.

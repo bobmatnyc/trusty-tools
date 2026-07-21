@@ -32,6 +32,8 @@
 //! `cargo install` path and the confirmation gate's TTY plumbing are
 //! side-effecting / covered by `super::install_gate::tests`.
 
+use std::path::{Path, PathBuf};
+
 use serde::Serialize;
 use trusty_progress::{Component, ComponentTracker};
 
@@ -42,6 +44,7 @@ use super::runtime::block_on;
 use super::service_bootstrap::{
     bootstrap_enabled, bootstrap_member_service, BootstrapAction, NO_SERVICE_ENV,
 };
+use super::shadow_check;
 use super::stable_set::{select_members_transitive, ManageStrategy, StableMember};
 use crate::output::render_json;
 
@@ -60,8 +63,14 @@ use crate::output::render_json;
 /// plist already present — none of those are failures) OR when it ran and
 /// succeeded; it is `false` ONLY when `service install` was attempted and
 /// genuinely errored. `service_detail` carries the human note for whichever
-/// case applied.
-/// Test: `tests::report_serialises`, `tests::report_all_ok_reflects_service_failure`.
+/// case applied. `shadow_ok` / `shadow_detail` (#3554) are the analogous pair
+/// for PATH-shadow detection: `shadow_ok` is `false` ONLY when the
+/// just-installed binary is provably shadowed by a DIFFERENT, earlier-PATH
+/// copy of the same name (see `super::shadow_check`) — a genuine "the new
+/// version will not take effect" condition, never silently swallowed into a
+/// reported success.
+/// Test: `tests::report_serialises`, `tests::report_all_ok_reflects_service_failure`,
+/// `tests::report_all_ok_reflects_shadow_failure`.
 #[derive(Clone, Debug, Serialize)]
 pub struct InstallOutcome {
     /// Crate name installed.
@@ -76,6 +85,12 @@ pub struct InstallOutcome {
     pub service_ok: bool,
     /// Human note for the service bootstrap outcome.
     pub service_detail: String,
+    /// `false` ONLY when the just-installed binary is shadowed on `$PATH` by
+    /// a different, stale copy (#3554); `true` when clear or not applicable.
+    pub shadow_ok: bool,
+    /// Human note for the shadow-detection outcome (the actionable
+    /// `ShadowReport::message`, or empty when `shadow_ok`).
+    pub shadow_detail: String,
 }
 
 impl InstallOutcome {
@@ -122,12 +137,17 @@ impl InstallReport {
     ///
     /// Why: Centralises the `all_ok` derivation so the exit code and JSON agree,
     /// and so the report cannot claim success while a genuine service-bootstrap
-    /// failure occurred (#2566 review finding).
+    /// failure occurred (#2566 review finding) OR a genuine PATH-shadow
+    /// condition (#3554) leaves the just-installed binary unreachable from a
+    /// plain shell invocation — both are "looks installed, actually not
+    /// live" failures the report must never paper over.
     /// What: Sets `command = "install"`, `verify = None`, and
-    /// `all_ok = every outcome has ok == true AND service_ok == true`.
-    /// Test: `tests::report_all_ok`, `tests::report_all_ok_reflects_service_failure`.
+    /// `all_ok = every outcome has ok == true AND service_ok == true AND
+    /// shadow_ok == true`.
+    /// Test: `tests::report_all_ok`, `tests::report_all_ok_reflects_service_failure`,
+    /// `tests::report_all_ok_reflects_shadow_failure`.
     fn build(members: Vec<InstallOutcome>) -> Self {
-        let all_ok = members.iter().all(|m| m.ok && m.service_ok);
+        let all_ok = members.iter().all(|m| m.ok && m.service_ok && m.shadow_ok);
         Self {
             command: "install",
             members,
@@ -518,16 +538,36 @@ pub fn run(
     report.exit_code()
 }
 
+/// A just-installed binary's resolved location + health-gated version
+/// (#3554) — [`install_one`]'s return value.
+///
+/// Why: `install_all` needs the CONCRETE path (never re-derived by name) for
+/// two downstream steps that #3554 identified as PATH-shadowable: the
+/// trusty-mpm supervisor bootstrap's candidate-version comparison, and the
+/// post-install shadow-detection warning. Threading the path through as data
+/// (rather than each downstream step re-resolving it) is what makes both
+/// immune to PATH order.
+struct InstalledBinary {
+    /// The concrete path the binary was health-gated at (never a bare name).
+    path: PathBuf,
+    /// The version that exact binary reported via `--version`.
+    version: String,
+}
+
 /// Install every selected member in order, returning the aggregate report.
 ///
 /// Why: The async core, separated from the sync CLI shell so the runtime is
 /// owned in exactly one place (`run`).
-/// What: For each member, runs `perform_upgrade` then `verify_installed_binary`,
-/// rendering a `trusty-progress` narration line per member and a final component
-/// table of the installed binaries (with on-disk sizes when resolvable).
-/// When `service_enabled`, each launchd-managed daemon member also has its own
-/// `<binary> service install` run after it lands (#2556, Phase 7b) so the plist
-/// exists before `tctl start`.
+/// What: For each member, runs `perform_upgrade` then health-gates the
+/// CONCRETE installed binary (`install_one` / #3554), rendering a
+/// `trusty-progress` narration line per member and a final component table of
+/// the installed binaries (with on-disk sizes when resolvable). When
+/// `service_enabled`, each launchd-managed daemon member also has its own
+/// `<binary> service install` run after it lands (#2556, Phase 7b) so the
+/// plist exists before `tctl start`. After a successful install, also checks
+/// whether the just-installed binary is PATH-shadowed by a stale copy
+/// (#3554) and surfaces that loudly, folding a genuine shadow into
+/// `all_ok`/the exit code rather than a silent success.
 /// Test: Side-effecting; the report shaping is tested via `InstallReport` and the
 /// per-member service policy is tested in `super::service_bootstrap::tests`.
 async fn install_all(
@@ -546,13 +586,17 @@ async fn install_all(
             .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"))
     });
 
+    // #3554: the real $PATH, resolved once, used by every member's
+    // shadow-detection check below.
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
+
     let mut outcomes = Vec::with_capacity(selected.len());
     let mut tracker = ComponentTracker::new(narr.output());
 
     for m in selected {
         let _ = narr.info(&format!("installing {}", m.crate_name));
         match install_one(m).await {
-            Ok(()) => {
+            Ok(installed) => {
                 tracker.add(Component::new(m.binary.clone(), binary_size(&m.binary)));
                 // Phase 7: bootstrap trusty-mpm supervisor plist (fail-soft).
                 // #3527: gated behind the SAME `--no-service` /
@@ -562,9 +606,14 @@ async fn install_all(
                 // opt-out. A refusal from the downgrade guard inside
                 // `install_mpm_supervisor` also surfaces here as a (non-fatal)
                 // `Err`, which correctly leaves the running daemon untouched.
+                // #3554: passes `installed.path` — the CONCRETE binary this
+                // install just health-gated — as the supervisor's candidate
+                // version source, never a PATH-shadowable name lookup.
                 if m.crate_name == "trusty-mpm" {
                     if plans_mpm_supervisor_bootstrap(m, service_enabled) {
-                        if let Err(e) = super::plist_bootstrap::install_mpm_supervisor(force) {
+                        if let Err(e) =
+                            super::plist_bootstrap::install_mpm_supervisor(force, &installed.path)
+                        {
                             let _ = narr.info(&format!(
                                 "warning: trusty-mpm supervisor bootstrap failed (non-fatal): {e}"
                             ));
@@ -626,12 +675,38 @@ async fn install_all(
                 } else {
                     InstallOutcome::service_not_attempted()
                 };
+                // Phase 9 (#3554): after a successful, health-gated install,
+                // check whether a plain shell invocation of `m.binary` would
+                // actually run the binary we just installed, or a stale copy
+                // shadowing it earlier on $PATH. A genuine shadow is reported
+                // LOUDLY (`narr.error`, not `info`) and folds into
+                // `shadow_ok`/`all_ok`/the exit code — the install succeeded
+                // on disk, but the operator's shell would not see it, which
+                // is exactly the #3554 "looks installed, actually isn't
+                // live" failure class.
+                let (shadow_ok, shadow_detail) = match shadow_check::detect(
+                    &m.binary,
+                    &installed.path,
+                    Some(&installed.version),
+                    &path_env,
+                )
+                .await
+                {
+                    Some(report) => {
+                        let msg = report.message();
+                        let _ = narr.error(&format!("{}: {msg}", m.crate_name));
+                        (false, msg)
+                    }
+                    None => (true, String::new()),
+                };
                 outcomes.push(InstallOutcome {
                     member: m.crate_name.clone(),
                     ok: true,
                     detail: "installed".to_owned(),
                     service_ok,
                     service_detail,
+                    shadow_ok,
+                    shadow_detail,
                 });
             }
             Err(e) => {
@@ -643,6 +718,8 @@ async fn install_all(
                     detail: e.to_string(),
                     service_ok,
                     service_detail,
+                    shadow_ok: true,
+                    shadow_detail: String::new(),
                 });
             }
         }
@@ -655,6 +732,43 @@ async fn install_all(
     InstallReport::build(outcomes)
 }
 
+/// Select the concrete path for `binary` from a prebuilt placement's
+/// reported `paths` (#3554 review — MEDIUM).
+///
+/// Why: this — plus [`cargo_fallback_bin_path`] — is the exact glue that TWO
+/// of the three original #3554 bugs lived in (picking the wrong file after
+/// an otherwise-correct install/verify split). It cannot be exercised via a
+/// real `install_one` call in tests without a network round-trip
+/// (`download::try_install_prebuilt` hits GitHub Releases), so it is
+/// extracted as a pure function specifically to make it independently
+/// unit-testable without one.
+/// What: returns the first entry in `paths` whose file name exactly equals
+/// `binary`, or `install_dir.join(binary)` when none match (a defensive
+/// fallback — `download::try_install_prebuilt` always places the requested
+/// crate's binaries under `install_dir`, so this arm should not be reachable
+/// in practice, but must never panic if it is).
+/// Test: `tests::select_prebuilt_bin_path_matches_by_filename`,
+/// `tests::select_prebuilt_bin_path_falls_back_when_no_match`,
+/// `tests::select_prebuilt_bin_path_does_not_substring_match`.
+fn select_prebuilt_bin_path(paths: &[PathBuf], binary: &str, install_dir: &Path) -> PathBuf {
+    paths
+        .iter()
+        .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(binary))
+        .cloned()
+        .unwrap_or_else(|| install_dir.join(binary))
+}
+
+/// Resolve the concrete `cargo install` destination for `binary` (#3554
+/// review — MEDIUM, see [`select_prebuilt_bin_path`]'s doc for why this is
+/// extracted as a pure function).
+/// What: `cargo_bin_dir().unwrap_or(install_dir).join(binary)`.
+/// Test: `tests::cargo_fallback_bin_path_joins_binary_onto_cargo_bin_dir`.
+fn cargo_fallback_bin_path(binary: &str, install_dir: &Path) -> PathBuf {
+    cargo_bin_dir()
+        .unwrap_or_else(|| install_dir.to_owned())
+        .join(binary)
+}
+
 /// Install + health-gate a single member, prebuilt-first with cargo fallback.
 ///
 /// Why: Prebuilt binaries install in seconds without requiring a Rust toolchain;
@@ -663,12 +777,26 @@ async fn install_all(
 /// What: Resolves the install directory (prefers `~/.local/bin` to avoid cdhash
 /// issues on macOS; falls back to cargo path via `perform_upgrade` when prebuilt
 /// fails). Calls `crate::download::try_install_prebuilt`; on `Outcome::Fallback`
-/// emits a narration line and delegates to `perform_upgrade`. In both cases
-/// health-gates with `verify_installed_binary`.
+/// emits a narration line and delegates to `perform_upgrade`. In BOTH cases,
+/// health-gates the CONCRETE just-installed path (#3554) via
+/// `trusty_common::update::verify_installed_binary_at_path` — never a
+/// name-based lookup a stale earlier-PATH/earlier-priority-directory binary
+/// could shadow; the path itself is resolved by the pure
+/// [`select_prebuilt_bin_path`] / [`cargo_fallback_bin_path`] helpers above.
+/// For the prebuilt path, additionally cross-checks the reported version
+/// against the version the download layer resolved
+/// (`Outcome::Installed::version`); a mismatch is a HARD error (#3554
+/// requirement: never a silent pass) rather than a successful report,
+/// because it means the binary being health-gated is provably not the one
+/// that was just placed.
 ///
 /// Test: Side-effecting; the fallback routing and shaping are unit-tested in
-/// `crate::download::tests`.
-async fn install_one(m: &StableMember) -> anyhow::Result<()> {
+/// `crate::download::tests`. The #3554 shape (health gate immune to a
+/// PATH-shadowing stale binary) is covered at the `verify_installed_binary_at_path`
+/// layer (`trusty-common`) and the `shadow_check`/`plist_bootstrap` layers; the
+/// path-selection glue specifically is covered by `select_prebuilt_bin_path`'s
+/// and `cargo_fallback_bin_path`'s own tests (see above).
+async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     use crate::download::{self, Outcome};
 
     // Resolve the install directory — prefer ~/.local/bin (the default used by
@@ -688,8 +816,41 @@ async fn install_one(m: &StableMember) -> anyhow::Result<()> {
 
     let outcome = download::try_install_prebuilt(&m.crate_name, &install_dir).await;
     match outcome {
-        Outcome::Installed { version, .. } => {
+        Outcome::Installed { paths, version } => {
             tracing::info!(crate_name = %m.crate_name, %version, "installed from prebuilt");
+            // #3554: health-gate the CONCRETE just-placed binary — the exact
+            // path `download::try_install_prebuilt` reports having written —
+            // never a name re-resolved afterward.
+            let bin_path = select_prebuilt_bin_path(&paths, &m.binary, &install_dir);
+            let reported = trusty_common::update::verify_installed_binary_at_path(&bin_path)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "health gate failed for {} at {}: {e}",
+                        m.crate_name,
+                        bin_path.display()
+                    )
+                })?;
+            // #3554: the health gate passing is not enough on its own — cross
+            // check that the exact binary we just probed reports the SAME
+            // version the download layer believes it placed. A mismatch here
+            // means `bin_path` is provably NOT the binary just installed
+            // (e.g. an unexpected pre-existing file at that exact path), and
+            // must be a hard error, never a silently "passed" health gate.
+            let reported_version = super::update_engine::extract_version_from_line(&reported);
+            if reported_version.as_deref() != Some(version.as_str()) {
+                anyhow::bail!(
+                    "health gate mismatch for {}: installer believes it just installed \
+                     version {version} to {}, but that exact binary reports {reported_version:?} \
+                     (raw `--version` output: {reported:?}) — refusing to report success",
+                    m.crate_name,
+                    bin_path.display(),
+                );
+            }
+            Ok(InstalledBinary {
+                path: bin_path,
+                version,
+            })
         }
         Outcome::Fallback { reason } => {
             tracing::info!(crate_name = %m.crate_name, %reason, "prebuilt unavailable; using cargo install");
@@ -702,10 +863,27 @@ async fn install_one(m: &StableMember) -> anyhow::Result<()> {
                 )
             })?;
             trusty_common::update::perform_upgrade(&m.crate_name).await?;
+            // #3554: `cargo install` always lands in the cargo bin dir
+            // (`$CARGO_HOME/bin`, falling back to `~/.cargo/bin`) — resolve
+            // that CONCRETE destination directly rather than a name lookup.
+            let bin_path = cargo_fallback_bin_path(&m.binary, &install_dir);
+            let reported = trusty_common::update::verify_installed_binary_at_path(&bin_path)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "health gate failed for {} at {}: {e}",
+                        m.crate_name,
+                        bin_path.display()
+                    )
+                })?;
+            let version = super::update_engine::extract_version_from_line(&reported)
+                .unwrap_or_else(|| reported.trim().to_owned());
+            Ok(InstalledBinary {
+                path: bin_path,
+                version,
+            })
         }
     }
-
-    trusty_common::update::verify_installed_binary(&m.binary).await
 }
 
 /// Best-effort on-disk size of an installed binary (for the component row).
