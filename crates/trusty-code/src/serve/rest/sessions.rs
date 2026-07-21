@@ -141,16 +141,28 @@ async fn get_transcript_markdown(
     Path(id): Path<String>,
 ) -> Response {
     let ctx = throwaway_ctx();
-    let transcript_val =
-        match call(&state.router, "session.get_transcript", json!({"session_id": id}), &ctx).await {
-            Ok(v) => v,
-            Err(err) => return (rpc_error_to_status(&err), err.message).into_response(),
-        };
-    let session_val =
-        match call(&state.router, "session.status", json!({"session_id": id}), &ctx).await {
-            Ok(v) => v,
-            Err(err) => return (rpc_error_to_status(&err), err.message).into_response(),
-        };
+    let transcript_val = match call(
+        &state.router,
+        "session.get_transcript",
+        json!({"session_id": id}),
+        &ctx,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => return (rpc_error_to_status(&err), err.message).into_response(),
+    };
+    let session_val = match call(
+        &state.router,
+        "session.status",
+        json!({"session_id": id}),
+        &ctx,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(err) => return (rpc_error_to_status(&err), err.message).into_response(),
+    };
 
     let record: TranscriptRecord = match serde_json::from_value(transcript_val) {
         Ok(r) => r,
@@ -208,7 +220,10 @@ fn render_transcript_markdown(
     ));
     out.push_str(&format!(
         "- **Project:** {}\n",
-        session.project.clone().unwrap_or_else(|| "_(none)_".to_string())
+        session
+            .project
+            .clone()
+            .unwrap_or_else(|| "_(none)_".to_string())
     ));
     out.push_str(&format!(
         "- **Task:** {}\n",
@@ -465,8 +480,11 @@ mod tests {
     #[tokio::test]
     async fn get_transcript_markdown_renders_turns_and_tool_calls() {
         let (app, sessions) = app_and_registry().await;
-        let session =
-            sessions.create("investigate the loop".to_string(), None, crate::binding::ProjectBinding::None);
+        let session = sessions.create(
+            "investigate the loop".to_string(),
+            None,
+            crate::binding::ProjectBinding::None,
+        );
         sessions.set_run_outcome(
             &session.id,
             vec![
@@ -498,13 +516,21 @@ mod tests {
             "text/markdown; charset=utf-8"
         );
         let md = body_text(resp).await;
-        assert!(md.contains("# Workstream transcript — investigate the loop"), "{md}");
-        assert!(md.contains(&format!("- **Session:** `{}`", session.id)), "{md}");
+        assert!(
+            md.contains("# Workstream transcript — investigate the loop"),
+            "{md}"
+        );
+        assert!(
+            md.contains(&format!("- **Session:** `{}`", session.id)),
+            "{md}"
+        );
         assert!(md.contains("- **Turns:** 2"), "{md}");
         assert!(md.contains("delegating to the engineer"), "{md}");
         // Each tool-run entry is its own bullet — a runaway loop stays visible.
         assert!(
-            md.contains("- `PYTHON-ENGINEER` ran: write_files\n- `PYTHON-ENGINEER` ran: write_files"),
+            md.contains(
+                "- `PYTHON-ENGINEER` ran: write_files\n- `PYTHON-ENGINEER` ran: write_files"
+            ),
             "{md}"
         );
     }
@@ -530,7 +556,10 @@ mod tests {
         let resp = get(&app, &format!("/sessions/{}/transcript.md", session.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let md = body_text(resp).await;
-        assert!(md.contains("_No turns were recorded for this session._"), "{md}");
+        assert!(
+            md.contains("_No turns were recorded for this session._"),
+            "{md}"
+        );
     }
 
     /// `GET /sessions/{id}/transcript` on an unknown id must 404.
