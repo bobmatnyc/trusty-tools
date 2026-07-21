@@ -1,3 +1,10 @@
+# Standalone package (not a multi-package monorepo): `packages: []` is
+# required as of pnpm >=9.15 (github.com/pnpm/pnpm#9361) whenever a
+# pnpm-workspace.yaml exists at all, even when its only purpose is housing
+# `allowBuilds`/`onlyBuiltDependencies` settings (as created by `pnpm
+# approve-builds`). Without it, `pnpm install` hard-fails with "ERROR
+# packages field missing or empty".
+packages: []
 allowBuilds:
   esbuild: true
   svelte-preprocess: true
