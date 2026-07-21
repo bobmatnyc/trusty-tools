@@ -1098,6 +1098,43 @@ impl crate::core::Embedder for FakePythonEmbedderErr {
     }
 }
 
+/// Fake python adapter whose readiness probe never resolves within any
+/// reasonable timeout (simulates a hung/stalled real embed call) — used to
+/// drive the orchestrator's probe-TIMEOUT teardown path deterministically
+/// under paused virtual time.
+struct FakePythonEmbedderHangs;
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for FakePythonEmbedderHangs {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        std::future::pending().await
+    }
+
+    async fn embed_batch(&self, _texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        std::future::pending().await
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+}
+
+/// Controllable fake [`PythonAdapterTeardown`] — records how many times
+/// `teardown()` was invoked so tests can assert it fires on the probe
+/// failure/timeout paths and NEVER on success or on a pre-adapter
+/// (venv-bootstrap) failure (epic #3524 slice 6 PR-3 fix — code-critic HIGH).
+struct FakeTeardown {
+    calls: OrchestratorArc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl super::graceful_bootstrap::PythonAdapterTeardown for FakeTeardown {
+    async fn teardown(&self) {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Fully deterministic fake [`PythonBootstrap`] — no real `uv`/torch/venv or
 /// subprocess ever runs.
 struct FakeBootstrap {
@@ -1105,9 +1142,15 @@ struct FakeBootstrap {
     venv_failures_remaining: AtomicUsize,
     /// When true, the built adapter's readiness probe always fails.
     fail_probe: bool,
+    /// When true, the built adapter's readiness probe hangs forever (the
+    /// probe timeout fires instead of an `Err`).
+    hang_probe: bool,
     /// Total `ensure_venv()` invocations observed — lets tests assert retry
     /// behavior actually re-ran the bootstrap step.
     venv_attempts: AtomicUsize,
+    /// Total `PythonAdapterTeardown::teardown()` invocations observed across
+    /// every `build_adapter` call this fake made.
+    teardown_calls: OrchestratorArc<AtomicUsize>,
 }
 
 impl FakeBootstrap {
@@ -1115,7 +1158,9 @@ impl FakeBootstrap {
         Self {
             venv_failures_remaining: AtomicUsize::new(0),
             fail_probe: false,
+            hang_probe: false,
             venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1123,7 +1168,19 @@ impl FakeBootstrap {
         Self {
             venv_failures_remaining: AtomicUsize::new(0),
             fail_probe: true,
+            hang_probe: false,
             venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn probe_always_hangs() -> Self {
+        Self {
+            venv_failures_remaining: AtomicUsize::new(0),
+            fail_probe: false,
+            hang_probe: true,
+            venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1131,7 +1188,9 @@ impl FakeBootstrap {
         Self {
             venv_failures_remaining: AtomicUsize::new(u32::MAX as usize),
             fail_probe: false,
+            hang_probe: false,
             venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -1139,8 +1198,15 @@ impl FakeBootstrap {
         Self {
             venv_failures_remaining: AtomicUsize::new(1),
             fail_probe: false,
+            hang_probe: false,
             venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
         }
+    }
+
+    fn teardown_calls(&self) -> usize {
+        self.teardown_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -1169,20 +1235,34 @@ impl PythonBootstrap for FakeBootstrap {
     ) -> (
         OrchestratorArc<dyn crate::core::Embedder>,
         Option<OrchestratorArc<OrchestratorAtomicU32>>,
+        OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown>,
     ) {
         let adapter: OrchestratorArc<dyn crate::core::Embedder> = if self.fail_probe {
             OrchestratorArc::new(FakePythonEmbedderErr)
+        } else if self.hang_probe {
+            OrchestratorArc::new(FakePythonEmbedderHangs)
         } else {
             OrchestratorArc::new(FakePythonEmbedderOk)
         };
+        let teardown: OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown> =
+            OrchestratorArc::new(FakeTeardown {
+                calls: OrchestratorArc::clone(&self.teardown_calls),
+            });
         (
             adapter,
             Some(OrchestratorArc::new(OrchestratorAtomicU32::new(4242))),
+            teardown,
         )
     }
 
     fn probe_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(5)
+        if self.hang_probe {
+            // Short enough that the paused-clock test resolves instantly,
+            // long enough to be unambiguous in intent.
+            std::time::Duration::from_millis(50)
+        } else {
+            std::time::Duration::from_secs(5)
+        }
     }
 }
 
@@ -1209,14 +1289,19 @@ async fn graceful_bootstrap_swaps_to_python_on_success() {
         test_ort_bootstrapping_active(),
     ));
     let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
-    let ops: OrchestratorArc<dyn PythonBootstrap> =
-        OrchestratorArc::new(FakeBootstrap::always_succeeds());
+    let fake = OrchestratorArc::new(FakeBootstrap::always_succeeds());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
 
     drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 2).await;
 
     let active = switchable.active();
     assert_eq!(active.kind, SwitchableBackendKind::Python);
     assert_eq!(active.bootstrap, SwitchableBootstrapState::Ready);
+    assert_eq!(
+        fake.teardown_calls(),
+        0,
+        "teardown must never fire on the success path — the handle stays live"
+    );
 }
 
 /// A readiness-probe failure must leave the switchable on the still-installed
@@ -1230,8 +1315,8 @@ async fn graceful_bootstrap_stays_ort_and_failed_after_probe_failure() {
         test_ort_bootstrapping_active(),
     ));
     let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
-    let ops: OrchestratorArc<dyn PythonBootstrap> =
-        OrchestratorArc::new(FakeBootstrap::probe_always_fails());
+    let fake = OrchestratorArc::new(FakeBootstrap::probe_always_fails());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
 
     drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 1).await;
 
@@ -1262,14 +1347,90 @@ async fn graceful_bootstrap_stays_ort_and_failed_after_bootstrap_failure() {
         test_ort_bootstrapping_active(),
     ));
     let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
-    let ops: OrchestratorArc<dyn PythonBootstrap> =
-        OrchestratorArc::new(FakeBootstrap::venv_always_fails());
+    let fake = OrchestratorArc::new(FakeBootstrap::venv_always_fails());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
 
     drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 1).await;
 
     let active = switchable.active();
     assert_eq!(active.kind, SwitchableBackendKind::Ort);
     assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
+    assert_eq!(
+        fake.teardown_calls(),
+        0,
+        "no adapter/handle was ever built (venv bootstrap failed first) — \
+         nothing to tear down"
+    );
+}
+
+/// code-critic HIGH fix (epic #3524 slice 6 PR-3): a probe-failure path must
+/// cooperatively tear down the just-spawned handle BEFORE dropping it, so a
+/// failed bootstrap never orphans a real python/MPS child process waiting on
+/// the idle watchdog (up to 1800s later).
+///
+/// Why: this is the dedicated regression test for the exact leak code-critic
+/// flagged — earlier `graceful_bootstrap_stays_ort_and_failed_after_probe_failure`
+/// proves the SWITCHABLE state; this test proves the TEARDOWN CALL itself
+/// fires exactly once per failed attempt.
+/// What: 2 retries, both probe failures — `teardown_calls()` must equal 2
+/// (one per attempt, each attempt builds a fresh adapter/handle).
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_probe_failure_tears_down_the_handle() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::probe_always_fails());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 2).await;
+
+    assert_eq!(
+        switchable.active().bootstrap,
+        SwitchableBootstrapState::Failed
+    );
+    assert_eq!(
+        fake.teardown_calls(),
+        2,
+        "teardown must fire once per failed attempt — a probe failure must \
+         never leave a spawned handle un-shut-down"
+    );
+}
+
+/// code-critic HIGH fix, timeout variant: a probe TIMEOUT (not just an
+/// `Err`) must ALSO tear down the handle before dropping it — the probe may
+/// still be in flight against a live, just-spawned child when the timeout
+/// fires.
+/// What: a hanging fake adapter + a short fake probe timeout, under paused
+/// virtual time so the test resolves instantly; asserts the switchable stays
+/// ort/Failed and `teardown_calls() == 1`.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_probe_timeout_tears_down_the_handle() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::probe_always_hangs());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 1).await;
+
+    let active = switchable.active();
+    assert_eq!(active.kind, SwitchableBackendKind::Ort);
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
+    assert_eq!(
+        fake.teardown_calls(),
+        1,
+        "a probe TIMEOUT must also tear down the handle, not just a probe Err"
+    );
 }
 
 /// A transient failure on the first attempt must be retried, succeeding on

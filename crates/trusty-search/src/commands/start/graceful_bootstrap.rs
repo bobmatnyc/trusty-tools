@@ -31,7 +31,10 @@
 //! Test: `graceful_bootstrap_swaps_to_python_on_success`,
 //! `graceful_bootstrap_stays_ort_and_failed_after_probe_failure`,
 //! `graceful_bootstrap_stays_ort_and_failed_after_bootstrap_failure`,
-//! `graceful_bootstrap_retries_before_giving_up` in `start/tests.rs`.
+//! `graceful_bootstrap_retries_before_giving_up`,
+//! `graceful_bootstrap_probe_failure_tears_down_the_handle`,
+//! `graceful_bootstrap_probe_timeout_tears_down_the_handle` in
+//! `start/tests.rs`.
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU32;
@@ -50,6 +53,36 @@ use crate::service::SearchAppState;
 /// is unset or malformed.
 const DEFAULT_BOOTSTRAP_RETRIES: u32 = 2;
 
+/// Abstracts "the thing that must be torn down if the readiness probe fails
+/// or times out after an adapter/handle has already been built" — real:
+/// `LazyEmbedderHandle::shutdown()`; fakes: a spy that records the call
+/// (epic #3524 slice 6 PR-3 fix — code-critic HIGH: orphaned python child on
+/// bootstrap-probe failure).
+///
+/// Why: the readiness probe (`adapter.embed_batch(...)` in
+/// [`try_bootstrap_once`]) forces `LazyEmbedderHandle` to spawn a REAL child
+/// process (torch+MPS, hundreds of MB-GB). If the probe then fails or times
+/// out, simply dropping the adapter left that child running until the
+/// detached idle watchdog reaped it — up to 1800s later for the python arm,
+/// with up to `TRUSTY_PY_BOOTSTRAP_RETRIES` such orphans alive concurrently.
+/// This trait is the seam that lets [`try_bootstrap_once`] force an
+/// IMMEDIATE, cooperative kill on every failure path that occurs after a
+/// handle may have spawned, before ever dropping it.
+/// What: one method, `teardown()`, async so the real implementation can
+/// await `SupervisorHandle::shutdown()`'s "confirmed dead" guarantee.
+/// Test: see the module-level `Test:` pointer.
+#[async_trait::async_trait]
+pub(crate) trait PythonAdapterTeardown: Send + Sync {
+    async fn teardown(&self);
+}
+
+#[async_trait::async_trait]
+impl PythonAdapterTeardown for crate::service::embedder_supervisor::LazyEmbedderHandle {
+    async fn teardown(&self) {
+        self.shutdown().await;
+    }
+}
+
 /// Abstracts the three fallible, real-world steps of standing up the python
 /// sidecar (venv bootstrap, launcher discovery, adapter construction) plus
 /// the probe timeout, so [`drive_bootstrap`] — the retry/probe/swap state
@@ -63,13 +96,22 @@ const DEFAULT_BOOTSTRAP_RETRIES: u32 = 2;
 /// succeed deterministically at each step.
 /// What: `ensure_venv` (blocking bootstrap), `locate_launcher` (binary
 /// discovery), `build_adapter` (constructs the live `Arc<dyn Embedder>` +
-/// optional pid slot from the located launcher), `probe_timeout` (bound on
-/// the one real embed call `try_bootstrap_once` makes before hot-swapping).
+/// optional pid slot + the [`PythonAdapterTeardown`] handle for that same
+/// adapter, from the located launcher), `probe_timeout` (bound on the one
+/// real embed call `try_bootstrap_once` makes before hot-swapping).
 /// Test: see the module-level `Test:` pointer.
 pub(crate) trait PythonBootstrap: Send + Sync {
     fn ensure_venv(&self) -> Result<()>;
     fn locate_launcher(&self) -> Result<PathBuf>;
-    fn build_adapter(&self, launcher: PathBuf) -> (Arc<dyn Embedder>, Option<Arc<AtomicU32>>);
+    #[allow(clippy::type_complexity)]
+    fn build_adapter(
+        &self,
+        launcher: PathBuf,
+    ) -> (
+        Arc<dyn Embedder>,
+        Option<Arc<AtomicU32>>,
+        Arc<dyn PythonAdapterTeardown>,
+    );
     fn probe_timeout(&self) -> Duration;
 }
 
@@ -92,17 +134,25 @@ impl PythonBootstrap for RealPythonBootstrap {
         trusty_embedderd_py::locate_launcher_binary()
     }
 
-    fn build_adapter(&self, launcher: PathBuf) -> (Arc<dyn Embedder>, Option<Arc<AtomicU32>>) {
+    fn build_adapter(
+        &self,
+        launcher: PathBuf,
+    ) -> (
+        Arc<dyn Embedder>,
+        Option<Arc<AtomicU32>>,
+        Arc<dyn PythonAdapterTeardown>,
+    ) {
         use crate::service::embedder_supervisor::LazyEmbedderHandle;
 
         let config = super::embedder::resolve_python_supervisor_config();
         let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
         let pid_slot = handle.app_pid_slot();
+        let teardown: Arc<dyn PythonAdapterTeardown> = Arc::clone(&handle) as _;
         let adapter: Arc<dyn Embedder> = Arc::new(super::embedder::LazySlotEmbedderAdapter {
             handle,
             is_python: true,
         });
-        (adapter, Some(pid_slot))
+        (adapter, Some(pid_slot), teardown)
     }
 
     fn probe_timeout(&self) -> Duration {
@@ -225,8 +275,12 @@ async fn try_bootstrap_once(
     let launcher = ops.locate_launcher()?;
 
     // Step c: build the python `LazyEmbedderHandle` + adapter exactly like
-    // the existing eager `python` arm.
-    let (adapter, pid_slot) = ops.build_adapter(launcher);
+    // the existing eager `python` arm. `teardown` is the SAME underlying
+    // handle as `adapter` (just viewed through `PythonAdapterTeardown`
+    // instead of `Embedder`) — see that trait's doc for why an explicit,
+    // awaited teardown is required on every failure path below rather than
+    // relying on `Drop`.
+    let (adapter, pid_slot, teardown) = ops.build_adapter(launcher);
     let probe_timeout = ops.probe_timeout();
 
     // Step d: readiness probe — force the lazy spawn + torch import + model
@@ -240,14 +294,20 @@ async fn try_bootstrap_once(
     match probe {
         Ok(Ok(_vectors)) => {}
         Ok(Err(e)) => {
-            // Drop our only reference to the adapter so the underlying
-            // `LazyEmbedderHandle` (if the probe spawned a child) is
-            // reclaimed via its own idle-shutdown watchdog rather than left
-            // dangling — see PR-4's seam note on `drive_bootstrap`.
+            // code-critic HIGH fix (epic #3524 slice 6 PR-3): the probe call
+            // above may have forced a REAL child spawn. Cooperatively kill
+            // it now, BEFORE dropping our only references, so a
+            // probe-failure never leaves an orphaned python/MPS process
+            // alive for up to 1800s waiting on the idle watchdog.
+            teardown.teardown().await;
             drop(adapter);
             return Err(e.context("python readiness probe failed"));
         }
         Err(_elapsed) => {
+            // Same fix, timeout path: the probe may still be in flight
+            // against a live (just-spawned) child when the timeout fires —
+            // tear it down immediately rather than abandon it.
+            teardown.teardown().await;
             drop(adapter);
             anyhow::bail!(
                 "python readiness probe timed out after {}s",

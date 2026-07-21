@@ -49,6 +49,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     Extended: `SwitchableEmbedder::set_bootstrap_state` (updates only the
     bootstrap status, leaving the live backend untouched — used to mark
     `Failed` without disturbing the still-serving ort backend).
+  - **Fix (code-critic HIGH, pre-merge review): no more orphaned python
+    child on a bootstrap-probe failure/timeout.** The readiness probe forces
+    a REAL `trusty-embedderd-py` child to spawn (torch+MPS, hundreds of
+    MB-GB); previously, dropping the adapter on a failed/timed-out probe left
+    that child alive until the idle watchdog reaped it up to 1800s later —
+    with retries, up to `TRUSTY_PY_BOOTSTRAP_RETRIES` such orphans
+    concurrently on the memory-constrained Apple-Silicon machines this
+    targets. Added `LazyEmbedderHandle::shutdown()`
+    (`service/embedder_supervisor/mod.rs`) — an eager, cooperative
+    counterpart to the existing idle-shutdown watchdog's own teardown
+    (`SupervisorHandle::shutdown()`, issue #2979) — and a
+    `PythonAdapterTeardown` seam so `try_bootstrap_once` calls it
+    immediately on every probe failure/timeout path, before ever dropping
+    the handle.
 
 ### Changed
 

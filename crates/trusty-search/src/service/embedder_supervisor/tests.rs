@@ -2,9 +2,14 @@
 //!
 //! Why: we validate the deterministic, pure parts of the supervisor
 //! (config parsing, socket path, binary discovery, lazy-handle spawn
-//! accounting) without needing a live ONNX binary. Process-lifecycle
-//! tests (spawn/restart/shutdown) are in `tests/embedder_supervisor_e2e.rs`
-//! and marked `#[ignore]`.
+//! accounting) without needing a live ONNX binary. Real-ONNX-binary
+//! process-lifecycle tests (spawn/restart) are in
+//! `tests/embedder_supervisor_e2e.rs` and marked `#[ignore]`; the
+//! `shutdown_tests` submodule below is the exception — it exercises
+//! `LazyEmbedderHandle::shutdown()`'s real process-lifecycle teardown
+//! against a fast POSIX-shell mock stdio server instead, so it runs in every
+//! CI pass without `#[ignore]` (mirrors `trusty-common`'s own
+//! `supervisor.rs` `shutdown_tests` module).
 //! Test: `cargo test -p trusty-search -- embedder_supervisor`.
 
 use super::*;
@@ -720,5 +725,124 @@ impl Drop for EnvGuard {
                 None => std::env::remove_var(&self.key),
             }
         }
+    }
+}
+
+// ── LazyEmbedderHandle::shutdown() (epic #3524 slice 6 PR-3 fix — ──────────
+// code-critic HIGH: orphaned python child on bootstrap-probe failure)
+//
+// These spawn a real (but tiny) child process — a POSIX shell script that
+// speaks just enough of the trusty-embedderd stdio JSON-RPC wire protocol to
+// pass `spawn_child`'s startup probe, then idles until killed — so
+// `LazyEmbedderHandle::shutdown()` exercises its real process-lifecycle
+// teardown without needing the actual ONNX binary or `#[ignore]`. Mirrors
+// trusty-common's own `supervisor.rs` `shutdown_tests` module.
+#[cfg(unix)]
+mod shutdown_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Write a minimal stdio JSON-RPC mock of `trusty-embedderd --stdio` to a
+    /// temp file; returns the path plus the guarding `TempDir`.
+    /// Why/What: see `trusty_common::embedder_client::supervisor`'s own
+    /// `write_mock_embedderd` (private to that crate — reimplemented here,
+    /// identical wire behaviour).
+    fn write_mock_embedderd() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -n "$id" ] || id=1
+  printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
+done
+"#,
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
+    /// Best-effort liveness check via `kill -0 <pid>` (no signal sent, just
+    /// an existence probe).
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// `shutdown()` must be a no-op when the handle never spawned — nothing
+    /// to tear down, so it must return immediately without touching the pid
+    /// slot or panicking on an absent `SpawnedState`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_shutdown_is_noop_when_never_spawned() {
+        let handle = LazyEmbedderHandle::new(
+            PathBuf::from("/nonexistent/trusty-embedderd"),
+            SupervisorConfig::default(),
+        );
+        handle.shutdown().await;
+        assert_eq!(handle.app_pid_slot().load(Ordering::Acquire), 0);
+    }
+
+    /// `shutdown()` must cooperatively kill a REAL (mocked) spawned child
+    /// through its `SupervisorHandle` — the exact orphan-leak fix the
+    /// graceful-python bootstrap orchestrator's probe-failure path relies on
+    /// (epic #3524 slice 6 PR-3, code-critic HIGH: "orphaned python child on
+    /// bootstrap-probe failure").
+    ///
+    /// Why: without this method, a probe failure/timeout in
+    /// `commands::start::graceful_bootstrap::try_bootstrap_once` dropped the
+    /// orchestrator's only `LazyEmbedderHandle` reference and left the
+    /// just-spawned child alive until the detached idle watchdog reaped it
+    /// (up to 1800s later for the python arm) — with retries, up to N such
+    /// orphans concurrently.
+    /// What: forces a real spawn via `embed_via` against the mock stdio
+    /// script (the same real spawn path the readiness probe drives),
+    /// captures the child PID, calls `handle.shutdown()`, and asserts the OS
+    /// process is actually gone and the PID slot is cleared.
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_shutdown_kills_spawned_child() {
+        let (_dir, binary) = write_mock_embedderd();
+        let handle = LazyEmbedderHandle::new(
+            binary,
+            SupervisorConfig {
+                startup_timeout_secs: 5,
+                idle_shutdown_secs: 0, // no watchdog racing this test
+                ..SupervisorConfig::default()
+            },
+        );
+
+        // Force a real spawn — mirrors the readiness-probe embed call the
+        // graceful-python orchestrator makes before deciding to hot-swap.
+        handle
+            .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
+            .await
+            .expect("mock embed_batch must succeed");
+
+        let pid = handle.app_pid_slot().load(Ordering::Acquire);
+        assert!(pid > 0, "pid slot must be populated after a real spawn");
+        assert!(process_alive(pid), "child must be alive right after spawn");
+
+        handle.shutdown().await;
+
+        assert!(
+            !process_alive(pid),
+            "child process {pid} must be gone after LazyEmbedderHandle::shutdown()"
+        );
+        assert_eq!(
+            handle.app_pid_slot().load(Ordering::Acquire),
+            0,
+            "pid slot must be cleared after shutdown()"
+        );
     }
 }

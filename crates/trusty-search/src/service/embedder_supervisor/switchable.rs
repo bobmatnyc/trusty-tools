@@ -201,6 +201,20 @@ impl SwitchableEmbedder {
     /// replaces both fields together, so it is the wrong tool here.
     /// What: reads the current [`ActiveBackend`], clones every field except
     /// `bootstrap`, and stores a fresh snapshot with `bootstrap` replaced.
+    ///
+    /// Concurrency note (code-critic LOW, epic #3524 slice 6 PR-3 review):
+    /// this is a non-atomic read-modify-write on `active` — `self.active()`
+    /// then `self.active.store(..)` — NOT a compare-and-swap. Two concurrent
+    /// callers (or a concurrent [`Self::swap_to`]) can race: the read in one
+    /// call may be stale by the time its store lands, silently clobbering
+    /// whatever the other caller/`swap_to` just wrote. Safe today ONLY
+    /// because the graceful-default orchestrator (PR-3) is the sole writer
+    /// of `bootstrap` transitions and never runs concurrently with itself
+    /// (one orchestrator task per daemon lifetime, swap-in only). PR-4
+    /// (swap-back-on-death) introduces a SECOND writer of `active` racing
+    /// this one — at that point this method must become a real CAS loop
+    /// (`ArcSwap::rcu` or a compare-and-swap retry) instead of a plain
+    /// load-then-store.
     /// Test: `set_bootstrap_state_leaves_inner_untouched`.
     pub fn set_bootstrap_state(&self, new_state: BootstrapState) {
         let current = self.active();
