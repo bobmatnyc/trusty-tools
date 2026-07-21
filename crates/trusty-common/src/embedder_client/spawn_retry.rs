@@ -5,10 +5,11 @@
 //! sharing this crate's usual per-module split (`error.rs`, `stdio.rs`, …)
 //! rather than a test-only `#[path]` trick.
 //!
-//! Test: exercised indirectly via `supervisor::tests::shutdown_tests::supervisor_dropped_handle_does_not_busy_spin`
-//! (#3570) and `supervisor::tests::supervisor_spawns_mock_child_and_embeds`,
-//! both of which drive `EmbedderSupervisor::spawn_stdio` -> `spawn_child` ->
-//! `spawn_embedderd`.
+//! Test: exercised indirectly via every test in
+//! `supervisor::tests::shutdown_tests` (all of which call
+//! `EmbedderSupervisor::spawn_stdio` -> `spawn_child` -> `spawn_embedderd`
+//! before exercising shutdown), especially
+//! `supervisor_dropped_handle_does_not_busy_spin` (#3570).
 
 use std::path::Path;
 use std::process::Stdio;
@@ -29,7 +30,7 @@ use super::supervisor::SupervisorConfig;
 /// `config.sidecar_batch_size` is `Some(n)`) `TRUSTY_EMBED_BATCH_SIZE=n`
 /// (issue #747 Fix C) — then delegates to `spawn_with_etxtbsy_retry`.
 /// Test: `supervisor_dropped_handle_does_not_busy_spin`,
-/// `supervisor_spawns_mock_child_and_embeds`.
+/// `supervisor_shutdown_kills_child`.
 pub(super) async fn spawn_embedderd(
     binary_path: &Path,
     config: &SupervisorConfig,
@@ -66,7 +67,7 @@ pub(super) async fn spawn_embedderd(
 /// other error, or the success path, returns immediately. The bound keeps real
 /// failures (missing binary, permission denied) from being masked or delayed.
 /// Test: `supervisor_dropped_handle_does_not_busy_spin`,
-/// `supervisor_spawns_mock_child_and_embeds`.
+/// `supervisor_shutdown_kills_child`.
 async fn spawn_with_etxtbsy_retry<F>(mut build: F) -> std::io::Result<Child>
 where
     F: FnMut() -> Command,
