@@ -27,6 +27,7 @@ pub mod manager;
 pub mod mcp_backend;
 pub mod mcp_bugreport;
 pub mod mcp_console;
+pub mod mcp_context;
 pub mod mcp_project;
 pub mod mcp_proxy;
 pub mod mcp_session;

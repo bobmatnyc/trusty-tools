@@ -13,13 +13,14 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 /// A single git commit surfaced by the catch-up system.
 ///
 /// Why: callers render this into a markdown digest for the operator.
 /// What: minimal commit metadata — sha, subject, author, and ISO timestamp.
 /// Test: `git_commits_since_returns_commits`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CommitSummary {
     /// The full commit SHA.
     pub sha: String,
@@ -132,6 +133,87 @@ fn parse_commit_line(line: &str) -> Option<CommitSummary> {
         author,
         ts,
     })
+}
+
+/// Point-in-time git state for a pause snapshot's `## Git Context` section
+/// (#3540-ish MCP session-context tools).
+///
+/// Why: `session_context_pause` needs the same branch/last-commit/status shape
+/// the bash-based `/tm-session-pause` skill used to gather via `git status` +
+/// `git log --oneline -1`, without shelling out from the PM. Grouping the three
+/// probes here keeps that concern next to the other git helpers.
+/// What: `branch` (`git rev-parse --abbrev-ref HEAD`), `last_commit`
+/// (`<short-sha> <subject>` from `git log -1`), and `uncommitted_summary` (a
+/// one-line count derived from `git status --porcelain`, or `"clean"` when
+/// empty). Every field is `None`/fail-open on any git error or non-repo dir.
+/// Test: `capture_git_status_reports_branch_and_clean`,
+/// `capture_git_status_reports_uncommitted`,
+/// `capture_git_status_nonrepo_is_all_none`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct GitStatusSnapshot {
+    /// The current branch name (`HEAD` in detached state), if resolvable.
+    pub branch: Option<String>,
+    /// `<short-sha> <subject>` of the most recent commit, if any.
+    pub last_commit: Option<String>,
+    /// A one-line uncommitted-changes summary: `"clean"` or `"N file(s)
+    /// changed"`. `None` only when `git status` itself could not be run.
+    pub uncommitted_summary: Option<String>,
+}
+
+/// Capture branch, last-commit, and uncommitted-status summary for `repo`.
+///
+/// Why: single fail-open entry point so `session_context_pause` never aborts a
+/// pause snapshot just because git is momentarily unhappy.
+/// What: runs three small `git` commands against `repo` and folds their output
+/// into a [`GitStatusSnapshot`]. Every probe degrades to `None` independently
+/// on error — a repo with commits but a `HEAD` resolution failure still
+/// reports `last_commit`/`uncommitted_summary`.
+/// Test: see the `tests` module below.
+pub fn capture_git_status(repo: &Path) -> GitStatusSnapshot {
+    let branch = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let last_commit = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["log", "-1", "--format=%h %s"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let uncommitted_summary = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            let count = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count();
+            if count == 0 {
+                "clean".to_string()
+            } else {
+                format!("{count} file(s) changed")
+            }
+        });
+
+    GitStatusSnapshot {
+        branch,
+        last_commit,
+        uncommitted_summary,
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +335,41 @@ mod tests {
         let c = parse_commit_line(line).unwrap();
         assert_eq!(c.sha, "abc1234");
         assert!(c.ts.is_none());
+    }
+
+    #[test]
+    fn capture_git_status_reports_branch_and_clean() {
+        let tmp = TempDir::new().unwrap();
+        init_repo_with_commits(&tmp);
+        let snap = capture_git_status(tmp.path());
+        assert!(snap.branch.is_some(), "branch should resolve: {snap:?}");
+        assert!(
+            snap.last_commit
+                .as_deref()
+                .is_some_and(|c| c.contains("second commit")),
+            "last_commit should show the most recent subject: {snap:?}"
+        );
+        assert_eq!(snap.uncommitted_summary.as_deref(), Some("clean"));
+    }
+
+    #[test]
+    fn capture_git_status_reports_uncommitted() {
+        let tmp = TempDir::new().unwrap();
+        init_repo_with_commits(&tmp);
+        std::fs::write(tmp.path().join("dirty.txt"), b"dirty").unwrap();
+        let snap = capture_git_status(tmp.path());
+        assert_eq!(
+            snap.uncommitted_summary.as_deref(),
+            Some("1 file(s) changed")
+        );
+    }
+
+    #[test]
+    fn capture_git_status_nonrepo_is_all_none() {
+        let tmp = TempDir::new().unwrap();
+        let snap = capture_git_status(tmp.path());
+        assert!(snap.branch.is_none());
+        assert!(snap.last_commit.is_none());
+        assert!(snap.uncommitted_summary.is_none());
     }
 }

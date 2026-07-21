@@ -354,6 +354,44 @@ impl OrchestratorBackend for StateBackend {
         super::mcp_session::session_send(&self.state, session_id, text).await
     }
 
+    // ── PM pause/resume context tools (delegate to mcp_context) ──────────────
+
+    async fn session_context_catchup(
+        &self,
+        project_dir: &str,
+        session_id: Option<&str>,
+        all_projects: bool,
+        full: bool,
+    ) -> Result<Value, String> {
+        super::mcp_context::session_context_catchup(project_dir, session_id, all_projects, full)
+            .await
+    }
+
+    async fn session_context_pause(
+        &self,
+        project_dir: &str,
+        session_id: &str,
+        summary: &str,
+        completed: Vec<String>,
+        in_progress: Vec<String>,
+        next_steps: Vec<String>,
+        tmux_window: Option<&str>,
+        prune_worktrees: bool,
+    ) -> Result<Value, String> {
+        super::mcp_context::session_context_pause(
+            &self.state,
+            project_dir,
+            session_id,
+            summary,
+            completed,
+            in_progress,
+            next_steps,
+            tmux_window,
+            prune_worktrees,
+        )
+        .await
+    }
+
     // ── #1508: fleet-wide teardown tools (delegate to mcp_session) ───────────
 
     async fn session_decommission_ephemeral(&self) -> Result<Value, String> {

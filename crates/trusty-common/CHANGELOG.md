@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`catchup::generate_catchup_json` + `catchup::pause` module** ([#3543](https://github.com/bobmatnyc/trusty-tools/issues/3543)): a structured (JSON) sibling to `generate_catchup_context`'s markdown digest (`CatchupJson`/`PausedSessionJson`/`RecentMemoryJson`), plus a new `pause::write_pause_snapshot` writer that emits the exact session-snapshot section shape `session_finder` already parses, and a `git::capture_git_status` helper (branch/last-commit/uncommitted-summary) for its `## Git Context` section. Backs trusty-mpm's new `session_context_catchup` / `session_context_pause` MCP tools.
+
 ## [0.23.6] — 2026-07-20
 
 Release cut of the two embedding-performance fixes below

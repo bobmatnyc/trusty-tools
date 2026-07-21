@@ -111,6 +111,51 @@ impl OrchestratorBackend for MockBackend {
         Ok(json!({ "id": session_id, "sent": true, "text": text }))
     }
 
+    // ── PM pause/resume context mock impls ───────────────────────────────────
+    async fn session_context_catchup(
+        &self,
+        project_dir: &str,
+        session_id: Option<&str>,
+        all_projects: bool,
+        full: bool,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "sessions": [],
+            "recent_commits": [],
+            "recent_memory": [],
+            "resolved_snapshot": null,
+            "watermark_advanced": false,
+            "project_dir": project_dir,
+            "session_id": session_id,
+            "all_projects": all_projects,
+            "full": full,
+        }))
+    }
+    async fn session_context_pause(
+        &self,
+        project_dir: &str,
+        session_id: &str,
+        summary: &str,
+        completed: Vec<String>,
+        in_progress: Vec<String>,
+        next_steps: Vec<String>,
+        tmux_window: Option<&str>,
+        prune_worktrees: bool,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "snapshot_path": format!("{project_dir}/.trusty-mpm/sessions/session-mock.md"),
+            "timestamp": "2026-07-20T00:00:00Z",
+            "pruned_worktrees": [],
+            "session_id": session_id,
+            "summary": summary,
+            "completed": completed,
+            "in_progress": in_progress,
+            "next_steps": next_steps,
+            "tmux_window": tmux_window,
+            "prune_worktrees": prune_worktrees,
+        }))
+    }
+
     // ── #1508: fleet-wide teardown mock impls ────────────────────────────────
     async fn session_decommission_ephemeral(&self) -> Result<Value, String> {
         Ok(json!({ "decommissioned": 3 }))
@@ -325,10 +370,12 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 core + 9 session-lifecycle + 5 console + 4 project + 4 proxy = 31
+    // 9 core + 11 session-lifecycle + 5 console + 4 project + 4 proxy = 33
     // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools
     // + #2012 session_delete + the three #1519 project-registry tools + #1517
-    // WI-5 project_resolve + the four #2550 session-manager proxy tools).
+    // WI-5 project_resolve + the four #2550 session-manager proxy tools + the
+    // two PM pause/resume context tools `session_context_catchup` /
+    // `session_context_pause`).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -337,7 +384,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 31);
+    assert_eq!(tools.as_array().unwrap().len(), 33);
 }
 
 /// Why: the console Config tab calls `config_read`; dispatch must route it and
@@ -761,6 +808,91 @@ async fn dispatch_session_send_requires_text() {
             .as_str()
             .unwrap()
             .contains("text")
+    );
+}
+
+/// Why: `session_context_catchup` requires `project_dir` — the stdio bridge
+/// forwards no cwd, so a missing `project_dir` must be a clear dispatch-level
+/// error, not a downstream panic.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_context_catchup_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_context_catchup",
+            json!({ "project_dir": "/tmp/proj", "full": true }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("watermark_advanced")
+    );
+}
+
+#[tokio::test]
+async fn dispatch_session_context_catchup_requires_project_dir() {
+    let resp = dispatch(&MockBackend, call("session_context_catchup", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("project_dir")
+    );
+}
+
+/// Why: `session_context_pause` requires `project_dir`/`session_id`/`summary`;
+/// the optional bullet-list sections and `prune_worktrees` must round-trip
+/// through dispatch to the backend.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_context_pause_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_context_pause",
+            json!({
+                "project_dir": "/tmp/proj",
+                "session_id": "s1",
+                "summary": "Did the thing.",
+                "next_steps": ["ship it"],
+                "prune_worktrees": false,
+            }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("snapshot_path"));
+    assert!(text.contains("ship it"));
+    assert!(text.contains("\"prune_worktrees\":false"));
+}
+
+#[tokio::test]
+async fn dispatch_session_context_pause_requires_summary() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_context_pause",
+            json!({ "project_dir": "/tmp/proj", "session_id": "s1" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("summary")
     );
 }
 

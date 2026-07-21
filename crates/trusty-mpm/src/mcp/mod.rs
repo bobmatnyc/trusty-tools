@@ -7,11 +7,16 @@
 //! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the fifteen MCP tools — nine orchestration/bug-reporting (six
-//! core + three bug-reporting: `list_recent_errors`, `preview_bug_report`,
-//! `report_bug`) plus six session-lifecycle tools (#1221: `session_new`,
-//! `session_stop`, `session_resume`, `session_decommission`, `session_activity`,
-//! `session_send`) — the [`OrchestratorBackend`] trait the daemon implements to
+//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-three
+//! tools) — nine orchestration/bug-reporting (six core + three bug-reporting:
+//! `list_recent_errors`, `preview_bug_report`, `report_bug`), eleven
+//! session-lifecycle tools (#1221: `session_new`, `session_stop`,
+//! `session_resume`, `session_decommission`, `session_activity`, `session_send`,
+//! plus the PM pause/resume context tools `session_context_catchup` +
+//! `session_context_pause` — a DIFFERENT concept from managed-sub-session
+//! lifecycle, kept in the same tool group for file-count reasons only), five
+//! console-facing tools, four project-registry tools, and four session-manager
+//! proxy tools — the [`OrchestratorBackend`] trait the daemon implements to
 //! service them, and [`dispatch`], which routes a JSON-RPC [`Request`] to the
 //! backend. The daemon wires [`dispatch`] into both `run_stdio_loop` (the `tm
 //! daemon --mcp` path) and the loopback `POST /rpc` endpoint (the `serve
@@ -209,6 +214,59 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       confirmation with the tmux name. A missing id is an error string.
     /// Test: `dispatch_session_send_tool` (mock).
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String>;
+
+    // ── PM pause/resume context tools (DIFFERENT concept from the managed
+    // sub-session lifecycle above — these operate on the CALLING PM session's
+    // own project-local snapshot/catch-up state, not a spawned sub-session) ──
+
+    /// Back `session_context_catchup`: a structured (JSON) resume digest.
+    ///
+    /// Why: `/tm-session-resume` used to shell out to `tm session catchup` +
+    ///      `git log`/`git status` + snapshot-file reads to rebuild PM context;
+    ///      this is the same three-source digest (paused sessions, git commits,
+    ///      palace drawers) as typed JSON instead of scraped text. `project_dir`
+    ///      is required because the `serve --stdio` bridge forwards no cwd/env —
+    ///      the daemon cannot infer it.
+    /// What: returns `{ sessions, recent_commits, recent_memory,
+    ///       resolved_snapshot, watermark_advanced }`. This is a manual PEEK —
+    ///       it NEVER advances the incremental-catchup watermark (only
+    ///       automatic session-start injection does), so `watermark_advanced`
+    ///       is always `false` and repeated calls are always safe.
+    /// Test: `dispatch_session_context_catchup_tool` (mock).
+    async fn session_context_catchup(
+        &self,
+        project_dir: &str,
+        session_id: Option<&str>,
+        all_projects: bool,
+        full: bool,
+    ) -> Result<Value, String>;
+
+    /// Back `session_context_pause`: write a pause snapshot + prune worktrees.
+    ///
+    /// Why: `/tm-session-pause` used to shell out to write the
+    ///      `session-*.md` snapshot and append the pause log line by hand; this
+    ///      replaces that bash plumbing with an in-process writer that emits the
+    ///      EXACT section shape the catch-up reader already parses.
+    /// What: writes `<project_dir>/.trusty-mpm/sessions/session-<ts>.md`,
+    ///       appends a `pause` line to `sessions-log.jsonl`, and — unless
+    ///       `prune_worktrees` is `false` — prunes orphaned managed-session git
+    ///       worktrees in-process (the same engine `tm session prune-worktrees`
+    ///       uses, called directly rather than looped back over HTTP). Returns
+    ///       `{ snapshot_path, timestamp, pruned_worktrees }`. Never touches
+    ///       tmux — window realignment on resume stays a PM-side bash step.
+    /// Test: `dispatch_session_context_pause_tool` (mock).
+    #[allow(clippy::too_many_arguments)]
+    async fn session_context_pause(
+        &self,
+        project_dir: &str,
+        session_id: &str,
+        summary: &str,
+        completed: Vec<String>,
+        in_progress: Vec<String>,
+        next_steps: Vec<String>,
+        tmux_window: Option<&str>,
+        prune_worktrees: bool,
+    ) -> Result<Value, String>;
 
     // ── #1508: fleet-wide teardown tools ─────────────────────────────────────
 

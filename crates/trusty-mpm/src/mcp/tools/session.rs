@@ -8,12 +8,15 @@
 //! existing [`crate::session_manager::SessionManager`] lifecycle ops that the
 //! HTTP `…/managed/*` routes already use, so the behaviour is identical across
 //! transports.
-//! What: [`session_tools`] returns the nine `{ name, description, inputSchema }`
+//! What: [`session_tools`] returns the eleven `{ name, description, inputSchema }`
 //! descriptors — `session_new`, `session_stop`, `session_resume`,
 //! `session_decommission`, `session_delete` (#2012), `session_activity`,
-//! `session_send`, and the #1508 fleet-wide `session_decommission_ephemeral` +
-//! `session_prune`. The shared [`tool`] builder is re-exported from the parent
-//! module.
+//! `session_send`, the #1508 fleet-wide `session_decommission_ephemeral` +
+//! `session_prune`, and the PM pause/resume context tools
+//! `session_context_catchup` + `session_context_pause` (replace the bash
+//! `tm session catchup` / git / snapshot-file plumbing the `/tm-session-pause`
+//! and `/tm-session-resume` skills used to shell out to). The shared [`tool`]
+//! builder is re-exported from the parent module.
 //! Test: `cargo test -p trusty-mpm` (in [`super`]) asserts the full catalog is
 //! well-formed and that each of these names is present.
 
@@ -21,7 +24,7 @@ use serde_json::{Value, json};
 
 use super::tool;
 
-/// Build the nine session-lifecycle tool descriptors.
+/// Build the eleven session-lifecycle tool descriptors.
 ///
 /// Why: spawning, stopping, resuming, decommissioning, hard-deleting,
 /// observing, and driving a managed session are the operations the driver
@@ -30,14 +33,22 @@ use super::tool;
 /// throwaway test sessions and purge legacy tombstones without scraping the
 /// CLI; #2012 adds `session_delete` — a single-record hard-delete distinct
 /// from `session_decommission` (which stops the runtime and may remove the
-/// workspace but always leaves a tombstone). Keeping them in their own builder
-/// keeps `tools/core.rs` and this file each well under the 500-SLOC cap.
-/// What: returns the nine descriptors in catalog order. `session_new` takes the
+/// workspace but always leaves a tombstone). The PM pause/resume context tools
+/// (`session_context_catchup`, `session_context_pause`) are a DIFFERENT
+/// concept — PM session snapshot/digest, not managed-sub-session lifecycle —
+/// kept here anyway to avoid a third tool-group file for two tools. Keeping
+/// them in their own builder keeps `tools/core.rs` and this file each well
+/// under the 500-SLOC cap.
+/// What: returns the eleven descriptors in catalog order. `session_new` takes the
 /// repo/ref/task spawn inputs (plus optional `ephemeral`); the per-session tools
 /// take a `session_id` (`session_delete` also takes optional `force`);
-/// `session_decommission_ephemeral` takes no args; and `session_prune` takes a
-/// `state` filter plus `dry_run`/`include_active`. Every schema sets
-/// `additionalProperties: false` so the driver gets a clear error on a typo.
+/// `session_decommission_ephemeral` takes no args; `session_prune` takes a
+/// `state` filter plus `dry_run`/`include_active`; `session_context_catchup`
+/// takes a required `project_dir` plus optional `session_id`/`all_projects`/
+/// `full`; `session_context_pause` takes required `project_dir`/`session_id`/
+/// `summary` plus optional bullet-list sections, `tmux_window`, and
+/// `prune_worktrees`. Every schema sets `additionalProperties: false` so the
+/// driver gets a clear error on a typo.
 /// Test: `super::tests::session_tools_present`,
 /// `super::tests::catalog_names_match_constant`.
 pub(super) fn session_tools() -> Vec<Value> {
@@ -249,6 +260,94 @@ pub(super) fn session_tools() -> Vec<Value> {
                     }
                 },
                 "required": ["state"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "session_context_catchup",
+            "Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: \
+             paused sessions (native trusty-mpm + legacy claude-mpm formats), \
+             recent git commits, and recent memory-palace activity — the same \
+             three sources `tm session catchup` renders as markdown, restructured \
+             as typed fields. This is a manual PEEK: it NEVER advances the \
+             incremental-catchup watermark (only automatic session-start \
+             injection does that), so calling it repeatedly is always safe and \
+             `watermark_advanced` in the result is always `false`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_dir": {
+                        "type": "string",
+                        "description": "Absolute path to the project directory to scan. Required — the stdio bridge forwards no cwd, so the daemon cannot infer it."
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session id used only to resolve `resolved_snapshot` (the snapshot this specific session would resume from)."
+                    },
+                    "all_projects": {
+                        "type": "boolean",
+                        "description": "Also scan every project in the legacy claude-mpm registry, merging their sessions/commits/memory into the same arrays. Defaults to false (project_dir only)."
+                    },
+                    "full": {
+                        "type": "boolean",
+                        "description": "Ignore the watermark and return full history instead of just activity since the last catch-up. Defaults to false."
+                    }
+                },
+                "required": ["project_dir"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "session_context_pause",
+            "Write a session-pause snapshot for `project_dir`: a \
+             `session-YYYYMMDD-HHMMSS.md` file in the SAME section format the \
+             catch-up reader already parses (`## Summary` / `## Completed` / \
+             `## In Progress` / `## Next Steps` / `## Git Context` / \
+             `## Tmux Window`), plus an appended `pause` line in the \
+             append-only `sessions-log.jsonl`. Also prunes orphaned managed-session \
+             git worktrees in-process (same engine as `tm session prune-worktrees`) \
+             unless `prune_worktrees` is set to `false`. Does NOT touch tmux — \
+             window realignment on resume stays a PM-side `tmux select-window` step.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project_dir": {
+                        "type": "string",
+                        "description": "Absolute path to the project directory to snapshot."
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Stable id for the originating session; keys the append-only pause-log entry."
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "The `## Summary` section body — required, human-readable current-state prose."
+                    },
+                    "completed": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Bullet items for the `## Completed` section. Omitted entirely from the file when empty."
+                    },
+                    "in_progress": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Bullet items for the `## In Progress` section. Omitted entirely from the file when empty."
+                    },
+                    "next_steps": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Bullet items for the `## Next Steps` section. Omitted entirely from the file when empty."
+                    },
+                    "tmux_window": {
+                        "type": "string",
+                        "description": "`session_name:window_index:window_id` captured via `tmux display-message`, when inside tmux. Omitted entirely from the file when absent."
+                    },
+                    "prune_worktrees": {
+                        "type": "boolean",
+                        "description": "Also prune orphaned managed-session git worktree directories as part of pause wrap-up. Defaults to true."
+                    }
+                },
+                "required": ["project_dir", "session_id", "summary"],
                 "additionalProperties": false
             }),
         ),
