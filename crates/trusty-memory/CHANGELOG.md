@@ -12,7 +12,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Add crates.io package metadata (keywords/categories/homepage/readme).
 
-## [Unreleased]
+## [0.20.0] — 2026-07-21
 
 ### Changed
 
