@@ -10,17 +10,14 @@
 # `crate::agents::extends::merge_extends` — do not re-list tools/skills
 # already granted by the base.
 #
-# KNOWN LIMITATION: `merge_extends` inherits `[llm]` (temperature/max_tokens/
-# ...) WHOLESALE from the base — a child's `[llm]` block below is currently
-# NOT applied (see `crates/trusty-agents/src/agents/extends/mod.rs`,
-# "Inherited-from-base-wholesale bundles"). That means the #469 max_tokens
-# bump (1024 → 4096, to stop GFA reports/org tables from truncating) and the
-# lower temperature (0.3, for factual precision) are NOT currently in effect
-# post-`extends` — CTO Assistant runs at the base's conversational defaults
-# (temperature 0.7, max_tokens 1024) until a follow-up adds explicit child
-# `[llm]` override support to the extends resolver (a deliberate schema
-# addition, not a heuristic — see the same file). The block is kept below,
-# accurate to intent, so the follow-up has nothing to re-derive.
+# `[llm]` below declares ONLY `temperature`/`max_tokens` (the tuned deltas)
+# — these two fields use PER-KEY extends inheritance (`merge_extends`,
+# `crates/trusty-agents/src/agents/extends/mod.rs`): a declared value
+# overrides the base's, an omitted one inherits it. Every OTHER `[llm]`
+# field (`use_anthropic_direct`, `stop_sequences`, ...) is intentionally
+# NOT re-declared here — it's inherited from the base wholesale regardless
+# (unchanged pre-existing behavior), and the base's values already match
+# what this agent previously declared for those fields, so nothing is lost.
 
 [agent]
 name = "cto-assistant"
@@ -36,20 +33,12 @@ display_name = "CTO Assistant"
 prompt_label = "cto"
 
 [llm]
-# NOT CURRENTLY APPLIED post-`extends` — see the KNOWN LIMITATION note above.
+# #295: lower temperature than the base's 0.7 — factual precision for org
+# data / Duetto-specific answers over conversational warmth.
 temperature = 0.3
-# #295: Conversational assistant — short replies by default.
-# #469: Bumped from 1024 to 4096 to leave room for GFA reports and structured
-# org data tables which were getting truncated.
+# #469: Bumped from the base's 1024 to 4096 to leave room for GFA reports and
+# structured org data tables which were getting truncated.
 max_tokens = 4096
-use_anthropic_direct = false
-# Conversational mode (#feature-A): block markdown headers and divider rules
-# from appearing mid-response so replies stay in plain prose. Structured
-# outputs (tables, source-notes blocks) are still allowed when the user
-# explicitly requests them — those use distinct prefixes.
-stop_sequences = ["\n##", "\n* * *"]
-# Note: "\n---\n" intentionally excluded — qwen3 uses HR dividers naturally in
-# conversational output; including it caused mid-sentence truncation (#eval-qwen3)
 
 [tools]
 # CTO-specific DELTAS only — the base `assistant` already grants git_log,

@@ -30,12 +30,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   is refactored from a hand-forked full copy (`role = "assistant"`, no
   `extends`) to `extends = "assistant"`, keeping only its Duetto-specific
   deltas (CTO ops DB tools, ticketing, extra git tools, org/APEX/voice
-  skills) — it now also inherits the base's black-box posture and full
-  gworkspace surface. KNOWN LIMITATION: the `extends` resolver inherits
-  `[llm]` (temperature/max_tokens) wholesale from the base, so
-  `cto-assistant`'s #469 max_tokens bump (1024 → 4096, for untruncated GFA
-  reports) and lower temperature (0.3) are not currently applied post-merge;
-  flagged as a follow-up (see `crates/trusty-agents/src/agents/extends/mod.rs`).
+  skills, and its tuned `[llm]` sampling — see below) — it now also inherits
+  the base's black-box posture and full gworkspace surface.
+
+- **Per-key `[llm]` `extends` inheritance for `temperature`/`max_tokens`:**
+  `crate::agents::extends::merge_extends` previously inherited the entire
+  `[llm]` block wholesale from the base, discarding a child's declared
+  `temperature`/`max_tokens` even when explicitly set — a live regression
+  for `cto-assistant`'s conversion above (its #469 max_tokens bump, 1024 →
+  4096, for untruncated GFA reports/org tables, and its lower temperature,
+  0.3, for factual precision, would otherwise have silently reverted to the
+  base's conversational defaults). `temperature`/`max_tokens` are now the
+  only two `[llm]` fields resolved per-key: a child that declares one
+  overrides the base's, one it omits inherits the base's. This is enabled by
+  a new UNSET-sentinel serde default (`LlmParams::temperature`/`max_tokens`
+  — `NaN` / `u32::MAX`, never a realistic real-world value) plus a new
+  `AgentConfig::validate_llm_required_for_root` parse-time guard: a root
+  (non-`extends`) agent TOML must still declare real values (restoring the
+  fail-fast guarantee the old serde-mandatory-field requirement gave), while
+  an `extends` child may now legitimately omit either or both to inherit the
+  base's. `.md`-format `extends` children (which have no frontmatter path to
+  declare `temperature`/`max_tokens` at all) now correctly inherit the
+  base's values too, instead of always resolving to the `parse_md_agent`
+  stub defaults (0.2 / 8192) regardless of the base. Every other `[llm]`
+  field (`use_anthropic_direct`, `stop_sequences`, `max_turns`, ...) keeps
+  the pre-existing inherited-from-base-wholesale behavior — this is a
+  narrow, deliberate schema addition scoped to the two fields with no serde
+  default, not a general per-key `[llm]` merge. New tests:
+  `extends_llm_child_overrides_temperature_only`,
+  `extends_llm_child_overrides_max_tokens_only`,
+  `extends_llm_child_inherits_when_omitted`
+  (`crates/trusty-agents/src/agents/extends/tests.rs`),
+  `llm_required_fields_missing_on_root_agent_is_rejected`,
+  `llm_omitted_fields_allowed_on_extends_child`, and
+  `assistant_tier_llm_sampling_params_pin_per_key_extends_inheritance`
+  (`crates/trusty-agents/src/agents/tests/loading.rs`) — the last one pins
+  `cto-assistant` resolving to `(0.3, 4096)` and `assistant`/`izzie`
+  resolving to their unchanged `(0.7, 1024)`.
 
 ### Security
 
