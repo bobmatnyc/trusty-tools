@@ -101,9 +101,19 @@ fn is_managed_session_branch(branch: &str) -> bool {
 /// Why: `statusline` is on Claude Code's hot render path; a stuck credential
 /// helper, network filesystem, or git hook would otherwise block every render
 /// cycle. The bounded thread + `recv_timeout` pattern matches
-/// [`super::compaction::compaction_segment`].
-/// What: spawns a detached thread that calls `git rev-parse`, sends the result
-/// over an mpsc channel; the caller waits ≤100 ms, returns `None` on timeout.
+/// [`super::compaction::compaction_segment`]. Spawns via
+/// [`trusty_mpm::core::spawn_disclaim::disclaimed_output`] (issue #3580) rather than
+/// a raw `Command::new("git")`: this runs on EVERY prompt render, so — of the
+/// three sites #3580 fixes — it is the highest-frequency undisclaimed spawn in
+/// the crate, making the signed `trusty-mpm` binary TCC's misattributed
+/// "responsible process" for a git child on every single render.
+/// What: spawns a detached thread that calls `git rev-parse` through
+/// `disclaimed_output`, sends the result over an mpsc channel; the caller waits
+/// ≤100 ms, returns `None` on timeout. `disclaimed_output` mirrors
+/// `Command::new(program).args(args).output()` exactly (same captured
+/// stdout/stderr, same success/failure semantics) — on macOS it just spawns via
+/// `posix_spawnp` with the TCC disclaim attribute set instead of `std`'s
+/// internal spawn path; on non-macOS (no TCC) it IS `Command::output()`.
 /// Test: `render_statusline_full_payload` (in `mod.rs`) exercises the detected
 /// branch path; covered here via [`select_branch_label`]'s fallback tests.
 fn git_branch(cwd: &str) -> Option<String> {
@@ -114,12 +124,14 @@ fn git_branch(cwd: &str) -> Option<String> {
     let (tx, rx) = mpsc::channel::<Option<String>>();
     std::thread::spawn(move || {
         let result = (|| -> Option<String> {
-            let out = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&cwd)
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .output()
-                .ok()?;
+            let args = [
+                "-C".to_string(),
+                cwd.clone(),
+                "rev-parse".to_string(),
+                "--abbrev-ref".to_string(),
+                "HEAD".to_string(),
+            ];
+            let out = trusty_mpm::core::spawn_disclaim::disclaimed_output("git", &args).ok()?;
             if !out.status.success() {
                 return None;
             }
