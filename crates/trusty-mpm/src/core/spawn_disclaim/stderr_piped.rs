@@ -29,6 +29,13 @@
 use std::io::Read;
 use std::process::{Command, ExitStatus, Stdio};
 
+// Used by the `#[cfg(target_os = "macos")]` branch in
+// `disclaimed_stderr_piped_spawn` below AND by both test submodules'
+// `TM_DISABLE_SPAWN_DISCLAIM` toggles — but NOT by a plain, non-test,
+// non-macOS `--lib` build, where it would otherwise be a genuine unused
+// import (issue caught by CI's Linux `Clippy` job: neither the macOS cfg
+// branch nor `#[cfg(test)]` is active there).
+#[cfg(any(target_os = "macos", test))]
 use super::DISABLE_ENV;
 #[cfg(target_os = "macos")]
 use super::macos;
