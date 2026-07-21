@@ -196,7 +196,7 @@ async fn get_transcript_markdown(
 /// call as its own ``- `ROLE` ran: <tool>`` bullet, a ``ran the test command``
 /// note when flagged, and `_(no output)_` for a turn with neither. Roles are
 /// upper-cased to match the live GUI pane's styling and the issue's example.
-/// Test: `tests::render_transcript_markdown_*`.
+/// Test: `tests::get_transcript_markdown_*`.
 fn render_transcript_markdown(
     session: &Session,
     record: &TranscriptRecord,

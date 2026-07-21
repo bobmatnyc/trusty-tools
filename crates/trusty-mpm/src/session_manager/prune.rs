@@ -230,7 +230,7 @@ impl PruneOutcome {
 /// `delete_record_refuses_running_without_force` (live session still
 /// guarded), `delete_record_stale_active_deletable_when_tmux_dead` (#2022 —
 /// stale `Active` with a dead tmux is deletable without `--force`),
-/// `prune_stale_active_removable_without_force` (#2022 — same for
+/// `prune_stale_active_removable_without_force_*` (#2022 — same for
 /// `prune_managed`).
 pub(super) fn is_running(record: &SessionRecord, tmux: &dyn ManagedTmuxDriver) -> bool {
     tmux.session_exists(&record.tmux_name)

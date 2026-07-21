@@ -64,8 +64,8 @@ pub enum EdgeKindError {
 /// `trusty_search::core::symbol_graph::edge_tags`.
 ///
 /// Test: `edge_kind_score_multiplier_known_values` (this file);
-/// `edge_kind_serde_round_trip`; `edge_kind_union_coverage`;
-/// `edge_kind_tag_round_trip` in `trusty_search::core::symbol_graph::tests`.
+/// `edge_kind_serde_round_trip`; `edge_kind_union_coverage`; and
+/// trusty_search's `core::symbol_graph::tests::edge_kind_tag_round_trip`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
     // ── trusty-search KG (Phase A/B/C — 16 variants) ──────────────────────

@@ -707,7 +707,7 @@ impl crate::core::Embedder for RemoteEmbedderAdapter {
     /// parent can predict the same answer and `/health` reports the real
     /// provider instead of the trait-default `CPU`.
     /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
-    /// Test: `resolve_expected_provider_*` in trusty-common cover the resolver;
+    /// Test: covered by trusty-common's `resolve_expected_provider_*` tests;
     /// real-GPU end-to-end is hardware-gated.
     fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
         trusty_common::embedder::resolve_expected_provider()

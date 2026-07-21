@@ -15,7 +15,7 @@
 //! `call_tool_batch` packs requests into a JSON-RPC 2.0 Batch array
 //! written as one line. Optional `transport.max_concurrency` is honored
 //! via a permit semaphore; `transport.timeout_ms` bounds each request.
-//! Test: `extract_rpc_result_*` cover envelope parsing; `new_*` cover
+//! Test: `extract_result_*` cover envelope parsing; `new_*` cover
 //! spawn-time validation; the ignored unix tests round-trip a real
 //! sh-script "echo server" through stdin/stdout to verify the full wire
 //! flow without depending on a real OpenRPC server binary.

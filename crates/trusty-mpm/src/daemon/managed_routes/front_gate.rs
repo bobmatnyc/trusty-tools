@@ -359,7 +359,7 @@ pub enum EscalationSource {
 /// escalate, since the tier engine is the established safety authority, and
 /// tagging the source `Autonomy` in that case); `AutoAccept` (tagged `Neither`)
 /// only when BOTH auto-accept.
-/// Test: `tests::stricter_wins_*`, `tests::run_*_proposed_default_*`.
+/// Test: `tests::stricter_wins_*`, `tests::run_*_proposes_default`.
 #[must_use]
 pub fn stricter_of_with_source(
     conformance: Disposition,

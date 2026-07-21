@@ -897,3 +897,70 @@ crates/trusty-search/src/service/walker.rs	test_default_excludes_markdown_and_ch
 crates/trusty-search/src/service/walker.rs	test_include_docs_keeps_markdown
 crates/trusty-search/src/service/warm_boot/probe.rs	probe_timeout_increments_leaked_thread_count
 crates/trusty-search/src/service/warm_boot/probe.rs	probe_volume_inaccessible_fast_timeout
+#
+# Added 2026-07-21 (issue #3581): the check_test_pointers.sh parser had two
+# blind spots — glob-shaped citations (`foo_*`) were silently dropped by the
+# candidate filter instead of being resolved, and a `(parenthetical)` aside
+# right after a citation broke the leading-run scan before any later
+# citations in the same annotation were ever examined. Fixing both blind
+# spots surfaced 53 previously-invisible genuine dangling pointers below —
+# pre-existing drift the gate could never see, not new regressions. Each was
+# individually verified (no near-match test exists anywhere in the citing
+# crate, or the near-match is a different function's tests) before being
+# grandfathered here; several sibling pointers found in the same sweep were
+# fixed directly in the doc comment instead (renamed to the real test name,
+# corrected to a resolving glob, or reworded so a legitimate cross-crate
+# citation is no longer a bare backtick span) and are NOT in this list.
+crates/trusty-agents/src/agents/config.rs	build_safe_registry_with_ast_native
+crates/trusty-agents/src/api/server/project_registration.rs	connect_project_creates_tm_config_when_adapter_supplied
+crates/trusty-agents/src/api/server/state.rs	docs_search_*
+crates/trusty-agents/src/identity/mod.rs	caller_identity_from_env_*
+crates/trusty-agents/src/repl/tui/pickers.rs	detect_choices_*
+crates/trusty-agents/src/repl/tui/types.rs	inline_choice_picker_*
+crates/trusty-analyze/src/commands/port.rs	parse_port_from_addr_*
+crates/trusty-analyze/src/service/handlers/analysis.rs	smells_omit_content_*
+crates/trusty-analyze/src/service/handlers/analysis.rs	diagnostics_pagination_*
+crates/trusty-code/src/agent_loop/transcript.rs	compact_span_tagged_*
+crates/trusty-code/src/identity/mod.rs	caller_identity_from_env_*
+crates/trusty-code/src/skills/frontmatter.rs	parse_kv_line_*
+crates/trusty-common/src/chat/bedrock_impl.rs	bedrock_provider_new_uses_region
+crates/trusty-common/src/embedder_client/stdio.rs	decode_response_*
+crates/trusty-common/src/intent_source/backend_fetcher.rs	backend_fetcher_token_*
+crates/trusty-common/src/intent_source/linkage.rs	linkage_pr_*
+crates/trusty-common/src/intent_source/resolve.rs	linkage_pr_*
+crates/trusty-common/src/intent_source/resolve.rs	ticket_query_*
+crates/trusty-common/src/intent_source/resolve.rs	precedence_*
+crates/trusty-common/src/intent_source/resolve.rs	precedence_agree_*
+crates/trusty-common/src/intent_source/spec_resolve.rs	spec_resolve_section_*
+crates/trusty-common/src/intent_source/types.rs	pr_query_*
+crates/trusty-common/src/intent_source/types.rs	precedence_*
+crates/trusty-common/src/intent_source/types.rs	ticket_query_*
+crates/trusty-common/src/symgraph/contracts/edge_kind.rs	edge_kind_custom_survives_warm_boot
+crates/trusty-common/src/update/mod.rs	cache_freshness_*
+crates/trusty-git-analytics/src/commands/incidents/mod.rs	parse_datadog_value_*
+crates/trusty-gworkspace/src/api/services/calendar.rs	build_event_body_attendees_*
+crates/trusty-memory/src/commands/port.rs	parse_port_from_addr_*
+crates/trusty-memory/src/prompt_facts.rs	get_prompt_context_filters_by_query
+crates/trusty-memory/src/tools/memory_ops.rs	dispatch_memory_list_*
+crates/trusty-memory/src/tools/memory_ops.rs	dispatch_memory_recall_all_*
+crates/trusty-memory/src/tools/palace_ops.rs	dispatch_palace_delete_*
+crates/trusty-memory/src/tools/palace_ops.rs	dispatch_palace_update_*
+crates/trusty-mpm/src/bin/tm/cli/actions/session.rs	cli_parses_session_ls_terms_*
+crates/trusty-mpm/src/bin/tm/commands/picker_delete.rs	confirm_line_*
+crates/trusty-mpm/src/bin/tm/commands/watch/args.rs	looks_like_owner_repo_*
+crates/trusty-mpm/src/core/standalone/registry.rs	test_atomic_save_tmp_cleaned_on_rename_failure
+crates/trusty-mpm/src/daemon/managed_routes/front_gate.rs	production_gate_*
+crates/trusty-mpm/src/daemon/orphan_gc.rs	process_tree_probe_self_has_no_managed_child
+crates/trusty-mpm/src/daemon/state/sessions.rs	gather_tracked_names_degraded_on_store_error
+crates/trusty-mpm/src/tui/project_ctl/state/mod.rs	activity_failure_streak_*
+crates/trusty-review/src/commands/port.rs	parse_port_from_addr_*
+crates/trusty-review/src/config/mapreduce.rs	select_review_mode_*
+crates/trusty-search/src/commands/index_cwd_resolve.rs	cwd_resolve_matches_*
+crates/trusty-search/src/commands/port.rs	parse_port_from_addr_*
+crates/trusty-search/src/core/search/hierarchy.rs	hierarchy_from_root_paths_*
+crates/trusty-search/src/core/store_config.rs	mmap_serve_mode_from_env_*
+crates/trusty-search/src/core/store_config.rs	vector_quant_from_env_*
+crates/trusty-search/src/service/lazy_loader/mod.rs	select_warmboot_entries_*
+crates/trusty-search/src/service/lazy_loader/store.rs	select_warmboot_entries_*
+crates/trusty-search/src/service/reindex/runner.rs	interactive_reindex_not_starved_by_background
+crates/trusty-search/src/service/warm_boot/mod.rs	warm_boot_canonicalize_best_effort_*

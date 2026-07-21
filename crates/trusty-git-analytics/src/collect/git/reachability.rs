@@ -543,7 +543,7 @@ fn resolve_ref_to_commit(repo: &Repository, refname: &str) -> Option<git2::Oid> 
 /// with the prefix and ends with the suffix.  Multiple `*` are treated as a
 /// single wildcard spanning from the end of the prefix to the start of the
 /// suffix; this is sufficient for all documented patterns.
-/// Test: `tests::glob_matcher_*` exercises prefix-only, suffix-only,
+/// Test: `tests::glob_*` exercises prefix-only, suffix-only,
 /// prefix+suffix, double-star, and non-matching cases.
 pub fn glob_matches(pattern: &str, text: &str) -> bool {
     match pattern.find('*') {

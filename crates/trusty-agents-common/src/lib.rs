@@ -387,7 +387,7 @@ pub trait ToolExecutor: Send + Sync {
     ///
     /// Why: RBAC at the dispatch boundary; see `ServiceTier`.
     /// What: Default returns empty (no restriction). Concrete tools override.
-    /// Test: `trusty-agents/tools/mod::filter_tools_for_user_*`.
+    /// Test: exercised by `trusty-agents`'s `tools/mod::filter_tools_for_user_*`.
     fn restricted_tiers(&self) -> &[ServiceTier] {
         &[]
     }
@@ -397,7 +397,7 @@ pub trait ToolExecutor: Send + Sync {
     /// Why: Always-on tools run automatically before each LLM call; on-demand
     ///      tools appear in the LLM's tool list. See `ToolExecutionTier`.
     /// What: Default returns `OnDemand`.
-    /// Test: `trusty-agents/tools/always_on::build_live_context_*`.
+    /// Test: exercised by `trusty-agents`'s `tools/always_on::build_live_context_*`.
     fn execution_tier(&self) -> ToolExecutionTier {
         ToolExecutionTier::OnDemand
     }

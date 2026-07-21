@@ -92,7 +92,7 @@ fn text_box_request(slide_id: &str, text: &str) -> Value {
 /// styling on top of the plain box in one round-trip.
 /// What: Builds `createShape` + `insertText` + an optional `updateTextStyle`
 /// (only when any style field is supplied), styling the full text range.
-/// Test: `formatted_text_box_request_*` below.
+/// Test: `formatted_text_box_*` below.
 fn formatted_text_box_request(slide_id: &str, text: &str, args: &Value) -> Result<Value> {
     let box_id = new_id("textbox");
     let mut requests = vec![
@@ -206,7 +206,7 @@ fn build_bulleted_list_body(args: &Value) -> Result<Value> {
 /// parity behaviour creates a fresh slide and fills it with a bullet list.
 /// What: Builds `createSlide` + `createShape` + `insertText` (items joined by
 /// newlines) + `createParagraphBullets` over the full range.
-/// Test: `bulleted_list_request_*` below.
+/// Test: `bulleted_list_*` below.
 fn bulleted_list_request(items: &[String], layout: &str) -> Value {
     let slide_id = new_id("slide");
     let box_id = new_id("textbox");
