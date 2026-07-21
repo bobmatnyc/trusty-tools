@@ -119,7 +119,6 @@
   } from '../lib/new-workstream';
   import { clearPendingWorkstream, setPendingWorkstream } from '../lib/pending-workstream.svelte';
   import { selectedProjectState, selectProject } from '../lib/selected-project.svelte';
-  import { fetchAgentRoster, type AgentCatalogEntry } from '../lib/agent-roster';
   import ProjectPickerModal from './ProjectPickerModal.svelte';
 
   /** Delay between the two `activateWithRetry` attempts — see that
@@ -128,14 +127,6 @@
 
   let pickerOpen = $state(false);
   let task = $state('');
-
-  // Issue #3449 closes the "no pre-task agent roster endpoint" gap this
-  // form previously carried as a standing note (`GET /agents`,
-  // `lib/agent-roster.ts`). Fetched once on mount, best-effort — a failure
-  // just leaves the selector at its "daemon default" option, exactly the
-  // prior (only) behavior, rather than blocking the form.
-  let agentRoster = $state<AgentCatalogEntry[]>([]);
-  let selectedAgent = $state('');
 
   let submitPhase = $state<SubmitPhase>('idle');
   let submitError = $state<string | null>(null);
@@ -158,6 +149,30 @@
   // `$effect`s below.
   let lastSessionId = $state<string | null>(null);
   let continuationWorkstreamId = $state<string | null>(null);
+
+  /**
+   * Whether this conversation is already bound to a workstream/session —
+   * i.e. project selection is LOCKED (Bob: "once we choose a project for a
+   * workstream, we don't change it. New workstream if we want to change
+   * projects").
+   *
+   * Why: a workstream's project binding is immutable once its first session
+   * exists — the daemon itself enforces this (`task::protocol::task_run`
+   * rejects a `project` that mismatches an existing session's persisted
+   * binding; see `submitContinuation`'s HIGH-1 doc for the client-side
+   * mirror of that rule). The "choose project"/"clear" controls below must
+   * not even be offered once bound, rather than relying on a rejected
+   * request to explain why nothing happened.
+   * What: `true` once either continuation identifier is set — `lastSessionId`
+   * (a real session exists) or `continuationWorkstreamId` (this form is
+   * targeting an active workstream, even before its own first submit —
+   * HIGH 2's re-target adoption). Both reset to `null` together whenever the
+   * shared project selection genuinely changes (the `$effect` below), which
+   * is exactly the signal that this form has moved on to composing a NEW
+   * workstream and the picker should reappear.
+   * Test: `StartWorkingForm.test.ts`.
+   */
+  let isBound = $derived(lastSessionId !== null || continuationWorkstreamId !== null);
 
   let submitController: AbortController | null = null;
 
@@ -363,7 +378,7 @@
     let fallbackNotice: string | null = null;
 
     if (lastSessionId) {
-      const reuseBody = buildRunTaskBody(task, selectedProjectState.project, null, lastSessionId, selectedAgent);
+      const reuseBody = buildRunTaskBody(task, selectedProjectState.project, null, lastSessionId);
       const reuseRes = await fetch(`${base}/tasks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -435,13 +450,7 @@
       return false;
     }
 
-    const fallbackBody = buildRunTaskBody(
-      task,
-      selectedProjectState.project,
-      continuationWorkstreamId,
-      null,
-      selectedAgent,
-    );
+    const fallbackBody = buildRunTaskBody(task, selectedProjectState.project, continuationWorkstreamId, null);
     const fallbackRes = await fetch(`${base}/tasks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -530,7 +539,7 @@
     // below, in case activation ultimately fails again.
     setPendingWorkstream(workstreamId, workstreamName ?? inferWorkstreamName(selectedProjectState.project));
 
-    const body = buildRunTaskBody(task, selectedProjectState.project, workstreamId, null, selectedAgent);
+    const body = buildRunTaskBody(task, selectedProjectState.project, workstreamId, null);
     const res = await fetch(`${base}/tasks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -586,11 +595,11 @@
       // Continuation applies whenever this conversation already targets a
       // session OR a workstream (the latter alone after the active
       // workstream changed under the form — HIGH 2's re-target adoption);
-      // only a form with neither mints a brand-new workstream. Both paths
-      // thread `selectedAgent` (issue #3449) through to `buildRunTaskBody`
-      // — see `submitFirstMessage`/`submitContinuation`'s own call sites
-      // and `lib/new-workstream.ts::buildRunTaskBody`'s doc for why
-      // `agent_name` is sent on every call, not just the mint path.
+      // only a form with neither mints a brand-new workstream. Neither path
+      // passes an `agentName` to `buildRunTaskBody` (see that function's own
+      // doc) — "we don't choose agents, the PM does" (Bob): omitting the
+      // field means the daemon defaults to its PM entry agent, exactly as
+      // for any caller that never picks one.
       const ok =
         lastSessionId || continuationWorkstreamId
           ? await submitContinuation(base, controller.signal)
@@ -622,70 +631,33 @@
       submitController?.abort();
     };
   });
-
-  $effect(() => {
-    // One-shot, mount-only fetch of the agent catalog (issue #3449) — not
-    // polled, unlike the tab components' rosters: this form's selector only
-    // needs to be populated once before the operator submits, and a
-    // mid-session catalog edit does not need to reflow an in-progress form.
-    // Best-effort: any failure (daemon unreachable, etc.) just leaves the
-    // selector at its "daemon default" option — the prior, only behavior.
-    const controller = new AbortController();
-    void (async () => {
-      try {
-        const base = await apiBase();
-        const roster = await fetchAgentRoster(base, controller.signal);
-        if (!controller.signal.aborted) agentRoster = roster;
-      } catch {
-        // Non-fatal — see comment above.
-      }
-    })();
-    return () => controller.abort();
-  });
 </script>
 
 <div class="ibar shrink-0 border-t border-1.5 border-trusty-border bg-trusty-card p-3">
   <div class="flex flex-wrap items-center gap-2 text-xs text-trusty-text-secondary">
     <span class="font-mono uppercase tracking-wide text-trusty-text-muted">project:</span>
     <span class="font-mono">{bindingLabel(selectedProjectState.project)}</span>
-    <button
-      type="button"
-      onclick={openPicker}
-      class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
-    >
-      choose project
-    </button>
-    {#if selectedProjectState.project}
+    {#if !isBound}
+      <!-- Project is choosable only before this conversation is bound to a
+           workstream — once bound it is locked (see `isBound`'s doc): start
+           a NEW workstream to use a different project. -->
       <button
         type="button"
-        class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted underline hover:text-trusty-primary"
-        onclick={clearSelection}
+        onclick={openPicker}
+        class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
       >
-        clear
+        choose project
       </button>
+      {#if selectedProjectState.project}
+        <button
+          type="button"
+          class="font-mono text-[11px] uppercase tracking-wide text-trusty-text-muted underline hover:text-trusty-primary"
+          onclick={clearSelection}
+        >
+          clear
+        </button>
+      {/if}
     {/if}
-
-    <!-- Issue #3449's `GET /agents` roster selector, carried over into the
-         docked-bar layout (issue #3446/#3460) as a compact inline control
-         in the same status row as the project picker, rather than the
-         prior card layout's own labeled block — `selectedAgent` is threaded
-         through every `buildRunTaskBody` call site (mint, reuse, and
-         workstream-targeted fallback), so a pick here survives the whole
-         conversation, not just the first message. -->
-    <span class="font-mono uppercase tracking-wide text-trusty-text-muted">agent:</span>
-    <select
-      id="start-working-agent"
-      bind:value={selectedAgent}
-      title="GET /agents (issue #3449) — omitting this defers to the daemon's own default (DOC-39 §5.4), same as before this selector existed."
-      class="rounded-sm border-1.5 border-trusty-border-strong bg-trusty-raised px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-trusty-text-secondary"
-    >
-      <option value="">daemon default</option>
-      {#each agentRoster.filter((a) => a.tier !== 'broken') as agent (agent.name)}
-        <!-- `broken` entries (unparseable disk files, issue #3449 review)
-             are excluded: dispatching one is guaranteed to fail. -->
-        <option value={agent.name}>{agent.name} ({agent.tier})</option>
-      {/each}
-    </select>
   </div>
 
   <div class="mt-2 flex items-end gap-2">

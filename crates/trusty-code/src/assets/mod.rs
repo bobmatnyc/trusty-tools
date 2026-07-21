@@ -301,6 +301,32 @@ const BASE_OPS_MD: &str = include_str!("agents/BASE-OPS.md");
 const BASE_QA_MD: &str = include_str!("agents/BASE-QA.md");
 const BASE_RESEARCH_MD: &str = include_str!("agents/BASE-RESEARCH.md");
 
+/// The 5 `BASE-*` extends-template names — composition bases only, never
+/// meant to be dispatched directly (issue #3465 follow-up: the Agents
+/// catalog listing was surfacing these to end users).
+///
+/// Why: single source of truth for "is this name a composition base"
+/// (issue #3449's `agents.list`) instead of a scattered `starts_with`
+/// check re-implemented per call site — `assets::tests::
+/// base_templates_are_never_dispatchable` (this table never leaks into
+/// [`DEFAULT_AGENTS`]) and `agents::protocol::is_base_agent` (the disk-tier
+/// catalog listing never surfaces one of these names even when a project's
+/// `.claude/agents/` dir has real `BASE-*.md` files on disk, as trusty-mpm's
+/// own bundle installs them — see `crates/trusty-mpm/src/core/bundle_all.rs`)
+/// both key off this list rather than duplicating it. Matched
+/// case-insensitively against a lowercased candidate — the on-disk filename
+/// convention is `BASE-QA.md` while frontmatter `name:`/`extends:` values
+/// are lowercase `base-qa`.
+/// Test: `assets::tests::base_templates_are_never_dispatchable`,
+/// `agents::protocol::tests::list_excludes_base_agents_but_resolve_agent_still_finds_them`.
+pub const BASE_AGENT_NAMES: &[&str] = &[
+    "base-agent",
+    "base-engineer",
+    "base-ops",
+    "base-qa",
+    "base-research",
+];
+
 const API_QA_MD: &str = include_str!("agents/api-qa.md");
 const CODE_ANALYZER_MD: &str = include_str!("agents/code-analyzer.md");
 const CODE_CRITIC_MD: &str = include_str!("agents/code-critic.md");

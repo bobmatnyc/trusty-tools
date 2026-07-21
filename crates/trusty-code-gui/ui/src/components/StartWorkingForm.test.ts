@@ -74,6 +74,14 @@ function openPickerButton(): HTMLButtonElement {
   ) as HTMLButtonElement;
 }
 
+/** Whether a button with exactly this trimmed text is currently rendered —
+ * used where a control's ABSENCE (not just its presence) is the assertion,
+ * e.g. the project picker/clear controls once bound (issue #3446 + #3447),
+ * so no unsafe cast on a possibly-missing element is needed. */
+function hasButtonWithText(text: string): boolean {
+  return Array.from(target.querySelectorAll('button')).some((b) => b.textContent?.trim() === text);
+}
+
 const ROSTER = {
   entries: [{ name: 'acme-api', path: '/home/bob/acme-api', owner: null, registered: true }],
   source: 'registry',
@@ -92,12 +100,6 @@ function fullSuccessFetch(opts?: { tasksBody?: unknown; callLog?: string[] }) {
     opts?.callLog?.push(`${method} ${url.replace(/^https?:\/\/[^/]+/, '')}`);
     if (url.includes('/projects')) {
       return { ok: true, status: 200, json: async () => ROSTER } as Response;
-    }
-    if (url.endsWith('/agents') && method === 'GET') {
-      // Issue #3449's mount-only agent-roster fetch (`lib/agent-roster.ts`)
-      // — this form never selects an agent by default, so an empty roster
-      // is a valid, uneventful response.
-      return { ok: true, status: 200, json: async () => ({ agents: [] }) } as Response;
     }
     if (url.endsWith('/workstreams') && method === 'POST') {
       return { ok: true, status: 201, json: async () => ({ id: 'ws-abc123' }) } as Response;
@@ -287,10 +289,7 @@ describe('StartWorkingForm submit sequence', () => {
     submitButton().click();
     await waitFor(() => target.textContent?.includes('started') ?? false);
 
-    // Filters out the mount-only `GET /agents` roster fetch (issue #3449) —
-    // its timing relative to submit is not this test's concern; only the
-    // create -> run -> activate ORDER of the submit sequence itself is.
-    expect(callLog.filter((c) => c !== 'GET /agents')).toEqual([
+    expect(callLog).toEqual([
       'POST /workstreams',
       'POST /tasks',
       'POST /workstreams/ws-abc123/activate',
@@ -411,9 +410,7 @@ describe('StartWorkingForm submit sequence', () => {
     // The error names the already-created workstream (HIGH finding: the
     // operator must know it exists, not just that the task failed).
     expect(target.textContent).toContain('was created but not activated');
-    // Filters out the mount-only `GET /agents` roster fetch (issue #3449) —
-    // see the identical note in the create->run->activate order test above.
-    expect(callLog.filter((c) => c !== 'GET /agents')).toEqual(['POST /workstreams', 'POST /tasks']);
+    expect(callLog).toEqual(['POST /workstreams', 'POST /tasks']);
     expect(callLog.some((c) => c.includes('/activate'))).toBe(false);
 
     // Retry: must reuse the SAME workstream id — no second POST
@@ -991,7 +988,27 @@ describe('StartWorkingForm project-selection persistence + chat continuation (is
     });
   });
 
-  it('issue #3446 + #3447: picking a DIFFERENT project after a successful submit resets continuation — the next submit mints a fresh workstream, not a second POST /workstreams-free continuation', async () => {
+  it('issue #3446 + #3447: the project picker/clear controls are hidden once this conversation is bound to a workstream — a project is chosen at creation and then locked (Bob: "new workstream if we want to change projects")', async () => {
+    vi.stubGlobal('fetch', fullSuccessFetch());
+
+    instance = mount(StartWorkingForm, { target }) as unknown as Record<string, unknown>;
+    // Before the first submit — nothing bound yet — the picker is offered.
+    expect(hasButtonWithText('choose project')).toBe(true);
+
+    taskField().value = 'first message (projectless)';
+    taskField().dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !submitButton().disabled);
+    submitButton().click();
+    await waitFor(() => target.textContent?.includes('started') ?? false);
+
+    // Bound now (continuationWorkstreamId set by the successful submit) —
+    // "choose project" must be gone; there was no project to "clear" to
+    // begin with.
+    await waitFor(() => !hasButtonWithText('choose project'));
+    expect(hasButtonWithText('clear')).toBe(false);
+  });
+
+  it('a project change from an EXTERNAL surface (e.g. the rail\'s own project picker, via the shared selected-project store) still resets continuation — the next submit mints a fresh workstream, not a second POST /workstreams-free continuation', async () => {
     let wsCallCount = 0;
     vi.stubGlobal(
       'fetch',
@@ -1023,13 +1040,13 @@ describe('StartWorkingForm project-selection persistence + chat continuation (is
     await waitFor(() => target.textContent?.includes('started') ?? false);
     expect(wsCallCount).toBe(1);
 
-    // Pick a project — the shared selection changes, which must reset
-    // continuation (a session's project binding is immutable once set).
-    openPickerButton().click();
-    await waitFor(() => target.textContent?.includes('acme-api') ?? false);
-    (Array.from(target.querySelectorAll('button')).find(
-      (b) => b.textContent?.trim() === 'acme-api',
-    ) as HTMLButtonElement).click();
+    // This form's OWN picker is gone now (bound — see the test above); the
+    // shared store can still change from elsewhere (`WorkstreamRail`'s
+    // Projects rail view writes to the same `selected-project.svelte.ts`
+    // store) — that must still reset continuation (a session's project
+    // binding is immutable once set), matching this form's own effect.
+    selectProject({ path: '/home/bob/acme-api', displayPath: 'acme-api', isGitRepo: true });
+    flushSync();
     await waitFor(() => target.textContent?.includes('git repo — acme-api') ?? false);
 
     taskField().value = 'second message (now with a project)';

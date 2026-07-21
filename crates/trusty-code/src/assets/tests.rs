@@ -196,17 +196,10 @@ fn embedded_fallback_still_fires_and_yields_32_agents_with_original_4_intact() {
 /// Test: this test.
 #[test]
 fn base_templates_are_never_dispatchable() {
-    const BASE_NAMES: &[&str] = &[
-        "base-agent",
-        "base-engineer",
-        "base-ops",
-        "base-qa",
-        "base-research",
-    ];
     for agent in DEFAULT_AGENTS {
         let lower = agent.name().to_ascii_lowercase();
         assert!(
-            !BASE_NAMES.contains(&lower.as_str()),
+            !BASE_AGENT_NAMES.contains(&lower.as_str()),
             "BASE template '{}' must never be dispatchable",
             agent.name()
         );
