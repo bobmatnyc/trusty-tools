@@ -1,9 +1,11 @@
 // Why: Centralizes daemon-URL resolution and runtime Tauri detection so every
 // other module agrees on where the daemon lives and which transport to use.
-// What: Exposes the default daemon URL, an `isTauri()` runtime check, and an
-// `apiBase()` accessor that honors a user override stored in localStorage.
-// Test: With localStorage empty, `apiBase()` returns DEFAULT_DAEMON_URL; after
-// setting `trusty-mpm.daemonUrl`, it returns the stored value.
+// What: Exposes the default daemon URL and an `isTauri()` runtime check.
+// `apiBase()` always resolves to DEFAULT_DAEMON_URL — there is no
+// localStorage override (removed in #3315: nothing ever wrote it, and the
+// CSP `connect-src` in `tauri.conf.json` is pinned to DEFAULT_DAEMON_URL
+// anyway, so an override could never have reached a different host).
+// Test: `apiBase()` returns DEFAULT_DAEMON_URL.
 
 export const DEFAULT_DAEMON_URL = 'http://127.0.0.1:7880';
 
@@ -11,8 +13,7 @@ export const DEFAULT_DAEMON_URL = 'http://127.0.0.1:7880';
 export const isTauri = (): boolean =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
-/** Resolve the daemon base URL — user override wins over the default. */
+/** Resolve the daemon base URL. */
 export function apiBase(): string {
-  if (typeof localStorage === 'undefined') return DEFAULT_DAEMON_URL;
-  return localStorage.getItem('trusty-mpm.daemonUrl') ?? DEFAULT_DAEMON_URL;
+  return DEFAULT_DAEMON_URL;
 }
