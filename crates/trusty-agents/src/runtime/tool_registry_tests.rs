@@ -444,3 +444,50 @@ fn scope_assistant_allowed_tools_noop_when_allowed_already_set() {
     let kept = scope_assistant_allowed_tools(true, existing.clone(), Some(&allow), None);
     assert_eq!(kept, existing);
 }
+
+/// #3555 CRITICAL follow-up (code-critic) — live wiring check, `#[ignore]`d
+/// by default.
+///
+/// Why: The deterministic regression tests for the role gate itself live in
+/// `src/tools/delegate.rs` (`delegate_assistant_role_gate_rejects_*`), using
+/// a hand-built `DelegateToAgentTool` + tempdir so they're fast and
+/// environment-independent. This test instead exercises the REAL production
+/// wiring — `build_assistant_tier_registry()` unmodified, resolving against
+/// whatever roster is ACTUALLY deployed at `$HOME/.trusty-agents/agents/` on
+/// the machine running it (via `agents::bundled::ensure_bundled_agents_deployed`,
+/// which every `tagent` invocation runs at startup) — as an end-to-end proof
+/// that the role gate is really wired into the registry an assistant-tier
+/// sub-agent actually gets, not just proven in isolation. `#[ignore]`d
+/// because CI's `$HOME` may not have a deployed roster at all (in which case
+/// `pm` simply fails to resolve rather than exercising the role check
+/// specifically) — this is a manual/local verification aid, not a CI gate.
+/// Run with `cargo test -p trusty-agents --lib -- --ignored
+/// live_assistant_registry_rejects_pm_role`.
+/// What: builds the real registry, dispatches `delegate_to_agent` with
+/// `agent_name: "pm"`, and asserts the result is an error. Never spawns a
+/// subprocess (the role gate rejects before the runner is invoked) — no
+/// network or credentials required either way.
+/// Test: itself (manual verification only).
+#[tokio::test]
+#[ignore]
+async fn live_assistant_registry_rejects_pm_role() {
+    let reg = build_assistant_tier_registry();
+    assert!(
+        reg.contains("delegate_to_agent"),
+        "sanity: delegate_to_agent must be registered"
+    );
+
+    let result = reg
+        .dispatch(
+            "delegate_to_agent",
+            serde_json::json!({"agent_name": "pm", "task": "diagnostic ping"}),
+        )
+        .await;
+
+    assert!(
+        result.is_error(),
+        "delegate_to_agent(agent_name=\"pm\") against the REAL deployed roster \
+         must be rejected by the role gate, got: {}",
+        result.content()
+    );
+}

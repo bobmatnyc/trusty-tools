@@ -89,6 +89,44 @@ use tools::{ToolRegistry, shell_exec::ShellExecTool};
 /// `assistant_tier_registry_includes_curated_tools`.
 pub(super) const ASSISTANT_TIER_ROLE: &str = "assistant";
 
+/// Fail-closed allowlist of `agent.role` values an assistant-tier
+/// `delegate_to_agent` call may target — see
+/// [`crate::tools::delegate::DelegateToAgentTool::with_allowed_target_roles`]
+/// for the full rationale.
+///
+/// Why (#3555 CRITICAL follow-up, code-critic): `agents::agents_dir_candidates()`
+/// (wired into `build_assistant_tier_registry` below) makes the ENTIRE
+/// bundled roster resolvable from any CWD, including `pm` (role
+/// `orchestrator`), `ctrl` (role `controller`), `observe-agent` (role
+/// `observer`), and `postmortem-agent`/`analysis-agent` (role `analysis`).
+/// `run_subagent`'s registry is keyed on the SPAWNED child's own role, so an
+/// assistant delegating to one of those would hand the resulting subprocess
+/// an unrestricted orchestrator/controller registry — shell, `write_file`,
+/// unrestricted `delegate_to_agent` — a privilege escalation out of the
+/// sandboxed assistant tier.
+/// What: the exact `role` field values declared in each bundled worker's
+/// `agent.toml` (NOT the agent/file name — `qa-agent.toml` declares
+/// `role = "qa"`, not `"qa-agent"`) plus [`ASSISTANT_TIER_ROLE`] itself, so
+/// the Izzie <-> cto-assistant peer-consult lane keeps working: spawning a
+/// peer assistant is safe because IT ALSO gets routed through
+/// `build_assistant_tier_registry` (the same restricted registry), never an
+/// unrestricted one. Any role not in this list — including anything not yet
+/// declared in the bundled roster — is rejected.
+/// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
+/// `delegate_assistant_role_gate_rejects_controller_role`,
+/// `delegate_assistant_role_gate_allows_worker_role`,
+/// `delegate_assistant_role_gate_allows_peer_assistant_role`
+/// (`src/tools/delegate.rs`).
+pub(super) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
+    "engineer",          // engineer.toml, code-agent.toml, python-engineer.toml, …
+    "qa",                // qa-agent.toml
+    "researcher",        // research-agent.toml
+    "documentation",     // docs-agent.toml
+    "ops",               // local-ops-agent.toml
+    "planner",           // plan-agent.toml
+    ASSISTANT_TIER_ROLE, // peer assistant personas: izzie, cto-assistant, personal-assistant, …
+];
+
 /// Build a tool registry tailored to a specific agent.
 ///
 /// Why: Different agents need different tools (research -> web_search,
@@ -377,8 +415,11 @@ pub(super) fn build_registry_for_agent(
 /// tier `agents::agents_dir_candidates()` searches — CWD/`TAGENT_CONFIG_DIR`
 /// first, then `$HOME/.trusty-agents/agents`, the SAME tiers the actual
 /// sub-agent spawn resolves against — see #3555 delegate-resolve follow-up
-/// below). Deliberately omits `list_skills`, `load_skill`, and every generic
-/// coding-agent tool (`write_file`, `run_bash`, analysis tools, …).
+/// below — AND gated to [`ASSISTANT_ALLOWED_DELEGATE_ROLES`] via
+/// `with_allowed_target_roles`, #3555 CRITICAL follow-up, so a wider
+/// resolution search can never turn into a privilege escalation). Deliberately
+/// omits `list_skills`, `load_skill`, and every generic coding-agent tool
+/// (`write_file`, `run_bash`, analysis tools, …).
 /// Test: `assistant_tier_registry_excludes_skill_catalog_tools`,
 /// `assistant_tier_registry_includes_curated_tools`.
 pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
@@ -410,8 +451,20 @@ pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
     let runner: Arc<dyn AgentRunner> = Arc::new(
         crate::subprocess::SubprocessAgentRunner::new().with_config_dir(primary_config_dir),
     );
+    // #3555 CRITICAL follow-up: role-gate the assistant tier's delegation
+    // target to workers + peer assistants ONLY — see
+    // `ASSISTANT_ALLOWED_DELEGATE_ROLES`. `pm`/`ctrl` build their own
+    // `DelegateToAgentTool` elsewhere (`ctrl/pm_task/dispatch/*.rs`) and never
+    // call `with_allowed_target_roles`, so they are completely unaffected.
     reg.register(Arc::new(
-        DelegateToAgentTool::new(runner).with_config_dirs(config_dirs),
+        DelegateToAgentTool::new(runner)
+            .with_config_dirs(config_dirs)
+            .with_allowed_target_roles(
+                ASSISTANT_ALLOWED_DELEGATE_ROLES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
     ));
 
     reg

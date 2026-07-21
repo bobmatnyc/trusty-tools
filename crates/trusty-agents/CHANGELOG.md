@@ -173,6 +173,77 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     no local `.trusty-agents/agents/`): `delegate_to_agent` dispatches with
     `is_error=false`, a real `agent=engineer` sub-agent spawns and completes,
     and the assistant relays the engineer's actual `cargo check` findings.
+  - **`agent_name_resolves` edge-case fix (code-critic MEDIUM):** the real
+    resolver (`AgentConfig::by_name_in`, via `load_agent_package`'s `?`) hard
+    -aborts the ENTIRE search the moment `<dir>/<name>/` exists as a
+    directory without a readable `agent.toml`/`persona.md` inside it — it
+    does NOT fall through to a flat `<name>.toml` in a later directory.
+    `agent_name_resolves` previously kept scanning in that case (a
+    `.iter().any(...)` over all dirs), so validation could accept a name the
+    real spawn then hard-errors on. Rewrote it as an explicit per-`dir` loop
+    that mirrors the same short-circuit: on the first `<dir>/<name>/`
+    directory hit, it returns immediately based on whether BOTH
+    `agent.toml` and `persona.md` are present, exactly like the real
+    resolver either resolves or aborts right there. New pinning test
+    `agent_name_resolves_tests::short_circuits_on_malformed_directory_package_matching_real_resolver`
+    proves both `agent_name_resolves` and `AgentConfig::by_name_in` agree in
+    the same scenario. (Known, documented, deliberately-deferred limitation:
+    `agent_name_resolves` still doesn't check the legacy
+    `~/.claude/agents`/`<cwd>/.claude/agents` claude-mpm-format tier the real
+    resolver's final fallback searches — never affects the bundled roster
+    `delegate_to_agent` actually targets, since every bundled agent lives
+    under the `.trusty-agents/agents` tiers this function does check.)
+
+### Security
+
+- **CRITICAL — privilege escalation via unrestricted assistant-tier
+  delegation target, closed with a fail-closed role allowlist (#3555
+  follow-up, code-critic):** widening `delegate_to_agent`'s pre-flight
+  validation to the full `agents_dir_candidates()` multi-tier search (the fix
+  directly above) had an unreviewed consequence — it made the ENTIRE bundled
+  roster resolvable from an assistant-tier call regardless of cwd, including
+  `pm` (role `orchestrator`), `ctrl` (role `controller`), `observe-agent`
+  (role `observer`), and `postmortem-agent`/`analysis-agent` (role
+  `analysis`). `run_subagent`'s tool registry is built from the SPAWNED
+  child's own role, so an assistant delegating to `pm`/`ctrl` would have
+  handed the resulting subprocess an UNRESTRICTED orchestrator/controller
+  registry (shell, `write_file`, unrestricted `delegate_to_agent`) — an
+  escalation straight out of the sandboxed assistant tier, reopening the
+  internal-orchestration-leak class PR A (epic #3052) closed.
+  - `DelegateToAgentTool` (`src/tools/delegate.rs`) gained
+    `allowed_target_roles: Option<Vec<String>>` and a
+    `with_allowed_target_roles` builder. When set, `execute()` resolves the
+    TARGET's `AgentConfig` (via `config_dirs`) and requires its resolved
+    `agent.role` to be in the allowlist — checked BEFORE the runner is ever
+    invoked. Both "unknown agent name" and "role not allowed" return the
+    IDENTICAL generic error text, so neither leaks which case occurred or any
+    role taxonomy. `pm`/`ctrl` never call this builder — the full roster
+    remains a legitimate delegation target for them, completely unaffected.
+  - `build_assistant_tier_registry` (`src/runtime/tool_registry.rs`) now
+    wires a new `ASSISTANT_ALLOWED_DELEGATE_ROLES` constant: the exact `role`
+    field values of the bundled worker agents (`engineer`, `qa`,
+    `researcher`, `documentation`, `ops`, `planner`) plus `ASSISTANT_TIER_ROLE`
+    itself — so the Izzie ↔ cto-assistant peer-consult lane keeps working
+    (spawning a peer assistant is safe: it's routed through the SAME
+    restricted `build_assistant_tier_registry`, never an unrestricted one).
+    Any other role — orchestrator, controller, observer, analysis, or
+    anything undeclared — is rejected.
+  - New tests: `delegate_assistant_role_gate_rejects_orchestrator_role`,
+    `delegate_assistant_role_gate_rejects_controller_role`,
+    `delegate_assistant_role_gate_allows_worker_role`,
+    `delegate_assistant_role_gate_allows_peer_assistant_role`, and
+    `delegate_without_role_gate_allows_any_resolvable_role` (pins that
+    pm/ctrl are unaffected) — all in `src/tools/delegate.rs`. A `#[ignore]`d
+    live-wiring test, `runtime::tool_registry::registry_tests::
+    live_assistant_registry_rejects_pm_role`, exercises the REAL
+    `build_assistant_tier_registry()` against whatever roster is actually
+    deployed at `$HOME/.trusty-agents/agents/` (manual verification aid, not
+    a CI gate — CI's `$HOME` may have no deployed roster at all).
+  - Live-verified: the REAL production registry (built from the machine's
+    actual deployed `$HOME/.trusty-agents/agents/pm.toml`, role
+    `orchestrator`) rejects `delegate_to_agent(agent_name="pm")` without
+    invoking the runner, while a real `engineer` delegation still spawns and
+    completes normally.
 
 ### Changed
 

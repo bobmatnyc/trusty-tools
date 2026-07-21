@@ -51,6 +51,36 @@ pub struct DelegateToAgentTool {
     /// (`agents::agents_dir_candidates()`) the actual spawn resolves
     /// against, so validation and spawn can never diverge.
     config_dirs: Vec<PathBuf>,
+    /// Fail-closed allowlist of TARGET agent `role` strings this instance may
+    /// delegate to. `None` (the default / `pm`/`ctrl` callers) performs no
+    /// role check — the full on-disk roster is a legitimate target for those
+    /// callers. `Some(roles)` requires the resolved target's `agent.role` to
+    /// be a member of `roles`; anything else (including a name that fails to
+    /// resolve at all) is rejected with the SAME generic error `config_dirs`
+    /// validation already returns, before any resolution artifact or role
+    /// name is ever surfaced.
+    ///
+    /// Why (#3555 CRITICAL follow-up, code-critic): widening `config_dirs` to
+    /// include the `$HOME` fallback tier means an assistant-tier
+    /// `delegate_to_agent` can now resolve ANY bundled agent from that tier —
+    /// including `pm` (role `orchestrator`), `ctrl` (role `controller`),
+    /// `observe-agent` (role `observer`), and `postmortem-agent`/
+    /// `analysis-agent` (role `analysis`). `run_subagent`'s tool registry is
+    /// built from the SPAWNED child's own role
+    /// (`build_registry_for_agent`/`build_assistant_tier_registry`), so
+    /// spawning `pm` or `ctrl` from an assistant-tier call would hand the
+    /// resulting subprocess an UNRESTRICTED orchestrator/controller registry
+    /// (shell, `write_file`, unrestricted `delegate_to_agent`) — a privilege
+    /// escalation straight out of the sandboxed assistant, and a reopening
+    /// of the internal-orchestration-leak class #3052 PR A closed. This field
+    /// gates that at the SAME choke point every other pre-flight check
+    /// already lives at, before resolution or spawn.
+    /// What: See `with_allowed_target_roles`.
+    /// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
+    /// `delegate_assistant_role_gate_rejects_controller_role`,
+    /// `delegate_assistant_role_gate_allows_worker_role`,
+    /// `delegate_assistant_role_gate_allows_peer_assistant_role`.
+    allowed_target_roles: Option<Vec<String>>,
 }
 
 impl DelegateToAgentTool {
@@ -67,6 +97,7 @@ impl DelegateToAgentTool {
         Self {
             runner,
             config_dirs: Vec::new(),
+            allowed_target_roles: None,
         }
     }
 
@@ -108,6 +139,31 @@ impl DelegateToAgentTool {
     /// `delegate_rejects_agent_absent_from_all_config_dirs`.
     pub fn with_config_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
         self.config_dirs = dirs;
+        self
+    }
+
+    /// Restrict delegation targets to agents whose resolved `agent.role` is
+    /// in `roles` — a fail-closed allowlist gate (#3555 CRITICAL follow-up).
+    ///
+    /// Why: See the field doc on `allowed_target_roles`. `pm`/`ctrl` never
+    /// call this — the full roster is a legitimate delegation target for
+    /// them; only `build_assistant_tier_registry` wires it, so an
+    /// assistant-tier persona can genuinely act on "bring in a specialist"
+    /// (or consult a peer assistant) WITHOUT being able to spawn an
+    /// orchestrator/controller/observer subprocess with an unrestricted tool
+    /// registry.
+    /// What: Stores `roles`. `execute()` resolves the target's `AgentConfig`
+    /// (via `config_dirs`) and rejects with the SAME generic "not a
+    /// recognized specialist" error used for a missing agent, whether the
+    /// name fails to resolve at all OR resolves to a role outside `roles` —
+    /// the caller never learns which case it hit, so no role taxonomy or
+    /// on-disk roster leaks.
+    /// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
+    /// `delegate_assistant_role_gate_rejects_controller_role`,
+    /// `delegate_assistant_role_gate_allows_worker_role`,
+    /// `delegate_assistant_role_gate_allows_peer_assistant_role`.
+    pub fn with_allowed_target_roles(mut self, roles: Vec<String>) -> Self {
+        self.allowed_target_roles = Some(roles);
         self
     }
 }
@@ -175,21 +231,58 @@ impl ToolExecutor for DelegateToAgentTool {
         // The failure reason is logged at `debug` here (content never left
         // the tool before #3555 — `is_error=true` with no payload anywhere
         // made this undebuggable in production).
-        if !self.config_dirs.is_empty()
-            && !crate::agents::agent_name_resolves(&self.config_dirs, agent_name)
-        {
-            tracing::debug!(
-                agent_name,
-                config_dirs = ?self.config_dirs,
-                "delegate_to_agent: agent not found in any candidate directory"
-            );
-            return ToolResult::err(format!(
-                "'{agent_name}' is not a recognized specialist. Check your own \
-                 instructions for the specialists available to you — native tools \
-                 (search_code, web_search, move_file, create_dir, memory_store, \
-                 memory_recall, etc.) are NOT specialist names; call them directly \
-                 as tools instead of via delegate_to_agent."
-            ));
+        //
+        // #3555 CRITICAL follow-up (code-critic): when `allowed_target_roles`
+        // is set (assistant tier only), existence is NOT enough — the
+        // TARGET's resolved role must also be in the allowlist, checked
+        // BEFORE any resolution artifact is used further or a spawn is
+        // attempted. See the field doc on `allowed_target_roles` for why
+        // (privilege escalation via delegating to `pm`/`ctrl`/etc.). Both the
+        // "unknown name" and "role not allowed" cases return the identical
+        // generic message below so neither leaks which one occurred.
+        if !self.config_dirs.is_empty() {
+            let rejected = if let Some(allowed_roles) = &self.allowed_target_roles {
+                match crate::agents::AgentConfig::by_name_in(&self.config_dirs, agent_name) {
+                    Ok(cfg) => {
+                        let allowed = allowed_roles.iter().any(|r| r == &cfg.agent.role);
+                        if !allowed {
+                            tracing::debug!(
+                                agent_name,
+                                target_role = %cfg.agent.role,
+                                allowed_roles = ?allowed_roles,
+                                "delegate_to_agent: target role not in the assistant-tier allowlist"
+                            );
+                        }
+                        !allowed
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            agent_name,
+                            error = %format!("{e:#}"),
+                            "delegate_to_agent: role-gated target failed to resolve"
+                        );
+                        true
+                    }
+                }
+            } else if !crate::agents::agent_name_resolves(&self.config_dirs, agent_name) {
+                tracing::debug!(
+                    agent_name,
+                    config_dirs = ?self.config_dirs,
+                    "delegate_to_agent: agent not found in any candidate directory"
+                );
+                true
+            } else {
+                false
+            };
+            if rejected {
+                return ToolResult::err(format!(
+                    "'{agent_name}' is not a recognized specialist. Check your own \
+                     instructions for the specialists available to you — native tools \
+                     (search_code, web_search, move_file, create_dir, memory_store, \
+                     memory_recall, etc.) are NOT specialist names; call them directly \
+                     as tools instead of via delegate_to_agent."
+                ));
+            }
         }
 
         // Detect coding persona + language idiom skill from the task and
@@ -469,5 +562,202 @@ mod tests {
 
         assert!(result.is_error(), "must reject an agent absent everywhere");
         assert!(runner.invoked.lock().unwrap().is_empty());
+    }
+
+    /// Writes a minimal, fully-parseable agent TOML with the given `role` —
+    /// the shape `AgentConfig::by_name_in` (used by the role gate) actually
+    /// requires, unlike the bare `[agent]\nname = "..."` fixtures the
+    /// existence-only tests above use (those never parse the file).
+    fn write_agent_toml_with_role(dir: &std::path::Path, name: &str, role: &str) {
+        std::fs::write(
+            dir.join(format!("{name}.toml")),
+            format!(
+                r#"
+[agent]
+name = "{name}"
+role = "{role}"
+model = "anthropic/claude-sonnet-4-6"
+description = "test fixture"
+
+[llm]
+temperature = 0.2
+max_tokens = 1024
+
+[system_prompt]
+content = "test"
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    /// #3555 CRITICAL follow-up (code-critic): privilege escalation via
+    /// unrestricted delegation target. Widening `config_dirs` to include the
+    /// `$HOME` fallback tier makes the FULL bundled roster resolvable from
+    /// any cwd — including `pm` (role `orchestrator`). Without a role gate,
+    /// an assistant-tier `delegate_to_agent(agent_name="pm")` would pass
+    /// validation and spawn a subprocess with `run_subagent`'s UNRESTRICTED
+    /// orchestrator registry (shell, write_file, unrestricted
+    /// delegate_to_agent) — an escalation straight out of the sandboxed
+    /// assistant. This test proves the role gate rejects it before the
+    /// runner is ever invoked, with the SAME generic error text (no role
+    /// taxonomy leak).
+    #[tokio::test]
+    async fn delegate_assistant_role_gate_rejects_orchestrator_role() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_toml_with_role(dir.path(), "pm", "orchestrator");
+
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = DelegateToAgentTool::new(runner.clone())
+            .with_config_dirs(vec![dir.path().to_path_buf()])
+            .with_allowed_target_roles(vec!["engineer".to_string(), "assistant".to_string()]);
+
+        let result = tool
+            .execute(json!({
+                "agent_name": "pm",
+                "task": "do orchestrator-tier things"
+            }))
+            .await;
+
+        assert!(
+            result.is_error(),
+            "role gate must reject a resolvable but disallowed-role target"
+        );
+        assert!(
+            result.content().contains("pm"),
+            "error may echo back the caller's own rejected input, got: {}",
+            result.content()
+        );
+        assert!(
+            !result.content().to_lowercase().contains("orchestrator"),
+            "error must not leak the target's actual role, got: {}",
+            result.content()
+        );
+        assert!(
+            runner.invoked.lock().unwrap().is_empty(),
+            "runner must not be called when the role gate rejects"
+        );
+    }
+
+    /// Sibling to `delegate_assistant_role_gate_rejects_orchestrator_role`
+    /// for `ctrl` (role `controller`) — the other privileged meta-agent
+    /// named in the CRITICAL finding.
+    #[tokio::test]
+    async fn delegate_assistant_role_gate_rejects_controller_role() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_toml_with_role(dir.path(), "ctrl", "controller");
+
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = DelegateToAgentTool::new(runner.clone())
+            .with_config_dirs(vec![dir.path().to_path_buf()])
+            .with_allowed_target_roles(vec!["engineer".to_string(), "assistant".to_string()]);
+
+        let result = tool
+            .execute(json!({
+                "agent_name": "ctrl",
+                "task": "do controller-tier things"
+            }))
+            .await;
+
+        assert!(result.is_error(), "role gate must reject role=controller");
+        assert!(runner.invoked.lock().unwrap().is_empty());
+    }
+
+    /// The positive case: a worker role (`engineer`) IS in the allowlist and
+    /// must still reach the runner — the role gate must not become a
+    /// blanket denial.
+    #[tokio::test]
+    async fn delegate_assistant_role_gate_allows_worker_role() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_toml_with_role(dir.path(), "engineer", "engineer");
+
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = DelegateToAgentTool::new(runner.clone())
+            .with_config_dirs(vec![dir.path().to_path_buf()])
+            .with_allowed_target_roles(vec!["engineer".to_string(), "assistant".to_string()]);
+
+        let result = tool
+            .execute(json!({
+                "agent_name": "engineer",
+                "task": "run cargo check"
+            }))
+            .await;
+
+        assert!(
+            !result.is_error(),
+            "worker role must pass the gate: {}",
+            result.content()
+        );
+        assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+    }
+
+    /// The other positive case: a PEER assistant (role `assistant`, e.g.
+    /// `cto-assistant`) must still reach the runner — this is the
+    /// Izzie <-> cto-assistant peer-consult lane the role gate must
+    /// preserve. Spawning a peer is safe because IT ALSO gets routed
+    /// through the restricted assistant-tier registry, never an
+    /// unrestricted one.
+    #[tokio::test]
+    async fn delegate_assistant_role_gate_allows_peer_assistant_role() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_toml_with_role(dir.path(), "cto-assistant", "assistant");
+
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = DelegateToAgentTool::new(runner.clone())
+            .with_config_dirs(vec![dir.path().to_path_buf()])
+            .with_allowed_target_roles(vec!["engineer".to_string(), "assistant".to_string()]);
+
+        let result = tool
+            .execute(json!({
+                "agent_name": "cto-assistant",
+                "task": "consult on architecture"
+            }))
+            .await;
+
+        assert!(
+            !result.is_error(),
+            "peer assistant role must pass the gate: {}",
+            result.content()
+        );
+        assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+    }
+
+    /// Without `with_allowed_target_roles` (pm/ctrl callers), the role gate
+    /// is a no-op — the existing existence-only check still governs, and a
+    /// name resolving to ANY role (including `orchestrator`/`controller`)
+    /// reaches the runner. Pins that widening the assistant tier's gate did
+    /// NOT change pm/ctrl's own delegation behavior.
+    #[tokio::test]
+    async fn delegate_without_role_gate_allows_any_resolvable_role() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_toml_with_role(dir.path(), "pm", "orchestrator");
+
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = DelegateToAgentTool::new(runner.clone())
+            .with_config_dirs(vec![dir.path().to_path_buf()]);
+
+        let result = tool
+            .execute(json!({
+                "agent_name": "pm",
+                "task": "do orchestrator-tier things"
+            }))
+            .await;
+
+        assert!(
+            !result.is_error(),
+            "pm/ctrl callers (no role gate) must be unaffected: {}",
+            result.content()
+        );
+        assert_eq!(runner.invoked.lock().unwrap().len(), 1);
     }
 }
