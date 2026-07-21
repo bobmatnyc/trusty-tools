@@ -50,6 +50,9 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 7. Run `scripts/check-publish-ready.sh <crate-name>` (or
    `make publish-check CRATE=<crate-name>`) — must pass before publishing. See
    [Publish-Only-From-Merged-Main Guard](#publish-only-from-merged-main-guard-issue-2227) below.
+   Also runs automatically post-merge: `make version-parity-check` (or wait
+   for `.github/workflows/version-parity.yml` on the merge commit) — see
+   [Version-Parity Guard](#version-parity-guard-issue-3366) below.
 8. Publish: `cargo publish -p <crate-name>`.
    - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): prefix with `SKIP_UI_BUILD=1`:
      ```bash
@@ -95,6 +98,34 @@ convention someone can forget under pressure.
 downgrades both guard failures to a loud warning and exits 0 instead of
 failing. Use it only when you have a specific, understood reason to publish
 from an unmerged commit; the default path is always "merge to main first."
+
+## Version-Parity Guard (issue #3366)
+
+🔴 **Before bumping a crate's version, confirm it hasn't already drifted.**
+`scripts/check-version-parity.sh` (also `make version-parity-check`) compares
+every publishable crate's local `src/` tree against the crates.io tarball for
+that crate's CURRENT (pre-bump) `Cargo.toml` version. If that version is
+already live and the source no longer matches it, the crate is flagged as
+drifted — source changes landed on `main` without a version bump, so the
+version number on crates.io no longer describes what's actually in the repo.
+
+This runs automatically on every push to `main`
+(`.github/workflows/version-parity.yml`), so drift is caught right after it
+merges instead of being discovered later as a `cargo publish --dry-run`
+failure (which is exactly how issue #3366 was found: `trusty-common` and
+`trusty-agents-common` had each drifted this way, and `cargo publish -p
+trusty-mpm --dry-run` failed with "symbol not found" errors for symbols that
+only existed in the unpublished, drifted source).
+
+The check fails CLOSED: if a crate's live/local comparison can't be verified
+(registry unreachable, unexpected response), that counts as a failure, never
+a silent pass. See `crates/trusty-publish-guard` for the underlying engine.
+
+For the cross-crate publish-ORDERING hazard (a related but distinct problem —
+publishing a crate before a sibling it depends on is live), see
+`scripts/publish-dry-run-order.sh` / `make publish-dry-run-order`, documented
+in `.claude/skills/cargo-publish/SKILL.md` under "Cross-Crate Publish
+Ordering."
 
 ## macOS Code-Signing Critical Alert
 

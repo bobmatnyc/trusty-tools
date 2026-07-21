@@ -104,6 +104,35 @@ the rare, logged `PREFLIGHT_ALLOW_DETACHED=1` override for check 1 (validated
 release worktrees only — misuse of it is exactly how the incident happened).
 No override exists for the identity check.
 
+## Step 6: Version-Parity Guard (MANDATORY, issue #3366)
+
+Before bumping a crate's version to publish, confirm the crate ISN'T already
+drifted — i.e. that its CURRENT (pre-bump) Cargo.toml version, if already
+live on crates.io, still matches the local `src/` tree. This is the
+`trusty-common`/`trusty-agents-common` incident: several commits of source
+changes landed on `main` without a version bump while the old version number
+was already published, so `cargo publish --dry-run` for a downstream crate
+failed with "symbol not found" for symbols that only existed in the drifted,
+unpublished source.
+
+```bash
+make version-parity-check
+# or directly:
+scripts/check-version-parity.sh
+```
+
+This also runs automatically on every push to `main`
+(`.github/workflows/version-parity.yml`) so drift is caught right after it
+merges rather than discovered as a release blocker. See
+`crates/trusty-publish-guard` for the underlying check (fails closed: a
+crate whose live/local comparison can't be verified is treated as a failure,
+never a silent pass).
+
+For the RELATED but distinct cross-crate ordering hazard (publishing a crate
+before a sibling it depends on is live — the 2026-07-20 incident), see
+`scripts/publish-dry-run-order.sh` in "Cross-Crate Publish Ordering" below —
+it now computes the dependency order mechanically instead of by hand.
+
 ## Worktree Discipline (MANDATORY)
 
 Always operate from a dedicated git worktree, never the main checkout.
@@ -222,6 +251,25 @@ registry — the same view downstream consumers will see.
 "dependency not found" because crates.io doesn't yet have A at the new version.
 
 ## Cross-Crate Publish Ordering (RED — Common Pitfall)
+
+**Automated (issue #3366)**: `scripts/publish-dry-run-order.sh` computes the
+dependency order mechanically from `cargo metadata` and runs
+`cargo publish --dry-run -p <crate>` for every publishable crate in that
+order (dependencies before dependents), stopping at the first failure — this
+replaces re-deriving the manual recipe below by hand for a full-workspace
+release. Pass specific crate names to restrict it to a partial release (it
+still includes any publishable crate they depend on, in order):
+
+```bash
+scripts/publish-dry-run-order.sh --list-only          # print the order, run nothing
+scripts/publish-dry-run-order.sh                      # dry-run every publishable crate, in order
+scripts/publish-dry-run-order.sh trusty-search trusty-common
+```
+
+The manual recipe below remains useful for reasoning about WHY a given order
+is correct, and the crate list in "Dependency Publish Order" further down is
+historical/illustrative rather than mechanically maintained — trust the
+script's computed order, not that hand-written list.
 
 ### The Recipe
 

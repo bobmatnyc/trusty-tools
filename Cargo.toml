@@ -64,6 +64,7 @@ default-members = [
     "crates/trusty-memory",
     "crates/trusty-mpm",
     "crates/trusty-progress",
+    "crates/trusty-publish-guard",
     "crates/trusty-review",
     "crates/trusty-search",
     "crates/trusty-sld-lint",
