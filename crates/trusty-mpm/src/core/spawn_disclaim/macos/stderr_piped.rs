@@ -30,7 +30,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::FromRawFd;
 use std::process::Command;
 
-use super::super::{StderrPipedHandle, StderrPipedSpawn};
+use super::super::stderr_piped::{StderrPipedHandle, StderrPipedSpawn};
 use super::{OwnedFd, pipe_cloexec, posix_spawn_file_actions_addchdir_np, resolve_disclaim_fn};
 
 /// Spawn `cmd` with stdout discarded, stderr piped, stdin inherited, and TCC

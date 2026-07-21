@@ -55,7 +55,10 @@
 //! #3261 code-critic review flagged: `provisioner::clone_progress::clone_with_progress`
 //! (a daemon-initiated `git clone`) and
 //! `formatters::info_box::probes::run_git_log` (the `tm` binary's welcome-panel
-//! `git log` probe).
+//! `git log` probe). Split into their own `stderr_piped`/`stdout_piped`
+//! submodules (mirroring the pre-existing `macos::stderr_piped`/
+//! `macos::stdout_piped` split) to keep this file under the 500-SLOC
+//! production cap — see those modules' own docs for their Why/What/Test.
 //! Test: `disclaimed_output_captures_stdout`,
 //! `disclaimed_output_captures_stderr_and_nonzero_exit`,
 //! `disclaimed_output_saturates_stdout_and_stderr_without_deadlock`,
@@ -71,17 +74,9 @@
 //! `disclaimed_spawn_detached_returns_ok_for_true`,
 //! `disclaimed_spawn_detached_reports_spawn_error_for_missing_binary`,
 //! `disclaimed_spawn_detached_disable_env_forces_plain_path` (macOS-only,
-//! this module's `tests`); `disclaimed_stderr_piped_spawn_streams_and_waits`,
-//! `disclaimed_stderr_piped_spawn_applies_cwd_and_env_override`,
-//! `disclaimed_stderr_piped_spawn_reports_spawn_error_for_missing_binary`,
-//! `disclaimed_stderr_piped_spawn_disable_env_forces_plain_path`,
-//! `disclaimed_stdout_piped_spawn_captures_and_waits`,
-//! `disclaimed_stdout_piped_spawn_id_allows_watchdog_kill_before_wait`,
-//! `disclaimed_stdout_piped_spawn_reports_spawn_error_for_missing_binary`,
-//! `disclaimed_stdout_piped_spawn_disable_env_forces_plain_path` (macOS-only,
-//! this module's `tests`); `disclaimed_stderr_piped_spawn_native_path_round_trips`,
-//! `disclaimed_stdout_piped_spawn_native_path_round_trips` (any OS,
-//! `piped_native_tests`).
+//! this module's `tests`); `stderr_piped`'s and `stdout_piped`'s own `tests`
+//! (macOS-only) and `native_tests` (any OS) submodules cover
+//! [`disclaimed_stderr_piped_spawn`]/[`disclaimed_stdout_piped_spawn`].
 
 /// Environment variable that, when set to any value, forces
 /// [`disclaimed_output`]/[`disclaimed_status`]/[`disclaimed_piped_spawn`]
@@ -203,202 +198,11 @@ pub fn disclaimed_spawn_detached(program: &str, args: &[&str]) -> std::io::Resul
         .map(|_| ())
 }
 
-/// A synchronously-readable, piped-stderr child spawned by
-/// [`disclaimed_stderr_piped_spawn`] — stdout discarded, stdin inherited.
-///
-/// Why: `provisioner::clone_progress::clone_with_progress` reads `git clone
-/// --progress`'s stderr line-by-line WHILE THE CHILD RUNS
-/// (to emit live percentage detail), so it needs a real-time stderr handle
-/// rather than [`disclaimed_output`]'s capture-to-completion contract.
-/// What: `stderr` is a boxed synchronous reader (the macOS-disclaimed pipe
-/// read end, or a native `std::process::ChildStderr`) the caller drains to
-/// EOF; [`Self::wait`] then reaps the child.
-/// Test: see [`disclaimed_stderr_piped_spawn`].
-pub struct StderrPipedSpawn {
-    /// The child's stderr, readable synchronously while the process runs.
-    pub stderr: Box<dyn std::io::Read + Send>,
-    handle: StderrPipedHandle,
-}
+mod stderr_piped;
+pub use stderr_piped::{StderrPipedSpawn, disclaimed_stderr_piped_spawn};
 
-enum StderrPipedHandle {
-    Native(std::process::Child),
-    #[cfg(target_os = "macos")]
-    Disclaimed(libc::pid_t),
-}
-
-impl StderrPipedSpawn {
-    /// Wait for the child to exit, mirroring `Child::wait()`.
-    ///
-    /// Why: callers must drain `stderr` to EOF first (as
-    /// `clone_with_progress` does) — the pipe's write end only closes once
-    /// the child exits or closes fd 2 itself, so waiting before draining a
-    /// large-output child can deadlock on a full pipe buffer.
-    /// What: reaps the native `Child` or, on the macOS-disclaimed path, the
-    /// raw pid via [`macos::wait_for`].
-    /// Test: see [`disclaimed_stderr_piped_spawn`].
-    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        match &mut self.handle {
-            StderrPipedHandle::Native(child) => child.wait(),
-            #[cfg(target_os = "macos")]
-            StderrPipedHandle::Disclaimed(pid) => macos::wait_for(*pid),
-        }
-    }
-}
-
-/// Spawn `cmd` with stdout discarded to `/dev/null`, stdin inherited, and
-/// stderr piped for synchronous streaming — and, on macOS, disclaim TCC
-/// responsibility exactly like [`disclaimed_output`]. Returns immediately
-/// with a live stderr reader instead of blocking until the child exits.
-///
-/// Why: fixes one of the two spawn sites named by issue #3267 (#2997 part 6):
-/// `clone_progress::clone_with_progress` previously called `cmd.spawn()`
-/// directly, so the `git clone`'s (and anything a clone/checkout hook
-/// forks') TCC access rolled up to the signed `trusty-mpm` binary — the same
-/// mis-attribution shape as #2819/#2721/#2997/#3126, just on the
-/// daemon-initiated workspace-provisioning path rather than a `claude`
-/// launch. This is the "closest existing shape is the piped/long-lived
-/// pattern" the issue called out, minimally adapted: unlike
-/// [`disclaimed_piped_spawn`] this is synchronous (no tokio — `clone_with_progress`
-/// is a blocking function called from a non-async trait method) and pipes
-/// ONLY stderr rather than all three streams.
-/// What: on macOS, re-derives argv/envp/cwd from `cmd` via the same stable
-/// `Command` accessors [`macos::spawn_status_inherit_disclaimed`] uses, and
-/// spawns via `posix_spawnp` with a `/dev/null` stdout file action, a piped
-/// stderr, no stdin file action (inherited — matches the pre-existing
-/// `Command`'s implicit default), and the disclaim attribute when the
-/// private SPI resolves. On non-macOS (or with [`DISABLE_ENV`] set) sets
-/// `cmd.stdout(Stdio::null()).stderr(Stdio::piped())` and delegates to
-/// `cmd.spawn()`, taking the child's stderr pipe exactly as the pre-fix code
-/// did.
-/// Test: `disclaimed_stderr_piped_spawn_streams_and_waits`,
-/// `disclaimed_stderr_piped_spawn_reports_spawn_error_for_missing_binary`,
-/// `disclaimed_stderr_piped_spawn_disable_env_forces_plain_path` (macOS-only,
-/// this module's `tests`); `disclaimed_stderr_piped_spawn_native_path_round_trips`
-/// (any OS, `piped_native_tests`).
-pub fn disclaimed_stderr_piped_spawn(
-    mut cmd: std::process::Command,
-) -> std::io::Result<StderrPipedSpawn> {
-    #[cfg(target_os = "macos")]
-    {
-        if std::env::var_os(DISABLE_ENV).is_none() {
-            return macos::spawn_stderr_piped_disclaimed(&cmd);
-        }
-    }
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn()?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| std::io::Error::other("child stderr pipe was not opened"))?;
-    Ok(StderrPipedSpawn {
-        stderr: Box::new(stderr),
-        handle: StderrPipedHandle::Native(child),
-    })
-}
-
-/// A piped-stdout child spawned by [`disclaimed_stdout_piped_spawn`] —
-/// stderr discarded, stdin inherited — exposing the child's pid so a caller
-/// can arm an external kill-watchdog BEFORE blocking on
-/// [`Self::wait_with_output`].
-///
-/// Why: `formatters::info_box::probes::run_git_log` (in the `tm` binary)
-/// spawns `git log` with a 3-second SIGKILL watchdog
-/// that must be armed with the child's pid BEFORE the blocking
-/// read-to-EOF-then-wait, so it needs the pid available immediately after
-/// spawn — [`disclaimed_output`] only returns after the child has already
-/// exited, so it cannot expose the pid in time.
-/// What: `id` mirrors `std::process::Child::id()`; `wait_with_output`
-/// consumes `self`, drains stdout, and reaps the child.
-/// Test: see [`disclaimed_stdout_piped_spawn`].
-pub struct StdoutPipedSpawn {
-    /// The child's OS process id, valid immediately after spawn — used to
-    /// arm an external kill-watchdog before [`Self::wait_with_output`] blocks.
-    pub id: u32,
-    stdout: Box<dyn std::io::Read + Send>,
-    handle: StdoutPipedHandle,
-}
-
-enum StdoutPipedHandle {
-    Native(std::process::Child),
-    #[cfg(target_os = "macos")]
-    Disclaimed(libc::pid_t),
-}
-
-impl StdoutPipedSpawn {
-    /// Read stdout to EOF, then wait for exit — mirrors
-    /// `Child::wait_with_output()`'s stdout+status contract. `stderr` is
-    /// always empty (this spawn shape discards it to `/dev/null`).
-    ///
-    /// Why/What: see the struct docs.
-    /// Test: see [`disclaimed_stdout_piped_spawn`].
-    pub fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
-        use std::io::Read as _;
-        let mut stdout = Vec::new();
-        self.stdout.read_to_end(&mut stdout)?;
-        let status = match self.handle {
-            StdoutPipedHandle::Native(mut child) => child.wait()?,
-            #[cfg(target_os = "macos")]
-            StdoutPipedHandle::Disclaimed(pid) => macos::wait_for(pid)?,
-        };
-        Ok(std::process::Output {
-            status,
-            stdout,
-            stderr: Vec::new(),
-        })
-    }
-}
-
-/// Spawn `cmd` with stdout piped, stderr discarded to `/dev/null`, and stdin
-/// inherited — and, on macOS, disclaim TCC responsibility exactly like
-/// [`disclaimed_output`]. Returns immediately with the child's pid and a live
-/// stdout reader instead of blocking until the child exits.
-///
-/// Why: fixes the second spawn site named by issue #3267 (#2997 part 6):
-/// `formatters::info_box::probes::run_git_log` previously called
-/// `std::process::Command::new("git")...spawn()` directly. Its 3-second
-/// SIGKILL watchdog (guarding against a slow/network-mounted `.git`) needs
-/// the pid immediately after spawn — before the blocking
-/// read-then-wait — so this fits neither [`disclaimed_output`] (blocks
-/// internally until the child exits, pid never exposed) nor
-/// [`disclaimed_piped_spawn`] (async, three pipes); it needs its own thin
-/// wrapper following the same argv/envp/cwd/disclaim-SPI reconstruction
-/// pattern as [`macos::spawn_status_inherit_disclaimed`].
-/// What: on macOS, re-derives argv/envp/cwd from `cmd`, spawns via
-/// `posix_spawnp` with a piped stdout, a `/dev/null` stderr file action, no
-/// stdin file action (inherited), and the disclaim attribute when the
-/// private SPI resolves — returning the pid immediately, unwaited. On
-/// non-macOS (or with [`DISABLE_ENV`] set) sets
-/// `cmd.stdout(Stdio::piped()).stderr(Stdio::null())` and delegates to
-/// `cmd.spawn()`, exposing `Child::id()` exactly as the pre-fix code did.
-/// Test: `disclaimed_stdout_piped_spawn_captures_and_waits`,
-/// `disclaimed_stdout_piped_spawn_reports_spawn_error_for_missing_binary`,
-/// `disclaimed_stdout_piped_spawn_disable_env_forces_plain_path` (macOS-only,
-/// this module's `tests`); `disclaimed_stdout_piped_spawn_native_path_round_trips`
-/// (any OS, `piped_native_tests`).
-pub fn disclaimed_stdout_piped_spawn(
-    mut cmd: std::process::Command,
-) -> std::io::Result<StdoutPipedSpawn> {
-    #[cfg(target_os = "macos")]
-    {
-        if std::env::var_os(DISABLE_ENV).is_none() {
-            return macos::spawn_stdout_piped_disclaimed(&cmd);
-        }
-    }
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn()?;
-    let id = child.id();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| std::io::Error::other("child stdout pipe was not opened"))?;
-    Ok(StdoutPipedSpawn {
-        id,
-        stdout: Box::new(stdout),
-        handle: StdoutPipedHandle::Native(child),
-    })
-}
+mod stdout_piped;
+pub use stdout_piped::{StdoutPipedSpawn, disclaimed_stdout_piped_spawn};
 
 /// Trait-object alias for a spawned child's writable stdin, uniform across
 /// the native (`tokio::process::ChildStdin`) and macOS-disclaimed
@@ -868,158 +672,6 @@ mod tests {
         unsafe { std::env::remove_var(DISABLE_ENV) };
         assert!(result.is_ok());
     }
-
-    // --- disclaimed_stderr_piped_spawn (issue #3267: clone_with_progress) ---
-
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stderr_piped_spawn_streams_and_waits() {
-        // Writes to BOTH stdout and stderr, plus a distinct exit code — pins
-        // the exact stdio shape `clone_with_progress` depends on: stdout
-        // discarded (never observable), stderr captured, exit status
-        // preserved.
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args([
-            "-c",
-            "echo should-be-discarded; echo captured-line >&2; exit 5",
-        ]);
-        let mut spawned = disclaimed_stderr_piped_spawn(cmd).unwrap();
-        let mut stderr_buf = Vec::new();
-        std::io::Read::read_to_end(&mut spawned.stderr, &mut stderr_buf).unwrap();
-        assert_eq!(String::from_utf8_lossy(&stderr_buf), "captured-line\n");
-        let status = spawned.wait().unwrap();
-        assert_eq!(status.code(), Some(5));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stderr_piped_spawn_applies_cwd_and_env_override() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let tmp_path = std::fs::canonicalize(tmp.path()).unwrap();
-
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.current_dir(&tmp_path);
-        cmd.env("SPAWN_DISCLAIM_STDERR_TEST_VAR_3267", "hello-3267");
-        cmd.args([
-            "-c",
-            "printf '%s' \"$SPAWN_DISCLAIM_STDERR_TEST_VAR_3267\" >&2 && pwd > cwd.txt",
-        ]);
-        let mut spawned = disclaimed_stderr_piped_spawn(cmd).unwrap();
-        let mut stderr_buf = Vec::new();
-        std::io::Read::read_to_end(&mut spawned.stderr, &mut stderr_buf).unwrap();
-        let status = spawned.wait().unwrap();
-        assert!(status.success());
-        assert_eq!(String::from_utf8_lossy(&stderr_buf), "hello-3267");
-
-        let cwd_contents = std::fs::read_to_string(tmp_path.join("cwd.txt")).unwrap();
-        assert_eq!(
-            std::fs::canonicalize(cwd_contents.trim()).unwrap(),
-            tmp_path,
-            "expected the Command's current_dir to reach the child via chdir_np"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stderr_piped_spawn_reports_spawn_error_for_missing_binary() {
-        let cmd =
-            std::process::Command::new("/nonexistent/definitely-not-a-real-binary-3267-stderr");
-        // `StderrPipedSpawn` holds a `Box<dyn Read>` trait object, so it
-        // isn't `Debug` and can't go through `expect_err` (mirrors
-        // `PipedSpawn`'s same constraint — see
-        // `spawn_piped_disclaimed_reports_spawn_error_for_missing_binary`).
-        let err = disclaimed_stderr_piped_spawn(cmd)
-            .err()
-            .expect("spawning a missing binary must error, not hang or panic");
-        assert!(matches!(
-            err.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::Other
-        ));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stderr_piped_spawn_disable_env_forces_plain_path() {
-        // SAFETY: single-threaded test setup around the env toggle.
-        unsafe { std::env::set_var(DISABLE_ENV, "1") };
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", "echo out; echo err >&2; exit 2"]);
-        let mut spawned = disclaimed_stderr_piped_spawn(cmd).unwrap();
-        let mut stderr_buf = Vec::new();
-        std::io::Read::read_to_end(&mut spawned.stderr, &mut stderr_buf).unwrap();
-        let status = spawned.wait().unwrap();
-        unsafe { std::env::remove_var(DISABLE_ENV) };
-        assert_eq!(String::from_utf8_lossy(&stderr_buf), "err\n");
-        assert_eq!(status.code(), Some(2));
-    }
-
-    // --- disclaimed_stdout_piped_spawn (issue #3267: probes::run_git_log) ---
-
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stdout_piped_spawn_captures_and_waits() {
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args([
-            "-c",
-            "echo captured-out; echo should-be-discarded >&2; exit 5",
-        ]);
-        let spawned = disclaimed_stdout_piped_spawn(cmd).unwrap();
-        assert!(spawned.id > 0, "pid must be available before waiting");
-        let out = spawned.wait_with_output().unwrap();
-        assert_eq!(out.status.code(), Some(5));
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "captured-out\n");
-        assert!(out.stderr.is_empty());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stdout_piped_spawn_id_allows_watchdog_kill_before_wait() {
-        // Reproduces the exact shape `run_git_log`'s 3-second SIGKILL
-        // watchdog depends on: the pid must be usable to kill the child
-        // BEFORE `wait_with_output` is called (which would otherwise block
-        // forever on `sleep 30`'s stdout never reaching EOF).
-        let mut cmd = std::process::Command::new("/bin/sleep");
-        cmd.arg("30");
-        let spawned = disclaimed_stdout_piped_spawn(cmd).unwrap();
-        let pid = spawned.id;
-        assert!(pid > 0);
-        // SAFETY: `pid` is our own freshly spawned child.
-        let killed = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        assert_eq!(killed, 0, "SIGKILL must reach the child by its exposed pid");
-        let out = spawned.wait_with_output().unwrap();
-        assert!(!out.status.success());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stdout_piped_spawn_reports_spawn_error_for_missing_binary() {
-        let cmd =
-            std::process::Command::new("/nonexistent/definitely-not-a-real-binary-3267-stdout");
-        // `StdoutPipedSpawn` holds a `Box<dyn Read>` trait object, so it
-        // isn't `Debug` and can't go through `expect_err` — same constraint
-        // as `StderrPipedSpawn` above.
-        let err = disclaimed_stdout_piped_spawn(cmd)
-            .err()
-            .expect("spawning a missing binary must error, not hang or panic");
-        assert!(matches!(
-            err.kind(),
-            std::io::ErrorKind::NotFound | std::io::ErrorKind::Other
-        ));
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stdout_piped_spawn_disable_env_forces_plain_path() {
-        // SAFETY: single-threaded test setup around the env toggle.
-        unsafe { std::env::set_var(DISABLE_ENV, "1") };
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", "echo out; exit 3"]);
-        let spawned = disclaimed_stdout_piped_spawn(cmd).unwrap();
-        let out = spawned.wait_with_output().unwrap();
-        unsafe { std::env::remove_var(DISABLE_ENV) };
-        assert_eq!(out.status.code(), Some(3));
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "out\n");
-    }
 }
 
 #[cfg(test)]
@@ -1056,54 +708,5 @@ mod piped_native_tests {
         assert_eq!(line, "native path\n");
         let status = spawned.handle.wait().await.unwrap();
         assert!(status.success());
-    }
-
-    /// Exercises the exact code path every non-macOS platform always takes
-    /// for [`disclaimed_stderr_piped_spawn`] (and that macOS takes under
-    /// [`DISABLE_ENV`]) — no `cfg(target_os = "macos")` gate, so this runs on
-    /// every CI platform.
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stderr_piped_spawn_native_path_round_trips() {
-        if cfg!(target_os = "windows") {
-            return; // no portable `sh` equivalent; skip on Windows
-        }
-        // SAFETY: no other test in this binary reads/writes DISABLE_ENV
-        // concurrently with this one.
-        unsafe { std::env::set_var(DISABLE_ENV, "1") };
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", "echo out; echo native-stderr >&2; exit 4"]);
-        let mut spawned = disclaimed_stderr_piped_spawn(cmd).unwrap();
-        unsafe { std::env::remove_var(DISABLE_ENV) };
-
-        let mut stderr_buf = Vec::new();
-        std::io::Read::read_to_end(&mut spawned.stderr, &mut stderr_buf).unwrap();
-        let status = spawned.wait().unwrap();
-        assert_eq!(String::from_utf8_lossy(&stderr_buf), "native-stderr\n");
-        assert_eq!(status.code(), Some(4));
-    }
-
-    /// Exercises the exact code path every non-macOS platform always takes
-    /// for [`disclaimed_stdout_piped_spawn`] (and that macOS takes under
-    /// [`DISABLE_ENV`]) — no `cfg(target_os = "macos")` gate, so this runs on
-    /// every CI platform.
-    #[test]
-    #[serial_test::serial]
-    fn disclaimed_stdout_piped_spawn_native_path_round_trips() {
-        if cfg!(target_os = "windows") {
-            return; // no portable `sh` equivalent; skip on Windows
-        }
-        // SAFETY: no other test in this binary reads/writes DISABLE_ENV
-        // concurrently with this one.
-        unsafe { std::env::set_var(DISABLE_ENV, "1") };
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.args(["-c", "echo native-stdout; exit 4"]);
-        let spawned = disclaimed_stdout_piped_spawn(cmd).unwrap();
-        unsafe { std::env::remove_var(DISABLE_ENV) };
-        assert!(spawned.id > 0);
-
-        let out = spawned.wait_with_output().unwrap();
-        assert_eq!(String::from_utf8_lossy(&out.stdout), "native-stdout\n");
-        assert_eq!(out.status.code(), Some(4));
     }
 }
