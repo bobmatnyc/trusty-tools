@@ -1,0 +1,44 @@
+[project]
+# The Python/MPS embedding sidecar for trusty-search (epic #3524, slices 2-4).
+#
+# This project is bundled inside the `trusty-embedderd-py` Rust crate and
+# materialized into the trusty-search data dir at bootstrap time. The Rust
+# launcher (`trusty-embedderd-py`) ensures a venv from the committed, hashed
+# `uv.lock` and then execs `python -m trusty_embed_sidecar --stdio`.
+name = "trusty-embed-sidecar"
+version = "0.1.0"
+description = "Python/MPS embedding sidecar speaking trusty-embedderd's stdio JSON-RPC 2.0 wire protocol."
+readme = "README.md"
+# Pinned CPython. `uv python install` installs exactly this interpreter so the
+# venv is reproducible regardless of the host's system Python.
+requires-python = "==3.11.*"
+dependencies = [
+    # Pinned to the versions validated by the spike (results.md): torch 2.9.x
+    # + sentence-transformers 5.6.x produced >=0.9999 cosine vs the CPU fp32
+    # reference on MPS. The exact resolved versions + hashes are frozen in
+    # uv.lock; these ranges only bound the resolver.
+    "torch>=2.9,<2.10",
+    "sentence-transformers>=5.6,<5.7",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+trusty-embed-sidecar = "trusty_embed_sidecar.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["trusty_embed_sidecar"]
+
+[tool.uv]
+# Resolve the lockfile for BOTH platforms trusty-search ships on: Apple
+# Silicon macOS (the MPS target) and x86_64 Linux (CI / server). uv records
+# per-platform wheels + hashes for each so a single committed uv.lock
+# bootstraps reproducibly on either host. See the bootstrap module's cross-
+# platform note.
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]

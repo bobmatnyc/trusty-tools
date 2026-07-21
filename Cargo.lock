@@ -11537,6 +11537,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-embedderd-py"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs4 0.8.4",
+ "hex",
+ "include_dir",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+ "which 6.0.3",
+]
+
+[[package]]
 name = "trusty-gworkspace"
 version = "0.2.2"
 dependencies = [
@@ -11829,6 +11846,7 @@ dependencies = [
  "tree-sitter-typescript",
  "trusty-common",
  "trusty-embedderd",
+ "trusty-embedderd-py",
  "usearch",
  "uuid",
  "walkdir",

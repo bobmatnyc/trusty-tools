@@ -55,9 +55,7 @@ pub(super) async fn build_embedder() -> Result<(
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
 )> {
-    use crate::service::embedder_supervisor::{
-        locate_embedderd_binary, LazyEmbedderHandle, SupervisorConfig,
-    };
+    use crate::service::embedder_supervisor::LazyEmbedderHandle;
 
     let trusty_embedder_env = std::env::var("TRUSTY_EMBEDDER").unwrap_or_default();
 
@@ -77,42 +75,66 @@ pub(super) async fn build_embedder() -> Result<(
 
     match trusty_embedder_env.as_str() {
         // ── Lazy-spawn stdio sidecar (issue #315 — deferred boot default) ──
-        "" | "auto" | "stdio" => {
-            // `trusty-embedderd` is a required runtime dependency — fail fast
-            // with an actionable install hint rather than silently downgrading
-            // to in-process embedding. Users who need to skip the sidecar for
-            // tests or debugging must set `TRUSTY_EMBEDDER=in-process` explicitly.
-            let binary = locate_embedderd_binary().map_err(|e| {
-                anyhow::anyhow!(
-                    "{e}\n\n\
-                     ERROR: trusty-embedderd binary not found on PATH.\n\
-                     \n\
-                     trusty-search v0.13+ requires trusty-embedderd to be installed alongside it.\n\
-                     \n\
-                     Install it with:\n\
-                     \x20 cargo install trusty-embedderd --locked\n\
-                     \n\
-                     Or set TRUSTY_EMBEDDERD_BIN to an absolute path:\n\
-                     \x20 export TRUSTY_EMBEDDERD_BIN=/path/to/trusty-embedderd\n\
-                     \n\
-                     If you need to run without the sidecar (tests, debugging), use:\n\
-                     \x20 TRUSTY_EMBEDDER=in-process trusty-search start"
-                )
-            })?;
+        "" | "auto" | "stdio" => build_ort_stdio_sidecar(),
 
-            let config = SupervisorConfig::from_env();
+        // ── Opt-in Python/MPS sidecar (epic #3524, slices 2-4) — DEFAULT-OFF ──
+        //
+        // Why: on Apple Silicon a torch/MPS sentence-transformers sidecar
+        // embeds ~2.4x faster than the Rust ort path with numerically
+        // identical results (the spike measured 561 emb/s end-to-end through
+        // the real supervisor). Selection is strictly opt-in; default-on is a
+        // LATER slice. Reuses `LazyEmbedderHandle` / `EmbedderSupervisor` with
+        // ZERO changes to the supervisor/stdio/protocol wire code — the
+        // launcher speaks the exact same JSON-RPC 2.0 stdio protocol.
+        //
+        // Robustness: eager-bootstrap the venv here (at `start`). On ANY
+        // bootstrap or launcher-discovery failure, log a loud actionable
+        // warning and FALL BACK to the Rust ort path so search never
+        // hard-fails.
+        "python" => {
+            // The bootstrap is a blocking, potentially minutes-long one-time
+            // build; run it off the async runtime. `ensure_venv_eager` (not the
+            // plain `ensure_venv` the per-respawn launcher binary uses) pays for
+            // the FULL torch-importing `.ready` recheck — worth it here since
+            // this call happens once per daemon lifetime, not once per respawn.
+            let bootstrap = tokio::task::spawn_blocking(trusty_embedderd_py::ensure_venv_eager)
+                .await
+                .map_err(|e| anyhow::anyhow!("py-embedder bootstrap task panicked: {e}"));
 
-            tracing::info!(
-                "embedder mode: stdio-sidecar lazy (binary={}, idle_shutdown_secs={})",
-                binary.display(),
-                config.idle_shutdown_secs,
-            );
-
-            // Issue #315: construct the lazy handle (no child spawned yet).
-            let handle = Arc::new(LazyEmbedderHandle::new(binary, config));
-            let pid_slot = handle.app_pid_slot();
-
-            Ok((Arc::new(LazySlotEmbedderAdapter { handle }), Some(pid_slot)))
+            match bootstrap.and_then(|r| r.map_err(|e| e.context("py-embedder venv bootstrap"))) {
+                Ok(_layout) => match trusty_embedderd_py::locate_launcher_binary() {
+                    Ok(launcher) => {
+                        let config = resolve_python_supervisor_config();
+                        tracing::info!(
+                            "embedder mode: python/MPS sidecar lazy \
+                             (launcher={}, idle_shutdown_secs={})",
+                            launcher.display(),
+                            config.idle_shutdown_secs,
+                        );
+                        let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
+                        let pid_slot = handle.app_pid_slot();
+                        Ok((Arc::new(LazySlotEmbedderAdapter { handle }), Some(pid_slot)))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "TRUSTY_EMBEDDER=python: could not locate the \
+                             trusty-embedderd-py launcher ({e:#}) — FALLING BACK to the \
+                             Rust ort stdio sidecar. Set TRUSTY_EMBEDDERD_PY_BIN or ensure \
+                             the launcher is on PATH to use the Python/MPS sidecar."
+                        );
+                        build_ort_stdio_sidecar()
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "TRUSTY_EMBEDDER=python: venv bootstrap failed ({e:#}) — FALLING \
+                         BACK to the Rust ort stdio sidecar so search does not hard-fail. \
+                         Ensure `uv` is installed (or set TRUSTY_UV_BIN) and there is \
+                         ~3 GB free disk, then restart to retry the Python/MPS sidecar."
+                    );
+                    build_ort_stdio_sidecar()
+                }
+            }
         }
 
         // ── In-process safety-valve ────────────────────────────────────────
@@ -144,10 +166,147 @@ pub(super) async fn build_embedder() -> Result<(
 
         other => anyhow::bail!(
             "invalid TRUSTY_EMBEDDER value: {other:?}. \
-             Expected: unset (default stdio sidecar), 'auto', 'stdio', 'in-process', \
+             Expected: unset (default stdio sidecar), 'auto', 'stdio', 'python' \
+             (opt-in Python/MPS sidecar), 'in-process', \
              'http://...', or 'unix:/path/to/socket'"
         ),
     }
+}
+
+/// Python-arm-only override of the shared 300s idle-shutdown default (fast-follow,
+/// epic #3524).
+///
+/// Why: the shared `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` default (300s / 5 min,
+/// issue #2315) is tuned for the lightweight Rust ort sidecar, whose cold
+/// restart is cheap. The Python/MPS sidecar's cold restart (torch import +
+/// model load + one MPS warmup) is only ~2.5-3s, but reclaiming it every 5
+/// minutes of think-time means a normal ~30 minute work session (edit, read,
+/// edit again) repeatedly pays that cost for no real memory benefit in
+/// between. Raising the DEFAULT to 1800s (30 min) — for the python arm only —
+/// keeps the sidecar warm through a typical session while still reclaiming
+/// its ~500 MB after genuine extended idle, which matters on the 16 GB
+/// minimum-spec tier. Operators on higher-RAM machines can set
+/// `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS=0` for always-warm (idle-shutdown
+/// disabled).
+///
+/// What: resolution precedence (see [`resolve_python_idle_shutdown_secs`] for
+/// the pure logic): `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS`, if set to a
+/// valid `u64` (including `0`), wins outright. Otherwise, if the operator
+/// explicitly set the SHARED `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` (present in
+/// the environment at all — any value, including `0`), that value is
+/// honoured: their intent must not be silently overridden. Otherwise the
+/// shared 300s `SupervisorConfig::from_env()` default is replaced with 1800
+/// for this arm only. The ort/default arm (`build_ort_stdio_sidecar`) still
+/// calls `SupervisorConfig::from_env()` directly and is completely unaffected.
+/// Test: `resolve_python_idle_shutdown_secs_*` in `start/tests.rs`.
+pub(super) fn resolve_python_supervisor_config(
+) -> crate::service::embedder_supervisor::SupervisorConfig {
+    use crate::service::embedder_supervisor::SupervisorConfig;
+
+    let mut config = SupervisorConfig::from_env();
+    config.idle_shutdown_secs = resolve_python_idle_shutdown_secs(
+        std::env::var("TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS").ok(),
+        std::env::var("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS").ok(),
+        config.idle_shutdown_secs,
+    );
+    config
+}
+
+/// Pure resolution logic for [`resolve_python_supervisor_config`] — unit
+/// testable without touching real process env vars.
+///
+/// `py_var` / `shared_var` are the RAW `std::env::var(..).ok()` results (so
+/// `None` means "not present at all", distinguishing "unset" from
+/// "explicitly set to the same value as the default" — `SupervisorConfig`
+/// alone cannot make that distinction). `shared_resolved` is the value
+/// `SupervisorConfig::from_env()` already computed for the shared var
+/// (300 when unset/malformed, or the operator's parsed value) — reused here
+/// so a malformed shared value falls back exactly like `parse_env_u64` does,
+/// without re-implementing that parsing.
+pub(super) fn resolve_python_idle_shutdown_secs(
+    py_var: Option<String>,
+    shared_var: Option<String>,
+    shared_resolved: u64,
+) -> u64 {
+    const PYTHON_IDLE_DEFAULT_SECS: u64 = 1800;
+
+    if let Some(raw) = py_var {
+        if let Ok(secs) = raw.trim().parse::<u64>() {
+            return secs;
+        }
+        // Malformed py-specific value: ignore it (matches `parse_env_u64`'s
+        // "malformed falls through" convention) and fall through to the
+        // shared-var-or-1800 resolution below.
+    }
+
+    match shared_var {
+        // Operator explicitly touched the shared var (any value, including a
+        // malformed one that resolved to 300 via `parse_env_u64`) — honour
+        // their intent rather than silently applying the python-specific
+        // default on top of it.
+        Some(_) => shared_resolved,
+        None => PYTHON_IDLE_DEFAULT_SECS,
+    }
+}
+
+/// Construct the default Rust ort stdio-sidecar `LazyEmbedderHandle`.
+///
+/// Why: this is the default `auto`/`stdio` path AND the fallback target for the
+/// opt-in `TRUSTY_EMBEDDER=python` arm (epic #3524) when the Python venv
+/// bootstrap or launcher discovery fails — search must never hard-fail, so it
+/// degrades to the Rust ort embedder. Extracted so both call sites share one
+/// implementation.
+/// What: locates `trusty-embedderd` (fail-fast install hint if missing) and
+/// arms a `LazyEmbedderHandle` (deferred spawn — no child at boot).
+/// Test: the default-path behaviour is covered by `start/tests.rs`
+/// (`lazy_adapter_reports_resolved_provider`).
+/// The pair every embedder-construction path returns: the `Arc<dyn Embedder>`
+/// plus the optional sidecar PID slot (`Some` only for stdio-sidecar paths).
+type BuiltEmbedder = (
+    std::sync::Arc<dyn crate::core::Embedder>,
+    Option<Arc<AtomicU32>>,
+);
+
+fn build_ort_stdio_sidecar() -> Result<BuiltEmbedder> {
+    use crate::service::embedder_supervisor::{
+        locate_embedderd_binary, LazyEmbedderHandle, SupervisorConfig,
+    };
+
+    // `trusty-embedderd` is a required runtime dependency — fail fast with an
+    // actionable install hint rather than silently downgrading to in-process
+    // embedding. Users who need to skip the sidecar for tests or debugging must
+    // set `TRUSTY_EMBEDDER=in-process` explicitly.
+    let binary = locate_embedderd_binary().map_err(|e| {
+        anyhow::anyhow!(
+            "{e}\n\n\
+             ERROR: trusty-embedderd binary not found on PATH.\n\
+             \n\
+             trusty-search v0.13+ requires trusty-embedderd to be installed alongside it.\n\
+             \n\
+             Install it with:\n\
+             \x20 cargo install trusty-embedderd --locked\n\
+             \n\
+             Or set TRUSTY_EMBEDDERD_BIN to an absolute path:\n\
+             \x20 export TRUSTY_EMBEDDERD_BIN=/path/to/trusty-embedderd\n\
+             \n\
+             If you need to run without the sidecar (tests, debugging), use:\n\
+             \x20 TRUSTY_EMBEDDER=in-process trusty-search start"
+        )
+    })?;
+
+    let config = SupervisorConfig::from_env();
+
+    tracing::info!(
+        "embedder mode: stdio-sidecar lazy (binary={}, idle_shutdown_secs={})",
+        binary.display(),
+        config.idle_shutdown_secs,
+    );
+
+    // Issue #315: construct the lazy handle (no child spawned yet).
+    let handle = Arc::new(LazyEmbedderHandle::new(binary, config));
+    let pid_slot = handle.app_pid_slot();
+
+    Ok((Arc::new(LazySlotEmbedderAdapter { handle }), Some(pid_slot)))
 }
 
 /// Build the in-process `FastEmbedder` and log details.

@@ -1,0 +1,7 @@
+# Runtime/dev artifacts — never embedded (include_dir!) or committed.
+__pycache__/
+*.pyc
+.pytest_cache/
+# Generated at bootstrap into the materialized project dir, not here.
+requirements.txt
+.venv/
