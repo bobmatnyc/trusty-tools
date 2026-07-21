@@ -133,8 +133,9 @@ pub async fn session_context_catchup(
 /// just called directly instead of over HTTP. A worktree-prune failure is
 /// logged and reported as an empty list rather than failing the whole pause
 /// (the snapshot write is the operation that must not silently fail).
-/// Test: `session_context_pause_writes_snapshot`,
-/// `session_context_pause_skips_prune_when_disabled`.
+/// Test: `session_context_pause_missing_project_dir_errors`,
+/// `session_context_pause_requires_summary`,
+/// `session_context_pause_writes_snapshot_without_pruning`.
 #[allow(clippy::too_many_arguments)]
 pub async fn session_context_pause(
     state: &Arc<DaemonState>,
