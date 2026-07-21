@@ -100,7 +100,7 @@ pub async fn serve_http(
     // Auto-discover existing Claude Code sessions — both tmux panes and native
     // Terminal.app processes — so they appear in the dashboard and the Telegram
     // bot without a manual `/adopt`.
-    let discovered = discovery::discover_all(&state);
+    let discovered = discovery::discover_all(&state).await;
     if discovered.adopted > 0 {
         info!(
             "auto-discovered {} Claude Code session(s)",
