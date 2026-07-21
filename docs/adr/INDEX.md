@@ -1,6 +1,6 @@
 # ADR Index — Accepted Decisions
 
-**Last updated:** 2026-07-19 | **Format version:** 1.0
+**Last updated:** 2026-07-21 | **Format version:** 1.0
 
 This index is the **single source of truth** for the ADR corpus. It serves as a quick reference for **consistency vetting** (see DOC-46 §3, "Related Decisions" protocol) and as a discoverability surface for understanding the architectural decision landscape.
 
@@ -12,7 +12,7 @@ This index is the **single source of truth** for the ADR corpus. It serves as a 
 | [0002](./0002-single-install-convention.md) | Single-install convention for main crates | Accepted | All major crates install to the same location via single `cargo install` command | Workspace |
 | [0003](./0003-msrv-and-edition-policy.md) | MSRV 1.88 and per-crate Rust edition policy | Accepted | MSRV drives Rust edition choice; crates use 2021 or 2024 per feature support | Workspace |
 | [0004](./0004-three-harnesses-shared-event-driven-common.md) | Three distinct harnesses on a shared event-driven trusty-common foundation | Accepted | Three independent harnesses (trusty-agents, trusty-search, trusty-memory) share event-driven, KG-backed trusty-common | Workspace |
-| [0005](./0005-harness-event-bus.md) | Shared HarnessEvent envelope + process-global event bus in trusty-agents-common | Accepted | Unified event bus for all harness events; subscribers do not know message types in advance ("adapt, don't fold") | Workspace |
+| [0005](./0005-harness-event-bus.md) | Shared HarnessEvent envelope + process-global event bus in trusty-agents-common | Superseded by 0019 | Unified event bus for all harness events; subscribers do not know message types in advance ("adapt, don't fold") | Workspace |
 | [0006](./0006-trusty-controller-naming.md) | Name the stack control plane `trusty-controller` (binary `tctl`) | Superseded by 0013 | Control plane service is called trusty-controller; CLI binary is `tctl` (replaced by trusty-installer in ADR-0013) | Workspace |
 | [0007](./0007-tool-contract-versioning-and-verb-model.md) | Monotonic-integer `contract_version` + 3-layer extensible verb model | Accepted | Tools versioned by contract_version integer; verbs have Base/Extended/Custom layers for extensibility | Workspace |
 | [0008](./0008-project-identity-convention.md) | Project-identity convention: full-path slug of the nearest git root | Accepted | Projects identified by full-path slug of nearest `.git` root (e.g., `/Users/alice/dev/myapp` → `/Users/alice/dev/myapp`) | Workspace |
@@ -26,6 +26,7 @@ This index is the **single source of truth** for the ADR corpus. It serves as a 
 | [0016](./0016-orchestration-hierarchy-lead-pm-assistant.md) | Orchestration Hierarchy: Engineering Lead / PM / Assistant | Proposed | Three-tier agent orchestration hierarchy: Engineering Lead leads cross-tool workstreams; PM orchestrates projects; Assistant executes delegated tasks | Workspace |
 | [0017](./0017-shared-ingress-via-console-tailscale-funnel.md) | Shared webhook ingress via trusty-console + Tailscale Funnel | Proposed | External webhooks flow through one /api/webhooks/{source} endpoint, reverse-proxied by trusty-console, exposed publicly via Tailscale Funnel | Workspace |
 | [0018](./0018-loopback-only-doctrine.md) | Loopback-only doctrine: `trusty-console` is the sole off-loopback HTTP surface | Accepted | trusty-console is the only daemon allowed to bind off-loopback; sibling daemons may run loopback-only HTTP for CLI/stdio-bridge/GUI use (amends 0011) | Workspace |
+| [0019](./0019-unified-ipc-messaging-on-event-bus.md) | Unified IPC messaging on the event-driven control bus | Accepted | Single durable IPC channel for all cross-PM and cross-agent messaging, built on the event bus with explicit delivery acknowledgment | Workspace |
 
 ## Notes
 
