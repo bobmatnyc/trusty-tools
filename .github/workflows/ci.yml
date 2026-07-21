@@ -598,11 +598,22 @@ jobs:
   # hosted non-GPU runner is only reliably available as a build-time stub,
   # not something guaranteed loadable at process start — exactly the
   # "full CUDA runtime isn't available" risk the issue itself flagged.
+  #
+  # CUDA_COMPUTE_CAP: candle-kernels' build.rs (see above) also auto-detects
+  # the target GPU architecture by shelling out to `nvidia-smi`, which does
+  # not exist on a driver-less runner. Its own error message documents the
+  # override: `CUDA_COMPUTE_CAP=90` (verified empirically — the build
+  # advanced past nvcc detection and failed here first, confirming nvcc
+  # itself was found correctly). The value doesn't affect this job's
+  # correctness: we only need `nvcc` to emit *some* valid PTX/cubin for
+  # `cargo check`'s type-checking pass, never to run on an actual device.
   # --------------------------------------------------------------------------
   embedder-cuda-check:
     name: embedder-cuda compile check (#3508)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CUDA_COMPUTE_CAP: "90"
     steps:
       - uses: actions/checkout@v5
 
