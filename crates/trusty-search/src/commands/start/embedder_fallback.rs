@@ -673,6 +673,7 @@ exit 1
         ));
         let python_embedder: Arc<dyn Embedder> = Arc::new(LazySlotEmbedderAdapter {
             handle: Arc::clone(&handle),
+            is_python: true,
         });
         let adapter = Arc::new(FallbackEmbedderAdapter::new(python_embedder, || {
             Ok(Arc::new(AlwaysOkEmbedder) as Arc<dyn Embedder>)

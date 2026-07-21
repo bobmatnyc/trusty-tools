@@ -693,6 +693,7 @@ fn lazy_python_adapter_reports_supervisor_gave_up_default_false() {
     ));
     let adapter = LazySlotEmbedderAdapter {
         handle: handle.clone(),
+        is_python: true,
     };
     assert_eq!(
         adapter.supervisor_gave_up(),
