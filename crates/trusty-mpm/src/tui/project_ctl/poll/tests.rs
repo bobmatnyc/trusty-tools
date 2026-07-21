@@ -40,9 +40,9 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         injection_status: None,
         unresumable: false,
         stale_assets: false,
-attached: false,
-slot: 0,
-deleted: false,
+        attached: false,
+        slot: 0,
+        deleted: false,
     }
 }
 
