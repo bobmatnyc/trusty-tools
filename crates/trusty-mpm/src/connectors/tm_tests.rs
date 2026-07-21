@@ -235,7 +235,7 @@ async fn delegate_unknown_session_is_backend_error() {
 async fn create_session_full_lifecycle() {
     let (_scratch, repo_url) = local_bare_repo();
     let (_daemon_root, url) = spawn_test_daemon().await;
-    let connector = TmConnector::with_daemon_url(url);
+    let connector = TmConnector::with_daemon_url(url.clone());
 
     // ── Hermetic workspace-provisioning root (#3450) ─────────────────────────
     // `DaemonState::with_root_isolated_managed` only isolates the session
@@ -273,7 +273,96 @@ async fn create_session_full_lifecycle() {
             ephemeral: true,
         },
     };
-    let info = ConnectorTestKit::assert_basic_lifecycle(&connector, req, "echo hello").await;
+
+    // NOT `ConnectorTestKit::assert_basic_lifecycle` (issue #3603 follow-up):
+    // that helper's `send_input` step hard-asserts success, which assumes the
+    // spawned session reaches `Active`. This test drives the REAL
+    // `spawn_managed_cloned` handler (module docs above), which calls the
+    // REAL `ClaudeCodeAdapter::spawn` — unlike every other tmux operation
+    // here, that is NOT faked by `FakeNoopTmuxDriver`, and it resolves an
+    // actual `claude` binary on `PATH`/well-known dirs
+    // (`ClaudeCodeAdapter::resolve_claude`). On a developer machine with
+    // Claude Code installed this succeeds and the record reaches `Active`;
+    // on a CI runner with no `claude` binary it fails and
+    // `spawn_managed_cloned` calls `mark_errored`, leaving the record
+    // `Errored`. Before #3603's send_input readiness gate, this test's
+    // `assert_basic_lifecycle` call "passed" in BOTH cases only because
+    // `send_input` had no Provisioning/Errored guard at all — on an Errored
+    // session that meant silently typing `echo hello` + Enter into a bare
+    // shell with no runtime attached, i.e. exactly the shell-execution risk
+    // #3603 closes. That was the test asserting broken (vulnerable)
+    // behavior, not a real contract. Assert the CORRECT, environment-
+    // independent contract instead: `send_input` must succeed for `Active`,
+    // and must be refused (never silently accepted) for anything else.
+    let info = connector
+        .create_session(req)
+        .await
+        .expect("create_session must succeed for a well-formed request");
+    assert!(
+        !info.id.is_empty(),
+        "create_session must return a non-empty session id"
+    );
+
+    let listed = connector
+        .list_sessions()
+        .await
+        .expect("list_sessions must succeed");
+    assert!(
+        listed.iter().any(|s| s.id == info.id),
+        "list_sessions must include the just-created session {}",
+        info.id
+    );
+
+    let status = connector
+        .session_status(&info.id)
+        .await
+        .expect("session_status must succeed for a known id");
+    assert_eq!(
+        status.id, info.id,
+        "session_status must echo back the id it was asked about"
+    );
+
+    // `session_status`'s `state` is DISPLAY-reconciled against live tmux
+    // (#3302): with `FakeNoopTmuxDriver` the tmux session never "exists", so
+    // an `active` PERSISTED record is shown as `stopped` here regardless of
+    // what actually gates `send_input` (which reads the PERSISTED state —
+    // `SessionManager::check_send_input_ready` via `self.get(id)`, never the
+    // display-reconciled view). Fetch the raw summary directly to read
+    // `persisted_state`, the field the daemon's own docs say resume/restart
+    // (and, by the same logic, this test's expectation) must key off of,
+    // rather than predicting the gate's outcome from a value it does not
+    // actually consult.
+    let raw: ManagedSessionSummary = reqwest::Client::new()
+        .get(format!("{url}/api/v1/sessions/managed/{}", info.id))
+        .send()
+        .await
+        .expect("raw status GET must succeed")
+        .json()
+        .await
+        .expect("raw status GET must decode as ManagedSessionSummary");
+    let persisted_state = raw.persisted_state.as_deref().unwrap_or(&raw.state);
+
+    match persisted_state {
+        "active" => {
+            connector
+                .send_input(&info.id, "echo hello")
+                .await
+                .expect("send_input must succeed for an Active session");
+        }
+        other => {
+            let err = connector
+                .send_input(&info.id, "echo hello")
+                .await
+                .expect_err(&format!(
+                    "send_input must be refused for a non-Active persisted state \
+                     ({other}), never silently accepted"
+                ));
+            assert!(
+                matches!(err, ConnectorError::Backend(_)),
+                "expected a Backend refusal for persisted state {other:?}, got {err:?}"
+            );
+        }
+    }
 
     // Restore the env var immediately after the one call that provisions a
     // workspace — attach/delegate below never re-provision.
@@ -287,7 +376,7 @@ async fn create_session_full_lifecycle() {
     assert_eq!(
         info.task.as_deref(),
         Some("list files"),
-        "the kit's lifecycle assertion doesn't check task content — do it here"
+        "create_session must echo back the task"
     );
 
     let attach = connector.attach(&info.id).await.expect("attach");
