@@ -1132,3 +1132,92 @@ fn test_rust_symbol_graph_resolves_caller() {
         "expected alpha among callers of beta, got {callers:?}"
     );
 }
+
+/// Regression test for issue #3537: a deeply nested, non-chunk-producing
+/// global-scope expression must not stack-overflow the chunker.
+///
+/// Why: `walk_for_chunks` used to be a native recursive descent whose stack
+/// depth tracked raw AST depth. A global-scope declaration containing a
+/// deeply parenthesized expression (the reported shape: "extreme nesting
+/// depth" in deeply templated/generated headers) is never pruned the way a
+/// function *body* is, so it drove unbounded recursion and crashed the whole
+/// daemon process with `fatal runtime error: stack overflow`. Confirmed via
+/// an out-of-tree repro before this fix: the exact same construction (scaled
+/// up to 200,000 levels) reliably aborted the process with SIGABRT.
+/// What: 50,000 levels of nested parens is two orders of magnitude past the
+/// walker's internal depth ceiling and far beyond anything the previous
+/// recursive implementation could survive on a normal thread stack — if this
+/// test completes at all (rather than aborting the whole `cargo test`
+/// process), the fix holds.
+/// Test: this is the test — asserts `chunk_ast` returns normally (a single
+/// fallback chunk, since nothing in a bare expression is chunk-classified)
+/// instead of crashing.
+#[test]
+fn test_deeply_nested_expression_does_not_crash() {
+    const DEPTH: usize = 50_000;
+    let mut src = String::from("const X: i32 = ");
+    src.push_str(&"(".repeat(DEPTH));
+    src.push('1');
+    src.push_str(&")".repeat(DEPTH));
+    src.push_str(";\n");
+
+    let (chunks, _entities) = chunk_ast("deeply_nested.rs", &src);
+
+    // Nothing in a bare parenthesized expression is chunk-classified, so
+    // this falls back to a single generic chunk covering the whole file.
+    assert_eq!(
+        chunks.len(),
+        1,
+        "expected the single-file fallback chunk, got {} chunks",
+        chunks.len()
+    );
+}
+
+/// Regression test for issue #3537: deeply nested *classified* containers
+/// (the `walk_for_chunks` branch that recurses into impl/class/module
+/// bodies) must not stack-overflow the chunker either.
+///
+/// Why: unlike the unclassified-node branch covered by
+/// `test_deeply_nested_expression_does_not_crash`, this branch increments
+/// `chunk_depth` and additionally calls `collect_calls`/`collect_inherits`
+/// per classified node — both of which perform their own subtree walk. A
+/// long chain of nested containers (e.g. `mod a { mod a { … } }`) exercises
+/// a different, previously-quadratic cost path (each classified node's
+/// `collect_calls` call re-walking its full remaining subtree) that the
+/// depth ceiling on the outer walk alone does not bound; `collect_calls`
+/// itself needed a matching depth cap to keep this bounded.
+/// What: 50,000 nested `mod` blocks — completes quickly and returns a
+/// bounded chunk count (capped by the walker's internal depth ceiling)
+/// rather than either crashing or taking superlinear time.
+/// Test: this is the test.
+#[test]
+fn test_deeply_nested_modules_does_not_crash() {
+    const DEPTH: usize = 50_000;
+    let mut src = String::new();
+    src.push_str(&"mod a{".repeat(DEPTH));
+    src.push_str("fn f(){}");
+    src.push_str(&"}".repeat(DEPTH));
+
+    let (chunks, entities) = chunk_ast("deeply_nested_mods.rs", &src);
+
+    // Chunk count is bounded by the walker's internal depth ceiling, not by
+    // DEPTH — the key assertion is simply that this returns at all (rather
+    // than crashing) and stays well under DEPTH, proving the walk was
+    // truncated rather than paying O(DEPTH) or worse.
+    assert!(
+        !chunks.is_empty(),
+        "expected at least the outermost mod chunks to be emitted"
+    );
+    assert!(
+        chunks.len() < DEPTH,
+        "expected the walk to be depth-capped well below {DEPTH}, got {} chunks",
+        chunks.len()
+    );
+    // Entity extraction (`walk_rust` in `core/entity.rs`) shares the same
+    // failure mode and the same depth cap; it must also stay bounded.
+    assert!(
+        entities.len() < DEPTH,
+        "expected entity extraction to be depth-capped well below {DEPTH}, got {} entities",
+        entities.len()
+    );
+}
