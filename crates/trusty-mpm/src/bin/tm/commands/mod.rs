@@ -36,6 +36,7 @@ pub(crate) mod manager;
 pub(crate) mod mcp;
 pub(crate) mod meta;
 pub(crate) mod misc;
+pub(crate) mod pane_identity;
 pub(crate) mod picker_delete;
 pub(crate) mod pm_guard;
 pub(crate) mod pm_guard_bash;

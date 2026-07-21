@@ -18,7 +18,9 @@
 //! Test: `to_command_maps_*` and `render_cli_*` in `tests.rs`; the HTTP round-trip
 //! is covered by the executor tests and `tests/session_manager_mvp.rs`.
 
-use trusty_mpm::client::{CommandExecutor, CommandResult, TrustyCommand, resolve_target};
+use trusty_mpm::client::{
+    CommandExecutor, CommandResult, ManagedSessionSummary, TrustyCommand, resolve_target,
+};
 
 use crate::cli::SessionAction;
 
@@ -169,6 +171,33 @@ pub(crate) fn render_cli(result: &CommandResult) -> String {
     }
 }
 
+/// Resolve a fuzzy id/name against the managed session list, returning the
+/// FULL matched summary (issue #3600).
+///
+/// Why: [`resolve_managed_match`] discarded everything but the matched
+/// session's `id`, but a pane-identity cross-check (`commands::pane_identity`)
+/// needs the record's own captured `pane_id` too. Both callers now share this
+/// one fetch-and-resolve, rather than each re-implementing the "list, then
+/// `resolve_target`" round trip.
+/// What: fetches the managed list via the shared [`CommandExecutor`]'s client
+/// and returns a clone of the matched [`ManagedSessionSummary`], or `None`
+/// when the daemon is unreachable / nothing matches.
+/// Test: the resolver precedence is covered by `client::resolver` tests;
+/// `resolve_managed_match` (below) is a thin projection of this and shares
+/// its coverage.
+pub(crate) async fn resolve_managed_summary(
+    client: &reqwest::Client,
+    url: &str,
+    id_or_name: &str,
+) -> Option<ManagedSessionSummary> {
+    let sessions = executor(client, url)
+        .client()
+        .list_managed_sessions()
+        .await
+        .ok()?;
+    resolve_target(&sessions, id_or_name).cloned()
+}
+
 /// Resolve a fuzzy id/name against the managed session list (managed-vs-project
 /// routing decision for `stop`/`resume`).
 ///
@@ -178,10 +207,10 @@ pub(crate) fn render_cli(result: &CommandResult) -> String {
 /// [`resolve_target`] resolver (Phase 1B collapsed the bespoke
 /// `classify_managed_target`/`resolve_managed_id`), so the precedence (id-exact →
 /// name-exact → unambiguous prefix) is identical to every other surface.
-/// What: fetches the managed list via the shared [`CommandExecutor`]'s client and
-/// returns the matched session's canonical id, or `None` when the daemon is
-/// unreachable / nothing matches (the caller then takes the project path, exactly
-/// as the old `resolve_managed_id` did).
+/// What: thin projection of [`resolve_managed_summary`] onto just the matched
+/// session's canonical id, or `None` when the daemon is unreachable / nothing
+/// matches (the caller then takes the project path, exactly as the old
+/// `resolve_managed_id` did).
 /// Test: the resolver precedence is covered by `client::resolver` tests; the
 /// managed-vs-project fallback by the integration suite.
 pub(crate) async fn resolve_managed_match(
@@ -189,12 +218,9 @@ pub(crate) async fn resolve_managed_match(
     url: &str,
     id_or_name: &str,
 ) -> Option<String> {
-    let sessions = executor(client, url)
-        .client()
-        .list_managed_sessions()
+    resolve_managed_summary(client, url, id_or_name)
         .await
-        .ok()?;
-    resolve_target(&sessions, id_or_name).map(|s| s.id.clone())
+        .map(|s| s.id)
 }
 
 /// Resolve a PROJECT-session id/name to its canonical UUID via the shared
