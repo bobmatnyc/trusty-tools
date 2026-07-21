@@ -164,6 +164,10 @@ pub use attribution::{CreatorInfo, CreatorSource};
 // stays crate-internal but is re-exported so `AppState::new` and `lib_tests`
 // reach it by its bare name via `super::*`.
 pub(crate) use events::open_activity_log_with_fallback;
+// #3434: test-only seam so `lib_tests` can force the tempdir-fallback path
+// via an explicit parameter instead of mutating the process-global `TMPDIR`.
+#[cfg(test)]
+pub(crate) use events::open_activity_log_with_fallback_in;
 pub use events::{DaemonEvent, HookType, InjectionKind};
 
 // Re-export the HTTP-serving surface so the crate's public API is unchanged

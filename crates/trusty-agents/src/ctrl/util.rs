@@ -38,13 +38,47 @@ pub(crate) fn drain_slot<T>(slot: &Arc<Mutex<Option<T>>>) -> Option<T> {
 /// Detection has to work whether the user runs `cargo run` (cwd = repo) or
 /// invokes a release binary from elsewhere on the filesystem (cwd =
 /// somewhere unrelated; current_exe = `…/target/release/trusty-agents`).
-/// What: Tries three strategies in order:
-///   1. `TAGENT_PROJECT_DIR` env var (explicit override).
-///   2. Walk up from `current_exe()` looking for `.trusty-agents/agents/pm.toml`.
-///   3. Use `current_dir()` if it contains the same marker.
-/// Returns the first match, or `None` when no strategy succeeds.
+/// What: Resolves the `TAGENT_PROJECT_DIR` env-var hint (with its
+/// `OPEN_MPM_PROJECT_DIR` legacy fallback) and delegates to
+/// [`detect_self_project_with_hint`], which does the actual three-strategy
+/// search.
 /// Test: `detect_self_project_finds_repo_via_cwd` (in tests below).
 pub fn detect_self_project() -> Option<PathBuf> {
+    let env_hint = crate::env_compat::env_var("TAGENT_PROJECT_DIR", "OPEN_MPM_PROJECT_DIR").ok();
+    detect_self_project_with_hint(env_hint.as_deref())
+}
+
+/// Same as [`detect_self_project`], but the `TAGENT_PROJECT_DIR`-equivalent
+/// hint is an explicit parameter rather than resolved from the process
+/// environment (issue #3398).
+///
+/// Why: `tools_tests.rs`'s `detect_self_project_finds_via_env_var` /
+/// `detect_self_project_returns_none_when_no_marker` used to mutate the
+/// process-global `TAGENT_PROJECT_DIR` env var directly with no
+/// `#[serial_test::serial]` guard — but `checkpoint_resume.rs` (a sibling
+/// test module in this same crate) mutates the SAME env var under its own
+/// `#[serial]` `EnvVarGuard` convention. Since `cargo test` runs every test
+/// in a crate's lib binary as threads of one process, and `#[serial]`
+/// mutual exclusion only applies to tests that carry the attribute, the
+/// unguarded `tools_tests.rs` tests could clobber `TAGENT_PROJECT_DIR`
+/// mid-flight while a `checkpoint_resume.rs` test was relying on it,
+/// producing a `CheckpointNotFound` failure keyed on a completely unrelated
+/// test's timing. Threading the hint through as a parameter — mirroring
+/// `catchup::pm_catchup_context_with_memory_url` (#3003) and
+/// `session::memory_sink::TurnMemorySink`'s identical fix in the sibling
+/// `trusty-code` crate — removes the shared mutable global from this path
+/// entirely, so `tools_tests.rs` needs no lock and can never race
+/// `checkpoint_resume.rs` again, regardless of which file adds a new
+/// env-mutating test in the future.
+/// What: Tries three strategies in order:
+///   1. `hint`, if `Some` and it canonicalizes to a path carrying the
+///      `.trusty-agents/agents/pm.toml` self-project marker.
+///   2. Walk up from `current_exe()` looking for the same marker.
+///   3. Use `current_dir()` if it contains the same marker.
+/// Returns the first match, or `None` when no strategy succeeds.
+/// Test: `detect_self_project_finds_via_env_var`,
+/// `detect_self_project_returns_none_when_no_marker`.
+pub fn detect_self_project_with_hint(hint: Option<&str>) -> Option<PathBuf> {
     fn looks_like_self(p: &Path) -> bool {
         p.join(".trusty-agents")
             .join("agents")
@@ -62,8 +96,8 @@ pub fn detect_self_project() -> Option<PathBuf> {
         None
     }
 
-    if let Ok(p) = crate::env_compat::env_var("TAGENT_PROJECT_DIR", "OPEN_MPM_PROJECT_DIR")
-        && let Ok(canon) = PathBuf::from(&p).canonicalize()
+    if let Some(p) = hint
+        && let Ok(canon) = PathBuf::from(p).canonicalize()
         && looks_like_self(&canon)
     {
         return Some(canon);
