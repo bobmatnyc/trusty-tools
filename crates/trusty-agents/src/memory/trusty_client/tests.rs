@@ -44,6 +44,23 @@ async fn auto_detect_falls_back_to_local() {
     }
 }
 
+/// Why (issue #3336): `default_trusty_url` used to hard-code a port
+/// (`7775`) that had silently drifted from `trusty_memory::DEFAULT_HTTP_PORT`
+/// (`7070`) — auto-detection probed a port nothing listens on, so every
+/// install with the daemon up on its default port fell back to the
+/// embedded store. Asserting the URL embeds the daemon crate's own
+/// constant (rather than a re-typed literal) makes a future edit to either
+/// side's default fail this test instead of silently drifting again.
+/// What: parses the port out of `default_trusty_url()` and asserts it
+/// equals `trusty_memory::DEFAULT_HTTP_PORT` exactly.
+/// Test: This test.
+#[test]
+fn default_trusty_url_port_matches_trusty_memory_default() {
+    let url = default_trusty_url();
+    let expected = format!("http://127.0.0.1:{}", trusty_memory::DEFAULT_HTTP_PORT);
+    assert_eq!(url, expected);
+}
+
 /// Why: `ns_id` is what keeps separate segments from colliding in the
 /// daemon's flat key namespace. Lock the format with a test so refactors
 /// don't silently break cross-segment isolation.

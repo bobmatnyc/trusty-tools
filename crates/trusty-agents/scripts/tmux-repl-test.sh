@@ -5,12 +5,15 @@
 #   bugs — banner layout, cursor issues, async timing problems. A tmux-driven
 #   e2e test exercises the binary in a real PTY so regressions surface here
 #   instead of in front of users.
-# What: DEPLOY test — verifies the installed `open-mpm` binary by default.
-#   Launches `open-mpm ctrl` inside a tmux session, waits for the prompt,
+# What: DEPLOY test — verifies the installed `tagent` binary by default
+#   (issue #3353: the `open-mpm` binary name was removed in the tagent
+#   rebrand, commit 40ef720b — this script now targets the actual bin
+#   targets, `tagent`/`ompm`, declared in Cargo.toml).
+#   Launches `tagent --ctrl` inside a tmux session, waits for the prompt,
 #   sends a chat message, and asserts the captured output matches the expected
 #   banner + response layout.
 # Flags:
-#   (default)  Test the installed binary (`which open-mpm`). Fails fast with
+#   (default)  Test the installed binary (`which tagent`). Fails fast with
 #              a helpful message if not installed.
 #   --dev      Build the debug binary first (`cargo build`) and test it
 #              instead. Use during development before installing.
@@ -21,17 +24,24 @@ set -u
 set -o pipefail
 
 # ---------- config ----------
-SESSION="ompm-e2e"
+SESSION="tagent-e2e"
 COLS=220
 ROWS=50
 STARTUP_TIMEOUT_S=45
 RESPONSE_TIMEOUT_S=60
 POLL_INTERVAL_S=0.5
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# REPL/ctrl mode is provided by the `open-mpm` binary (src/main.rs). The
+# `trusty-agents` is a member of the top-level `trusty-tools` workspace
+# (matched by the `crates/*` glob in the root Cargo.toml), so `cargo build`
+# always writes to the WORKSPACE's target dir, not a per-crate one under
+# `crates/trusty-agents/target/`. Ask cargo directly rather than assuming a
+# fixed `../..` depth, so this keeps working if the crate is ever relocated.
+WORKSPACE_ROOT="$(cd "$(dirname "$(cargo locate-project --workspace --message-format=plain 2>/dev/null)")" && pwd)"
+[[ -z "$WORKSPACE_ROOT" ]] && WORKSPACE_ROOT="$PROJECT_ROOT"
+# REPL/ctrl mode is provided by the `tagent` binary (src/main.rs). The
 # `ompm` binary is just an HTTP thin client and does not have ctrl mode.
-BIN_NAME="open-mpm"
-BIN="${PROJECT_ROOT}/target/debug/${BIN_NAME}"
+BIN_NAME="tagent"
+BIN="${WORKSPACE_ROOT}/target/debug/${BIN_NAME}"
 
 # ---------- flags ----------
 # Default: test the installed binary. Pass --dev to build + test the debug binary.
@@ -96,8 +106,8 @@ fi
 info "Creating tmux session '$SESSION' (${COLS}x${ROWS})..."
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS"
 
-info "Sending run command: OPEN_MPM_PROJECT_DIR=$PROJECT_ROOT RUST_LOG=warn $BIN --ctrl"
-tmux send-keys -t "$SESSION" "OPEN_MPM_PROJECT_DIR=$PROJECT_ROOT RUST_LOG=warn $BIN --ctrl" Enter
+info "Sending run command: TAGENT_PROJECT_DIR=$PROJECT_ROOT RUST_LOG=warn $BIN --ctrl"
+tmux send-keys -t "$SESSION" "TAGENT_PROJECT_DIR=$PROJECT_ROOT RUST_LOG=warn $BIN --ctrl" Enter
 
 # ---------- poll for startup ----------
 info "Polling for 'ctrl>' prompt (max ${STARTUP_TIMEOUT_S}s)..."
@@ -141,7 +151,7 @@ assert_absent() {
     fi
 }
 
-assert_present "╭─── open-mpm ctrl" "banner top (╭─── open-mpm ctrl)"
+assert_present "╭─── trusty-agents ctrl" "banner top (╭─── trusty-agents ctrl)"
 assert_present "╰─" "banner bottom (╰─)"
 assert_present "All systems go" "'All systems go' status line"
 assert_present "ctrl>" "'ctrl>' prompt"
