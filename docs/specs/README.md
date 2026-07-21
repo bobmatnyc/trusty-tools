@@ -66,6 +66,7 @@ normative grammar — this note does not restate it.
 | DOC-47 | `SPEC-EVTING-01~draft` … `-04~draft` | [External Event Ingestion — Webhooks & Connector Push](./DOC-47-external-event-ingestion.md) | trusty-agents-common — event seam; trusty-mpm — webhook ingress + goal store; trusty-console — Tailscale Funnel binding |
 | DOC-48 | `SPEC-WS-01~draft` … `-09~draft` | [tcode Workstreams: Durable Named Work Aggregation](./DOC-48-tcode-workstreams.md) | trusty-code — activation-lock exclusivity model, multi-client attach transport (shared with trusty-agents #3052), RPC/REST/CLI surfaces |
 | DOC-50 | `SPEC-TTUI-01~draft` … `-09~draft` | [trusty-code Interactive TUI: Claude Code Clone over Shared REPL Layer](./DOC-50-tcode-tui-claude-code-clone.md) | trusty-code — interactive terminal UI thin client; trusty-tui shared crate (ratatui REPL extraction from trusty-agents) |
+| DOC-51 | `SPEC-TCPLUGIN-01~draft` | [trusty-code Claude Code Plugin Support, Phase 1: Local-Directory Agents + Skills](./DOC-51-tcode-plugin-support-phase1.md) | trusty-code — agent/skill catalog, discovery, dispatch |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -79,8 +80,9 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-51`** (re-scan of the whole `docs/` tree, 2026-07-20): the
-> highest cataloged number is now **DOC-50** ([trusty-code Interactive TUI](./DOC-50-tcode-tui-claude-code-clone.md),
+> **Next free `DOC-N` = `DOC-52`** (updated 2026-07-20 — DOC-51 claimed below by
+> [trusty-code Claude Code Plugin Support Phase 1](./DOC-51-tcode-plugin-support-phase1.md)):
+> before that claim, the highest cataloged number was **DOC-50** ([trusty-code Interactive TUI](./DOC-50-tcode-tui-claude-code-clone.md),
 > the entry above), which claimed the next free number after **DOC-48**
 > ([tcode Workstreams](./DOC-48-tcode-workstreams.md)) per the
 > scan-before-claim rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free"

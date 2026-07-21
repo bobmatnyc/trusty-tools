@@ -33,7 +33,11 @@
 //! embedded-fallback threshold, and `FsSkillResolver`'s `SkillResolver` trait
 //! conformance.
 
-mod frontmatter;
+// `pub(crate)`: also reused by `plugins::agents`/`plugins::skills` (#3539)
+// — both are generic frontmatter helpers, not skill-specific, so a plugin
+// agent's unsupported-field detection and a plugin skill's body-stripping
+// share this one parser rather than forking a second copy.
+pub(crate) mod frontmatter;
 pub mod protocol;
 
 use std::path::{Path, PathBuf};
@@ -282,12 +286,24 @@ pub fn format_skill_catalog(skills: &[SkillMetadata]) -> String {
 /// What: Wraps `skills_dir` plus the metadata discovered from it at
 /// construction time. `metadata()`/`list()` return the cached catalog;
 /// `resolve()` calls `load_skill_body` per invocation.
+/// As of #3539 (Phase 1 Claude Code plugin support), also namespaces and
+/// resolves plugin skills (`<plugin>:<name>`) — see `plugins::skills`,
+/// which this struct delegates to additively (never suppressing, never
+/// suppressed by, the project/embedded threshold above).
 /// Test: `fs_skill_resolver_resolves_known_skill`,
 /// `fs_skill_resolver_list_matches_metadata_names`,
-/// `fs_skill_resolver_resolve_unknown_returns_none`.
+/// `fs_skill_resolver_resolve_unknown_returns_none`,
+/// `fs_skill_resolver_resolves_namespaced_plugin_skill`,
+/// `fs_skill_resolver_metadata_includes_plugin_skills_alongside_project_skill`.
 pub struct FsSkillResolver {
     skills_dir: PathBuf,
     metadata: Vec<SkillMetadata>,
+    /// The project root recovered from `skills_dir`
+    /// (`crate::plugins::project_root_two_levels_up`), or `None` when
+    /// `skills_dir` isn't shaped `<root>/.claude/skills` (e.g. a bare
+    /// tempdir in a unit test that doesn't exercise plugins). Cached once at
+    /// construction so `resolve` never re-derives it per call.
+    project_root: Option<PathBuf>,
 }
 
 impl FsSkillResolver {
@@ -296,20 +312,47 @@ impl FsSkillResolver {
     /// Why: Metadata discovery is a directory scan plus frontmatter parsing
     /// only — cheap enough to do once at construction so every later
     /// `metadata()`/`list()` call is a clone of an in-memory `Vec`.
-    /// What: Calls `discover_skill_metadata(&skills_dir)` and stores both.
-    /// Test: `fs_skill_resolver_resolves_known_skill`.
+    /// What: Calls `discover_skill_metadata(&skills_dir)`, then additively
+    /// extends it with `plugins::skills::discover_plugin_skills` when a
+    /// project root can be recovered from `skills_dir` (#3539) — plugin
+    /// skills are independent of the project/embedded threshold
+    /// `discover_skill_metadata` applies, so they are appended regardless
+    /// of whether that call returned the project's own catalog or the
+    /// embedded fallback.
+    /// Test: `fs_skill_resolver_resolves_known_skill`,
+    /// `fs_skill_resolver_metadata_includes_plugin_skills_alongside_project_skill`.
     pub fn new(skills_dir: impl Into<PathBuf>) -> Self {
         let skills_dir = skills_dir.into();
-        let metadata = discover_skill_metadata(&skills_dir);
+        let mut metadata = discover_skill_metadata(&skills_dir);
+        let project_root = crate::plugins::project_root_two_levels_up(&skills_dir);
+        if let Some(root) = &project_root {
+            metadata.extend(crate::plugins::skills::discover_plugin_skills(root));
+        }
         Self {
             skills_dir,
             metadata,
+            project_root,
         }
     }
 }
 
 impl SkillResolver for FsSkillResolver {
+    /// A namespaced `<plugin>:<name>` (the exact shape a plugin skill
+    /// listing surfaces, and — via `tools::skill::UseSkillTool` — the exact
+    /// shape an LLM's raw `use_skill` argument can be) routes to
+    /// `plugins::skills::resolve_plugin_skill_body`, which is itself the
+    /// authoritative traversal guard (validates the namespaced shape and
+    /// discovered-catalog membership before ever building a path — issue
+    /// #3547 CRITICAL 2). This wrapper does not re-validate; it only
+    /// recovers the cached `project_root` (`None` short-circuits to `None`
+    /// rather than falling through to the plain-name path below, since a
+    /// namespaced name is never a valid plain skill name either way).
     fn resolve(&self, name: &str) -> Option<String> {
+        if let Some((plugin, skill_name)) = name.split_once(':') {
+            return self.project_root.as_deref().and_then(|root| {
+                crate::plugins::skills::resolve_plugin_skill_body(root, plugin, skill_name)
+            });
+        }
         load_skill_body(&self.skills_dir, name, &self.metadata).ok()
     }
 
@@ -601,5 +644,76 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let resolver = FsSkillResolver::new(tmp.path());
         assert!(resolver.resolve("ghost").is_none());
+    }
+
+    /// `FsSkillResolver::resolve` routes a namespaced `<plugin>:<name>` to
+    /// the plugin's own `SKILL.md` (issue #3539).
+    ///
+    /// Why: this is the acceptance criterion for the resolution half of
+    /// #3539's skill-namespacing decision — a namespaced skill must
+    /// actually load its body via `use_skill`, not just appear in a catalog
+    /// listing.
+    /// Test: this test.
+    #[test]
+    fn fs_skill_resolver_resolves_namespaced_plugin_skill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join(".claude").join("skills");
+        std::fs::create_dir_all(&skills_dir).expect("mkdir");
+        write_skill(
+            &tmp.path()
+                .join(".claude")
+                .join("plugins")
+                .join("my-plugin")
+                .join("skills"),
+            "demo-skill",
+            "---\nname: demo-skill\n---\n",
+            "Plugin skill body.\n",
+        );
+
+        let resolver = FsSkillResolver::new(&skills_dir);
+        let body = resolver
+            .resolve("my-plugin:demo-skill")
+            .expect("resolve namespaced plugin skill");
+        assert!(body.contains("Plugin skill body."));
+    }
+
+    /// `FsSkillResolver`'s cached metadata includes plugin skills ADDITIVELY
+    /// alongside a project's own custom skill catalog — the
+    /// project-vs-bundled whole-catalog-replacement threshold (PR #3465)
+    /// neither suppresses nor is suppressed by the plugin tier (#3539's
+    /// locked precedence-interaction requirement).
+    ///
+    /// Test: this test.
+    #[test]
+    fn fs_skill_resolver_metadata_includes_plugin_skills_alongside_project_skill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join(".claude").join("skills");
+        write_skill(
+            &skills_dir,
+            "project-only-skill",
+            "---\nname: project-only-skill\n---\n",
+            "body\n",
+        );
+        write_skill(
+            &tmp.path()
+                .join(".claude")
+                .join("plugins")
+                .join("my-plugin")
+                .join("skills"),
+            "plugin-skill",
+            "---\nname: plugin-skill\n---\n",
+            "body\n",
+        );
+
+        let resolver = FsSkillResolver::new(&skills_dir);
+        let names = resolver.list();
+        assert!(
+            names.contains(&"project-only-skill".to_string()),
+            "the project's own custom skill must still be listed, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"my-plugin:plugin-skill".to_string()),
+            "the namespaced plugin skill must be listed too, got: {names:?}"
+        );
     }
 }

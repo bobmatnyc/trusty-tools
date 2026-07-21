@@ -10,6 +10,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Claude Code plugin support, Phase 1: local-directory agents + skills
+  (issue #3539, DOC-51).** New `crate::plugins` module auto-scans
+  `<project_root>/.claude/plugins/<plugin>/` (honoring an optional
+  `.claude-plugin/plugin.json`'s `name`/`agents`/`skills` overrides) and
+  surfaces each plugin's `agents/*.md` and `skills/<name>/SKILL.md` in
+  `agents.list`/`skills.list` under a new `plugin` tier, namespaced
+  `<plugin>:<name>` and resolvable by that name via `agents::resolve_agent`
+  and the `use_skill` skill resolver. Plugin entries are additive only — the
+  namespaced key can never collide with (and so never overrides) a project
+  or embedded/bundled name, and plugin skills are independent of the
+  bundled-vs-project whole-catalog-replacement threshold (PR #3465) for
+  `skills.list`. A plugin agent's unsupported trusty-mpm-style frontmatter
+  fields (`effort`/`maxTurns`/`memory`/`isolation`/`disallowedTools`) are
+  dropped with a warning rather than failing the load; an `extends:` chain
+  is treated as leaf-only (warned, not composed). Phase 1 is local-directory
+  agents + skills only — no marketplace/git fetch, no commands/hooks/MCP
+  (later phases, tracked against #3539). Plugin content is treated as
+  HOSTILE input throughout (code-critic PR #3547 review): a `plugin.json`
+  `agents`/`skills` override that is absolute, contains `..`, or resolves
+  outside the plugin directory is rejected and falls back to the default
+  convention; every namespaced `<plugin>:<name>` dispatch/resolution path
+  (`use_skill`, `delegate_to_agent`, `agent_config_exists`, `tcode run-task`)
+  validates both segments against the existing `[a-z0-9-]+`
+  (<= 64 chars) safe charset before ever building a filesystem path, making
+  a traversal payload syntactically impossible to construct. A namespaced
+  plugin agent is also now genuinely delegatable end-to-end — the PM's
+  `delegate_to_agent` tool, the CLI, and the pre-flight existence gate all
+  accept the `<plugin>:<name>` shape (previously only `agents::resolve_agent`
+  itself could resolve one; every caller in front of it rejected `:`
+  outright). A further hardening pass (code-critic re-review) closed a
+  leaf-file-identity gap (CWE-59): a discovered `agents/*.md` or
+  `skills/<name>/SKILL.md` — or the `skills/<name>` directory itself — that
+  is a symlink escaping the plugin's `agents_dir`/`skills_dir` is now
+  rejected via `plugins::path_is_contained` (canonicalize + containment,
+  applied at both the listing and resolve/dispatch paths for both agents
+  and skills) before its content is ever read, closing a host-file
+  disclosure vector the directory- and name-level guards above didn't
+  cover. `runner::agent_config_exists`'s pre-flight gate now also requires
+  a namespaced plugin agent to resolve CLEANLY (not merely be found) to
+  count as "exists".
 - **Markdown transcript endpoint for dev observability (issue #3526).** New
   `GET /sessions/{id}/transcript.md` (`crate::serve::rest::sessions`) renders
   a session's full transcript as a readable `text/markdown` document —
