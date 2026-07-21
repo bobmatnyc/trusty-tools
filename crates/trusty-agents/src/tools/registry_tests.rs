@@ -281,6 +281,49 @@ fn filter_tools_for_user_empty_registry() {
     assert!(reg.filter_tools_for_user(&user).is_empty());
 }
 
+/// Fake tool that declares an OpenRPC scope, mirroring `RegistryToolExecutor`
+/// (#3208). Used to prove `ToolRegistry::tool_scopes()` only surfaces tools
+/// that opt into the scoped surface.
+struct ScopedFakeTool;
+
+#[async_trait]
+impl ToolExecutor for ScopedFakeTool {
+    fn name(&self) -> &str {
+        "gworkspace_read_email"
+    }
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "gworkspace_read_email",
+                "description": "Reads email.",
+                "parameters": {"type":"object","properties":{},"additionalProperties":false}
+            }
+        })
+    }
+    async fn execute(&self, _args: Value) -> ToolResult {
+        ToolResult::ok("email-output")
+    }
+    fn scope(&self) -> Option<&str> {
+        Some("google.gmail.read")
+    }
+}
+
+#[test]
+fn tool_scopes_includes_only_scoped_tools() {
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(FakeTool)); // no declared scope (trait default)
+    reg.register(Arc::new(ScopedFakeTool));
+
+    let scopes = reg.tool_scopes();
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(
+        scopes.get("gworkspace_read_email").map(String::as_str),
+        Some("google.gmail.read")
+    );
+    assert!(!scopes.contains_key("fake"));
+}
+
 #[test]
 fn native_tool_registry_returns_six_tools_without_ticketing() {
     // Default backends (all None) still returns the six native tools in

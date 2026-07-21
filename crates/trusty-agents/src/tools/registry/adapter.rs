@@ -60,6 +60,10 @@ impl ToolExecutor for RegistryToolExecutor {
         })
     }
 
+    fn scope(&self) -> Option<&str> {
+        Some(&self.tool.scope)
+    }
+
     async fn execute(&self, args: Value) -> ToolResult {
         match self.driver.call_tool(&self.tool.name, args).await {
             Ok(v) => {
