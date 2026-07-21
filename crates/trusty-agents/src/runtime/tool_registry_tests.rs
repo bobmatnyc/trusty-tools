@@ -491,3 +491,99 @@ async fn live_assistant_registry_rejects_pm_role() {
         result.content()
     );
 }
+
+/// #3556 regression test — closes the exact gap that shipped: bundled
+/// template changes (e.g. PR-A's `delegate_to_agent` grant added to the
+/// base `assistant` agent) never reached a machine that had already
+/// deployed an older copy, because the deploy path only ever wrote MISSING
+/// files. Deploying a FRESH tempdir and reading it back would pass
+/// identically on pre-#3556 code (it never exercises the refresh path), so
+/// this test instead seeds a genuinely STALE `assistant/agent.toml` — an old
+/// allow-list WITHOUT `delegate_to_agent`, standing in for a machine that
+/// deployed an older binary's bundle — plus a wrong stamp, then drives the
+/// REAL refresh path (`ensure_bundled_agents_deployed_in`) before resolving.
+/// This assertion sequence WOULD fail on pre-#3556 code (the stale file is
+/// never rewritten). It then proves the end-to-end chain a real `tagent
+/// --direct assistant` invocation depends on — the refreshed (on-disk)
+/// `assistant` TOML, loaded via the REAL production resolver
+/// (`AgentConfig::by_name`), scoped through the REAL assistant-tier registry
+/// (`build_assistant_tier_registry`) and the REAL `scope_assistant_
+/// allowed_tools` glob translation — carries `delegate_to_agent`. Unlike
+/// `live_assistant_registry_rejects_pm_role` above, this is NOT `#[ignore]`d:
+/// everything happens in an isolated tempdir, so it makes no environment
+/// assumptions and runs in CI every time.
+///
+/// Uses `AgentConfig::by_name` (not `by_name_in`) via a `TAGENT_CONFIG_DIR`
+/// override so the test exercises the SAME default-dirs entry point
+/// `run_subagent` actually calls — `by_name` is documented as "a thin
+/// wrapper over `by_name_in` with the default dirs"
+/// (`agents/loader.rs`), and `agents_dir()` honors `TAGENT_CONFIG_DIR`
+/// first, so pointing it at the tempdir makes that the sole resolved tier.
+#[test]
+fn deployed_assistant_config_survives_scoping_with_delegate_to_agent() {
+    use crate::agents::AgentConfig;
+    use crate::agents::tests::loading::ENV_LOCK;
+
+    let _guard = ENV_LOCK.blocking_lock();
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Establish a baseline deploy, then simulate a STALE on-disk
+    // `assistant/agent.toml` — e.g. deployed before the `delegate_to_agent`
+    // grant existed on the bundled template — the exact scenario #3556
+    // fixes.
+    let written = crate::agents::bundled::deploy_bundled_agents(tmp.path()).unwrap();
+    assert!(
+        written > 0,
+        "sanity: bundled deploy wrote at least one file"
+    );
+    let assistant_toml = tmp.path().join("assistant").join("agent.toml");
+    let stale_content = "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n\n[tools]\nallow = [\"web_search\"]\n";
+    std::fs::write(&assistant_toml, stale_content).unwrap();
+
+    // Drive the REAL refresh path (#3556) — a stale/missing stamp must
+    // rewrite the stale file to match the CURRENT embedded template. This is
+    // the assertion that actually closes the gap: without the refresh
+    // mechanism, `stale_content` (no `delegate_to_agent`) would still be on
+    // disk below.
+    let report = crate::agents::bundled::ensure_bundled_agents_deployed_in(tmp.path()).unwrap();
+    assert!(
+        report.refreshed > 0,
+        "seeded stale assistant/agent.toml must trigger a refresh, got: {report:?}"
+    );
+
+    // SAFETY: guarded by ENV_LOCK, same convention as every other
+    // TAGENT_CONFIG_DIR mutator in this crate (see `agents::tests::loading`).
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", tmp.path());
+    }
+    let cfg = AgentConfig::by_name("assistant");
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let cfg = cfg.expect("refreshed assistant package must resolve via AgentConfig::by_name");
+
+    assert!(
+        cfg.tools
+            .allow
+            .as_ref()
+            .is_some_and(|allow| allow.iter().any(|p| p == "delegate_to_agent")),
+        "REFRESHED assistant TOML must declare delegate_to_agent in [tools].allow, got: {:?}",
+        cfg.tools.allow
+    );
+
+    let reg = build_assistant_tier_registry();
+    let kept = scope_assistant_allowed_tools(
+        true,
+        cfg.tools.allowed.clone(),
+        cfg.tools.allow.as_deref(),
+        Some(&reg),
+    )
+    .unwrap_or_default();
+
+    assert!(
+        kept.iter().any(|n| n == "delegate_to_agent"),
+        "delegate_to_agent must survive the refresh -> deployed-config -> \
+         registry-scoping chain, got: {kept:?}"
+    );
+}

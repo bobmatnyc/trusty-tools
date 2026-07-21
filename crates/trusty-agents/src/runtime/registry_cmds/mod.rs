@@ -117,48 +117,43 @@ use tools::{ToolRegistry, delegate::DelegateToAgentTool, shell_exec::ShellExecTo
 use workflow::WorkflowEngine;
 
 /// Handle `trusty-agents agents <subcommand>` (#167, `deploy` added by
-/// #3405/#3406 follow-up).
+/// #3405/#3406 follow-up, version-stamped refresh + `repair` added by
+/// #3556).
 ///
 /// Why: Exposes the discovery results to operators. Without this, there's
 /// no way to verify which agents were picked up from which directory.
-/// `deploy` gives an explicit, re-runnable repair path for the automatic
-/// first-run deploy in `runtime::startup::run_startup_init` — useful when a
-/// user deletes `~/.trusty-agents/agents/` or wants to confirm the bundled
-/// roster landed without waiting for the next interactive startup.
+/// `deploy` gives an explicit, re-runnable path for the automatic first-run
+/// deploy in `runtime::startup::run_startup_init` — useful when a user
+/// deletes `~/.trusty-agents/agents/` or wants to confirm the bundled roster
+/// landed without waiting for the next interactive startup. `repair`
+/// (#3556) is the explicit manual escape hatch that force-refreshes every
+/// bundled file regardless of the content stamp.
 /// What: `list` (default) prints discovered agents with their source and
-/// capability tags. `deploy` writes any bundled agent files MISSING from
-/// `$HOME/.trusty-agents/agents/`, reporting how many were newly written
-/// (idempotent — a repeat run reports 0). Deliberate tradeoff, stated in the
-/// output text below (code-critic follow-up on #3429/#3431): a file that
-/// ALREADY EXISTS there — whether from a prior deploy or a user's own
-/// edit — is never touched, even if the bundled version has since changed.
-/// A future release that improves a bundled persona will NOT reach a user
-/// who already has the old file; `rm ~/.trusty-agents/agents/<name>` (or the
-/// whole directory) before re-running `deploy` is the escape hatch.
+/// capability tags. `deploy` now shares `ensure_bundled_agents_deployed`'s
+/// version-stamped logic (#3556): it writes any bundled agent file missing
+/// from `$HOME/.trusty-agents/agents/`, AND, when the binary's embedded
+/// bundle content has changed since the last deploy (detected via a
+/// persisted content-hash stamp), refreshes exactly the bundled files whose
+/// content actually differs — archiving any differing on-disk copy to
+/// `<file>.stale.bak` first. A non-bundled file (a user's own agent) is
+/// never touched either way. `repair` bypasses the stamp check entirely,
+/// force-refreshing every bundled file unconditionally.
 /// Test: Covered manually; unit-tested via `AgentRegistry::list` and
-/// `agents::bundled::deploy_bundled_agents`'s own tests
-/// (`deploy_never_overwrites_existing_file`).
+/// `agents::bundled`'s own tests (`deploy_never_overwrites_existing_file`,
+/// `stale_stamp_triggers_refresh`, `force_reprovision_overwrites_even_when_stamp_matches`).
 pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
     let sub = args.first().map(String::as_str).unwrap_or("list");
     match sub {
         "deploy" => {
-            let written = agents::bundled::ensure_bundled_agents_deployed()
+            let report = agents::bundled::ensure_bundled_agents_deployed()
                 .context("failed to deploy bundled agents to $HOME/.trusty-agents/agents")?;
-            if written > 0 {
-                println!(
-                    "Deployed {written} bundled agent file(s) to ~/.trusty-agents/agents/ \
-                     (only files that did not already exist there — existing files, including \
-                     prior deploys and your own edits, are never overwritten or updated)."
-                );
-            } else {
-                println!(
-                    "Bundled agents already present in ~/.trusty-agents/agents/ — nothing to \
-                     deploy. Note: deploy only WRITES MISSING files; it never updates an \
-                     existing file even if the bundled version has changed. To pick up an \
-                     updated bundled agent, remove it from ~/.trusty-agents/agents/ first, \
-                     then re-run `tagent agents deploy`."
-                );
-            }
+            print_reprovision_report("Deployed", &report);
+            Ok(())
+        }
+        "repair" => {
+            let report = agents::bundled::repair_bundled_agents()
+                .context("failed to repair bundled agents in $HOME/.trusty-agents/agents")?;
+            print_reprovision_report("Repaired", &report);
             Ok(())
         }
         "list" => {
@@ -203,15 +198,49 @@ pub(super) async fn run_agents_subcommand(args: &[String]) -> Result<()> {
         other => {
             // #366: Surface a "did you mean?" hint for typos like
             // `agents lst` -> `agents list`.
-            let known = &["list", "deploy"];
+            let known = &["list", "deploy", "repair"];
             if let Some(s) = cli::did_you_mean(other, known, 2) {
                 eprintln!("tagent agents: unknown subcommand '{other}'. Did you mean '{s}'?");
             } else {
-                eprintln!("tagent agents: unknown subcommand '{other}'. Try: list, deploy");
+                eprintln!("tagent agents: unknown subcommand '{other}'. Try: list, deploy, repair");
             }
             bail!("unknown agents subcommand: {other}");
         }
     }
+}
+
+/// Render a bundled-agent (re)provision outcome for `tagent agents
+/// deploy`/`repair` (#3556).
+///
+/// Why: `deploy` and `repair` differ only in WHICH reprovision function they
+/// call (stamp-aware vs. force); the human-readable report of what actually
+/// happened is identical, so it's pulled out once rather than duplicated.
+/// What: prints a one-line summary distinguishing "nothing to do" from a
+/// written/refreshed/backed-up breakdown, prefixed with `verb` ("Deployed"
+/// or "Repaired").
+/// Test: covered indirectly via `agents::bundled`'s `ReprovisionReport`
+/// tests; this is thin, side-effect-only `println!` formatting.
+fn print_reprovision_report(verb: &str, report: &agents::bundled::ReprovisionReport) {
+    if report.total_touched() == 0 {
+        println!(
+            "Bundled agents in ~/.trusty-agents/agents/ already match the compiled template \
+             set — nothing to do."
+        );
+        return;
+    }
+    let backup_note = if report.backed_up > 0 {
+        format!(
+            ", {} pre-refresh backup(s) saved as *.stale.bak",
+            report.backed_up
+        )
+    } else {
+        String::new()
+    };
+    println!(
+        "{verb} bundled agents in ~/.trusty-agents/agents/: {} written, {} refreshed (content \
+         changed since last deploy){backup_note}.",
+        report.written, report.refreshed
+    );
 }
 
 /// Handle `trusty-agents plugins <subcommand>` (#414).
