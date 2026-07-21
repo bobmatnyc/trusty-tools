@@ -182,6 +182,60 @@ async fn namespaced_traversal_agent_name_is_rejected_before_runner() {
     );
 }
 
+/// `delegate_to_agent my-plugin:leak` — a validly-namespaced, validly-pathed
+/// name whose FILE is a symlink escaping the plugin's `agents/` directory —
+/// is rejected at the pre-flight gate, and the runner is never invoked
+/// (code-critic PR #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// Why: this is the exact end-to-end shape the re-review's PoC targeted —
+/// `is_valid_namespaced_name` and the directory guard both pass for
+/// `my-plugin:leak` (the name and the directory are both fine); only the
+/// LEAF FILE identity is wrong. Proves `runner::agent_config_exists`'s
+/// `find_plugin_agent_config` call (which now enforces
+/// `plugins::path_is_contained`) actually blocks it before `execute` ever
+/// reaches the runner.
+/// Test: this test.
+#[tokio::test]
+#[cfg(unix)]
+async fn namespaced_symlinked_agent_leak_is_rejected_before_runner() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("mkdir");
+    let plugin_agents_dir = tmp
+        .path()
+        .join(".claude")
+        .join("plugins")
+        .join("my-plugin")
+        .join("agents");
+    std::fs::create_dir_all(&plugin_agents_dir).expect("mkdir");
+
+    let secret_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir");
+    let secret_path = secret_dir.join("id_rsa");
+    std::fs::write(&secret_path, "SECRET_KEY_MATERIAL").expect("write secret");
+    std::os::unix::fs::symlink(&secret_path, plugin_agents_dir.join("leak.md")).expect("symlink");
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone()).with_config_dir(agents_dir);
+
+    let result = tool
+        .execute(json!({"agent_name": "my-plugin:leak", "task": "x"}))
+        .await;
+
+    assert!(result.is_error(), "symlinked plugin agent must be rejected");
+    assert!(
+        !result.content().contains("SECRET_KEY_MATERIAL"),
+        "the secret content must never appear in the tool result, got: {}",
+        result.content()
+    );
+    assert!(
+        runner.invoked.lock().expect("lock").is_empty(),
+        "the runner must never be invoked for a rejected symlinked agent"
+    );
+}
+
 /// Without `with_config_dir`, validation is skipped — the runner is invoked.
 ///
 /// Why: Preserves backward compatibility with callers that don't need

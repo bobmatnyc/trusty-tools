@@ -71,7 +71,7 @@ pub fn discover_plugin_agents(project_root: &Path) -> Vec<AgentConfig> {
             if crate::agents::protocol::is_base_agent(&agent_name) {
                 continue;
             }
-            match load_plugin_agent(&root.name, &agent_name, &path) {
+            match load_plugin_agent(&root.name, &agent_name, &path, &root.agents_dir) {
                 Ok(cfg) => out.push(cfg),
                 Err(e) => tracing::warn!("skipping plugin agent '{}:{agent_name}': {e}", root.name),
             }
@@ -87,25 +87,43 @@ pub fn discover_plugin_agents(project_root: &Path) -> Vec<AgentConfig> {
 /// [`find_plugin_agent_config`] (dispatch resolution) share, so the
 /// namespacing + unsupported-field-drop + extends-warn contract is written
 /// exactly once.
-/// What: reads `path`, parses frontmatter via
-/// `trusty_agents_common::agents::metadata::agent_metadata_from_str` (no
-/// `compose_agent` call — a plugin agent is a leaf, #3539), warns and drops
-/// any [`UNSUPPORTED_AGENT_FIELDS`] present (see [`warn_unsupported_fields`]),
-/// warns (never errors) on a present `extends:` — the agent is still loaded
-/// as a direct/leaf document with no inheritance resolved — then projects
-/// via `agents::md_loader::project_to_agent_config` exactly as a disk agent
+/// What: FIRST requires `path`'s canonicalized identity to stay contained
+/// within `agents_dir`'s own canonicalization
+/// (`plugins::path_is_contained` — code-critic PR #3547 re-review,
+/// CRITICAL 5, CWE-59) — rejects a `path` that is (or resolves through) a
+/// symlink escaping `agents_dir`, e.g. `agents/leak.md -> ~/.ssh/id_rsa`,
+/// BEFORE any content is read. Only then reads `path`, parses frontmatter
+/// via `trusty_agents_common::agents::metadata::agent_metadata_from_str`
+/// (no `compose_agent` call — a plugin agent is a leaf, #3539), warns and
+/// drops any [`UNSUPPORTED_AGENT_FIELDS`] present (see
+/// [`warn_unsupported_fields`]), warns (never errors) on a present
+/// `extends:` — the agent is still loaded as a direct/leaf document with no
+/// inheritance resolved — then projects via
+/// `agents::md_loader::project_to_agent_config` exactly as a disk agent
 /// would, overriding only `agent.name` with the namespaced form. An
-/// unreadable file is the only real error path.
+/// unreadable file or a rejected symlink are the only error paths.
 /// Test: `tests::load_plugin_agent_projects_fields`,
 /// `tests::load_plugin_agent_warns_and_drops_unsupported_fields`,
 /// `tests::load_plugin_agent_warns_on_extends_and_treats_as_leaf`,
-/// `tests::load_plugin_agent_missing_file_errors`.
+/// `tests::load_plugin_agent_missing_file_errors`,
+/// `tests::load_plugin_agent_rejects_symlinked_file`.
 pub(crate) fn load_plugin_agent(
     plugin: &str,
     agent_name: &str,
     path: &Path,
+    agents_dir: &Path,
 ) -> anyhow::Result<AgentConfig> {
     let namespaced = format!("{plugin}:{agent_name}");
+
+    if !super::path_is_contained(path, agents_dir) {
+        anyhow::bail!(
+            "plugin agent '{namespaced}' at {} is a symlink (or resolves through one) outside \
+             the plugin's agents directory — rejected as a potential host-file disclosure \
+             (#3547)",
+            path.display()
+        );
+    }
+
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading plugin agent {}", path.display()))?;
 
@@ -191,7 +209,12 @@ pub fn find_plugin_agent_config(
     if !path.exists() {
         return None;
     }
-    Some(load_plugin_agent(&root.name, agent_name, &path))
+    Some(load_plugin_agent(
+        &root.name,
+        agent_name,
+        &path,
+        &root.agents_dir,
+    ))
 }
 
 #[cfg(test)]

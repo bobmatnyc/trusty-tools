@@ -18,7 +18,8 @@
 //! body on demand (used by `skills::FsSkillResolver::resolve`).
 //! Test: `tests::*` — discovery finds and namespaces skills, a skill
 //! directory without `SKILL.md` is skipped, body resolution finds/misses a
-//! namespaced name.
+//! namespaced name, a symlinked `<name>`/`SKILL.md` is rejected at both the
+//! discovery and resolution paths (issue #3547 CRITICAL 5).
 
 use std::path::Path;
 
@@ -53,10 +54,22 @@ pub fn discover_plugin_skills(project_root: &Path) -> Vec<SkillMetadata> {
 ///
 /// Why: factored out of [`discover_plugin_skills`] so the per-plugin scan
 /// (mirroring `skills::load_metadata_from_skill_dir`'s shape) is
-/// independently readable.
+/// independently readable. This is the ONE place a plugin skill's
+/// `SKILL.md` content is read for listing purposes, so it is also the
+/// enforcement point for the leaf-file-identity guard (code-critic PR
+/// #3547 re-review, CRITICAL 5, CWE-59) — see [`super::path_is_contained`].
 /// What: a missing/unreadable `skills_dir` yields an empty `Vec` (not an
-/// error — most plugins ship agents only, or vice versa).
-/// Test: covered via `discover_plugin_skills`'s tests above.
+/// error — most plugins ship agents only, or vice versa). `path.is_dir()`
+/// FOLLOWS symlinks (so a symlinked `<name>` directory is not rejected by
+/// this check alone), but every candidate's full `<name>/SKILL.md` leaf
+/// path is additionally required to canonicalize within `skills_dir`'s own
+/// canonicalization before its content is read — this single check catches
+/// a symlinked `<name>` directory, a symlinked `SKILL.md` leaf file inside
+/// a real `<name>` directory, or both, uniformly (see
+/// [`super::path_is_contained`]'s doc). A rejected candidate is skipped
+/// with a `WARN`, never surfacing the escaped target's content.
+/// Test: covered via `discover_plugin_skills`'s tests above,
+/// `tests::discover_plugin_skills_excludes_symlinked_skill_md`.
 fn discover_one_plugin_skills(root: &PluginRoot) -> Vec<SkillMetadata> {
     let Ok(entries) = std::fs::read_dir(&root.skills_dir) else {
         return Vec::new();
@@ -69,7 +82,18 @@ fn discover_one_plugin_skills(root: &PluginRoot) -> Vec<SkillMetadata> {
                 return None;
             }
             let dirname = path.file_name()?.to_str()?.to_string();
-            let raw = std::fs::read_to_string(path.join("SKILL.md")).ok()?;
+            let skill_md = path.join("SKILL.md");
+            if !super::path_is_contained(&skill_md, &root.skills_dir) {
+                tracing::warn!(
+                    "plugin '{}' skill dir '{dirname}' SKILL.md at {} is a symlink (or resolves \
+                     through one) outside the plugin's skills directory — rejected as a \
+                     potential host-file disclosure (#3547)",
+                    root.name,
+                    skill_md.display()
+                );
+                return None;
+            }
+            let raw = std::fs::read_to_string(&skill_md).ok()?;
             let front = crate::skills::frontmatter::parse_frontmatter(&raw);
             let local_name = front.get("name").cloned().unwrap_or(dirname);
             let description = front.get("description").cloned().unwrap_or_default();
@@ -102,18 +126,26 @@ fn discover_one_plugin_skills(root: &PluginRoot) -> Vec<SkillMetadata> {
 /// `skills::load_skill_body`'s "reject anything not in `known`" contract —
 /// which also closes the residual gap where a plugin's own `SKILL.md`
 /// frontmatter could declare a spoofed `name:` that passed the charset
-/// check but was never a real, scanned skill. Only once both guards pass
-/// does it read `<skills_dir>/<skill_name>/SKILL.md` and strip the
-/// frontmatter fence via `skills::frontmatter::strip_frontmatter` (the same
-/// generic stripper project/embedded skill bodies use). `None` on any miss
-/// (failed validation, unknown plugin, unknown skill, unreadable file) —
-/// the resolver trait's `Option`-returning API has no separate error
-/// channel, matching `FsSkillResolver::resolve`'s existing unknown-name
-/// handling.
+/// check but was never a real, scanned skill. Because
+/// [`discover_one_plugin_skills`] itself now rejects a symlinked
+/// `<name>`/`SKILL.md` (code-critic PR #3547 re-review, CRITICAL 5), a
+/// symlinked skill is never "found on disk" and this membership check
+/// alone already excludes it — a THIRD, independent
+/// [`super::path_is_contained`] check is still applied immediately before
+/// the read below as defense in depth, so the guard holds even if the two
+/// callers of [`discover_one_plugin_skills`] ever drift. Only once all
+/// guards pass does it read `<skills_dir>/<skill_name>/SKILL.md` and strip
+/// the frontmatter fence via `skills::frontmatter::strip_frontmatter` (the
+/// same generic stripper project/embedded skill bodies use). `None` on any
+/// miss (failed validation, unknown plugin, unknown/symlinked skill,
+/// unreadable file) — the resolver trait's `Option`-returning API has no
+/// separate error channel, matching `FsSkillResolver::resolve`'s existing
+/// unknown-name handling.
 /// Test: `tests::resolve_plugin_skill_body_returns_body`,
 /// `tests::resolve_plugin_skill_body_unknown_plugin_is_none`,
 /// `tests::resolve_plugin_skill_body_unknown_skill_is_none`,
-/// `tests::resolve_plugin_skill_body_rejects_traversal_name`.
+/// `tests::resolve_plugin_skill_body_rejects_traversal_name`,
+/// `tests::resolve_plugin_skill_body_rejects_symlinked_file`.
 pub fn resolve_plugin_skill_body(
     project_root: &Path,
     plugin: &str,
@@ -134,7 +166,18 @@ pub fn resolve_plugin_skill_body(
         return None;
     }
 
-    let raw = std::fs::read_to_string(root.skills_dir.join(skill_name).join("SKILL.md")).ok()?;
+    let skill_md = root.skills_dir.join(skill_name).join("SKILL.md");
+    if !super::path_is_contained(&skill_md, &root.skills_dir) {
+        tracing::warn!(
+            "plugin skill '{namespaced}' SKILL.md at {} is a symlink (or resolves through one) \
+             outside the plugin's skills directory — rejected as a potential host-file \
+             disclosure (#3547)",
+            skill_md.display()
+        );
+        return None;
+    }
+
+    let raw = std::fs::read_to_string(&skill_md).ok()?;
     Some(
         crate::skills::frontmatter::strip_frontmatter(&raw)
             .trim()

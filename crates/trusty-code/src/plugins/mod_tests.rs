@@ -299,3 +299,65 @@ fn project_root_two_levels_up_none_when_too_shallow() {
     assert_eq!(project_root_two_levels_up(Path::new("agents")), None);
     assert_eq!(project_root_two_levels_up(Path::new("/")), None);
 }
+
+/// [`path_is_contained`] accepts a real file directly inside its container.
+///
+/// Test: this test.
+#[test]
+fn path_is_contained_accepts_real_file_within_container() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let file = tmp.path().join("real.md");
+    std::fs::write(&file, "content").expect("write");
+
+    assert!(path_is_contained(&file, tmp.path()));
+}
+
+/// [`path_is_contained`] rejects a symlink whose target resolves outside
+/// the container — the exact CWE-59 shape (code-critic PR #3547 re-review,
+/// CRITICAL 5).
+///
+/// Test: this test.
+#[test]
+#[cfg(unix)]
+fn path_is_contained_rejects_symlink_escaping_container() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let container = tmp.path().join("container");
+    std::fs::create_dir_all(&container).expect("mkdir");
+    let outside = tmp.path().join("outside.txt");
+    std::fs::write(&outside, "secret").expect("write");
+    let leak = container.join("leak.md");
+    std::os::unix::fs::symlink(&outside, &leak).expect("symlink");
+
+    assert!(!path_is_contained(&leak, &container));
+}
+
+/// [`path_is_contained`] rejects a symlink escaping via an intermediate
+/// directory component, not just the final leaf.
+///
+/// Test: this test.
+#[test]
+#[cfg(unix)]
+fn path_is_contained_rejects_symlinked_intermediate_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let container = tmp.path().join("container");
+    std::fs::create_dir_all(&container).expect("mkdir");
+    let outside_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&outside_dir).expect("mkdir");
+    std::fs::write(outside_dir.join("SKILL.md"), "secret").expect("write");
+    // `container/linked-dir` is a symlinked DIRECTORY pointing outside.
+    std::os::unix::fs::symlink(&outside_dir, container.join("linked-dir")).expect("symlink");
+
+    let leaf = container.join("linked-dir").join("SKILL.md");
+    assert!(!path_is_contained(&leaf, &container));
+}
+
+/// [`path_is_contained`] fails closed (rejects) a leaf that does not exist
+/// / cannot be canonicalized, rather than assuming it's safe.
+///
+/// Test: this test.
+#[test]
+fn path_is_contained_rejects_nonexistent_leaf() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ghost = tmp.path().join("does-not-exist.md");
+    assert!(!path_is_contained(&ghost, tmp.path()));
+}

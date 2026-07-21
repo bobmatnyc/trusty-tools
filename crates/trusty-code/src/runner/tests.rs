@@ -389,6 +389,39 @@ fn agent_config_exists_rejects_plugin_traversal_name() {
     ));
 }
 
+/// A namespaced plugin agent whose `.md` FILE is a symlink escaping the
+/// plugin's `agents/` directory must NOT count as "exists" — even though
+/// the name is validly namespaced and the file literally exists on disk
+/// (code-critic PR #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// Why: `find_plugin_agent_config` returns `Some(Err(_))` for a symlinked
+/// leaf file (found, but rejected) — before this fix, `agent_config_exists`
+/// treated ANY `Some(_)` as "exists", letting a symlink-rejected name slip
+/// past the `delegate_to_agent` pre-flight gate.
+/// Test: this test.
+#[test]
+#[cfg(unix)]
+fn agent_config_exists_rejects_symlinked_plugin_agent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("mkdir");
+    let plugin_agents_dir = tmp
+        .path()
+        .join(".claude")
+        .join("plugins")
+        .join("my-plugin")
+        .join("agents");
+    std::fs::create_dir_all(&plugin_agents_dir).expect("mkdir");
+
+    let secret_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir");
+    let secret_path = secret_dir.join("id_rsa");
+    std::fs::write(&secret_path, "SECRET_KEY_MATERIAL").expect("write secret");
+    std::os::unix::fs::symlink(&secret_path, plugin_agents_dir.join("leak.md")).expect("symlink");
+
+    assert!(!super::agent_config_exists(&agents_dir, "my-plugin:leak"));
+}
+
 /// Dispatching to an embedded, tools-restricted roster agent (`qa` — one of
 /// the four Slice E3 restricted agents) with NO disk config at all still
 /// enforces its `tools.allowed` — the embedded-fallback path in `load_agent`

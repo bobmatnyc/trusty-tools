@@ -177,7 +177,35 @@ trust boundary (code-critic review on PR #3547):
   dispatchable. All three now check `plugins::is_valid_namespaced_name`
   first (falling through to their original plain-name charset check when it
   doesn't match), which both ENABLES dispatch and IS the traversal guard for
-  each of those three call sites.
+  each of those three call sites. `runner::agent_config_exists`'s namespaced
+  branch additionally requires the plugin agent to have RESOLVED CLEANLY
+  (`Some(Ok(_))`, not merely `Some(_)`) to count as "exists" — a plugin
+  agent found-but-rejected (e.g. by the leaf-file-identity guard directly
+  below) must fail the pre-flight gate outright, not slip through to the
+  runner.
+- **Leaf-file identity (CRITICAL, CWE-59, re-review finding).** The two
+  guards above validate the plugin's DIRECTORY and the dispatch NAME — they
+  say nothing about what the resulting `<agents_dir>/<name>.md` or
+  `<skills_dir>/<name>/SKILL.md` leaf path actually points AT on disk.
+  `std::fs::read_to_string`, `Path::is_dir`, and `Path::is_file` all FOLLOW
+  symlinks, so a plugin could ship `agents/leak.md` (or make `skills/<name>`
+  itself, or the `SKILL.md` inside it, a symlink) pointing at an arbitrary
+  host file such as `~/.ssh/id_rsa`; discovery would read the TARGET's
+  content as that agent's system prompt / skill body, reaching an LLM
+  prompt verbatim once the (validly namespaced, validly directoried) name
+  is dispatched. `plugins::path_is_contained` closes this: every point a
+  discovered `.md`/`SKILL.md` file's content is actually read
+  (`plugins::agents::load_plugin_agent`,
+  `plugins::skills::discover_one_plugin_skills`,
+  `plugins::skills::resolve_plugin_skill_body`) canonicalizes the full leaf
+  path and requires it stay contained within the already-validated
+  `agents_dir`/`skills_dir`. Because `canonicalize` resolves EVERY symlink
+  in the path, not merely the final component, this ONE check per call site
+  catches a symlinked leaf file, a symlinked intermediate directory (e.g.
+  `skills/<name>` itself), or both, uniformly — applied at BOTH the
+  discovery/listing path and the resolve-body/dispatch path for both agents
+  and skills, so a symlink is never read as content whether it is merely
+  listed or actually invoked.
 
 ## 3. Non-Goals (Explicitly Out of Scope, Phase 1)
 
@@ -206,3 +234,4 @@ trust boundary (code-critic review on PR #3547):
 | Ignore commands/hooks/MCP with a debug log | `plugins::load_plugin_root` | Implemented |
 | Reject `plugin.json` `agents`/`skills` overrides that escape `plugin_dir` (§2.5) | `plugins::safe_plugin_subdir` | Implemented |
 | Reject a traversal/unsafe-charset namespaced dispatch name before any path is built (§2.5) | `plugins::is_valid_namespaced_name` | Implemented |
+| Reject a discovered `.md`/`SKILL.md` leaf file (or an intermediate skill directory) that is a symlink escaping `agents_dir`/`skills_dir`, at both the listing and resolve-body paths (§2.5) | `plugins::path_is_contained`, `plugins::agents::load_plugin_agent`, `plugins::skills::discover_one_plugin_skills`, `plugins::skills::resolve_plugin_skill_body` | Implemented |

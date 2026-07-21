@@ -46,6 +46,22 @@
 //! `..` escapes the plugin's `agents_dir`/`skills_dir` — CRITICAL 2 / HIGH
 //! 3) before [`agents::find_plugin_agent_config`]/
 //! [`skills::resolve_plugin_skill_body`] ever join it onto a directory.
+//! A third, independent hole (re-review, CRITICAL 5, CWE-59): the
+//! DIRECTORY-path and NAME guards above say nothing about the LEAF FILE a
+//! validated name resolves to — `std::fs::read_to_string`,
+//! `Path::is_dir`/`is_file` all FOLLOW symlinks, so a plugin can ship
+//! `agents/leak.md` (or a `skills/<name>/SKILL.md`, or even `skills/<name>`
+//! itself) as a symlink to an arbitrary host file/directory (e.g.
+//! `~/.ssh/id_rsa`); discovery would read the TARGET's content as that
+//! agent's system prompt or skill body, which then reaches an LLM prompt
+//! verbatim once dispatched. [`path_is_contained`] closes this: every
+//! point a discovered `.md`/`SKILL.md` file's content is actually read
+//! (`agents::load_plugin_agent`, `skills::discover_one_plugin_skills`,
+//! `skills::resolve_plugin_skill_body`) canonicalizes the full leaf path
+//! and requires it stay contained within the already-validated
+//! `agents_dir`/`skills_dir` — since `canonicalize` resolves every symlink
+//! in the path, not just the final component, one check catches a
+//! symlinked leaf file, a symlinked intermediate directory, or both.
 
 pub mod agents;
 pub mod skills;
@@ -312,6 +328,40 @@ pub fn is_valid_namespaced_name(name: &str) -> bool {
             crate::agents::protocol::validate_agent_name(plugin).is_ok()
                 && crate::agents::protocol::validate_agent_name(local).is_ok()
         }
+        _ => false,
+    }
+}
+
+/// Whether `leaf`'s canonicalized path is contained within `container`'s
+/// own canonicalization — the LEAF-FILE-IDENTITY guard neither
+/// [`safe_plugin_subdir`] (guards a `plugin.json` directory override) nor
+/// [`is_valid_namespaced_name`] (guards the dispatch NAME) provides
+/// (code-critic PR #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// Why: `std::fs::read_to_string`, `Path::is_dir`, and `Path::is_file` all
+/// FOLLOW symlinks. A validated directory (`agents_dir`/`skills_dir`) and a
+/// validated namespaced NAME together still say nothing about what the
+/// resulting `<dir>/<name>` (or `<dir>/<name>/SKILL.md`) path actually
+/// points AT on disk — a hostile plugin can make that exact leaf entry (or
+/// an intermediate path component, e.g. `skills/<name>` itself) a symlink
+/// to an arbitrary host file/directory (`~/.ssh/id_rsa`). Reading it would
+/// feed the target's content into an LLM prompt verbatim once the
+/// (legitimately namespaced, legitimately-directoried) name is dispatched.
+/// What: canonicalizes both `leaf` and `container`; `true` only when BOTH
+/// canonicalize successfully AND the canonicalized `leaf` starts with the
+/// canonicalized `container`. A leaf that fails to canonicalize (broken
+/// symlink, race, doesn't exist) is treated as NOT contained — fail
+/// closed, never fail open into "assume safe". Because `canonicalize`
+/// resolves EVERY symlink in the path (not merely the final component),
+/// ONE call here catches a symlinked leaf file, a symlinked intermediate
+/// directory, or both, uniformly — callers do not need a separate check
+/// for "is the containing directory itself a symlink".
+/// Test: `tests::path_is_contained_accepts_real_file_within_container`,
+/// `tests::path_is_contained_rejects_symlink_escaping_container`,
+/// `tests::path_is_contained_rejects_nonexistent_leaf`.
+pub(crate) fn path_is_contained(leaf: &Path, container: &Path) -> bool {
+    match (leaf.canonicalize(), container.canonicalize()) {
+        (Ok(canon_leaf), Ok(canon_container)) => canon_leaf.starts_with(&canon_container),
         _ => false,
     }
 }

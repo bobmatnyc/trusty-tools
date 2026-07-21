@@ -99,7 +99,7 @@ fn load_plugin_agent_projects_fields() {
     )
     .expect("write");
 
-    let cfg = load_plugin_agent("plug", "solo", &path).expect("load");
+    let cfg = load_plugin_agent("plug", "solo", &path, tmp.path()).expect("load");
     assert_eq!(cfg.agent.name, "plug:solo");
     assert_eq!(cfg.agent.role.as_deref(), Some("engineer"));
     assert_eq!(cfg.agent.description.as_deref(), Some("A lone agent"));
@@ -131,7 +131,8 @@ fn load_plugin_agent_warns_and_drops_unsupported_fields() {
     )
     .expect("write");
 
-    let cfg = load_plugin_agent("plug", "fancy", &path).expect("load must still succeed");
+    let cfg =
+        load_plugin_agent("plug", "fancy", &path, tmp.path()).expect("load must still succeed");
     assert_eq!(cfg.agent.name, "plug:fancy");
 
     let captured = crate::test_support::captured_at_least(tracing::Level::WARN);
@@ -165,7 +166,8 @@ fn load_plugin_agent_warns_on_extends_and_treats_as_leaf() {
     )
     .expect("write");
 
-    let cfg = load_plugin_agent("plug", "child", &path).expect("load must still succeed");
+    let cfg =
+        load_plugin_agent("plug", "child", &path, tmp.path()).expect("load must still succeed");
     assert_eq!(cfg.system_prompt.content, "Only my own body.");
 
     let captured = crate::test_support::captured_at_least(tracing::Level::WARN);
@@ -182,8 +184,50 @@ fn load_plugin_agent_warns_on_extends_and_treats_as_leaf() {
 /// Test: this test.
 #[test]
 fn load_plugin_agent_missing_file_errors() {
-    let result = load_plugin_agent("plug", "ghost", Path::new("/nonexistent/ghost.md"));
+    let result = load_plugin_agent(
+        "plug",
+        "ghost",
+        Path::new("/nonexistent/ghost.md"),
+        Path::new("/nonexistent"),
+    );
     assert!(result.is_err());
+}
+
+/// A plugin agent file that is (or resolves through) a symlink escaping
+/// `agents_dir` is rejected — the secret content it would otherwise expose
+/// is planted at the escape target and asserted never read (code-critic PR
+/// #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// Why: this is the exact repro shape the re-review flagged — a real
+/// `agents/leak.md` symlinked to an arbitrary host file (`~/.ssh/id_rsa` in
+/// the wild; a planted "secret" file here).
+/// Test: this test.
+#[test]
+#[cfg(unix)]
+fn load_plugin_agent_rejects_symlinked_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = tmp.path().join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("mkdir");
+
+    let secret_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir");
+    let secret_path = secret_dir.join("id_rsa");
+    std::fs::write(
+        &secret_path,
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n",
+    )
+    .expect("write secret");
+
+    let leak_path = agents_dir.join("leak.md");
+    std::os::unix::fs::symlink(&secret_path, &leak_path).expect("create symlink");
+
+    let result = load_plugin_agent("plug", "leak", &leak_path, &agents_dir);
+    let err = result.expect_err("a symlinked leaf file must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        !msg.contains("SECRET"),
+        "the secret content must never appear anywhere, even in an error message, got: {msg}"
+    );
 }
 
 /// [`find_plugin_agent_config`] resolves a known plugin/agent pair.
@@ -270,4 +314,79 @@ fn find_plugin_agent_config_rejects_traversal_name() {
         find_plugin_agent_config(tmp.path(), "my-plugin", "/etc/passwd").is_none(),
         "an absolute-path-shaped agent_name must be rejected"
     );
+}
+
+/// `discover_plugin_agents` (the `agents.list` listing path) excludes a
+/// symlinked plugin agent file — a real, legitimate agent alongside it is
+/// still listed, but the symlinked one, and the secret content it points
+/// at, never appear (code-critic PR #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// Test: this test.
+#[test]
+#[cfg(unix)]
+fn discover_plugin_agents_excludes_symlinked_leak_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_agent(
+        &plugins_dir,
+        "my-plugin",
+        "reviewer",
+        "---\nname: reviewer\n---\n\nBody.\n",
+    );
+
+    let secret_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir");
+    let secret_path = secret_dir.join("id_rsa");
+    std::fs::write(&secret_path, "SECRET_KEY_MATERIAL").expect("write secret");
+    let leak_path = plugins_dir.join("my-plugin").join("agents").join("leak.md");
+    std::os::unix::fs::symlink(&secret_path, &leak_path).expect("create symlink");
+
+    let agents = discover_plugin_agents(tmp.path());
+    let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["my-plugin:reviewer"],
+        "the symlinked entry must be excluded; the real agent must still be listed"
+    );
+    assert!(
+        agents
+            .iter()
+            .all(|a| !a.system_prompt.content.contains("SECRET_KEY_MATERIAL")),
+        "the secret content must never appear in any listed agent's body"
+    );
+}
+
+/// `find_plugin_agent_config` (the dispatch/`delegate_to_agent` resolution
+/// path) rejects a symlinked plugin agent file, never surfacing the target
+/// file's content (code-critic PR #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// Test: this test.
+#[test]
+#[cfg(unix)]
+fn find_plugin_agent_config_rejects_symlinked_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    std::fs::create_dir_all(plugins_dir.join("my-plugin").join("agents")).expect("mkdir");
+
+    let secret_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir");
+    let secret_path = secret_dir.join("id_rsa");
+    std::fs::write(&secret_path, "SECRET_KEY_MATERIAL").expect("write secret");
+    let leak_path = plugins_dir.join("my-plugin").join("agents").join("leak.md");
+    std::os::unix::fs::symlink(&secret_path, &leak_path).expect("create symlink");
+
+    match find_plugin_agent_config(tmp.path(), "my-plugin", "leak") {
+        None => {}
+        Some(Ok(cfg)) => panic!(
+            "a symlinked agent must never resolve successfully, got: {:?}",
+            cfg.system_prompt.content
+        ),
+        Some(Err(e)) => {
+            let msg = format!("{e:#}");
+            assert!(
+                !msg.contains("SECRET_KEY_MATERIAL"),
+                "the secret content must never leak into the error message, got: {msg}"
+            );
+        }
+    }
 }

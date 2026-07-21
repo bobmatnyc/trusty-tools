@@ -243,6 +243,55 @@ mod tests {
         }
     }
 
+    /// `use_skill` with `name: "my-plugin:leak"` — a validly-namespaced,
+    /// validly-pathed name whose `SKILL.md` is a symlink escaping the
+    /// plugin's `skills/` directory — is rejected end-to-end through the
+    /// REAL `skills::FsSkillResolver`, and the secret content it points at
+    /// never reaches the tool result (code-critic PR #3547 re-review,
+    /// CRITICAL 5, CWE-59).
+    ///
+    /// Why: `is_valid_namespaced_name` and the directory guard both pass
+    /// for `my-plugin:leak` — only the LEAF FILE identity is wrong. This
+    /// proves `plugins::skills::resolve_plugin_skill_body`'s containment
+    /// check actually fires on the exact production path `use_skill`
+    /// drives.
+    /// Test: this test.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn use_skill_rejects_symlinked_plugin_skill_leak() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join(".claude").join("skills");
+        std::fs::create_dir_all(&skills_dir).expect("mkdir skills");
+
+        let leak_skill_dir = tmp
+            .path()
+            .join(".claude")
+            .join("plugins")
+            .join("my-plugin")
+            .join("skills")
+            .join("leak");
+        std::fs::create_dir_all(&leak_skill_dir).expect("mkdir leak dir");
+
+        let secret_dir = tmp.path().join("outside");
+        std::fs::create_dir_all(&secret_dir).expect("mkdir");
+        let secret_path = secret_dir.join("id_rsa");
+        std::fs::write(&secret_path, "SECRET_KEY_MATERIAL").expect("write secret");
+        std::os::unix::fs::symlink(&secret_path, leak_skill_dir.join("SKILL.md")).expect("symlink");
+
+        let resolver: Arc<dyn SkillResolver> =
+            Arc::new(crate::skills::FsSkillResolver::new(skills_dir));
+        let tool = UseSkillTool::new(resolver);
+
+        let result = tool.execute(json!({"name": "my-plugin:leak"})).await;
+
+        assert!(result.is_error(), "symlinked plugin skill must be rejected");
+        assert!(
+            !result.content().contains("SECRET_KEY_MATERIAL"),
+            "the secret content must never appear in the tool result, got: {}",
+            result.content()
+        );
+    }
+
     /// `name()` and the schema's `function.name` both match
     /// `USE_SKILL_TOOL_NAME` — no drift between the constant and the wire
     /// name (#2070 depends on this identifying skill outputs for pinning).

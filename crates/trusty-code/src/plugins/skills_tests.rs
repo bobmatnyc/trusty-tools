@@ -172,3 +172,76 @@ fn resolve_plugin_skill_body_rejects_traversal_name() {
         "an absolute-path-shaped skill_name must be rejected"
     );
 }
+
+/// `discover_plugin_skills` (the `skills.list` listing path) excludes a
+/// skill whose `SKILL.md` is a symlink escaping the plugin's `skills_dir`
+/// — a real, legitimate skill alongside it is still listed, but the
+/// symlinked one, and the secret content it points at, never appear
+/// (code-critic PR #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// Test: this test.
+#[test]
+#[cfg(unix)]
+fn discover_plugin_skills_excludes_symlinked_skill_md() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_skill(
+        &plugins_dir,
+        "my-plugin",
+        "real-skill",
+        "---\nname: real-skill\n---\n\nBody.\n",
+    );
+
+    let secret_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir");
+    let secret_path = secret_dir.join("id_rsa");
+    std::fs::write(&secret_path, "SECRET_KEY_MATERIAL").expect("write secret");
+    let leak_skill_dir = plugins_dir.join("my-plugin").join("skills").join("leak");
+    std::fs::create_dir_all(&leak_skill_dir).expect("mkdir leak dir");
+    std::os::unix::fs::symlink(&secret_path, leak_skill_dir.join("SKILL.md"))
+        .expect("create symlink");
+
+    let skills = discover_plugin_skills(tmp.path());
+    let names: Vec<&str> = skills.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["my-plugin:real-skill"],
+        "the symlinked entry must be excluded; the real skill must still be listed"
+    );
+    assert!(
+        skills
+            .iter()
+            .all(|m| !m.description.contains("SECRET_KEY_MATERIAL")),
+        "the secret content must never appear in any listed skill's metadata"
+    );
+}
+
+/// `resolve_plugin_skill_body` (the `use_skill` resolution path) rejects a
+/// symlinked `SKILL.md`, never surfacing the target file's content
+/// (code-critic PR #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// What: the symlinked skill directory is planted DIRECTLY (bypassing
+/// `discover_plugin_skills`) to prove `resolve_plugin_skill_body`'s own
+/// defense-in-depth containment check fires independently, not merely
+/// because the membership check upstream already filtered it.
+/// Test: this test.
+#[test]
+#[cfg(unix)]
+fn resolve_plugin_skill_body_rejects_symlinked_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    let secret_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir");
+    let secret_path = secret_dir.join("id_rsa");
+    std::fs::write(&secret_path, "SECRET_KEY_MATERIAL").expect("write secret");
+    let leak_skill_dir = plugins_dir.join("my-plugin").join("skills").join("leak");
+    std::fs::create_dir_all(&leak_skill_dir).expect("mkdir leak dir");
+    std::os::unix::fs::symlink(&secret_path, leak_skill_dir.join("SKILL.md"))
+        .expect("create symlink");
+
+    let result = resolve_plugin_skill_body(tmp.path(), "my-plugin", "leak");
+    assert!(
+        result.is_none(),
+        "a symlinked skill must never resolve, got: {result:?}"
+    );
+}

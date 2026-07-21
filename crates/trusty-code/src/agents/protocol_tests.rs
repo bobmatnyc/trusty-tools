@@ -490,3 +490,48 @@ async fn list_plugin_agent_does_not_override_project_agent_of_same_local_name() 
     assert_eq!(plugin_entry["tier"], "plugin");
     assert_eq!(plugin_entry["description"], "PLUGIN engineer");
 }
+
+/// `agents.list` never surfaces a plugin agent that is a symlink escaping
+/// the plugin's `agents/` directory — the secret content a hostile plugin
+/// would otherwise disclose never appears anywhere in the JSON response
+/// (code-critic PR #3547 re-review, CRITICAL 5, CWE-59).
+///
+/// Test: this test.
+#[tokio::test]
+#[cfg(unix)]
+async fn list_excludes_symlinked_plugin_agent_leak_file() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("mkdir");
+    let plugin_agents_dir = tmp
+        .path()
+        .join(".claude")
+        .join("plugins")
+        .join("my-plugin")
+        .join("agents");
+    std::fs::create_dir_all(&plugin_agents_dir).expect("mkdir");
+    std::fs::write(
+        plugin_agents_dir.join("reviewer.md"),
+        "---\nname: reviewer\n---\n\nBody.\n",
+    )
+    .expect("write");
+
+    let secret_dir = tmp.path().join("outside");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir");
+    let secret_path = secret_dir.join("id_rsa");
+    std::fs::write(&secret_path, "SECRET_KEY_MATERIAL").expect("write secret");
+    std::os::unix::fs::symlink(&secret_path, plugin_agents_dir.join("leak.md")).expect("symlink");
+
+    let s = state(&agents_dir, true);
+    let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+    let agents = result["agents"].as_array().expect("array");
+
+    assert!(
+        !agents.iter().any(|a| a["name"] == "my-plugin:leak"),
+        "the symlinked entry must not be listed, got: {agents:?}"
+    );
+    assert!(
+        !result.to_string().contains("SECRET_KEY_MATERIAL"),
+        "the secret content must never appear anywhere in the response"
+    );
+}

@@ -518,15 +518,27 @@ impl AgentRunner for InProcessAgentRunner {
 /// redundantly enforced inside `find_plugin_agent_config` itself, issue
 /// #3547 HIGH 3) and by recovering a project root from `dir` via
 /// `plugins::project_root_two_levels_up`. `true` iff that resolves to
-/// `Some` (found on disk, whether or not it parsed cleanly — mirrors the
-/// plain-name path below, which is also a bare existence check, not a
-/// parseability one). Otherwise, unchanged: `true` iff `<dir>/<name>.md`
-/// exists (#2897 Slice D — `.toml` is no longer a loadable source) OR
-/// `name` matches an entry in `crate::assets::DEFAULT_AGENTS`.
+/// `Some(Ok(_))` — a plugin agent must actually load cleanly, NOT merely be
+/// found-but-broken, to pass this gate. This is DELIBERATELY stricter than
+/// the plain-name path below (a bare existence check, not a parseability
+/// one): `find_plugin_agent_config` can return `Some(Err(_))` for a
+/// SECURITY rejection (a symlinked `.md` file escaping `agents_dir` —
+/// issue #3547 CRITICAL 5, CWE-59), and that must fail this pre-flight gate
+/// outright rather than let `delegate_to_agent` proceed to invoke the
+/// runner on a name that can never actually resolve (code-critic PR #3547
+/// re-review — `Some(Err(_))` counting as "exists" let a symlink-rejected
+/// name slip past the pre-flight gate; the real `InProcessAgentRunner`
+/// would still refuse it one layer later via `resolve_agent`, so content
+/// never reached an LLM prompt either way, but the gate's whole purpose is
+/// to fail fast with a clear "unknown agent" error before ever attempting
+/// dispatch). Otherwise, unchanged: `true` iff `<dir>/<name>.md` exists
+/// (#2897 Slice D — `.toml` is no longer a loadable source) OR `name`
+/// matches an entry in `crate::assets::DEFAULT_AGENTS`.
 /// Test: `runner::tests::agent_config_exists_detects_present_and_absent`,
 /// `runner::tests::agent_config_exists_detects_embedded_default`,
 /// `runner::tests::agent_config_exists_detects_plugin_agent`,
-/// `runner::tests::agent_config_exists_rejects_plugin_traversal_name`.
+/// `runner::tests::agent_config_exists_rejects_plugin_traversal_name`,
+/// `runner::tests::agent_config_exists_rejects_symlinked_plugin_agent`.
 pub fn agent_config_exists(dir: &Path, name: &str) -> bool {
     if let Some((plugin, local)) = name.split_once(':') {
         if !crate::plugins::is_valid_namespaced_name(name) {
@@ -534,7 +546,7 @@ pub fn agent_config_exists(dir: &Path, name: &str) -> bool {
         }
         return crate::plugins::project_root_two_levels_up(dir)
             .and_then(|root| crate::plugins::agents::find_plugin_agent_config(&root, plugin, local))
-            .is_some();
+            .is_some_and(|r| r.is_ok());
     }
     dir.join(format!("{name}.md")).exists()
         || crate::assets::DEFAULT_AGENTS

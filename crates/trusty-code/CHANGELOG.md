@@ -39,7 +39,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `delegate_to_agent` tool, the CLI, and the pre-flight existence gate all
   accept the `<plugin>:<name>` shape (previously only `agents::resolve_agent`
   itself could resolve one; every caller in front of it rejected `:`
-  outright).
+  outright). A further hardening pass (code-critic re-review) closed a
+  leaf-file-identity gap (CWE-59): a discovered `agents/*.md` or
+  `skills/<name>/SKILL.md` — or the `skills/<name>` directory itself — that
+  is a symlink escaping the plugin's `agents_dir`/`skills_dir` is now
+  rejected via `plugins::path_is_contained` (canonicalize + containment,
+  applied at both the listing and resolve/dispatch paths for both agents
+  and skills) before its content is ever read, closing a host-file
+  disclosure vector the directory- and name-level guards above didn't
+  cover. `runner::agent_config_exists`'s pre-flight gate now also requires
+  a namespaced plugin agent to resolve CLEANLY (not merely be found) to
+  count as "exists".
 - **Markdown transcript endpoint for dev observability (issue #3526).** New
   `GET /sessions/{id}/transcript.md` (`crate::serve::rest::sessions`) renders
   a session's full transcript as a readable `text/markdown` document —
