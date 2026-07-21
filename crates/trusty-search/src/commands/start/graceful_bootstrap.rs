@@ -21,12 +21,13 @@
 //! `TRUSTY_EMBEDDER=python` arm performs
 //! (`embedder::build_eager_python_embedder`).
 //!
-//! This PR implements SWAP-IN ONLY: once hot-swapped to python, this module
-//! is done — it never runs again for the lifetime of the daemon. Detecting a
-//! live python sidecar dying later and swapping back to ort is PR-4's scope;
-//! the seam for that is the same `switchable` handle and the pid-slot /
-//! stall-tracker machinery [`drive_bootstrap`] already wires up on success
-//! (see the `TODO(PR-4)` below).
+//! PR-3 implemented SWAP-IN ONLY. PR-4 (epic #3524 slice 6) adds the other
+//! half: once [`drive_bootstrap`] hot-swaps to python, [`run_graceful_python_bootstrap`]
+//! spawns `start::swap_back_watchdog::run_swap_back_watchdog` — a sibling
+//! detached task that watches the same `switchable` handle and the pid-slot /
+//! stall-tracker machinery this module already wires up on success, and
+//! swaps back to ort if the python sidecar is ever confirmed dead beyond
+//! recovery. See that module's docs for the swap-back predicate.
 //!
 //! Test: `graceful_bootstrap_swaps_to_python_on_success`,
 //! `graceful_bootstrap_stays_ort_and_failed_after_probe_failure`,
@@ -68,18 +69,29 @@ const DEFAULT_BOOTSTRAP_RETRIES: u32 = 2;
 /// This trait is the seam that lets [`try_bootstrap_once`] force an
 /// IMMEDIATE, cooperative kill on every failure path that occurs after a
 /// handle may have spawned, before ever dropping it.
-/// What: one method, `teardown()`, async so the real implementation can
-/// await `SupervisorHandle::shutdown()`'s "confirmed dead" guarantee.
+/// What: `teardown()`, async so the real implementation can await
+/// `SupervisorHandle::shutdown()`'s "confirmed dead" guarantee; plus
+/// `is_confirmed_terminated()` (epic #3524 slice 6 PR-4 follow-up,
+/// code-critic BLOCK on PR #3584) — the DEFINITIVE "this python sidecar's
+/// supervisor gave up permanently" signal the swap-back watchdog gates on,
+/// replacing the earlier ambiguous pid==0 + stall-tracker heuristic. See
+/// `LazyEmbedderHandle::is_confirmed_terminated`'s doc for the full
+/// false-positive analysis that signal fixes.
 /// Test: see the module-level `Test:` pointer.
 #[async_trait::async_trait]
 pub(crate) trait PythonAdapterTeardown: Send + Sync {
     async fn teardown(&self);
+    async fn is_confirmed_terminated(&self) -> bool;
 }
 
 #[async_trait::async_trait]
 impl PythonAdapterTeardown for crate::service::embedder_supervisor::LazyEmbedderHandle {
     async fn teardown(&self) {
         self.shutdown().await;
+    }
+
+    async fn is_confirmed_terminated(&self) -> bool {
+        crate::service::embedder_supervisor::LazyEmbedderHandle::is_confirmed_terminated(self).await
     }
 }
 
@@ -183,15 +195,36 @@ pub(super) fn resolve_bootstrap_retries() -> u32 {
 /// What: constructs the production [`RealPythonBootstrap`] and delegates to
 /// [`drive_bootstrap`]. Never panics — every failure path is caught and
 /// logged; the daemon and the ort backend it is already serving on are
-/// completely unaffected regardless of outcome.
+/// completely unaffected regardless of outcome. On a successful hot-swap
+/// (epic #3524 slice 6, PR 4/5), spawns the swap-back watchdog as a detached
+/// sibling task so a later confirmed death of the python sidecar falls back
+/// to ort without anyone needing to restart the daemon.
 /// Test: `drive_bootstrap` (this function's callee) is what carries the
-/// actual test coverage — this wrapper has no independent branches.
+/// actual test coverage for the bootstrap state machine itself; the
+/// watchdog hand-off has no independent branches worth a dedicated test here
+/// (it is one `if let Some`) — `start::swap_back_watchdog`'s own tests cover
+/// the watchdog's behavior.
 pub(super) async fn run_graceful_python_bootstrap(
     switchable: Arc<SwitchableEmbedder>,
     state: SearchAppState,
 ) {
     let ops: Arc<dyn PythonBootstrap> = Arc::new(RealPythonBootstrap);
-    drive_bootstrap(switchable, state, ops, resolve_bootstrap_retries()).await;
+    if let Some(python_teardown) = drive_bootstrap(
+        Arc::clone(&switchable),
+        state.clone(),
+        ops,
+        resolve_bootstrap_retries(),
+    )
+    .await
+    {
+        let swap_back_ops = super::swap_back_watchdog::real_swap_back_ops();
+        tokio::spawn(super::swap_back_watchdog::run_swap_back_watchdog(
+            switchable,
+            state,
+            python_teardown,
+            swap_back_ops,
+        ));
+    }
 }
 
 /// Drive the ort→python hot-swap state machine: bootstrap the venv, locate
@@ -208,13 +241,14 @@ pub(super) async fn run_graceful_python_bootstrap(
 /// ort backend (`inner`) is never touched, so search keeps serving on ort
 /// exactly as it was before this task ever ran.
 ///
-/// TODO(PR-4): this function currently has no way to notice the python
-/// sidecar dying AFTER a successful hot-swap and fall back to ort. The seam
-/// for that is here: `switchable` and the installed pid slot / the daemon's
-/// existing `embedder_stall_tracker` are already wired up by the time this
-/// function returns `Ok` from a caller's perspective — PR-4 only needs to
-/// add a supervising task that watches those and calls
-/// `switchable.swap_to`/`set_bootstrap_state` again on death.
+/// Returns the python adapter's [`PythonAdapterTeardown`] handle on a
+/// successful hot-swap (epic #3524 slice 6, PR 4/5) — `None` on exhaustion.
+/// [`run_graceful_python_bootstrap`] uses the `Some` case to hand the live
+/// python handle's teardown to the swap-back watchdog, which needs it to
+/// cleanly shut down the dead sidecar once IT confirms death and swaps back
+/// to ort. This is a pure return-type addition: every existing PR-3 test
+/// calls this function without using its return value, so none of them
+/// needed to change.
 ///
 /// Test: `graceful_bootstrap_swaps_to_python_on_success`,
 /// `graceful_bootstrap_stays_ort_and_failed_after_probe_failure`,
@@ -225,15 +259,15 @@ pub(super) async fn drive_bootstrap(
     state: SearchAppState,
     ops: Arc<dyn PythonBootstrap>,
     retries: u32,
-) {
+) -> Option<Arc<dyn PythonAdapterTeardown>> {
     let retries = retries.max(1);
     let mut last_err = None;
 
     for attempt in 1..=retries {
         match try_bootstrap_once(&switchable, &state, &ops).await {
-            Ok(()) => {
+            Ok(python_teardown) => {
                 tracing::info!("embedder hot-swapped ort -> python/MPS (sidecar ready)");
-                return;
+                return Some(python_teardown);
             }
             Err(e) => {
                 tracing::warn!(
@@ -255,15 +289,21 @@ pub(super) async fn drive_bootstrap(
          retry, or set TRUSTY_EMBEDDER=python for the eager blocking path",
         last_err.expect("at least one attempt runs when retries >= 1"),
     );
+    None
 }
 
 /// One bootstrap→probe→swap attempt. See [`drive_bootstrap`] for the retry
-/// loop around this.
+/// loop around this. Returns the newly-installed python adapter's
+/// [`PythonAdapterTeardown`] handle on success (epic #3524 slice 6, PR 4/5)
+/// — the SAME underlying handle just installed into `switchable`, viewed
+/// through the teardown trait so the swap-back watchdog can shut it down
+/// later without needing to downcast the trait object `switchable` now
+/// holds.
 async fn try_bootstrap_once(
     switchable: &SwitchableEmbedder,
     state: &SearchAppState,
     ops: &Arc<dyn PythonBootstrap>,
-) -> Result<()> {
+) -> Result<Arc<dyn PythonAdapterTeardown>> {
     // Step a: blocking venv bootstrap off the async runtime — mirrors the
     // eager `TRUSTY_EMBEDDER=python` arm's `ensure_venv_eager` off-thread call.
     let venv_ops = Arc::clone(ops);
@@ -337,5 +377,5 @@ async fn try_bootstrap_once(
         state.install_embedderd_pid_slot(slot).await;
     }
 
-    Ok(())
+    Ok(teardown)
 }

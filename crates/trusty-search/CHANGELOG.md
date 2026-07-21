@@ -18,6 +18,62 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Swap-BACK watchdog: python/MPS → ort on confirmed sidecar death (epic
+  #3524 slice 6, PR 4/5) — ships DEFAULT OFF (unchanged behind
+  `TRUSTY_PY_DEFAULT`).** PR-3 hot-swaps ort→python once the sidecar proves
+  itself, then stops watching. This PR adds the other half: once hot-swapped,
+  a new detached watchdog task (`commands/start/swap_back_watchdog.rs`)
+  watches the python sidecar's pid slot and the existing
+  `EmbedderStallTracker`, and swaps `SwitchableEmbedder` back to a fresh ort
+  backend if the python sidecar is ever confirmed dead beyond recovery —
+  search never degrades permanently, with no daemon restart required.
+  - **The swap-back predicate uses a DEFINITIVE supervisor signal, not a
+    heuristic (post-merge-review fix — code-critic BLOCK on PR #3584).** The
+    first version of this predicate fired on `active.kind == Python &&
+    pid_slot == 0 && recent_timeout_count > 0`, debounced across 2 polling
+    ticks. Code-critic caught a real false-positive window before merge: an
+    ordinary idle-shutdown ALSO zeros the pid slot, and a stale non-zero
+    `recent_timeout_count` left over from an earlier TRANSIENT failure is
+    never cleared by idle-shutdown (only a subsequent successful embed clears
+    it) — so a quiet period with zero further embed traffic after an
+    idle-shutdown could satisfy the heuristic and PERMANENTLY swap away a
+    perfectly healthy sidecar. Fixed by adding
+    `trusty-common`'s new `EmbedderSupervisor::terminated_signal()` (see that
+    crate's changelog) — an `Arc<AtomicBool>` the supervision loop sets ONLY
+    at the instant it exhausts `max_restarts` / a wedge-restart storm, never
+    on a clean exit or an intentional shutdown. `LazyEmbedderHandle::is_confirmed_terminated()`
+    exposes this (via the extended `PythonAdapterTeardown` trait), and the
+    predicate is now simply `active.kind == Python &&
+    is_confirmed_terminated()` — no debounce needed, since the flag is
+    monotonic and unambiguous the instant it's observed. The regression test
+    `swap_back_does_not_fire_on_stale_timeout_count_plus_idle_shutdown`
+    reproduces the exact scenario code-critic named and fails against the
+    pre-fix heuristic.
+  - On confirmed death: builds a fresh ort backend via the same
+    `build_ort_stdio_sidecar()` the daemon's default path uses, hot-swaps
+    `SwitchableEmbedder` to it (`ActiveBackend { kind: Ort, bootstrap:
+    FellBackToOrt }`), reinstalls the ort pid slot, and cleanly shuts down the
+    dead python handle via `LazyEmbedderHandle::shutdown()` (no orphan). Logs
+    a loud `warn`: "python/MPS sidecar unrecoverable — fell back to ort;
+    search unaffected". `/health`'s `embedder_bootstrap` already reports
+    `"fell_back_to_ort"` for this state (wired in PR-2/PR-3).
+  - **CAS upgrade (code-critic LOW follow-up from PR-3 review)**:
+    `SwitchableEmbedder::set_bootstrap_state` was a non-atomic
+    read-modify-write on `active`, safe only because PR-3's orchestrator was
+    the sole writer. PR-4 introduces a second writer (the watchdog's own
+    `swap_to`), so `set_bootstrap_state` now uses `ArcSwap::rcu` — a real
+    compare-and-swap retry loop — so a concurrent `swap_to` and
+    `set_bootstrap_state` can never lose either side's update.
+  - Bounded and quiet: polls every 15s (not a tight loop), and stops
+    permanently once it either acts (swaps back) or notices the active
+    backend already moved away from python — never watches a backend it no
+    longer owns.
+  - New file: `commands/start/swap_back_watchdog.rs`. `drive_bootstrap`
+    (`graceful_bootstrap.rs`) now returns the python adapter's teardown
+    handle on success so `run_graceful_python_bootstrap` can hand it to the
+    watchdog — a pure return-type addition; no existing call site needed to
+    change.
+
 - **Graceful Apple-Silicon default gating + background bootstrap→hot-swap
   orchestrator (epic #3524 slice 6, PR 3/5) — ships DEFAULT OFF.** On Apple
   Silicon, once `TRUSTY_PY_DEFAULT` is enabled, `trusty-search start` now

@@ -267,6 +267,12 @@ struct SpawnedState {
     /// clone if the caller drops their reference.
     #[allow(dead_code)]
     pid_slot: Arc<AtomicU32>,
+    /// Definitive "the supervisor for THIS spawn gave up permanently" signal
+    /// (epic #3524 slice 6 PR-4 follow-up, code-critic BLOCK on PR #3584).
+    /// `None` only in hand-seeded test states that never went through
+    /// `do_spawn`. See [`LazyEmbedderHandle::is_confirmed_terminated`] for
+    /// why this exists instead of inferring death from the pid slot alone.
+    terminated: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Deferred-spawn handle for the `trusty-embedderd` sidecar (issue #315).
@@ -574,6 +580,42 @@ impl LazyEmbedderHandle {
             handle.shutdown().await;
         }
     }
+
+    /// Definitive "the underlying supervisor gave up permanently" check
+    /// (epic #3524 slice 6 PR-4 follow-up, code-critic BLOCK on PR #3584).
+    ///
+    /// Why: the swap-back watchdog originally inferred death from
+    /// `app_pid_slot == 0` combined with `EmbedderStallTracker::recent_timeout_count()
+    /// > 0` — a heuristic with a real false-positive window: an ordinary
+    /// idle-shutdown ALSO zeroes the pid slot, and a stale non-zero timeout
+    /// count left over from an earlier transient failure is never cleared by
+    /// idle-shutdown (only a subsequent SUCCESSFUL embed clears it via
+    /// `record_success`), so a quiet period with zero further embed traffic
+    /// after an idle-shutdown could satisfy the old heuristic and
+    /// permanently swap away a perfectly healthy backend. This method
+    /// answers the question unambiguously instead.
+    /// What: `true` iff a sidecar is currently "spawned" from this handle's
+    /// perspective (`state` is `Some`) AND that spawn's supervisor set its
+    /// [`trusty_common::embedder_client::EmbedderSupervisor::terminated_signal`]
+    /// to `true` (exhausted `max_restarts` / a wedge-restart storm — never a
+    /// clean exit or an intentional `shutdown()`). Returns `false` whenever
+    /// `state` is `None` — which covers BOTH "never spawned yet" and "an
+    /// idle-shutdown (or an explicit `shutdown()`) already reset the spawn
+    /// gate": in either case there is no reason to believe this handle is
+    /// unrecoverably dead, so `false` is the only safe answer.
+    /// Test: `lazy_handle_is_confirmed_terminated_false_when_never_spawned`,
+    /// `lazy_handle_is_confirmed_terminated_reflects_supervisor_signal` in
+    /// this module's `tests` submodule.
+    pub async fn is_confirmed_terminated(&self) -> bool {
+        let guard = self.state.lock().await;
+        match guard.as_ref() {
+            Some(spawned) => spawned
+                .terminated
+                .as_ref()
+                .is_some_and(|flag| flag.load(AtomicOrdering::Acquire)),
+            None => false,
+        }
+    }
 }
 
 /// RAII guard that tracks an in-flight embed request (issue #2315).
@@ -732,6 +774,12 @@ async fn do_spawn(
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
+    // Capture the definitive "gave up permanently" signal (epic #3524 slice
+    // 6 PR-4 follow-up) BEFORE detaching — `start_supervisor_task` consumes
+    // `supervisor`, so this is the last point it's reachable, mirroring how
+    // `child_pid_slot` above is captured from `spawn_stdio`'s return tuple.
+    let terminated = supervisor.terminated_signal();
+
     // Detach the crash-restart loop. `start_supervisor_task` returns a
     // `SupervisorHandle` (issue #2979) that `idle_watchdog` uses for
     // cooperative shutdown — flipping its internal shutdown flag makes the
@@ -765,6 +813,7 @@ async fn do_spawn(
         supervisor_handle: Some(supervisor_handle),
         shutdown_tx,
         pid_slot: child_pid_slot,
+        terminated: Some(terminated),
     })
 }
 

@@ -450,6 +450,7 @@ async fn lazy_handle_supervisor_gave_up_reflects_handle_state() {
         supervisor_handle: None,
         shutdown_tx,
         pid_slot: Arc::new(AtomicU32::new(0)),
+        terminated: None,
     });
 
     assert!(
@@ -592,6 +593,7 @@ async fn lazy_handle_last_reported_device_reflects_client() {
         supervisor_handle: None,
         shutdown_tx,
         pid_slot: Arc::new(AtomicU32::new(0)),
+        terminated: None,
     });
 
     assert_eq!(
@@ -628,6 +630,7 @@ async fn lazy_handle_idle_shutdown_waits_for_inflight_request() {
         supervisor_handle: None,
         shutdown_tx,
         pid_slot: inner_pid_slot,
+        terminated: None,
     })));
     let app_pid_slot = Arc::new(AtomicU32::new(0));
     // Already well past the 1s idle window.
@@ -724,6 +727,7 @@ async fn embed_via_defers_watchdog_eviction_while_request_in_flight() {
             supervisor_handle: None,
             shutdown_tx,
             pid_slot: Arc::new(AtomicU32::new(0)),
+            terminated: None,
         });
     }
     // Mark last_use as already well past the 1s idle deadline so the
@@ -875,6 +879,33 @@ done
         (dir, path)
     }
 
+    /// Like `write_mock_embedderd`, but answers exactly one request and then
+    /// exits non-zero — drives the real `EmbedderSupervisor` into its
+    /// crash-restart path deterministically (epic #3524 slice 6 PR-4
+    /// follow-up, code-critic BLOCK on PR #3584).
+    /// Why/What: see `trusty_common::embedder_client::supervisor`'s own
+    /// `write_mock_embedderd_crash_once` (private to that crate —
+    /// reimplemented here, identical wire behaviour).
+    fn write_mock_embedderd_crash_once() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd-crash-once.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+[ -n "$id" ] || id=1
+printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
+exit 1
+"#,
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
     /// Best-effort liveness check via `kill -0 <pid>` (no signal sent, just
     /// an existence probe).
     fn process_alive(pid: u32) -> bool {
@@ -951,6 +982,83 @@ done
             handle.app_pid_slot().load(Ordering::Acquire),
             0,
             "pid slot must be cleared after shutdown()"
+        );
+    }
+
+    /// `is_confirmed_terminated()` must be `false` when the handle has never
+    /// spawned anything — there is no reason to believe an unspawned handle
+    /// is "unrecoverably dead" (epic #3524 slice 6 PR-4 follow-up,
+    /// code-critic BLOCK on PR #3584).
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_is_confirmed_terminated_false_when_never_spawned() {
+        let handle = LazyEmbedderHandle::new(
+            PathBuf::from("/nonexistent/trusty-embedderd"),
+            SupervisorConfig::default(),
+        );
+        assert!(!handle.is_confirmed_terminated().await);
+    }
+
+    /// `is_confirmed_terminated()` must reflect the REAL underlying
+    /// `EmbedderSupervisor::terminated_signal()` once it flips true —
+    /// proving the wiring through `do_spawn` → `SpawnedState::terminated`
+    /// actually works end-to-end, not just the pure predicate in
+    /// `swap_back_watchdog`'s own tests (which use a fake).
+    ///
+    /// Why: this is the regression the swap-back watchdog now depends on
+    /// instead of the ambiguous pid==0 + stall-tracker heuristic (see
+    /// `commands::start::swap_back_watchdog`'s module doc for the full
+    /// false-positive analysis).
+    /// What: a real, always-crashing mock child (`write_mock_embedderd_crash_once`)
+    /// with `max_restarts: 1` so exhaustion is fast. Forces the first real
+    /// spawn via `embed_via`, then polls `is_confirmed_terminated()` until it
+    /// flips `true` (the real supervisor gave up) within a generous timeout.
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_is_confirmed_terminated_reflects_supervisor_signal() {
+        let (_dir, binary) = write_mock_embedderd_crash_once();
+        let handle = LazyEmbedderHandle::new(
+            binary,
+            SupervisorConfig {
+                startup_timeout_secs: 5,
+                // Zero backoff so the crash -> respawn -> exhaustion sequence
+                // completes as fast as possible; this test asserts on the
+                // give-up signal, not on backoff timing.
+                backoff_max_secs: 0,
+                max_restarts: 1,
+                idle_shutdown_secs: 0, // no watchdog racing this test
+                ..SupervisorConfig::default()
+            },
+        );
+        assert!(
+            !handle.is_confirmed_terminated().await,
+            "must start false — nothing has failed yet"
+        );
+
+        // Force the first real spawn; the mock crashes immediately after,
+        // and every respawn attempt crashes the same way, so max_restarts=1
+        // is exhausted quickly.
+        let _ = handle
+            .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
+            .await;
+
+        // Generous ceiling (45s) so a loaded CI runner cannot false-fail —
+        // the poll interval is short (20ms) so a passing run still returns
+        // in milliseconds; only a genuinely stuck supervisor eats the full
+        // budget.
+        let gave_up = tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                if handle.is_confirmed_terminated().await {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            gave_up.is_ok(),
+            "is_confirmed_terminated() never flipped true within 45s of \
+             exhausting max_restarts=1 against an always-crashing mock child"
         );
     }
 }

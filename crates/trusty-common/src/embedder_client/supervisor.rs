@@ -110,6 +110,14 @@ pub struct EmbedderSupervisor {
     /// `child.wait()` and re-fetches a fresh receiver from each respawned
     /// client (see `StdioEmbedderClient::unhealthy_signal`).
     unhealthy_signal: watch::Receiver<bool>,
+    /// Definitive "gave up permanently" flag (epic #3524 slice 6 PR-4
+    /// follow-up, code-critic BLOCK on PR #3584). `false` for the entire
+    /// supervised lifetime except the one instant `supervision_loop` decides
+    /// `should_give_up` and is about to `return` without respawning — never
+    /// set on a clean exit, an intentional `shutdown()`, or any ordinary
+    /// respawn. See [`Self::terminated_signal`] for why callers need this
+    /// distinct from `child_pid_slot` reading `0`.
+    terminated: Arc<std::sync::atomic::AtomicBool>,
     config: SupervisorConfig,
 }
 
@@ -159,10 +167,40 @@ impl EmbedderSupervisor {
             client_slot,
             child_pid_slot,
             unhealthy_signal,
+            terminated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config,
         };
 
         Ok((supervisor, client_slot_clone, child_pid_slot_clone))
+    }
+
+    /// Clone the definitive "gave up permanently" signal — must be called
+    /// BEFORE [`Self::start_supervisor_task`] (which consumes `self`), the
+    /// same way callers capture `child_pid_slot` from `spawn_stdio`'s return
+    /// tuple before detaching.
+    ///
+    /// Why (epic #3524 slice 6 PR-4 follow-up, code-critic BLOCK on PR
+    /// #3584): the swap-back watchdog originally inferred "the python sidecar
+    /// is unrecoverably dead" from `child_pid_slot == 0` combined with
+    /// `EmbedderStallTracker::recent_timeout_count() > 0`. That heuristic has
+    /// a real false-positive window: an ordinary idle-shutdown ALSO zeroes
+    /// the pid slot, and a stale non-zero timeout count left over from an
+    /// earlier transient failure is never cleared by the idle-shutdown path
+    /// (only a subsequent SUCCESSFUL embed clears it) — so a quiet period
+    /// with zero further embed traffic after an idle-shutdown could
+    /// satisfy the heuristic and permanently swap away a perfectly healthy
+    /// backend. This method gives callers the actual, unambiguous signal
+    /// instead: `true` if and only if the supervision loop itself decided to
+    /// give up (exhausted `max_restarts` or a wedge-restart storm) — never
+    /// true for a clean exit, an intentional `shutdown()`, or an ordinary
+    /// respawn.
+    /// What: clones and returns the `Arc<AtomicBool>` `supervision_loop` sets
+    /// to `true` at the exact instant it decides `should_give_up` and returns
+    /// without respawning.
+    /// Test: `supervisor_terminated_signal_fires_after_exhausting_max_restarts`,
+    /// `supervisor_terminated_signal_stays_false_on_intentional_shutdown`.
+    pub fn terminated_signal(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.terminated)
     }
 
     /// Detach the supervisor background task.
@@ -203,6 +241,7 @@ impl EmbedderSupervisor {
             self.client_slot,
             self.child_pid_slot,
             self.unhealthy_signal,
+            self.terminated,
             self.config,
             shutdown_rx,
             gave_up_tx,
@@ -524,9 +563,10 @@ pub(crate) static SUPERVISION_LOOP_ITERATIONS: std::sync::atomic::AtomicU64 =
 // Each parameter is a distinct piece of shared state this internal (private,
 // not part of any public API) orchestration loop threads through — spawn
 // target, live child/client slots, the two independent signal channels
-// (unhealthy, shutdown) plus the new one-way give-up signal (PR #3560 HIGH
-// fix), and config. Bundling them into a struct would not reduce complexity,
-// only relocate it.
+// (unhealthy, shutdown), the one-way give-up signal (PR #3560 HIGH fix), the
+// definitive terminated signal (epic #3524 slice 6 PR-4 follow-up, code-critic
+// BLOCK on PR #3584), and config. Bundling them into a struct would not reduce
+// complexity, only relocate it.
 #[allow(clippy::too_many_arguments)]
 async fn supervision_loop(
     binary_path: PathBuf,
@@ -534,6 +574,7 @@ async fn supervision_loop(
     client_slot: Arc<RwLock<Arc<dyn EmbedderClient>>>,
     child_pid_slot: Arc<AtomicU32>,
     mut unhealthy_signal: watch::Receiver<bool>,
+    terminated: Arc<std::sync::atomic::AtomicBool>,
     config: SupervisorConfig,
     mut shutdown_rx: watch::Receiver<bool>,
     gave_up_tx: watch::Sender<bool>,
@@ -729,6 +770,12 @@ async fn supervision_loop(
             // the REAL give-up ceiling instead of an independently-counted
             // proxy. `send` on a channel with no live receiver is harmless.
             let _ = gave_up_tx.send(true);
+            // The definitive "gave up permanently" signal (epic #3524 slice 6
+            // PR-4 follow-up) — set ONLY on this exact path, never on a clean
+            // exit or an intentional shutdown. See `terminated_signal`'s doc
+            // for why callers need this instead of inferring death from
+            // `child_pid_slot == 0` alone.
+            terminated.store(true, AtomicOrdering::Release);
             return;
         }
 
