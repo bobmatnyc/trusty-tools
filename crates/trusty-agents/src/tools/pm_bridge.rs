@@ -156,7 +156,8 @@ fn session_id_pattern() -> &'static Regex {
 /// separator at all between `trusty` and `mpm`/`code`, so `trusty-mpm`,
 /// `trusty mpm`, `Trusty MPM`, and `trustympm` all match the same way.
 /// What: see `scrub_branding`'s docs for the two-pass replacement order.
-/// Test: `scrub_branding_removes_the_real_tm_launch_banner`,
+/// Test: `scrub_branding_removes_the_real_tm_launch_banner_plain_fallback`,
+/// `scrub_branding_removes_the_real_tm_launch_banner_box_form`,
 /// `scrub_branding_removes_every_forbidden_token`.
 fn branded_token_pattern() -> &'static Regex {
     static PATTERN: OnceLock<Regex> = OnceLock::new();
