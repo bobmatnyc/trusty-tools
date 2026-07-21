@@ -7,6 +7,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **`SwitchableEmbedder` plumbing (epic #3524 slice 6, PR 1/5)** — pure
+  refactor, no behavior change. `build_embedder()` now wraps whatever backend
+  it constructs (ort stdio sidecar, opt-in Python/MPS sidecar, in-process,
+  remote HTTP/UDS, candle) in a new `SwitchableEmbedder`
+  (`service/embedder_supervisor/switchable.rs`) that holds the live backend
+  behind `arc_swap::ArcSwap` and implements the crate-local `core::Embedder`
+  trait itself, delegating every call to whichever backend is currently
+  installed. This closes a real gap the embed-pool workers had: each worker
+  captures its own `Arc::clone` of the embedder at construction
+  (`service/embed_pool.rs`), so writing a fresh `Arc` into
+  `SearchAppState::embedder_slot` could never reach an already-running
+  worker. Every existing owner (the slot, the pool workers, warm-boot
+  restore) now transparently holds the same `SwitchableEmbedder` and will
+  observe a future hot-swap (`SwitchableEmbedder::swap_to`, wired up by a
+  later slice) with zero further call-site changes. Nothing calls `swap_to`
+  yet in this PR — every code path behaves identically to before.
+  `SearchAppState` gained a `switchable_embedder` field (populated alongside
+  `embedder_slot` by the same background init task) so a later hot-swap
+  orchestrator and `/health` work can reach it without an `Any`-downcast.
+  New workspace dependency: `arc-swap`.
+
 ## [0.37.0] — 2026-07-20
 
 Minor release: opt-in Python/MPS embedding sidecar (`TRUSTY_EMBEDDER=python`),

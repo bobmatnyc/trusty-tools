@@ -33,6 +33,12 @@ use trusty_common::embedder_client::EmbedderClient;
 // Re-export the core supervisor type from trusty-common.
 pub use trusty_common::embedder_client::EmbedderSupervisor;
 
+// Atomically-swappable embedder backend (epic #3524 slice 6, PR 1/5). See
+// `switchable` module docs for why this exists and how it wires into
+// `build_embedder()`.
+pub mod switchable;
+pub use switchable::{ActiveBackend, BackendKind, BootstrapState, SwitchableEmbedder};
+
 // ── Configuration ────────────────────────────────────────────────────────────
 
 /// Supervisor tuning knobs, all settable via environment variables.

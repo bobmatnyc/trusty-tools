@@ -114,6 +114,42 @@ async fn install_embedder_clears_previous_error() {
     assert!(resp.embedder_error.is_none());
 }
 
+/// Epic #3524 slice 6 (PR 1/5): `install_switchable_embedder` must make the
+/// concrete `SwitchableEmbedder` handle visible via
+/// `current_switchable_embedder`, independent of (but installed alongside)
+/// the trait-object `embedder_slot`.
+#[tokio::test]
+async fn switchable_embedder_installed_alongside_embedder() {
+    use crate::core::embed::MockEmbedder;
+    use crate::core::registry::IndexRegistry;
+    use crate::service::embedder_supervisor::{
+        ActiveBackend, BackendKind, BootstrapState, SwitchableEmbedder,
+    };
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    // Nothing installed yet.
+    assert!(state.current_switchable_embedder().await.is_none());
+
+    let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
+    let active = ActiveBackend {
+        kind: BackendKind::Ort,
+        provider: trusty_common::embedder::ExecutionProvider::Cpu,
+        model: "test-model".to_string(),
+        quantized: false,
+        bootstrap: BootstrapState::NotApplicable,
+    };
+    let switchable = Arc::new(SwitchableEmbedder::new(inner, active));
+    state
+        .install_switchable_embedder(Arc::clone(&switchable))
+        .await;
+
+    let installed = state
+        .current_switchable_embedder()
+        .await
+        .expect("switchable embedder must be installed");
+    assert_eq!(installed.active().kind, BackendKind::Ort);
+}
+
 /// Issue #120: when the previous reindex for an index aborted at the
 /// memory limit, a follow-up `POST /indexes/:id/reindex` request must be
 /// refused with `429 Too Many Requests` for the duration of the cooldown.

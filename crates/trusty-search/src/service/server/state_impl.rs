@@ -93,6 +93,9 @@ impl SearchAppState {
             // Issue #2717: production reads the env-resolved registry path;
             // tests override via `with_registry_path` to avoid TRUSTY_DATA_DIR.
             registry_path_override: None,
+            // Epic #3524 slice 6: populated by `install_switchable_embedder`
+            // in lockstep with `embedder_slot`.
+            switchable_embedder: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -284,6 +287,37 @@ impl SearchAppState {
             *err = None;
         }
         let _ = self.embedder_ready_tx.send(true);
+    }
+
+    /// Install the concrete [`SwitchableEmbedder`] handle produced by
+    /// `build_embedder()` (epic #3524 slice 6 — PR 1/5).
+    ///
+    /// Why: called from the same background init task and at the same point
+    /// as `install_embedder`, so both the trait-object slot and this concrete
+    /// handle become visible together — a reader can never observe one
+    /// populated without the other.
+    /// What: writes into `switchable_embedder`. Does not touch the readiness
+    /// watch — `install_embedder` already flips that.
+    /// Test: `switchable_embedder_installed_alongside_embedder` in
+    /// `tests_state.rs`.
+    pub async fn install_switchable_embedder(
+        &self,
+        switchable: Arc<crate::service::embedder_supervisor::SwitchableEmbedder>,
+    ) {
+        let mut slot = self.switchable_embedder.write().await;
+        *slot = Some(switchable);
+    }
+
+    /// Snapshot the currently-installed [`SwitchableEmbedder`] handle, or
+    /// `None` while the daemon is still warming up.
+    ///
+    /// Why: PR-2 (`/health`) and PR-3 (the hot-swap orchestrator) need the
+    /// concrete handle to call `swap_to`/`active()`. Nothing in this PR calls
+    /// this method yet.
+    pub async fn current_switchable_embedder(
+        &self,
+    ) -> Option<Arc<crate::service::embedder_supervisor::SwitchableEmbedder>> {
+        self.switchable_embedder.read().await.clone()
     }
 
     /// Record a fatal embedder-init error so `/health` can surface it and
