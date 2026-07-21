@@ -1,0 +1,44 @@
+# Leaked AI-generation / tool-call artifact gate for the trusty-tools
+# workspace (issue #3579).
+#
+# Enforces that raw, pasted LLM tool-call fragments (`</content>`,
+# `</invoke>`, `</parameter>`, `<function_calls>`, `</function_calls>`) never
+# land in tracked stylesheets or prose/doc files:
+#   - a bare occurrence anywhere in a *.css/*.scss/*.less file fails the job
+#     (these tokens have zero legitimate meaning in stylesheet syntax);
+#   - a bare occurrence as the LAST line of a *.md/*.mdx/*.txt/*.rst file
+#     fails the job, unless it sits inside an unterminated fenced code block;
+#   - grandfathered pre-existing instances live in
+#     .generation-artifact-allowlist.tsv (ratchet — can only shrink).
+#
+# Issue #3579 traces back to #3499 (a single stray `</content>` in
+# docs/design/UI/design-system/tokens.css:75) and the sweep that found four
+# more instances, all of which had zero mechanical enforcement before this.
+#
+# Pure text scan — no Rust toolchain or build needed, so this is fast and
+# runs as its own lightweight job (matches line-cap.yml's shape). Kept in its
+# own workflow file rather than ci.yml to avoid colliding with concurrent
+# ci.yml changes (PR #3571).
+name: Generation artifact lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches line-cap.yml).
+concurrency:
+  group: generation-artifact-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  generation-artifact-lint:
+    name: No leaked AI-generation / tool-call artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Scan for leaked generation artifacts (#3579)
+        run: bash scripts/check_generation_artifacts.sh

@@ -1,0 +1,19 @@
+# .generation-artifact-allowlist.tsv — grandfathered leaked
+# AI-generation / tool-call artifacts (issue #3579).
+# Format: <relative/path>, one per row. A listed path has ALL of its
+# check_generation_artifacts.sh findings suppressed.
+# Ratchet: rows may only be REMOVED once the file is fixed; the gate
+# FAILS on any row whose file no longer has a finding (stale — prune
+# with: scripts/check_generation_artifacts.sh --update).
+#
+# Seeded 2026-07-21: the five known pre-existing instances
+# from issue #3499 (docs/design/UI/design-system/tokens.css:75 and its
+# two sibling token files; docs/specs/sessions-tui-interactive.md and
+# docs/specs/telui-telegram-ui.md at EOF), all dating to 3e25f6bc and
+# fixed upstream by PR #3578. New leaks introduced after this point are
+# NOT grandfathered — fix them for real.
+docs/design/UI/design-system-svelte/src/styles/tokens.css
+docs/design/UI/design-system/tokens.css
+docs/design/archive/gui-v1/tokens.css
+docs/specs/sessions-tui-interactive.md
+docs/specs/telui-telegram-ui.md
