@@ -7,13 +7,26 @@
 //! this venv; on ANY failure the caller (trusty-search) falls back to the Rust
 //! ort path so search never hard-fails.
 //!
-//! What: [`ensure_venv`] materializes the embedded Python project, locates
-//! `uv`, installs a pinned CPython, creates a venv, and `uv pip sync`s a
-//! hashed requirements file exported from the committed `uv.lock`, then runs an
-//! import+embed smoke test and writes a `.ready` sentinel (recording the
-//! lockfile hash). Robustness: disk-space precheck, bounded timeout + one retry
-//! on transient failure, `flock` against concurrent bootstraps, and a
-//! double-checked `.ready` fast path.
+//! What: [`ensure_venv`] / [`ensure_venv_eager`] materialize the embedded
+//! Python project, locate `uv`, install a pinned CPython, create a venv, and
+//! `uv pip sync` a hashed requirements file exported from the committed
+//! `uv.lock`, then run an import+embed smoke test and write a `.ready`
+//! sentinel (recording the lockfile hash). Robustness: disk-space precheck,
+//! bounded timeout + one retry on transient failure, `flock` against
+//! concurrent bootstraps, and a double-checked `.ready` fast path.
+//!
+//! Two-tier `.ready` recheck (fast-follow): `.ready` is trusted forever by
+//! default, so a post-build corruption (broken native `.so`, an ABI shift, a
+//! half-deleted directory) would otherwise route real traffic to a broken
+//! interpreter. [`ensure_venv`] — called by the `trusty-embedderd-py` launcher
+//! binary on EVERY respawn — rechecks with the CHEAP, torch-free
+//! [`verify_venv_alive`] (interpreter liveness + an installed-package marker
+//! file, no `import sentence_transformers`) so a respawn never re-pays torch's
+//! import cost. [`ensure_venv_eager`] — called ONCE by trusty-search's daemon
+//! at `start` — rechecks with the FULL [`verify_full_import_smoke`] (a real
+//! `import sentence_transformers`) since that cost is paid only once per
+//! daemon lifetime. See `verify_venv_alive`'s doc comment for the accepted
+//! trade-off.
 //!
 //! Cross-platform lock note: the committed `uv.lock` is resolved for BOTH
 //! macOS-arm64 and linux-x86_64 (see `python/pyproject.toml` `tool.uv.environments`).
@@ -21,9 +34,10 @@
 //! emits a hashed requirements file, which `uv pip sync` installs — so one
 //! committed lock bootstraps reproducibly on either host.
 //!
-//! Test: `bootstrap_tests.rs` covers hash stability, layout derivation, the
-//! `.ready` fast path, and disk/space/uv-missing error surfaces (no real
-//! torch/venv). The full venv build is an `#[ignore]` e2e test.
+//! Test: `bootstrap_tests.rs` covers hash stability, layout derivation, both
+//! `.ready` fast paths (cheap and full recheck), and disk/space/uv-missing
+//! error surfaces (no real torch/venv). The full venv build is an `#[ignore]`
+//! e2e test.
 
 use std::fs;
 use std::io::Write as _;
@@ -126,40 +140,89 @@ fn bootstrap_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
-/// Bound on the cheap post-`.ready` import recheck (see [`verify_import_smoke`]).
-/// Independent of, and much shorter than, `bootstrap_timeout()` — this runs on
-/// every `ensure_venv()` fast-path hit, not just at build time.
-const READY_RECHECK_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound on the FULL import recheck (see [`verify_full_import_smoke`]) — the
+/// eager, once-per-daemon-start path only.
+const FULL_RECHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Ensure a ready venv exists and return its layout.
+/// Bound on the cheap, torch-free liveness recheck (see [`verify_venv_alive`])
+/// — the per-respawn hot-path check. Shorter than [`FULL_RECHECK_TIMEOUT`]
+/// since it only waits on interpreter startup, never an import of torch.
+const LIVENESS_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Ensure a ready venv exists and return its layout — the PER-RESPAWN path.
 ///
-/// Fast path (no lock): if `.ready` matches the current lock, the venv python
-/// exists, AND the venv still imports cleanly (see [`verify_import_smoke`]),
-/// return immediately. Otherwise flock the base dir and (re)build. Idempotent
-/// and safe under concurrent callers.
+/// Called by the `trusty-embedderd-py` launcher binary on EVERY spawn
+/// (initial lazy spawn, crash-restart, post-idle-shutdown re-spawn) — a
+/// short-lived process that `exec`s into python immediately after this
+/// returns. Fast path (no lock): if `.ready` matches the current lock, the
+/// venv python exists, AND the venv passes the CHEAP, torch-free
+/// [`verify_venv_alive`] liveness check, return immediately. Otherwise flock
+/// the base dir and (re)build. Idempotent and safe under concurrent callers.
+///
+/// See [`ensure_venv_eager`] for the once-per-daemon-start variant that pays
+/// for a full `import sentence_transformers` recheck instead — deliberately
+/// NOT done here; see [`verify_venv_alive`]'s doc comment for why.
 pub fn ensure_venv() -> Result<VenvLayout> {
+    ensure_venv_checked(RecheckDepth::Liveness)
+}
+
+/// Ensure a ready venv exists and return its layout — the EAGER,
+/// once-per-daemon-start path.
+///
+/// Called exactly once by trusty-search's long-lived daemon process at
+/// `start` (`commands/start/embedder.rs`'s `TRUSTY_EMBEDDER=python` arm).
+/// Identical to [`ensure_venv`] except the `.ready` fast-path recheck is the
+/// FULL [`verify_full_import_smoke`] (imports `sentence_transformers`, i.e.
+/// torch) rather than the cheap liveness check — worth the one-time cost here
+/// because it runs once per daemon lifetime, not once per respawn, and
+/// catches a torch-internal corruption (bad `.so`, ABI shift) that the cheap
+/// check cannot.
+pub fn ensure_venv_eager() -> Result<VenvLayout> {
+    ensure_venv_checked(RecheckDepth::FullImport)
+}
+
+/// How thoroughly to recheck an already-`.ready` venv before trusting it —
+/// see [`ensure_venv`] vs [`ensure_venv_eager`].
+#[derive(Clone, Copy)]
+enum RecheckDepth {
+    /// Cheap, torch-free interpreter-liveness + marker-file check
+    /// ([`verify_venv_alive`]). Used on every respawn.
+    Liveness,
+    /// Full `import sentence_transformers` (imports torch)
+    /// ([`verify_full_import_smoke`]). Used once, at eager daemon-start.
+    FullImport,
+}
+
+impl RecheckDepth {
+    fn verify(self, layout: &VenvLayout) -> bool {
+        match self {
+            RecheckDepth::Liveness => verify_venv_alive(layout),
+            RecheckDepth::FullImport => verify_full_import_smoke(layout),
+        }
+    }
+}
+
+fn ensure_venv_checked(depth: RecheckDepth) -> Result<VenvLayout> {
     let layout = resolve_layout()?;
 
     // Fast path — already built for this lock.
     //
-    // Why the extra `verify_import_smoke` beyond `is_ready`: `.ready` is a
-    // sentinel written once, at the end of a successful build, and trusted
-    // forever after. If the venv is corrupted *after* that (a broken native
-    // `.so`, an ABI shift from an OS/Xcode upgrade, a half-deleted directory)
-    // the stale sentinel would keep routing real embed traffic to a broken
-    // interpreter instead of falling back to the Rust ort path. This recheck
-    // is a fast IMPORT-ONLY smoke test (no model load, no torch device init —
-    // see `verify_import_smoke`), so it stays cheap enough to run on every
-    // `ensure_venv()` call, not just the initial build.
+    // Why the extra recheck beyond `is_ready`: `.ready` is a sentinel written
+    // once, at the end of a successful build, and trusted forever after. If
+    // the venv is corrupted *after* that (a broken native `.so`, an ABI shift
+    // from an OS/Xcode upgrade, a half-deleted directory) the stale sentinel
+    // would keep routing real embed traffic to a broken interpreter instead
+    // of falling back to the Rust ort path. `depth` controls how thoroughly
+    // that recheck looks (see `RecheckDepth`).
     if is_ready(&layout) {
-        if verify_import_smoke(&layout) {
+        if depth.verify(&layout) {
             tracing::debug!(venv = %layout.venv_dir.display(), "py-embedder venv already ready");
             return Ok(layout);
         }
         tracing::warn!(
             venv = %layout.venv_dir.display(),
-            "py-embedder: `.ready` sentinel present but the venv failed an \
-             import smoke-check (possibly corrupted) — rebuilding"
+            "py-embedder: `.ready` sentinel present but the venv failed its \
+             recheck (possibly corrupted) — rebuilding"
         );
     }
 
@@ -180,7 +243,7 @@ pub fn ensure_venv() -> Result<VenvLayout> {
 
     // Double-checked: another process may have finished while we waited.
     let result = (|| {
-        if is_ready(&layout) && verify_import_smoke(&layout) {
+        if is_ready(&layout) && depth.verify(&layout) {
             tracing::info!("py-embedder: venv became ready while awaiting lock — reusing");
             return Ok(());
         }
@@ -192,11 +255,74 @@ pub fn ensure_venv() -> Result<VenvLayout> {
     Ok(layout)
 }
 
-/// Cheap import-only recheck of an already-`.ready` venv.
+/// The venv's site-packages directory (standard `<venv>/lib/pythonX.Y/site-packages`
+/// layout on macOS/Linux, `<venv>\Lib\site-packages` on Windows).
+fn site_packages_dir(layout: &VenvLayout) -> PathBuf {
+    if cfg!(windows) {
+        layout.venv_dir.join("Lib").join("site-packages")
+    } else {
+        layout
+            .venv_dir
+            .join("lib")
+            .join(format!("python{PINNED_PYTHON}"))
+            .join("site-packages")
+    }
+}
+
+/// Cheap, torch-free liveness check for the per-respawn hot path.
+///
+/// Why (fast-follow: the prior version of this recheck ran
+/// `import sentence_transformers`, which transitively imports torch — on
+/// EVERY respawn via `ensure_venv`, called by the short-lived launcher binary
+/// each time the supervisor spawns it. That duplicated a large slice of the
+/// sidecar's cold-start cost (torch's own import is the dominant chunk of
+/// `t_import` in `model.py`'s startup log) on every single respawn and
+/// undercut the whole point of a longer idle-shutdown window
+/// (`TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS`, default 1800s): a "cheap" cold
+/// restart that pays torch's import cost twice (once here, once for real in
+/// `build_encoder`). This check instead only proves (1) the installed-package
+/// marker is present on disk — catches a half-deleted venv — and (2) the
+/// interpreter itself starts and runs cleanly — catches a broken interpreter
+/// binary or a missing/incompatible shared library severe enough to crash
+/// python at startup — WITHOUT ever importing torch.
+///
+/// Accepted trade-off: this cannot detect a torch-internal-only breakage that
+/// leaves the bare interpreter working (e.g. a corrupted torch `.so` from an
+/// ABI shift, with `python -c "import sys"` still exiting 0). That deeper
+/// check still runs once per daemon lifetime via [`verify_full_import_smoke`]
+/// (see [`ensure_venv_eager`]); a respawn that hits this residual gap still
+/// fails safely one request later — `build_encoder`'s non-zero-exit-on-
+/// failure contract (`__main__.py`) surfaces it as a failed startup probe,
+/// which the supervisor's crash-restart/backoff already handles.
+///
+/// What: (1) `<venv>/lib/pythonX.Y/site-packages/sentence_transformers` must
+/// exist as a directory (a cheap `Path::is_dir`, no process spawn); (2)
+/// `<venv>/bin/python -c "import sys; sys.exit(0)"` must exit 0 within
+/// [`LIVENESS_CHECK_TIMEOUT`] — proves the interpreter starts and runs
+/// without touching torch.
+/// Test: `verify_venv_alive_*` in `bootstrap_tests.rs`.
+fn verify_venv_alive(layout: &VenvLayout) -> bool {
+    if !site_packages_dir(layout)
+        .join("sentence_transformers")
+        .is_dir()
+    {
+        tracing::warn!("py-embedder: liveness-recheck: sentence_transformers marker missing from site-packages");
+        return false;
+    }
+    run_bounded_python_check(
+        &layout.venv_python,
+        &["-c", "import sys; sys.exit(0)"],
+        LIVENESS_CHECK_TIMEOUT,
+        "liveness-recheck",
+    )
+}
+
+/// Full import recheck of an already-`.ready` venv — the eager,
+/// once-per-daemon-start path only (see [`ensure_venv_eager`]).
 ///
 /// What: runs `<venv>/bin/python -c "import sentence_transformers"` — an
 /// import only, NOT a full embed (no model download/load, no torch device
-/// init) — bounded by [`READY_RECHECK_TIMEOUT`]. Returns `true` only on a
+/// init) — bounded by [`FULL_RECHECK_TIMEOUT`]. Returns `true` only on a
 /// clean, successful exit; any spawn failure, non-zero exit, or timeout
 /// returns `false` so the caller treats the venv as not-ready and rebuilds
 /// (and if the rebuild itself fails, that error propagates so
@@ -208,16 +334,29 @@ pub fn ensure_venv() -> Result<VenvLayout> {
 /// package): this only imports the venv's own installed `sentence_transformers`
 /// from site-packages, so it stays correct even if `project_dir` were ever
 /// missing (e.g. manually deleted) while the venv itself is intact.
-fn verify_import_smoke(layout: &VenvLayout) -> bool {
-    let mut cmd = Command::new(&layout.venv_python);
-    cmd.args(["-c", "import sentence_transformers"])
+fn verify_full_import_smoke(layout: &VenvLayout) -> bool {
+    run_bounded_python_check(
+        &layout.venv_python,
+        &["-c", "import sentence_transformers"],
+        FULL_RECHECK_TIMEOUT,
+        "full-import-recheck",
+    )
+}
+
+/// Shared bounded spawn-and-poll helper for [`verify_venv_alive`] and
+/// [`verify_full_import_smoke`]: run `python <args>` to completion, killing it
+/// (and returning `false`) if it outlives `timeout`. `label` only tags the
+/// warn-log lines so the two call sites stay distinguishable in output.
+fn run_bounded_python_check(python: &Path, args: &[&str], timeout: Duration, label: &str) -> bool {
+    let mut cmd = Command::new(python);
+    cmd.args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("py-embedder: ready-recheck failed to spawn venv python: {e}");
+            tracing::warn!("py-embedder: {label} failed to spawn venv python: {e}");
             return false;
         }
     };
@@ -227,19 +366,19 @@ fn verify_import_smoke(layout: &VenvLayout) -> bool {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
             Ok(None) => {
-                if start.elapsed() >= READY_RECHECK_TIMEOUT {
+                if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
                     tracing::warn!(
-                        "py-embedder: ready-recheck timed out after {}s",
-                        READY_RECHECK_TIMEOUT.as_secs()
+                        "py-embedder: {label} timed out after {}s",
+                        timeout.as_secs()
                     );
                     return false;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                tracing::warn!("py-embedder: ready-recheck poll failed: {e}");
+                tracing::warn!("py-embedder: {label} poll failed: {e}");
                 return false;
             }
         }

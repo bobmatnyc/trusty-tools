@@ -93,8 +93,11 @@ pub(super) async fn build_embedder() -> Result<(
         // hard-fails.
         "python" => {
             // The bootstrap is a blocking, potentially minutes-long one-time
-            // build; run it off the async runtime.
-            let bootstrap = tokio::task::spawn_blocking(trusty_embedderd_py::ensure_venv)
+            // build; run it off the async runtime. `ensure_venv_eager` (not the
+            // plain `ensure_venv` the per-respawn launcher binary uses) pays for
+            // the FULL torch-importing `.ready` recheck — worth it here since
+            // this call happens once per daemon lifetime, not once per respawn.
+            let bootstrap = tokio::task::spawn_blocking(trusty_embedderd_py::ensure_venv_eager)
                 .await
                 .map_err(|e| anyhow::anyhow!("py-embedder bootstrap task panicked: {e}"));
 

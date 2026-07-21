@@ -15,11 +15,14 @@
 //! all runtime.
 //!
 //! Public surface consumed by trusty-search:
-//!   * [`bootstrap::ensure_venv`] — eager venv bootstrap at `start`.
+//!   * [`bootstrap::ensure_venv_eager`] — eager, once-per-daemon-start venv
+//!     bootstrap at `start` (full torch-importing `.ready` recheck).
+//!   * [`bootstrap::ensure_venv`] — per-respawn venv bootstrap, called by this
+//!     crate's own launcher binary (cheap, torch-free `.ready` recheck).
 //!   * [`launcher::locate_launcher_binary`] — sibling/PATH/env discovery.
 
 pub mod bootstrap;
 pub mod launcher;
 
-pub use bootstrap::{ensure_venv, resolve_layout, VenvLayout};
+pub use bootstrap::{ensure_venv, ensure_venv_eager, resolve_layout, VenvLayout};
 pub use launcher::{exec_sidecar, locate_launcher_binary};

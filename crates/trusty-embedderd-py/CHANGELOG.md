@@ -26,24 +26,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **Bounded worker-join on shutdown.** `sidecar.py`'s shutdown path now joins
-  the encode-worker thread with a 10s timeout instead of an unbounded `join()`;
-  if the worker is wedged (e.g. a hung MPS `encode()` mid-batch) the process
-  force-exits (`os._exit(1)`) rather than hanging indefinitely.
+- **Progress-aware shutdown watchdog.** `sidecar.py`'s shutdown path no longer
+  bounds the worker-join with a flat timeout (which would force-exit a
+  legitimately slow-but-healthy drain — e.g. a reindex burst queued right at
+  SIGTERM — dropping in-flight, not hung, replies). The worker now marks a
+  monotonic `_ProgressTracker` timestamp after each completed item;
+  `_join_with_progress_watchdog` polls in short (1s) increments and only
+  force-exits (`os._exit(1)`) once NO item has completed for 20s — a genuine
+  wedge (e.g. a hung MPS `encode()` mid-batch), not merely a long drain. New
+  tests (`test_shutdown_watchdog.py`) cover both: a slow-but-progressing
+  worker drains fully without force-exit, and a truly wedged worker
+  force-exits within the no-progress window.
 - **`TOKENIZERS_PARALLELISM=false` by default.** Set (via `setdefault`, so an
   operator override is never clobbered) before `sentence_transformers`/
   `transformers` are ever imported, eliminating the extra
   `multiprocessing.resource_tracker` child HuggingFace tokenizers otherwise
   spawns and the associated "leaked semaphore" shutdown noise — a simpler
   process tree with one fewer orphan-prone child.
-- **`.ready` sentinel re-verification.** `bootstrap.rs`'s `ensure_venv()` no
-  longer trusts a `.ready` sentinel forever: on every fast-path hit it now runs
-  a cheap import-only smoke check (`<venv>/bin/python -c "import
-  sentence_transformers"`, bounded to 10s) before reusing the venv. A venv that
-  fails the recheck (corrupted native `.so`, ABI shift after an OS/Xcode
-  upgrade, half-deleted directory) is rebuilt instead of silently serving from
-  a broken interpreter; if the rebuild itself fails, the error propagates so
-  `commands/start/embedder.rs`'s existing fall-back-to-ort path fires.
+- **Two-tier `.ready` sentinel re-verification.** `.ready` is no longer
+  trusted forever (a post-build corruption — a broken native `.so`, an ABI
+  shift, a half-deleted directory — would otherwise route real traffic to a
+  broken interpreter), but the recheck depth now depends on the caller:
+  `ensure_venv()` — called by the `trusty-embedderd-py` launcher binary on
+  EVERY respawn — uses the CHEAP, torch-free `verify_venv_alive` (interpreter
+  liveness + an installed-package marker-file check, bounded to 5s, no
+  `import sentence_transformers`) so a respawn never re-pays torch's import
+  cost and undercuts the point of a longer idle-shutdown window.
+  `ensure_venv_eager()` — called ONCE by trusty-search's daemon at `start` —
+  uses the FULL `verify_full_import_smoke` (a real `import
+  sentence_transformers`, bounded to 10s), since that cost is paid only once
+  per daemon lifetime. A venv that fails its recheck is rebuilt instead of
+  silently serving from a broken interpreter; if the rebuild itself fails, the
+  error propagates so `commands/start/embedder.rs`'s existing
+  fall-back-to-ort path fires.
 
 ---
 ## [0.1.0] — 2026-07-20

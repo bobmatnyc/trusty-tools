@@ -30,6 +30,15 @@ fn write_fake_venv_python(path: &Path, body: &str) {
     }
 }
 
+/// Create the site-packages marker directory `verify_venv_alive` checks for
+/// (`<venv>/lib/pythonX.Y/site-packages/sentence_transformers/`) so
+/// lightweight-liveness-check tests can simulate "the package is installed"
+/// without a real `uv pip sync`.
+fn write_site_packages_marker(layout: &VenvLayout) {
+    let marker = super::site_packages_dir(layout).join("sentence_transformers");
+    fs::create_dir_all(&marker).unwrap();
+}
+
 #[test]
 fn lockfile_hash_is_stable_and_hex() {
     let h1 = lockfile_hash();
@@ -88,11 +97,12 @@ fn ensure_venv_fast_path_returns_when_ready_without_building() {
     let tmp = tempfile::tempdir().unwrap();
     with_data_override(tmp.path(), || {
         let layout = resolve_layout().unwrap();
-        // An executable stub that exits 0 satisfies the import-smoke recheck
-        // (it ignores the `-c "import ..."` args and just succeeds), so this
-        // genuinely hits the fast path rather than falling through to a real
-        // (network-dependent) rebuild.
+        // An executable stub that exits 0, PLUS the site-packages marker dir,
+        // satisfies the lightweight `verify_venv_alive` liveness recheck
+        // (per-respawn path), so this genuinely hits the fast path rather than
+        // falling through to a real (network-dependent) rebuild.
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
+        write_site_packages_marker(&layout);
         std::fs::write(layout.base.join(".ready"), lockfile_hash()).unwrap();
         // Should hit the fast path (no uv, no build) and return Ok.
         let got = ensure_venv().expect("fast path");
@@ -100,48 +110,102 @@ fn ensure_venv_fast_path_returns_when_ready_without_building() {
     });
 }
 
+// ── verify_venv_alive (cheap, torch-free, per-respawn liveness check) ──────
+
 #[test]
-fn verify_import_smoke_false_when_venv_python_missing() {
+fn verify_venv_alive_false_when_venv_python_missing() {
     let tmp = tempfile::tempdir().unwrap();
     with_data_override(tmp.path(), || {
         let layout = resolve_layout().unwrap();
+        write_site_packages_marker(&layout);
         // Nothing written at `layout.venv_python` at all.
-        assert!(!super::verify_import_smoke(&layout));
+        assert!(!super::verify_venv_alive(&layout));
     });
 }
 
 #[test]
-fn verify_import_smoke_false_when_stub_exits_nonzero() {
+fn verify_venv_alive_false_when_site_packages_marker_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        // A perfectly runnable interpreter, but the package marker is absent
+        // (simulates a half-deleted venv) — must fail WITHOUT ever spawning
+        // python, since the marker check runs first.
+        write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
+        assert!(!super::verify_venv_alive(&layout));
+    });
+}
+
+#[test]
+fn verify_venv_alive_false_when_interpreter_exits_nonzero() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        write_site_packages_marker(&layout);
+        // Simulates a broken interpreter binary / missing shared library.
+        write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
+        assert!(!super::verify_venv_alive(&layout));
+    });
+}
+
+#[test]
+fn verify_venv_alive_true_when_marker_present_and_interpreter_ok() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        write_site_packages_marker(&layout);
+        write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
+        assert!(super::verify_venv_alive(&layout));
+    });
+}
+
+// ── verify_full_import_smoke (torch-importing, eager daemon-start check) ──
+
+#[test]
+fn verify_full_import_smoke_false_when_venv_python_missing() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        // Nothing written at `layout.venv_python` at all.
+        assert!(!super::verify_full_import_smoke(&layout));
+    });
+}
+
+#[test]
+fn verify_full_import_smoke_false_when_stub_exits_nonzero() {
     let tmp = tempfile::tempdir().unwrap();
     with_data_override(tmp.path(), || {
         let layout = resolve_layout().unwrap();
         // Simulates a corrupted venv (e.g. a broken native `.so`): the
         // interpreter itself runs but the import fails.
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
-        assert!(!super::verify_import_smoke(&layout));
+        assert!(!super::verify_full_import_smoke(&layout));
     });
 }
 
 #[test]
-fn verify_import_smoke_true_when_stub_exits_zero() {
+fn verify_full_import_smoke_true_when_stub_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
     with_data_override(tmp.path(), || {
         let layout = resolve_layout().unwrap();
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
-        assert!(super::verify_import_smoke(&layout));
+        assert!(super::verify_full_import_smoke(&layout));
     });
 }
 
+// ── ensure_venv (per-respawn) vs ensure_venv_eager (daemon-start) ──────────
+
 #[test]
 fn ensure_venv_rebuilds_when_ready_sentinel_is_stale_corruption() {
-    // A `.ready` sentinel + venv python that FAILS the import recheck must
-    // not be trusted: `ensure_venv` must fall through past the fast path
-    // (verified here via the `uv`-missing error it surfaces once it tries to
-    // rebuild, proving the recheck actually gates reuse rather than silently
-    // returning the broken venv).
+    // A `.ready` sentinel + venv python that FAILS the lightweight liveness
+    // recheck must not be trusted: `ensure_venv` (per-respawn path) must fall
+    // through past the fast path (verified here via the `uv`-missing error it
+    // surfaces once it tries to rebuild, proving the recheck actually gates
+    // reuse rather than silently returning the broken venv).
     let tmp = tempfile::tempdir().unwrap();
     with_data_override(tmp.path(), || {
         let layout = resolve_layout().unwrap();
+        write_site_packages_marker(&layout);
         write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
         std::fs::write(layout.base.join(".ready"), lockfile_hash()).unwrap();
 
@@ -149,6 +213,49 @@ fn ensure_venv_rebuilds_when_ready_sentinel_is_stale_corruption() {
         // this closure, so `TRUSTY_UV_BIN` is mutated directly here.
         unsafe { std::env::set_var("TRUSTY_UV_BIN", "/nonexistent/uv/binary") };
         let err = ensure_venv().expect_err("stale/corrupt venv must not be reused");
+        unsafe { std::env::remove_var("TRUSTY_UV_BIN") };
+        assert!(
+            err.to_string()
+                .contains("does not point to an existing file")
+                || format!("{err:#}").contains("does not point to an existing file"),
+            "expected the rebuild attempt to surface the uv-missing error, got: {err:#}"
+        );
+    });
+}
+
+#[test]
+fn ensure_venv_eager_fast_path_uses_full_import_recheck() {
+    // `ensure_venv_eager` (daemon-start path) must accept a venv that passes
+    // the lightweight liveness bar too, since the fake stub here also
+    // satisfies `verify_full_import_smoke` (it ignores the `-c "import ..."`
+    // args and just exits 0) — this proves the eager variant's fast path
+    // wires through `verify_full_import_smoke`, not the cheap check, without
+    // requiring a real torch install to prove the DIFFERENCE (see the
+    // `_rebuilds_when_stale_corruption` test above for the cheap-path
+    // rebuild-on-failure behaviour, which is symmetric here).
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 0\n");
+        std::fs::write(layout.base.join(".ready"), lockfile_hash()).unwrap();
+        // Deliberately NOT writing the site-packages marker: `ensure_venv_eager`
+        // must succeed anyway, proving it does NOT go through the
+        // marker-checking `verify_venv_alive` path.
+        let got = ensure_venv_eager().expect("eager fast path via full import recheck");
+        assert_eq!(got.venv_python, layout.venv_python);
+    });
+}
+
+#[test]
+fn ensure_venv_eager_rebuilds_when_full_recheck_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_data_override(tmp.path(), || {
+        let layout = resolve_layout().unwrap();
+        write_fake_venv_python(&layout.venv_python, "#!/bin/sh\nexit 1\n");
+        std::fs::write(layout.base.join(".ready"), lockfile_hash()).unwrap();
+
+        unsafe { std::env::set_var("TRUSTY_UV_BIN", "/nonexistent/uv/binary") };
+        let err = ensure_venv_eager().expect_err("stale/corrupt venv must not be reused");
         unsafe { std::env::remove_var("TRUSTY_UV_BIN") };
         assert!(
             err.to_string()
