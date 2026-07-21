@@ -96,7 +96,8 @@ pub(super) fn resolve_component_toggle(
 /// What: write-locks `handle.stages` once and applies both component flips
 /// (KG and vector are independent, so both may apply in the same call); a
 /// KG turn-off additionally calls `clear_symbol_graph_in_memory` (D2).
-/// Test: `apply_component_transition_*` in `tests_components`.
+/// Test: `patch_*` in `tests_components` (integration tests exercising this
+/// indirectly via the PATCH endpoint).
 pub(super) async fn apply_component_transition(
     handle: &IndexHandle,
     transition: &ComponentTransition,

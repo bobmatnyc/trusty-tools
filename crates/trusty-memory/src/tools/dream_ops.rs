@@ -12,7 +12,7 @@
 //! `handle_palace_dream` is an alias for `handle_dream_consolidate_room` with
 //! the same parameters, exposed as `palace_dream` in the MCP tool surface.
 //! Test: `crates/trusty-memory/tests/dream_room_mcp.rs` (wiring + no-op) and
-//! `dream::tests::consolidate_scoped_*` in trusty-common (behaviour).
+//! trusty-common's `dream::tests::consolidate_scoped_*` (behaviour).
 
 use crate::AppState;
 use anyhow::{Context, Result};

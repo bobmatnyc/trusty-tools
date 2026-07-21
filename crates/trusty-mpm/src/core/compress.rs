@@ -83,7 +83,7 @@ impl CompressionStats {
 /// Why: called in the daemon's PostToolUse handler on every event; pure so it
 /// is testable without a running session.
 /// What: applies the level's strategy; returns (compressed_text, stats).
-/// Test: `compress_output_*` tests cover every level and threshold boundary.
+/// Test: `compress_*` tests cover every level and threshold boundary.
 pub fn compress_output(text: &str, level: CompressionLevel) -> (String, CompressionStats) {
     let original_bytes = text.len();
     let compressed = match level {

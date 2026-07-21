@@ -90,7 +90,7 @@ pub fn classify_probe_error(e: std::io::Error) -> WriteProbe {
 /// to named abort variants and everything else to `WriteProbe::Other`.
 ///
 /// Test: `tests::probe_writable_temp_dir`, `tests::probe_nonwritable_dir` (unix),
-///       `tests::probe_nonexistent_dir_is_other`.
+///       `tests::probe_nonexistent_dir_is_other_not_permission_denied`.
 pub fn probe_install_dir(dir: &Path) -> WriteProbe {
     match tempfile::Builder::new().tempfile_in(dir) {
         Ok(_) => WriteProbe::Writable,
