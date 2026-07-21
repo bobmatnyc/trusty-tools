@@ -475,18 +475,34 @@ fn telegram_pid_guard_garbage_is_overwritten() {
     assert_eq!(contents.trim(), std::process::id().to_string());
 }
 
-/// Tiny helper that creates a unique tempdir under the system temp.
-/// Why: Avoids pulling in the `tempfile` crate just for two tests.
+/// Creates a unique tempdir under the system temp, for the pid-guard tests'
+/// `telegram.pid` fixture.
+///
+/// Why (#3516): the previous implementation hand-rolled "uniqueness" from
+/// `std::process::id()` (constant across every thread of this ONE test
+/// binary) plus a nanosecond timestamp. At very high `--test-threads`
+/// (`cargo test -p trusty-agents --lib -- --test-threads=64`, ~4x realistic
+/// CI concurrency), several of these pid-guard tests can start close enough
+/// together that two threads observe the SAME nanosecond value — the
+/// underlying clock's actual tick resolution is not guaranteed to be as
+/// fine as `SystemTime`'s nanosecond formatting suggests, especially under
+/// heavy scheduler contention. A collision means two tests silently share
+/// one `telegram.pid` directory: one test's `TelegramPidGuard::acquire`
+/// (over)writes or removes the file while another concurrently-running
+/// test is asserting on it, producing an intermittent failure that looks
+/// like a "process-liveness" bug but is actually a shared-path collision in
+/// the test's OWN fixture, not the guard logic. `tempfile::tempdir()`
+/// (already a dev-dependency of this crate, used throughout
+/// `interaction_log.rs`/`build_info.rs`/etc.) creates its directory with an
+/// OS-level atomic, retry-on-collision unique name — removing the
+/// possibility of two calls ever returning the same path, without adding
+/// any synchronisation between the tests.
+/// What: `.keep()` (mirrors the same idiom already used by
+/// `trusty-mpm`'s own tests, e.g. `manager_cli_client.rs`) leaks the
+/// directory rather than auto-cleaning on drop, matching this helper's
+/// previous behaviour exactly (callers already didn't clean up either).
 fn tempdir_for_test() -> PathBuf {
-    let uniq = format!(
-        "trusty-agents-telegram-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-    let dir = std::env::temp_dir().join(uniq);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    tempfile::tempdir()
+        .expect("create unique tempdir for telegram pid-guard test")
+        .keep()
 }

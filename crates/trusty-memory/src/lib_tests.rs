@@ -135,6 +135,19 @@ async fn app_state_default_constructs() {
 /// root user — the kernel grants root access regardless of mode bits.
 /// CI typically runs as non-root, so coverage is preserved in the
 /// common case; local root invocations simply skip with a warning.
+///
+/// (#3434) This test used to force the tempdir-fallback path by mutating
+/// the process-global `TMPDIR` env var for its duration. Because `cargo
+/// test` runs every test in this crate's lib binary as threads of ONE
+/// process, that mutation was visible to any OTHER concurrently-running
+/// test that called `tempfile::tempdir()` (which respects `$TMPDIR`) —
+/// such a test would fail with `PermissionDenied` for a reason entirely
+/// unrelated to its own code, in whichever test happened to be running at
+/// that instant. `open_activity_log_with_fallback_in` (test-only seam,
+/// `events.rs`) now takes the fallback ROOT as an explicit parameter, so
+/// this test points it directly at the unwritable `fake-tmp` dir instead —
+/// no env var is touched, so no lock, no restore-on-panic guard, and no
+/// possible cross-test leakage.
 #[test]
 #[cfg(unix)]
 fn open_activity_log_with_fallback_returns_discard_when_unwritable() {
@@ -150,7 +163,7 @@ fn open_activity_log_with_fallback_returns_discard_when_unwritable() {
     use std::os::unix::fs::PermissionsExt;
 
     // Build two unwritable directories: the primary "data root" and a
-    // shadow "TMPDIR" so the tempdir fallback also fails.
+    // shadow "fallback root" so the tempdir fallback also fails.
     let outer = tempfile::tempdir().expect("outer tempdir");
     let primary = outer.path().join("primary");
     let tmpdir = outer.path().join("fake-tmp");
@@ -163,21 +176,9 @@ fn open_activity_log_with_fallback_returns_discard_when_unwritable() {
     std::fs::set_permissions(&tmpdir, std::fs::Permissions::from_mode(0o000))
         .expect("chmod tmpdir");
 
-    // Override the tempdir lookup so `open_activity_log_with_fallback`
-    // hits our unwritable fake-tmp instead of the real system temp.
-    // Note: env var mutation is process-global; this test is the only
-    // accessor for `TMPDIR` in this test binary, and we restore the
-    // previous value before returning.
-    let prev_tmpdir = std::env::var_os("TMPDIR");
-    std::env::set_var("TMPDIR", &tmpdir);
-
-    let log = open_activity_log_with_fallback(&primary);
-
-    // Restore TMPDIR ASAP so a panic later in the test doesn't leak it.
-    match prev_tmpdir {
-        Some(v) => std::env::set_var("TMPDIR", v),
-        None => std::env::remove_var("TMPDIR"),
-    }
+    // Pass the unwritable "fake-tmp" dir directly as the fallback root —
+    // no process-global env var involved (#3434).
+    let log = open_activity_log_with_fallback_in(&primary, &tmpdir);
 
     // Restore permissions so the outer tempdir can clean up.
     let _ = std::fs::set_permissions(&primary, std::fs::Permissions::from_mode(0o700));

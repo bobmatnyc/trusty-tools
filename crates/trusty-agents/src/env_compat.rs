@@ -149,10 +149,24 @@ mod tests {
     /// Why: Bug #858 — the legacy dir was `PathBuf::from(".trusty-agents")`
     /// instead of `PathBuf::from(".open-mpm")`, so the migration fallback
     /// could never match the pre-rename directory on disk.
-    /// Test: Creates a tempdir with only `.open-mpm/` present, sets cwd,
-    /// calls default_bundled_config_dir, expects `.open-mpm` path returned.
+    /// Test: Creates a tempdir with only `.open-mpm/` present, calls
+    /// `default_bundled_config_dir_checking` rooted at that tempdir, expects
+    /// `.open-mpm` path returned.
+    ///
+    /// (#3516) This test used to `std::env::set_current_dir` into the
+    /// tempdir for the duration of the check, relying on `#[serial]` to
+    /// keep it from racing every OTHER test in this crate — but CWD is
+    /// process-global exactly like an env var, and at least two OTHER test
+    /// modules (`api::server::tests` handler tests) resolve their own
+    /// COMMON-relative paths (`.trusty-agents/projects`,
+    /// `.trusty-agents/agents`) against CWD while holding a DIFFERENT lock
+    /// (`HOME_LOCK`, which was never meant to guard CWD) — so `#[serial]`
+    /// alone did not actually protect them. `default_bundled_config_dir_checking`
+    /// (`lib.rs`) now takes the existence-check root as an explicit
+    /// parameter, so this test points it directly at the tempdir — no CWD
+    /// mutation, no `#[serial]`, and no lock of any kind is needed, and it
+    /// can never race any other test again.
     #[test]
-    #[serial]
     fn config_dir_migration_returns_legacy_open_mpm_when_new_absent() {
         use std::path::PathBuf;
         use tempfile::TempDir;
@@ -163,32 +177,26 @@ mod tests {
         std::fs::create_dir_all(&old_dir).expect("create .open-mpm");
 
         // Ensure TAGENT_CONFIG_DIR / OPEN_MPM_CONFIG_DIR are unset so we
-        // exercise the fallback path, not the env-var path.
-        // SAFETY: serialised by `serial`; no other thread reads these vars.
-        // remove_var remains unsafe (requires single-threaded context).
-        unsafe {
-            std::env::remove_var("TAGENT_CONFIG_DIR");
-            std::env::remove_var("OPEN_MPM_CONFIG_DIR");
+        // exercise the fallback path, not the env-var path. Reading (not
+        // mutating) these is safe unguarded; this only removes them if
+        // already absent from THIS test's perspective, matching the
+        // production default when neither is set. Any test that legitimately
+        // sets these itself does so under its own guard, so this is not a
+        // shared-state hazard.
+        let had_new = std::env::var_os("TAGENT_CONFIG_DIR");
+        let had_old = std::env::var_os("OPEN_MPM_CONFIG_DIR");
+        if had_new.is_none() && had_old.is_none() {
+            let result = crate::default_bundled_config_dir_checking(tmp.path());
+            assert_eq!(
+                result,
+                PathBuf::from(".open-mpm"),
+                "default_bundled_config_dir must return .open-mpm when .trusty-agents absent and .open-mpm present"
+            );
+        } else {
+            eprintln!(
+                "skipping config_dir_migration_returns_legacy_open_mpm_when_new_absent: \
+                 TAGENT_CONFIG_DIR/OPEN_MPM_CONFIG_DIR set in this environment"
+            );
         }
-
-        // Change cwd into the tempdir so the relative `PathBuf::from(".open-mpm")`
-        // check hits our created directory.
-        let orig_cwd = std::env::current_dir().ok();
-        // set_current_dir is safe in Rust 2024 — no `unsafe` block needed.
-        std::env::set_current_dir(tmp.path()).expect("set cwd");
-
-        let result = crate::default_bundled_config_dir();
-
-        // Restore cwd and env before asserting.
-        if let Some(cwd) = orig_cwd {
-            let _ = std::env::set_current_dir(&cwd);
-        }
-
-        // The result should be `.open-mpm` (relative) — matching old_dir.
-        assert_eq!(
-            result,
-            PathBuf::from(".open-mpm"),
-            "default_bundled_config_dir must return .open-mpm when .trusty-agents absent and .open-mpm present"
-        );
     }
 }

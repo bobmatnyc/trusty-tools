@@ -184,6 +184,35 @@ pub use agents::AgentConfig;
 ///       from `.open-mpm` with a migration warning.
 /// Test: Indirectly via the agent-registry load path and inspection tests.
 pub fn default_bundled_config_dir() -> std::path::PathBuf {
+    default_bundled_config_dir_checking(std::path::Path::new("."))
+}
+
+/// Same resolution as [`default_bundled_config_dir`], but the two
+/// existence checks (`.trusty-agents`, `.open-mpm`) are rooted at
+/// `search_root` instead of implicitly at the process CWD (issue #3516).
+///
+/// Why: The only way to unit-test the legacy-migration branch used to be
+/// `std::env::set_current_dir` into a scratch tempdir for the duration of
+/// the test — but CWD is process-global, exactly like an env var, and
+/// `cargo test` runs every test in this crate's lib binary as threads of
+/// ONE process. Two OTHER tests in this crate resolve their own
+/// COMMON-relative paths against the (possibly-swapped) CWD at call time —
+/// `api::server::handlers::projects_config_dir()` (`.trusty-agents/projects`)
+/// and `agents_dir()` (`.trusty-agents/agents`) — so a concurrently-running
+/// CWD-mutating test could race `get_project_config_falls_back_to_registry_when_toml_missing`
+/// and other handler tests that assume CWD is the real repo root, even
+/// though those tests hold `HOME_LOCK` (a *different* mutex; CWD isn't an
+/// env var and `HOME_LOCK` was never meant to guard it). Rooting the
+/// EXISTENCE CHECK at an explicit `search_root` parameter — while still
+/// returning the same bare-relative `PathBuf` the production contract
+/// documents (callers join it against CWD themselves, unchanged) — lets
+/// the migration test point at a tempdir directly, so this function's own
+/// tests need no CWD mutation, no lock, and cannot race anything.
+/// What: identical branch logic to `default_bundled_config_dir`, except
+/// `.exists()` is checked via `search_root.join(...)` rather than the bare
+/// relative path.
+/// Test: `env_compat::tests::config_dir_migration_returns_legacy_open_mpm_when_new_absent`.
+fn default_bundled_config_dir_checking(search_root: &std::path::Path) -> std::path::PathBuf {
     use std::path::{Path, PathBuf};
     let config_dir_str = env_compat::env_var("TAGENT_CONFIG_DIR", "OPEN_MPM_CONFIG_DIR").ok();
     if let Some(s) = config_dir_str.filter(|s| !s.is_empty()) {
@@ -196,9 +225,9 @@ pub fn default_bundled_config_dir() -> std::path::PathBuf {
     }
     // Prefer .trusty-agents; migrate transparently from legacy .open-mpm.
     let new_dir = PathBuf::from(".trusty-agents");
-    if !new_dir.exists() {
+    if !search_root.join(&new_dir).exists() {
         let legacy = PathBuf::from(".open-mpm");
-        if legacy.exists() {
+        if search_root.join(&legacy).exists() {
             tracing::warn!(
                 ".open-mpm config dir detected; migrate to .trusty-agents \
                  (trusty-agents will read from .open-mpm until you rename it)"

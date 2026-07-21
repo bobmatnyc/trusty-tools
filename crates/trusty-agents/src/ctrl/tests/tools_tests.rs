@@ -14,38 +14,31 @@ use super::super::handlers::{
     TaskStatusTool,
 };
 use super::super::state::PmMsg;
-use super::super::util::detect_self_project;
+use super::super::util::detect_self_project_with_hint;
 use super::make_fake_self_project;
 
 use crate::tools::traits::ToolExecutor;
 
 // -- #182: self-project detection + tools --
 
+/// (#3398) Calls `detect_self_project_with_hint` directly instead of
+/// mutating the process-global `TAGENT_PROJECT_DIR` env var — see that
+/// function's doc comment for why the previous env-mutating version of this
+/// test could race `checkpoint_resume.rs`'s `#[serial]` tests in the same
+/// crate's parallel test binary.
 #[test]
 fn detect_self_project_finds_via_env_var() {
     let tmp = tempfile::tempdir().unwrap();
     let root = make_fake_self_project(tmp.path());
-    // SAFETY: tests run single-threaded within this process by default.
-    unsafe {
-        std::env::set_var("TAGENT_PROJECT_DIR", &root);
-    }
-    let detected = detect_self_project();
-    unsafe {
-        std::env::remove_var("TAGENT_PROJECT_DIR");
-    }
+    let detected = detect_self_project_with_hint(Some(&root.to_string_lossy()));
     assert!(detected.is_some(), "expected detection via env var");
 }
 
+/// (#3398) See `detect_self_project_finds_via_env_var`'s doc comment.
 #[test]
 fn detect_self_project_returns_none_when_no_marker() {
     let tmp = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("TAGENT_PROJECT_DIR", tmp.path());
-    }
-    let detected = detect_self_project();
-    unsafe {
-        std::env::remove_var("TAGENT_PROJECT_DIR");
-    }
+    let detected = detect_self_project_with_hint(Some(&tmp.path().to_string_lossy()));
     let _ = detected;
 }
 

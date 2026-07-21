@@ -103,6 +103,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`run_task::tests` are hermetic again — no longer corrupted by an ambient local `trusty-memory`/`trusty-search` daemon (issue #3361).** `execute_run_task` background-indexes the project via `trusty-search` and seeds the PM prompt via `trusty-memory`'s catch-up digest; on a machine with either daemon actually running, both were discovered and contacted for real, and the live `trusty-search` daemon would register + reindex the test's tempdir project, writing its own colocated storage (`.trusty-search/schema_version.json`) INSIDE the sandbox. That extra file corrupted the before/after diff `no_changes_yields_no_changes_exit`, `missing_disk_pm_config_falls_back_to_embedded_pm`, and `exit_code_reflects_run_failure` assert on. `run_task::tests` now installs a one-time, process-lifetime isolation (via the existing `TRUSTY_MEMORY_URL`/`TRUSTY_DATA_DIR_OVERRIDE` production override seams) before the first call to `execute_run_task`, so no ambient daemon is ever reachable from this suite again, regardless of what happens to be running on the developer's machine.
 - **`agents.list`/`GET /agents` no longer surfaces the 5 `BASE-*` composition-template agents (issue #3465 follow-up).** `base-agent`, `base-engineer`,
   `base-ops`, `base-qa`, `base-research` exist only to be `extends:`-ed by
   concrete agents and were never meant to be dispatched — they were leaking

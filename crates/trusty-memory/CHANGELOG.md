@@ -43,6 +43,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`open_activity_log_with_fallback_returns_discard_when_unwritable` no longer mutates the process-global `TMPDIR` env var (issue #3434).** The test used to point `TMPDIR` at an unwritable directory for its duration to force the tempdir-fallback path — but `cargo test` runs every test in this crate's lib binary as threads of ONE process, so any concurrently-running test that called `tempfile::tempdir()` (which respects `$TMPDIR`) during that window failed with `PermissionDenied` for a reason entirely unrelated to its own code. `open_activity_log_with_fallback` now delegates to a new `open_activity_log_with_fallback_in(data_root, fallback_root)` that takes the fallback root as an explicit parameter; the test calls it directly with the unwritable dir, so no env var is touched and no other test can be corrupted by it.
 - idle-to-disk palace eviction + unpin dream scheduler + configurable max-open ([#2276](https://github.com/bobmatnyc/trusty-tools/pull/2276)) ([`0e8e504`](https://github.com/bobmatnyc/trusty-tools/commit/0e8e50440cea09a8f5eedf2c7bba9613f96cd8a8))
 
 ### Changed
