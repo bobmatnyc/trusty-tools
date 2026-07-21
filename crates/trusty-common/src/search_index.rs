@@ -34,6 +34,25 @@
 //! own detached thread rather than relying on the caller to wrap it, since
 //! its call sites are tcode's tool executors, not a one-shot task-start hook).
 //!
+//! `allow_sensitive_path` (issue #2914 — ephemeral index leak): earlier
+//! revisions hardcoded `allow_sensitive_path: true` on every `POST /indexes`
+//! this module issued, unconditionally bypassing the daemon's
+//! `SENSITIVE_PATH_PREFIXES` denylist (`/tmp`, `/private/tmp`, `/var/folders`,
+//! `/private/var/folders`) for BOTH callers. That bypass is only meaningful
+//! for trusty-code, whose `directory`-bound working project can legitimately
+//! live under an OS-temp prefix (issue #2747: a tcode scratch/bake-off
+//! project). trusty-mpm's session-launch caller never has a legitimate reason
+//! to index an OS-temp path — a real session workspace is always either the
+//! user's checked-out repo or a `.worktrees/<uuid>` leaf INSIDE it — so for
+//! that caller the bypass was a pure liability: any test exercising the
+//! session-launch pipeline with a `tempfile`-backed workspace stand-in (e.g.
+//! trusty-mpm's own `*-selfheal-ws`/`*-stale-heal-ws` fixtures) silently
+//! registered that throwaway tempdir against whatever REAL trusty-search
+//! daemon happened to be discoverable, because the denylist's one guard
+//! against exactly that was switched off unconditionally. [`ensure_project_indexed`]
+//! now takes `allow_sensitive_path` as an explicit parameter so each caller
+//! states its own intent instead of inheriting trusty-code's opt-in for free.
+//!
 //! Test: `ensure_project_indexed_returns_derived_id_when_daemon_down`,
 //! `ensure_project_indexed_none_for_root`, the `index_is_fresh_*` predicate
 //! tests, the `index_files_inner_*` / `relative_index_path_*` /
@@ -60,17 +79,31 @@ use std::path::Path;
 /// registers an EMPTY index and starts a future-changes file watcher — it never
 /// walks the existing tree — so a reindex is triggered right after, in the same
 /// reachable-daemon branch, sharing one "is the daemon up" check.
+///
+/// `allow_sensitive_path` (issue #2914): forwarded verbatim to `POST
+/// /indexes`' `allow_sensitive_path` field (see
+/// [`create_index_request_body`]). Pass `true` ONLY when the caller's
+/// `project_root` may legitimately be a deliberately-bound OS-temp path (e.g.
+/// tcode's `directory` binding — issue #2747); pass `false` for any caller
+/// whose root is always a real, persistent project directory (e.g.
+/// trusty-mpm's session workspaces), so an accidental OS-temp root — most
+/// commonly a `tempfile`-backed fixture standing in for that workspace in a
+/// test — is refused by the daemon's `SENSITIVE_PATH_PREFIXES` denylist
+/// instead of silently registered against whatever daemon happens to be
+/// discoverable.
 /// What: resolves the git-root for `project_root`, derives the index id, and —
 /// when the id is non-empty AND the trusty-search daemon address is discoverable
-/// — POSTs `{id, root_path}` to `/indexes` then best-effort triggers a reindex
-/// (skipping it when the index is already fresh; see
-/// [`best_effort_trigger_reindex`]). ALWAYS returns the derived id (`None` only
-/// when derivation yields an empty string) so the caller can still pin the id
-/// even if the daemon is unreachable; every failed/skipped step is logged at
-/// warn/debug and never propagates (the caller must still make progress).
+/// — POSTs `{id, root_path, allow_sensitive_path}` to `/indexes` then
+/// best-effort triggers a reindex (skipping it when the index is already
+/// fresh; see [`best_effort_trigger_reindex`]). ALWAYS returns the derived id
+/// (`None` only when derivation yields an empty string) so the caller can
+/// still pin the id even if the daemon is unreachable; every failed/skipped
+/// step is logged at warn/debug and never propagates (the caller must still
+/// make progress).
 /// Test: `ensure_project_indexed_returns_derived_id_when_daemon_down`,
-/// `ensure_project_indexed_none_for_root`.
-pub fn ensure_project_indexed(project_root: &Path) -> Option<String> {
+/// `ensure_project_indexed_none_for_root`,
+/// `ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body`.
+pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -> Option<String> {
     let root = crate::resolve_project_root(project_root);
     let index_id = crate::derive_index_id(&root);
     if index_id.trim().is_empty() {
@@ -88,7 +121,7 @@ pub fn ensure_project_indexed(project_root: &Path) -> Option<String> {
     // index on first reindex.
     match crate::resolve_daemon_base_url("trusty-search") {
         Some(base) => {
-            best_effort_create_index(&base, &index_id, &root);
+            best_effort_create_index(&base, &index_id, &root, allow_sensitive_path);
             best_effort_trigger_reindex(&base, &index_id);
         }
         None => {
@@ -419,28 +452,33 @@ fn index_file_request_body(rel_path: &str, content: &str) -> serde_json::Value {
 /// Build the JSON body for the `POST /indexes` find-or-create call.
 ///
 /// Why: extracted from `best_effort_create_index` so the request shape —
-/// specifically, that `allow_sensitive_path` is always `true` here — is
-/// unit-testable without a live daemon or a spawned thread.
-/// What: `allow_sensitive_path: true` (explicit-index-sensitive-path-bypass):
-/// this is ONLY reached from `ensure_project_indexed`, which is ONLY ever
-/// called with one specific project root a client explicitly wants indexed
-/// (tcode's/trusty-mpm's own working project) — never from trusty-search's
-/// auto/broad-discovery paths, which keep the full denylist. That makes this
-/// the "explicit request" case the flag exists for: it lets trusty-search
-/// index a bake-off scratch project living under an OS-temp prefix (e.g.
-/// `/var/folders/…`) instead of hard-rejecting it with 400. Harmless for
-/// ordinary project roots (trusty-mpm worktrees, checked-out repos): none of
-/// those live under `SENSITIVE_PATH_PREFIXES`, so the flag is a no-op for
-/// them, and it never bypasses the OTHER denylist checks (credential dirs,
-/// sensitive file names, top-level home dirs) — see
+/// specifically, whether `allow_sensitive_path` is set — is unit-testable
+/// without a live daemon or a spawned thread.
+/// What: `allow_sensitive_path` (explicit-index-sensitive-path-bypass) is
+/// forwarded verbatim from the caller (issue #2914 — it is NOT unconditionally
+/// `true` any more). When `true`, this is the "explicit request" case the
+/// daemon-side flag exists for: it lets trusty-search index a bake-off scratch
+/// project living under an OS-temp prefix (e.g. `/var/folders/…`) instead of
+/// hard-rejecting it with 400 (issue #2747 — tcode's `directory` binding).
+/// When `false`, an OS-temp root (most commonly an accidental `tempfile`
+/// fixture standing in for a real project in a test) is refused by the
+/// daemon's `SENSITIVE_PATH_PREFIXES` denylist instead of silently registered.
+/// Harmless either way for ordinary project roots (trusty-mpm worktrees,
+/// checked-out repos): none of those live under `SENSITIVE_PATH_PREFIXES`, so
+/// the flag is a no-op for them. It never bypasses the OTHER denylist checks
+/// (credential dirs, sensitive file names, top-level home dirs) — see
 /// `trusty-search::allowlist::is_denied_allowing_sensitive_path`'s doc comment
 /// for exactly what stays enforced.
-/// Test: `create_index_request_body_sets_allow_sensitive_path`.
-fn create_index_request_body(index_id: &str, root: &Path) -> serde_json::Value {
+/// Test: `create_index_request_body_respects_allow_sensitive_path_param`.
+fn create_index_request_body(
+    index_id: &str,
+    root: &Path,
+    allow_sensitive_path: bool,
+) -> serde_json::Value {
     serde_json::json!({
         "id": index_id,
         "root_path": root.to_string_lossy(),
-        "allow_sensitive_path": true,
+        "allow_sensitive_path": allow_sensitive_path,
     })
 }
 
@@ -466,9 +504,9 @@ fn create_index_request_body(index_id: &str, root: &Path) -> serde_json::Value {
 /// must NOT stall when the daemon is slow or unreachable.
 /// Test: exercised via `ensure_project_indexed_returns_derived_id_when_daemon_down`
 /// (daemon-down path); the live HTTP path is covered by integration use.
-fn best_effort_create_index(base: &str, index_id: &str, root: &Path) {
+fn best_effort_create_index(base: &str, index_id: &str, root: &Path, allow_sensitive_path: bool) {
     let url = format!("{base}/indexes");
-    let body = create_index_request_body(index_id, root);
+    let body = create_index_request_body(index_id, root, allow_sensitive_path);
     let index_id = index_id.to_string();
     let root_display = root.display().to_string();
 
@@ -657,7 +695,7 @@ mod tests {
         let nested = project.join("crates/inner");
         fs::create_dir_all(&nested).unwrap();
 
-        let id = ensure_project_indexed(&nested);
+        let id = ensure_project_indexed(&nested, true);
         let expected = crate::derive_index_id(&project);
 
         unsafe {
@@ -673,7 +711,8 @@ mod tests {
     fn ensure_project_indexed_none_for_root() {
         // Derivation yields an empty id for the filesystem root, so the helper
         // returns None without touching the daemon.
-        assert_eq!(ensure_project_indexed(Path::new("/")), None);
+        assert_eq!(ensure_project_indexed(Path::new("/"), true), None);
+        assert_eq!(ensure_project_indexed(Path::new("/"), false), None);
     }
 
     /// `index_files_inner` is a true no-op — no filesystem or network I/O —
@@ -813,35 +852,139 @@ mod tests {
         );
     }
 
-    /// `ensure_project_indexed`'s `POST /indexes` request body always sets
-    /// `allow_sensitive_path: true` (owner directive: explicit index requests
-    /// bypass the temp-dir denylist).
+    /// `create_index_request_body`'s `allow_sensitive_path` field always
+    /// mirrors the caller-supplied parameter, for any root (issue #2914).
     ///
-    /// Why: this is the trusty-common-side half of the bypass — without it,
-    /// trusty-search would still hard-reject a tcode bake-off project living
-    /// under an OS-temp prefix even after the daemon-side opt-in field exists.
-    /// Exercising `create_index_request_body` directly (rather than spawning a
-    /// thread and standing up a live daemon) keeps this test fast and offline.
+    /// Why: before the fix this field was hardcoded `true` regardless of what
+    /// the caller wanted — the exact defect that let trusty-mpm's session-launch
+    /// caller (which never needs the OS-temp-prefix bypass) unconditionally
+    /// bypass the daemon's `SENSITIVE_PATH_PREFIXES` denylist for every
+    /// registration, including throwaway `tempfile` fixtures standing in for a
+    /// workspace in a test. Exercising `create_index_request_body` directly
+    /// (rather than spawning a thread and standing up a live daemon) keeps this
+    /// test fast and offline; `ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body`
+    /// below proves the parameter actually reaches the wire from the public
+    /// entry point.
     /// What: builds the request body for both a plain project root and a
-    /// `/var/folders/…`-style scratch root, and asserts `allow_sensitive_path`
-    /// is `true` in both cases (the flag is unconditional, not path-dependent —
-    /// the daemon is the one that decides what it means).
+    /// `/var/folders/…`-style scratch root, for both `allow_sensitive_path`
+    /// values, and asserts the field always matches what was passed in — never
+    /// hardcoded, never path-dependent (the daemon decides what the path means).
     /// Test: this test.
     #[test]
-    fn create_index_request_body_sets_allow_sensitive_path() {
+    fn create_index_request_body_respects_allow_sensitive_path_param() {
         for root in [
             Path::new("/Users/dev/projects/my-repo"),
             Path::new("/private/var/folders/xx/scratch-project"),
         ] {
-            let body = create_index_request_body("my-index", root);
+            for allow in [true, false] {
+                let body = create_index_request_body("my-index", root, allow);
+                assert_eq!(
+                    body.get("allow_sensitive_path"),
+                    Some(&serde_json::Value::Bool(allow)),
+                    "request body for root {root:?} must set allow_sensitive_path: {allow}"
+                );
+                assert_eq!(
+                    body.get("id").and_then(serde_json::Value::as_str),
+                    Some("my-index")
+                );
+            }
+        }
+    }
+
+    /// End-to-end regression for issue #2914: `ensure_project_indexed`'s
+    /// `allow_sensitive_path` parameter actually reaches the `POST /indexes`
+    /// wire body — not just `create_index_request_body` in isolation.
+    ///
+    /// Why: `create_index_request_body_respects_allow_sensitive_path_param`
+    /// proves the pure body-builder is correct, but the actual regression this
+    /// issue reports happened at the PLUMBING layer — `ensure_project_indexed`
+    /// forwarding its parameter through `best_effort_create_index` into the
+    /// body builder. A future edit could silently drop the parameter partway
+    /// through that chain (e.g. hardcode `true` back into
+    /// `best_effort_create_index`'s call) without this pure-function test
+    /// catching it. This test drives the real public entry point against a
+    /// bound TCP listener standing in for the trusty-search daemon and
+    /// inspects the actual bytes sent over the wire.
+    /// What: for each `allow_sensitive_path` value, binds an ephemeral
+    /// listener, writes its address to the isolated `TRUSTY_DATA_DIR_OVERRIDE`
+    /// data dir's `trusty-search/http_addr` file (mirroring
+    /// `resolve_daemon_base_url`'s discovery contract), calls
+    /// `ensure_project_indexed(project, allow)`, and asserts the captured
+    /// `POST /indexes` body's `allow_sensitive_path` field equals `allow`.
+    /// `ENV_LOCK` serialises against sibling env-mutating tests in this module,
+    /// matching `ensure_project_indexed_returns_derived_id_when_daemon_down`.
+    /// Test: this test.
+    #[test]
+    fn ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body() {
+        for allow in [true, false] {
+            let _guard = crate::data_dir::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+
+            let data_dir = scratch_dir(&format!("wire-{allow}"));
+            fs::create_dir_all(&data_dir).unwrap();
+            // SAFETY: guarded by ENV_LOCK; removed below before returning.
+            unsafe {
+                std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+            }
+
+            // Fake daemon: accept one connection, capture the request body,
+            // answer 200 so `best_effort_create_index` logs success (not that
+            // it matters — the assertion is on the captured body).
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let server = std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                let (mut stream, _) = listener.accept().unwrap();
+                // Close the listening socket immediately after accepting the
+                // ONE connection this test cares about (the create-index
+                // POST), so `ensure_project_indexed`'s follow-up
+                // `best_effort_trigger_reindex` calls hit a fast
+                // connection-refused instead of idling in the kernel's accept
+                // backlog until their own multi-second timeouts elapse.
+                drop(listener);
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                );
+                let _ = stream.flush();
+                let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                let _ = tx.send(body);
+            });
+
+            // Mirrors `write_daemon_addr("trusty-search", ..)`'s on-disk
+            // discovery contract so `resolve_daemon_base_url` finds this fake
+            // daemon instead of reporting "not discoverable".
+            let search_data_dir = data_dir.join("trusty-search");
+            fs::create_dir_all(&search_data_dir).unwrap();
+            fs::write(search_data_dir.join("http_addr"), addr.to_string()).unwrap();
+
+            let project = scratch_dir(&format!("wire-project-{allow}"));
+            fs::create_dir_all(project.join(".git")).unwrap();
+
+            let _ = ensure_project_indexed(&project, allow);
+
+            let body_json: serde_json::Value = serde_json::from_str(
+                &rx.recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("fake daemon must have received the create-index POST"),
+            )
+            .expect("captured body must be valid JSON");
+            let _ = server.join();
+
+            unsafe {
+                std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+            }
+            let _ = fs::remove_dir_all(&project);
+            let _ = fs::remove_dir_all(&data_dir);
+
             assert_eq!(
-                body.get("allow_sensitive_path"),
-                Some(&serde_json::Value::Bool(true)),
-                "request body for root {root:?} must set allow_sensitive_path: true"
-            );
-            assert_eq!(
-                body.get("id").and_then(serde_json::Value::as_str),
-                Some("my-index")
+                body_json.get("allow_sensitive_path"),
+                Some(&serde_json::Value::Bool(allow)),
+                "POST /indexes body must carry allow_sensitive_path={allow} \
+                 all the way from ensure_project_indexed's parameter; got {body_json:?}"
             );
         }
     }

@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Test-only ambient-daemon leaks closed for two `run_task` tests (issue
+  #2914).** `spawns_indexing_thread_for_non_git_project_path` and
+  `background_indexing_invokes_readiness_observer` call
+  `ensure_project_indexed_in_background` directly, bypassing the
+  `execute_run_task` wrapper's `isolate_ambient_daemons()` guard (#3361) — on
+  a machine with a live trusty-search daemon they registered their tempdir
+  fixture against it for real. Both now install the same isolation guard.
+  Production behaviour (task-start indexing still opts in to
+  `allow_sensitive_path: true` for its own working project, issue #2747) is
+  unchanged — see `trusty-common`'s changelog for the shared-helper fix this
+  pairs with.
+
 ## [0.3.0] — 2026-07-21
 
 ### Added
