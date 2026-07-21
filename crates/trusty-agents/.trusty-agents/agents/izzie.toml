@@ -37,11 +37,16 @@ stop_sequences = ["\n##", "\n* * *"]
 
 [tools]
 # Curated tool surface mirrored from personal-assistant.toml — Izzie is the
-# friendly day-to-day voice and benefits from the same MCP / git / granola
-# read access that lets her answer schedule and lookup questions.
+# friendly day-to-day voice and benefits from the same git / granola read
+# access that lets her answer schedule and lookup questions.
+# BLACK-BOX POSTURE (PR A, epic #3052): this file is the `extends`-shadow-
+# fallback safety net for `izzie/agent.toml` (see that package's header
+# note) — `mcp_list`/`mcp_enable`/`mcp_disable` (enumerate internal MCP
+# service names) are DELIBERATELY EXCLUDED, and `delegate_to_agent` is
+# granted directly so the fallback keeps delegation working too.
 allow = [
-  # management
-  "mcp_list", "mcp_enable", "mcp_disable",
+  # delegation (PR A, epic #3052)
+  "delegate_to_agent",
   # git
   "git_log", "git_status",
   # granola

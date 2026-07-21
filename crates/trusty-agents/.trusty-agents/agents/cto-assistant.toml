@@ -6,7 +6,14 @@ role = "assistant"
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
 # in `src/llm/credentials.rs`. NOTE: this flat file is shadowed by the
 # directory package at `cto-assistant/agent.toml` (loader prefers packages,
-# #482) and is not resolved by name today — kept in sync for hygiene.
+# #482) and is not resolved by name today — kept in sync for hygiene. Since
+# the package now declares `extends = "assistant"` (PR A, epic #3052), this
+# flat file is ALSO the `extends`-shadow-fallback safety net
+# (`AgentConfig::extends_shadow_fallback_in`): if the package's `extends`
+# chain ever fails to resolve, the loader falls back to loading THIS file
+# directly. It must therefore stay a COMPLETE, SAFE, standalone config —
+# BLACK-BOX POSTURE (no session_list/system_status/mcp_list/... leaks) in
+# particular — same discipline as `izzie.toml`.
 model = "claude-sonnet-4-6"
 description = "CTO Assistant — private assistant for Robert Matsuoka (CTO, Duetto)"
 display_name = "CTO Assistant"
@@ -35,8 +42,11 @@ stop_sequences = ["\n##", "\n* * *"]
 # except for `ticket_search` which is the cross-text search tool added in #246).
 # #256: `granola_*` added for meeting/transcript lookup; `metro_*` for the
 # shared metro-north skill (Masa often asks transit questions during work hours).
+# BLACK-BOX POSTURE (PR A, epic #3052): `mcp_list`/`mcp_enable`/`mcp_disable`
+# (enumerate MCP service names) are DELIBERATELY EXCLUDED — this is the
+# extends-shadow-fallback safety net, see the header note above.
 allow = [
-    "mcp_list", "mcp_enable", "mcp_disable",
+    "delegate_to_agent",
     "git_log", "git_status", "git_branches", "git_search_commits",
     "ticket_search", "list_tickets", "get_ticket", "create_ticket",
     "granola_*",

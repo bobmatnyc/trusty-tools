@@ -8,18 +8,21 @@
 # `assistant`, leaving only the personal deltas here (display name, warm/witty
 # Masa-bound persona, and the user-specific skills).
 #
-# ⚠️ TEMPORARY REDUNDANCY (until #3055): the `extends` resolver is NOT
-# implemented yet, so an overlay carrying ONLY deltas would resolve — via
-# `AgentConfig::by_name("izzie")` (this directory package shadows the flat
-# `../izzie.toml`) — to an Izzie with NO `[tools]` restriction (absent = all
-# tools UNRESTRICTED) and no inherited guardrails. That is a live safety
-# regression the moment this merges, independent of #3055. To keep the overlay
-# SAFE STANDALONE, the `[tools]` block and the safety-critical guardrail
-# sections in persona.md are duplicated verbatim from the base for now. Once
-# #3055 lands the inheritance resolver, DELETE this redundant `[tools]` block
-# (and the redundant persona guardrails) so the overlay is deltas-only again.
+# #3055/#3106 landed the `extends` resolver: `AgentConfig::by_name("izzie")`
+# (this directory package shadows the flat `../izzie.toml`) now unions this
+# overlay's `[tools].allow` with the base `assistant`'s, base-first, deduped
+# (`crate::agents::extends::merge_extends`) — so the block below is REDUNDANT
+# with the base's list, not load-bearing for safety anymore (an overlay with
+# no `[tools]` at all would still inherit the base's restricted allowlist,
+# not go unrestricted). It is kept explicit here so this overlay stays
+# self-documenting and SAFE STANDALONE if ever loaded directly (e.g. the
+# `extends`-shadow-fallback path, or a future direct-load caller) without
+# relying on union semantics. When editing the base's tool surface (e.g.
+# PR A / epic #3052's black-box tool strip), the base file
+# (`../assistant/agent.toml`) is the single source of truth — this list does
+# not need to be kept byte-identical, only a safe subset.
 
-# Inherit the base productivity assistant (resolved by #3055).
+# Inherit the base productivity assistant (resolved by #3055/#3106).
 extends = "assistant"
 
 [agent]
@@ -44,13 +47,15 @@ max_tokens = 1024
 stop_sequences = ["\n##", "\n* * *"]
 
 [tools]
-# ⚠️ TEMPORARY REDUNDANCY (until #3055) — see the header note. This is the SAME
-# curated allowlist as `../assistant/agent.toml`, duplicated so the overlay is
-# safe standalone (absent `allow` = UNRESTRICTED, which we must not ship). Once
-# the `extends` resolver lands, delete this block and inherit from the base.
+# Redundant-but-harmless — see the header note. This mirrors the curated
+# allowlist in `../assistant/agent.toml` (now UNIONED with it at load time,
+# not overridden) so the overlay stays safe and self-documenting even when
+# read standalone (absent `allow` = UNRESTRICTED, which we must not ship).
+# BLACK-BOX POSTURE (PR A, epic #3052): `mcp_list`/`mcp_enable`/`mcp_disable`
+# are DELIBERATELY EXCLUDED — see `../assistant/agent.toml` for rationale.
 allow = [
-  # management
-  "mcp_list", "mcp_enable", "mcp_disable",
+  # delegation (PR A, epic #3052)
+  "delegate_to_agent",
   # git
   "git_log", "git_status",
   # meeting notes

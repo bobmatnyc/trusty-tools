@@ -8,8 +8,10 @@
 # supplied by a USER via an `extends = "assistant"` personalization overlay
 # (Eve §2.5.1). See `../izzie/` for the reference overlay example.
 #
-# NOTE: the `extends`-based overlay resolver is NOT implemented yet (#3055);
-# this base is fully self-contained and loads standalone today.
+# NOTE: the `extends`-based overlay resolver landed in #3055/#3106
+# (`crate::agents::extends`) — a personalization overlay's `[tools].allow`
+# list is UNIONED with this base's at load time, base-first, deduped. This
+# base is also fully self-contained and loads standalone.
 
 [agent]
 name = "assistant"
@@ -39,26 +41,28 @@ stop_sequences = ["\n##", "\n* * *"]
 # Curated productivity tool surface. Every entry here is generic — a capability
 # any user of the assistant benefits from — so it belongs on the base. Personal,
 # user-specific tools (if any) are added by the overlay, not here.
+#
+# BLACK-BOX POSTURE (PR A, epic #3052): the assistant tier must never leak
+# internal trusty-* system/daemon names to the user. `session_list`,
+# `session_status`, `project_list`, `console_metrics` (trusty-mpm proxied
+# tools), `system_status` (enumerates daemon names incl. "trusty-mpm"), and
+# `mcp_list`/`mcp_enable`/`mcp_disable` (enumerate MCP service names) are
+# DELIBERATELY EXCLUDED here — do not re-add them to an assistant-tier
+# allowlist. They remain reachable to pm/ctrl/research/observe roles via
+# their own scoping. A follow-up PR adds a black-boxed "talk to my team"
+# escalation path instead of exposing these directly.
 allow = [
-  # management
-  "mcp_list", "mcp_enable", "mcp_disable",
+  # delegation (PR A, epic #3052): lets the assistant bring in a specialist
+  # (engineer/QA/research) or consult a peer assistant instance, natively
+  # in-process (tagent -> tagent), without exposing internal mechanics to
+  # the user. See `delegate_to_agent` (`src/tools/delegate.rs`).
+  "delegate_to_agent",
   # git
   "git_log", "git_status",
   # meeting notes
   "granola_*",
   # web search
   "web_search",
-  # trusty-mpm (#3203) — read-only subset only, per the base's read-only
-  # posture (see the `scopes` note below); session_send/agent_delegate are
-  # left to cto-assistant's broader, write-capable allowlist.
-  "session_list",
-  "session_status",
-  "project_list",
-  "console_metrics",
-  # system_status (epic #3052) — on-demand trusty-* subsystem health check
-  # (daemons, MCP servers, credential tiers by name/tier only, registry
-  # counts, and the assistant's own resolved model/runner). Read-only.
-  "system_status",
   # gworkspace — Gmail
   "compose_email",
   "download_gmail_attachment",
