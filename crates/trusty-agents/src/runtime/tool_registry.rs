@@ -373,10 +373,12 @@ pub(super) fn build_registry_for_agent(
 /// (`run_subagent`) applying the persona's `[tools].allow` glob patterns —
 /// registering a tool here is not the same as granting it.
 /// What: Registers `git_log`/`git_status` (when CWD is a git repo),
-/// `web_search`, and `delegate_to_agent` (pre-flight-validated against
-/// `<cwd>/.trusty-agents/agents/`). Deliberately omits `list_skills`,
-/// `load_skill`, and every generic coding-agent tool (`write_file`,
-/// `run_bash`, analysis tools, …).
+/// `web_search`, and `delegate_to_agent` (pre-flight-validated against every
+/// tier `agents::agents_dir_candidates()` searches — CWD/`TAGENT_CONFIG_DIR`
+/// first, then `$HOME/.trusty-agents/agents`, the SAME tiers the actual
+/// sub-agent spawn resolves against — see #3555 delegate-resolve follow-up
+/// below). Deliberately omits `list_skills`, `load_skill`, and every generic
+/// coding-agent tool (`write_file`, `run_bash`, analysis tools, …).
 /// Test: `assistant_tier_registry_excludes_skill_catalog_tools`,
 /// `assistant_tier_registry_includes_curated_tools`.
 pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
@@ -391,12 +393,25 @@ pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
 
     reg.register(Arc::new(BraveSearchTool::from_env()));
 
-    let config_dir = cwd.join(".trusty-agents").join("agents");
+    // #3555 delegate-resolve follow-up: previously this was a single
+    // hand-rolled `cwd.join(".trusty-agents").join("agents")` — invisible to
+    // the bundled worker roster (`engineer`, `qa-agent`, …) that
+    // `agents::bundled::ensure_bundled_agents_deployed` deploys to
+    // `$HOME/.trusty-agents/agents/` at startup. Any assistant launched from
+    // a directory without its OWN local `.trusty-agents/agents/` (e.g. a bare
+    // worktree root, `/tmp`) failed `delegate_to_agent`'s pre-flight check
+    // before ever reaching the runner — `is_error=true` with no engineer
+    // sub-agent ever spawned. `agents_dir_candidates()` is the exact
+    // multi-tier list `AgentConfig::by_name` uses for the actual spawn (see
+    // `run_subagent`), so validation and spawn now share one source of truth
+    // and can never diverge.
+    let config_dirs = crate::agents::agents_dir_candidates();
+    let primary_config_dir = config_dirs.first().cloned();
     let runner: Arc<dyn AgentRunner> = Arc::new(
-        crate::subprocess::SubprocessAgentRunner::new().with_config_dir(Some(config_dir.clone())),
+        crate::subprocess::SubprocessAgentRunner::new().with_config_dir(primary_config_dir),
     );
     reg.register(Arc::new(
-        DelegateToAgentTool::new(runner).with_config_dir(config_dir),
+        DelegateToAgentTool::new(runner).with_config_dirs(config_dirs),
     ));
 
     reg

@@ -127,6 +127,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     corrected to assert the NOW-CORRECT real-inheritance behavior (it
     previously asserted the absence of inheritance, which was the bug).
 
+### Fixed
+
+- **Assistant can now actually delegate to bundled worker agents (`engineer`,
+  `qa-agent`, …) regardless of the invoking CWD (#3555 follow-up):** a live
+  run (`tagent --direct assistant --task "have an engineer run cargo check
+  and report back"`) proved `delegate_to_agent` always failed with
+  `is_error=true` and no `engineer` sub-agent was ever spawned, whenever the
+  assistant was launched from a directory with no local
+  `.trusty-agents/agents/` of its own (a bare worktree root, `/tmp`, …) — the
+  model honestly reported "no engineering agent is wired up right now."
+  Root cause: `build_assistant_tier_registry`
+  (`src/runtime/tool_registry.rs`) built `delegate_to_agent`'s pre-flight
+  validation directory as a single, hand-rolled
+  `<cwd>/.trusty-agents/agents` — invisible to the bundled worker roster
+  `agents::bundled::ensure_bundled_agents_deployed` deploys to
+  `$HOME/.trusty-agents/agents/` at every startup. `AgentConfig::by_name`
+  (used by the actual spawn) already resolves through
+  `agents_dir_candidates()` — CWD/`TAGENT_CONFIG_DIR` tier, THEN the `$HOME`
+  fallback — so validation rejected names the spawn would have happily
+  found, killing the delegate call before the runner was ever invoked.
+  - `DelegateToAgentTool` (`src/tools/delegate.rs`) now validates against a
+    `Vec<PathBuf>` of candidate directories (`with_config_dirs`) instead of a
+    single `Option<PathBuf>`, checked via the new `agents::agent_name_resolves`
+    predicate (package/flat-toml/flat-md tiers — the same tiers the loader's
+    `by_name_unresolved_src_in` uses). `with_config_dir` (single dir) is kept
+    unchanged for `pm`/`ctrl`, which intentionally validate against exactly
+    one project-scoped roster.
+  - `build_assistant_tier_registry` now sources its directories from the
+    newly crate-visible `agents::agents_dir_candidates()` — the SAME
+    multi-tier list `AgentConfig::by_name` resolves against — so validation
+    and the actual spawn can never diverge again.
+  - Observability: `delegate_to_agent`'s pre-flight rejection and any
+    sub-agent run error are now logged at `debug` with the actual failure
+    reason (`src/tools/delegate.rs`); the tool-loop's per-call log
+    (`src/llm/tool_loop/mod.rs`) now includes the error content on failure
+    instead of only `is_error=true` with no payload — previously a failing
+    `delegate_to_agent` call was undebuggable at any log level.
+  - New tests: `delegate_resolves_agent_from_secondary_config_dir` and
+    `delegate_rejects_agent_absent_from_all_config_dirs`
+    (`src/tools/delegate.rs`); `agent_name_resolves_tests::*`
+    (`src/agents/tests/loading.rs`) pin the three resolution tiers plus the
+    negative/traversal cases.
+  - Live-verified end-to-end (`RUST_LOG=debug`, CWD = bare worktree root with
+    no local `.trusty-agents/agents/`): `delegate_to_agent` dispatches with
+    `is_error=false`, a real `agent=engineer` sub-agent spawns and completes,
+    and the assistant relays the engineer's actual `cargo check` findings.
+
 ### Changed
 
 - **Assistant delegates to specialists + peers; black-boxes internal tooling

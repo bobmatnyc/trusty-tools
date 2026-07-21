@@ -1589,3 +1589,81 @@ fn all_bundled_agent_tomls_outside_the_specialist_allowlist_avoid_claude_code_ru
         dir.display()
     );
 }
+
+/// #3555 delegate-resolve follow-up: `agent_name_resolves` is the shared
+/// predicate `delegate_to_agent`'s pre-flight validation now uses instead of
+/// a single hand-rolled directory. These tests pin its three resolution
+/// tiers (directory package / flat toml / flat md) plus the negative cases,
+/// independent of any `AgentConfig` parsing so they don't need `ENV_LOCK`.
+mod agent_name_resolves_tests {
+    use crate::agents::agent_name_resolves;
+
+    #[test]
+    fn finds_flat_toml_in_secondary_dir() {
+        let empty_primary = tempfile::tempdir().unwrap();
+        let secondary = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secondary.path().join("engineer.toml"),
+            "[agent]\nname = \"engineer\"\n",
+        )
+        .unwrap();
+
+        let dirs = vec![
+            empty_primary.path().to_path_buf(),
+            secondary.path().to_path_buf(),
+        ];
+        assert!(
+            agent_name_resolves(&dirs, "engineer"),
+            "must find engineer.toml in the second candidate directory"
+        );
+    }
+
+    #[test]
+    fn finds_directory_package() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("assistant")).unwrap();
+        std::fs::write(
+            dir.path().join("assistant").join("agent.toml"),
+            "[agent]\nname = \"assistant\"\n",
+        )
+        .unwrap();
+
+        let dirs = vec![dir.path().to_path_buf()];
+        assert!(agent_name_resolves(&dirs, "assistant"));
+    }
+
+    #[test]
+    fn finds_flat_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("izzie.md"),
+            "---\nname: izzie\nrole: assistant\n---\nbody",
+        )
+        .unwrap();
+
+        let dirs = vec![dir.path().to_path_buf()];
+        assert!(agent_name_resolves(&dirs, "izzie"));
+    }
+
+    #[test]
+    fn false_when_absent_everywhere() {
+        let primary = tempfile::tempdir().unwrap();
+        let secondary = tempfile::tempdir().unwrap();
+        let dirs = vec![primary.path().to_path_buf(), secondary.path().to_path_buf()];
+        assert!(!agent_name_resolves(&dirs, "nonexistent-agent"));
+    }
+
+    #[test]
+    fn false_for_traversal_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.toml"), "[agent]\nname = \"x\"\n").unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        assert!(!agent_name_resolves(&dirs, "../secret"));
+        assert!(!agent_name_resolves(&dirs, "..\\secret"));
+    }
+
+    #[test]
+    fn false_on_empty_dirs() {
+        assert!(!agent_name_resolves(&[], "engineer"));
+    }
+}

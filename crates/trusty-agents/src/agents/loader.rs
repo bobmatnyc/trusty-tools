@@ -659,7 +659,7 @@ fn agents_dir() -> PathBuf {
 /// `same_name_project_local_shadows_home_tier` (+ async),
 /// `extends_shadow_fallback_searches_home_tier_when_package_resolved_there`
 /// (tests/loading.rs).
-fn agents_dir_candidates() -> Vec<PathBuf> {
+pub(crate) fn agents_dir_candidates() -> Vec<PathBuf> {
     let primary = agents_dir();
     let mut dirs = vec![primary.clone()];
     if let Some(home) = std::env::var_os("HOME") {
@@ -669,6 +669,43 @@ fn agents_dir_candidates() -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// Cheap, parse-free existence check for an agent name across candidate
+/// directories, using the SAME resolution tiers as
+/// [`AgentConfig::by_name_unresolved_src_in`] (directory package, flat
+/// `.toml`, flat `.md`) — minus the `extends`-chain resolution and the
+/// `claude_mpm_loader` legacy tier, neither of which is needed to answer
+/// "does a file for this name exist somewhere in `dirs`".
+///
+/// Why (#3555 delegate-resolve follow-up): `delegate_to_agent`'s pre-flight
+/// validation must accept exactly the names `run_subagent`'s later
+/// `AgentConfig::by_name` call will actually spawn. Before this fix,
+/// `build_assistant_tier_registry` hand-rolled a SINGLE cwd-relative
+/// directory (`<cwd>/.trusty-agents/agents`) for that check — invisible to
+/// the bundled worker roster deployed at `$HOME/.trusty-agents/agents/` by
+/// [`super::bundled::ensure_bundled_agents_deployed`] — so validation
+/// rejected every delegate call whenever the assistant was launched from a
+/// directory with no local `.trusty-agents/agents/` of its own, even though
+/// the actual spawn (which resolves via [`agents_dir_candidates`]) would
+/// have found the agent fine. This function is the single source of truth
+/// both sides now share, so validation and spawn can never diverge again.
+/// What: rejects path-traversal names via `validate_agent_name`, then for
+/// each `dir` in `dirs` (in order) checks `<dir>/<name>/agent.toml`,
+/// `<dir>/<name>.toml`, `<dir>/<name>.md`; returns `true` on first hit.
+/// Test: `agent_name_resolves_finds_flat_toml_in_secondary_dir`,
+/// `agent_name_resolves_finds_directory_package`,
+/// `agent_name_resolves_false_when_absent_everywhere`,
+/// `agent_name_resolves_false_for_traversal_name` (agents/tests/loading.rs).
+pub(crate) fn agent_name_resolves(dirs: &[PathBuf], name: &str) -> bool {
+    if validate_agent_name(name).is_err() {
+        return false;
+    }
+    dirs.iter().any(|dir| {
+        dir.join(name).join("agent.toml").is_file()
+            || dir.join(format!("{name}.toml")).is_file()
+            || dir.join(format!("{name}.md")).is_file()
+    })
 }
 
 // Why: Helper kept available for ad-hoc tooling that needs the flat

@@ -35,12 +35,22 @@ use crate::tools::traits::{AgentRunner, ToolExecutor, ToolResult};
 /// Tool executor that delegates a task to a named specialist agent.
 pub struct DelegateToAgentTool {
     runner: Arc<dyn AgentRunner>,
-    /// Directory holding `<agent>.toml` files. When `Some`, `execute()` will
-    /// reject calls whose `agent_name` does not have a matching TOML, with a
-    /// generic error (#3052 PR A: no on-disk roster enumeration — see the
-    /// module docs). When `None` (legacy callers / tests), validation is
-    /// skipped and the runner is invoked directly.
-    config_dir: Option<PathBuf>,
+    /// Candidate directories searched (in order) for `<agent>.toml` /
+    /// `<agent>/agent.toml` / `<agent>.md` during pre-flight `agent_name`
+    /// validation. When non-empty, `execute()` rejects calls whose
+    /// `agent_name` resolves in NONE of them, with a generic error (#3052 PR
+    /// A: no on-disk roster enumeration — see the module docs). When empty
+    /// (legacy callers / tests via `new()` alone), validation is skipped and
+    /// the runner is invoked directly.
+    ///
+    /// #3555 delegate-resolve follow-up: this used to be a single
+    /// `Option<PathBuf>`, populated by `build_assistant_tier_registry` with
+    /// only the CWD-relative `.trusty-agents/agents` — invisible to the
+    /// bundled worker roster deployed at `$HOME/.trusty-agents/agents/`.
+    /// Widening to a `Vec` lets callers pass the same multi-tier list
+    /// (`agents::agents_dir_candidates()`) the actual spawn resolves
+    /// against, so validation and spawn can never diverge.
+    config_dirs: Vec<PathBuf>,
 }
 
 impl DelegateToAgentTool {
@@ -49,19 +59,19 @@ impl DelegateToAgentTool {
     /// Why: Lets tests substitute an in-process mock runner without touching
     /// production subprocess code.
     /// What: Stores the `Arc<dyn AgentRunner>` for later dispatch. No
-    /// pre-flight name validation is performed unless `with_config_dir` is
-    /// also called.
+    /// pre-flight name validation is performed unless `with_config_dir`/
+    /// `with_config_dirs` is also called.
     /// Test: `DelegateToAgentTool::new(Arc::new(MockRunner))` compiles and
     /// yields a tool whose `name()` is `delegate_to_agent`.
     pub fn new(runner: Arc<dyn AgentRunner>) -> Self {
         Self {
             runner,
-            config_dir: None,
+            config_dirs: Vec::new(),
         }
     }
 
-    /// Attach an agent config directory used for pre-flight `agent_name`
-    /// validation.
+    /// Attach a SINGLE agent config directory used for pre-flight
+    /// `agent_name` validation.
     ///
     /// Why: When the LLM hallucinates an agent name (e.g. `code-searcher`
     /// from the `search_code` native tool, #204), spawning the subprocess
@@ -70,11 +80,34 @@ impl DelegateToAgentTool {
     /// the next turn by re-checking its OWN instructions for the specialists
     /// legitimately available to it — this tool does not enumerate the
     /// on-disk roster (#3052 PR A code-critic CRITICAL-2).
-    /// What: Stores `dir`. Files matching `<dir>/<agent_name>.toml` are
-    /// considered valid. Missing dir is treated like "no agents available".
+    /// What: Sets `config_dirs` to the single-element `[dir]`. Kept as the
+    /// primary constructor for callers (`pm`, `ctrl`) that intentionally
+    /// validate against exactly one project-scoped roster and must NOT fall
+    /// back to any other tier. Use `with_config_dirs` for a multi-tier
+    /// search (e.g. the assistant tier's bundled-roster fallback).
     /// Test: `unknown_agent_is_rejected_without_naming_the_agent_or_roster`.
     pub fn with_config_dir(mut self, dir: PathBuf) -> Self {
-        self.config_dir = Some(dir);
+        self.config_dirs = vec![dir];
+        self
+    }
+
+    /// Attach MULTIPLE candidate agent config directories, searched in order,
+    /// for pre-flight `agent_name` validation.
+    ///
+    /// Why (#3555 delegate-resolve follow-up): the assistant tier must
+    /// delegate to the bundled worker roster (`engineer`, `qa-agent`, …)
+    /// regardless of the invoking CWD. `AgentConfig::by_name` already
+    /// resolves this way via `agents_dir_candidates()` (CWD/`TAGENT_CONFIG_DIR`
+    /// tier, then `$HOME/.trusty-agents/agents`, which
+    /// `agents::bundled::ensure_bundled_agents_deployed` populates at
+    /// startup) — a single-directory check here would reject names the
+    /// actual spawn resolves fine.
+    /// What: Sets `config_dirs` to `dirs` verbatim. An empty `Vec` behaves
+    /// identically to the default (unset) constructor — validation skipped.
+    /// Test: `delegate_resolves_agent_from_secondary_config_dir`,
+    /// `delegate_rejects_agent_absent_from_all_config_dirs`.
+    pub fn with_config_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.config_dirs = dirs;
         self
     }
 }
@@ -118,10 +151,10 @@ impl ToolExecutor for DelegateToAgentTool {
             return ToolResult::err("delegate_to_agent: missing 'task'");
         };
 
-        // Pre-flight validation (#204): if a config_dir was attached, verify
-        // the agent TOML exists before spawning a subprocess. This converts a
-        // generic "subprocess failed" IO error into a structured tool error
-        // the LLM can act on.
+        // Pre-flight validation (#204): if any config_dirs were attached,
+        // verify the agent resolves in at least one of them before spawning
+        // a subprocess. This converts a generic "subprocess failed" IO error
+        // into a structured tool error the LLM can act on.
         //
         // #3052 PR A code-critic CRITICAL-2: the error message MUST NOT
         // enumerate the on-disk agent roster — this tool is now reachable
@@ -135,17 +168,28 @@ impl ToolExecutor for DelegateToAgentTool {
         // conversation. `available_agents()` is kept (used by tests only
         // now) rather than deleted, since a future caller-gated surface
         // (e.g. an internal-only diagnostic) may still want it.
-        if let Some(dir) = &self.config_dir {
-            let agent_toml = dir.join(format!("{agent_name}.toml"));
-            if !agent_toml.exists() {
-                return ToolResult::err(format!(
-                    "'{agent_name}' is not a recognized specialist. Check your own \
-                     instructions for the specialists available to you — native tools \
-                     (search_code, web_search, move_file, create_dir, memory_store, \
-                     memory_recall, etc.) are NOT specialist names; call them directly \
-                     as tools instead of via delegate_to_agent."
-                ));
-            }
+        //
+        // #3555 delegate-resolve follow-up: uses `agents::agent_name_resolves`
+        // (package/flat-toml/flat-md tiers) across ALL `config_dirs`, not a
+        // single hand-rolled directory — see the field doc on `config_dirs`.
+        // The failure reason is logged at `debug` here (content never left
+        // the tool before #3555 — `is_error=true` with no payload anywhere
+        // made this undebuggable in production).
+        if !self.config_dirs.is_empty()
+            && !crate::agents::agent_name_resolves(&self.config_dirs, agent_name)
+        {
+            tracing::debug!(
+                agent_name,
+                config_dirs = ?self.config_dirs,
+                "delegate_to_agent: agent not found in any candidate directory"
+            );
+            return ToolResult::err(format!(
+                "'{agent_name}' is not a recognized specialist. Check your own \
+                 instructions for the specialists available to you — native tools \
+                 (search_code, web_search, move_file, create_dir, memory_store, \
+                 memory_recall, etc.) are NOT specialist names; call them directly \
+                 as tools instead of via delegate_to_agent."
+            ));
         }
 
         // Detect coding persona + language idiom skill from the task and
@@ -157,7 +201,20 @@ impl ToolExecutor for DelegateToAgentTool {
         match self.runner.run(agent_name, &final_task).await {
             // PM gets the full content (it may want to inspect code sections).
             Ok(out) => ToolResult::ok(out.content),
-            Err(e) => ToolResult::err(format!("sub-agent '{agent_name}' failed: {e:#}")),
+            Err(e) => {
+                // #3555 delegate-resolve follow-up: log the full error chain
+                // at debug so a spawn/resolution failure is diagnosable
+                // locally, even though the ToolResult sent back to the LLM
+                // stays generic-safe (it already carries `{e:#}` too, but
+                // `tool_loop`'s turn-level log previously logged only
+                // `is_error=true` and dropped the content entirely).
+                tracing::debug!(
+                    agent_name,
+                    error = %format!("{e:#}"),
+                    "delegate_to_agent: sub-agent run failed"
+                );
+                ToolResult::err(format!("sub-agent '{agent_name}' failed: {e:#}"))
+            }
         }
     }
 }
@@ -339,5 +396,78 @@ mod tests {
 
         assert!(!result.is_error(), "legacy mode should bypass validation");
         assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+    }
+
+    /// #3555 delegate-resolve regression guard: the primary use case this
+    /// fix targets — an assistant launched from a CWD with NO local
+    /// `.trusty-agents/agents/` (empty tempdir, standing in for e.g. a bare
+    /// worktree root) must still successfully delegate to a bundled worker
+    /// agent that only exists in the SECONDARY tier (standing in for
+    /// `$HOME/.trusty-agents/agents/`, populated by
+    /// `agents::bundled::ensure_bundled_agents_deployed`). Before the fix,
+    /// `DelegateToAgentTool` only ever checked a single directory, so this
+    /// would have rejected the call before the runner was ever invoked —
+    /// exactly the reported symptom (`is_error=true`, no `engineer` spawn).
+    #[tokio::test]
+    async fn delegate_resolves_agent_from_secondary_config_dir() {
+        let empty_primary = tempfile::tempdir().unwrap();
+        let secondary = tempfile::tempdir().unwrap();
+        std::fs::write(
+            secondary.path().join("engineer.toml"),
+            "[agent]\nname = \"engineer\"\n",
+        )
+        .unwrap();
+
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = DelegateToAgentTool::new(runner.clone()).with_config_dirs(vec![
+            empty_primary.path().to_path_buf(),
+            secondary.path().to_path_buf(),
+        ]);
+
+        let result = tool
+            .execute(json!({
+                "agent_name": "engineer",
+                "task": "run cargo check and report back"
+            }))
+            .await;
+
+        assert!(
+            !result.is_error(),
+            "agent present only in the secondary (fallback) tier must still resolve: {}",
+            result.content()
+        );
+        let invoked = runner.invoked.lock().unwrap();
+        assert_eq!(invoked.len(), 1, "runner should be called exactly once");
+        assert_eq!(invoked[0].0, "engineer");
+    }
+
+    /// The multi-tier counterpart to
+    /// `unknown_agent_is_rejected_without_naming_the_agent_or_roster`: when
+    /// an agent name is absent from EVERY candidate directory, validation
+    /// still rejects before the runner is invoked.
+    #[tokio::test]
+    async fn delegate_rejects_agent_absent_from_all_config_dirs() {
+        let primary = tempfile::tempdir().unwrap();
+        let secondary = tempfile::tempdir().unwrap();
+
+        let runner = Arc::new(RecordingRunner {
+            invoked: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = DelegateToAgentTool::new(runner.clone()).with_config_dirs(vec![
+            primary.path().to_path_buf(),
+            secondary.path().to_path_buf(),
+        ]);
+
+        let result = tool
+            .execute(json!({
+                "agent_name": "nonexistent-agent",
+                "task": "do the thing"
+            }))
+            .await;
+
+        assert!(result.is_error(), "must reject an agent absent everywhere");
+        assert!(runner.invoked.lock().unwrap().is_empty());
     }
 }
