@@ -459,6 +459,26 @@ pub struct SearchAppState {
     /// `list_indexes_repo_identity_details_and_filter` construct state with this
     /// override and assert with zero env mutation.
     pub registry_path_override: Option<std::path::PathBuf>,
+    /// Concrete handle to the currently-installed [`SwitchableEmbedder`]
+    /// (epic #3524 slice 6 — PR 1/5).
+    ///
+    /// Why: `embedder_slot` only holds the trait-object view
+    /// (`Arc<dyn Embedder>`), which is enough for every existing call site
+    /// (search, reindex, the embed pool). A future hot-swap orchestrator
+    /// (PR-3) and `/health` (PR-2) need the CONCRETE `SwitchableEmbedder` so
+    /// they can call `swap_to`/`active()` — those methods aren't on the
+    /// `Embedder` trait, so a trait object alone can't reach them without an
+    /// `Any`-downcast. Stashing the concrete `Arc` here avoids that.
+    /// What: `None` until `install_switchable_embedder` runs (mirrors the
+    /// `embedder_slot` deferred-init timing exactly — both are populated by
+    /// the same background init task in the same call). `RwLock` because the
+    /// same background task installs it once and later hot-swap orchestrator
+    /// calls only ever *read* through it (swap_to is a method on the
+    /// SwitchableEmbedder itself, not on this field).
+    /// Test: `switchable_embedder_installed_alongside_embedder` in
+    /// `tests_state.rs`.
+    pub switchable_embedder:
+        Arc<RwLock<Option<Arc<crate::service::embedder_supervisor::SwitchableEmbedder>>>>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.

@@ -737,6 +737,43 @@ fn resolve_python_supervisor_config_py_var_zero_is_always_warm() {
     assert_eq!(config.idle_shutdown_secs, 0);
 }
 
+// ── SwitchableEmbedder wiring metadata (epic #3524 slice 6, PR 1/5) ────────
+
+use super::embedder::quantized_from_env;
+
+/// Unset `TRUSTY_EMBEDDER_MODEL` must describe the fp32 (non-quantized)
+/// default — matches trusty-common's `resolve_default_embedding_model`
+/// default.
+#[test]
+#[serial]
+fn quantized_from_env_unset_is_false() {
+    let _g = EnvGuard::remove("TRUSTY_EMBEDDER_MODEL");
+    assert!(!quantized_from_env());
+}
+
+/// `int8` / `quantized` / `q` (case-insensitive, trimmed) must all describe
+/// the quantized backend — mirrors trusty-common's own convention exactly.
+#[test]
+#[serial]
+fn quantized_from_env_recognizes_all_aliases() {
+    for alias in ["int8", "INT8", "quantized", " Q ", "q"] {
+        let _g = EnvGuard::set("TRUSTY_EMBEDDER_MODEL", alias);
+        assert!(
+            quantized_from_env(),
+            "{alias:?} must be recognized as the quantized alias"
+        );
+    }
+}
+
+/// Any other value (including unrecognized junk) must describe fp32 — the
+/// same "anything else defaults to fp32" fallback trusty-common applies.
+#[test]
+#[serial]
+fn quantized_from_env_unrecognized_value_is_false() {
+    let _g = EnvGuard::set("TRUSTY_EMBEDDER_MODEL", "fp32");
+    assert!(!quantized_from_env());
+}
+
 /// RAII guard that restores an env var to its original state on drop.
 ///
 /// Why: env vars are global; leaking changes between tests causes flakiness

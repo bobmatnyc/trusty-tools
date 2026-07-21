@@ -351,7 +351,7 @@ pub async fn handle_start(
             tokio::time::timeout(Duration::from_secs(init_timeout_secs), init_handle).await;
 
         match init_result {
-            Ok(Ok(Ok((embedder, pid_slot)))) => {
+            Ok(Ok(Ok((embedder, pid_slot, switchable)))) => {
                 // Issue #282: if the sidecar path returned a PID slot, install
                 // it on the state so `/health` and the reindex RSS poller can
                 // read the child PID lock-free.
@@ -359,6 +359,11 @@ pub async fn handle_start(
                     install_state.install_embedderd_pid_slot(slot).await;
                 }
                 install_state.install_embedder(Arc::clone(&embedder)).await;
+                // Epic #3524 slice 6: stash the concrete SwitchableEmbedder
+                // handle so a later slice's hot-swap orchestrator and /health
+                // work can reach `swap_to`/`active()` without downcasting the
+                // trait object.
+                install_state.install_switchable_embedder(switchable).await;
                 // Issue #41: worker pool — priority-aware dispatch, bounded queue.
                 let tracker = Arc::clone(&install_state.embedder_stall_tracker);
                 use crate::service::embed_pool::EmbedPool;

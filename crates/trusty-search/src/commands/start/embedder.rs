@@ -21,7 +21,86 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-/// Resolve the embedder back-end and return an `Arc<dyn Embedder>` ready for use.
+use crate::service::embedder_supervisor::{
+    ActiveBackend, BackendKind, BootstrapState, SwitchableEmbedder,
+};
+
+/// Descriptive base model name surfaced on `ActiveBackend::model` (epic #3524
+/// slice 6). Every backend arm below embeds into the same 384-dim MiniLM
+/// family space — only quantization (see [`quantized_from_env`]) differs.
+/// Purely informational: nothing in this PR reads it, PR-2's `/health` work
+/// will.
+const EMBEDDER_MODEL_NAME: &str = "all-MiniLM-L6-v2";
+
+/// Best-effort mirror of `trusty_common::embedder::fast_embedder`'s private
+/// `resolve_default_embedding_model` env-var convention, for descriptive
+/// metadata only (`ActiveBackend::quantized`).
+///
+/// Why: that resolver is `pub(super)` inside trusty-common and not reachable
+/// from here; re-reading the same env var with the same convention gives an
+/// accurate-enough answer for `/health` display without adding a new public
+/// API surface for a single boolean. This function must never influence
+/// which model is actually loaded — it only describes what the (unrelated)
+/// real init already decided.
+/// Test: `quantized_from_env_*` in `start/tests.rs`.
+pub(super) fn quantized_from_env() -> bool {
+    matches!(
+        std::env::var("TRUSTY_EMBEDDER_MODEL")
+            .ok()
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("int8") | Some("quantized") | Some("q")
+    )
+}
+
+/// Resolve the embedder back-end, wrap it in a [`SwitchableEmbedder`], and
+/// return both the trait-object handle and the concrete switchable handle.
+///
+/// Why (epic #3524 slice 6 — PR 1/5): every existing owner of the embedder
+/// `Arc` (embed-pool workers, `embedder_slot`, restore) captures its own
+/// clone at construction time, so writing a fresh `Arc<dyn Embedder>`
+/// somewhere else never reaches them. Wrapping the real backend in
+/// `SwitchableEmbedder` here — once, at the single construction point — means
+/// every one of those owners transparently observes a future hot-swap
+/// (`SwitchableEmbedder::swap_to`, wired up by a later slice) with zero
+/// call-site changes. This PR is a pure refactor: nothing calls `swap_to`
+/// yet, so every code path behaves exactly as it did before.
+///
+/// What: delegates backend selection to [`build_embedder_raw`], reads the
+/// resolved provider off the raw embedder, builds an [`ActiveBackend`]
+/// snapshot (`bootstrap: NotApplicable` — no orchestrator exists yet), and
+/// returns `(Arc<dyn Embedder>, Option<Arc<AtomicU32>>, Arc<SwitchableEmbedder>)`.
+/// The first element is the `switchable` handle coerced to the trait object
+/// (identical value, just a different static view) so existing call sites
+/// keep working unchanged; the third element is the concrete handle PR-2
+/// (`/health`) and PR-3 (the hot-swap orchestrator) need.
+///
+/// Test: `build_embedder_raw`'s existing coverage (`lazy_adapter_reports_resolved_provider`,
+/// `uds_adapter_reports_resolved_provider`) is unaffected; `switchable.rs`
+/// unit tests cover the wrapper itself.
+pub(super) async fn build_embedder() -> Result<(
+    std::sync::Arc<dyn crate::core::Embedder>,
+    Option<Arc<AtomicU32>>,
+    Arc<SwitchableEmbedder>,
+)> {
+    let (raw, pid_slot, kind) = build_embedder_raw().await?;
+    let provider = raw.provider();
+    let active = ActiveBackend {
+        kind,
+        provider,
+        model: EMBEDDER_MODEL_NAME.to_string(),
+        quantized: quantized_from_env(),
+        bootstrap: BootstrapState::NotApplicable,
+    };
+    let switchable = Arc::new(SwitchableEmbedder::new(raw, active));
+    let embedder: Arc<dyn crate::core::Embedder> =
+        Arc::clone(&switchable) as Arc<dyn crate::core::Embedder>;
+    Ok((embedder, pid_slot, switchable))
+}
+
+/// Resolve the embedder back-end and return the raw `Arc<dyn Embedder>` ready
+/// for use, tagged with which [`BackendKind`] was constructed.
 ///
 /// Why (issue #110 Phase 2 — stdio): `trusty-embedderd` is a required runtime
 /// dependency. Running embedding in-process inside the search daemon couples
@@ -46,14 +125,17 @@ use anyhow::Result;
 /// first request is served, and `"spawning trusty-embedderd"` only when the
 /// first hybrid search or reindex arrives.
 ///
-/// Returns `(embedder, embedderd_pid_slot)`. `embedderd_pid_slot` is `Some` only
-/// for the stdio-sidecar path and holds an `Arc<AtomicU32>` that the
-/// `LazyEmbedderHandle` keeps updated with the current child OS PID (0 when no
-/// live process) so callers can sample the sidecar's RSS without holding any
-/// mutex. Non-stdio paths return `None`.
-pub(super) async fn build_embedder() -> Result<(
+/// Returns `(embedder, embedderd_pid_slot, kind)`. `embedderd_pid_slot` is
+/// `Some` only for the stdio-sidecar path and holds an `Arc<AtomicU32>` that
+/// the `LazyEmbedderHandle` keeps updated with the current child OS PID (0
+/// when no live process) so callers can sample the sidecar's RSS without
+/// holding any mutex. Non-stdio paths return `None`. `kind` (epic #3524
+/// slice 6) tags which [`BackendKind`] was constructed so [`build_embedder`]
+/// can build an accurate [`ActiveBackend`] snapshot around it.
+async fn build_embedder_raw() -> Result<(
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
+    BackendKind,
 )> {
     use crate::service::embedder_supervisor::LazyEmbedderHandle;
 
@@ -69,13 +151,13 @@ pub(super) async fn build_embedder() -> Result<(
                     .map_err(|e| anyhow::anyhow!("candle embedder init task panicked: {e}"))??;
             let dim = candle.dimension();
             tracing::info!("embedder initialized: model=all-MiniLM-L6-v2 dim={dim} backend=candle");
-            return Ok((std::sync::Arc::new(candle), None));
+            return Ok((std::sync::Arc::new(candle), None, BackendKind::Candle));
         }
     }
 
     match trusty_embedder_env.as_str() {
         // ── Lazy-spawn stdio sidecar (issue #315 — deferred boot default) ──
-        "" | "auto" | "stdio" => build_ort_stdio_sidecar(),
+        "" | "auto" | "stdio" => build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort)),
 
         // ── Opt-in Python/MPS sidecar (epic #3524, slices 2-4) — DEFAULT-OFF ──
         //
@@ -113,7 +195,11 @@ pub(super) async fn build_embedder() -> Result<(
                         );
                         let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
                         let pid_slot = handle.app_pid_slot();
-                        Ok((Arc::new(LazySlotEmbedderAdapter { handle }), Some(pid_slot)))
+                        Ok((
+                            Arc::new(LazySlotEmbedderAdapter { handle }),
+                            Some(pid_slot),
+                            BackendKind::Python,
+                        ))
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -122,7 +208,7 @@ pub(super) async fn build_embedder() -> Result<(
                              Rust ort stdio sidecar. Set TRUSTY_EMBEDDERD_PY_BIN or ensure \
                              the launcher is on PATH to use the Python/MPS sidecar."
                         );
-                        build_ort_stdio_sidecar()
+                        build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
                     }
                 },
                 Err(e) => {
@@ -132,7 +218,7 @@ pub(super) async fn build_embedder() -> Result<(
                          Ensure `uv` is installed (or set TRUSTY_UV_BIN) and there is \
                          ~3 GB free disk, then restart to retry the Python/MPS sidecar."
                     );
-                    build_ort_stdio_sidecar()
+                    build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
                 }
             }
         }
@@ -141,7 +227,7 @@ pub(super) async fn build_embedder() -> Result<(
         "in-process" | "local" => {
             tracing::info!("embedder mode: in-process (override via TRUSTY_EMBEDDER=in-process)");
             let embedder = build_in_process_embedder().await?;
-            Ok((embedder, None))
+            Ok((embedder, None, BackendKind::InProcess))
         }
 
         // ── HTTP remote (manually managed embedderd) ───────────────────────
@@ -153,6 +239,7 @@ pub(super) async fn build_embedder() -> Result<(
                     client: EmbedderClientKind::Http(client),
                 }),
                 None,
+                BackendKind::Remote,
             ))
         }
 
@@ -161,7 +248,11 @@ pub(super) async fn build_embedder() -> Result<(
             let sock = PathBuf::from(&path["unix:".len()..]);
             tracing::info!("embedder mode: remote uds ({})", sock.display());
             let client = trusty_common::embedder_client::UdsEmbedderClient::new(sock);
-            Ok((Arc::new(UdsEmbedderAdapter { client }), None))
+            Ok((
+                Arc::new(UdsEmbedderAdapter { client }),
+                None,
+                BackendKind::Remote,
+            ))
         }
 
         other => anyhow::bail!(

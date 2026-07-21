@@ -229,6 +229,10 @@ indicatif = "0.17"
 # Misc utilities used across crates.
 dashmap = "6"
 walkdir = "2"
+# Lock-free `Arc` hot-swap for runtime backend switching (epic #3524 slice 6:
+# `SwitchableEmbedder` wraps the active embedder backend behind this so
+# reads never block a swap). Widely used, minimal deps.
+arc-swap = "1"
 # gitignore-aware recursive file walking (ripgrep's walker) + glob matching —
 # power the tcode engineer's native glob/grep exploration tools (#1027). Both
 # are already in the workspace lockfile (transitive via trusty-search), so

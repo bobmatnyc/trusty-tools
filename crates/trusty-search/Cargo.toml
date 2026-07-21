@@ -135,6 +135,11 @@ redb = { workspace = true }
 redb2 = { package = "redb", version = "2.6" }
 dashmap = "5"
 petgraph = "0.6"
+# Lock-free `Arc` hot-swap backing `SwitchableEmbedder` (epic #3524 slice 6):
+# lets the embedder-supervisor swap the active backend (ort -> python) at
+# runtime without every embed-pool worker's captured `Arc<dyn Embedder>`
+# going stale.
+arc-swap = { workspace = true }
 lru = "0.16"
 # Clustering deps are only compiled when the `clustering` feature is enabled.
 # Why: linfa + ndarray pull in a deep BLAS/numerical stack that significantly
