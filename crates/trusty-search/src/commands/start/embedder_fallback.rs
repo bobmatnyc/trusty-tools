@@ -607,7 +607,13 @@ exit 1
         let handle = Arc::new(LazyEmbedderHandle::new(
             script_path,
             SupervisorConfig {
-                startup_timeout_secs: 5,
+                // Kept short (not the production default) so that IF the
+                // readiness probe fails to observe the mock's near-instant
+                // response on a slow/contended CI runner, each failed spawn
+                // attempt wastes at most 2s of the poll budget below rather
+                // than the full 5s — the mock always exits almost
+                // immediately, so 2s is still generous.
+                startup_timeout_secs: 2,
                 backoff_max_secs: 0,
                 max_restarts: 1,
                 idle_shutdown_secs: 0,
@@ -653,7 +659,16 @@ exit 1
         }
 
         // ── Phase 2: poll until the REAL supervisor gives up ─────────────
-        let gave_up = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        //
+        // 30s budget (not the tighter 10s an earlier version of this test
+        // used): observed flaky under CI's slower/more-contended process
+        // scheduling — with `startup_timeout_secs: 2`, two full crash cycles
+        // worst-case is ~4s of readiness-probe timeouts plus process-spawn
+        // overhead, but a loaded CI runner can stretch that further. This is
+        // still a condition-based poll (returns the instant the flag flips),
+        // never a fixed sleep — the larger number only raises the ceiling
+        // for a slow CI box, it does not make the common case slower.
+        let gave_up = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if handle.supervisor_gave_up() {
                     return;
@@ -665,7 +680,7 @@ exit 1
         .await;
         assert!(
             gave_up.is_ok(),
-            "the real supervisor never reached its give-up ceiling within 10s \
+            "the real supervisor never reached its give-up ceiling within 30s \
              of a persistent crash loop with max_restarts=1"
         );
 

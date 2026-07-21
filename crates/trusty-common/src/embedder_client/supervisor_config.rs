@@ -15,7 +15,7 @@
 //! `embedder_client` module's public API (`SupervisorConfig`,
 //! `cuda_sidecar_batch_cap`, `sidecar_batch_size`) is unchanged.
 //!
-//! Test: `supervisor_tests.rs` (`from_env_uses_defaults`, `sidecar_batch_size_*`)
+//! Test: `supervisor_tests.rs` (`from_env_uses_defaults_when_no_vars_set`, `sidecar_batch_size_*`)
 //! exercises this module via `use super::*;` in `supervisor.rs`'s test
 //! submodule.
 
@@ -30,7 +30,7 @@
 /// resolved ONNX batch size to forward to the sidecar process. All fields have
 /// sensible defaults readable via `SupervisorConfig::from_env()`.
 ///
-/// Test: `from_env_uses_defaults` verifies the default values.
+/// Test: `from_env_uses_defaults_when_no_vars_set` verifies the default values.
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
     /// How many consecutive crashes are tolerated before the supervisor gives
@@ -100,7 +100,7 @@ impl SupervisorConfig {
     /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`, and
     /// `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` from the process environment.
     /// `sidecar_batch_size` defaults to `None`; callers set it via the struct.
-    /// Test: `from_env_uses_defaults` (no env vars set → defaults).
+    /// Test: `from_env_uses_defaults_when_no_vars_set` (no env vars set → defaults).
     pub fn from_env() -> Self {
         let def = Self::default();
         Self {

@@ -200,7 +200,6 @@ crates/trusty-common/src/catchup/session_finder.rs	parse_trusty_mpm_session_extr
 crates/trusty-common/src/embedder_client/error.rs	error_display
 crates/trusty-common/src/embedder_client/in_process.rs	in_process_embed_batch_empty
 crates/trusty-common/src/embedder_client/remote.rs	remote_embed_url_construction
-crates/trusty-common/src/embedder_client/supervisor.rs	from_env_uses_defaults
 crates/trusty-common/src/embedder_client/supervisor.rs	stdio_eof_terminates_child
 crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_restarts_on_crash
 crates/trusty-common/src/embedder_client/supervisor.rs	supervisor_spawns_mock_child_and_embeds
