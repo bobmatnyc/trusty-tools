@@ -54,10 +54,10 @@ use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{RwLock, watch};
 
-use super::{EmbedderClient, StdioEmbedderClient};
+use super::{EmbedderClient, StdioEmbedderClient, spawn_retry};
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -473,18 +473,14 @@ impl SupervisorHandle {
 ///
 /// Why: extracted so both the initial spawn and the respawn path call the same
 /// code.
-/// What: `Command::new(binary_path).arg("--stdio")` with piped stdin/stdout
-/// and inherited stderr. When `config.sidecar_batch_size` is `Some(n)`, sets
-/// `TRUSTY_EMBED_BATCH_SIZE=n` (issue #747 Fix C).
+/// What: delegates command construction and the bounded ETXTBSY retry (#3570)
+/// to `spawn_retry::spawn_embedderd`, then runs the startup probe.
 /// Test: called by `spawn_stdio` and the supervision loop.
 async fn spawn_child(
     binary_path: &Path,
     config: &SupervisorConfig,
 ) -> Result<(Child, StdioEmbedderClient)> {
-    use std::process::Stdio;
-
-    // Forward resolved ONNX batch size (issue #747 Fix C). Logged once here
-    // (rather than inside `build_cmd`) so a retry doesn't repeat the log line.
+    // Forward resolved ONNX batch size (issue #747 Fix C).
     if let Some(bs) = config.sidecar_batch_size {
         tracing::debug!(
             bs,
@@ -492,29 +488,16 @@ async fn spawn_child(
         );
     }
 
-    // Build the command inside a closure so the ETXTBSY retry wrapper can
-    // reconstruct it on each attempt (`Command` is not `Clone`). See
-    // `spawn_with_etxtbsy_retry` for why the retry exists (#3570 / #1634).
-    let build_cmd = || {
-        let mut cmd = Command::new(binary_path);
-        cmd.arg("--stdio")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-
-        if let Some(bs) = config.sidecar_batch_size {
-            cmd.env("TRUSTY_EMBED_BATCH_SIZE", bs.to_string());
-        }
-        cmd
-    };
-
-    let mut child = spawn_with_etxtbsy_retry(build_cmd).await.with_context(|| {
-        format!(
-            "spawn trusty-embedderd --stdio from {}",
-            binary_path.display()
-        )
-    })?;
+    // Command construction + the bounded ETXTBSY retry (#3570 / #1634) both
+    // live in `spawn_retry` to keep this file under the 500-SLOC prod cap.
+    let mut child = spawn_retry::spawn_embedderd(binary_path, config)
+        .await
+        .with_context(|| {
+            format!(
+                "spawn trusty-embedderd --stdio from {}",
+                binary_path.display()
+            )
+        })?;
 
     let stdin = child
         .stdin
@@ -563,59 +546,6 @@ async fn spawn_child(
     }
 
     Ok((child, client))
-}
-
-/// Spawn a freshly-built `Command`, retrying on ETXTBSY (os error 26).
-///
-/// Why: `execve` can fail with `ETXTBSY` ("Text file busy") when the kernel
-/// still considers the target inode open-for-write — e.g. when a just-written,
-/// just-chmod'd mock `trusty-embedderd` script is exec'd before the page-cache
-/// flush settles. This is the same race class already diagnosed and fixed in
-/// `trusty-agents` under #866, #1528, and #1634 (see
-/// `spawn_with_etxtbsy_retry` in `claude_code_runner/mod.rs`); this transplants
-/// that exact bounded-retry shape rather than inventing a new one, so the
-/// regression test `supervisor_dropped_handle_does_not_busy_spin` (#3570) — and
-/// the real sidecar spawn path — stop hitting the transient kernel state.
-/// What: calls `build()` to obtain a fresh `Command` on each attempt (required
-/// because `Command` is not `Clone`) and `.spawn()`s it. On `ETXTBSY` it backs
-/// off with a short exponential delay (≤3 attempts, 5 ms base) and retries; any
-/// other error, or the success path, returns immediately. The bound keeps real
-/// failures (missing binary, permission denied) from being masked or delayed.
-/// Test: `supervisor_dropped_handle_does_not_busy_spin`,
-/// `supervisor_spawns_mock_child_and_embeds`.
-async fn spawn_with_etxtbsy_retry<F>(mut build: F) -> std::io::Result<Child>
-where
-    F: FnMut() -> Command,
-{
-    const MAX_ATTEMPTS: u32 = 3;
-    const BACKOFF_MS: u64 = 5;
-
-    let mut last_err: Option<std::io::Error> = None;
-    for attempt in 0..MAX_ATTEMPTS {
-        match build().spawn() {
-            Ok(child) => return Ok(child),
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                last_err = Some(e);
-                // Exponential backoff: 5ms, 10ms, 20ms for MAX_ATTEMPTS=3.
-                // `attempt` is bounded by MAX_ATTEMPTS, so the shift is far
-                // below u64's 64-bit width. Use an explicit `1u64` shift and a
-                // saturating multiply so this stays overflow-safe for any
-                // reasonable MAX_ATTEMPTS value if it is ever raised.
-                let backoff_ms = BACKOFF_MS.saturating_mul(1u64 << attempt);
-                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    // Unreachable in practice: the loop only falls through after recording an
-    // ETXTBSY error, so `last_err` is always `Some`. Construct a defensive
-    // fallback rather than panicking.
-    Err(last_err.unwrap_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::ExecutableFileBusy,
-            "spawn retries exhausted",
-        )
-    }))
 }
 
 /// Why a process-exit wait and an unhealthy-signal wait produce different
