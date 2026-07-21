@@ -21,7 +21,7 @@ use tempfile::TempDir;
 
 use trusty_mpm::core::sm::control::Submit;
 use trusty_mpm::session_manager::{
-    ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
+    ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, SessionManager,
 };
 
 /// A recording tmux driver that captures EVERY keystroke primitive (#1461).
@@ -300,6 +300,12 @@ async fn send_input_back_compat_still_uses_send_line() {
     // a literal+Enter send — equivalent to inject(.., Submit::Enter).
     let dir = TempDir::new().unwrap();
     let (mgr, driver, id) = make_session(&dir).await;
+    // `create()` leaves the record `Provisioning`; `send_input`'s state guard
+    // (#3591) now correctly refuses that, so mark it `Active` via the public
+    // `set_workspace` transition to exercise the back-compat dispatch path.
+    mgr.set_workspace(&id, dir.path().to_path_buf(), ManagedSessionState::Active)
+        .await
+        .expect("mark session Active");
 
     mgr.send_input(&id, "legacy text")
         .await
