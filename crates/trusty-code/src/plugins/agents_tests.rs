@@ -1,0 +1,232 @@
+use super::*;
+
+fn write_plugin_agent(plugins_dir: &Path, plugin: &str, agent_name: &str, content: &str) {
+    let dir = plugins_dir.join(plugin).join("agents");
+    std::fs::create_dir_all(&dir).expect("mkdir agents dir");
+    std::fs::write(dir.join(format!("{agent_name}.md")), content).expect("write agent");
+}
+
+/// Discovery namespaces every plugin agent `<plugin>:<name>` and projects
+/// its fields.
+///
+/// Why: this is the acceptance criterion for #3539's namespacing decision.
+/// Test: this test.
+#[test]
+fn discover_plugin_agents_namespaces_entries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_agent(
+        &plugins_dir,
+        "my-plugin",
+        "reviewer",
+        "---\nname: reviewer\ndescription: Reviews code\nmodel: sonnet\n---\n\nYou review code.\n",
+    );
+
+    let agents = discover_plugin_agents(tmp.path());
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].agent.name, "my-plugin:reviewer");
+    assert_eq!(agents[0].agent.description.as_deref(), Some("Reviews code"));
+    assert_eq!(agents[0].agent.model.as_deref(), Some("sonnet"));
+    assert_eq!(agents[0].system_prompt.content, "You review code.");
+}
+
+/// A plugin agent literally named a `BASE-*` template name is excluded from
+/// discovery, exactly like the embedded/disk tiers (#3539's base-filter
+/// interaction clause).
+///
+/// Test: this test.
+#[test]
+fn discover_plugin_agents_excludes_base_named_agent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_agent(
+        &plugins_dir,
+        "my-plugin",
+        "base-engineer",
+        "---\nname: base-engineer\n---\n\nTemplate only.\n",
+    );
+    write_plugin_agent(
+        &plugins_dir,
+        "my-plugin",
+        "real-agent",
+        "---\nname: real-agent\n---\n\nBody.\n",
+    );
+
+    let agents = discover_plugin_agents(tmp.path());
+    let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
+    assert_eq!(names, vec!["my-plugin:real-agent"]);
+}
+
+/// A plugin agent that fails to load (unreadable/malformed) is skipped with
+/// a warning, never aborting the whole scan.
+///
+/// Test: this test.
+#[test]
+fn discover_plugin_agents_skips_unparseable_agent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    // A directory named `broken.md` (unreadable as a file) exercises the
+    // read failure path without depending on filesystem permissions.
+    std::fs::create_dir_all(
+        plugins_dir
+            .join("my-plugin")
+            .join("agents")
+            .join("broken.md"),
+    )
+    .expect("mkdir");
+    write_plugin_agent(
+        &plugins_dir,
+        "my-plugin",
+        "good-agent",
+        "---\nname: good-agent\n---\n\nBody.\n",
+    );
+
+    let agents = discover_plugin_agents(tmp.path());
+    let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
+    assert_eq!(names, vec!["my-plugin:good-agent"]);
+}
+
+/// [`load_plugin_agent`] projects every supported field.
+///
+/// Test: this test.
+#[test]
+fn load_plugin_agent_projects_fields() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("solo.md");
+    std::fs::write(
+        &path,
+        "---\nname: solo\nrole: engineer\ndescription: A lone agent\nmodel: sonnet\nmax_tokens: 4096\ntools: [read_file]\n---\n\nBody text.\n",
+    )
+    .expect("write");
+
+    let cfg = load_plugin_agent("plug", "solo", &path).expect("load");
+    assert_eq!(cfg.agent.name, "plug:solo");
+    assert_eq!(cfg.agent.role.as_deref(), Some("engineer"));
+    assert_eq!(cfg.agent.description.as_deref(), Some("A lone agent"));
+    assert_eq!(cfg.agent.model.as_deref(), Some("sonnet"));
+    assert_eq!(cfg.llm.max_tokens, Some(4096));
+    assert_eq!(cfg.system_prompt.content, "Body text.");
+    assert_eq!(
+        cfg.tools.and_then(|t| t.allowed),
+        Some(vec!["read_file".to_string()])
+    );
+}
+
+/// Unsupported trusty-mpm-style frontmatter fields
+/// (`effort`/`maxTurns`/`memory`/`isolation`/`disallowedTools`) are dropped
+/// with one aggregated warning, never a load failure.
+///
+/// Why: this is the acceptance criterion for #3539's "DROP unsupported
+/// plugin fields ... with a one-line warn per agent" requirement.
+/// Test: this test.
+#[test]
+fn load_plugin_agent_warns_and_drops_unsupported_fields() {
+    crate::test_support::begin_capture();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("fancy.md");
+    std::fs::write(
+        &path,
+        "---\nname: fancy\neffort: high\nmaxTurns: 10\nmemory: enabled\nisolation: worktree\ndisallowedTools: [Bash]\n---\n\nBody.\n",
+    )
+    .expect("write");
+
+    let cfg = load_plugin_agent("plug", "fancy", &path).expect("load must still succeed");
+    assert_eq!(cfg.agent.name, "plug:fancy");
+
+    let captured = crate::test_support::captured_at_least(tracing::Level::WARN);
+    let warning = captured
+        .iter()
+        .find(|m| m.contains("unsupported field"))
+        .unwrap_or_else(|| panic!("expected an unsupported-field warning, got: {captured:?}"));
+    assert!(warning.contains("plug:fancy"), "got: {warning}");
+    assert!(warning.contains("effort"), "got: {warning}");
+    assert!(warning.contains("maxTurns"), "got: {warning}");
+    assert!(warning.contains("memory"), "got: {warning}");
+    assert!(warning.contains("isolation"), "got: {warning}");
+    assert!(warning.contains("disallowedTools"), "got: {warning}");
+}
+
+/// An `extends:` chain on a plugin agent is warned-and-ignored — the agent
+/// still loads as a leaf, its own body only, with no parent content pulled
+/// in.
+///
+/// Why: #3539 — "a plugin agent with extends: -> warn + treat as direct".
+/// Test: this test.
+#[test]
+fn load_plugin_agent_warns_on_extends_and_treats_as_leaf() {
+    crate::test_support::begin_capture();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("child.md");
+    std::fs::write(
+        &path,
+        "---\nname: child\nextends: some-base\n---\n\nOnly my own body.\n",
+    )
+    .expect("write");
+
+    let cfg = load_plugin_agent("plug", "child", &path).expect("load must still succeed");
+    assert_eq!(cfg.system_prompt.content, "Only my own body.");
+
+    let captured = crate::test_support::captured_at_least(tracing::Level::WARN);
+    let warning = captured
+        .iter()
+        .find(|m| m.contains("extends"))
+        .unwrap_or_else(|| panic!("expected an extends warning, got: {captured:?}"));
+    assert!(warning.contains("plug:child"), "got: {warning}");
+    assert!(warning.contains("some-base"), "got: {warning}");
+}
+
+/// A missing plugin agent file surfaces a descriptive error, never a panic.
+///
+/// Test: this test.
+#[test]
+fn load_plugin_agent_missing_file_errors() {
+    let result = load_plugin_agent("plug", "ghost", Path::new("/nonexistent/ghost.md"));
+    assert!(result.is_err());
+}
+
+/// [`find_plugin_agent_config`] resolves a known plugin/agent pair.
+///
+/// Test: this test.
+#[test]
+fn find_plugin_agent_config_resolves_known_agent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_agent(
+        &plugins_dir,
+        "my-plugin",
+        "reviewer",
+        "---\nname: reviewer\n---\n\nBody.\n",
+    );
+
+    let result = find_plugin_agent_config(tmp.path(), "my-plugin", "reviewer");
+    let cfg = result.expect("must find").expect("must load");
+    assert_eq!(cfg.agent.name, "my-plugin:reviewer");
+}
+
+/// An unknown plugin name resolves to `None` (not found), never an error.
+///
+/// Test: this test.
+#[test]
+fn find_plugin_agent_config_unknown_plugin_is_none() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    assert!(find_plugin_agent_config(tmp.path(), "no-such-plugin", "reviewer").is_none());
+}
+
+/// A known plugin but an unknown agent name resolves to `None`.
+///
+/// Test: this test.
+#[test]
+fn find_plugin_agent_config_unknown_agent_is_none() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_agent(
+        &plugins_dir,
+        "my-plugin",
+        "reviewer",
+        "---\nname: reviewer\n---\n\nBody.\n",
+    );
+
+    assert!(find_plugin_agent_config(tmp.path(), "my-plugin", "ghost").is_none());
+}

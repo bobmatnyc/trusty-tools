@@ -398,3 +398,95 @@ async fn register_wires_all_three_methods() {
     assert!(resp.result.is_some(), "agents.list must be wired");
     assert!(resp.result.unwrap()["agents"].is_array());
 }
+
+/// `agents.list` includes a `plugin`-tier entry, namespaced
+/// `<plugin>:<name>`, for every agent discovered under
+/// `<project_root>/.claude/plugins/*/agents/` (issue #3539).
+///
+/// Why: this is the acceptance criterion for #3539's namespacing decision
+/// at the catalog-listing level — `project_root_two_levels_up` must
+/// correctly recover the project root from `state.dir` (a real
+/// `.claude/agents` directory, unlike this file's other tests which pass a
+/// bare tempdir root as `dir` for brevity — plugin discovery specifically
+/// needs the real on-disk shape).
+/// Test: this test.
+#[tokio::test]
+async fn list_includes_namespaced_plugin_agents() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("mkdir");
+    let plugin_agents_dir = tmp
+        .path()
+        .join(".claude")
+        .join("plugins")
+        .join("my-plugin")
+        .join("agents");
+    std::fs::create_dir_all(&plugin_agents_dir).expect("mkdir");
+    std::fs::write(
+        plugin_agents_dir.join("reviewer.md"),
+        "---\nname: reviewer\ndescription: Plugin reviewer\n---\n\nBody.\n",
+    )
+    .expect("write");
+
+    let s = state(&agents_dir, true);
+    let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+    let agents = result["agents"].as_array().expect("array");
+    let plugin_entry = agents
+        .iter()
+        .find(|a| a["name"] == "my-plugin:reviewer")
+        .unwrap_or_else(|| panic!("expected a namespaced plugin entry, got: {agents:?}"));
+    assert_eq!(plugin_entry["tier"], "plugin");
+    assert_eq!(plugin_entry["description"], "Plugin reviewer");
+}
+
+/// A plugin shipping an agent whose LOCAL name matches an existing project
+/// agent's name does NOT override the project entry — both appear, the
+/// project one unnamespaced and unchanged, the plugin one namespaced
+/// (issue #3539's additive-only guarantee).
+///
+/// Why: this is the explicit collision test #3539 calls for — namespacing
+/// makes the "additive only, never overrides project/bundled" contract
+/// structural (the keys literally cannot collide), and this test pins that
+/// outcome rather than just trusting the mechanism.
+/// Test: this test.
+#[tokio::test]
+async fn list_plugin_agent_does_not_override_project_agent_of_same_local_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("mkdir");
+    std::fs::write(
+        agents_dir.join("engineer.md"),
+        "---\nname: engineer\ndescription: PROJECT engineer\n---\n\nProject body.\n",
+    )
+    .expect("write");
+    let plugin_agents_dir = tmp
+        .path()
+        .join(".claude")
+        .join("plugins")
+        .join("my-plugin")
+        .join("agents");
+    std::fs::create_dir_all(&plugin_agents_dir).expect("mkdir");
+    std::fs::write(
+        plugin_agents_dir.join("engineer.md"),
+        "---\nname: engineer\ndescription: PLUGIN engineer\n---\n\nPlugin body.\n",
+    )
+    .expect("write");
+
+    let s = state(&agents_dir, true);
+    let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+    let agents = result["agents"].as_array().expect("array");
+
+    let project_entry = agents
+        .iter()
+        .find(|a| a["name"] == "engineer")
+        .expect("project 'engineer' must still be present, untouched");
+    assert_eq!(project_entry["tier"], "project");
+    assert_eq!(project_entry["description"], "PROJECT engineer");
+
+    let plugin_entry = agents
+        .iter()
+        .find(|a| a["name"] == "my-plugin:engineer")
+        .expect("namespaced plugin entry must be present alongside it");
+    assert_eq!(plugin_entry["tier"], "plugin");
+    assert_eq!(plugin_entry["description"], "PLUGIN engineer");
+}

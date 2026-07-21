@@ -10,6 +10,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Claude Code plugin support, Phase 1: local-directory agents + skills
+  (issue #3539, DOC-51).** New `crate::plugins` module auto-scans
+  `<project_root>/.claude/plugins/<plugin>/` (honoring an optional
+  `.claude-plugin/plugin.json`'s `name`/`agents`/`skills` overrides) and
+  surfaces each plugin's `agents/*.md` and `skills/<name>/SKILL.md` in
+  `agents.list`/`skills.list` under a new `plugin` tier, namespaced
+  `<plugin>:<name>` and resolvable by that name via `agents::resolve_agent`
+  and the `use_skill` skill resolver. Plugin entries are additive only — the
+  namespaced key can never collide with (and so never overrides) a project
+  or embedded/bundled name, and plugin skills are independent of the
+  bundled-vs-project whole-catalog-replacement threshold (PR #3465) for
+  `skills.list`. A plugin agent's unsupported trusty-mpm-style frontmatter
+  fields (`effort`/`maxTurns`/`memory`/`isolation`/`disallowedTools`) are
+  dropped with a warning rather than failing the load; an `extends:` chain
+  is treated as leaf-only (warned, not composed). Phase 1 is local-directory
+  agents + skills only — no marketplace/git fetch, no commands/hooks/MCP
+  (later phases, tracked against #3539).
 - **Markdown transcript endpoint for dev observability (issue #3526).** New
   `GET /sessions/{id}/transcript.md` (`crate::serve::rest::sessions`) renders
   a session's full transcript as a readable `text/markdown` document —

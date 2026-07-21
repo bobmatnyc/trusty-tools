@@ -195,6 +195,23 @@ pub mod agents;
 /// Test: `skills::tests::*`.
 pub mod skills;
 
+/// Claude Code plugin ingestion, Phase 1: local-directory agents + skills
+/// only (issue #3539).
+///
+/// Why: a plugin packages agents/skills for drop-in use the same way a
+/// project's own `.claude/agents`/`.claude/skills` do; this module scans
+/// `.claude/plugins/<plugin>/` and layers the result additively, namespaced
+/// `<plugin>:<name>`, onto `agents::protocol::agents_list`,
+/// `skills::protocol::skills_list`, `agents::resolve_agent`, and
+/// `skills::FsSkillResolver` — never overriding an unnamespaced
+/// project/embedded/bundled entry.
+/// What: `discover_plugin_roots`, `agents::discover_plugin_agents`/
+/// `agents::find_plugin_agent_config`,
+/// `skills::discover_plugin_skills`/`skills::resolve_plugin_skill_body`.
+/// Test: `plugins::tests::*`, `plugins::agents::tests::*`,
+/// `plugins::skills::tests::*`.
+pub mod plugins;
+
 /// Harness mode selection: `daily-driver` (default, token-efficiency
 /// consumption point) vs `parity` (full-schema benchmark mode) — #2059,
 /// vision spec §5.9.

@@ -153,7 +153,12 @@ pub fn register(router: &mut Router, state: AgentsCatalogState) {
 /// the frontmatter `name:`/`extends:` convention is lowercase `base-qa`, so
 /// this must tolerate either.
 /// Test: `tests::list_excludes_base_agents_but_resolve_agent_still_finds_them`.
-fn is_base_agent(name: &str) -> bool {
+///
+/// `pub(crate)`: also reused by `plugins::agents::discover_plugin_agents`
+/// (#3539) so a plugin literally shipping `base-engineer.md` etc. is
+/// excluded from the catalog exactly like the embedded/disk tiers, via the
+/// same single filter.
+pub(crate) fn is_base_agent(name: &str) -> bool {
     crate::assets::BASE_AGENT_NAMES.contains(&name.to_ascii_lowercase().as_str())
 }
 
@@ -193,11 +198,25 @@ fn entry_json(cfg: &AgentConfig, tier: &str) -> Value {
 /// `md_loader::load_md_agent` are untouched, so composition (a leaf agent's
 /// `extends: base-engineer`) keeps working exactly as before — only the
 /// user-facing catalog an operator browses/picks from hides them.
+///
+/// A FOURTH tier, `"plugin"`, is layered on top when `state.tier ==
+/// "project"` (issue #3539 — Phase 1 Claude Code plugin support): every
+/// agent discovered under `<project_root>/.claude/plugins/*/agents/` is
+/// added, namespaced `<plugin>:<name>` by
+/// `plugins::agents::discover_plugin_agents`. This is ADDITIVE ONLY — the
+/// namespaced key can never collide with an embedded or disk agent's
+/// unnamespaced name, so a plugin agent never overrides (or is suppressed
+/// by) a project/embedded entry of the "same" local name; see that
+/// function's docs for the base-agent-name exclusion it applies too.
+/// Projectless daemons (`state.tier == "user"`) see no plugin tier — #3539
+/// scopes plugin discovery to a bound project's `.claude/plugins/`.
 /// Test: `tests::list_returns_embedded_when_disk_empty`,
 /// `tests::list_disk_override_wins_and_suppresses_embedded`,
 /// `tests::list_disk_only_entries_are_additive`,
 /// `tests::list_marks_unparseable_disk_override_as_broken`,
-/// `tests::list_excludes_base_agents_but_resolve_agent_still_finds_them`.
+/// `tests::list_excludes_base_agents_but_resolve_agent_still_finds_them`,
+/// `tests::list_includes_namespaced_plugin_agents`,
+/// `tests::list_plugin_agent_does_not_override_project_agent_of_same_local_name`.
 async fn agents_list(
     state: &AgentsCatalogState,
     _params: Value,
@@ -228,6 +247,21 @@ async fn agents_list(
         match by_name.iter_mut().find(|(n, _)| *n == name) {
             Some(slot) => slot.1 = entry,
             None => by_name.push((name, entry)),
+        }
+    }
+
+    if state.tier == "project"
+        && let Some(project_root) = crate::plugins::project_root_two_levels_up(&state.dir)
+    {
+        for cfg in crate::plugins::agents::discover_plugin_agents(&project_root) {
+            let name = cfg.agent.name.clone();
+            // Namespacing already guarantees no collision with an
+            // unnamespaced project/embedded name; the containment check is
+            // defense-in-depth so "additive only" holds even if two plugins
+            // resolved to the same namespaced name (first one found wins).
+            if !by_name.iter().any(|(n, _)| *n == name) {
+                by_name.push((name, entry_json(&cfg, "plugin")));
+            }
         }
     }
 

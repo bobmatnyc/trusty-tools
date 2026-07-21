@@ -153,9 +153,22 @@ fn entry_json(m: &SkillMetadata, tier: &str) -> Value {
 /// at all. Otherwise (`state.dir` is `None`, i.e. projectless, OR the
 /// project's skills dir is missing/empty) the response is the full bundled
 /// catalog (`tier: "bundled"`). Sorted by name either way.
+///
+/// A FOURTH tier, `"plugin"`, is layered on top when `state.dir` is `Some`
+/// and a project root can be recovered from it (issue #3539 — Phase 1
+/// Claude Code plugin support): every skill discovered under
+/// `<project_root>/.claude/plugins/*/skills/` is added, namespaced
+/// `<plugin>:<name>` by `plugins::skills::discover_plugin_skills`. This
+/// layer is DELIBERATELY INDEPENDENT of the bundled-vs-project threshold
+/// above — it is added identically whether the response above was the
+/// bundled catalog or the project's own disk skills, so a project with one
+/// custom skill AND a plugin still sees both its custom skill and every
+/// plugin skill (#3539's locked precedence-interaction requirement; see
+/// `tests::list_plugin_skills_are_additive_alongside_project_custom_skill`).
 /// Test: `tests::list_returns_bundled_when_projectless`,
 /// `tests::list_returns_bundled_when_disk_empty`,
-/// `tests::list_returns_disk_only_when_disk_non_empty_no_bundled_entries`.
+/// `tests::list_returns_disk_only_when_disk_non_empty_no_bundled_entries`,
+/// `tests::list_plugin_skills_are_additive_alongside_project_custom_skill`.
 async fn skills_list(
     state: &SkillsCatalogState,
     _params: Value,
@@ -177,6 +190,14 @@ async fn skills_list(
             .map(|m| (m.name.clone(), entry_json(m, "project")))
             .collect()
     };
+
+    if let Some(dir) = &state.dir
+        && let Some(project_root) = crate::plugins::project_root_two_levels_up(dir)
+    {
+        for m in crate::plugins::skills::discover_plugin_skills(&project_root) {
+            entries.push((m.name.clone(), entry_json(&m, "plugin")));
+        }
+    }
 
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     let skills: Vec<Value> = entries.into_iter().map(|(_, v)| v).collect();
@@ -535,5 +556,66 @@ mod tests {
         let resp = router.dispatch(req, &ctx()).await;
         assert!(resp.result.is_some(), "skills.list must be wired");
         assert!(resp.result.unwrap()["skills"].is_array());
+    }
+
+    /// `skills.list`'s `plugin` tier is independent of the bundled-vs-project
+    /// whole-catalog-replacement threshold (PR #3465): a project with ONE
+    /// custom skill (which alone would suppress the bundled catalog, see
+    /// `list_returns_disk_only_when_disk_non_empty_no_bundled_entries`)
+    /// PLUS a plugin still shows both the project's custom skill and every
+    /// namespaced plugin skill (issue #3539's locked precedence-interaction
+    /// requirement).
+    ///
+    /// Why: this is the exact test #3539 calls for — proof that neither
+    /// side of the interaction suppresses the other.
+    /// Test: this test.
+    #[tokio::test]
+    async fn list_plugin_skills_are_additive_alongside_project_custom_skill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join(".claude").join("skills");
+        let custom_dir = skills_dir.join("my-custom-skill");
+        std::fs::create_dir_all(&custom_dir).expect("mkdir");
+        std::fs::write(
+            custom_dir.join("SKILL.md"),
+            "---\nname: my-custom-skill\ndescription: Custom\n---\n\nBody.\n",
+        )
+        .expect("write");
+
+        let plugin_skill_dir = tmp
+            .path()
+            .join(".claude")
+            .join("plugins")
+            .join("my-plugin")
+            .join("skills")
+            .join("plugin-skill");
+        std::fs::create_dir_all(&plugin_skill_dir).expect("mkdir");
+        std::fs::write(
+            plugin_skill_dir.join("SKILL.md"),
+            "---\nname: plugin-skill\ndescription: From a plugin\n---\n\nBody.\n",
+        )
+        .expect("write");
+
+        let s = SkillsCatalogState {
+            dir: Some(skills_dir),
+        };
+        let result = skills_list(&s, Value::Null, ctx()).await.expect("list");
+        let skills = result["skills"].as_array().expect("array");
+
+        let project_entry = skills
+            .iter()
+            .find(|sk| sk["name"] == "my-custom-skill")
+            .expect("the project's own custom skill must still be listed");
+        assert_eq!(project_entry["tier"], "project");
+
+        let plugin_entry = skills
+            .iter()
+            .find(|sk| sk["name"] == "my-plugin:plugin-skill")
+            .expect("the namespaced plugin skill must be listed too");
+        assert_eq!(plugin_entry["tier"], "plugin");
+
+        assert!(
+            skills.iter().all(|sk| sk["tier"] != "bundled"),
+            "the bundled catalog must still be entirely absent (unrelated to the plugin tier)"
+        );
     }
 }
