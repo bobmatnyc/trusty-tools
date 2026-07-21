@@ -98,6 +98,11 @@ pub async fn handle_serve(
 /// trusty-search-specific config: health path `/health`, spawn args
 /// `start --foreground` (which binds a fixed port written to the discovery
 /// file), and a `base_url_fn` that re-reads the address file on every poll.
+/// Issue #3545: `base_url_fn` now delegates straight to `daemon_base_url()`,
+/// the same `TRUSTY_DATA_DIR`-aware resolver every other CLI subcommand uses,
+/// instead of a separate inline call to `trusty_common::read_daemon_addr`
+/// (which only honoured the test-only `TRUSTY_DATA_DIR_OVERRIDE` env var and
+/// could re-discover the wrong daemon instance).
 /// Test: covered by `trusty_common::mcp::daemon_bridge` unit tests; the live
 /// path is exercised by `cargo run -- serve` with no daemon running.
 async fn ensure_search_daemon_up() -> Result<String> {
@@ -109,16 +114,7 @@ async fn ensure_search_daemon_up() -> Result<String> {
         // iteration to discover the live address.
         spawn_args: vec!["start".to_string(), "--foreground".to_string()],
         health_path: "/health".to_string(),
-        base_url_fn: Box::new(|| match trusty_common::read_daemon_addr("trusty-search") {
-            Ok(Some(addr)) if !addr.is_empty() => {
-                if addr.starts_with("http://") || addr.starts_with("https://") {
-                    addr
-                } else {
-                    format!("http://{addr}")
-                }
-            }
-            _ => daemon_base_url(),
-        }),
+        base_url_fn: Box::new(daemon_base_url),
         startup_timeout: None,
         poll_interval: None,
         no_spawn: false,     // trusty-search bridge may auto-start its daemon

@@ -1506,16 +1506,10 @@ async fn run() -> Result<()> {
 
         Commands::Monitor { target } => match target {
             MonitorTarget::Web => {
-                // Prefer the live address written by a running daemon; fall
-                // back to the default loopback port so the command still
-                // prints something useful when the daemon has not started.
-                let url = match trusty_common::read_daemon_addr("trusty-search") {
-                    Ok(Some(addr)) => format!("{addr}/ui"),
-                    _ => format!(
-                        "http://127.0.0.1:{}/ui",
-                        trusty_search::service::DEFAULT_PORT
-                    ),
-                };
+                // Issue #3545: `daemon_base_url()` is the shared, TRUSTY_DATA_DIR
+                // -aware resolver every other subcommand uses; it already falls
+                // back to the default loopback port when no daemon is discovered.
+                let url = format!("{}/ui", commands::daemon_utils::daemon_base_url());
                 println!("{url}");
                 open::that(&url).ok();
             }

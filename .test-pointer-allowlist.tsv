@@ -779,7 +779,6 @@ crates/trusty-review/src/service/webhook.rs	webhook_ignores_non_review_requested
 crates/trusty-review/src/store/outcome_store.rs	record_below_threshold
 crates/trusty-search/src/allowlist/mod.rs	denylist_allows_path_with_sensitive_word_in_name
 crates/trusty-search/src/allowlist/mod.rs	upsert_appends_new
-crates/trusty-search/src/commands/daemon_utils.rs	daemon_base_url_falls_back_when_http_addr_dead
 crates/trusty-search/src/commands/hook.rs	hook_scripts_all_exit_zero
 crates/trusty-search/src/commands/hook.rs	install_creates_and_is_idempotent
 crates/trusty-search/src/commands/hook.rs	resolve_repo_root_falls_back_to_git

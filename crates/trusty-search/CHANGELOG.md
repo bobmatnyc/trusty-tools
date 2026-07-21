@@ -16,6 +16,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   current `ui/` source so a fresh install/upgrade gets the dark-themed
   dashboard. No Rust source changes.
 
+### Fixed
+
+- **CLI daemon discovery (`index`/`list`/`reindex`/`search`/`port`/`serve`)
+  now honors `TRUSTY_DATA_DIR` (issue #3545).** These subcommands resolved
+  the daemon's address via a generic `trusty_common` resolver keyed only to
+  the test-only `TRUSTY_DATA_DIR_OVERRIDE` env var and a file location
+  distinct from the one `start`/`run_daemon()` actually wrote
+  (`$HOME/.trusty-search/http_addr`, hardcoded regardless of
+  `TRUSTY_DATA_DIR`) — so an isolated instance's clients could silently
+  reconnect to a stale, cached production-daemon address instead of the
+  isolated instance, even with `TRUSTY_DATA_DIR` and a non-default port set.
+  This caused an accidental production-daemon index mutation during PR
+  #3529. `service::daemon::http_addr_path()` now honors `TRUSTY_DATA_DIR`
+  (mirroring `daemon_dir()`), and every CLI call site reads/writes through
+  that single resolver instead of the generic one, so `start` and every
+  client subcommand always agree on which daemon they mean.
+  - **Follow-up (code-critic review):** the first cut of this fix removed
+    the only writer of the generic `trusty_common::write_daemon_addr`
+    registry without replacing it, silently breaking two other consumers
+    that still read it exclusively — `trusty_common::monitor::search_client`
+    (`trusty-search monitor status`/`monitor indexes`/`monitor tui`, whose
+    `[r]` hotkey reindexes via that resolved address) and trusty-installer's
+    `ensure` (register-index + readiness-poll stages). `run_daemon()` now
+    also populates that registry, but **only for the default
+    (`TRUSTY_DATA_DIR`-unset) instance** — an isolated instance still never
+    writes it, preserving the original fix's isolation guarantee. The CLI's
+    reachability-probe refresh write also now goes through the same atomic
+    tmp+rename helper the daemon itself uses, instead of a bare
+    `std::fs::write` that could race a torn read.
+
 ### Added
 
 - **Swap-BACK watchdog: python/MPS → ort on confirmed sidecar death (epic

@@ -6,9 +6,11 @@
 //! records the exact address the daemon bound; this command exposes it as a
 //! first-class, machine-parsable CLI surface.
 //!
-//! What: reads the daemon's persisted address via `trusty_common::read_daemon_addr`
-//! (issue #984: `daemon_utils::read_http_addr_file` was replaced by this shared helper)
-//! and prints one of
+//! What: reads the daemon's persisted address via
+//! `trusty_search::service::http_addr_path()` (issue #3545: switched from the
+//! generic, `TRUSTY_DATA_DIR`-oblivious `trusty_common::read_daemon_addr` so
+//! `port` agrees with `start`/`index`/`list`/`reindex`/`search` on which
+//! daemon instance is addressed) and prints one of
 //! three formats to stdout based on the caller's flags:
 //!   - default: bare port number  →  `7879\n`
 //!   - `--addr`: `host:port`      →  `127.0.0.1:7879\n`
@@ -43,7 +45,7 @@ pub enum PortFormat {
 
 /// Parse a `host:port` string and return the port as `u16`.
 ///
-/// Why: `read_daemon_addr` returns the full `host:port` string; extracting the
+/// Why: the discovery file stores the full `host:port` string; extracting the
 /// port number for the `Port` and `Json` output modes requires splitting on
 /// the last `:` (to handle IPv6 addresses where the host itself contains `:`).
 /// What: splits on the final `:`, parses the port, returns `None` on any parse
@@ -84,18 +86,22 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
 /// shell substitutions like `curl http://127.0.0.1:$(trusty-search port)/health`
 /// work without guessing. Issue #526.
 /// What: reads the address from the `http_addr` discovery file via
-/// `trusty_common::read_daemon_addr("trusty-search")`, formats it per the
-/// caller's flags, and prints to stdout. On any error (no daemon, missing file,
-/// corrupt address) the message goes to stderr and the function returns `Err`
-/// so `main` exits non-zero.
+/// `trusty_search::service::http_addr_path()` (issue #3545 -- honours
+/// `TRUSTY_DATA_DIR` so an isolated instance's port is reported instead of the
+/// production daemon's), formats it per the caller's flags, and prints to
+/// stdout. On any error (no daemon, missing file, corrupt address) the
+/// message goes to stderr and the function returns `Err` so `main` exits
+/// non-zero.
 /// Test: unit tests cover all format variants; integration tests in
 /// `tests/port_command.rs` cover the end-to-end path with a real lockfile.
 pub fn handle_port(format: PortFormat) -> Result<()> {
     // Prefer the canonical address-discovery file written by a running daemon.
     // Fall back to the legacy daemon_port_path (daemon.port) when available.
-    let addr = match trusty_common::read_daemon_addr("trusty-search") {
-        Ok(Some(a)) if !a.is_empty() => a,
-        Ok(Some(_)) | Ok(None) => {
+    let addr = match trusty_search::service::http_addr_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+    {
+        Some(a) if !a.trim().is_empty() => a.trim().to_string(),
+        _ => {
             // Legacy fallback: try the port-only daemon.port file.
             match read_legacy_port_file() {
                 Some(port) => format!("127.0.0.1:{port}"),
@@ -107,10 +113,6 @@ pub fn handle_port(format: PortFormat) -> Result<()> {
                     std::process::exit(1);
                 }
             }
-        }
-        Err(e) => {
-            eprintln!("trusty-search: could not read daemon address: {e:#}");
-            std::process::exit(1);
         }
     };
 
