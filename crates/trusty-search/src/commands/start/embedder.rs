@@ -54,6 +54,28 @@ pub(super) fn quantized_from_env() -> bool {
     )
 }
 
+/// Whether `ActiveBackend::quantized` should reflect [`quantized_from_env`]
+/// for the given [`BackendKind`] (issue #3530 / #3493 P1).
+///
+/// Why: `TRUSTY_EMBEDDER_MODEL=int8` only ever selects between
+/// `AllMiniLML6V2`/`AllMiniLML6V2Q` inside the ort/in-process `FastEmbedder`
+/// path (`resolve_default_embedding_model` in trusty-common) — it has no
+/// effect on the Python sidecar (which only ever loads its one pinned fp32
+/// `sentence-transformers` model, see
+/// `trusty_embed_sidecar.model.MODEL_NAME`) or on a manually managed remote
+/// sidecar (whose model config the parent cannot see at all). Applying
+/// `quantized_from_env()` unconditionally to every `BackendKind` would
+/// report `quantized=true` for a python/remote backend just because the
+/// operator happens to have `TRUSTY_EMBEDDER_MODEL=int8` set for an
+/// unrelated ort run — never actually true.
+/// What: `true` only for [`BackendKind::Ort`] and [`BackendKind::InProcess`]
+/// — the two backends whose model selection actually reads that env var.
+/// Test: `backend_respects_quantized_env_only_ort_and_in_process` in
+/// `start/tests.rs`.
+pub(super) fn backend_respects_quantized_env(kind: BackendKind) -> bool {
+    matches!(kind, BackendKind::Ort | BackendKind::InProcess)
+}
+
 /// Resolve the embedder back-end, wrap it in a [`SwitchableEmbedder`], and
 /// return both the trait-object handle and the concrete switchable handle.
 ///
@@ -90,7 +112,10 @@ pub(super) async fn build_embedder() -> Result<(
         kind,
         provider,
         model: EMBEDDER_MODEL_NAME.to_string(),
-        quantized: quantized_from_env(),
+        // Issue #3530 / #3493 P1: only the ort/in-process `FastEmbedder`
+        // path actually honours `TRUSTY_EMBEDDER_MODEL` — see
+        // `backend_respects_quantized_env`'s doc for why.
+        quantized: backend_respects_quantized_env(kind) && quantized_from_env(),
         bootstrap: BootstrapState::NotApplicable,
     };
     let switchable = Arc::new(SwitchableEmbedder::new(raw, active));
@@ -196,7 +221,10 @@ async fn build_embedder_raw() -> Result<(
                         let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
                         let pid_slot = handle.app_pid_slot();
                         Ok((
-                            Arc::new(LazySlotEmbedderAdapter { handle }),
+                            Arc::new(LazySlotEmbedderAdapter {
+                                handle,
+                                is_python: true,
+                            }),
                             Some(pid_slot),
                             BackendKind::Python,
                         ))
@@ -397,7 +425,13 @@ fn build_ort_stdio_sidecar() -> Result<BuiltEmbedder> {
     let handle = Arc::new(LazyEmbedderHandle::new(binary, config));
     let pid_slot = handle.app_pid_slot();
 
-    Ok((Arc::new(LazySlotEmbedderAdapter { handle }), Some(pid_slot)))
+    Ok((
+        Arc::new(LazySlotEmbedderAdapter {
+            handle,
+            is_python: false,
+        }),
+        Some(pid_slot),
+    ))
 }
 
 /// Build the in-process `FastEmbedder` and log details.
@@ -420,10 +454,14 @@ async fn build_in_process_embedder() -> Result<Arc<dyn crate::core::Embedder>> {
         trusty_common::embedder::ExecutionProvider::CoreML => " (Metal GPU + ANE + CPU)",
         trusty_common::embedder::ExecutionProvider::CoreMLAne => " (Neural Engine + CPU)",
         trusty_common::embedder::ExecutionProvider::Cuda => " (CUDA GPU)",
+        trusty_common::embedder::ExecutionProvider::Mps => " (Metal Performance Shaders)",
         trusty_common::embedder::ExecutionProvider::Cpu => "",
     };
+    // Issue #3530: report the RESOLVED model name (fp32 default vs the
+    // explicit int8 opt-in) instead of the stale hardcoded "AllMiniLML6V2(Q)".
+    let model_name = embedder.model_name();
     tracing::info!(
-        "embedder initialized: model=AllMiniLML6V2(Q) dim={dim} provider={provider}{metal_hint}"
+        "embedder initialized: model={model_name} dim={dim} provider={provider}{metal_hint}"
     );
     tune_batch_size_for_provider(provider);
     Ok(Arc::new(embedder))
@@ -566,6 +604,26 @@ impl crate::core::Embedder for UdsEmbedderAdapter {
 /// validates round-trip correctness (marked `#[ignore]`, requires binary).
 pub(super) struct LazySlotEmbedderAdapter {
     pub(super) handle: Arc<crate::service::embedder_supervisor::LazyEmbedderHandle>,
+    /// Which provider-prediction resolver `provider()` must delegate to
+    /// (epic #3524 slice 6 / issue #3493 P1).
+    ///
+    /// Why: this SAME adapter type wraps both the default Rust ort stdio
+    /// sidecar (`trusty-embedderd`) and the opt-in Python/MPS sidecar
+    /// (`trusty-embedderd-py`) — they speak the identical JSON-RPC 2.0 stdio
+    /// protocol, so `LazyEmbedderHandle` cannot tell them apart. But the two
+    /// sidecars select their execution provider through entirely different
+    /// code (ONNX Runtime's CoreML/CUDA/CPU EPs vs. torch's MPS/CUDA/CPU
+    /// device), so `provider()` must predict through the matching resolver —
+    /// calling the ORT-oriented `resolve_expected_provider` for the Python
+    /// arm is exactly the pre-fix bug (`/health` reported `CoreML` for a
+    /// sidecar that never touches ONNX Runtime at all).
+    /// What: `false` for the ort stdio sidecar (`build_ort_stdio_sidecar`),
+    /// `true` for the python arm (`build_embedder_raw`'s `"python"` match
+    /// arm's success path only — its own ort-fallback sub-branches
+    /// construct a separate adapter with `is_python: false`).
+    /// Test: `lazy_adapter_reports_resolved_provider` (ort),
+    /// `lazy_adapter_python_reports_mps_provider` (python) in `start/tests.rs`.
+    pub(super) is_python: bool,
 }
 
 #[async_trait::async_trait]
@@ -600,14 +658,24 @@ impl crate::core::Embedder for LazySlotEmbedderAdapter {
     /// own startup log said `provider=CUDA`. The `LazyEmbedderHandle` defers the
     /// child spawn, so there is no live provider to read until the first embed;
     /// rather than report a stale `CPU`, predict the provider the sidecar will
-    /// resolve via the shared `init_options` logic. This is correct even before
-    /// the child has spawned, because the resolution is a pure function of build
-    /// features + env.
-    /// What: delegates to `trusty_common::embedder::resolve_expected_provider`.
-    /// Test: covered by trusty-common's `resolve_expected_provider_*` tests;
-    /// real-GPU validation is hardware-gated.
+    /// resolve. This is correct even before the child has spawned, because the
+    /// resolution is a pure function of build features + env.
+    ///
+    /// Issue #3493 P1: this adapter also wraps the Python/MPS sidecar (see
+    /// `is_python`'s doc), whose device selection is torch's, not ONNX
+    /// Runtime's — delegating unconditionally to the ORT-oriented resolver
+    /// reported `CoreML` for a sidecar that never runs CoreML at all.
+    /// What: delegates to `trusty_common::embedder::resolve_expected_python_provider`
+    /// when `is_python` is set, otherwise `resolve_expected_provider`.
+    /// Test: covered by trusty-common's `resolve_expected_provider_*` /
+    /// `resolve_expected_python_provider_*` tests; real-GPU/MPS validation is
+    /// hardware-gated.
     fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
-        trusty_common::embedder::resolve_expected_provider()
+        if self.is_python {
+            trusty_common::embedder::resolve_expected_python_provider()
+        } else {
+            trusty_common::embedder::resolve_expected_provider()
+        }
     }
 }
 

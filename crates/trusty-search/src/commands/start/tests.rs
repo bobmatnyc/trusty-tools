@@ -589,11 +589,50 @@ fn lazy_adapter_reports_resolved_provider() {
         std::path::PathBuf::from("/nonexistent/trusty-embedderd"),
         SupervisorConfig::default(),
     ));
-    let adapter = LazySlotEmbedderAdapter { handle };
+    let adapter = LazySlotEmbedderAdapter {
+        handle,
+        is_python: false,
+    };
     assert_eq!(
         adapter.provider(),
         trusty_common::embedder::resolve_expected_provider(),
         "lazy stdio adapter must report the sidecar's resolved provider, not the CPU default"
+    );
+}
+
+/// Issue #3493 P1 (epic #3524 slice 6): the SAME `LazySlotEmbedderAdapter`
+/// type also wraps the opt-in Python/MPS sidecar, which resolves its
+/// execution provider through torch, not ONNX Runtime. Before this fix
+/// `provider()` unconditionally delegated to the ORT resolver, so `/health`
+/// reported `CoreML` for a sidecar that never runs CoreML at all.
+/// What: builds the adapter with `is_python: true` and asserts its
+/// `provider()` equals `resolve_expected_python_provider()` (MPS on Apple
+/// Silicon), never the ORT-oriented `resolve_expected_provider()`'s CoreML
+/// answer.
+/// Test: this test.
+#[test]
+fn lazy_adapter_python_reports_mps_provider() {
+    use crate::core::Embedder as _;
+    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+    let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+        std::path::PathBuf::from("/nonexistent/trusty-embedderd-py"),
+        SupervisorConfig::default(),
+    ));
+    let adapter = LazySlotEmbedderAdapter {
+        handle,
+        is_python: true,
+    };
+    assert_eq!(
+        adapter.provider(),
+        trusty_common::embedder::resolve_expected_python_provider(),
+        "python-arm adapter must report the python-sidecar's resolved provider"
+    );
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    assert_eq!(
+        adapter.provider(),
+        trusty_common::embedder::ExecutionProvider::Mps,
+        "on Apple Silicon the python arm must predict MPS, not CoreML"
     );
 }
 
@@ -772,6 +811,22 @@ fn quantized_from_env_recognizes_all_aliases() {
 fn quantized_from_env_unrecognized_value_is_false() {
     let _g = EnvGuard::set("TRUSTY_EMBEDDER_MODEL", "fp32");
     assert!(!quantized_from_env());
+}
+
+/// Issue #3530 / #3493 P1: `TRUSTY_EMBEDDER_MODEL` only governs the
+/// ort/in-process `FastEmbedder` path — the Python sidecar and a manually
+/// managed remote sidecar must never inherit `quantized=true` just because
+/// that env var happens to be set for an unrelated ort run.
+#[test]
+fn backend_respects_quantized_env_only_ort_and_in_process() {
+    use super::embedder::backend_respects_quantized_env;
+    use crate::service::embedder_supervisor::BackendKind;
+
+    assert!(backend_respects_quantized_env(BackendKind::Ort));
+    assert!(backend_respects_quantized_env(BackendKind::InProcess));
+    assert!(!backend_respects_quantized_env(BackendKind::Python));
+    assert!(!backend_respects_quantized_env(BackendKind::Remote));
+    assert!(!backend_respects_quantized_env(BackendKind::Candle));
 }
 
 /// RAII guard that restores an env var to its original state on drop.

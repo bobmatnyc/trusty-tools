@@ -5,6 +5,20 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Changed
+
+- **Report the real loaded model on startup logs + `/health` (issue #3530 —
+  the `(Q)` observability bug, epic #3524 slice 6, PR 2/5)** — the
+  `"loading AllMiniLML6V2Q model..."` startup log and the `/health` JSON's
+  `"model": "AllMiniLML6V2Q"` field were hardcoded and went stale the moment
+  `trusty-common`'s default flipped to the non-quantized fp32 model (#3486 /
+  #3493 P0). Both now read the RESOLVED model name via the new
+  `FastEmbedder::model_name()` (trusty-common), threaded through `AppState`
+  as a new `model_name` field so `health_handler` (now
+  `State`-extractor-based) can report it.
+
 ## [0.3.9] — 2026-07-20
 
 ### Changed

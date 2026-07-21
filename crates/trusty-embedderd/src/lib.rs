@@ -184,6 +184,13 @@ pub struct Args {
 #[derive(Clone)]
 pub struct AppState {
     pub queue: Arc<BatchQueue>,
+    /// Human-readable name of the embedding model actually loaded (issue
+    /// #3530 — the `(Q)` observability bug). Resolved once, at model-load
+    /// time, via `FastEmbedder::model_name()`; surfaced verbatim on
+    /// `GET /health` instead of the previous hardcoded `"AllMiniLML6V2Q"`,
+    /// which stayed wrong after the default flipped to fp32 (#3486 / #3493
+    /// P0).
+    pub model_name: &'static str,
 }
 
 // ── Library entry point ──────────────────────────────────────────────────────
@@ -283,16 +290,20 @@ pub async fn run_with_args(args: Args) -> Result<()> {
     // Load the ONNX model (expensive one-time init), bounded so a
     // provider-init deadlock (issue #1633 — AL2023/glibc 2.34) fails loudly
     // instead of hanging forever with no listener ever bound.
-    info!("loading AllMiniLML6V2Q model...");
+    info!("loading embedding model...");
     let init_timeout = readiness::model_init_timeout();
     let embedder = readiness::run_bounded(
-        "FastEmbedder::new (AllMiniLML6V2Q model load)",
+        "FastEmbedder::new (model load)",
         init_timeout,
         FastEmbedder::new(),
     )
     .await?;
     let dim = embedder.dimension();
-    info!("model loaded: dim={dim}");
+    // Issue #3530: report the RESOLVED model name (fp32 default vs the
+    // explicit int8 opt-in), not a hardcoded string that goes stale the
+    // moment the default changes.
+    let model_name = embedder.model_name();
+    info!("model loaded: model={model_name} dim={dim}");
 
     // Spawn the BatchQueue — it owns the embedder exclusively.
     let embedder: Arc<dyn trusty_common::embedder::Embedder> = Arc::new(embedder);
@@ -331,6 +342,7 @@ pub async fn run_with_args(args: Args) -> Result<()> {
     if http_enabled {
         let state = AppState {
             queue: Arc::clone(&queue),
+            model_name,
         };
         let app = Router::new()
             .route("/health", get(health_handler))
@@ -399,13 +411,15 @@ pub async fn run_with_args(args: Args) -> Result<()> {
 ///
 /// Why: allows operators and trusty-search to verify the daemon is up and
 /// serving requests before sending embedding work.
-/// What: returns a static JSON body with `status`, `model`, and `dim` fields.
+/// What: returns a JSON body with `status`, `model` (issue #3530 — the
+/// RESOLVED model name, sourced from `AppState::model_name` rather than a
+/// hardcoded string), and `dim` fields.
 /// Test: `curl http://127.0.0.1:7890/health` returns HTTP 200.
 #[cfg(feature = "http-server")]
-pub async fn health_handler() -> Json<serde_json::Value> {
+pub async fn health_handler(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "status": "ok",
-        "model": "AllMiniLML6V2Q",
+        "model": state.model_name,
         "dim": trusty_common::embedder::EMBED_DIM,
     }))
 }

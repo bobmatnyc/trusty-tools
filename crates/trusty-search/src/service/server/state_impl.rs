@@ -93,9 +93,9 @@ impl SearchAppState {
             // Issue #2717: production reads the env-resolved registry path;
             // tests override via `with_registry_path` to avoid TRUSTY_DATA_DIR.
             registry_path_override: None,
-            // Epic #3524 slice 6: populated by `install_switchable_embedder`
-            // in lockstep with `embedder_slot`.
-            switchable_embedder: Arc::new(RwLock::new(None)),
+            // Epic #3524 slice 6: populated by `install_switchable_embedder`,
+            // read wait-free by `/health` via `ArcSwapOption`.
+            switchable_embedder: Arc::new(arc_swap::ArcSwapOption::empty()),
         }
     }
 
@@ -292,32 +292,45 @@ impl SearchAppState {
     /// Install the concrete [`SwitchableEmbedder`] handle produced by
     /// `build_embedder()` (epic #3524 slice 6 — PR 1/5).
     ///
-    /// Why: called from the same background init task and at the same point
-    /// as `install_embedder`, so both the trait-object slot and this concrete
-    /// handle become visible together — a reader can never observe one
-    /// populated without the other.
-    /// What: writes into `switchable_embedder`. Does not touch the readiness
-    /// watch — `install_embedder` already flips that.
+    /// Why: called from the same background init task, ideally at the same
+    /// point as `install_embedder`, so both the trait-object slot and this
+    /// concrete handle become visible together.
+    ///
+    /// **Ordering note (PR-2 forward-fix):** the daemon's init task
+    /// (`commands/start/daemon.rs`) calls this BEFORE `install_embedder` —
+    /// the opposite of PR-1's original order — specifically so there is no
+    /// instant where `is_embedder_ready()` is `true` (flipped by
+    /// `install_embedder`'s readiness watch) while this handle is still
+    /// `None`. `/health` additionally treats a `None` read here as
+    /// non-fatal regardless (falls back to the pre-PR-2 provider-inference
+    /// path — see `health::health_handler`), so a caller that races this
+    /// ordering some other way still gets a graceful answer, never a panic
+    /// or a 500.
+    /// What: `store`s into the wait-free `ArcSwapOption` — never blocks a
+    /// concurrent reader (`/health`) or writer.
     /// Test: `switchable_embedder_installed_alongside_embedder` in
     /// `tests_state.rs`.
-    pub async fn install_switchable_embedder(
+    pub fn install_switchable_embedder(
         &self,
         switchable: Arc<crate::service::embedder_supervisor::SwitchableEmbedder>,
     ) {
-        let mut slot = self.switchable_embedder.write().await;
-        *slot = Some(switchable);
+        self.switchable_embedder.store(Some(switchable));
     }
 
     /// Snapshot the currently-installed [`SwitchableEmbedder`] handle, or
-    /// `None` while the daemon is still warming up.
+    /// `None` while the daemon is still warming up (or, briefly, between
+    /// `install_switchable_embedder` and `install_embedder` — see that
+    /// method's ordering note).
     ///
-    /// Why: PR-2 (`/health`) and PR-3 (the hot-swap orchestrator) need the
-    /// concrete handle to call `swap_to`/`active()`. Nothing in this PR calls
-    /// this method yet.
-    pub async fn current_switchable_embedder(
+    /// Why: `/health` (PR-2) and the hot-swap orchestrator (PR-3) need the
+    /// concrete handle to call `swap_to`/`active()`. Backed by
+    /// `ArcSwapOption::load_full` — wait-free with respect to a concurrent
+    /// `store`, so this is safe to call from the health handler unconditionally
+    /// (issue #1006's non-blocking-`/health` invariant, extended to this field).
+    pub fn current_switchable_embedder(
         &self,
     ) -> Option<Arc<crate::service::embedder_supervisor::SwitchableEmbedder>> {
-        self.switchable_embedder.read().await.clone()
+        self.switchable_embedder.load_full()
     }
 
     /// Record a fatal embedder-init error so `/health` can surface it and

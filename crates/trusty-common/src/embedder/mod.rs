@@ -40,12 +40,19 @@ mod types;
 #[cfg(any(test, feature = "embedder-test-support"))]
 mod mock;
 
+// Issue #610 (line-cap): split out of this file's own `mod tests` (already
+// at its grandfathered SLOC budget) rather than growing it further — covers
+// `resolve_expected_python_provider`, `embedding_model_name`, and
+// `FastEmbedder::model_name` (epic #3524 slice 6 / issue #3530, #3493 P1).
+#[cfg(test)]
+mod provider_tests;
+
 pub use fast_embedder::FastEmbedder;
 pub use types::{
     CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
     DEFAULT_ORT_INTER_THREADS, EMBED_DIM, Embedder, ExecutionProvider, OrtThreadingOptions,
     default_ort_intra_threads, embed_one, resolve_cuda_options, resolve_expected_provider,
-    resolve_fastembed_cache_dir, resolve_ort_threading_options,
+    resolve_expected_python_provider, resolve_fastembed_cache_dir, resolve_ort_threading_options,
 };
 
 #[cfg(any(test, feature = "embedder-test-support"))]
