@@ -588,30 +588,13 @@ mod tests {
     ///      `handle.supervisor_gave_up()` observes `true` — i.e. the real
     ///      supervisor has crossed its own `max_restarts` ceiling — then
     ///      asserts a subsequent call IS served by the fallback.
-    ///
-    /// `#[ignore]`: this spawns a REAL child process twice over and measured
-    /// ~1-in-8 to ~1-in-10 spurious failures under heavy parallel-test-suite
-    /// contention (real `fork`+`exec` scheduling variance, not a design
-    /// flaw — see the marker-file rationale above) even after widening the
-    /// poll deadline to 20s. Matches the established convention for
-    /// subprocess-spawning tests in this same area of the codebase (see
-    /// `service/embedder_supervisor/mod.rs`'s and `tests.rs`'s own
-    /// `#[ignore]`-tagged real-ONNX-binary tests) — excluded from the
-    /// default `cargo test` / CI path, run on demand with
-    /// `cargo test -- --include-ignored`.
     /// Test: this test.
     #[cfg(unix)]
     #[tokio::test]
-    #[ignore = "spawns a real child process twice; flaky under CI/parallel-test contention (~1-in-8) even with the deterministic marker-file mock — run manually with --include-ignored"]
     async fn fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up() {
         use crate::commands::start::embedder::LazySlotEmbedderAdapter;
         use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
         use std::os::unix::fs::PermissionsExt;
-
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter("trace")
-            .with_test_writer()
-            .try_init();
 
         // Mock `trusty-embedderd --stdio` (CI follow-up, PR #3560): the
         // FIRST invocation answers exactly one JSON-RPC request (the initial
@@ -732,22 +715,16 @@ exit 1
         // deterministic — the second respawn's probe is GUARANTEED to fail
         // (not merely likely to, on a fast enough box), so
         // `consecutive_failures` crosses `max_restarts=1` after exactly two
-        // detected crash-cycles: typically low single-digit milliseconds
+        // detected crash-cycles, typically in low single-digit milliseconds
         // (two process spawn/exec cycles, no backoff since
-        // `backoff_max_secs: 0`), but a REAL `fork`+`exec` twice over can
-        // still occasionally stall well past that under heavy contention —
-        // e.g. many other tests in this binary (or other processes on a
-        // shared dev/CI box) spawning children or saturating the scheduler
-        // at the same moment. Measured locally: ~1-in-8 runs took the full
-        // width of a 5s bound before this was widened. 20s is therefore pure
-        // headroom for that contention, not part of the mechanism that makes
-        // this test pass — unlike the earlier (non-deterministic-mock)
-        // version of this test, a bigger number here is not "fixing" a
-        // design race; it is a safety net around a deterministic,
-        // fast-converging design that occasionally has a slow real subprocess
-        // spawn. This is still a condition-based poll (returns the instant
-        // the flag flips), never a fixed sleep.
-        let gave_up = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // `backoff_max_secs: 0`). The 5s bound below is pure headroom for a
+        // slow CI process-spawn, not part of the mechanism that makes this
+        // test pass — unlike the previous version of this test, a bigger
+        // number here would not be "fixing" anything; it is a safety net
+        // around a deterministic, fast-converging design. This is still a
+        // condition-based poll (returns the instant the flag flips), never
+        // a fixed sleep.
+        let gave_up = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if handle.supervisor_gave_up() {
                     return;
@@ -759,10 +736,9 @@ exit 1
         .await;
         assert!(
             gave_up.is_ok(),
-            "the real supervisor never reached its give-up ceiling within 20s \
+            "the real supervisor never reached its give-up ceiling within 5s \
              of a persistent crash loop with max_restarts=1 — the deterministic \
-             marker-file mock should make this converge in milliseconds absent \
-             severe scheduler contention"
+             marker-file mock should make this converge in milliseconds"
         );
 
         // ── Phase 3: the latch must now be tripped ───────────────────────

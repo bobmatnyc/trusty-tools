@@ -416,6 +416,26 @@ enum RestartTrigger {
     /// `unhealthy_signal` fired (#1448/#1450) — reader died or the sidecar
     /// was judged wedged. The child may still be alive and must be killed.
     Unhealthy,
+    /// No live child was found in `child_slot` (CI follow-up, PR #3560): the
+    /// PREVIOUS iteration's respawn attempt itself failed after an
+    /// `Unhealthy`-triggered kill had already taken the old (dead) child out
+    /// of the slot — see that branch's `guard.take()`. Unlike a plain
+    /// process-exit crash, whose already-dead `Child` is left in the slot
+    /// and gets re-observed by `child.wait()` on the very next iteration
+    /// (that re-observation is what turns "the respawn itself failed" into
+    /// another counted failure), a wedge-kill leaves nothing behind to
+    /// re-observe. Before this fix, hitting an empty slot here was
+    /// unconditionally treated as "an explicit shutdown must have cleared
+    /// it" and the loop returned immediately — silently abandoning the
+    /// crash-restart path (and, critically, `should_give_up`/`gave_up_tx`)
+    /// without ever giving up. That reasoning no longer holds: neither the
+    /// cooperative shutdown path (`shutdown_rx`, handled inside the
+    /// `Some(child)` arm above) nor the self-consuming `EmbedderSupervisor::
+    /// shutdown()` (mutually exclusive with this loop even running) ever
+    /// clears `child_slot` to `None` while this loop is live — only the
+    /// `Unhealthy` branch's kill does. So an empty slot here can only mean
+    /// "the last respawn failed"; treat it as one more crash-cycle instead.
+    RespawnFailed,
 }
 
 // ── Wedge-restart-storm prevention (#1450 HIGH follow-up) ──────────────────
@@ -622,9 +642,17 @@ async fn supervision_loop(
                     }
                 }
                 None => {
-                    // Sidecar was explicitly shut down; stop supervising.
+                    // CI follow-up, PR #3560 (see `RestartTrigger::RespawnFailed`):
+                    // this is NOT necessarily an explicit shutdown — the
+                    // `Unhealthy` branch below can leave the slot empty
+                    // after a wedge-kill, and if the respawn attempt that
+                    // followed then failed, there is nothing left to
+                    // re-observe via `child.wait()` next time around (unlike
+                    // a plain process-exit crash, whose dead `Child` stays
+                    // in the slot). Treat an empty slot as another
+                    // crash-cycle rather than assuming shutdown.
                     child_pid_slot.store(0, AtomicOrdering::Release);
-                    return;
+                    RestartTrigger::RespawnFailed
                 }
             }
         };
@@ -673,6 +701,14 @@ async fn supervision_loop(
                 }
                 drop(guard);
                 child_pid_slot.store(0, AtomicOrdering::Release);
+            }
+            RestartTrigger::RespawnFailed => {
+                tracing::warn!(
+                    "EmbedderSupervisor: previous respawn attempt failed with no live \
+                     child left to observe — retrying (failure #{}/{})",
+                    consecutive_failures + 1,
+                    config.max_restarts,
+                );
             }
         }
 
