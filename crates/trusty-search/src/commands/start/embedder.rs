@@ -573,12 +573,17 @@ pub(super) fn resolve_python_idle_shutdown_secs(
 /// (`lazy_adapter_reports_resolved_provider`).
 /// The pair every embedder-construction path returns: the `Arc<dyn Embedder>`
 /// plus the optional sidecar PID slot (`Some` only for stdio-sidecar paths).
-type BuiltEmbedder = (
+pub(super) type BuiltEmbedder = (
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
 );
 
-fn build_ort_stdio_sidecar() -> Result<BuiltEmbedder> {
+/// `pub(super)` (epic #3524 slice 6, PR 4/5): the swap-back watchdog
+/// (`start::swap_back_watchdog`) reuses this exact construction on confirmed
+/// python-sidecar death — a fresh ort backend must be built exactly the same
+/// way the daemon's normal default/fallback paths build it, so there is only
+/// ever one code path that knows how to stand up the ort stdio sidecar.
+pub(super) fn build_ort_stdio_sidecar() -> Result<BuiltEmbedder> {
     use crate::service::embedder_supervisor::{
         locate_embedderd_binary, LazyEmbedderHandle, SupervisorConfig,
     };

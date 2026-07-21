@@ -199,32 +199,41 @@ impl SwitchableEmbedder {
     /// forever) while explicitly staying on the still-installed ort
     /// backend — i.e. `inner` must NOT change. [`Self::swap_to`] always
     /// replaces both fields together, so it is the wrong tool here.
-    /// What: reads the current [`ActiveBackend`], clones every field except
-    /// `bootstrap`, and stores a fresh snapshot with `bootstrap` replaced.
+    /// What: a compare-and-swap retry loop (`ArcSwap::rcu`) that reads the
+    /// CURRENT `active` snapshot, clones every field except `bootstrap`,
+    /// and attempts to install a fresh snapshot with `bootstrap` replaced —
+    /// retrying against whatever the latest value is if a concurrent writer
+    /// (another `set_bootstrap_state` call, or [`Self::swap_to`]) landed
+    /// first.
     ///
-    /// Concurrency note (code-critic LOW, epic #3524 slice 6 PR-3 review):
-    /// this is a non-atomic read-modify-write on `active` — `self.active()`
-    /// then `self.active.store(..)` — NOT a compare-and-swap. Two concurrent
-    /// callers (or a concurrent [`Self::swap_to`]) can race: the read in one
-    /// call may be stale by the time its store lands, silently clobbering
-    /// whatever the other caller/`swap_to` just wrote. Safe today ONLY
-    /// because the graceful-default orchestrator (PR-3) is the sole writer
-    /// of `bootstrap` transitions and never runs concurrently with itself
-    /// (one orchestrator task per daemon lifetime, swap-in only). PR-4
-    /// (swap-back-on-death) introduces a SECOND writer of `active` racing
-    /// this one — at that point this method must become a real CAS loop
-    /// (`ArcSwap::rcu` or a compare-and-swap retry) instead of a plain
-    /// load-then-store.
-    /// Test: `set_bootstrap_state_leaves_inner_untouched`.
+    /// Concurrency note (code-critic LOW, epic #3524 slice 6 PR-3 review;
+    /// fixed in PR-4/5): the PR-3 implementation was a non-atomic
+    /// read-modify-write — `self.active()` then `self.active.store(..)` —
+    /// NOT a compare-and-swap. It was safe only because the graceful-default
+    /// orchestrator (PR-3) was the sole writer of `bootstrap` transitions and
+    /// never ran concurrently with itself. PR-4's swap-back watchdog
+    /// introduces a SECOND writer of `active` (racing this one when the
+    /// watchdog's `swap_to` and a stray `set_bootstrap_state` call overlap),
+    /// so this is now a real `ArcSwap::rcu` CAS loop: `rcu` re-invokes the
+    /// closure against the LATEST value on every failed
+    /// `compare_and_swap`, so a `set_bootstrap_state` call that started
+    /// against a stale (pre-`swap_to`) snapshot can never resurrect that
+    /// stale `kind`/`provider`/`model` — it always retries against whatever
+    /// `swap_to` (or another `set_bootstrap_state` call) most recently
+    /// installed, and its own `bootstrap` write is layered on top rather than
+    /// lost.
+    /// Test: `set_bootstrap_state_leaves_inner_untouched`,
+    /// `set_bootstrap_state_cas_survives_concurrent_swap_to`.
     pub fn set_bootstrap_state(&self, new_state: BootstrapState) {
-        let current = self.active();
-        self.active.store(Arc::new(ActiveBackend {
-            kind: current.kind,
-            provider: current.provider,
-            model: current.model.clone(),
-            quantized: current.quantized,
-            bootstrap: new_state,
-        }));
+        self.active.rcu(|current| {
+            Arc::new(ActiveBackend {
+                kind: current.kind,
+                provider: current.provider,
+                model: current.model.clone(),
+                quantized: current.quantized,
+                bootstrap: new_state,
+            })
+        });
     }
 
     /// Snapshot the currently-installed backend itself.
@@ -475,5 +484,88 @@ mod tests {
 
         // The last swap_to call in the loop above installed Python.
         assert_eq!(sw.active().kind, BackendKind::Python);
+    }
+
+    /// Regression test for the code-critic LOW fixed in PR-4/5: a concurrent
+    /// [`SwitchableEmbedder::swap_to`] and a burst of
+    /// [`SwitchableEmbedder::set_bootstrap_state`] calls must never lose
+    /// either side's update — the CAS retry loop in `set_bootstrap_state`
+    /// (via `ArcSwap::rcu`) must re-read the LATEST `active` snapshot on
+    /// every retry rather than resurrecting a stale one captured before
+    /// `swap_to` ran.
+    ///
+    /// Why: the pre-fix implementation was a plain read-then-store. Had a
+    /// `set_bootstrap_state` call read `active` (kind=Ort) BEFORE `swap_to`
+    /// installed kind=Python, and then stored its own `Failed` write AFTER
+    /// `swap_to` returned, that store would silently overwrite `swap_to`'s
+    /// just-written `kind=Python` with a resurrected, stale `kind=Ort` —
+    /// exactly the lost-update race this test targets.
+    ///
+    /// What: spawns many tasks that each hammer `set_bootstrap_state(Failed)`
+    /// in a tight, yielding loop; while they are in flight, the main task
+    /// yields a few times (to let some iterations interleave with the
+    /// upcoming write) and then calls `swap_to` exactly once, installing
+    /// `kind=Python` with `bootstrap=NotApplicable`. The hammering tasks keep
+    /// running (and keep calling `set_bootstrap_state(Failed)`) for a while
+    /// longer after `swap_to` returns, so the very last `set_bootstrap_state`
+    /// call is guaranteed to run chronologically after `swap_to`. Asserts
+    /// both effects are observable in the final snapshot:
+    ///   - `kind == Python` (proves `swap_to`'s write was never resurrected
+    ///     back to the stale `Ort` a racing `set_bootstrap_state` caller may
+    ///     have read).
+    ///   - `bootstrap == Failed` (proves the last `set_bootstrap_state` call
+    ///     — which necessarily ran after `swap_to` — was correctly layered on
+    ///     top of the new `Python` snapshot rather than being lost).
+    /// Test: this test.
+    #[tokio::test]
+    async fn set_bootstrap_state_cas_survives_concurrent_swap_to() {
+        let fake_ort: Arc<dyn Embedder> = Arc::new(FakeEmbedder::new());
+        let sw = Arc::new(SwitchableEmbedder::new(
+            fake_ort,
+            test_active(BackendKind::Ort),
+        ));
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let sw = Arc::clone(&sw);
+            handles.push(tokio::spawn(async move {
+                for _ in 0..25 {
+                    sw.set_bootstrap_state(BootstrapState::Failed);
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+
+        // Let some hammering iterations run before the swap so at least one
+        // `set_bootstrap_state` call is racing against a still-Ort snapshot.
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        let fake_python: Arc<dyn Embedder> = Arc::new(FakeEmbedder::new());
+        let mut python_active = test_active(BackendKind::Python);
+        python_active.bootstrap = BootstrapState::NotApplicable;
+        sw.swap_to(fake_python, python_active);
+
+        // Let the hammering tasks keep running past the swap so the LAST
+        // set_bootstrap_state call is guaranteed to be chronologically after
+        // swap_to.
+        for h in handles {
+            h.await.expect("hammering task panicked");
+        }
+
+        let active = sw.active();
+        assert_eq!(
+            active.kind,
+            BackendKind::Python,
+            "swap_to's kind must never be resurrected by a racing, stale \
+             set_bootstrap_state write"
+        );
+        assert_eq!(
+            active.bootstrap,
+            BootstrapState::Failed,
+            "the last set_bootstrap_state call (necessarily after swap_to) \
+             must still be observable, layered on top of the new backend"
+        );
     }
 }

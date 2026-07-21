@@ -7,6 +7,10 @@
 //!   - `embedder` — embedder construction and adapter types
 //!     (`build_embedder`, `UdsEmbedderAdapter`, `LazySlotEmbedderAdapter`,
 //!     `tune_batch_size_for_provider`)
+//!   - `graceful_bootstrap` — background ort→python hot-swap orchestrator
+//!     (epic #3524 slice 6, PR 3/5)
+//!   - `swap_back_watchdog` — background python→ort swap-back watchdog on
+//!     confirmed sidecar death (epic #3524 slice 6, PR 4/5)
 //!   - `daemon`   — main boot sequence (`handle_start`)
 //!
 //! What: re-exports `handle_start` (the public CLI entry point) and the
@@ -21,6 +25,7 @@ mod embedder;
 mod embedder_fallback;
 mod graceful_bootstrap;
 mod restore;
+mod swap_back_watchdog;
 
 #[cfg(test)]
 mod tests;

@@ -9,6 +9,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Swap-BACK watchdog: python/MPS → ort on confirmed sidecar death (epic
+  #3524 slice 6, PR 4/5) — ships DEFAULT OFF (unchanged behind
+  `TRUSTY_PY_DEFAULT`).** PR-3 hot-swaps ort→python once the sidecar proves
+  itself, then stops watching. This PR adds the other half: once hot-swapped,
+  a new detached watchdog task (`commands/start/swap_back_watchdog.rs`)
+  watches the python sidecar's pid slot and the existing
+  `EmbedderStallTracker`, and swaps `SwitchableEmbedder` back to a fresh ort
+  backend if the python sidecar is ever confirmed dead beyond recovery —
+  search never degrades permanently, with no daemon restart required.
+  - **The swap-back predicate is deliberately conservative**: it fires only
+    when the active backend is python, its pid slot reads `0` (no live
+    child), AND at least one embed attempt has failed since the last success
+    (`EmbedderStallTracker::recent_timeout_count() > 0`), confirmed across 2
+    consecutive polling ticks (15s apart). Bare pid-zero is NOT the trigger —
+    it also occurs on ordinary idle-shutdown (`LazyEmbedderHandle`'s own idle
+    watchdog), whose respawn resets `recent_timeout_count` to `0` on its next
+    successful embed, keeping the predicate false. Only a genuinely dead
+    sidecar (the underlying `EmbedderSupervisor` exhausted
+    `TRUSTY_EMBEDDERD_MAX_RESTARTS`) keeps failing every subsequent embed
+    attempt, since `LazyEmbedderHandle`'s own spawn gate is never reset in
+    that case.
+  - On confirmed death: builds a fresh ort backend via the same
+    `build_ort_stdio_sidecar()` the daemon's default path uses, hot-swaps
+    `SwitchableEmbedder` to it (`ActiveBackend { kind: Ort, bootstrap:
+    FellBackToOrt }`), reinstalls the ort pid slot, and cleanly shuts down the
+    dead python handle via `LazyEmbedderHandle::shutdown()` (no orphan). Logs
+    a loud `warn`: "python/MPS sidecar unrecoverable — fell back to ort;
+    search unaffected". `/health`'s `embedder_bootstrap` already reports
+    `"fell_back_to_ort"` for this state (wired in PR-2/PR-3).
+  - **CAS upgrade (code-critic LOW follow-up from PR-3 review)**:
+    `SwitchableEmbedder::set_bootstrap_state` was a non-atomic
+    read-modify-write on `active`, safe only because PR-3's orchestrator was
+    the sole writer. PR-4 introduces a second writer (the watchdog's own
+    `swap_to`), so `set_bootstrap_state` now uses `ArcSwap::rcu` — a real
+    compare-and-swap retry loop — so a concurrent `swap_to` and
+    `set_bootstrap_state` can never lose either side's update.
+  - Bounded and quiet: polls every 15s (not a tight loop), and stops
+    permanently once it either acts (swaps back) or notices the active
+    backend already moved away from python — never watches a backend it no
+    longer owns.
+  - New file: `commands/start/swap_back_watchdog.rs`. `drive_bootstrap`
+    (`graceful_bootstrap.rs`) now returns the python adapter's teardown
+    handle on success so `run_graceful_python_bootstrap` can hand it to the
+    watchdog — a pure return-type addition; no existing call site needed to
+    change.
+
 - **Graceful Apple-Silicon default gating + background bootstrap→hot-swap
   orchestrator (epic #3524 slice 6, PR 3/5) — ships DEFAULT OFF.** On Apple
   Silicon, once `TRUSTY_PY_DEFAULT` is enabled, `trusty-search start` now
