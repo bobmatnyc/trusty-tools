@@ -45,6 +45,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   observe the supervisor's actual give-up decision instead of reconstructing
   an independent, faster-firing proxy at the request layer.
 
+### Fixed
+
+- **`EmbedderSupervisor` could silently stop supervising, and never give up,
+  after a wedge-triggered crash whose respawn attempt then failed** (CI
+  follow-up, PR [#3560](https://github.com/bobmatnyc/trusty-tools/pull/3560)):
+  `supervision_loop`'s top-of-loop check treated an empty `child_slot` as
+  unconditional proof of an explicit cooperative shutdown and returned
+  immediately. That is only true for the shutdown path — the `Unhealthy`
+  (wedge-kill) branch also empties `child_slot` before attempting a respawn,
+  and if that respawn itself failed, the next iteration saw the same empty
+  slot and silently exited without ever incrementing `consecutive_failures`
+  or reaching `should_give_up`/`gave_up_tx`. A daemon could end up with a
+  dead sidecar, no supervision, and no fallback signal ever firing. Added
+  `RestartTrigger::RespawnFailed` so an empty slot with no shutdown in flight
+  is now treated as one more crash-cycle instead of a silent early return.
+
 ## [0.23.7] — 2026-07-21
 
 Publishes the `catchup::{pause, generate_catchup_json}` API to crates.io.
