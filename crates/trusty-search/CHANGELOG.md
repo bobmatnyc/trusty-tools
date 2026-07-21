@@ -5,16 +5,15 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [0.37.1] — 2026-07-21
+## [0.37.2] — 2026-07-21
 
-### Fixed
-
-- **Regenerated the `ui-dist` bundle** (#3590, `b76e08ea`): the published
-  0.37.0 tarball shipped a stale prebuilt dashboard bundle that predated the
-  Foundry v2 dark-mode migration, so the installed dashboard was missing the
-  dark-mode feature entirely. The bundle under `ui-dist/` is rebuilt from the
-  current `ui/` source so a fresh install/upgrade gets the dark-themed
-  dashboard. No Rust source changes.
+Patch release closing unpublished source drift under the already-published
+0.37.1 (issue #3366 defect class). 0.37.1 was published to crates.io (from
+`831103dd`) containing only the `ui-dist` regeneration below; every other
+entry in this section — the #3545 CLI daemon-discovery fix and the epic
+#3524 slice 5/6 embedder work — landed on `main` in later commits that
+never bumped the version, so none of it is in the live 0.37.1 tarball. This
+release carries all of it.
 
 ### Fixed
 
@@ -240,6 +239,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   over the build-features prediction when one is available — fixes the
   sidecar reporting `CoreML(ANE)` while torch actually selected `mps` (issue
   #3493 P1).
+
+## [0.37.1] — 2026-07-21
+
+### Fixed
+
+- **Regenerated the `ui-dist` bundle** (#3590, `b76e08ea`): the published
+  0.37.0 tarball shipped a stale prebuilt dashboard bundle that predated the
+  Foundry v2 dark-mode migration, so the installed dashboard was missing the
+  dark-mode feature entirely. The bundle under `ui-dist/` is rebuilt from the
+  current `ui/` source so a fresh install/upgrade gets the dark-themed
+  dashboard. No Rust source changes.
 
 ## [0.37.0] — 2026-07-20
 
