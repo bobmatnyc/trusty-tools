@@ -26,9 +26,21 @@
 //! injected keystrokes instead keeps the loop polling (and, if the modal never
 //! clears, correctly reports `FailedTimeout` instead of the #2361-review-flagged
 //! silent-discard bug).
+//! [`SessionManager::pane_readiness`] (#3591) factors the `runtime_ready` +
+//! `pane_shows_blocking_modal` conjunction out of this module's poll loop into
+//! one [`PaneReadiness`]-returning probe. `SessionManager::send_input`
+//! (`super::manager`, also #3591) reuses this module's modal-detection
+//! machinery directly (`pane_shows_blocking_modal` +
+//! `capture_readiness_pane`) as a fail-fast gate, but deliberately does NOT
+//! reuse the `runtime_ready` half — see [`PaneReadiness`]'s doc for why (in
+//! short: `runtime_ready` is `false` by construction for the fallback
+//! no-tmux driver and every hermetic test built on it, which made it too
+//! blunt an instrument outside this module's own bounded, just-spawned poll
+//! loop).
 //! Test: `should_inject_*` (pure gate), `pane_shows_blocking_modal_*` (pure
-//! marker match), and `inject_when_ready_*` (delivery + status transitions via
-//! the `FakeTmuxDriver` seam) in this module's `tests` submodule.
+//! marker match), `pane_readiness_*` (the poll loop's probe), and
+//! `inject_when_ready_*` (delivery + status transitions via the
+//! `FakeTmuxDriver` seam) in this module's `tests` submodule.
 
 use std::time::Duration;
 
@@ -101,6 +113,50 @@ const BLOCKING_MODAL_MARKERS: &[&str] = &[
 /// `pane_shows_blocking_modal_false_for_normal_prompt`.
 pub fn pane_shows_blocking_modal(pane_text: &str) -> bool {
     BLOCKING_MODAL_MARKERS.iter().any(|m| pane_text.contains(m))
+}
+
+/// Outcome of a one-shot pane-readiness probe used by
+/// [`SessionManager::inject_task_when_ready`]'s bounded poll loop (issue #3591
+/// factored this out of the loop body).
+///
+/// Why NOT also used by `send_input`'s gate (issue #3591 design note): the
+/// natural instinct is to reuse this wholesale for `send_input` too, but
+/// `runtime_ready` looks for a live `claude` PID via `ps`, which is `false`
+/// by definition for [`super::real_tmux::FakeNoopTmuxDriver`] (the
+/// documented "tmux is not installed" fallback — its `list_sessions` always
+/// returns empty, so `session_exists`/`runtime_ready`'s default impls can
+/// never report `true`) and for every hermetic test built on
+/// `DaemonState::with_root_isolated_managed`, which wires that same fake
+/// driver specifically so handler/proxy/connector tests don't need a real
+/// tmux. Gating `send_input` on `runtime_ready` was tried and reverted after
+/// it broke three such tests
+/// (`connectors::tm::tests::create_session_full_lifecycle`,
+/// `daemon::managed_routes::proxy::tests::proxy_message_route_focused_sends_unfocused_no_focus`,
+/// `daemon::mcp_proxy::tests::mcp_proxy_focus_message_summary_unfocus_round_trip`)
+/// — proof that a hard `runtime_ready` gate has too high a false-positive
+/// rate outside the narrow, bounded, just-spawned context
+/// `inject_task_when_ready` uses it in. `send_input`'s gate instead reuses
+/// only the modal-detection half directly (see
+/// `super::manager::SessionManager::send_input`), and relies on its OWN
+/// state guard (refusing `Provisioning`/`Errored`) for the shell-execution
+/// risk this issue is about.
+/// What: `Ready` — the runtime PID is up AND the captured pane tail shows no
+/// known blocking-modal marker. `RuntimeNotReady` — the PID has not appeared
+/// yet (still booting), is definitively absent (crashed out to a bare
+/// shell), or the driver has no real signal to offer (see above).
+/// `BlockingModal` — the PID is up but the pane tail matches a
+/// [`BLOCKING_MODAL_MARKERS`] entry.
+/// Test: `pane_readiness_ready_when_pid_up_and_no_modal`,
+/// `pane_readiness_not_ready_when_pid_absent`,
+/// `pane_readiness_blocking_modal_when_pid_up_but_modal_shown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneReadiness {
+    /// Runtime PID present, no known blocking modal in the captured tail.
+    Ready,
+    /// The runtime PID has not (yet, or ever) appeared.
+    RuntimeNotReady,
+    /// PID present but the pane tail matches a known first-run/trust-dialog marker.
+    BlockingModal,
 }
 
 /// Pure gate: should the spawned session's task be auto-injected into its pane?
@@ -220,11 +276,7 @@ impl SessionManager {
                     .await;
                 return Ok(false);
             }
-            if self.tmux.runtime_ready(&name)
-                && !pane_shows_blocking_modal(
-                    &self.capture_readiness_pane(&name, pane_id.as_deref()),
-                )
-            {
+            if self.pane_readiness(&name, pane_id.as_deref()) == PaneReadiness::Ready {
                 ready = true;
                 break;
             }
@@ -277,17 +329,47 @@ impl SessionManager {
     /// failure must never itself look like "modal detected"; it is treated as
     /// "nothing to flag," leaving the PID-presence check as the sole
     /// readiness signal for that attempt (the loop simply retries).
+    /// `pub(super)` (#3591): also called directly by [`Self::send_input`]'s
+    /// modal-only gate in `super::manager` — see that method's doc for why it
+    /// reuses this capture but NOT [`Self::pane_readiness`] wholesale.
     /// What: `capture_pane(name, pane_id, MODAL_PROBE_LINES)` when `pane_id`
     /// is `Some`, else `capture(name, MODAL_PROBE_LINES)`.
     /// Test: exercised via `inject_when_ready_waits_out_blocking_modal_then_succeeds`
     /// (pane-scoped) and the session-scoped fallback is covered by every other
-    /// `inject_when_ready_*` test (no `pane_id` seeded).
-    fn capture_readiness_pane(&self, name: &str, pane_id: Option<&str>) -> String {
+    /// `inject_when_ready_*` test (no `pane_id` seeded); `send_input`'s reuse
+    /// is covered by `manager_send_input_rejected_when_pane_shows_blocking_modal`.
+    pub(super) fn capture_readiness_pane(&self, name: &str, pane_id: Option<&str>) -> String {
         match pane_id {
             Some(p) => self.tmux.capture_pane(name, p, MODAL_PROBE_LINES),
             None => self.tmux.capture(name, MODAL_PROBE_LINES),
         }
         .unwrap_or_default()
+    }
+
+    /// One-shot readiness probe used by [`Self::inject_task_when_ready`]'s
+    /// bounded poll loop (issue #3591 factored this out of the loop body; see
+    /// [`PaneReadiness`]'s doc for why `send_input` deliberately does NOT
+    /// reuse this wholesale).
+    ///
+    /// Why: split out so the loop reads as one clear condition instead of the
+    /// `runtime_ready(...) && !pane_shows_blocking_modal(...)` conjunction
+    /// inline.
+    /// What: short-circuits to [`PaneReadiness::RuntimeNotReady`] without
+    /// paying for a pane capture when `runtime_ready` is false; otherwise
+    /// inspects the captured tail (pane-scoped via
+    /// [`Self::capture_readiness_pane`] when `pane_id` is known — #2545
+    /// convention) for a [`BLOCKING_MODAL_MARKERS`] hit.
+    /// Test: `pane_readiness_ready_when_pid_up_and_no_modal`,
+    /// `pane_readiness_not_ready_when_pid_absent`,
+    /// `pane_readiness_blocking_modal_when_pid_up_but_modal_shown`.
+    pub(super) fn pane_readiness(&self, name: &str, pane_id: Option<&str>) -> PaneReadiness {
+        if !self.tmux.runtime_ready(name) {
+            return PaneReadiness::RuntimeNotReady;
+        }
+        if pane_shows_blocking_modal(&self.capture_readiness_pane(name, pane_id)) {
+            return PaneReadiness::BlockingModal;
+        }
+        PaneReadiness::Ready
     }
 
     /// Persist an [`InjectionStatus`] transition on the session record (#2364).
@@ -319,6 +401,50 @@ impl SessionManager {
         if let Err(e) = self.store.write().await.upsert(record).await {
             warn!(id = %id, "set_injection_status({status}): persist failed: {e}");
         }
+    }
+
+    /// Refuse [`Self::send_input`] (`super::manager`) for a session that is
+    /// not safe to type into (issue #3591).
+    ///
+    /// Why: lives beside the readiness/modal machinery it reuses (and out of
+    /// `manager.rs`, which is at its 500-SLOC production cap) rather than a
+    /// second copy inline in `send_input` — see [`PaneReadiness`]'s doc for
+    /// why this reuses only the modal half, not the `runtime_ready` half.
+    /// What: refuses `Provisioning`/`Errored` outright (the shell-execution
+    /// risk this issue is about); for `RuntimeKind::ClaudeCode` also refuses
+    /// a pane showing a [`BLOCKING_MODAL_MARKERS`] hit. Fail-fast: a single
+    /// probe, no retry loop — see `send_input`'s doc for the block-vs-fail-fast
+    /// rationale.
+    /// Test: `manager_send_input_rejected_for_provisioning_and_errored`,
+    /// `manager_send_input_rejected_when_pane_shows_blocking_modal`,
+    /// `manager_send_input_skips_modal_probe_for_tcode` (in the sibling
+    /// `send_input_gate_tests.rs`).
+    pub(super) async fn check_send_input_ready(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<(), ManagedError> {
+        let record = self.get(id).await?;
+        if matches!(
+            record.state,
+            ManagedSessionState::Provisioning | ManagedSessionState::Errored
+        ) {
+            return Err(ManagedError::TmuxUnavailable(format!(
+                "session {} is {}; cannot inject input",
+                record.tmux_name, record.state
+            )));
+        }
+        if record.runtime == RuntimeKind::ClaudeCode
+            && pane_shows_blocking_modal(
+                &self.capture_readiness_pane(&record.tmux_name, record.pane_id.as_deref()),
+            )
+        {
+            return Err(ManagedError::TmuxUnavailable(format!(
+                "session {} is showing a blocking onboarding/trust modal; \
+                 cannot inject input until it is dismissed",
+                record.tmux_name
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -400,6 +526,17 @@ mod tests {
             .create("wire up the widget".into(), None, None, None, None, None)
             .await
             .expect("create");
+        // `spawn_task_injection` only calls `inject_task_when_ready` once
+        // `should_inject_task` has already confirmed the record reached
+        // `Active` (see `lifecycle.rs::spawn_task_injection`) — mirror that
+        // precondition here rather than leaving the record `Provisioning`
+        // (#3591: `send_input`'s new state guard now refuses `Provisioning`).
+        {
+            let mut store = mgr.store.write().await;
+            let mut r = store.get(&record.id).await.unwrap();
+            r.state = ManagedSessionState::Active;
+            store.upsert(r).await.unwrap();
+        }
 
         let injected = mgr
             .inject_task_when_ready(&record.id, "wire up the widget")
@@ -470,6 +607,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pane_readiness_ready_when_pid_up_and_no_modal() {
+        // #3591: the happy path both callers (poll loop and send_input's
+        // fail-fast gate) rely on — PID up (FakeTmuxDriver's default
+        // runtime_ready == session_exists, true right after create) and no
+        // capture_responses seeded (empty tail, no marker match).
+        let dir = TempDir::new().unwrap();
+        let (mgr, _fake) = make_manager(&dir).await;
+        let record = mgr
+            .create("wire up SSO".into(), None, None, None, None, None)
+            .await
+            .expect("create");
+
+        assert_eq!(
+            mgr.pane_readiness(&record.tmux_name, record.pane_id.as_deref()),
+            PaneReadiness::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_readiness_not_ready_when_pid_absent() {
+        // #3591: a pane with no live runtime PID (still booting, or crashed
+        // out — modeled here via kill_session, which drops the fake's
+        // session_exists/runtime_ready signal) must report RuntimeNotReady,
+        // and must NOT pay for a modal-marker capture in that case.
+        let dir = TempDir::new().unwrap();
+        let (mgr, _fake) = make_manager(&dir).await;
+        let record = mgr
+            .create("wire up SSO".into(), None, None, None, None, None)
+            .await
+            .expect("create");
+        mgr.tmux_driver()
+            .kill_session(&record.tmux_name)
+            .expect("kill_session");
+
+        assert_eq!(
+            mgr.pane_readiness(&record.tmux_name, record.pane_id.as_deref()),
+            PaneReadiness::RuntimeNotReady
+        );
+    }
+
+    #[tokio::test]
+    async fn pane_readiness_blocking_modal_when_pid_up_but_modal_shown() {
+        // #3591: PID present but the captured tail matches a known
+        // onboarding/trust-dialog marker — must report BlockingModal, not Ready.
+        let dir = TempDir::new().unwrap();
+        let (mgr, fake) = make_manager(&dir).await;
+        let record = mgr
+            .create("wire up SSO".into(), None, None, None, None, None)
+            .await
+            .expect("create");
+        fake.capture_responses.lock().unwrap().insert(
+            record.tmux_name.clone(),
+            "Do you trust the files in this folder?".into(),
+        );
+
+        assert_eq!(
+            mgr.pane_readiness(&record.tmux_name, record.pane_id.as_deref()),
+            PaneReadiness::BlockingModal
+        );
+    }
+
+    #[tokio::test]
     async fn inject_when_ready_marks_success_status() {
         // #2364a: a successful delivery must leave the record's
         // injection_status as Success, not just return Ok(true).
@@ -479,6 +678,14 @@ mod tests {
             .create("ship the feature".into(), None, None, None, None, None)
             .await
             .expect("create");
+        // See the matching comment in `inject_when_ready_sends_task_via_send_seam`:
+        // mirror `spawn_task_injection`'s Active precondition (#3591).
+        {
+            let mut store = mgr.store.write().await;
+            let mut r = store.get(&record.id).await.unwrap();
+            r.state = ManagedSessionState::Active;
+            store.upsert(r).await.unwrap();
+        }
 
         let injected = mgr
             .inject_task_when_ready(&record.id, "ship the feature")

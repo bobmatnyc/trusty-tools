@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
-use crate::session_manager::record::ManagedSessionId;
+use crate::session_manager::record::{ManagedSessionId, ManagedSessionState};
 
 /// Decode an axum `impl IntoResponse` into its JSON body.
 ///
@@ -40,6 +40,12 @@ async fn decode_response(resp: impl axum::response::IntoResponse) -> serde_json:
 /// seed keeps each test focused on the proxy behavior, not setup.
 /// What: returns the state and the seeded session's friendly name (`tmux_name`),
 /// which the tests resolve by name (proving the fuzzy-name path, not just id).
+/// The record is marked `Active` right after creation (`create_with_id`
+/// otherwise leaves it `Provisioning`, #3591): this fixture represents a
+/// normal working session a caller focuses and messages, and
+/// `SessionManager::send_input`'s state guard (#3591) now correctly refuses
+/// `Provisioning` — a real bug in the proxy target, not something these
+/// route-wiring tests are exercising.
 async fn seeded_state() -> (Arc<DaemonState>, String) {
     let root = tempfile::tempdir().unwrap().keep();
     let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
@@ -59,6 +65,12 @@ async fn seeded_state() -> (Arc<DaemonState>, String) {
         )
         .await
         .expect("seed session");
+    {
+        let mut store = mgr.store.write().await;
+        let mut r = store.get(&record.id).await.unwrap();
+        r.state = ManagedSessionState::Active;
+        store.upsert(r).await.unwrap();
+    }
     (state, record.tmux_name)
 }
 

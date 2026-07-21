@@ -360,14 +360,63 @@ impl SessionManager {
     // under the 500-SLOC cap (the same pattern `reactivate.rs`/`reconcile.rs`
     // already use for `mark_reactivated`/`reconcile_on_boot`).
 
-    /// Inject text into a live session's tmux pane (Enter-submit variant).
+    /// Inject text into a live session's tmux pane (Enter-submit variant),
+    /// state- and modal-gated (issue #3591).
     ///
-    /// Why: `POST /api/v1/sessions/managed/{id}/send` lets the operator or
-    /// automation feed text into a running session without attaching.
-    /// What: delegates to `inject(id, text, Submit::Enter)` so all input-path
-    /// guard logic lives in one place.
-    /// Test: `manager_send_input`.
+    /// Why: `POST /api/v1/sessions/managed/{id}/send`, `tm sessions send`, and
+    /// the MCP `session_send` tool all let the operator or automation feed
+    /// arbitrary text into a running session without attaching. Before #3591
+    /// the only guard was [`Self::inject`]'s Stopped/Decommissioned check —
+    /// `Provisioning` (pane exists, Claude Code hasn't finished booting) and
+    /// `Errored` (runtime crashed back to a bare shell) were NOT refused, so
+    /// `Submit::Enter`'s literal-then-Enter dispatch would type the message
+    /// into a bare shell and press Enter, **executing it as a shell command**.
+    /// [`super::task_inject::SessionManager::check_send_input_ready`] (kept
+    /// in that sibling file, alongside the readiness/modal machinery it
+    /// reuses, to stay under THIS file's 500-SLOC production cap) now runs
+    /// first: a state guard refusing `Provisioning`/`Errored` (closes the
+    /// shell-execution risk outright — the priority fix), and — for
+    /// `RuntimeKind::ClaudeCode` sessions only — the SAME modal-detection
+    /// machinery [`Self::inject_task_when_ready`] uses for spawn-time
+    /// `--task` delivery, catching an `Active` session whose pane is showing
+    /// a first-run onboarding/trust modal that would otherwise silently
+    /// swallow the send. Deliberately NOT reused: `task_inject`'s
+    /// `runtime_ready`-based half of [`super::task_inject::PaneReadiness`]
+    /// (the "is the `claude` PID up" check) — it was tried and reverted
+    /// after it broke three hermetic tests built on
+    /// `DaemonState::with_root_isolated_managed` (whose `FakeNoopTmuxDriver`
+    /// makes `runtime_ready` `false` by construction), proof it is too blunt
+    /// an instrument outside the narrow, bounded, just-spawned poll loop
+    /// `inject_task_when_ready` uses it in. See `PaneReadiness`'s doc for the
+    /// full account. `RuntimeKind::Tcode` sessions skip the modal probe
+    /// entirely (mirrors `should_inject_task`'s existing ClaudeCode-only
+    /// scoping): its markers are Claude-Code-specific onboarding copy.
+    /// What: fail-fast, not block-and-poll — unlike spawn-time injection
+    /// (which owns the session and can afford to wait out a first-run modal),
+    /// `send_input` is called from an interactive CLI and from MCP tools
+    /// where a caller blocked for up to ~60s on someone else's pane is bad
+    /// UX; a caller that gets an immediate, precise "still provisioning" or
+    /// "showing a modal" error can decide to retry itself. This also
+    /// strengthens what a caller gets back on success: previously
+    /// `sent: true` (the MCP `session_send` wrapper,
+    /// `crates/trusty-mpm/src/daemon/mcp_session.rs`) meant only "the two
+    /// tmux subprocesses exited 0"; now reaching that path additionally means
+    /// the pane was NOT `Provisioning`/`Errored` and (for ClaudeCode) showed
+    /// no known blocking modal immediately beforehand — the existing field's
+    /// meaning is strengthened for free, no wire format change needed (#3168
+    /// scopes the full delivery-ack layer). Delegates the actual dispatch to
+    /// `inject(id, text, Submit::Enter)` so the pane-alive check and
+    /// `send_line` dispatch stay the single source of truth for the wire
+    /// mechanics (unchanged — `Submit::Enter`'s literal-then-Enter dispatch
+    /// is issue #1461's deliberate, unit-tested behavior).
+    /// Test: `manager_send_input`,
+    /// `manager_send_input_rejected_for_stopped_and_decommissioned`,
+    /// `manager_send_input_rejected_for_provisioning_and_errored`,
+    /// `manager_send_input_rejected_when_pane_shows_blocking_modal`,
+    /// `manager_send_input_skips_modal_probe_for_tcode` (the last three in
+    /// the sibling `send_input_gate_tests.rs`).
     pub async fn send_input(&self, id: &ManagedSessionId, text: &str) -> Result<(), ManagedError> {
+        self.check_send_input_ready(id).await?;
         self.inject(id, text, Submit::Enter).await
     }
 

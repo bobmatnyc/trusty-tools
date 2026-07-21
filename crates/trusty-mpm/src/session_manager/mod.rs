@@ -94,6 +94,9 @@ mod injection_status_tests;
 #[cfg(test)]
 mod slots_tests;
 
+#[cfg(test)]
+mod send_input_gate_tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]

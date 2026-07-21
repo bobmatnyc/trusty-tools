@@ -753,7 +753,17 @@ async fn tcode_session_spawns_and_accepts_commands() {
         &[],
     );
 
-    // Issue a command into the session's pane (operator interaction).
+    // `create_with_id` leaves the record `Provisioning`; `send_input`'s state
+    // guard (#3591) now correctly refuses that, so mark it `Active` (mirrors
+    // what the real spawn handler does once the adapter above has launched)
+    // before issuing a command into the session's pane (operator interaction).
+    mgr.set_workspace(
+        &record.id,
+        std::path::PathBuf::from("/tmp/tcode-ws"),
+        trusty_mpm::session_manager::ManagedSessionState::Active,
+    )
+    .await
+    .expect("mark session Active");
     mgr.send_input(&record.id, "status")
         .await
         .expect("send_input");

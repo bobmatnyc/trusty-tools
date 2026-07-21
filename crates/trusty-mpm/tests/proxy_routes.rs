@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use trusty_mpm::daemon::{api, state::DaemonState};
 use trusty_mpm::runtime::RuntimeKind;
-use trusty_mpm::session_manager::ManagedSessionId;
+use trusty_mpm::session_manager::{ManagedSessionId, ManagedSessionState};
 
 /// Spawn the real daemon router on a loopback port with one seeded session.
 ///
@@ -29,7 +29,11 @@ use trusty_mpm::session_manager::ManagedSessionId;
 /// What: builds a hermetic `DaemonState::with_root_isolated_managed` (no real
 /// tmux — `FakeNoopTmuxDriver`), seeds one managed session, serves
 /// `api::router` on an ephemeral `127.0.0.1` port, and returns the base URL plus
-/// the seeded session's friendly name.
+/// the seeded session's friendly name. The record is marked `Active` via the
+/// public `set_workspace` transition (`create_with_id` otherwise leaves it
+/// `Provisioning`, #3591): this fixture represents a normal working session a
+/// caller focuses and messages, and `SessionManager::send_input`'s state
+/// guard (#3591) now correctly refuses `Provisioning`.
 async fn spawn_daemon_with_session() -> (String, String) {
     let root = tempfile::tempdir().unwrap().keep();
     let state = Arc::new(DaemonState::with_root_isolated_managed(root).await);
@@ -49,6 +53,13 @@ async fn spawn_daemon_with_session() -> (String, String) {
         )
         .await
         .expect("seed session");
+    mgr.set_workspace(
+        &record.id,
+        std::env::temp_dir(),
+        ManagedSessionState::Active,
+    )
+    .await
+    .expect("mark seeded session Active");
 
     let router = api::router(Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
