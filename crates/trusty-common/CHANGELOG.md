@@ -36,6 +36,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   issue #3493 P1). `StdioEmbedderClient` overrides it, capturing the optional
   `device` field the Python/MPS sidecar now echoes in its response frames;
   every other transport keeps the `None` default unchanged.
+- **`SupervisorHandle::has_given_up()`** — a new non-blocking readback of
+  whether `EmbedderSupervisor`'s supervision loop has permanently given up
+  respawning its sidecar (crossed `max_restarts` on either the crash-storm or
+  wedge-storm counter — see `should_give_up`), exposed via a second one-way
+  `watch` channel alongside the existing shutdown signal (PR #3560 review,
+  HIGH fix). Lets a caller (trusty-search's `FallbackEmbedderAdapter`)
+  observe the supervisor's actual give-up decision instead of reconstructing
+  an independent, faster-firing proxy at the request layer.
 
 ## [0.23.7] — 2026-07-21
 
