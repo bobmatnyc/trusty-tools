@@ -465,6 +465,24 @@ pub async fn run_pm_task_with_history(
 /// `registry.filter_tools_for_user` computation
 /// `ctrl::pm_task::dispatch::persona::run_pm_task_with_persona` already uses
 /// for the same property (see `persona.rs`'s `allowed_by_tier`).
+///
+/// Reconciliation with #3576 (`fix(trusty-agents): enforce RBAC tier and
+/// agent-declared tool scopes at dispatch`, merged to main as this fix
+/// landed): #3576 closed two DIFFERENT enforcement gaps — `PythonToolPlugin`
+/// never overriding `restricted_tiers()` (#3236), and agent-declared
+/// `[tools].scopes` never being consulted inside
+/// `persona::filter_persona_tool_names` (#3208). Neither touches
+/// `dispatch_gated`, `dispatch_for_user`, or this (`run_pm_task_with_history`)
+/// code path — #3208's fix is entirely local to `persona.rs`'s OWN filter
+/// function, which this file does not call. So this fix is NOT redundant
+/// with, nor superseded by, #3576: it remains the ONLY RBAC-tier
+/// enforcement on the `run_pm_task_with_history` (ctrl/Slack/Telegram/API)
+/// dispatch path, complementary to (not overlapping with) #3576's
+/// persona-path and `PythonToolPlugin` fixes. `dispatch_task` also needs no
+/// `ToolExecutor::scope()` override for #3208's purposes — it is a native
+/// in-process tool (like `delegate_to_agent`/`run_bash`), gated entirely by
+/// name/glob allowlist + RBAC tier, exactly the category #3576's own scope
+/// doc comment says is unaffected by scope-pattern gating.
 /// What: `None` (no `UserIdentity` — the local REPL/CLI path never sets
 /// `overrides.user`) returns `None`, meaning NO filtering: every registered
 /// tool stays callable, preserving the existing unauthenticated-CLI
