@@ -529,16 +529,34 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p <crate>
 cargo check --workspace
 
-# 5. If UI changes (trusty-search, trusty-memory), check for stale artifacts
+# 5. If UI changes (trusty-search, trusty-memory, trusty-analyze, trusty-console),
+#    check for stale artifacts AND stale bundle content (issue #3568)
 git status  # Look for node_modules/ or pnpm-workspace.yaml
 git clean -fdX  # If present
+#    Freshness (not just presence) matters: verify the COMMITTED ui-dist/ /
+#    ui/dist/ bundle actually reflects current ui/src — cargo publish cannot
+#    catch this for you (see step 7 note). Rebuild and diff:
+#      cd crates/<crate>/ui && pnpm install --frozen-lockfile && pnpm run build
+#      # trusty-search only: also copy ui/dist/* into ../ui-dist/ (or `make release-prep`)
+#    If the rebuild differs from what's committed, commit the regenerated
+#    bundle before continuing. `.github/workflows/release.yml`'s
+#    ui-freshness-check job does this same check automatically once you tag
+#    (step 9) — but catching it here, before tagging, is cheaper.
 
 # 6. Commit version bump
 git add -A
 git commit -m "chore: bump <crate> to v<version>"
 
 # 7. Dry run (essential — catches dependency issues early)
-cargo publish --dry-run -p <crate>
+# UI-embedding crates (trusty-search, trusty-memory, trusty-analyze,
+# trusty-console) REQUIRE SKIP_UI_BUILD=1 here — and this is not optional for
+# trusty-search/trusty-console specifically: their Cargo.toml `include` list
+# ships only the pre-built bundle, never `ui/src` (verified via `cargo
+# package --list`), so cargo has nothing to rebuild from during packaging
+# either way. This dry-run therefore verifies the RUST package publishes
+# cleanly — it provides NO signal on UI bundle freshness (that's step 5 /
+# ui-freshness-check, a structurally separate concern).
+SKIP_UI_BUILD=1 cargo publish --dry-run -p <crate>
 
 # 8. If dry-run fails:
 #    - Read the error (usually "dependency X version Y not found on crates.io")
@@ -552,8 +570,9 @@ git tag <crate>-v<version>
 # 10. Push tag to origin
 git push -u origin <crate>-v<version>
 
-# 11. Publish to crates.io
-cargo publish -p <crate>
+# 11. Publish to crates.io (same SKIP_UI_BUILD=1 requirement as step 7, for
+#     the same reason)
+SKIP_UI_BUILD=1 cargo publish -p <crate>
 
 # 12. Verification step
 sleep 100

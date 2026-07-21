@@ -59,6 +59,8 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
      SKIP_UI_BUILD=1 cargo publish -p <crate-name>
      ```
      The committed `ui-dist/` bundle is already in the repo; without this flag, `build.rs` will attempt to invoke `pnpm` inside cargo's verification tarball, which fails because it tries to modify files outside `OUT_DIR`.
+
+     **This is not optional for `trusty-search`/`trusty-console`** (verified via `cargo package --list`): their `Cargo.toml` `include` list ships only the pre-built `ui-dist/`/`ui/dist/` bundle, never `ui/src` — so `cargo publish`, with or without `SKIP_UI_BUILD`, can never rebuild the UI from source during packaging. Before running step 8 for any UI-embedding crate, confirm the committed bundle is actually current: `.github/workflows/release.yml`'s `ui-freshness-check` job does this automatically on every tag push by rebuilding fresh from `ui/src` and diffing against the committed bundle (issue #3568) — if it's red, regenerate (`cd crates/<crate>/ui && pnpm install --frozen-lockfile && pnpm run build`, then for `trusty-search` also copy `ui/dist/*` into `ui-dist/`, or run `make release-prep`) and commit before publishing. Do not rely on `cargo publish --dry-run` to catch this — see the `publish-dry-run` job's header comment for why it structurally cannot.
 9. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
 10. Install the binary locally with `cargo install --path crates/<dir> --locked`
    (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
