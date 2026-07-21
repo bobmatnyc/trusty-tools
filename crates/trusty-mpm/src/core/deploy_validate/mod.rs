@@ -45,11 +45,15 @@
 //! `validate_complete_workspace_has_no_gaps`,
 //! `validate_filtered_but_manifest_matching_workspace_has_no_gaps`,
 //! `validate_entry_missing_on_disk_but_in_manifest_is_still_a_gap`,
+//! `validate_stale_broken_frontmatter_is_a_gap` (issue #3556),
+//! `validate_well_formed_agent_is_not_flagged` (issue #3556),
 //! `repair_closes_gaps_on_incomplete_workspace`,
 //! `repair_is_a_noop_on_already_complete_workspace`; the expected-set
 //! resolution itself is covered by `expected_set`'s own test module.
 
 use std::path::Path;
+
+use trusty_agents_common::agents::frontmatter::validate_frontmatter;
 
 use crate::core::agent_manifest::{self, AgentManifest, ManifestLoad};
 use crate::core::bundle::OUTPUT_STYLES;
@@ -75,6 +79,13 @@ pub enum DeploymentGap {
     AgentManifestCorrupt(String),
     /// A canonical bundled agent (`<name>.md`) is not deployed on disk.
     AgentMissing(String),
+    /// A deployed agent (`<name>.md`) is present but its frontmatter fails a
+    /// strict YAML parse (issue #3556) — e.g. a stale copy predating the
+    /// quote-on-emit fix in `trusty-agents-common::agents::builder`, still
+    /// carrying an unquoted scalar that contains a colon. Deployed but
+    /// unparseable is worse than missing: the agent silently fails to load at
+    /// `tagent`/Claude Code runtime instead of surfacing here at deploy time.
+    AgentFrontmatterInvalid(String, String),
     /// `.claude/skills/.trusty-mpm-skills-manifest.json` does not exist.
     SkillManifestMissing,
     /// A canonical bundled skill (`<name>/SKILL.md`) is not deployed on disk.
@@ -109,6 +120,10 @@ impl DeploymentGap {
             ),
             Self::AgentManifestCorrupt(detail) => format!("agent manifest is corrupt: {detail}"),
             Self::AgentMissing(name) => format!("agent `{name}` is not deployed"),
+            Self::AgentFrontmatterInvalid(name, detail) => format!(
+                "agent `{name}` is deployed but its frontmatter is not valid YAML: {detail} \
+                 — run `tm install --reset-agents` (or delete the file and redeploy) to refresh it"
+            ),
             Self::SkillManifestMissing => format!(
                 "skill ownership manifest ({}) is missing",
                 skill_manifest::SKILL_MANIFEST_FILE
@@ -191,8 +206,19 @@ fn validate_agents(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
         }
     };
     for name in expected_agent_stems(fw, manifest.as_ref()) {
-        if !target.join(format!("{name}.md")).is_file() {
+        let path = target.join(format!("{name}.md"));
+        if !path.is_file() {
             gaps.push(DeploymentGap::AgentMissing(name));
+            continue;
+        }
+        // Issue #3556: presence on disk is not enough — a deployed copy can
+        // predate the quote-on-emit composer fix and still carry frontmatter
+        // a strict YAML parser rejects. Catch that here, at deploy-validation
+        // time, rather than letting it fail silently at `tagent` runtime.
+        if let Ok(content) = std::fs::read_to_string(&path)
+            && let Err(detail) = validate_frontmatter(&content)
+        {
+            gaps.push(DeploymentGap::AgentFrontmatterInvalid(name, detail));
         }
     }
 }
@@ -420,8 +446,19 @@ mod tests {
 
         let agents_dir = fw.claude_agents_dir();
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("engineer.md"), "agent").unwrap();
-        std::fs::write(agents_dir.join("BASE-AGENT.md"), "base").unwrap();
+        // #3556: deployed fixtures must carry real (valid) frontmatter now
+        // that `validate_agents` strict-YAML-checks every present file —
+        // a bare content string with no frontmatter at all is itself a gap.
+        std::fs::write(
+            agents_dir.join("engineer.md"),
+            "---\nname: engineer\n---\n\nagent\n",
+        )
+        .unwrap();
+        std::fs::write(
+            agents_dir.join("BASE-AGENT.md"),
+            "---\nname: base-agent\n---\n\nbase\n",
+        )
+        .unwrap();
         AgentManifest::default().save(&agents_dir).unwrap();
 
         let skills_dir = fw.claude_skills_dir();
@@ -479,7 +516,11 @@ mod tests {
 
         let agents_dir = fw.claude_agents_dir();
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("rust-engineer.md"), "agent").unwrap();
+        std::fs::write(
+            agents_dir.join("rust-engineer.md"),
+            "---\nname: rust-engineer\n---\n\nagent\n",
+        )
+        .unwrap();
         let mut agent_manifest = AgentManifest::default();
         agent_manifest.managed.insert(
             "rust-engineer.md".to_string(),
@@ -551,6 +592,57 @@ mod tests {
                 .gaps
                 .contains(&DeploymentGap::AgentMissing("rust-engineer".to_string())),
             "the entry that IS on disk must not be falsely reported missing, got: {:?}",
+            report.gaps
+        );
+    }
+
+    #[test]
+    fn validate_stale_broken_frontmatter_is_a_gap() {
+        // Issue #3556: a deployed agent that predates the quote-on-emit
+        // composer fix — its `description:` is an unquoted plain scalar
+        // containing a colon — must be surfaced as a gap even though the
+        // FILE is present (the pre-#3556 validator only checked existence,
+        // so this reproduced-in-production case slipped through silently).
+        let tmp = TempDir::new().unwrap();
+        let fw = fully_provisioned(tmp.path());
+        std::fs::write(
+            fw.claude_agents_dir().join("engineer.md"),
+            "---\nname: engineer\ndescription: Rust 2024 edition specialist: memory-safe systems\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let report = validate_workspace(&fw);
+        assert!(
+            report.gaps.iter().any(|g| matches!(
+                g,
+                DeploymentGap::AgentFrontmatterInvalid(name, _) if name == "engineer"
+            )),
+            "expected an AgentFrontmatterInvalid gap for `engineer`, got: {:?}",
+            report.gaps
+        );
+    }
+
+    #[test]
+    fn validate_well_formed_agent_is_not_flagged() {
+        // Negative case for the #3556 probe: a deployed agent whose
+        // description contains a colon but is PROPERLY quoted must not be
+        // flagged — the check is strict-YAML-validity, not "no colons
+        // allowed".
+        let tmp = TempDir::new().unwrap();
+        let fw = fully_provisioned(tmp.path());
+        std::fs::write(
+            fw.claude_agents_dir().join("engineer.md"),
+            "---\nname: engineer\ndescription: \"Rust 2024 edition specialist: memory-safe systems\"\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let report = validate_workspace(&fw);
+        assert!(
+            !report
+                .gaps
+                .iter()
+                .any(|g| matches!(g, DeploymentGap::AgentFrontmatterInvalid(..))),
+            "properly quoted frontmatter must not be flagged, got: {:?}",
             report.gaps
         );
     }
@@ -662,6 +754,7 @@ mod tests {
             DeploymentGap::AgentManifestMissing,
             DeploymentGap::AgentManifestCorrupt("bad".to_string()),
             DeploymentGap::AgentMissing("engineer".to_string()),
+            DeploymentGap::AgentFrontmatterInvalid("engineer".to_string(), "bad".to_string()),
             DeploymentGap::SkillManifestMissing,
             DeploymentGap::SkillMissing("tm-doctor".to_string()),
             DeploymentGap::SettingsMissing,

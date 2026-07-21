@@ -478,10 +478,25 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
     });
 
     let fm = Frontmatter {
-        name: fields.remove("name"),
-        role: fields.remove("role"),
-        description: fields.remove("description"),
-        model: fields.remove("model"),
+        // #3556: `merge_frontmatter`/`render_scalar` now double-quotes and
+        // escapes any of these scalars that needed it on emit (mirroring the
+        // pre-existing `initialPrompt` treatment below); decode that escaping
+        // here so a compose -> deploy -> re-compose cycle round-trips the
+        // original value verbatim. `unescape_yaml_double_quoted` is a no-op
+        // for a value with no backslash escapes, so plain (unquoted-on-emit)
+        // values are unaffected.
+        name: fields
+            .remove("name")
+            .map(|v| unescape_yaml_double_quoted(&v)),
+        role: fields
+            .remove("role")
+            .map(|v| unescape_yaml_double_quoted(&v)),
+        description: fields
+            .remove("description")
+            .map(|v| unescape_yaml_double_quoted(&v)),
+        model: fields
+            .remove("model")
+            .map(|v| unescape_yaml_double_quoted(&v)),
         extends: fields.remove("extends"),
         // `parse_kv_line` lower-cases keys, so `initialPrompt` arrives as
         // `initialprompt`; match that normalised form. Decode the YAML
@@ -490,7 +505,9 @@ pub(crate) fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), Agen
         initial_prompt: fields
             .remove("initialprompt")
             .map(|v| unescape_yaml_double_quoted(&v)),
-        resource_tier: fields.remove("resource_tier"),
+        resource_tier: fields
+            .remove("resource_tier")
+            .map(|v| unescape_yaml_double_quoted(&v)),
         skills: skills_block.or(inline_skills).unwrap_or_default(),
         max_tokens,
         tools,
@@ -556,6 +573,64 @@ fn unescape_yaml_double_quoted(value: &str) -> String {
         }
     }
     out
+}
+
+/// Whether a frontmatter scalar value requires YAML quoting to stay parseable
+/// by a strict YAML reader.
+///
+/// Why (issue #3556): `merge_frontmatter` used to emit every scalar field
+/// (`name`, `role`, `description`, `model`, `resource_tier`) as a bare plain
+/// scalar regardless of content, even though `parse_kv_line` had already
+/// stripped any quotes the SOURCE file used. `split_frontmatter`'s own
+/// lenient parser (first-colon-only split) tolerates a colon anywhere in the
+/// value, so a source template quoting `description: 'Rust 2024 edition
+/// specialist: memory-safe systems...'` composed to the exact same UNQUOTED
+/// `description: Rust 2024 edition specialist: memory-safe systems...` line
+/// regardless of the source's quoting style — invalid YAML a strict parser
+/// (`serde_yaml`, used by `trusty-agents::agents::registry::md_agent::parse_md_agent`)
+/// rejects with "mapping values are not allowed in this context". Because
+/// compose output was invariant to source quoting, re-provisioning alone
+/// could never have fixed the 11 affected agents — recomposing reproduced
+/// byte-identical broken output. Quoting-on-emit whenever a value is unsafe
+/// as a plain scalar fixes it at the one place all consumers share.
+/// What: `true` when `value` is empty, opens with a YAML indicator
+/// character, has leading/trailing whitespace, or contains a `": "` /
+/// trailing `:` sequence a plain scalar cannot represent.
+/// Test: `needs_quoting_true_for_colon_space`, `needs_quoting_true_for_empty`,
+/// `needs_quoting_false_for_plain_value` in builder_tests.rs.
+fn needs_quoting(value: &str) -> bool {
+    if value.is_empty() {
+        return true;
+    }
+    let first = value.chars().next().expect("checked non-empty above");
+    if "!&*-?|>%@`\"'#,[]{}:".contains(first) {
+        return true;
+    }
+    if value.starts_with(' ') || value.ends_with(' ') {
+        return true;
+    }
+    value.contains(": ") || value.ends_with(':')
+}
+
+/// Render one frontmatter scalar value, quoting it when [`needs_quoting`]
+/// says a plain scalar would not survive a strict YAML parse.
+///
+/// Why: shared by every scalar field `merge_frontmatter` emits (`name`,
+/// `role`, `description`, `model`, `resource_tier`) so the quote-when-needed
+/// policy is applied uniformly rather than ad hoc per field (issue #3556).
+/// What: returns `value` unchanged when it is safe as a plain scalar;
+/// otherwise a double-quoted, escaped scalar via
+/// [`escape_yaml_double_quoted`] — the same quoting style `initialPrompt`
+/// already used, so `split_frontmatter`'s existing `unescape_yaml_double_quoted`
+/// decode (now applied to these fields too) round-trips it.
+/// Test: `compose_description_with_colon_is_quoted`,
+/// `compose_description_without_colon_is_unquoted` in builder_tests.rs.
+fn render_scalar(value: &str) -> String {
+    if needs_quoting(value) {
+        format!("\"{}\"", escape_yaml_double_quoted(value))
+    } else {
+        value.to_string()
+    }
 }
 
 /// Render a single merged frontmatter block from a resolved chain.
@@ -653,22 +728,22 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
 
     let mut out = String::from("---\n");
     if let Some(v) = &merged.name {
-        out.push_str(&format!("name: {v}\n"));
+        out.push_str(&format!("name: {}\n", render_scalar(v)));
     }
     if let Some(v) = &merged.role {
-        out.push_str(&format!("role: {v}\n"));
+        out.push_str(&format!("role: {}\n", render_scalar(v)));
     }
     if let Some(v) = &merged.description {
-        out.push_str(&format!("description: {v}\n"));
+        out.push_str(&format!("description: {}\n", render_scalar(v)));
     }
     if let Some(v) = &merged.model {
-        out.push_str(&format!("model: {v}\n"));
+        out.push_str(&format!("model: {}\n", render_scalar(v)));
     }
     if let Some(v) = &merged.max_tokens {
         out.push_str(&format!("max_tokens: {v}\n"));
     }
     if let Some(v) = &merged.resource_tier {
-        out.push_str(&format!("resource_tier: {v}\n"));
+        out.push_str(&format!("resource_tier: {}\n", render_scalar(v)));
     }
     if !merged.skills.is_empty() {
         // DOC-42: emit the flattened, unioned skill list so a deployed agent

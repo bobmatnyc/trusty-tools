@@ -411,6 +411,96 @@ fn deploy_isolates_single_malformed_agent_failure() {
 }
 
 #[test]
+fn deploy_refreshes_stale_broken_frontmatter_copy_to_valid_yaml() {
+    // Issue #3556 causality check: a deployed copy written by the PRE-FIX
+    // composer carries the exact broken shape reported in production — an
+    // unquoted `description:` whose value contains ": " — even though the
+    // SOURCE template quotes it correctly. Before this fix, recomposing
+    // reproduced BYTE-IDENTICAL broken output (`merge_frontmatter` discarded
+    // the source's quoting regardless), so `deploy_agents` saw
+    // `checksum(composed) == checksum(current)` and reported the file
+    // `unchanged` — re-provisioning could never have refreshed it. This test
+    // fails against pre-fix code on both counts: (1) the file would stay in
+    // `unchanged`, never `deployed`, and (2) even if it were rewritten, the
+    // content would still fail strict YAML validation.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    fs::write(
+        src.path().join("stale-engineer.md"),
+        "---\nname: stale-engineer\nrole: engineer\ndescription: 'Rust 2024 edition specialist: memory-safe systems'\n---\n\n# Stale Engineer\n\nBody.\n",
+    )
+    .unwrap();
+
+    // Simulate a copy deployed by the OLD (broken) composer: unquoted
+    // description with a colon, tracked in the manifest as managed and
+    // unmodified (its checksum matches exactly what's on disk, exactly as a
+    // real prior deploy would have recorded).
+    let broken_content = "---\nname: stale-engineer\nrole: engineer\ndescription: Rust 2024 edition specialist: memory-safe systems\n---\n\n# Stale Engineer\n\nBody.\n";
+    fs::write(tgt.path().join("stale-engineer.md"), broken_content).unwrap();
+    let mut manifest = AgentManifest::default();
+    manifest.managed.insert(
+        "stale-engineer.md".to_string(),
+        ManifestEntry {
+            source_chain: vec!["stale-engineer".to_string()],
+            checksum: checksum(broken_content),
+            deployed_at: "2026-01-01T00:00:00Z".to_string(),
+            origin: Origin::Bundled,
+        },
+    );
+    manifest.save(tgt.path()).unwrap();
+
+    // Sanity: the pre-existing deployed copy really is invalid YAML, exactly
+    // matching the issue's reported failure mode.
+    assert!(
+        crate::agents::frontmatter::validate_frontmatter(broken_content).is_err(),
+        "the seeded fixture must reproduce genuinely invalid YAML"
+    );
+
+    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+
+    assert!(
+        result.deployed.contains(&"stale-engineer.md".to_string()),
+        "the stale copy must be refreshed (not left `unchanged`), got: {result:?}"
+    );
+    assert!(!result.unchanged.contains(&"stale-engineer.md".to_string()));
+
+    let refreshed = fs::read_to_string(tgt.path().join("stale-engineer.md")).unwrap();
+    crate::agents::frontmatter::validate_frontmatter(&refreshed)
+        .unwrap_or_else(|e| panic!("refreshed deployed copy must be valid YAML: {e}\n{refreshed}"));
+}
+
+#[test]
+fn deploy_isolates_agent_with_invalid_composed_yaml() {
+    // Strict-YAML validation (issue #3556) must catch a composition that is
+    // still invalid despite the scalar-quoting fix (e.g. a `skills:` list
+    // entry starting with a YAML indicator character, which flow-sequence
+    // emission does not quote) — logging it, recording it in `failed`, and
+    // skipping the write, without aborting the rest of the roster deploy.
+    let src = TempDir::new().unwrap();
+    let tgt = TempDir::new().unwrap();
+    fs::write(
+        src.path().join("bad-skills.md"),
+        "---\nname: bad-skills\nrole: engineer\nskills:\n  - \"@weird-skill\"\n---\n\n# Bad\n",
+    )
+    .unwrap();
+    fs::write(
+        src.path().join("good.md"),
+        "---\nname: good\nrole: engineer\n---\n\n# Good\n\nGOOD BODY\n",
+    )
+    .unwrap();
+
+    let result = deploy_agents(src.path(), tgt.path()).unwrap();
+
+    assert!(result.deployed.contains(&"good.md".to_string()));
+    assert!(!tgt.path().join("bad-skills.md").exists());
+    assert!(
+        result.failed.iter().any(|f| f.starts_with("bad-skills:")),
+        "expected an isolated failure entry for bad-skills, got: {:?}",
+        result.failed
+    );
+}
+
+#[test]
 fn deploy_content_file_is_atomic() {
     // After a successful deploy no stale .tmp file should remain in the
     // target directory — the atomic rename must have completed.

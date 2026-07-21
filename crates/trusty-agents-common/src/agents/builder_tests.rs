@@ -227,6 +227,83 @@ fn timestamp_value_round_trips() {
     );
 }
 
+// ── quote-on-emit regression tests (issue #3556) ─────────────────────────
+//
+// #389 (above) fixed the PARSE side: `parse_kv_line` splits on the first
+// colon only, so a colon anywhere in a raw value survives reading. But
+// `merge_frontmatter` re-EMITS every scalar as a bare plain YAML scalar
+// regardless of content — so a description like "Rust specialist: memory-safe
+// systems" composed to an UNQUOTED `description: Rust specialist: memory-safe
+// systems` line, which trusty-mpm's own lenient reader tolerates but a real
+// YAML parser (`serde_yaml`, what `trusty-agents`' `.md` agent loader uses)
+// rejects with "mapping values are not allowed in this context". These tests
+// assert the EMIT side is now also colon-safe, and that the composed output
+// is actually valid strict YAML — not just re-parseable by the lenient
+// reader that missed the bug in the first place.
+
+#[test]
+fn compose_description_with_colon_is_quoted_and_strict_yaml_valid() {
+    // Reproduces the exact issue #3556 shape (rust-engineer's real
+    // description). Before the fix this composed to an unquoted plain
+    // scalar containing ": " — invalid YAML.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "rust-engineer",
+        "---\nname: rust-engineer\nrole: engineer\ndescription: 'Rust 2024 edition specialist: memory-safe systems, zero-cost abstractions'\nmodel: sonnet\n---\n\n# Rust Engineer\n",
+    );
+    let composed = compose_agent("rust-engineer", tmp.path()).unwrap();
+
+    // The frontmatter block, strict-parsed with the SAME parser
+    // `trusty-agents`' `.md` agent loader uses, must be valid YAML.
+    crate::agents::frontmatter::validate_frontmatter(&composed)
+        .unwrap_or_else(|e| panic!("composed frontmatter must be valid YAML: {e}\n{composed}"));
+
+    // The description text itself must survive verbatim (quoting must not
+    // truncate or corrupt it).
+    assert!(
+        composed.contains("Rust 2024 edition specialist: memory-safe systems"),
+        "description text must survive quoting; got:\n{composed}"
+    );
+}
+
+#[test]
+fn compose_description_without_colon_is_unquoted() {
+    // A description with no colon needs no quoting — output must stay byte-
+    // identical to today's plain-scalar emission so this fix does not
+    // needlessly rewrite the other ~65 already-working deployed agents.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "plain-agent",
+        "---\nname: plain-agent\nrole: engineer\ndescription: A plain specialist with no special characters\n---\n\n# Plain\n",
+    );
+    let composed = compose_agent("plain-agent", tmp.path()).unwrap();
+    assert!(
+        composed.contains("description: A plain specialist with no special characters\n"),
+        "colon-free description must remain an unquoted plain scalar; got:\n{composed}"
+    );
+}
+
+#[test]
+fn needs_quoting_true_for_colon_space() {
+    assert!(needs_quoting("has: a colon"));
+    assert!(needs_quoting("trailing colon:"));
+}
+
+#[test]
+fn needs_quoting_true_for_empty() {
+    assert!(needs_quoting(""));
+}
+
+#[test]
+fn needs_quoting_false_for_plain_value() {
+    assert!(!needs_quoting("plain sonnet"));
+    assert!(!needs_quoting(
+        "https://example.com/model-api-no-space-colon"
+    ));
+}
+
 #[test]
 fn bedrock_model_id_round_trips() {
     // Model ids like `bedrock/us.anthropic.claude-sonnet-4-6` contain
