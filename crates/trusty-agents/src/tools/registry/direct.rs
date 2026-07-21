@@ -34,7 +34,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use super::config::EndpointConfig;
-use super::discovery::{EndpointCapabilities, EndpointManifest};
+use super::discovery::{EndpointCapabilities, EndpointManifest, parse_manifest};
 use super::driver::{BatchCall, BatchResult, RegistryDriver};
 
 const PROTOCOL_VERSION: &str = "openrpc/1";
@@ -245,9 +245,13 @@ impl RegistryDriver for DirectDriver {
             "protocol_versions": [PROTOCOL_VERSION],
         });
         let v = self.rpc_call("rpc.discover", params).await?;
-        let manifest: EndpointManifest = serde_json::from_value(v.clone())
-            .with_context(|| format!("malformed rpc.discover result: {v}"))?;
-        Ok(manifest)
+        // #3577: `parse_manifest` recognizes both the real OpenRPC
+        // `methods[]` shape every current server emits and the legacy
+        // `tools[]` shape; a raw `serde_json::from_value::<EndpointManifest>`
+        // here (the pre-fix behavior) silently produced `tools: vec![]` on
+        // any shape mismatch instead of erroring — see
+        // `discovery::parse_manifest` for the full rationale.
+        parse_manifest(&self.name, &v)
     }
 
     async fn call_tool(&self, name: &str, args: Value) -> Result<Value> {
