@@ -452,11 +452,15 @@ async fn build_eager_python_embedder() -> Result<(
                         handle: Arc::clone(&handle),
                         is_python: true,
                     });
-                let fallback_adapter = super::embedder_fallback::FallbackEmbedderAdapter::new(
-                    python_embedder,
-                    || build_ort_stdio_sidecar().map(|(embedder, _pid_slot)| embedder),
-                );
-                Ok((Arc::new(fallback_adapter), Some(pid_slot), BackendKind::Python))
+                let fallback_adapter =
+                    super::embedder_fallback::FallbackEmbedderAdapter::new(python_embedder, || {
+                        build_ort_stdio_sidecar().map(|(embedder, _pid_slot)| embedder)
+                    });
+                Ok((
+                    Arc::new(fallback_adapter),
+                    Some(pid_slot),
+                    BackendKind::Python,
+                ))
             }
             Err(e) => {
                 tracing::warn!(
