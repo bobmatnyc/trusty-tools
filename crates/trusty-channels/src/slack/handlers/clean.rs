@@ -83,6 +83,12 @@ pub(super) fn clean_search_matches(resp: &Value) -> Vec<Value> {
 }
 
 /// Shape one `search.messages` match with escaped untrusted text.
+///
+/// `is_private` is carried through as `Some(bool)`/`null` (Slack documents it
+/// on the match's `channel` object) rather than defaulting to `false` on
+/// absence, so [`super::search::search_messages`]'s public-scope filter can
+/// tell "known public" apart from "unknown" and treat the latter
+/// conservatively (issue #3617).
 fn clean_search_match(m: &Value) -> Value {
     let channel = m.get("channel");
     let channel_id = channel
@@ -93,9 +99,13 @@ fn clean_search_match(m: &Value) -> Value {
         .and_then(|c| c.get("name"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    let is_private = channel
+        .and_then(|c| c.get("is_private"))
+        .and_then(Value::as_bool);
     json!({
         "channel_id": channel_id,
         "channel_name": mrkdwn_escape(channel_name),
+        "is_private": is_private,
         "user": field_str(m, "user"),
         "ts": field_str(m, "ts"),
         "text": mrkdwn_escape(m.get("text").and_then(Value::as_str).unwrap_or("")),
@@ -184,6 +194,93 @@ pub(super) fn clean_user(u: &Value) -> Value {
     })
 }
 
+/// Filter a `users.list` response to members matching `query` (issue #3617).
+///
+/// Why: `slack_search_users` has no server-side search — Slack exposes no
+/// non-admin `users.search` method — so, exactly like [`filter_channels`], it
+/// matches `query` (case-insensitive) against a locally-scanned page of
+/// `users.list` results.
+/// What: keeps members whose `name`, `real_name` (top-level or
+/// `profile.real_name`), or `profile.email` contains `query`; returns escaped
+/// `{id, name, real_name}` entries via [`clean_user`].
+/// Test: `filter_users_matches_name_real_name_and_email`.
+pub(super) fn filter_users(resp: &Value, query: &str) -> Vec<Value> {
+    let needle = query.to_lowercase();
+    resp.get("members")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter(|u| user_matches(u, &needle))
+                .map(clean_user)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether a user object matches the lowercased search `needle`.
+fn user_matches(u: &Value, needle: &str) -> bool {
+    let name = u.get("name").and_then(Value::as_str).unwrap_or("");
+    let real_name = u
+        .get("real_name")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            u.get("profile")
+                .and_then(|p| p.get("real_name"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("");
+    let email = u
+        .get("profile")
+        .and_then(|p| p.get("email"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    name.to_lowercase().contains(needle)
+        || real_name.to_lowercase().contains(needle)
+        || email.to_lowercase().contains(needle)
+}
+
+/// Filter an `emoji.list` response (a flat `{name: url_or_alias}` map) to
+/// entries whose name contains `query` (issue #3617).
+///
+/// Why: Slack has no `emoji.search` method, so this mirrors [`filter_channels`]
+/// / [`filter_users`]'s local-filter pattern over the one listing method Slack
+/// does provide. Alias entries (`"shipit": "alias:squirrel"`) are shaped
+/// distinctly from direct entries so a caller can tell the two apart instead
+/// of getting a nonsensical "url" pointing at the literal string `alias:...`.
+/// What: keeps `(name, value)` pairs whose lowercased name contains `query`;
+/// returns `{name, url, is_alias, alias_for}` — `url` is `None`/omitted-shaped
+/// and `alias_for` set when the value is an `alias:target` reference, and vice
+/// versa for a direct emoji.
+/// Test: `filter_emoji_matches_name_and_shapes_aliases`.
+pub(super) fn filter_emoji(resp: &Value, query: &str) -> Vec<Value> {
+    let needle = query.to_lowercase();
+    resp.get("emoji")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter(|(name, _)| name.to_lowercase().contains(&needle))
+                .map(|(name, value)| {
+                    let value = value.as_str().unwrap_or("");
+                    match value.strip_prefix("alias:") {
+                        Some(target) => json!({
+                            "name": name,
+                            "url": Value::Null,
+                            "is_alias": true,
+                            "alias_for": target,
+                        }),
+                        None => json!({
+                            "name": name,
+                            "url": value,
+                            "is_alias": false,
+                            "alias_for": Value::Null,
+                        }),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +365,53 @@ mod tests {
         let resp = json!({ "channels": [ { "id": "C1", "name": "al<e>rt" } ] });
         let out = filter_channels(&resp, "al");
         assert_eq!(out[0]["name"], "al&lt;e&gt;rt");
+    }
+
+    #[test]
+    fn filter_users_matches_name_real_name_and_email() {
+        let resp = json!({
+            "members": [
+                { "id": "U1", "name": "alice", "profile": { "real_name": "Alice A", "email": "alice@x.com" } },
+                { "id": "U2", "name": "bob", "profile": { "real_name": "Bob B", "email": "bob@alerts.io" } },
+                { "id": "U3", "name": "carol", "profile": { "real_name": "Carol C", "email": "carol@x.com" } },
+            ]
+        });
+        // Matches by name.
+        let by_name = filter_users(&resp, "alice");
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0]["id"], "U1");
+        // Matches by email substring, independent of name.
+        let by_email = filter_users(&resp, "alerts");
+        assert_eq!(by_email.len(), 1);
+        assert_eq!(by_email[0]["id"], "U2");
+        // No match.
+        assert!(filter_users(&resp, "nobody").is_empty());
+    }
+
+    #[test]
+    fn filter_emoji_matches_name_and_shapes_aliases() {
+        let resp = json!({
+            "emoji": {
+                "bowtie": "https://x.slack.com/emoji/bowtie/1.png",
+                "shipit": "alias:squirrel",
+                "partyparrot": "https://x.slack.com/emoji/partyparrot/2.png",
+            }
+        });
+        let out = filter_emoji(&resp, "bow");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], "bowtie");
+        assert_eq!(out[0]["is_alias"], false);
+        assert_eq!(out[0]["url"], "https://x.slack.com/emoji/bowtie/1.png");
+
+        let alias_out = filter_emoji(&resp, "shipit");
+        assert_eq!(alias_out.len(), 1);
+        assert_eq!(alias_out[0]["is_alias"], true);
+        assert_eq!(alias_out[0]["alias_for"], "squirrel");
+        assert!(alias_out[0]["url"].is_null());
+    }
+
+    #[test]
+    fn filter_emoji_missing_map_is_empty() {
+        assert!(filter_emoji(&json!({ "ok": true }), "any").is_empty());
     }
 }

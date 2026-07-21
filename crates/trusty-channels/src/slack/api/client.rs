@@ -23,8 +23,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::slack::api::constants::{
-    DEFAULT_RETRY_AFTER, MAX_RATE_LIMIT_RETRIES, MAX_RETRY_AFTER, SLACK_API_BASE, SLACK_PROVIDER,
-    SLACK_USER_PROVIDER,
+    DEFAULT_RETRY_AFTER, MAX_DOWNLOAD_BYTES, MAX_RATE_LIMIT_RETRIES, MAX_RETRY_AFTER,
+    SLACK_API_BASE, SLACK_PROVIDER, SLACK_USER_PROVIDER,
 };
 use crate::slack::api::error::SlackError;
 
@@ -193,6 +193,54 @@ impl BaseClient {
             .as_deref()
             .ok_or(SlackError::MissingUserToken)?;
         self.request(token, method, body).await
+    }
+
+    /// Download a private Slack file (or canvas export) via its
+    /// `url_private_download` URL, authenticated with the bot token.
+    ///
+    /// Why: `files.info` only returns metadata (issue #3615); `slack_read_file`
+    /// and `slack_read_canvas` (issue #3612 — a canvas's `canvas_id` is a file
+    /// id, and Slack has no documented full-content-read method, so both tools
+    /// fetch bytes the same way) need the actual bytes. Slack's private file
+    /// URLs accept the same bot bearer token as the JSON Web API.
+    /// What: GETs `url` with the bot token as a bearer credential; maps HTTP
+    /// 401/403 to [`SlackError::Auth`], any other non-2xx status to
+    /// [`SlackError::UnexpectedStatus`], and a body over
+    /// [`MAX_DOWNLOAD_BYTES`] (checked via `Content-Length` first, then the
+    /// actual decoded length) to [`SlackError::DownloadTooLarge`]. Returns the
+    /// raw bytes on success — callers decide how to interpret them (UTF-8 text
+    /// vs. binary).
+    /// Test: `tests/client_http.rs::download_private_file_*`.
+    pub async fn download_private_file(&self, url: &str) -> Result<Vec<u8>, SlackError> {
+        let token = self.token.as_deref().ok_or(SlackError::MissingToken)?;
+        let response = self.http.get(url).bearer_auth(token).send().await?;
+        let status = response.status();
+
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(SlackError::Auth {
+                status: status.as_u16(),
+                reason: "unauthorized file download".to_string(),
+            });
+        }
+        if !status.is_success() {
+            return Err(SlackError::UnexpectedStatus(status.as_u16()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|len| len as usize > MAX_DOWNLOAD_BYTES)
+        {
+            return Err(SlackError::DownloadTooLarge {
+                limit: MAX_DOWNLOAD_BYTES,
+            });
+        }
+
+        let bytes = response.bytes().await?;
+        if bytes.len() > MAX_DOWNLOAD_BYTES {
+            return Err(SlackError::DownloadTooLarge {
+                limit: MAX_DOWNLOAD_BYTES,
+            });
+        }
+        Ok(bytes.to_vec())
     }
 
     /// The shared hardened request loop, parameterised by bearer `token`.

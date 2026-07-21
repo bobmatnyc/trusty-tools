@@ -13,7 +13,7 @@
 
 use serial_test::serial;
 use trusty_channels::slack::api::client::BaseClient;
-use trusty_channels::slack::api::constants::{SLACK_PROVIDER, SLACK_TOKEN_ENV};
+use trusty_channels::slack::api::constants::{MAX_DOWNLOAD_BYTES, SLACK_PROVIDER, SLACK_TOKEN_ENV};
 use trusty_channels::slack::api::error::SlackError;
 use trusty_common::inference::credentials::{
     env_var_for, resolve_key_with, KeyStore, MemoryKeyStore,
@@ -234,6 +234,83 @@ async fn missing_token_errors_before_network() {
     let client = BaseClient::with_endpoint(server.uri(), None).expect("construct client");
     let err = client
         .call_method("chat.postMessage", &serde_json::json!({}))
+        .await
+        .expect_err("no token should error");
+    assert!(matches!(err, SlackError::MissingToken));
+}
+
+// ── Private-file download (`download_private_file`, issues #3612/#3615) ───
+
+#[tokio::test]
+async fn download_private_file_returns_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/F123/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("# hello canvas"))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server).await;
+    let bytes = client
+        .download_private_file(&format!("{}/files/F123/download", server.uri()))
+        .await
+        .expect("download should succeed");
+    assert_eq!(bytes, b"# hello canvas");
+}
+
+#[tokio::test]
+async fn download_private_file_401_is_auth_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/F123/download"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server).await;
+    let err = client
+        .download_private_file(&format!("{}/files/F123/download", server.uri()))
+        .await
+        .expect_err("401 should error");
+    assert!(matches!(err, SlackError::Auth { status: 401, .. }));
+}
+
+#[tokio::test]
+async fn download_private_file_rejects_oversized_body() {
+    let server = MockServer::start().await;
+    let oversized_body = "a".repeat(MAX_DOWNLOAD_BYTES + 1);
+    Mock::given(method("GET"))
+        .and(path("/files/F123/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(oversized_body))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server).await;
+    let err = client
+        .download_private_file(&format!("{}/files/F123/download", server.uri()))
+        .await
+        .expect_err("oversized body should error");
+    assert!(matches!(
+        err,
+        SlackError::DownloadTooLarge {
+            limit
+        } if limit == MAX_DOWNLOAD_BYTES
+    ));
+}
+
+#[tokio::test]
+async fn download_private_file_missing_token_errors_before_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/F123/download"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = BaseClient::with_endpoint(server.uri(), None).expect("construct client");
+    let err = client
+        .download_private_file(&format!("{}/files/F123/download", server.uri()))
         .await
         .expect_err("no token should error");
     assert!(matches!(err, SlackError::MissingToken));

@@ -1,10 +1,11 @@
-//! MCP `tools/list` response — JSON Schema for every planned Slack tool.
+//! MCP `tools/list` response — JSON Schema for every live Slack tool.
 //!
 //! Why: Claude Code (and any MCP client) needs a machine-readable contract
 //! describing each tool's arguments so the model can fill them correctly. This
 //! is the single source of truth for the Slack MCP surface; the dispatcher in
-//! `server` routes on the same names. All nine tools now have live handlers
-//! (issues #2639 + #2640, see ADR-0014).
+//! `server` routes on the same names. All nine original tools have live
+//! handlers (issues #2639 + #2640, see ADR-0014); epic #3611 adds ten more for
+//! parity with the claude.ai Slack connector (issues #3612-#3618).
 //! What: `tool_list_response()` returns `{"tools": [{name, description,
 //! inputSchema}, ...]}`; `is_known_tool()` reports whether a name is part of
 //! the planned surface so the dispatcher can distinguish "not yet implemented"
@@ -14,11 +15,17 @@
 
 use serde_json::{json, Value};
 
-/// The authoritative list of planned Slack tool names.
+/// The authoritative list of live Slack tool names.
 ///
 /// Why: Both `tool_list_response` (indirectly) and `is_known_tool` must agree
 /// on the exact surface; a single constant array prevents drift.
-/// What: The nine chat-as-tools operations planned for the native Slack MCP.
+/// What: The 19 chat-as-tools operations implemented by the native Slack MCP —
+/// the original nine (#2639/#2640) plus ten added for claude.ai Slack-connector
+/// parity (epic #3611). `slack_send_message_draft` (claude.ai's 20th tool) is
+/// deliberately NOT included: Slack has no public API to create a message
+/// draft (`chat.postMessage`/`chat.scheduleMessage` send or schedule; neither
+/// creates an editable draft), so there is nothing for this adapter to call —
+/// see the crate README and the PR for issue #3616.
 /// Test: `known_tools_match_registry` cross-checks this against the built list.
 pub const TOOL_NAMES: &[&str] = &[
     "slack_send_message",
@@ -30,6 +37,16 @@ pub const TOOL_NAMES: &[&str] = &[
     "slack_list_users",
     "slack_get_user",
     "slack_add_reaction",
+    "slack_get_reactions",
+    "slack_schedule_message",
+    "slack_create_conversation",
+    "slack_list_channel_members",
+    "slack_create_canvas",
+    "slack_update_canvas",
+    "slack_read_canvas",
+    "slack_read_file",
+    "slack_search_emojis",
+    "slack_search_users",
 ];
 
 /// Report whether `name` is a planned Slack tool.
@@ -184,6 +201,16 @@ pub fn tool_list_response() -> Value {
                     "type": "integer",
                     "description": "Maximum number of results to return (default 20).",
                 },
+                "scope": {
+                    "type": "string",
+                    "enum": ["public", "public_and_private"],
+                    "description": "'public' returns only matches from channels known to be \
+                        public; 'public_and_private' (default) returns every match the user \
+                        token can see, unfiltered. Slack's search API has no server-side \
+                        public/private filter, so 'public' is applied client-side after the \
+                        search — a match whose channel privacy Slack didn't report is treated \
+                        as private (excluded) rather than assumed public.",
+                },
             }),
             &["query"],
         ),
@@ -231,6 +258,145 @@ pub fn tool_list_response() -> Value {
                 },
             }),
             &["channel", "timestamp", "name"],
+        ),
+        tool(
+            "slack_get_reactions",
+            "Read the emoji reactions on a message. Requires scope reactions:read.",
+            json!({
+                "channel": channel_prop(),
+                "timestamp": {
+                    "type": "string",
+                    "description": "The ts of the message to read reactions from.",
+                },
+            }),
+            &["channel", "timestamp"],
+        ),
+        tool(
+            "slack_schedule_message",
+            "Schedule a message to be posted at a future time. Requires scope chat:write.",
+            json!({
+                "channel": channel_prop(),
+                "text": { "type": "string", "description": "Message text to send." },
+                "post_at": {
+                    "type": "integer",
+                    "description": "Unix timestamp (seconds) of when to post the message.",
+                },
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Optional parent message ts to reply in-thread.",
+                },
+            }),
+            &["channel", "text", "post_at"],
+        ),
+        tool(
+            "slack_create_conversation",
+            "Create a new Slack channel. Requires scope channels:manage (public) / \
+             groups:write (private).",
+            json!({
+                "name": {
+                    "type": "string",
+                    "description": "Channel name (lowercase letters, numbers, hyphens, \
+                        underscores; max 80 characters).",
+                },
+                "is_private": {
+                    "type": "boolean",
+                    "description": "Create a private channel instead of public (default false).",
+                },
+            }),
+            &["name"],
+        ),
+        tool(
+            "slack_list_channel_members",
+            "List a channel's member user IDs. Supports cursor pagination: pass the \
+             previous call's `next_cursor` back as `cursor` to fetch more. Requires \
+             scope channels:read / groups:read / im:read / mpim:read (by channel type).",
+            json!({
+                "channel": channel_prop(),
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of member IDs to return per page (default 100).",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque pagination cursor from a previous call's `next_cursor`.",
+                },
+            }),
+            &["channel"],
+        ),
+        tool(
+            "slack_create_canvas",
+            "Create a standalone canvas, optionally tabbed into a channel and/or \
+             seeded with markdown content. Requires scope canvases:write.",
+            json!({
+                "title": { "type": "string", "description": "Optional canvas title." },
+                "markdown": {
+                    "type": "string",
+                    "description": "Optional initial markdown content.",
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "Optional channel ID to tab the new canvas into.",
+                },
+            }),
+            &[],
+        ),
+        tool(
+            "slack_update_canvas",
+            "Replace a canvas's entire document content. Requires scope canvases:write.",
+            json!({
+                "canvas_id": { "type": "string", "description": "Canvas ID (e.g. F0123ABCD)." },
+                "markdown": {
+                    "type": "string",
+                    "description": "New markdown content, replacing the canvas in full.",
+                },
+                "operation_id": {
+                    "type": "string",
+                    "description": "Optional idempotency key for the edit.",
+                },
+            }),
+            &["canvas_id", "markdown"],
+        ),
+        tool(
+            "slack_read_canvas",
+            "Read a canvas's content. Slack has no documented full-content-read API, so \
+             this downloads the canvas's private file export (HTML, not the original \
+             markdown). Requires scopes canvases:read and files:read.",
+            json!({
+                "canvas_id": { "type": "string", "description": "Canvas ID (e.g. F0123ABCD)." },
+            }),
+            &["canvas_id"],
+        ),
+        tool(
+            "slack_read_file",
+            "Read a Slack file's metadata and, for text files, its content. Binary \
+             files are reported as such (with a permalink) rather than embedded. \
+             Requires scope files:read.",
+            json!({
+                "file": { "type": "string", "description": "Slack file ID (e.g. F0123ABCD)." },
+            }),
+            &["file"],
+        ),
+        tool(
+            "slack_search_emojis",
+            "Search custom workspace emoji by name. Slack has no emoji.search endpoint, \
+             so this filters emoji.list locally. Requires scope emoji:read.",
+            json!({
+                "query": { "type": "string", "description": "Substring to match against emoji names." },
+            }),
+            &["query"],
+        ),
+        tool(
+            "slack_search_users",
+            "Search workspace users by name, real name, or email. Slack has no \
+             non-admin users.search endpoint, so this filters users.list locally \
+             (bounded scan, large workspaces may truncate). Requires scope users:read.",
+            json!({
+                "query": {
+                    "type": "string",
+                    "description": "Substring to match against name, real name, or email.",
+                },
+            }),
+            &["query"],
         ),
     ];
     json!({ "tools": tools })
