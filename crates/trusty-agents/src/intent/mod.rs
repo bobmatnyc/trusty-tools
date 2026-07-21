@@ -15,6 +15,19 @@
 //! research verbs, question words, action-verb tasks, and edge cases.
 //! See `tests` module below — fixes #199, #203.
 
+/// Deterministic Tm-vs-Tcode router for the `dispatch_task` bridge tool
+/// (epic #3052, PR B, lane 3).
+///
+/// Why: a separate, focused module rather than folding into
+/// `classify_intent` above — that classifier answers "how much machinery
+/// does this input need" (conversational / research / implementation);
+/// `route` answers an orthogonal question once the answer is already
+/// "hand this off": WHICH black-boxed backend (orchestration vs direct
+/// coding) should receive it.
+/// What: see `route::route_task` / `route::BridgeRoute`.
+/// Test: `route::route_tests`.
+pub mod route;
+
 /// Classification of user input for PM fast-pathing.
 ///
 /// Why: Distinguishes conversational chatter (no work) from research questions
@@ -172,7 +185,9 @@ const SELF_QUESTIONS: &[&str] = &[
 /// ACTION_VERBS).
 /// Test: Covered indirectly by classifier tests — "Hello!!!" must classify
 /// the same as "hello".
-fn normalize(input: &str) -> String {
+/// `pub(crate)` (not private) so `intent::route`'s `route_task` can reuse the
+/// exact same normalization instead of forking a second copy (#3052 PR B).
+pub(crate) fn normalize(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         if ch.is_alphanumeric() || ch == '\'' || ch == '-' || ch == '_' || ch.is_whitespace() {
