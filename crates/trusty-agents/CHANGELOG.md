@@ -7,7 +7,54 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **Assistant delegates to specialists + peers; black-boxes internal tooling
+  (PR A, epic #3052):** the base `assistant` agent (and every persona built
+  on it — `izzie`, `cto-assistant`, `personal-assistant`) can now actually
+  get hands-on engineering/QA/research work done. `assistant/agent.toml`
+  gains `delegate_to_agent` in `[tools].allow` (native, in-process
+  tagent→tagent delegation via `src/tools/delegate.rs`, already wired into
+  persona dispatch by `filter_persona_tool_names` — only the grant was
+  missing). `izzie` and `cto-assistant` both declare `extends = "assistant"`
+  and inherit the grant automatically (`[tools].allow` is unioned base-first
+  by `crate::agents::extends::merge_extends`, #3055/#3106).
+  `assistant/persona.md` softens the old "redirect coding to engineering
+  agents" framing to "bring in the right specialist and relay the outcome",
+  adds a peer consult-and-relay capability (assistant instances may consult
+  each other and summarize the input, staying in control of the
+  conversation), and adds a BLACK-BOX rule: never say "tm", "tcode",
+  "trusty-mpm", "trusty-code", "PM session", "subprocess", "sub-agent", or
+  "subagent" to the user — describe outcomes via "a specialist" / "my team",
+  never internal mechanics or system/daemon names. `cto-assistant/agent.toml`
+  is refactored from a hand-forked full copy (`role = "assistant"`, no
+  `extends`) to `extends = "assistant"`, keeping only its Duetto-specific
+  deltas (CTO ops DB tools, ticketing, extra git tools, org/APEX/voice
+  skills) — it now also inherits the base's black-box posture and full
+  gworkspace surface. KNOWN LIMITATION: the `extends` resolver inherits
+  `[llm]` (temperature/max_tokens) wholesale from the base, so
+  `cto-assistant`'s #469 max_tokens bump (1024 → 4096, for untruncated GFA
+  reports) and lower temperature (0.3) are not currently applied post-merge;
+  flagged as a follow-up (see `crates/trusty-agents/src/agents/extends/mod.rs`).
+
 ### Security
+
+- **Assistant-tier tool black-box strip (PR A, epic #3052):** removed
+  `session_list`, `session_status`, `session_send`, `project_list`,
+  `console_metrics` (trusty-mpm proxied tools), `system_status` (enumerates
+  daemon names including "trusty-mpm"), `mcp_list`/`mcp_enable`/`mcp_disable`
+  (enumerate MCP service names), and `agent_delegate` (trusty-mpm's, distinct
+  from the native `delegate_to_agent`) from every assistant-tier
+  `[tools].allow` list (`assistant`, `izzie` (package + flat shadow),
+  `cto-assistant` (package + flat shadow), `personal-assistant`) so a
+  conversational assistant persona can no longer name-drop internal
+  trusty-* system/daemon architecture to the user. These tools remain
+  reachable to `pm`/`ctrl`/`research`/`observe` roles via their own scoping —
+  unaffected by this change. A pinning test
+  (`assistant_tier_grants_delegation_and_blackboxes_internal_tools`,
+  `crates/trusty-agents/src/agents/tests/loading.rs`) asserts the resolved
+  `[tools].allow` for `assistant`/`izzie`/`cto-assistant` includes
+  `delegate_to_agent` and excludes every black-boxed name.
 
 - **Loopback-only doctrine (#3329):** the HTTP API server (`--api`/`--serve`)
   now binds `127.0.0.1` by default instead of `0.0.0.0`. A non-loopback bind is
