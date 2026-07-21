@@ -84,10 +84,16 @@ pub(crate) fn parse_git_progress(line: &str) -> Option<String> {
 /// [`parse_git_progress`] detail on the scoped `CloningRepo` stage, then waits
 /// and returns a [`CloneOutcome`]. Callers must have already added `--progress`
 /// to `cmd` (git suppresses progress on a non-TTY stderr otherwise).
-/// Test: exercised via the `#[ignore]` clone integration tests; parsing by the
-/// `tests` submodule; `clone_with_progress_disclaims_via_spawn_wrapper`
-/// (structural — asserts the disclaim wrapper's own contract holds for this
-/// call site's exact stdio shape).
+/// Test: no dedicated unit test of `clone_with_progress` itself — its
+/// contract (stream stderr, discard stdout, preserve success/stderr) is
+/// unchanged by the #3267 disclaim-wrapper conversion, so there is no
+/// meaningful failing-first test for that change; the underlying
+/// `disclaimed_stderr_piped_spawn` wrapper is unit-tested directly (see its
+/// own doc). Exercised end-to-end via a real `git clone` through this exact
+/// function by `provisioner::workspace::tests::ensure_base_checkout_recovers_from_concurrent_race`
+/// and `ensure_base_checkout_rejects_stale_non_bare_directory`; the pure
+/// parse logic is unit-tested by `parse_git_progress`'s own `tests` module
+/// below.
 pub(crate) fn clone_with_progress(cmd: Command) -> std::io::Result<CloneOutcome> {
     let mut spawned = disclaimed_stderr_piped_spawn(cmd)?;
 

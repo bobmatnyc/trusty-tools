@@ -20,8 +20,9 @@
 //! returned immediately, UNWAITED — the caller arms its watchdog on the pid,
 //! then reads stdout to EOF and reaps via
 //! [`super::super::StdoutPipedSpawn::wait_with_output`].
-//! Test: `super::super::tests::disclaimed_stdout_piped_spawn_*` (macOS-only);
-//! `super::super::piped_native_tests::disclaimed_stdout_piped_spawn_native_path_round_trips`
+//! Test: `super::super::stdout_piped::tests::disclaimed_stdout_piped_spawn_*`
+//! (macOS-only);
+//! `super::super::stdout_piped::native_tests::disclaimed_stdout_piped_spawn_native_path_round_trips`
 //! (any OS).
 
 use std::ffi::{CString, OsString};
@@ -37,7 +38,7 @@ use super::{OwnedFd, pipe_cloexec, posix_spawn_file_actions_addchdir_np, resolve
 /// responsibility disclaimed — returns immediately, unwaited.
 ///
 /// Why/What: see the module docs.
-/// Test: `super::super::tests::disclaimed_stdout_piped_spawn_*`.
+/// Test: `super::super::stdout_piped::tests::disclaimed_stdout_piped_spawn_*`.
 pub(crate) fn spawn_stdout_piped_disclaimed(cmd: &Command) -> io::Result<StdoutPipedSpawn> {
     let prog_c = CString::new(cmd.get_program().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "program contains NUL"))?;

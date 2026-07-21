@@ -20,8 +20,9 @@
 //! end is wrapped in a plain `std::fs::File` (synchronous — this is a
 //! blocking call site, not async) for the caller to read to EOF; the pid is
 //! kept for [`super::super::StderrPipedSpawn::wait`] to reap later.
-//! Test: `super::super::tests::disclaimed_stderr_piped_spawn_*` (macOS-only);
-//! `super::super::piped_native_tests::disclaimed_stderr_piped_spawn_native_path_round_trips`
+//! Test: `super::super::stderr_piped::tests::disclaimed_stderr_piped_spawn_*`
+//! (macOS-only);
+//! `super::super::stderr_piped::native_tests::disclaimed_stderr_piped_spawn_native_path_round_trips`
 //! (any OS).
 
 use std::ffi::{CString, OsString};
@@ -37,7 +38,7 @@ use super::{OwnedFd, pipe_cloexec, posix_spawn_file_actions_addchdir_np, resolve
 /// responsibility disclaimed.
 ///
 /// Why/What: see the module docs.
-/// Test: `super::super::tests::disclaimed_stderr_piped_spawn_*`.
+/// Test: `super::super::stderr_piped::tests::disclaimed_stderr_piped_spawn_*`.
 pub(crate) fn spawn_stderr_piped_disclaimed(cmd: &Command) -> io::Result<StderrPipedSpawn> {
     let prog_c = CString::new(cmd.get_program().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "program contains NUL"))?;
