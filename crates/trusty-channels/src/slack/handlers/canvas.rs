@@ -36,7 +36,7 @@
 //! Test: `tests/tools_http.rs::create_canvas_returns_id`,
 //! `::create_canvas_with_channel_and_markdown`, `::update_canvas_replaces_content`,
 //! `::read_canvas_downloads_and_escapes_content`,
-//! `::read_canvas_missing_download_url_errors`.
+//! `::read_canvas_without_download_url_returns_empty_content`.
 
 use serde_json::{json, Value};
 
@@ -123,7 +123,7 @@ pub(super) async fn update_canvas(
 /// Returns `{canvas_id, title, content}`; if Slack reports no download URL
 /// (e.g. an empty canvas) `content` is an empty string rather than an error.
 /// Test: `tests/tools_http.rs::read_canvas_downloads_and_escapes_content`,
-/// `::read_canvas_missing_download_url_errors`.
+/// `::read_canvas_without_download_url_returns_empty_content`.
 pub(super) async fn read_canvas(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
     let canvas_id = require_str(&args, "canvas_id")?;
     let body = json!({ "file": canvas_id.as_str() });
