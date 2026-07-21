@@ -239,6 +239,11 @@ nix = { version = "0.29", features = ["signal", "user", "fs"] }
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3"
+# test-util enables tokio's paused-clock (`tokio::time::pause` /
+# `start_paused = true`), used by the graceful-python-bootstrap orchestrator
+# retry test (epic #3524 slice 6, PR 3/5) so the linear backoff between
+# attempts advances instantly instead of sleeping in real time.
+tokio = { version = "1", features = ["test-util"] }
 # Why: tower::ServiceExt::oneshot is used in the unit tests for the new
 # `service::concurrency` and `service::metrics` modules (issue #41 Phase 1)
 # to exercise router behaviour without binding a TCP port.

@@ -474,6 +474,54 @@ impl LazyEmbedderHandle {
 
         result
     }
+
+    /// Immediately, cooperatively shut down the sidecar this handle owns, if
+    /// one has spawned — an EAGER counterpart to `idle_watchdog`'s own
+    /// teardown (epic #3524 slice 6, PR 3/5 fix — code-critic HIGH, orphaned
+    /// python child on bootstrap-probe failure).
+    ///
+    /// Why: the graceful-python background bootstrap orchestrator
+    /// (`commands::start::graceful_bootstrap`) builds a fresh
+    /// `LazyEmbedderHandle` per bootstrap attempt and forces a real spawn via
+    /// its readiness-probe embed call (`embed_via` → `do_spawn`). If that
+    /// probe fails or times out, the orchestrator's only reference to the
+    /// handle is dropped — but `LazyEmbedderHandle` has no `Drop` impl (its
+    /// `SpawnedState` teardown is an async cooperative shutdown, which
+    /// `Drop::drop` cannot perform), so without this method the just-spawned
+    /// child (torch+MPS, hundreds of MB-GB on the memory-constrained
+    /// Apple-Silicon machines this targets) would only be reaped
+    /// `idle_shutdown_secs` later (up to 1800s for the python arm) by the
+    /// detached `idle_watchdog` — with `TRUSTY_PY_BOOTSTRAP_RETRIES`, up to N
+    /// such orphans could be alive concurrently.
+    ///
+    /// What: takes the state lock, takes the `SpawnedState` out (so the spawn
+    /// gate is reset — a concurrent caller would trigger a fresh spawn rather
+    /// than reuse a killed one), clears the PID slot, and — mirroring
+    /// `idle_watchdog`'s own teardown exactly — calls
+    /// `SupervisorHandle::shutdown()` (cooperative: flips the shared shutdown
+    /// flag; the supervision loop kills + reaps the child itself, clears
+    /// `child_pid_slot`, and never enters the crash-restart path, so this can
+    /// never be misclassified as a crash and respawned; this method then
+    /// awaits that confirmation before returning). Dropping the taken
+    /// `SpawnedState` afterwards also drops its `shutdown_tx`, which signals
+    /// this same instance's `idle_watchdog` task (if one was armed) to exit
+    /// immediately rather than tick uselessly against an already-empty
+    /// state. A no-op (returns immediately) if no child has spawned yet.
+    ///
+    /// Test: `lazy_handle_shutdown_kills_spawned_child`,
+    /// `lazy_handle_shutdown_is_noop_when_never_spawned` in this module's
+    /// `tests` submodule.
+    pub async fn shutdown(&self) {
+        let mut guard = self.state.lock().await;
+        let Some(spawned) = guard.take() else {
+            return;
+        };
+        drop(guard);
+        self.app_pid_slot.store(0, AtomicOrdering::Release);
+        if let Some(handle) = spawned.supervisor_handle {
+            handle.shutdown().await;
+        }
+    }
 }
 
 /// RAII guard that tracks an in-flight embed request (issue #2315).

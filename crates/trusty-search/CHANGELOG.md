@@ -7,6 +7,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **Graceful Apple-Silicon default gating + background bootstrap→hot-swap
+  orchestrator (epic #3524 slice 6, PR 3/5) — ships DEFAULT OFF.** On Apple
+  Silicon, once `TRUSTY_PY_DEFAULT` is enabled, `trusty-search start` now
+  serves on the ort stdio sidecar IMMEDIATELY (identical to today's default)
+  while a new background task bootstraps the python/MPS sidecar (venv +
+  launcher discovery), proves it with one real readiness-probe embed call,
+  and hot-swaps the running `SwitchableEmbedder` (epic #3524 PR-1) over to it
+  — with zero HTTP-listener or startup delay. On any bootstrap or
+  readiness-probe failure (after `TRUSTY_PY_BOOTSTRAP_RETRIES` attempts,
+  default 2, with a linear backoff between attempts) the daemon stays
+  permanently on the still-installed ort backend for that daemon's lifetime
+  and `/health`'s `embedder_bootstrap` reports `"failed"` instead of
+  `"bootstrapping"` forever.
+  - **`TRUSTY_PY_DEFAULT`** (env, default OFF): the ship-gate for this PR.
+    Unset/falsy leaves Apple-Silicon unset/`auto` resolution completely
+    unchanged (ort) — this PR is a no-op for real users until a later slice
+    (PR-5) flips the default on after a soak period. `TRUSTY_EMBEDDER=stdio`
+    remains the permanent per-invocation opt-out even after that flip.
+  - **`TRUSTY_EMBEDDER_PYTHON_EAGER`** (env, default OFF): reaches the
+    existing eager, blocking `python` arm (identical to explicit
+    `TRUSTY_EMBEDDER=python`) via unset/`auto` instead of an explicit value;
+    not platform-gated. Takes precedence over the ship-gate flag being off,
+    but the ship-gate flag wins outright when both are set (no reason to
+    block startup when the background path is available).
+  - **`TRUSTY_PY_BOOTSTRAP_RETRIES`** (env, default `2`): number of
+    bootstrap→probe attempts the background orchestrator makes before giving
+    up and marking the bootstrap `Failed`. A malformed or `0` value falls
+    back to the default rather than disabling retries.
+  - Linux/CUDA/Intel-mac hosts are completely unaffected: the new
+    `DefaultEmbedderMode::GracefulPython` resolution is unreachable off
+    Apple Silicon regardless of env — `ensure_venv`/`uv`/torch are never
+    invoked there.
+  - This PR is swap-in only: detecting a live python sidecar dying after a
+    successful hot-swap and falling back to ort is epic #3524 slice 6 PR-4's
+    scope (seam left in `commands/start/graceful_bootstrap.rs`'s
+    `drive_bootstrap` doc comment).
+  - New files: `commands/start/graceful_bootstrap.rs` (the orchestrator).
+    Extended: `SwitchableEmbedder::set_bootstrap_state` (updates only the
+    bootstrap status, leaving the live backend untouched — used to mark
+    `Failed` without disturbing the still-serving ort backend).
+  - **Fix (code-critic HIGH, pre-merge review): no more orphaned python
+    child on a bootstrap-probe failure/timeout.** The readiness probe forces
+    a REAL `trusty-embedderd-py` child to spawn (torch+MPS, hundreds of
+    MB-GB); previously, dropping the adapter on a failed/timed-out probe left
+    that child alive until the idle watchdog reaped it up to 1800s later —
+    with retries, up to `TRUSTY_PY_BOOTSTRAP_RETRIES` such orphans
+    concurrently on the memory-constrained Apple-Silicon machines this
+    targets. Added `LazyEmbedderHandle::shutdown()`
+    (`service/embedder_supervisor/mod.rs`) — an eager, cooperative
+    counterpart to the existing idle-shutdown watchdog's own teardown
+    (`SupervisorHandle::shutdown()`, issue #2979) — and a
+    `PythonAdapterTeardown` seam so `try_bootstrap_once` calls it
+    immediately on every probe failure/timeout path, before ever dropping
+    the handle.
+
 ### Changed
 
 - **`/health` reports the true active embedder backend + MPS provider (epic

@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 
 use super::embedder::build_embedder;
+use super::graceful_bootstrap::run_graceful_python_bootstrap;
 use super::restore::restore_indexes;
 use crate::commands::prior_index_count::load_prior_index_count;
 
@@ -351,7 +352,7 @@ pub async fn handle_start(
             tokio::time::timeout(Duration::from_secs(init_timeout_secs), init_handle).await;
 
         match init_result {
-            Ok(Ok(Ok((embedder, pid_slot, switchable)))) => {
+            Ok(Ok(Ok((embedder, pid_slot, switchable, needs_graceful_bootstrap)))) => {
                 // Issue #282: if the sidecar path returned a PID slot, install
                 // it on the state so `/health` and the reindex RSS poller can
                 // read the child PID lock-free.
@@ -369,8 +370,24 @@ pub async fn handle_start(
                 // entirely). A later slice's hot-swap orchestrator and
                 // `/health` both reach `swap_to`/`active()` through this
                 // handle without downcasting the trait object.
-                install_state.install_switchable_embedder(switchable);
+                install_state.install_switchable_embedder(Arc::clone(&switchable));
                 install_state.install_embedder(Arc::clone(&embedder)).await;
+                // Epic #3524 slice 6 (PR 3/5): the graceful Apple-Silicon
+                // default arm serves on ort above and needs the python/MPS
+                // bootstrap to run in the background — spawn it now, right
+                // after both the switchable handle and the embedder slot are
+                // visible, so the orchestrator's eventual `swap_to` /
+                // `install_embedderd_pid_slot` calls race no in-progress
+                // install. Detached: never blocks the HTTP listener or the
+                // rest of this init task. No-op (never spawned) unless
+                // `TRUSTY_PY_DEFAULT` is enabled — this PR ships with the
+                // default OFF, so this branch does not run for real users yet.
+                if needs_graceful_bootstrap {
+                    tokio::spawn(run_graceful_python_bootstrap(
+                        switchable,
+                        install_state.clone(),
+                    ));
+                }
                 // Issue #41: worker pool — priority-aware dispatch, bounded queue.
                 let tracker = Arc::clone(&install_state.embedder_stall_tracker);
                 use crate::service::embed_pool::EmbedPool;
