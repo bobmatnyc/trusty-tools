@@ -230,12 +230,12 @@ pub fn select_github_config_for<'a>(
 /// no enforcement, `resolve_for_config`'s result is returned unchanged (the
 /// pre-#3312, unconfigured-project behaviour, byte-for-byte).
 /// Test: `resolve_for_config_enforced_self_heals_mismatch`,
-/// `resolve_for_config_enforced_fails_closed_on_switch_failure`,
-/// `resolve_for_config_enforced_skips_when_account_unset`,
-/// `resolve_for_config_enforced_matches_plain_resolver_pre_fix_behaviour`
-/// (the causality proof: `resolve_for_config` alone — the exact pre-#3312
-/// production path — resolves `Ok` on the same mismatched-account fixture
-/// that this function correctly rejects).
+/// `resolve_for_config_enforced_skips_when_account_unset`, and
+/// `resolve_for_config_enforced_fails_closed_on_switch_failure` — which also
+/// carries the causality proof: it asserts `resolve_for_config` ALONE (the
+/// exact pre-#3312 production path) still resolves `Ok` on the same
+/// mismatched-account fixture that `resolve_for_config_enforced` correctly
+/// rejects.
 pub async fn resolve_for_config_enforced(
     config: &TrustyToolsConfig,
     repo_url: &str,
