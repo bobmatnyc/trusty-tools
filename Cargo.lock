@@ -11563,7 +11563,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -11628,7 +11628,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "0.19.27"
+version = "0.19.28"
 dependencies = [
  "anyhow",
  "async-trait",
