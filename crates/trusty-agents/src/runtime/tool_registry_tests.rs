@@ -66,6 +66,7 @@ fn empty_tag_registry() -> Arc<skills::registry::SkillRegistry> {
 fn research_agent_registry_has_web_tools() {
     let reg = build_registry_for_agent(
         "research-agent",
+        "researcher",
         None,
         None,
         empty_skill_registry(),
@@ -87,6 +88,7 @@ fn research_agent_registry_has_memory_tools() {
     // #53: memory_recall + vector_search registered for the research agent.
     let reg = build_registry_for_agent(
         "research-agent",
+        "researcher",
         None,
         None,
         empty_skill_registry(),
@@ -103,6 +105,7 @@ fn research_agent_registry_has_readonly_fs_tools() {
     // single "find out" agent and must be able to read/grep the codebase.
     let reg = build_registry_for_agent(
         "research-agent",
+        "researcher",
         None,
         None,
         empty_skill_registry(),
@@ -120,6 +123,7 @@ fn plan_agent_registry_has_memory_tools() {
     // plans in existing code / project knowledge.
     let reg = build_registry_for_agent(
         "plan-agent",
+        "planner",
         None,
         None,
         empty_skill_registry(),
@@ -147,6 +151,7 @@ fn all_known_agents_get_skill_tools() {
     ] {
         let reg = build_registry_for_agent(
             agent,
+            "engineer",
             None,
             None,
             empty_skill_registry(),
@@ -164,6 +169,7 @@ fn plan_agent_registry_has_write_file_tool() {
     // assignments.json for interface-first decomposition.
     let reg = build_registry_for_agent(
         "plan-agent",
+        "planner",
         None,
         None,
         empty_skill_registry(),
@@ -182,6 +188,7 @@ fn docs_agent_registry_has_write_and_read_tools() {
     // can inspect generated code and emit documentation files.
     let reg = build_registry_for_agent(
         "docs-agent",
+        "documentation",
         None,
         None,
         empty_skill_registry(),
@@ -219,6 +226,7 @@ async fn list_skills_uses_tag_registry_when_wired() {
 
     let reg = build_registry_for_agent(
         "research-agent",
+        "researcher",
         None,
         None,
         empty_skill_registry(),
@@ -252,6 +260,7 @@ async fn list_skills_falls_back_to_legacy_when_tag_registry_empty() {
     // register and return a non-panicking response.
     let reg = build_registry_for_agent(
         "research-agent",
+        "researcher",
         None,
         None,
         empty_skill_registry(),
@@ -287,4 +296,151 @@ async fn web_search_without_api_key_returns_graceful_error() {
         "error should mention BRAVE_API_KEY, got: {}",
         out.content()
     );
+}
+
+// #3550 follow-up: a live smoke test proved the assistant persona still
+// leaked internal names (`trusty-mpm`, `subagent`) and recited the entire
+// bundled skill catalog (wave planning, git worktree discipline, the full
+// engineering skill bench) when dispatched via `tagent --direct assistant`,
+// even after PR #3550 hardened the SEPARATE persona-chat dispatch path. Root
+// cause: `build_registry_for_agent`'s catch-all branch unconditionally wired
+// `list_skills`/`load_skill` to the full tag-indexed skill registry for ANY
+// agent without a dedicated branch — including role=="assistant" — and the
+// caller never applied the persona's `[tools].allow` glob restriction on
+// this path (see `scope_assistant_allowed_tools` below). These tests pin
+// the fix: role-keyed dispatch to `build_assistant_tier_registry`.
+
+#[test]
+fn assistant_tier_registry_excludes_skill_catalog_tools() {
+    // A non-empty tag registry (as production wires via
+    // `default_bundled_config_dir()`) must NOT leak `list_skills`/
+    // `load_skill` into the assistant-tier registry — those tools are how
+    // the assistant could recite the entire engineering skill catalog
+    // (languages, frameworks, `workflow/wave-planning.md`,
+    // `workflow/delegation.md`, …) it has no business knowing about.
+    use tempfile::TempDir;
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+        dir.path().join("wave-planning.md"),
+        "---\nname: wave-planning\ndescription: decompose\ntags: [workflow]\n---\nbody\n",
+    )
+    .unwrap();
+    let tag_reg = Arc::new(skills::registry::SkillRegistry::load(&[dir
+        .path()
+        .to_path_buf()]));
+    assert!(!tag_reg.is_empty(), "sanity: tag registry loaded a skill");
+
+    let reg = build_registry_for_agent(
+        "assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        tag_reg,
+    )
+    .expect("assistant-tier agent builds a registry");
+
+    assert!(
+        !reg.contains("list_skills"),
+        "list_skills must not be reachable from the assistant tier"
+    );
+    assert!(
+        !reg.contains("load_skill"),
+        "load_skill must not be reachable from the assistant tier"
+    );
+}
+
+#[test]
+fn assistant_tier_registry_includes_curated_tools() {
+    // The assistant tier still needs SOME way to genuinely act on "bring in
+    // a specialist" rather than only ever talking about it — delegation and
+    // web search are registered (actual reachability is still gated by
+    // `[tools].allow` at the `run_subagent` call site).
+    let reg = build_registry_for_agent(
+        "assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+    )
+    .expect("assistant-tier agent builds a registry");
+    assert!(
+        reg.contains("delegate_to_agent"),
+        "delegate_to_agent missing from assistant-tier registry"
+    );
+    assert!(
+        reg.contains("web_search"),
+        "web_search missing from assistant-tier registry"
+    );
+}
+
+#[test]
+fn role_takes_precedence_over_name_for_assistant_tier() {
+    // Role gating is checked BEFORE the `name`-based match — an agent named
+    // like a coding sub-agent (e.g. a persona overlay someone accidentally
+    // names "docs-agent") must still get the curated assistant-tier
+    // registry, never the generic coding-agent tool set, when its role is
+    // "assistant".
+    let reg = build_registry_for_agent(
+        "docs-agent",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+    )
+    .expect("builds a registry");
+    assert!(
+        !reg.contains("write_file"),
+        "assistant-tier role must not get docs-agent's write_file tool"
+    );
+    assert!(reg.contains("delegate_to_agent"));
+}
+
+#[test]
+fn scope_assistant_allowed_tools_filters_by_glob() {
+    // The exact gap that caused the leak: `[tools].allow` (glob) must be
+    // translated into `[tools].allowed` (exact names) for the assistant
+    // tier, or `chat_with_tools_gated` treats the persona as unrestricted.
+    let reg = build_registry_for_agent(
+        "assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+    )
+    .expect("assistant-tier agent builds a registry");
+
+    let allow = vec!["delegate_to_agent".to_string()];
+    let kept =
+        scope_assistant_allowed_tools(true, None, Some(&allow), Some(&reg)).unwrap_or_default();
+
+    assert_eq!(kept, vec!["delegate_to_agent".to_string()]);
+    assert!(
+        !kept.iter().any(|n| n == "web_search"),
+        "web_search not in the allow list must not survive scoping"
+    );
+}
+
+#[test]
+fn scope_assistant_allowed_tools_noop_for_non_assistant() {
+    // Coding sub-agents rely on `allowed == None` meaning "unrestricted"
+    // (see `ToolsConfig::allowed` doc comment) — the assistant-tier gate
+    // must never touch that default for role != "assistant".
+    let allow = vec!["git_*".to_string()];
+    let kept = scope_assistant_allowed_tools(false, None, Some(&allow), None);
+    assert_eq!(kept, None);
+}
+
+#[test]
+fn scope_assistant_allowed_tools_noop_when_allowed_already_set() {
+    // An assistant-tier agent that already sets `[tools].allowed` explicitly
+    // keeps that list untouched rather than being overwritten by the
+    // glob-derived set.
+    let existing = Some(vec!["only_this_tool".to_string()]);
+    let allow = vec!["*".to_string()];
+    let kept = scope_assistant_allowed_tools(true, existing.clone(), Some(&allow), None);
+    assert_eq!(kept, existing);
 }
