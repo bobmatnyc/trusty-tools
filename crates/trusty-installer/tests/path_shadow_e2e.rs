@@ -107,6 +107,7 @@ async fn health_gate_reads_new_version_and_shadow_is_surfaced_despite_earlier_pa
         Some("0.19.29"),
         OsStr::new(&synthetic_path),
     )
+    .await
     .expect("shadow warning must fire — an older copy shadows the new install on PATH");
     assert_eq!(report.shadowing_path, early_dir.join("tm"));
     assert_eq!(report.shadowing_version.as_deref(), Some("0.19.26"));
@@ -149,6 +150,7 @@ async fn no_shadow_warning_when_path_resolves_to_the_installed_binary() {
         &install_path,
         Some("0.19.29"),
         OsStr::new(&install_dir.display().to_string()),
-    );
+    )
+    .await;
     assert!(report.is_none(), "no shadow should be reported: {report:?}");
 }

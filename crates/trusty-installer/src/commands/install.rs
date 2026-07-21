@@ -32,7 +32,7 @@
 //! `cargo install` path and the confirmation gate's TTY plumbing are
 //! side-effecting / covered by `super::install_gate::tests`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use trusty_progress::{Component, ComponentTracker};
@@ -689,7 +689,9 @@ async fn install_all(
                     &installed.path,
                     Some(&installed.version),
                     &path_env,
-                ) {
+                )
+                .await
+                {
                     Some(report) => {
                         let msg = report.message();
                         let _ = narr.error(&format!("{}: {msg}", m.crate_name));
@@ -730,6 +732,43 @@ async fn install_all(
     InstallReport::build(outcomes)
 }
 
+/// Select the concrete path for `binary` from a prebuilt placement's
+/// reported `paths` (#3554 review — MEDIUM).
+///
+/// Why: this — plus [`cargo_fallback_bin_path`] — is the exact glue that TWO
+/// of the three original #3554 bugs lived in (picking the wrong file after
+/// an otherwise-correct install/verify split). It cannot be exercised via a
+/// real `install_one` call in tests without a network round-trip
+/// (`download::try_install_prebuilt` hits GitHub Releases), so it is
+/// extracted as a pure function specifically to make it independently
+/// unit-testable without one.
+/// What: returns the first entry in `paths` whose file name exactly equals
+/// `binary`, or `install_dir.join(binary)` when none match (a defensive
+/// fallback — `download::try_install_prebuilt` always places the requested
+/// crate's binaries under `install_dir`, so this arm should not be reachable
+/// in practice, but must never panic if it is).
+/// Test: `tests::select_prebuilt_bin_path_matches_by_filename`,
+/// `tests::select_prebuilt_bin_path_falls_back_when_no_match`,
+/// `tests::select_prebuilt_bin_path_does_not_substring_match`.
+fn select_prebuilt_bin_path(paths: &[PathBuf], binary: &str, install_dir: &Path) -> PathBuf {
+    paths
+        .iter()
+        .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(binary))
+        .cloned()
+        .unwrap_or_else(|| install_dir.join(binary))
+}
+
+/// Resolve the concrete `cargo install` destination for `binary` (#3554
+/// review — MEDIUM, see [`select_prebuilt_bin_path`]'s doc for why this is
+/// extracted as a pure function).
+/// What: `cargo_bin_dir().unwrap_or(install_dir).join(binary)`.
+/// Test: `tests::cargo_fallback_bin_path_joins_binary_onto_cargo_bin_dir`.
+fn cargo_fallback_bin_path(binary: &str, install_dir: &Path) -> PathBuf {
+    cargo_bin_dir()
+        .unwrap_or_else(|| install_dir.to_owned())
+        .join(binary)
+}
+
 /// Install + health-gate a single member, prebuilt-first with cargo fallback.
 ///
 /// Why: Prebuilt binaries install in seconds without requiring a Rust toolchain;
@@ -742,8 +781,10 @@ async fn install_all(
 /// health-gates the CONCRETE just-installed path (#3554) via
 /// `trusty_common::update::verify_installed_binary_at_path` — never a
 /// name-based lookup a stale earlier-PATH/earlier-priority-directory binary
-/// could shadow. For the prebuilt path, additionally cross-checks the
-/// reported version against the version the download layer resolved
+/// could shadow; the path itself is resolved by the pure
+/// [`select_prebuilt_bin_path`] / [`cargo_fallback_bin_path`] helpers above.
+/// For the prebuilt path, additionally cross-checks the reported version
+/// against the version the download layer resolved
 /// (`Outcome::Installed::version`); a mismatch is a HARD error (#3554
 /// requirement: never a silent pass) rather than a successful report,
 /// because it means the binary being health-gated is provably not the one
@@ -752,7 +793,9 @@ async fn install_all(
 /// Test: Side-effecting; the fallback routing and shaping are unit-tested in
 /// `crate::download::tests`. The #3554 shape (health gate immune to a
 /// PATH-shadowing stale binary) is covered at the `verify_installed_binary_at_path`
-/// layer (`trusty-common`) and the `shadow_check`/`plist_bootstrap` layers.
+/// layer (`trusty-common`) and the `shadow_check`/`plist_bootstrap` layers; the
+/// path-selection glue specifically is covered by `select_prebuilt_bin_path`'s
+/// and `cargo_fallback_bin_path`'s own tests (see above).
 async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     use crate::download::{self, Outcome};
 
@@ -778,11 +821,7 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
             // #3554: health-gate the CONCRETE just-placed binary — the exact
             // path `download::try_install_prebuilt` reports having written —
             // never a name re-resolved afterward.
-            let bin_path = paths
-                .iter()
-                .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(m.binary.as_str()))
-                .cloned()
-                .unwrap_or_else(|| install_dir.join(&m.binary));
+            let bin_path = select_prebuilt_bin_path(&paths, &m.binary, &install_dir);
             let reported = trusty_common::update::verify_installed_binary_at_path(&bin_path)
                 .await
                 .map_err(|e| {
@@ -827,9 +866,7 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
             // #3554: `cargo install` always lands in the cargo bin dir
             // (`$CARGO_HOME/bin`, falling back to `~/.cargo/bin`) — resolve
             // that CONCRETE destination directly rather than a name lookup.
-            let bin_path = cargo_bin_dir()
-                .unwrap_or_else(|| install_dir.clone())
-                .join(&m.binary);
+            let bin_path = cargo_fallback_bin_path(&m.binary, &install_dir);
             let reported = trusty_common::update::verify_installed_binary_at_path(&bin_path)
                 .await
                 .map_err(|e| {

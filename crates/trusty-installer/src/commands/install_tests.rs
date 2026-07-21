@@ -237,6 +237,81 @@ fn cargo_bin_dir_from_env_falls_back() {
     }
 }
 
+// ── select_prebuilt_bin_path / cargo_fallback_bin_path (#3554 review — MEDIUM) ──
+//
+// These pin the exact glue that two of the three original #3554 bugs lived
+// in: picking the CONCRETE just-installed path rather than re-deriving it by
+// name. Extracted as pure functions specifically because `install_one` can't
+// be exercised in a unit test without a live network round-trip
+// (`download::try_install_prebuilt` hits GitHub Releases).
+
+/// Why: the common case — `paths` (as `download::try_install_prebuilt`
+/// actually returns them) already live under `install_dir`; the selector
+/// must pick the entry matching `binary` by exact file-name equality.
+/// What: three siblings under one dir; selecting `"tm"` returns exactly
+/// `install_dir.join("tm")`.
+/// Test: This is the test.
+#[test]
+fn select_prebuilt_bin_path_matches_by_filename() {
+    let install_dir = std::path::PathBuf::from("/home/x/.local/bin");
+    let paths = vec![
+        install_dir.join("trusty-search"),
+        install_dir.join("tm"),
+        install_dir.join("trusty-mpm"),
+    ];
+    assert_eq!(
+        select_prebuilt_bin_path(&paths, "tm", &install_dir),
+        install_dir.join("tm")
+    );
+}
+
+/// Why: `paths` not containing the requested binary at all must not panic —
+/// the defensive fallback must still resolve to a path INSIDE `install_dir`
+/// (never `None`, never a path elsewhere).
+/// What: `paths` has no entry named `tm`; selecting `tm` falls back to
+/// `install_dir.join("tm")`.
+/// Test: This is the test.
+#[test]
+fn select_prebuilt_bin_path_falls_back_when_no_match() {
+    let install_dir = std::path::PathBuf::from("/home/x/.local/bin");
+    let paths = vec![install_dir.join("trusty-search")];
+    assert_eq!(
+        select_prebuilt_bin_path(&paths, "tm", &install_dir),
+        install_dir.join("tm"),
+        "defensive fallback must still point inside install_dir"
+    );
+}
+
+/// Why: the selector matches by exact file-name EQUALITY, never substring —
+/// `tm` must not accidentally match `trusty-mpm` (a real sibling in the same
+/// tarball placement) just because one contains a similar sequence.
+/// What: `paths` contains only `trusty-mpm`; selecting `tm` must NOT return
+/// it — it falls back to `install_dir.join("tm")` instead.
+/// Test: This is the test.
+#[test]
+fn select_prebuilt_bin_path_does_not_substring_match() {
+    let install_dir = std::path::PathBuf::from("/home/x/.local/bin");
+    let paths = vec![install_dir.join("trusty-mpm")];
+    assert_eq!(
+        select_prebuilt_bin_path(&paths, "tm", &install_dir),
+        install_dir.join("tm"),
+        "must not substring-match trusty-mpm for binary name tm"
+    );
+}
+
+/// Why: the cargo-install fallback path must resolve to a concrete path
+/// ending in the requested binary name, regardless of which directory
+/// `cargo_bin_dir()` (or the `install_dir` fallback) resolves to on the test
+/// host.
+/// What: the returned path's file name is exactly `binary`.
+/// Test: This is the test.
+#[test]
+fn cargo_fallback_bin_path_joins_binary_onto_cargo_bin_dir() {
+    let install_dir = std::path::PathBuf::from("/home/x/.local/bin");
+    let p = cargo_fallback_bin_path("tm", &install_dir);
+    assert_eq!(p.file_name().and_then(|f| f.to_str()), Some("tm"));
+}
+
 /// Why: An unknown member must be a clean error (exit 3), not a silent skip.
 /// What: Calls `run` with a bogus member in `--json` mode; asserts exit 3.
 /// Test: This is the test.

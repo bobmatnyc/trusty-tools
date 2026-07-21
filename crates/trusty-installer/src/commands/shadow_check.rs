@@ -154,15 +154,30 @@ impl ShadowReport {
 /// What: resolves `binary_name` against `search_path` (the real `$PATH` in
 /// production, a synthetic one in tests); returns `Some(ShadowReport)` only
 /// for the genuine [`ShadowVerdict::Shadowed`] case (a DIFFERENT file
-/// resolves), probing that file's `--version` best-effort. Returns `None`
-/// for [`ShadowVerdict::Clear`] and [`ShadowVerdict::NotOnPath`] — the latter
-/// is a distinct, lower-severity condition already surfaced by `install.sh`
-/// (see [`ShadowVerdict::NotOnPath`]'s doc).
+/// resolves). Returns `None` for [`ShadowVerdict::Clear`] and
+/// [`ShadowVerdict::NotOnPath`] — the latter is a distinct, lower-severity
+/// condition already surfaced by `install.sh` (see [`ShadowVerdict::NotOnPath`]'s
+/// doc).
+///
+/// #3554 review (HIGH): the shadowing file is discovered via `$PATH` — an
+/// arbitrary, untrusted file that is strictly LESS trustworthy than the
+/// binary the health gate just verified. Probing its `--version` therefore
+/// goes through the SAME timeout-guarded primitive the health gate uses
+/// (`trusty_common::update::verify_installed_binary_at_path`, a 10-second
+/// `tokio::time::timeout`), never the un-timed-out
+/// `update_engine::installed_version`. A shadowing binary that hangs on
+/// `--version` (a shell shim blocked on stdin, a renamed/broken executable,
+/// a non-CLI program under the same name) must never hang the unattended
+/// `curl -sSf … | sh -s -- -y` flow on the very step meant to make failure
+/// loud — a timed-out or failed probe degrades to `shadowing_version: None`
+/// (the SHADOW itself is still reported; only the version detail is best
+/// effort).
 ///
 /// Test: `detect_reports_shadow_with_both_paths_and_versions`,
 /// `detect_returns_none_when_path_resolves_to_installed_binary`,
-/// `detect_returns_none_when_not_on_path`.
-pub fn detect(
+/// `detect_returns_none_when_not_on_path`,
+/// `detect_does_not_hang_on_an_unresponsive_shadowing_binary`.
+pub async fn detect(
     binary_name: &str,
     install_path: &Path,
     install_version: Option<&str>,
@@ -173,7 +188,10 @@ pub fn detect(
         ShadowVerdict::Clear | ShadowVerdict::NotOnPath => None,
         ShadowVerdict::Shadowed { resolved } => {
             let shadowing_version =
-                super::update_engine::installed_version(&resolved.to_string_lossy());
+                trusty_common::update::verify_installed_binary_at_path(&resolved)
+                    .await
+                    .ok()
+                    .and_then(|raw| super::update_engine::extract_version_from_line(&raw));
             Some(ShadowReport {
                 binary_name: binary_name.to_owned(),
                 install_path: install_path.to_owned(),
@@ -236,8 +254,8 @@ mod tests {
     /// EARLIER on the search path than the just-installed one. Must report
     /// `Shadowed`, naming both paths and both versions.
     #[cfg(unix)]
-    #[test]
-    fn detect_reports_shadow_with_both_paths_and_versions() {
+    #[tokio::test]
+    async fn detect_reports_shadow_with_both_paths_and_versions() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
         let early_dir = tmp.path().join("early-cargo-bin");
@@ -257,6 +275,7 @@ mod tests {
             Some("0.19.29"),
             OsStr::new(&search_path),
         )
+        .await
         .expect("shadow must be detected — an older copy precedes the install dir on PATH");
 
         assert_eq!(report.shadowing_path, early_dir.join("tm"));
@@ -283,9 +302,77 @@ mod tests {
         );
     }
 
+    /// #3554 review (HIGH): a shadowing binary that hangs on `--version`
+    /// (here, a shell script that sleeps well past the health gate's 10s
+    /// timeout) must NOT hang `detect` indefinitely — it must complete in
+    /// bounded time, still reporting the SHADOW itself (the operator's shell
+    /// still resolves to a different file — that fact doesn't depend on
+    /// being able to read its version), with `shadowing_version: None`
+    /// because the probe couldn't complete.
+    ///
+    /// Why this reproduces the reviewed risk: prior to routing this probe
+    /// through `verify_installed_binary_at_path`'s timeout-guarded
+    /// primitive, the un-timed-out `update_engine::installed_version` would
+    /// block on `Command::output()` for as long as the child process runs —
+    /// i.e. forever, for a shell shim blocked on stdin or any other hung
+    /// `--version` invocation, on the very step meant to make failure loud
+    /// right after the health gate passed.
     #[cfg(unix)]
-    #[test]
-    fn detect_returns_none_when_path_resolves_to_installed_binary() {
+    #[tokio::test]
+    async fn detect_does_not_hang_on_an_unresponsive_shadowing_binary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let early_dir = tmp.path().join("early-hanging-bin");
+        std::fs::create_dir_all(&early_dir).expect("mkdir early");
+        // Sleeps well past the 10s health-gate timeout, then would exit 0 —
+        // the test must never wait for that exit.
+        std::fs::write(
+            early_dir.join("tm"),
+            "#!/bin/sh\nsleep 30\necho 'trusty-mpm 9.9.9'\nexit 0\n",
+        )
+        .expect("write hanging fake binary");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(early_dir.join("tm"))
+                .expect("stat")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(early_dir.join("tm"), perms).expect("chmod");
+        }
+
+        let install_dir = tmp.path().join("local-bin");
+        std::fs::create_dir_all(&install_dir).expect("mkdir install");
+        let install_path = install_dir.join("tm");
+        write_versioned_binary(&install_path, "trusty-mpm 0.19.29");
+
+        let search_path = format!("{}:{}", early_dir.display(), install_dir.display());
+
+        // Bound the WHOLE test well under what an indefinite hang would look
+        // like (the pre-fix behaviour), but comfortably above the 10s
+        // internal health-gate timeout `detect` now goes through.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            detect(
+                "tm",
+                &install_path,
+                Some("0.19.29"),
+                OsStr::new(&search_path),
+            ),
+        )
+        .await
+        .expect("detect must return within 20s, never hang on an unresponsive shadowing binary");
+
+        let report = result.expect("the shadow itself must still be reported");
+        assert_eq!(report.shadowing_path, early_dir.join("tm"));
+        assert_eq!(
+            report.shadowing_version, None,
+            "an unprobeable (timed-out) shadowing binary must degrade to None, not block"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn detect_returns_none_when_path_resolves_to_installed_binary() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let install_dir = tmp.path().join("local-bin");
         std::fs::create_dir_all(&install_dir).expect("mkdir");
@@ -297,17 +384,18 @@ mod tests {
             &install_path,
             Some("0.19.29"),
             OsStr::new(&install_dir.display().to_string()),
-        );
+        )
+        .await;
         assert!(report.is_none(), "no shadow should be reported: {report:?}");
     }
 
-    #[test]
-    fn detect_returns_none_when_not_on_path() {
+    #[tokio::test]
+    async fn detect_returns_none_when_not_on_path() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let install_path = tmp.path().join("local-bin").join("tm");
 
         // Empty search path — nothing resolves `tm` at all.
-        let report = detect("tm", &install_path, Some("0.19.29"), OsStr::new(""));
+        let report = detect("tm", &install_path, Some("0.19.29"), OsStr::new("")).await;
         assert!(
             report.is_none(),
             "a binary absent from PATH entirely is not 'shadowed': {report:?}"
