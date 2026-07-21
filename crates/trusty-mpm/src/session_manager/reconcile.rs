@@ -14,7 +14,7 @@
 //! Test: `manager_reconcile_gone_tmux_yields_stopped`,
 //! `manager_reconcile_adopts_new_prefix_session` in `tests.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use tracing::{info, warn};
@@ -93,6 +93,24 @@ impl SessionManager {
             guard.upsert(record).await?;
         }
 
+        // Canonical workspace paths already tracked by a non-terminal record
+        // (#3396): the external-adopt loop below must never mint a SECOND
+        // identity for a worktree an existing record already owns, mirroring
+        // the fix `decide_native_registration` (#3599) applied to the
+        // native-process discovery path. Built from the FRESH post-reconcile
+        // state (the per-record loop above already re-upserted every live/gone
+        // transition through `guard`), so a record whose tmux session just
+        // went live this pass is included too.
+        let known_workspaces: std::collections::HashSet<PathBuf> = guard
+            .all()
+            .await?
+            .iter()
+            .filter(|r| !matches!(r.state, ManagedSessionState::Decommissioned))
+            .filter_map(|r| r.workspace_path.clone())
+            .filter(|p| p.as_path() != Path::new("/unknown"))
+            .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+            .collect();
+
         // Adopt tmux sessions the store has never seen. Issue #2158: an
         // adopted session must never be left as a silent half-record with
         // cwd/workspace_path permanently stubbed to "/unknown" — re-resolve
@@ -105,6 +123,28 @@ impl SessionManager {
         for name in &live_names {
             if !known_names.contains(name) {
                 let resolved_cwd = self.tmux.get_pane_cwd(name).filter(|p| p.is_dir());
+                // #3396: a live tmux session unknown BY NAME can still resolve
+                // to a workspace an EXISTING record already tracks — e.g. a
+                // renamed/second tmux session fronting the same worktree.
+                // Minting a second record here is exactly the duplicate-record
+                // defect; skip adoption and surface the crossed mapping loudly
+                // instead so an operator can reconcile the tmux_name drift
+                // (`tm sessions ls`, `tmux list-panes`) rather than the daemon
+                // silently doubling the identity.
+                if let Some(path) = &resolved_cwd {
+                    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                    if known_workspaces.contains(&canon) {
+                        warn!(
+                            name = %name,
+                            workspace = %path.display(),
+                            "reconcile: skipping external-adopt — live tmux session resolves to \
+                             a workspace already tracked by another managed session record; its \
+                             tmux_name may be stale/crossed (#3396) — investigate with `tm sessions \
+                             ls` and `tmux list-panes` rather than auto-adopting a duplicate"
+                        );
+                        continue;
+                    }
+                }
                 let (cwd, workspace_path, task) = match &resolved_cwd {
                     Some(path) => (
                         path.clone(),

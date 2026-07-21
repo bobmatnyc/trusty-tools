@@ -5,6 +5,13 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **Duplicate/stale/crossed managed-session records for one worktree** (closes [#3396](https://github.com/bobmatnyc/trusty-tools/issues/3396)): `reconcile_on_boot`'s external-adopt loop minted a brand-new `SessionRecord` for any live tmux session unknown to the store BY NAME ALONE, never checking whether its resolved cwd already belonged to an existing, non-`Decommissioned` record — so a renamed/replaced tmux session fronting an already-managed worktree got a second, uncorrelated identity (the same defect class #3599 fixed for native-process discovery). The stale sibling's drifted `tmux_name` then made `session_send`/`session_proxy_message` falsely refuse delivery (`PaneGone`) even though the pane was alive under its new name. The external-adopt loop now skips adoption (logging the crossed mapping) when a live session's resolved workspace already has a tracked owner, and a new `plan_workspace_duplicates` pass in `dedup_stale_duplicates` reconciles duplicates already on disk from before this fix — grouping strictly by canonicalized `workspace_path` (independent of `plan_dedup`'s per-repository `source_id`/live-group rules, which correctly never touch this shape): an SM-owned record is never a loser, a live sibling always survives over a dead one, and two simultaneously-live records at one path are left for manual review rather than guessed at.
+
+---
 ## [0.20.0] — 2026-07-21
 
 ### Added

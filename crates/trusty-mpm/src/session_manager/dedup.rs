@@ -48,7 +48,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
@@ -86,7 +86,29 @@ impl SessionManager {
             .filter(|n| crate::core::names::is_managed_session_name(n))
             .collect();
         let records = self.store.write().await.all().await?;
-        let losers = plan_dedup(&records, &live_names);
+        let mut losers = plan_dedup(&records, &live_names);
+
+        // #3396: also collapse EXACT-workspace_path duplicates — two+
+        // non-Decommissioned records resolving to the literal SAME on-disk
+        // worktree. `plan_dedup` above deliberately never touches this shape
+        // (its `source_id` grouping is per-repository, and a
+        // resolved-existing member is categorically immune there — both
+        // correct for the LEGITIMATE concurrent-worktree case, which is why
+        // the #3396 duplicate persisted across every prior dedup pass). See
+        // `plan_workspace_duplicates`'s doc for why "same literal path" is
+        // safe to treat differently. Track which ids came from THIS mechanism
+        // so the belt-and-suspenders recheck below applies the right predicate
+        // to each.
+        let workspace_dup_losers: HashSet<ManagedSessionId> =
+            plan_workspace_duplicates(&records, &live_names)
+                .into_iter()
+                .collect();
+        for id in &workspace_dup_losers {
+            if !losers.contains(id) {
+                losers.push(*id);
+            }
+        }
+
         if losers.is_empty() {
             return Ok(losers);
         }
@@ -94,7 +116,7 @@ impl SessionManager {
         info!(
             count = losers.len(),
             ids = ?losers.iter().map(ManagedSessionId::to_string).collect::<Vec<_>>(),
-            "dedup: plan computed stale duplicate(s) to decommission (#2306)"
+            "dedup: plan computed stale duplicate(s) to decommission (#2306, #3396)"
         );
 
         // Never auto-resume a record we are about to decommission.
@@ -102,13 +124,9 @@ impl SessionManager {
 
         let mut decommissioned = Vec::new();
         for id in &losers {
-            // Belt-and-suspenders (#2306 review fix): re-fetch and rerun the
-            // EXACT safety predicate used during planning immediately before
-            // acting, guarding a TOCTOU race between the plan snapshot above
-            // and this decommission call. A loser is only ever planned when
-            // unresolved/dead; if its workspace_path now resolves to an
-            // existing directory, refuse to decommission rather than risk
-            // deleting live work.
+            // Belt-and-suspenders: re-fetch immediately before acting, guarding
+            // a TOCTOU race between the plan snapshot above and this
+            // decommission call.
             let current = match self.get(id).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -116,7 +134,40 @@ impl SessionManager {
                     continue;
                 }
             };
-            if is_resolved_existing(&current) {
+            if workspace_dup_losers.contains(id) {
+                // #3396 recheck: an exact-workspace-duplicate loser is
+                // EXPECTED to be resolved-existing (that is the grouping key),
+                // so the #2306 predicate below does not apply here. Instead
+                // refuse when the record turned out to be SM-owned (deletion
+                // would risk `git worktree remove --force`ing real work — see
+                // `plan_workspace_duplicates`'s categorical owned-record
+                // exclusion, rechecked here against a TOCTOU) or when its OWN
+                // tmux session has since gone live (decommission kills the
+                // whole tmux session — never do that to a live one).
+                if current.workspace_owned {
+                    warn!(
+                        id = %id,
+                        "dedup: #3396 belt-and-suspenders skip — loser is SM-owned; \
+                         refusing to decommission"
+                    );
+                    continue;
+                }
+                if live_names.contains(&current.tmux_name) {
+                    warn!(
+                        id = %id,
+                        name = %current.tmux_name,
+                        "dedup: #3396 belt-and-suspenders skip — loser's tmux session is now \
+                         live; refusing to decommission an active session"
+                    );
+                    continue;
+                }
+            } else if is_resolved_existing(&current) {
+                // Belt-and-suspenders (#2306 review fix): re-run the EXACT
+                // safety predicate used during planning immediately before
+                // acting. A `plan_dedup` loser is only ever planned when
+                // unresolved/dead; if its workspace_path now resolves to an
+                // existing directory, refuse to decommission rather than risk
+                // deleting live work.
                 warn!(
                     id = %id,
                     workspace = ?current.workspace_path,
@@ -130,7 +181,7 @@ impl SessionManager {
                     info!(
                         id = %id,
                         name = %rec.tmux_name,
-                        "dedup: decommissioned stale duplicate session record (#2306)"
+                        "dedup: decommissioned stale duplicate session record (#2306, #3396)"
                     );
                     decommissioned.push(*id);
                 }
@@ -271,6 +322,130 @@ pub(crate) fn plan_dedup(
             // resolved-existing members themselves are left untouched — even
             // if there are 2+ of them (legitimate concurrent sessions).
             losers.extend(candidates.iter().map(|r| r.id));
+        }
+    }
+    losers
+}
+
+/// Plan losers among records that share the IDENTICAL, resolved-existing
+/// `workspace_path` (#3396).
+///
+/// Why: [`plan_dedup`]'s `source_id` grouping is per-REPOSITORY by design
+/// (see the module docs) — it deliberately never touches two
+/// resolved-existing records with DIFFERENT `workspace_path`s, because that
+/// shape is the legitimate concurrent-worktree-sessions case, and it treats
+/// ANY resolved-existing member as categorically immune regardless of group
+/// size. But two records pointing at the exact SAME `workspace_path` are
+/// never that: a single worktree directory hosts at most one live managed
+/// identity, so a group of 2+ non-`Decommissioned` records sharing one
+/// resolved-existing path is ALWAYS a duplicate-identity bug (#3396 — e.g. a
+/// live tmux session renamed/replaced out from under its record, then
+/// re-discovered and adopted under a different name against the same cwd by
+/// [`super::reconcile::SessionManager::reconcile_on_boot`]'s external-adopt
+/// loop, before that loop's own #3396 duplicate-prevention check existed).
+/// `plan_dedup`'s live-group guard ("skip the WHOLE group if ANY member is
+/// live") and its resolved-existing categorical immunity both, correctly,
+/// refuse to touch this shape — which is exactly why a #3396 stale duplicate
+/// persists across every `plan_dedup`-only pass. This function is the
+/// narrowly-scoped exact-path counterpart: it groups by canonicalized
+/// `workspace_path` alone (ignoring `source_id`), and — because "same
+/// directory" is unambiguous where "same repository" is not — is allowed to
+/// pick a survivor even when one member is currently live.
+/// What: groups non-`Decommissioned`, resolved-existing (per
+/// [`is_resolved_existing`]) records by canonicalized `workspace_path`, then
+/// for each group of 2+:
+/// - A `workspace_owned = true` member (the SM provisioned this directory
+///   itself, e.g. via clone) is NEVER a loser — categorical protection
+///   against ever risking a real, SM-owned repository, mirroring
+///   [`is_resolved_existing`]'s role in `plan_dedup`. Two-or-more owned
+///   members sharing one path should structurally never happen; rather than
+///   guess, that shape leaves the WHOLE group untouched.
+/// - Exactly one owned member: it is the automatic survivor, and every
+///   `workspace_owned = false` sibling whose `tmux_name` is currently DEAD is
+///   a loser (a live one is left alone too — never decommission a currently
+///   active session).
+/// - Zero owned members: the survivor is chosen among the unowned members —
+///   if exactly one has a live `tmux_name` it survives; if none are live, the
+///   most recently active/created one survives (mirrors `plan_dedup`'s
+///   /unknown tie-break); if two or more are simultaneously live, the group
+///   is left untouched — two genuinely-live panes pointed at the same
+///   directory is ambiguous enough that guessing a survivor risks tearing
+///   down a real session, so this defers to the operator rather than picking
+///   one.
+///
+/// A loser selected here therefore always has both `workspace_owned = false`
+/// (decommission never deletes the directory) and a currently-DEAD
+/// `tmux_name` (decommission never kills a live tmux session).
+/// Test: the `plan_workspace_duplicates_*` tests in `dedup_tests.rs`.
+pub(crate) fn plan_workspace_duplicates(
+    records: &[SessionRecord],
+    live_names: &HashSet<String>,
+) -> Vec<ManagedSessionId> {
+    let mut groups: HashMap<PathBuf, Vec<&SessionRecord>> = HashMap::new();
+    for record in records {
+        if matches!(record.state, ManagedSessionState::Decommissioned) {
+            continue;
+        }
+        if !is_resolved_existing(record) {
+            continue;
+        }
+        // is_resolved_existing() only returns true when workspace_path is
+        // Some, so this is always populated for a grouped record.
+        let Some(path) = record.workspace_path.as_ref() else {
+            continue;
+        };
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        groups.entry(canon).or_default().push(record);
+    }
+
+    let mut losers = Vec::new();
+    for members in groups.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        let (owned, unowned): (Vec<&SessionRecord>, Vec<&SessionRecord>) =
+            members.iter().copied().partition(|r| r.workspace_owned);
+
+        if owned.len() >= 2 {
+            // 2+ SM-owned records for one literal path should never happen;
+            // do not guess which is "real" — leave the whole group alone.
+            continue;
+        }
+        if owned.len() == 1 {
+            // The owned record is the permanent survivor. Every unowned
+            // sibling that is NOT currently live is a duplicate of it.
+            losers.extend(
+                unowned
+                    .iter()
+                    .filter(|r| !live_names.contains(&r.tmux_name))
+                    .map(|r| r.id),
+            );
+            continue;
+        }
+
+        // owned.is_empty(): pick a survivor among the unowned members.
+        if unowned.len() < 2 {
+            continue;
+        }
+        let live_candidates: Vec<&SessionRecord> = unowned
+            .iter()
+            .copied()
+            .filter(|r| live_names.contains(&r.tmux_name))
+            .collect();
+        match live_candidates.len() {
+            0 => {
+                if let Some(survivor) = unowned.iter().copied().max_by(|a, b| by_recency(a, b)) {
+                    losers.extend(unowned.iter().filter(|r| r.id != survivor.id).map(|r| r.id));
+                }
+            }
+            1 => {
+                let survivor_id = live_candidates[0].id;
+                losers.extend(unowned.iter().filter(|r| r.id != survivor_id).map(|r| r.id));
+            }
+            _ => {
+                // 2+ simultaneously-live candidates for one directory: leave
+                // the whole group untouched (see doc above).
+            }
         }
     }
     losers
