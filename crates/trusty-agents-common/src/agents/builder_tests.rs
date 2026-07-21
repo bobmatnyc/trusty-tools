@@ -305,6 +305,151 @@ fn needs_quoting_false_for_plain_value() {
 }
 
 #[test]
+fn needs_quoting_true_for_mid_string_hash_comment() {
+    // code-critic review finding on PR #3565 (HIGH): a space followed by `#`
+    // starts a YAML comment ANYWHERE in a plain scalar, not just when `#` is
+    // the very first character. The pre-fix `needs_quoting` only checked the
+    // leading character, so this value composed to an unquoted line where
+    // everything from `" #1..."` onward silently vanished as a comment —
+    // `compose_agent` succeeded, `validate_frontmatter` accepted it (it IS
+    // syntactically valid, truncated, YAML), and the real consumer
+    // (`trusty-agents`' `.md` loader) deserialized a silently truncated
+    // `description`. Exactly the #3556 root cause's blind spot, different
+    // trigger character.
+    assert!(needs_quoting(
+        "Model context protocol #1 tool for delegating to sub-agents"
+    ));
+    // A `#` with no preceding space is NOT a comment marker in YAML and must
+    // not force quoting that isn't needed.
+    assert!(!needs_quoting("agent-name#1-no-space-before-hash"));
+}
+
+#[test]
+fn compose_description_with_mid_string_hash_is_quoted_and_survives_verbatim() {
+    // End-to-end reproduction of the code-critic finding: compose an agent
+    // whose description contains a mid-string `" #"`, then parse the result
+    // with a REAL strict YAML parser (the same one a consumer like
+    // `trusty-agents`' `.md` loader uses) and confirm the deserialized value
+    // is the FULL, untruncated text.
+    //
+    // Checking the raw composed TEXT for the substring (as an earlier
+    // version of this test did) is NOT sufficient proof: pre-fix, the raw
+    // emitted text still contained the full string byte-for-byte — only a
+    // real YAML parser treats `" #1 tool..."` as a comment and silently
+    // drops it from the DESERIALIZED value. Asserting on the parsed value,
+    // not the raw text, is what actually exercises the bug.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "mcp-agent",
+        "---\nname: mcp-agent\nrole: engineer\ndescription: 'Model context protocol #1 tool for delegating to sub-agents'\n---\n\n# MCP\n",
+    );
+    let composed = compose_agent("mcp-agent", tmp.path()).unwrap();
+    crate::agents::frontmatter::validate_frontmatter(&composed)
+        .unwrap_or_else(|e| panic!("composed frontmatter must be valid YAML: {e}\n{composed}"));
+
+    let fm_block = composed
+        .split("---")
+        .nth(1)
+        .expect("composed document must have a frontmatter block");
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(fm_block).expect("frontmatter must strict-parse as YAML");
+    let description = value
+        .get("description")
+        .and_then(|v| v.as_str())
+        .expect("description key must be present and a string");
+    assert_eq!(
+        description, "Model context protocol #1 tool for delegating to sub-agents",
+        "the full description, including everything after the mid-string `#`, \
+         must survive the ACTUAL YAML PARSE — not merely appear in the raw text"
+    );
+}
+
+#[test]
+fn needs_quoting_true_for_embedded_newline() {
+    // A literal newline breaks the single-line frontmatter grammar; must be
+    // quoted (and escaped — see `description_with_embedded_newline_round_trips`).
+    assert!(needs_quoting("first line\nsecond line"));
+}
+
+#[test]
+fn description_with_embedded_newline_round_trips() {
+    // MEDIUM (code-critic review, PR #3565): an embedded newline previously
+    // had no escape support at all — `escape_yaml_double_quoted` had no
+    // `\n` case, so a quoted value containing one still produced a
+    // physically multi-line frontmatter block. That failed SAFE (rejected
+    // as invalid YAML by `validate_frontmatter`, isolated per-agent, never a
+    // silent-corruption risk) but was a capability gap. Closed: `\n` now
+    // escapes to the two-character `\n` sequence on emit and decodes back
+    // to a real newline on parse, verified via a full
+    // compose -> split_frontmatter round trip.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "multiline-agent",
+        "---\nname: multiline-agent\nrole: engineer\ndescription: 'first line'\n---\n\nBody.\n",
+    );
+    // compose_agent reads from a real source file (which cannot itself
+    // contain a raw embedded newline inside one frontmatter line), so build
+    // the composed-with-newline case directly through the merge/split pair
+    // the way a genuinely multi-line source value would flow: parse a
+    // hand-built frontmatter block containing the ESCAPED form, confirm it
+    // decodes to a real newline, then re-emit and confirm it re-escapes
+    // identically (the round trip `render_scalar` / `split_frontmatter`
+    // both exercise).
+    let raw = "---\nname: x\ndescription: \"first line\\nsecond line\"\n---\n\nBody.\n";
+    let (fm, _) = split_frontmatter(raw).unwrap();
+    assert_eq!(fm.description.as_deref(), Some("first line\nsecond line"));
+
+    let composed = render_composed(&[fm], &["Body.".to_string()]);
+    crate::agents::frontmatter::validate_frontmatter(&composed)
+        .unwrap_or_else(|e| panic!("re-composed frontmatter must be valid YAML: {e}\n{composed}"));
+    assert!(
+        composed.contains("description: \"first line\\nsecond line\"\n"),
+        "embedded newline must re-escape identically; got:\n{composed}"
+    );
+}
+
+#[test]
+fn needs_quoting_true_for_null_tokens() {
+    // LOW (code-critic review, PR #3565): the YAML core-schema null tokens
+    // deserialize a scalar field to `None` rather than the literal string,
+    // unlike every other bool/number-shaped value (`true`, `007`, dates),
+    // which round-trip fine through the typed `Option<String>` deserializer
+    // — this is NOT the classic Norway-problem footgun, just these two
+    // spellings (plus their case variants).
+    assert!(needs_quoting("null"));
+    assert!(needs_quoting("Null"));
+    assert!(needs_quoting("NULL"));
+    assert!(needs_quoting("~"));
+}
+
+#[test]
+fn needs_quoting_indicator_characters() {
+    // Table-driven coverage of every YAML indicator character `needs_quoting`
+    // checks as a leading character (code-critic review, PR #3565 — prior
+    // coverage only exercised 3 shapes plus one colon-free value despite the
+    // doc comment's broader claim).
+    let indicators = [
+        '!', '&', '*', '-', '?', '|', '>', '%', '@', '`', '"', '\'', '#', ',', '[', ']', '{', '}',
+        ':',
+    ];
+    for c in indicators {
+        let value = format!("{c}leading-indicator");
+        assert!(
+            needs_quoting(&value),
+            "leading `{c}` must require quoting, got needs_quoting({value:?}) == false"
+        );
+    }
+}
+
+#[test]
+fn needs_quoting_true_for_leading_and_trailing_whitespace() {
+    assert!(needs_quoting(" leading space"));
+    assert!(needs_quoting("trailing space "));
+}
+
+#[test]
 fn bedrock_model_id_round_trips() {
     // Model ids like `bedrock/us.anthropic.claude-sonnet-4-6` contain
     // slashes and dots; the full id must survive the round-trip without
