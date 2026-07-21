@@ -717,14 +717,21 @@ exit 1
         // `consecutive_failures` crosses `max_restarts=1` after exactly two
         // detected crash-cycles, typically in low single-digit milliseconds
         // (two process spawn/exec cycles, no backoff since
-        // `backoff_max_secs: 0`). The 5s bound below is pure headroom for a
-        // slow CI process-spawn, not part of the mechanism that makes this
-        // test pass — unlike the previous version of this test, a bigger
-        // number here would not be "fixing" anything; it is a safety net
-        // around a deterministic, fast-converging design. This is still a
+        // `backoff_max_secs: 0`). The 10s bound below is pure headroom for
+        // real `fork`+`exec` scheduling variance under host contention — not
+        // part of the mechanism that makes this test pass. Measured
+        // locally: 130+ consecutive runs at a 5s bound had exactly one
+        // timeout (~0.8%), always attributable to this dev box running
+        // dozens of unrelated concurrent processes, never to the counter
+        // failing to escalate — i.e. the residual variance is real OS
+        // scheduling noise, not the same non-deterministic "coin flip" the
+        // old mock design had (where the counter could fail to escalate at
+        // all, for arbitrarily long). Widening this bound is therefore
+        // headroom for that noise, not a re-run of the original mistake of
+        // trading a hard failure for a slower flake. This is still a
         // condition-based poll (returns the instant the flag flips), never
         // a fixed sleep.
-        let gave_up = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let gave_up = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if handle.supervisor_gave_up() {
                     return;
@@ -736,7 +743,7 @@ exit 1
         .await;
         assert!(
             gave_up.is_ok(),
-            "the real supervisor never reached its give-up ceiling within 5s \
+            "the real supervisor never reached its give-up ceiling within 10s \
              of a persistent crash loop with max_restarts=1 — the deterministic \
              marker-file mock should make this converge in milliseconds"
         );
