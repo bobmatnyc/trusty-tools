@@ -534,11 +534,16 @@ async fn spawn_managed_cloned(
     // refusal — see `core::gh_identity` module docs) is surfaced as a spawn
     // failure BEFORE any provisioning side effect, mirroring how the MCP
     // spawn gate above already fails closed before touching disk.
-    let git_identity = crate::core::git_identity::resolve_for_config(&config, &params.repo_url)
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed: git identity resolution failed: {e}");
-            format!("git identity resolution failed: {e}")
-        })?;
+    // #3312: `_enforced` also verifies (and self-heals) the #2081 account
+    // pairing inside the resolved `config_dir`, still BEFORE any
+    // provisioning side effect — see `core::git_identity` module docs.
+    let git_identity =
+        crate::core::git_identity::resolve_for_config_enforced(&config, &params.repo_url)
+            .await
+            .map_err(|e| {
+                warn!(id = %session_id, "spawn_managed: git identity resolution failed: {e}");
+                format!("git identity resolution failed: {e}")
+            })?;
 
     // Provision an isolated workspace under the pre-generated `session_id` (the id
     // is generated ONCE in `spawn_managed`, before the local-path/clone branch
@@ -1086,12 +1091,16 @@ async fn spawn_managed_local(
     let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);
     // #2184: same per-project identity resolution as the clone-based path
     // (`spawn_managed_cloned`) — this branch also provisions a managed clone
-    // (of `origin_url`), so it must honour the same binding.
-    let git_identity = crate::core::git_identity::resolve_for_config(&config, &origin_url)
-        .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed (local→managed): git identity resolution failed: {e}");
-            format!("git identity resolution failed: {e}")
-        })?;
+    // (of `origin_url`), so it must honour the same binding. #3312: `_enforced`
+    // also verifies/self-heals the #2081 account pairing — see
+    // `core::git_identity` module docs.
+    let git_identity =
+        crate::core::git_identity::resolve_for_config_enforced(&config, &origin_url)
+            .await
+            .map_err(|e| {
+                warn!(id = %session_id, "spawn_managed (local→managed): git identity resolution failed: {e}");
+                format!("git identity resolution failed: {e}")
+            })?;
     let provisioner = crate::provisioner::WorkspaceProvisioner::new(
         crate::provisioner::RealGitBackend::new(git_identity),
         std::path::PathBuf::new(),

@@ -11,6 +11,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **`session_context_catchup` + `session_context_pause` MCP tools** ([#3543](https://github.com/bobmatnyc/trusty-tools/issues/3543)): the PM's `/tm-session-pause` and `/tm-session-resume` skills now call two new internal MCP tools instead of shelling out to `git log`/`git status` and hand-written snapshot files. `session_context_catchup` returns a structured (JSON) resume digest — paused sessions, recent commits, recent memory-palace activity, `resolved_snapshot`, and `watermark_advanced` (always `false`, a manual peek that never advances the incremental-catchup watermark). `session_context_pause` writes the `session-YYYYMMDD-HHMMSS.md` snapshot in the exact section format the existing reader parses, appends the pause entry to `sessions-log.jsonl`, and by default prunes orphaned managed-session git worktrees in-process (the same engine `tm session prune-worktrees` uses). The `tm session catchup` CLI command is unchanged — the tools are additive.
 
+### Fixed
+
+- **`ensure_gh_account_for_project` (#2081) had zero production call sites** (closes [#3312](https://github.com/bobmatnyc/trusty-tools/issues/3312)): the per-project `gh`-account enforcement added in #2081 existed and was tested, but nothing on a real `gh`/git code path ever invoked it, so a `config_dir` whose isolated store had the wrong account active was never caught. It is now wired at the two real production choke points — `tm ticket`/`tm issue`/`tm watch` (via `gh_identity::resolve_project_aware`) and the daemon's managed-spawn/local-redirect provisioning paths (via the new `git_identity::resolve_for_config_enforced`) — and runs only when a project pairs `github.config_dir` with an explicit `github.account` (a project that only sets one of the two sees no behaviour change). A mismatch is corrected via a `GH_CONFIG_DIR`-scoped `gh auth switch` and re-verified; a switch that cannot succeed hard-fails the operation rather than silently proceeding under the wrong identity.
+
 ## [0.19.29] — 2026-07-21
 
 Binary-release re-cut: 0.19.28 was published to crates.io but never got a
