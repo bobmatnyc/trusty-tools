@@ -604,6 +604,74 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
     );
 }
 
+/// PR A (epic #3052): pins the assistant-tier delegation grant + black-box
+/// tool strip so a future edit to `assistant/agent.toml` (or the
+/// `extends`-based personas layered on it) can't silently regress either
+/// property.
+///
+/// Why: The base `assistant` gained `delegate_to_agent` (so it can actually
+/// bring in a specialist/peer) and lost `session_list`, `session_status`,
+/// `project_list`, `console_metrics`, `system_status`, `mcp_list`,
+/// `mcp_enable`, `mcp_disable` (all of which either proxy trusty-mpm by name
+/// or enumerate internal daemon/MCP-service names to the user). Both `izzie`
+/// and `cto-assistant` declare `extends = "assistant"`, and `merge_extends`
+/// UNIONS `[tools].allow` base-first — so this test also confirms the grant
+/// propagates through inheritance and the strip isn't reintroduced by either
+/// overlay's own (now-deltas-only) allowlist.
+/// What: Loads `assistant`, `izzie`, and `cto-assistant` via the real
+/// `AgentConfig::by_name` dispatch loader (bundled agents dir) and asserts
+/// each resolved `[tools].allow` contains `delegate_to_agent` and excludes
+/// every black-boxed tool name.
+/// Test: This function IS the test.
+#[test]
+fn assistant_tier_grants_delegation_and_blackboxes_internal_tools() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    let leaked_tools = [
+        "session_list",
+        "session_status",
+        "session_send",
+        "project_list",
+        "console_metrics",
+        "system_status",
+        "mcp_list",
+        "mcp_enable",
+        "mcp_disable",
+        "agent_delegate",
+    ];
+
+    for agent_name in ["assistant", "izzie", "cto-assistant"] {
+        clear_model_env(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{agent_name}' must resolve: {e}"));
+
+        let allow = cfg
+            .tools
+            .allow
+            .unwrap_or_else(|| panic!("'{agent_name}' must declare an allowlist"));
+
+        assert!(
+            allow.iter().any(|t| t == "delegate_to_agent"),
+            "'{agent_name}' resolved allow-list must include delegate_to_agent (got {allow:?})"
+        );
+        for leaked in leaked_tools {
+            assert!(
+                !allow.iter().any(|t| t == leaked),
+                "'{agent_name}' resolved allow-list must NOT include black-boxed tool \
+                 '{leaked}' (got {allow:?})"
+            );
+        }
+    }
+}
+
 // --- #3055 `extends` end-to-end loader tests -----------------------------
 //
 // These exercise the REAL dispatch loaders (`AgentConfig::by_name` /
