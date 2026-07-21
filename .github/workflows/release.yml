@@ -620,6 +620,129 @@ jobs:
               f.write(f"matrix={result}\n")
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 1b: preflight (issue #3366)
+  #
+  # WHY: this workflow triggers on ANY push of a `*-v*` tag, from ANY branch —
+  #   there was no check that the tagged commit actually came from merged
+  #   main. This project's hard rule (see scripts/check-publish-ready.sh,
+  #   .claude/skills/cargo-publish/SKILL.md) is "publish only from merged main
+  #   or a release tag on main"; until now that rule was enforced only for a
+  #   human running check-publish-ready.sh by hand before `cargo publish` —
+  #   nothing stopped a tag pushed from an unmerged branch from firing this
+  #   entire binary-release pipeline (issue #2209 was exactly this class of
+  #   mistake, just for `cargo publish` directly rather than a tag push).
+  #
+  #   A naive `if: github.ref == 'refs/heads/main'` guard would NEVER match on
+  #   a tag push (`github.ref` is `refs/tags/<tag>` here, not a branch ref) and
+  #   would silently disable every release — so this instead verifies REAL
+  #   ancestry: the tagged commit must be reachable from `origin/main` via
+  #   `git merge-base --is-ancestor`. That check is only trustworthy against a
+  #   FULL clone (`fetch-depth: 0`) — a shallow checkout can make ancestry
+  #   checks lie (report "not an ancestor" for a commit that truly is, simply
+  #   because the shallow history horizon doesn't reach far enough back to
+  #   find the merge-base), so this job always fetches full history.
+  #
+  # WHAT: single job, runs first (before build/release/homebrew-bump), and
+  #   everything else now depends on it:
+  #     1. Full-history checkout.
+  #     2. On a real tag push: fetch the true `origin/main` tip and assert the
+  #        tagged commit (dereferenced via `HEAD^{commit}`, which resolves an
+  #        annotated tag object to its underlying commit — never trust
+  #        `github.sha` blindly here) is an ancestor of it. Fails loudly and
+  #        stops the entire pipeline (build/release/homebrew-bump AND the new
+  #        publish-dry-run job below all `need` this job) if not.
+  #     3. On workflow_dispatch (no tag exists): this is a deliberate manual
+  #        invocation already gated by repo write access, so the ancestry
+  #        check is a no-op (documented, not silently skipped — it prints why).
+  #     4. Resolves this tag's crate's crates.io package identity directly
+  #        from `crates/<crate>/Cargo.toml` (`name`, `publish`) — independent
+  #        of the binary-release allowlist in the `config` step above, because
+  #        library-only crates (e.g. trusty-common) are `bundled=true` there
+  #        but are very much real crates.io packages and exactly the ones
+  #        #3366 was about.
+  # ─────────────────────────────────────────────────────────────────────────────
+  preflight:
+    name: Verify tag ancestry + resolve publish identity (issue #3366)
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      pkg_name:     ${{ steps.pkg.outputs.pkg_name }}
+      publishable:  ${{ steps.pkg.outputs.publishable }}
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit is reachable from origin/main
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            echo "workflow_dispatch invocation (no tag) — the merged-main ancestry"
+            echo "check only applies to real tag pushes; this is a deliberate manual"
+            echo "invocation already gated by repo write access. Skipping (not a gap:"
+            echo "there is no tag/commit here to verify ancestry for)."
+            exit 0
+          fi
+
+          git fetch origin main --quiet
+          # `HEAD^{commit}` dereferences an annotated tag object to the commit
+          # it points at; using this instead of `${{ github.sha }}` directly
+          # avoids ever comparing/trusting a tag-object SHA as if it were a
+          # commit SHA.
+          TAGGED_SHA="$(git rev-parse 'HEAD^{commit}')"
+          MAIN_SHA="$(git rev-parse origin/main)"
+          echo "Tag:            ${{ github.ref_name }}"
+          echo "Tagged commit:  ${TAGGED_SHA}"
+          echo "origin/main:    ${MAIN_SHA}"
+
+          if git merge-base --is-ancestor "${TAGGED_SHA}" "${MAIN_SHA}"; then
+            echo "OK — tagged commit is reachable from origin/main."
+          else
+            echo "::error::Tag '${{ github.ref_name }}' points at commit ${TAGGED_SHA}, which is NOT reachable from origin/main (${MAIN_SHA}). This project publishes only from merged main / a release tag on main (see scripts/check-publish-ready.sh and .claude/skills/cargo-publish/SKILL.md). Refusing to run the release pipeline for this tag — merge to main first, then re-tag from a checkout of merged main."
+            exit 1
+          fi
+
+      - name: Resolve crates.io package identity
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          CRATE="${{ needs.setup.outputs.crate }}"
+          MANIFEST="crates/${CRATE}/Cargo.toml"
+          if [[ ! -f "${MANIFEST}" ]]; then
+            echo "::error::No Cargo.toml found at ${MANIFEST} for crate '${CRATE}'."
+            exit 1
+          fi
+
+          PKG_NAME="$(grep -m1 -E '^name[[:space:]]*=[[:space:]]*"' "${MANIFEST}" \
+            | sed -E 's/^name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+          if [[ -z "${PKG_NAME}" ]]; then
+            echo "::error::Could not read 'name' from ${MANIFEST}"
+            exit 1
+          fi
+
+          # `publish = false` is the only thing that makes a crate NOT a real
+          # crates.io package; anything else (absent, or a registry allowlist
+          # array) is publishable. Deliberately independent of the `bundled`
+          # binary-release-allowlist flag above — a library-only crate like
+          # trusty-common is bundled=true (no standalone binary) but IS a real,
+          # publishable crates.io package, and is exactly what #3366 was about.
+          if grep -qE '^publish[[:space:]]*=[[:space:]]*false' "${MANIFEST}"; then
+            PUBLISHABLE="false"
+          else
+            PUBLISHABLE="true"
+          fi
+
+          {
+            echo "pkg_name=${PKG_NAME}"
+            echo "publishable=${PUBLISHABLE}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Resolved: crate=${CRATE} pkg_name=${PKG_NAME} publishable=${PUBLISHABLE}"
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # JOB 2: build
   #
   # Fan-out matrix job.  Each entry builds one crate × platform × variant.
@@ -633,7 +756,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   build:
     name: Build ${{ matrix.crate }} ${{ matrix.asset_suffix }}
-    needs: setup
+    # `preflight` added (issue #3366): its ancestry check must pass (default
+    # `success()` on `needs`) before any binary is built, cascading the guard
+    # through release/homebrew-bump via their own existing `needs: build`.
+    needs: [setup, preflight]
     # Skip entirely for bundled crates — they have no standalone binary target.
     if: needs.setup.outputs.bundled != 'true'
     runs-on: ${{ matrix.runner }}
@@ -987,6 +1113,80 @@ jobs:
             ${{ steps.package.outputs.asset_checksum }}
           retention-days: 7
           if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2b: publish-dry-run (issue #3366)
+  #
+  # WHY: this workflow's whole `setup`/`build`/`release` chain governs the
+  #   GitHub binary release (tarballs + Homebrew formula) — it never actually
+  #   ran `cargo publish` or `--dry-run` anywhere. The separate crates.io
+  #   `cargo publish` step is a MANUAL action a human runs around the same
+  #   time as pushing this tag (.claude/skills/cargo-publish/SKILL.md); "always
+  #   dry-run first, in dependency order" existed only as tribal knowledge in
+  #   that skill file, not as anything actually enforced. This job converts it
+  #   into an automatic, un-skippable, always-fires check: the moment the tag
+  #   for a real crates.io package is pushed, this job independently proves
+  #   (or disproves) that `cargo publish --dry-run` succeeds for that crate
+  #   AND every publishable sibling it transitively depends on, resolved
+  #   against the LIVE crates.io registry (the same mechanism that would have
+  #   caught the 2026-07-20 half-published incident) — in dependency order, so
+  #   a crate is never dry-run-checked before the sibling versions it needs.
+  #
+  # SCOPE / COST (why this is workable where a full-workspace-per-PR gate
+  #   would not be): this does NOT run on every PR, and does NOT dry-run the
+  #   whole workspace — only the ONE crate this tag names, plus whatever
+  #   publishable crates it transitively depends on (scripts/publish-dry-run-order.sh
+  #   computes and filters to that closure). It runs exactly once, exactly
+  #   when a tag is pushed — i.e. exactly when a release is actually
+  #   happening, so its cost is bounded by what a real release naturally
+  #   requires anyway, unlike gating every PR (which would burn crates.io
+  #   registry calls/rate limit on changes that were never going to publish
+  #   anything) or a full-workspace run (which would dry-run ~17 crates for a
+  #   one-crate tag).
+  #
+  # BLOCKING vs INDEPENDENT (deliberate — read before changing): this job
+  #   `needs: [setup, preflight]` (so an unmerged-branch tag never reaches it
+  #   either) but is intentionally NOT a dependency of `build`/`release`
+  #   below. A failing dry-run means "this crate is not safe to `cargo
+  #   publish` right now" — it says nothing about whether the GitHub binary
+  #   tarball is safe to build and distribute, since building/shipping a
+  #   binary release touches crates.io not at all. Coupling them would also
+  #   import crates.io's own documented propagation lag (this repo's
+  #   Cross-Crate Publish Ordering notes 60-120s after an upstream publish)
+  #   into the binary-release path as pure flakiness with no corresponding
+  #   safety benefit. Kept independent, this job still FAILS LOUDLY on its own
+  #   — a failure turns the whole tag's workflow run red and is visible on the
+  #   commit/PR checks — it just doesn't also block the unrelated binary
+  #   artifact from being built. If a genuinely unified pre-publish gate is
+  #   wanted later, make `release` additionally `need` this job — deliberately
+  #   not done here to avoid coupling two failure domains that have never
+  #   actually been coupled in this project's process.
+  #
+  # NEVER runs a real `cargo publish` — `--dry-run` only, always.
+  # ─────────────────────────────────────────────────────────────────────────────
+  publish-dry-run:
+    name: crates.io publish dry-run, dependency-ordered (issue #3366)
+    needs: [setup, preflight]
+    # Skip cleanly for crates that are not real crates.io packages
+    # (`publish = false`, e.g. trusty-agents-common's INTERNAL sibling crates,
+    # the Tauri GUIs) — there is nothing to dry-run.
+    if: needs.preflight.outputs.publishable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust (MSRV 1.91)
+        uses: dtolnay/rust-toolchain@1.91
+
+      - name: Cache cargo registry + artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: publish-dry-run-${{ needs.preflight.outputs.pkg_name }}
+
+      - name: cargo publish --dry-run (dependency order)
+        run: bash scripts/publish-dry-run-order.sh "${{ needs.preflight.outputs.pkg_name }}"
 
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB 3: release

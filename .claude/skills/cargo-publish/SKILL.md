@@ -69,6 +69,18 @@ downgrades both guard failures to a loud warning and exits 0. Only use this
 when you have a specific, understood reason to publish from an unmerged
 commit — the default path is always "merge to main first, then publish."
 
+**Also now enforced independently of any human running a script (issue
+#3366)**: `.github/workflows/release.yml`'s `preflight` job verifies the SAME
+rule mechanically for the tag-triggered binary-release pipeline — a real
+ancestry check (`git merge-base --is-ancestor` against a full-history clone
+of the tagged commit vs. `origin/main`), not a naive ref-string comparison
+(which would never match on a tag push and would silently disable every
+release). A tag pushed from an unmerged branch now fails that job loudly and
+the entire pipeline (build/release/homebrew-bump AND the publish-dry-run job
+below) is skipped — this is a second, independent enforcement point, not a
+replacement for running `check-publish-ready.sh` yourself before `cargo
+publish`.
+
 ## Step 5: Identity + Clean-Tree + Version-Not-Live Guard (MANDATORY, closes the 2026-07-08 collision)
 
 🔴 **Run `scripts/preflight-publish.sh` immediately before every `cargo publish`
@@ -252,13 +264,27 @@ registry — the same view downstream consumers will see.
 
 ## Cross-Crate Publish Ordering (RED — Common Pitfall)
 
-**Automated (issue #3366)**: `scripts/publish-dry-run-order.sh` computes the
-dependency order mechanically from `cargo metadata` and runs
+**Automated and CI-enforced (issue #3366)**: `scripts/publish-dry-run-order.sh`
+computes the dependency order mechanically from `cargo metadata` and runs
 `cargo publish --dry-run -p <crate>` for every publishable crate in that
 order (dependencies before dependents), stopping at the first failure — this
-replaces re-deriving the manual recipe below by hand for a full-workspace
-release. Pass specific crate names to restrict it to a partial release (it
-still includes any publishable crate they depend on, in order):
+replaces re-deriving the manual recipe below by hand.
+
+This now ALSO runs automatically, with no human action required: every
+`*-v*` tag push runs `.github/workflows/release.yml`'s `publish-dry-run` job,
+which invokes this script scoped to just the tagged crate + its publishable
+dependency closure. A human forgetting to run the manual command below no
+longer means an unsafe publish goes unnoticed — the tag push itself proves
+(or disproves) publish-safety, independent of whether anyone remembered the
+manual step. See that job's header comment for why it is scoped
+per-tag/per-crate rather than full-workspace-per-PR (cost, registry rate
+limits), and why it is deliberately independent of (not blocking) the binary
+build/release jobs.
+
+For a partial-release dry run before you've even tagged anything, or to dry
+run a set of crates together, use the script directly. Pass specific crate
+names to restrict it (it still includes any publishable crate they depend
+on, in order):
 
 ```bash
 scripts/publish-dry-run-order.sh --list-only          # print the order, run nothing

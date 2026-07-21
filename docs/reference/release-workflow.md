@@ -99,6 +99,18 @@ downgrades both guard failures to a loud warning and exits 0 instead of
 failing. Use it only when you have a specific, understood reason to publish
 from an unmerged commit; the default path is always "merge to main first."
 
+**Independently enforced in CI (issue #3366)**: this same rule is now also a
+mechanical gate on the tag-triggered binary-release pipeline itself, not just
+something a human is instructed to check before `cargo publish`.
+`.github/workflows/release.yml`'s `preflight` job fetches full history and
+runs `git merge-base --is-ancestor` on the ACTUAL tagged commit (dereferenced
+via `HEAD^{commit}`, never trusting `github.sha` or a naive `github.ref ==
+'refs/heads/main'` string comparison — the latter can never match on a tag
+push and would silently disable every release) against the true
+`origin/main` tip. A tag pushed from an unmerged branch now fails this job
+loudly and the whole pipeline — build, release, homebrew-bump, and the
+publish-dry-run job below — is skipped rather than silently proceeding.
+
 ## Version-Parity Guard (issue #3366)
 
 🔴 **Before bumping a crate's version, confirm it hasn't already drifted.**
@@ -125,7 +137,14 @@ For the cross-crate publish-ORDERING hazard (a related but distinct problem —
 publishing a crate before a sibling it depends on is live), see
 `scripts/publish-dry-run-order.sh` / `make publish-dry-run-order`, documented
 in `.claude/skills/cargo-publish/SKILL.md` under "Cross-Crate Publish
-Ordering."
+Ordering." This ALSO now runs automatically and independently of human
+memory: every `*-v*` tag push runs it via `.github/workflows/release.yml`'s
+`publish-dry-run` job, scoped to just the tagged crate and its publishable
+dependency closure (not the whole workspace, and not on every PR — see that
+job's header comment for the cost/scope tradeoff). It is deliberately NOT a
+dependency of the binary build/release jobs (a failing crates.io dry-run says
+nothing about whether the GitHub binary tarball is safe to build), but its
+own failure still turns the tag's workflow run red.
 
 ## macOS Code-Signing Critical Alert
 

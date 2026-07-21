@@ -34,12 +34,17 @@
 #                                                  # in the right relative order),
 #                                                  # for a partial-release dry run
 #
-# This is a MANUAL preflight step (like check-publish-ready.sh and
-# preflight-publish.sh), run before a real `cargo publish` batch — it is
-# deliberately NOT wired into CI on every push: packaging every publishable
-# crate's tarball is comparatively expensive and only meaningful immediately
-# before a release, unlike the (cheaper, continuously-relevant)
-# version-parity check.
+# Wired into CI (issue #3366 scope-extension): `.github/workflows/release.yml`
+# runs this automatically, scoped to just the tagged crate (+ its publishable
+# dependency closure), as its own `publish-dry-run` job on every `*-v*` tag
+# push — see that job's header comment for why a single-crate-scoped,
+# tag-triggered run is workable where a full-workspace-per-PR gate would not
+# be (cost, registry rate limits), and why it is deliberately kept
+# INDEPENDENT of (not blocking) the binary-release build/release jobs.
+#
+# Also usable manually (`make publish-dry-run-order`) exactly like
+# check-publish-ready.sh and preflight-publish.sh, e.g. to dry-run a
+# multi-crate release batch before tagging anything.
 #
 # Requires: python3 (present on GitHub Actions ubuntu-latest runners and on
 #   every developer machine referenced elsewhere in this repo's scripts).
@@ -164,6 +169,15 @@ echo "${ORDER}" | sed 's/^/  /' >&2
 if [[ "${LIST_ONLY}" -eq 1 ]]; then
   exit 0
 fi
+
+# SKIP_UI_BUILD=1 unconditionally (matches ci.yml's global convention): the
+# UI-embedding crates (trusty-search, trusty-memory, trusty-analyze,
+# trusty-console) invoke pnpm from build.rs unless this is set, which fails
+# inside `cargo publish`'s isolated verification tarball (no network/pnpm
+# there) — see docs/reference/release-workflow.md's "UI-embedding crates"
+# note. A no-op for every other crate, so it is simplest to always set it
+# rather than special-case which crates in the computed order need it.
+export SKIP_UI_BUILD=1
 
 while IFS= read -r crate; do
   [[ -z "${crate}" ]] && continue
