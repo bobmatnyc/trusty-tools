@@ -110,6 +110,96 @@ fn extract_response_id_string_returns_none() {
     assert_eq!(extract_response_id(json), None);
 }
 
+// ── extract_response_device unit tests (epic #3524 slice 5, issue #3493 P1) ──
+
+#[test]
+fn extract_response_device_present_returns_it() {
+    // Why: the Python/MPS sidecar echoes its real torch device in every
+    // response; the reader must pick it up without touching `embeddings`.
+    // What: `result.device: "mps"` → `Some("mps")`.
+    let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[[0.1]],"device":"mps"},"id":1}"#;
+    assert_eq!(extract_response_device(json), Some("mps".to_string()));
+}
+
+#[test]
+fn extract_response_device_absent_returns_none() {
+    // Why: the reference Rust `trusty-embedderd` never sends this field —
+    // callers must fall back to the predicted provider, not panic or crash.
+    // What: no `device` key → `None`.
+    let json = r#"{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":1}"#;
+    assert_eq!(extract_response_device(json), None);
+}
+
+#[test]
+fn extract_response_device_error_frame_returns_none() {
+    // Why: an error frame has no `result` object at all.
+    // What: `error: {...}` → `None`.
+    let json = r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"boom"},"id":1}"#;
+    assert_eq!(extract_response_device(json), None);
+}
+
+#[test]
+fn extract_response_device_malformed_json_returns_none() {
+    // Why: never panic on a malformed frame.
+    assert_eq!(extract_response_device("{not valid json"), None);
+}
+
+/// End-to-end: `reader_task` captures the real device from a live response
+/// frame into the shared `last_device` slot (epic #3524 slice 5, issue #3493
+/// P1) — this is what `StdioEmbedderClient::last_reported_device()` reads.
+#[tokio::test]
+async fn reader_task_captures_wire_device() {
+    use tokio::io::{AsyncWriteExt, duplex};
+    use tokio::sync::oneshot;
+
+    let (mut writer, reader_end) = duplex(4096);
+    let reader = tokio::io::BufReader::new(reader_end);
+
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (unhealthy_tx, _unhealthy_rx) = watch::channel(false);
+    let timeout_tracker = Arc::new(TimeoutTracker::new());
+    let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let handle = tokio::spawn(reader_task(
+        reader,
+        Arc::clone(&pending),
+        Duration::from_secs(30),
+        timeout_tracker,
+        unhealthy_tx,
+        Arc::clone(&last_device),
+    ));
+
+    let (tx, rx) = oneshot::channel();
+    pending
+        .lock()
+        .await
+        .insert(1, PendingRequest { sent: 1, reply: tx });
+
+    assert!(
+        last_device.lock().unwrap().is_none(),
+        "last_device must be None before any response arrives"
+    );
+
+    let frame =
+        b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.1]],\"device\":\"mps\"},\"id\":1}\n";
+    writer.write_all(frame).await.unwrap();
+    writer.flush().await.unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("rx timed out")
+        .expect("channel closed unexpectedly");
+    assert!(result.is_ok(), "the embed call itself must still succeed");
+
+    assert_eq!(
+        last_device.lock().unwrap().clone(),
+        Some("mps".to_string()),
+        "reader_task must capture the wire-reported device"
+    );
+
+    drop(writer);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+}
+
 /// Verify that a stalled/silent sidecar reader produces a timeout error
 /// rather than blocking indefinitely.
 ///
@@ -205,12 +295,14 @@ async fn reader_task_survives_timeout_and_serves_next_request() {
     // Spawn the reader task with the injected short timeout.
     let (unhealthy_tx, _unhealthy_rx) = watch::channel(false);
     let timeout_tracker = Arc::new(TimeoutTracker::new());
+    let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let handle = tokio::spawn(reader_task(
         reader,
         pending_clone,
         short_timeout,
         timeout_tracker,
         unhealthy_tx,
+        Arc::clone(&last_device),
     ));
 
     // ── Request A (id=1): push a oneshot, wait for the timeout to fire ────
@@ -421,8 +513,12 @@ async fn reader_panic_drains_pending_and_signals_unhealthy() {
     // Deliberately long — proves the fast resolution below comes from the
     // panic-drain path, not a coincidental per-call timeout.
     let long_timeout = Duration::from_secs(30);
-    let (unhealthy_tx, mut unhealthy_rx) =
-        spawn_reader_with_monitor(PanicReader, Arc::clone(&pending), long_timeout);
+    let (unhealthy_tx, mut unhealthy_rx) = spawn_reader_with_monitor(
+        PanicReader,
+        Arc::clone(&pending),
+        long_timeout,
+        Arc::new(std::sync::Mutex::new(None)),
+    );
     // Mirrors `_unhealthy_rx_keepalive` on the real client: keep the sender
     // alive so `send(true)` in the monitor task doesn't silently no-op
     // against a zero-receiver channel.
@@ -468,8 +564,12 @@ async fn reader_eof_exit_also_signals_unhealthy() {
     let reader = tokio::io::BufReader::new(reader_end);
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
-    let (unhealthy_tx, mut unhealthy_rx) =
-        spawn_reader_with_monitor(reader, Arc::clone(&pending), Duration::from_secs(30));
+    let (unhealthy_tx, mut unhealthy_rx) = spawn_reader_with_monitor(
+        reader,
+        Arc::clone(&pending),
+        Duration::from_secs(30),
+        Arc::new(std::sync::Mutex::new(None)),
+    );
     let _keepalive_tx = unhealthy_tx;
 
     // Close the write end — the reader task sees EOF, drains (nothing
@@ -576,12 +676,14 @@ async fn wedge_threshold_fires_after_consecutive_timeouts() {
 
     let (unhealthy_tx, mut unhealthy_rx) = watch::channel(false);
     let timeout_tracker = Arc::new(TimeoutTracker::new());
+    let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let handle = tokio::spawn(reader_task(
         reader,
         Arc::clone(&pending),
         short_timeout,
         Arc::clone(&timeout_tracker),
         unhealthy_tx,
+        Arc::clone(&last_device),
     ));
 
     tokio::time::timeout(Duration::from_secs(5), unhealthy_rx.changed())
@@ -641,12 +743,14 @@ async fn wedge_threshold_resets_on_success() {
 
     let (unhealthy_tx, unhealthy_rx) = watch::channel(false);
     let timeout_tracker = Arc::new(TimeoutTracker::new());
+    let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let handle = tokio::spawn(reader_task(
         reader,
         Arc::clone(&pending),
         short_timeout,
         Arc::clone(&timeout_tracker),
         unhealthy_tx,
+        Arc::clone(&last_device),
     ));
 
     // Condition-poll until the first `below` entries have all timed out and

@@ -30,6 +30,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   hardcoded `"AllMiniLML6V2Q"` string that predated the fp32-default flip
   (#3486 / #3493 P0).
 - `update::verify_installed_binary_at_path`: health-gates a binary at a KNOWN, CONCRETE path via `--version`, never resolving by name. Complements the existing name-based `verify_installed_binary` (which intentionally searches `$CARGO_HOME/bin`/`~/.cargo/bin` then `~/.local/bin` then `$PATH`) for callers that already know exactly where they just placed a binary — a name-based re-resolution afterward is shadowable by a stale earlier-priority/earlier-PATH copy of the same name (trusty-installer#3554).
+- **`EmbedderClient::last_reported_device()`** — a new default-`None` trait
+  method for a real (wire-reported) backend device readback, as opposed to
+  the build-features/env-predicted `ExecutionProvider` (epic #3524 slice 5,
+  issue #3493 P1). `StdioEmbedderClient` overrides it, capturing the optional
+  `device` field the Python/MPS sidecar now echoes in its response frames;
+  every other transport keeps the `None` default unchanged.
 
 ## [0.23.7] — 2026-07-21
 
