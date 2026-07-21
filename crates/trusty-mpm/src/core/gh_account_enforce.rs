@@ -23,10 +23,40 @@
 //! `verify_active_account`) is unit-tested inline; the public entry point's
 //! refusal path is covered without a live `gh` by
 //! `ensure_gh_account_for_project_refuses_without_config_dir`.
+//!
+//! ## Production wiring (#3312)
+//!
+//! This enforcement had zero production call sites until #3312: the function
+//! existed and was tested, but nothing on a real `gh`/git operation path ever
+//! ran it. It is now wired at every point a wrong-account operation would
+//! actually do damage (project registration / workspace provisioning in the
+//! daemon's managed-spawn path, and issue/PR creation in the `tm
+//! ticket`/`tm issue`/`tm watch` CLI paths) via [`configured_account_pair`]
+//! (the shared decision of WHETHER there is anything to enforce) plus
+//! [`ensure_gh_account_in_dir`] (the explicit-directory core every wired call
+//! site — CLI and daemon alike — now calls directly, in place of
+//! [`ensure_gh_account_for_project`]'s env-var-reading wrapper). The daemon is
+//! a single long-lived process serving MANY projects concurrently, so
+//! mutating `std::env` process-globally to satisfy the env-based wrapper's
+//! contract is unsafe there; calling the explicit-directory core avoids that
+//! entirely for BOTH callers (keeping their behaviour identical rather than
+//! having the CLI and daemon diverge on how they invoke enforcement).
+//! [`ensure_gh_account_for_project`] itself is left unchanged and still
+//! `pub`/tested — it remains the documented entry point for any FUTURE caller
+//! that already owns an isolated `GH_CONFIG_DIR` in its own process env (e.g.
+//! a single-shot script).
+//!
+//! See `crates::core::gh_identity::resolve_project_aware` (CLI) and
+//! `crates::core::git_identity::resolve_for_config_enforced` (daemon) for the
+//! two wired call sites; `configured_account_pair` decides per-project
+//! whether enforcement applies at all (never for a project that only set
+//! `config_dir`, or set neither field).
 
 use std::path::PathBuf;
 
 use anyhow::Context;
+
+use crate::core::trusty_tools_config::GithubConfig;
 
 use super::{GH_ENFORCE_TIMEOUT, extract_login_token, run_bounded};
 
@@ -66,8 +96,21 @@ const GH_TOKEN_ENV_VARS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 /// re-check confirms `expected_user` is now active.
 /// Test: `verify_active_account_*`, `parse_active_account_from_status_*`
 /// cover the pure decision logic; `ensure_gh_account_for_project_*` cover the
-/// public entry point's refusal path without a live `gh`.
-fn ensure_gh_account_in_dir(
+/// public entry point's refusal path without a live `gh`;
+/// `ensure_gh_account_in_dir_*` (#3312) exercise this function directly
+/// against a fake `gh` on `PATH`, covering the self-heal, switch-failure, and
+/// already-active no-op outcomes.
+///
+/// Public (#3312) so every wired production call site — the CLI's
+/// `gh_identity::resolve_project_aware` and the daemon's
+/// `git_identity::resolve_for_config_enforced` — can call it directly with an
+/// already-resolved directory, instead of round-tripping through
+/// [`ensure_gh_account_for_project`]'s process-env contract (see the module
+/// docs for why: the daemon serves many projects concurrently, so mutating
+/// process-global env to satisfy that contract is unsafe there, and the CLI
+/// path matches it for consistency rather than diverging on how the two
+/// callers invoke the same enforcement).
+pub fn ensure_gh_account_in_dir(
     expected_user: &str,
     config_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
@@ -246,6 +289,41 @@ pub fn ensure_gh_account_for_project(gh_user: &str) -> anyhow::Result<()> {
     ensure_gh_account_in_dir(gh_user, &config_dir)
 }
 
+/// Decide WHETHER `#2081` account enforcement applies to a resolved
+/// [`GithubConfig`], and extract the `(config_dir, account)` pair to enforce
+/// when it does — the single decision point every wired call site (#3312)
+/// shares, so the CLI and the daemon can never diverge on when enforcement
+/// runs.
+///
+/// Why: `account` alone documents intent (see `gh_identity`'s module docs and
+/// its `account_with_config_dir_is_ok` test) and `config_dir` alone is just an
+/// isolation directory with no stated expectation of WHO should be active
+/// inside it — enforcement only has both a target (`config_dir`) and an
+/// expectation (`account`) to check when a project configures BOTH together.
+/// A project that only sets `config_dir` (isolation with no stated
+/// preference) or only sets `account` (a hint the `gh_identity` precedence
+/// chain already refuses to select alone) must see NO behaviour change: this
+/// returns `None` and the caller skips enforcement entirely, never spawning a
+/// `gh` subprocess and never failing a project that never opted in.
+/// What: `Some((dir, account))` only when `config.config_dir` is set AND
+/// `config.account` is set to a non-blank value (trimmed); `None` for a
+/// `None` `config`, a blank/whitespace-only `account`, or either field
+/// missing.
+/// Test: `configured_account_pair_both_set`,
+/// `configured_account_pair_config_dir_only`,
+/// `configured_account_pair_account_only`,
+/// `configured_account_pair_blank_account`, `configured_account_pair_none`.
+pub fn configured_account_pair(config: Option<&GithubConfig>) -> Option<(PathBuf, String)> {
+    let cfg = config?;
+    let dir = cfg.config_dir.clone()?;
+    let account = cfg
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    Some((dir, account.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +456,236 @@ github.com
     fn ensure_gh_account_for_project_rejects_empty_login() {
         let err = ensure_gh_account_for_project("   ").unwrap_err();
         assert!(err.to_string().contains("must not be empty"));
+    }
+
+    // ── configured_account_pair (#3312) ──────────────────────────────────
+
+    fn github_cfg(config_dir: Option<&str>, account: Option<&str>) -> GithubConfig {
+        GithubConfig {
+            config_dir: config_dir.map(PathBuf::from),
+            token_env: None,
+            account: account.map(str::to_string),
+            host: None,
+        }
+    }
+
+    /// Why: the intentional `#2081` pairing — both `config_dir` AND `account`
+    /// configured together — is exactly when enforcement must apply.
+    /// Test: itself.
+    #[test]
+    fn configured_account_pair_both_set() {
+        let cfg = github_cfg(Some("/cfg/acct"), Some("bobmatnyc"));
+        assert_eq!(
+            configured_account_pair(Some(&cfg)),
+            Some((PathBuf::from("/cfg/acct"), "bobmatnyc".to_string()))
+        );
+    }
+
+    /// Why: `config_dir` alone states isolation with no expectation of WHICH
+    /// account should be active inside it — nothing to enforce, must be
+    /// `None` so a project that never opted into `account` sees no new
+    /// behaviour.
+    /// Test: itself.
+    #[test]
+    fn configured_account_pair_config_dir_only() {
+        let cfg = github_cfg(Some("/cfg/acct"), None);
+        assert_eq!(configured_account_pair(Some(&cfg)), None);
+    }
+
+    /// Why: `account` alone (no `config_dir`) has no directory to enforce
+    /// inside — `gh_identity::resolve_gh_env` already refuses to select an
+    /// identity from `account` alone; enforcement must likewise be a no-op.
+    /// Test: itself.
+    #[test]
+    fn configured_account_pair_account_only() {
+        let cfg = github_cfg(None, Some("bobmatnyc"));
+        assert_eq!(configured_account_pair(Some(&cfg)), None);
+    }
+
+    /// Why: a blank/whitespace-only `account` is not a real expectation —
+    /// must be treated identically to `None`, never enforced against.
+    /// Test: itself.
+    #[test]
+    fn configured_account_pair_blank_account() {
+        let cfg = github_cfg(Some("/cfg/acct"), Some("   "));
+        assert_eq!(configured_account_pair(Some(&cfg)), None);
+    }
+
+    /// Why: no `github:` binding at all (the common, unconfigured case) must
+    /// yield `None` — the sensible default so enforcement never fires for a
+    /// project that never configured anything.
+    /// Test: itself.
+    #[test]
+    fn configured_account_pair_none() {
+        assert_eq!(configured_account_pair(None), None);
+    }
+
+    // ── ensure_gh_account_in_dir against a fake `gh` on PATH (#3312) ──────
+    //
+    // These prove the enforcement actually runs a verify/correct/re-verify
+    // cycle against a real subprocess, not just the pure parsers above. A
+    // fake `gh` script (stateful via a file inside the isolated config_dir)
+    // stands in for the real binary, following this workspace's established
+    // fake-binary-via-PATH test convention (see
+    // `trusty-common::update::tests::write_fake_binary`).
+
+    /// Serialises PATH/env mutation across the tests in this section so they
+    /// cannot race each other or any other test in the shared test binary.
+    fn fake_gh_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::core::trusty_tools_config::env_test_lock()
+    }
+
+    /// Write a fake `gh` that tracks the "active account" as a file inside
+    /// `config_dir` (mirroring how real `gh` persists active-account state
+    /// inside its config home): `auth status` reports whatever the state file
+    /// holds (or `initial` if absent); `auth switch --user X` writes `X` to
+    /// the state file and exits 0, unless `FAKE_GH_SWITCH_FAILS=1` is set in
+    /// the environment, in which case it exits 1 without writing anything.
+    #[cfg(unix)]
+    fn write_fake_gh(bin_dir: &std::path::Path, initial: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            r#"#!/bin/sh
+STATE="$GH_CONFIG_DIR/.fake_active"
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  if [ -f "$STATE" ]; then
+    ACTIVE=$(cat "$STATE")
+  else
+    ACTIVE="{initial}"
+  fi
+  echo "github.com"
+  echo "  - Logged in to github.com account $ACTIVE (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "switch" ]; then
+  if [ "$FAKE_GH_SWITCH_FAILS" = "1" ]; then
+    echo "fake gh: switch refused" >&2
+    exit 1
+  fi
+  target=""
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--user" ]; then target="$a"; fi
+    prev="$a"
+  done
+  echo "$target" > "$STATE"
+  exit 0
+fi
+exit 1
+"#
+        );
+        let path = bin_dir.join("gh");
+        std::fs::write(&path, script).expect("write fake gh");
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat fake gh")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod fake gh");
+    }
+
+    /// Prepend `dir` to `PATH`, returning the prior value to restore.
+    #[cfg(unix)]
+    fn prepend_path(dir: &std::path::Path) -> Option<String> {
+        let prior = std::env::var("PATH").ok();
+        let new_path = match &prior {
+            Some(p) => format!("{}:{p}", dir.display()),
+            None => dir.display().to_string(),
+        };
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe { std::env::set_var("PATH", new_path) };
+        prior
+    }
+
+    #[cfg(unix)]
+    fn restore_path(prior: Option<String>) {
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe {
+            match prior {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    /// Why (#3312): the exact #2081 incident shape — the isolated
+    /// `config_dir` itself has the WRONG account active — must be corrected:
+    /// `ensure_gh_account_in_dir` detects the mismatch, runs `gh auth switch`,
+    /// and re-verifies before returning `Ok`.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_gh_account_in_dir_self_heals_mismatch() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "wrong-account");
+        let prior_path = prepend_path(bin_dir.path());
+        // SAFETY: guarded by fake_gh_lock.
+        unsafe { std::env::remove_var("FAKE_GH_SWITCH_FAILS") };
+
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+
+        restore_path(prior_path);
+        assert!(result.is_ok(), "expected self-heal to succeed: {result:?}");
+        let state = std::fs::read_to_string(config_dir.path().join(".fake_active"))
+            .expect("state file written by switch");
+        assert_eq!(state.trim(), "bobmatnyc");
+    }
+
+    /// Why (#3312): when the isolated directory has the wrong account active
+    /// AND the switch itself fails (e.g. the expected account was never
+    /// logged in under that `GH_CONFIG_DIR`), enforcement must hard-fail —
+    /// never silently proceed with the wrong identity active.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_gh_account_in_dir_switch_failure_is_err() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "wrong-account");
+        let prior_path = prepend_path(bin_dir.path());
+        // SAFETY: guarded by fake_gh_lock; removed below.
+        unsafe { std::env::set_var("FAKE_GH_SWITCH_FAILS", "1") };
+
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+
+        unsafe { std::env::remove_var("FAKE_GH_SWITCH_FAILS") };
+        restore_path(prior_path);
+        let err = result.expect_err("switch failure must be a hard error");
+        assert!(err.to_string().contains("bobmatnyc"), "err: {err}");
+    }
+
+    /// Why (#3312): when the isolated directory's active account ALREADY
+    /// matches, `ensure_gh_account_in_dir` must be a pure no-op — it must not
+    /// even attempt a switch. Proven here by making a switch attempt fail
+    /// (`FAKE_GH_SWITCH_FAILS=1`) and asserting `Ok` is still returned, which
+    /// is only possible if no switch was ever invoked.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_gh_account_in_dir_noop_when_already_active() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "bobmatnyc");
+        let prior_path = prepend_path(bin_dir.path());
+        // SAFETY: guarded by fake_gh_lock; removed below. A switch attempt
+        // would fail if (incorrectly) invoked, proving the no-op path.
+        unsafe { std::env::set_var("FAKE_GH_SWITCH_FAILS", "1") };
+
+        let result = ensure_gh_account_in_dir("bobmatnyc", config_dir.path());
+
+        unsafe { std::env::remove_var("FAKE_GH_SWITCH_FAILS") };
+        restore_path(prior_path);
+        assert!(
+            result.is_ok(),
+            "already-active must be a no-op Ok: {result:?}"
+        );
+        assert!(
+            !config_dir.path().join(".fake_active").exists(),
+            "no switch should have been attempted"
+        );
     }
 }
