@@ -9,6 +9,65 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **Assistant no longer leaks internal orchestration or disclaims delegating
+  when dispatched via `--direct`/`--agent` (#3550 follow-up):** a live smoke
+  test (`tagent --direct assistant --task "..."`) proved the black-box/tool
+  hardening from PR A (epic #3052, below) did NOT cover this dispatch path —
+  it still leaked `trusty-mpm`, `subagent`, and `subprocess`, recited the
+  entire bundled skill catalog ("wave planning", "git worktree discipline",
+  the full engineering language/framework bench), and disclaimed delegating
+  ("not a coding agent myself", "I'd hand off... rather than writing code
+  myself"). Root cause: `--direct`/`--agent` route through `run_subagent`
+  (`src/runtime/subagent_mode.rs`), a SEPARATE dispatch path from the
+  persona-chat path (`run_pm_task_with_persona`) PR A actually hardened.
+  `run_subagent` treated every agent — including `role == "assistant"`
+  personas — as a generic coding sub-agent:
+  - `SystemPromptBuilder::walk_project_instructions` unconditionally injected
+    every ancestor `CLAUDE.md`/`AGENTS.md` verbatim, including this crate's
+    own `CLAUDE.md` (which literally documents "PM Orchestrator", "Sub-Agent
+    Process", "subprocess IPC") and the workspace root `CLAUDE.md`
+    (`trusty-mpm`, worktree/PR-workflow conventions).
+  - The binary's coding-harness protocol (`agents::harness_protocol::
+    BASE_PROTOCOL` — "## trusty-agents Harness Protocol", `out_dir`,
+    "workflow phases") was injected regardless of role, priming the model to
+    describe itself as a phase-based coding harness.
+  - `build_registry_for_agent`'s catch-all branch (`src/runtime/
+    tool_registry.rs`) unconditionally wired `list_skills`/`load_skill` to
+    the FULL tag-indexed skill registry (every language/framework/workflow
+    skill, including `workflow/wave-planning.md` and `workflow/
+    delegation.md`) with no restriction: `run_subagent_with_tools` gates
+    tool reachability on `cfg.tools.allowed` (an exact-name list), but
+    persona TOMLs declare `[tools].allow` (glob patterns) instead — a field
+    this path never read — so `allowed` stayed `None`, which
+    `chat_with_tools_gated` treats as unrestricted.
+
+  Fixed with a role-scoped gate (`ASSISTANT_TIER_ROLE = "assistant"`,
+  matches `AgentInfo.role` — covers `assistant`/`cto-assistant`/`izzie`/
+  `personal-assistant` uniformly, independent of display name) in
+  `run_subagent`: skips the CLAUDE.md walk and harness-protocol layers for
+  assistant-tier agents, routes registry construction to a new curated
+  `build_assistant_tier_registry` (delegation + read-only git/web lookups,
+  no catalog-browsing tools), and adds `scope_assistant_allowed_tools` to
+  translate `[tools].allow` glob patterns into the `[tools].allowed`
+  exact-name list the existing gate enforces. Engineer/qa/research/docs/ops/
+  plan/pm/ctrl dispatch is untouched — the gate only fires for
+  `role == "assistant"`.
+
+  `assistant/persona.md`, `izzie.toml`, and `personal-assistant.toml`'s
+  "What you are not — Not a coding agent" sections were reworded from an
+  identity-negation frame (which the model was echoing near-verbatim as
+  "I'm not a coding agent myself") to a positive delegation-ownership frame
+  ("you own getting it done, by delegating it") that explicitly forbids the
+  disclaiming phrasing.
+
+  New tests: `assistant_tier_registry_excludes_skill_catalog_tools`,
+  `assistant_tier_registry_includes_curated_tools`,
+  `role_takes_precedence_over_name_for_assistant_tier`,
+  `scope_assistant_allowed_tools_filters_by_glob`,
+  `scope_assistant_allowed_tools_noop_for_non_assistant`,
+  `scope_assistant_allowed_tools_noop_when_allowed_already_set`
+  (`src/runtime/tool_registry_tests.rs`).
+
 - **`delegate_to_agent` no longer leaks internal agent names (PR A code-critic
   fix, epic #3052):** granting `delegate_to_agent` to assistant-tier personas
   (see below) exposed two leaks in the shared tool implementation

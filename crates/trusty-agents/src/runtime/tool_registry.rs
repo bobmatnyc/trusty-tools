@@ -56,7 +56,9 @@ use std::sync::Arc;
 
 use crate::{skills, tools};
 
+use tools::AgentRunner;
 use tools::SkillResolver;
+use tools::delegate::DelegateToAgentTool;
 use tools::fs_reader::{GrepFilesTool, ListDirTool, ReadFileTool};
 #[allow(unused_imports)]
 use tools::memory::{MemoryRecallTool, VectorSearchTool};
@@ -67,6 +69,26 @@ use tools::web_search::{BraveSearchTool, FetchUrlTool};
 use tools::write_file::WriteFileTool;
 use tools::{ToolRegistry, shell_exec::ShellExecTool};
 
+/// Role string shared by every black-box persona/assistant-tier agent
+/// (`assistant`, `cto-assistant`, `izzie`, `personal-assistant`, …).
+///
+/// Why: `run_subagent` (the `--direct`/`--agent` subprocess dispatch path)
+/// previously treated every agent — including personas — as a generic
+/// coding sub-agent: full CLAUDE.md project-instruction injection, the
+/// binary's coding-harness protocol, and an UNRESTRICTED
+/// `list_skills`/`load_skill` tool pair wired to the entire bundled skill
+/// catalog (every language/framework/workflow skill, not just the persona's
+/// declared `system_prompt.skills`). None of that black-box scoping the
+/// persona-chat path (`run_pm_task_with_persona`, #3550) applies here,
+/// because this path never routed through it. This constant is the single
+/// place both `tool_registry.rs` and `subagent_mode.rs` check so the
+/// definition of "assistant tier" can't drift between the two call sites.
+/// What: Matches `AgentInfo.role`, not the agent's `name` — every persona
+/// TOML/overlay sets `role = "assistant"` regardless of its display name.
+/// Test: `assistant_tier_registry_excludes_skill_catalog_tools`,
+/// `assistant_tier_registry_includes_curated_tools`.
+pub(super) const ASSISTANT_TIER_ROLE: &str = "assistant";
+
 /// Build a tool registry tailored to a specific agent.
 ///
 /// Why: Different agents need different tools (research -> web_search,
@@ -74,14 +96,26 @@ use tools::{ToolRegistry, shell_exec::ShellExecTool};
 /// discoverable; a later version could drive it from the agent TOML.
 /// What: Returns `Some(ToolRegistry)` for agents that use tools, else None.
 /// `out_dir`, if present, is used to register `advance_workflow_phase`.
-/// Test: Called during `run_subagent`.
+/// `role` (`AgentInfo.role`) is checked FIRST, ahead of the `name` match
+/// below: any agent whose role is [`ASSISTANT_TIER_ROLE`] gets the curated,
+/// black-box-safe registry from `build_assistant_tier_registry` instead of
+/// falling into the generic coding-subagent branches (or the catch-all,
+/// which would otherwise hand it an unrestricted `list_skills`/`load_skill`
+/// pair over the ENTIRE bundled skill catalog — see #3550 follow-up).
+/// Test: `assistant_tier_registry_excludes_skill_catalog_tools`,
+/// `assistant_tier_registry_includes_curated_tools`; called during
+/// `run_subagent`.
 pub(super) fn build_registry_for_agent(
     name: &str,
+    role: &str,
     out_dir: Option<&std::path::Path>,
     code_dir: Option<&std::path::Path>,
     skill_registry: Arc<skills::SkillRegistry>,
     tag_skill_registry: Arc<skills::registry::SkillRegistry>,
 ) -> Option<ToolRegistry> {
+    if role == ASSISTANT_TIER_ROLE {
+        return Some(build_assistant_tier_registry());
+    }
     // #222: When `code_dir` is set and distinct from `out_dir`, the code-agent
     // and any future tool that writes *generated source files* should root at
     // `code_dir` (the user's project tree). All other agents (plan, docs,
@@ -316,6 +350,104 @@ pub(super) fn build_registry_for_agent(
             Some(reg)
         }
     }
+}
+
+/// Curated tool registry for black-box persona/assistant-tier agents
+/// (`role == "assistant"`) dispatched via the `--direct`/`--agent`
+/// subprocess path.
+///
+/// Why: The generic per-agent branches above (and the `_` catch-all) are
+/// built for coding sub-agents and unconditionally wire an unrestricted
+/// `list_skills`/`load_skill` pair over the ENTIRE bundled skill catalog
+/// (every language, framework, and workflow skill — including
+/// `workflow/wave-planning.md` and `workflow/delegation.md`, which name
+/// internal orchestration concepts the assistant must never recite). A
+/// persona's actual domain skills are already injected as system-prompt
+/// CONTENT from its declared `system_prompt.skills` list (see
+/// `run_subagent`'s skill-resolution loop) — it never needs a
+/// catalog-browsing tool. This function gives the assistant tier a small,
+/// fixed tool set instead: delegation (so it can still genuinely act on
+/// "bring in a specialist") plus read-only git/web lookups, mirroring the
+/// tool families the persona-chat path (`run_pm_task_with_persona`)
+/// registers. Actual reachability is still narrowed by the caller
+/// (`run_subagent`) applying the persona's `[tools].allow` glob patterns —
+/// registering a tool here is not the same as granting it.
+/// What: Registers `git_log`/`git_status` (when CWD is a git repo),
+/// `web_search`, and `delegate_to_agent` (pre-flight-validated against
+/// `<cwd>/.trusty-agents/agents/`). Deliberately omits `list_skills`,
+/// `load_skill`, and every generic coding-agent tool (`write_file`,
+/// `run_bash`, analysis tools, …).
+/// Test: `assistant_tier_registry_excludes_skill_catalog_tools`,
+/// `assistant_tier_registry_includes_curated_tools`.
+pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
+    let mut reg = ToolRegistry::new();
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    if let Ok(repo) = crate::git::GitRepo::open(&cwd) {
+        for tool in crate::tools::git_tools::git_tools(repo.root.clone()) {
+            reg.register(tool);
+        }
+    }
+
+    reg.register(Arc::new(BraveSearchTool::from_env()));
+
+    let config_dir = cwd.join(".trusty-agents").join("agents");
+    let runner: Arc<dyn AgentRunner> = Arc::new(
+        crate::subprocess::SubprocessAgentRunner::new().with_config_dir(Some(config_dir.clone())),
+    );
+    reg.register(Arc::new(
+        DelegateToAgentTool::new(runner).with_config_dir(config_dir),
+    ));
+
+    reg
+}
+
+/// Resolve the effective `[tools].allowed` override for the assistant-tier
+/// glob-scoping gate.
+///
+/// Why: `run_subagent_with_tools`/`run_subagent_single_shot` pass
+/// `cfg.tools.allowed` (an exact-name allowlist, `None` = unrestricted)
+/// straight into `chat_with_tools_gated`. Persona TOMLs (`assistant`,
+/// `cto-assistant`, `izzie`, `personal-assistant`) declare `[tools].allow`
+/// instead — GLOB patterns, the field the persona-chat dispatch path
+/// (`run_pm_task_with_persona` / `filter_persona_tool_names`) reads. Because
+/// `run_subagent` never consulted `allow`, an assistant-tier agent dispatched
+/// via `--direct`/`--agent` got `allowed_tools = None` — no restriction at
+/// all — regardless of its curated `allow` list. This pure function is the
+/// fix, pulled out of `run_subagent` so the glob-matching behavior is
+/// unit-testable without an LLM call.
+/// What: When `is_assistant_tier` is true, `existing_allowed` is `None`, and
+/// `allow` is `Some(patterns)`, returns `Some(<names from `registry` matching
+/// any pattern>)`. Otherwise returns `existing_allowed` unchanged — every
+/// non-persona agent, and any persona that already sets `allowed` explicitly,
+/// is untouched.
+/// Test: `scope_assistant_allowed_tools_filters_by_glob`,
+/// `scope_assistant_allowed_tools_noop_for_non_assistant`,
+/// `scope_assistant_allowed_tools_noop_when_allowed_already_set`.
+pub(super) fn scope_assistant_allowed_tools(
+    is_assistant_tier: bool,
+    existing_allowed: Option<Vec<String>>,
+    allow: Option<&[String]>,
+    registry: Option<&ToolRegistry>,
+) -> Option<Vec<String>> {
+    if !is_assistant_tier || existing_allowed.is_some() {
+        return existing_allowed;
+    }
+    let (Some(patterns), Some(reg)) = (allow, registry) else {
+        return existing_allowed;
+    };
+    let kept: Vec<String> = reg
+        .schemas()
+        .into_iter()
+        .filter_map(|s| {
+            s.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .map(String::from)
+        })
+        .filter(|n| crate::ctrl::pm_task::match_any_glob(n, patterns))
+        .collect();
+    Some(kept)
 }
 
 #[cfg(test)]
