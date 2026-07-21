@@ -12,8 +12,8 @@ spec_refs:
 **Owner:** Engineering (trusty-code)
 **Last-updated:** 2026-07-20
 **Spec ID:** `SPEC-TCPLUGIN-01~draft` (DOC-51)
-**Linked issues:** [#3539](https://github.com/bobmatnyc/trusty-tools/issues/3539) (Phase 1 scope decision); [#3542](https://github.com/bobmatnyc/trusty-tools/issues/3542) (base-agent listing filter, consumed unchanged); [#3465](https://github.com/bobmatnyc/trusty-tools/pull/3465) (skills whole-catalog-replacement threshold, consumed unchanged)
-**Cross-ref:** `crates/trusty-code/src/plugins/{mod,agents,skills}.rs` (this spec's implementation); `crates/trusty-code/src/agents/{mod,md_loader,protocol}.rs` (agent discovery/loading/catalog, reused not forked); `crates/trusty-code/src/skills/{mod,protocol}.rs` (skill discovery/catalog, reused not forked)
+**Linked issues:** [#3539](https://github.com/bobmatnyc/trusty-tools/issues/3539) (Phase 1 scope decision); [#3542](https://github.com/bobmatnyc/trusty-tools/issues/3542) (base-agent listing filter, consumed unchanged); [#3465](https://github.com/bobmatnyc/trusty-tools/pull/3465) (skills whole-catalog-replacement threshold, consumed unchanged); [PR #3547 code-critic review](https://github.com/bobmatnyc/trusty-tools/pull/3547) (hostile-plugin-input hardening + dispatch wiring, §2.5)
+**Cross-ref:** `crates/trusty-code/src/plugins/{mod,agents,skills}.rs` (this spec's implementation, incl. `is_valid_namespaced_name`/`safe_plugin_subdir`); `crates/trusty-code/src/agents/{mod,md_loader,protocol}.rs` (agent discovery/loading/catalog, reused not forked); `crates/trusty-code/src/skills/{mod,protocol}.rs` (skill discovery/catalog, reused not forked); `crates/trusty-code/src/tools/{delegate,skill}.rs`, `crates/trusty-code/src/runner/in_process.rs`, `crates/trusty-code/src/main.rs` (namespaced-dispatch validation gates, §2.5)
 
 > **Scope note.** This is a **behavior contract** for Phase 1 of Claude Code
 > plugin support: ingesting a plugin's `agents/` and `skills/` from a **local
@@ -122,6 +122,63 @@ it already holds — `<root>/.claude/agents` (agents catalog state,
 Projectless (no bound project) daemons see no plugin tier anywhere: there is
 no `.claude/plugins/` to scan without a project root.
 
+**Dispatch is wired end-to-end**, not merely resolvable at the
+`agents::resolve_agent` layer: `tools::delegate::DelegateToAgentTool::execute`
+(the PM's `delegate_to_agent` tool), the CLI's `tcode run-task` argument
+validation, and `runner::agent_config_exists` (the pre-flight existence
+gate both of those call before ever reaching the runner) all accept the
+`<plugin>:<name>` shape — see §2.5. A namespaced plugin agent is therefore
+genuinely delegatable by the PM, not just listed in `agents.list`.
+
+### 2.5 Security: plugin content is hostile input {#SPEC-TCPLUGIN-01~draft}
+
+Everything under `.claude/plugins/` — `plugin.json`, directory names, and
+frontmatter content — is THIRD-PARTY input, unlike a project's own
+`.claude/agents|skills/` (first-party, authored by the project owner). Two
+path-join sites and the dispatch-validation gates were hardened against this
+trust boundary (code-critic review on PR #3547):
+
+- **`plugin.json` `agents`/`skills` overrides (CRITICAL).**
+  `plugins::load_plugin_root` previously joined a manifest's `agents`/
+  `skills` string directly onto `plugin_dir` — `PathBuf::join` REPLACES the
+  base entirely for an absolute component (`plugin_dir.join("/etc")` ==
+  `/etc`), and a relative `../../..` override escapes upward even when not
+  absolute. `plugins::safe_plugin_subdir` now rejects an override that is
+  absolute or contains a `..` component outright, and additionally requires
+  the joined candidate to canonicalize to a path contained within
+  `plugin_dir`'s own canonicalization (also catching a symlink planted
+  inside `plugin_dir` that resolves outside it). Any rejection logs one
+  `WARN` and falls back to the un-overridden `agents`/`skills` convention —
+  it never returns the untrusted path.
+- **Namespaced dispatch names (CRITICAL/HIGH).** A caller-supplied
+  `<plugin>:<local>` name — reachable from an LLM via the `use_skill` and
+  `delegate_to_agent` tool arguments — is joined onto a plugin's
+  `agents_dir`/`skills_dir` to build a filesystem path
+  (`plugins::agents::find_plugin_agent_config`,
+  `plugins::skills::resolve_plugin_skill_body`). `plugins::is_valid_namespaced_name`
+  is the ONE shared guard: it requires EXACTLY two `:`-separated segments,
+  each matching `agents::protocol::validate_agent_name`'s existing safe
+  charset (`[a-z0-9-]+`, 1-64 chars — reused, not re-derived). Because that
+  charset contains no `/` and no `.` at all, a traversal payload like
+  `plugin:../../../../etc/passwd` or `plugin:/etc/passwd` is syntactically
+  impossible to construct — the guard runs BEFORE any path is built, in the
+  function that actually builds it (not merely in an upstream caller).
+  `plugins::skills::resolve_plugin_skill_body` additionally requires the
+  namespaced name to be one `discover_plugin_skills` actually found on disk
+  this scan — closing the residual gap where a plugin's own `SKILL.md`
+  frontmatter could declare a spoofed `name:` that passed the charset check
+  but was never a real, scanned skill.
+- **Dispatch-path validators updated to ACCEPT the namespaced shape.**
+  Before this fix, `tools::delegate::DelegateToAgentTool::execute`, the
+  CLI's `validate_agent_name` (`main.rs`), and `runner::agent_config_exists`
+  each rejected ANY name containing `:` outright — so even though
+  `agents::resolve_agent` could resolve a namespaced name, nothing upstream
+  ever let one reach it: a plugin agent was listed but never actually
+  dispatchable. All three now check `plugins::is_valid_namespaced_name`
+  first (falling through to their original plain-name charset check when it
+  doesn't match), which both ENABLES dispatch and IS the traversal guard for
+  each of those three call sites.
+
 ## 3. Non-Goals (Explicitly Out of Scope, Phase 1)
 
 - Marketplace or git-fetched plugin sources.
@@ -141,8 +198,11 @@ no `.claude/plugins/` to scan without a project root.
 | Discover plugins from `.claude/plugins/<plugin>/`, honoring `plugin.json` overrides | `plugins::discover_plugin_roots` | Implemented |
 | Namespace + list plugin agents in `agents.list` (`plugin` tier, additive) | `plugins::agents::discover_plugin_agents`, `agents::protocol::agents_list` | Implemented |
 | Resolve `<plugin>:<name>` for dispatch | `plugins::agents::find_plugin_agent_config`, `agents::resolve_agent` | Implemented |
+| `<plugin>:<name>` is genuinely delegatable end-to-end (PM tool, CLI, pre-flight gate) | `tools::delegate::DelegateToAgentTool`, `main.rs::validate_agent_name`, `runner::agent_config_exists` | Implemented |
 | Drop unsupported agent frontmatter fields with a warning | `plugins::agents::load_plugin_agent` | Implemented |
 | Treat `extends:` as leaf-only with a warning | `plugins::agents::load_plugin_agent` | Implemented |
 | Namespace + list plugin skills in `skills.list` (`plugin` tier, independent of PR #3465 threshold) | `plugins::skills::discover_plugin_skills`, `skills::protocol::skills_list` | Implemented |
 | Resolve `<plugin>:<name>` skill bodies for `use_skill` | `plugins::skills::resolve_plugin_skill_body`, `skills::FsSkillResolver` | Implemented |
 | Ignore commands/hooks/MCP with a debug log | `plugins::load_plugin_root` | Implemented |
+| Reject `plugin.json` `agents`/`skills` overrides that escape `plugin_dir` (§2.5) | `plugins::safe_plugin_subdir` | Implemented |
+| Reject a traversal/unsafe-charset namespaced dispatch name before any path is built (§2.5) | `plugins::is_valid_namespaced_name` | Implemented |

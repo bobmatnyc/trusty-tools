@@ -60,6 +60,9 @@ fn discover_plugin_roots_honors_manifest_name_override() {
 /// convention.
 ///
 /// Why: #3539 explicitly locks in "the `agents`/`skills` path overrides".
+/// What: the override targets must actually exist on disk — `safe_plugin_subdir`
+/// (#3547) requires the joined candidate to canonicalize, since a
+/// non-existent path can't be verified as contained within `plugin_dir`.
 /// Test: this test.
 #[test]
 fn discover_plugin_roots_honors_path_overrides() {
@@ -70,6 +73,8 @@ fn discover_plugin_roots_honors_path_overrides() {
         "custom-layout",
         r#"{"name": "custom", "agents": "my-agents", "skills": "my-skills"}"#,
     );
+    std::fs::create_dir_all(plugins_dir.join("custom-layout").join("my-agents")).expect("mkdir");
+    std::fs::create_dir_all(plugins_dir.join("custom-layout").join("my-skills")).expect("mkdir");
 
     let roots = discover_plugin_roots(tmp.path());
     assert_eq!(roots.len(), 1);
@@ -81,6 +86,133 @@ fn discover_plugin_roots_honors_path_overrides() {
         roots[0].skills_dir,
         plugins_dir.join("custom-layout/my-skills")
     );
+}
+
+/// An absolute-path `agents` override in `plugin.json` does NOT escape the
+/// plugin root — it is rejected and falls back to the default `agents`
+/// convention (code-critic PR #3547 review, CRITICAL 1).
+///
+/// Why: `PathBuf::join` replaces the base entirely when the joined
+/// component is absolute — `plugin_dir.join("/etc")` == `/etc` — so an
+/// unvalidated override would let a malicious `plugin.json` point
+/// discovery at an arbitrary host directory (here, a decoy "victim" dir
+/// standing in for something like `~/.ssh`).
+/// What: asserts the resolved `agents_dir` is NOT the absolute victim path,
+/// and IS the plugin-root-relative default instead.
+/// Test: this test.
+#[test]
+fn load_plugin_root_rejects_absolute_agents_override() {
+    crate::test_support::begin_capture();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let victim_dir = tmp.path().join("victim");
+    std::fs::create_dir_all(&victim_dir).expect("mkdir victim");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    let manifest_json = format!(r#"{{"name": "evil", "agents": {victim_dir:?}}}"#);
+    write_plugin_manifest(&plugins_dir, "evil-plugin", &manifest_json);
+
+    let roots = discover_plugin_roots(tmp.path());
+    assert_eq!(roots.len(), 1);
+    assert_ne!(
+        roots[0].agents_dir, victim_dir,
+        "an absolute override must never be honored"
+    );
+    assert_eq!(
+        roots[0].agents_dir,
+        plugins_dir.join("evil-plugin").join("agents"),
+        "must fall back to the default 'agents' convention"
+    );
+
+    let captured = crate::test_support::captured_at_least(tracing::Level::WARN);
+    assert!(
+        captured.iter().any(|m| m.contains("absolute")),
+        "expected a rejection warning, got: {captured:?}"
+    );
+}
+
+/// A `..`-bearing `skills` override in `plugin.json` does NOT escape the
+/// plugin root (code-critic PR #3547 review, CRITICAL 1).
+///
+/// Test: this test.
+#[test]
+fn load_plugin_root_rejects_dotdot_skills_override() {
+    crate::test_support::begin_capture();
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_manifest(
+        &plugins_dir,
+        "evil-plugin",
+        r#"{"name": "evil", "skills": "../../../../etc"}"#,
+    );
+
+    let roots = discover_plugin_roots(tmp.path());
+    assert_eq!(roots.len(), 1);
+    assert_eq!(
+        roots[0].skills_dir,
+        plugins_dir.join("evil-plugin").join("skills"),
+        "must fall back to the default 'skills' convention"
+    );
+    assert!(
+        !roots[0].skills_dir.to_string_lossy().contains(".."),
+        "the resolved path must never contain a literal '..' escape"
+    );
+
+    let captured = crate::test_support::captured_at_least(tracing::Level::WARN);
+    assert!(
+        captured.iter().any(|m| m.contains("..")),
+        "expected a rejection warning, got: {captured:?}"
+    );
+}
+
+/// [`is_valid_namespaced_name`] accepts exactly two safe segments.
+///
+/// Test: this test.
+#[test]
+fn is_valid_namespaced_name_accepts_two_safe_segments() {
+    assert!(is_valid_namespaced_name("my-plugin:reviewer"));
+    assert!(is_valid_namespaced_name("a:b"));
+}
+
+/// [`is_valid_namespaced_name`] rejects a local segment containing `..` or
+/// `/` — the exact traversal payload shape (code-critic PR #3547 review,
+/// CRITICAL 2).
+///
+/// Test: this test.
+#[test]
+fn is_valid_namespaced_name_rejects_traversal_segment() {
+    assert!(!is_valid_namespaced_name("foo:../../../../etc/passwd"));
+    assert!(!is_valid_namespaced_name("foo:..veryless"));
+    assert!(!is_valid_namespaced_name("foo:a/b"));
+    assert!(!is_valid_namespaced_name("../../etc:foo"));
+}
+
+/// [`is_valid_namespaced_name`] rejects an absolute-path-shaped segment.
+///
+/// Test: this test.
+#[test]
+fn is_valid_namespaced_name_rejects_absolute_segment() {
+    assert!(!is_valid_namespaced_name("foo:/etc/passwd"));
+}
+
+/// [`is_valid_namespaced_name`] rejects a plain (unnamespaced) name — it is
+/// not this validator's job to accept those, callers fall through to their
+/// existing plain-name path instead.
+///
+/// Test: this test.
+#[test]
+fn is_valid_namespaced_name_rejects_plain_name() {
+    assert!(!is_valid_namespaced_name("engineer"));
+    assert!(!is_valid_namespaced_name(""));
+}
+
+/// [`is_valid_namespaced_name`] rejects more than one colon.
+///
+/// Test: this test.
+#[test]
+fn is_valid_namespaced_name_rejects_extra_colon() {
+    assert!(!is_valid_namespaced_name("foo:bar:baz"));
+    assert!(!is_valid_namespaced_name("foo:bar:baz:qux"));
 }
 
 /// A malformed `plugin.json` degrades to the no-manifest fallback rather

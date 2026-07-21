@@ -328,6 +328,67 @@ fn agent_config_exists_detects_embedded_default() {
     assert!(!super::agent_config_exists(tmp.path(), "totally-bogus"));
 }
 
+/// `agent_config_exists` recognises a namespaced `<plugin>:<name>` plugin
+/// agent, proving the `delegate_to_agent` pre-flight gate actually wires
+/// plugin agents through to dispatch (code-critic PR #3547 review, HIGH 4 —
+/// previously this always returned `false` for any namespaced name, so a
+/// plugin agent was listed in `agents.list` but could never actually be
+/// delegated to).
+///
+/// What: `dir` shaped `<root>/.claude/agents` (required so
+/// `plugins::project_root_two_levels_up` can recover the root) plus a
+/// plugin agent on disk under `<root>/.claude/plugins/my-plugin/agents/`.
+/// Test: this test.
+#[test]
+fn agent_config_exists_detects_plugin_agent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("mkdir");
+    let plugin_agents_dir = tmp
+        .path()
+        .join(".claude")
+        .join("plugins")
+        .join("my-plugin")
+        .join("agents");
+    std::fs::create_dir_all(&plugin_agents_dir).expect("mkdir");
+    std::fs::write(
+        plugin_agents_dir.join("reviewer.md"),
+        "---\nname: reviewer\n---\n\nBody.\n",
+    )
+    .expect("write");
+
+    assert!(super::agent_config_exists(
+        &agents_dir,
+        "my-plugin:reviewer"
+    ));
+    assert!(!super::agent_config_exists(&agents_dir, "my-plugin:ghost"));
+    assert!(!super::agent_config_exists(
+        &agents_dir,
+        "no-such-plugin:reviewer"
+    ));
+}
+
+/// A traversal payload in a namespaced name is rejected, never treated as
+/// "exists" (code-critic PR #3547 review, HIGH 4's guard must hold even at
+/// this pre-flight layer, not only inside `find_plugin_agent_config`).
+///
+/// Test: this test.
+#[test]
+fn agent_config_exists_rejects_plugin_traversal_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let agents_dir = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).expect("mkdir");
+
+    assert!(!super::agent_config_exists(
+        &agents_dir,
+        "my-plugin:../../etc/passwd"
+    ));
+    assert!(!super::agent_config_exists(
+        &agents_dir,
+        "my-plugin:/etc/passwd"
+    ));
+}
+
 /// Dispatching to an embedded, tools-restricted roster agent (`qa` — one of
 /// the four Slice E3 restricted agents) with NO disk config at all still
 /// enforces its `tools.allowed` — the embedded-fallback path in `load_agent`

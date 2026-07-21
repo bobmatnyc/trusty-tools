@@ -337,6 +337,16 @@ impl FsSkillResolver {
 }
 
 impl SkillResolver for FsSkillResolver {
+    /// A namespaced `<plugin>:<name>` (the exact shape a plugin skill
+    /// listing surfaces, and — via `tools::skill::UseSkillTool` — the exact
+    /// shape an LLM's raw `use_skill` argument can be) routes to
+    /// `plugins::skills::resolve_plugin_skill_body`, which is itself the
+    /// authoritative traversal guard (validates the namespaced shape and
+    /// discovered-catalog membership before ever building a path — issue
+    /// #3547 CRITICAL 2). This wrapper does not re-validate; it only
+    /// recovers the cached `project_root` (`None` short-circuits to `None`
+    /// rather than falling through to the plain-name path below, since a
+    /// namespaced name is never a valid plain skill name either way).
     fn resolve(&self, name: &str) -> Option<String> {
         if let Some((plugin, skill_name)) = name.split_once(':') {
             return self.project_root.as_deref().and_then(|root| {

@@ -131,3 +131,44 @@ fn resolve_plugin_skill_body_unknown_skill_is_none() {
 
     assert!(resolve_plugin_skill_body(tmp.path(), "my-plugin", "ghost-skill").is_none());
 }
+
+/// A traversal payload in `skill_name` — exactly the `use_skill` LLM-input
+/// shape (`tools::skill::UseSkillTool::execute` -> `FsSkillResolver::resolve`
+/// -> here) — is rejected BEFORE any path is built, even when a real file
+/// sits at the escape target outside the plugin's `skills_dir`
+/// (code-critic PR #3547 review, CRITICAL 2).
+///
+/// Why: planting a REAL `SKILL.md` at the traversal target and asserting it
+/// is never read proves the guard fires before the filesystem is touched
+/// with the unsafe path — not merely that the target happens to miss.
+/// Test: this test.
+#[test]
+fn resolve_plugin_skill_body_rejects_traversal_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_skill(
+        &plugins_dir,
+        "my-plugin",
+        "demo-skill",
+        "---\nname: demo-skill\n---\n\nBody.\n",
+    );
+    // A real "secret" SKILL.md at the traversal target — if the guard did
+    // not fire, `skills_dir.join("../../../secret").join("SKILL.md")`
+    // resolves exactly here.
+    let secret_dir = tmp.path().join("secret");
+    std::fs::create_dir_all(&secret_dir).expect("mkdir secret");
+    std::fs::write(
+        secret_dir.join("SKILL.md"),
+        "---\nname: secret\n---\n\nSHOULD NEVER BE READ.\n",
+    )
+    .expect("write secret");
+
+    assert!(
+        resolve_plugin_skill_body(tmp.path(), "my-plugin", "../../../secret").is_none(),
+        "a traversal payload in skill_name must be rejected, not resolved"
+    );
+    assert!(
+        resolve_plugin_skill_body(tmp.path(), "my-plugin", "/etc/passwd").is_none(),
+        "an absolute-path-shaped skill_name must be rejected"
+    );
+}

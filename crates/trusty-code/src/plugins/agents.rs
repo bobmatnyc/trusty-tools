@@ -162,18 +162,28 @@ fn warn_unsupported_fields(namespaced: &str, raw: &str) {
 /// namespaced name — mirrors that function's own `NotFound`
 /// (nothing found, `None`) vs `Load` (found but failed to parse, `Some(Err)`)
 /// distinction so its caller can build the identical error shape.
-/// What: finds the [`PluginRoot`] whose resolved `name` equals `plugin`
-/// (not the directory name, which may differ — see [`PluginRoot`]'s doc);
-/// `None` if no such plugin. Within it, `None` if `<agent_name>.md` does not
-/// exist; otherwise `Some` wrapping [`load_plugin_agent`]'s result.
+/// What: validates `plugin:agent_name` via
+/// `plugins::is_valid_namespaced_name` FIRST, before any path is built
+/// (code-critic PR #3547 review, HIGH 3 — the guard belongs to this
+/// function, not merely to an upstream caller that happens to reject `:`
+/// today) — `None` on a traversal/unsafe-charset payload like
+/// `plugin:../../etc`. Then finds the [`PluginRoot`] whose resolved `name`
+/// equals `plugin` (not the directory name, which may differ — see
+/// [`PluginRoot`]'s doc); `None` if no such plugin. Within it, `None` if
+/// `<agent_name>.md` does not exist; otherwise `Some` wrapping
+/// [`load_plugin_agent`]'s result.
 /// Test: `tests::find_plugin_agent_config_resolves_known_agent`,
 /// `tests::find_plugin_agent_config_unknown_plugin_is_none`,
-/// `tests::find_plugin_agent_config_unknown_agent_is_none`.
+/// `tests::find_plugin_agent_config_unknown_agent_is_none`,
+/// `tests::find_plugin_agent_config_rejects_traversal_name`.
 pub fn find_plugin_agent_config(
     project_root: &Path,
     plugin: &str,
     agent_name: &str,
 ) -> Option<anyhow::Result<AgentConfig>> {
+    if !super::is_valid_namespaced_name(&format!("{plugin}:{agent_name}")) {
+        return None;
+    }
     let root = discover_plugin_roots(project_root)
         .into_iter()
         .find(|p| p.name == plugin)?;

@@ -29,6 +29,23 @@
 //! name/agents/skills overrides, later-phase key detection) and
 //! `discover_plugin_roots` scanning; `agents::tests`/`skills::tests` cover
 //! the per-domain ingestion contracts.
+//!
+//! ## Security: plugin content is HOSTILE input (issue #3547)
+//!
+//! Everything under `.claude/plugins/` — `plugin.json`, agent/skill
+//! directory names, and frontmatter content — is THIRD-PARTY, not authored
+//! by the project owner the way `.claude/agents|skills/` is. Two path-join
+//! sites are therefore treated as adversarial and validated BEFORE any
+//! filesystem join, exactly like `agents::protocol::validate_agent_name`
+//! already treats a caller-supplied catalog name:
+//! [`load_plugin_root`] validates a `plugin.json` `agents`/`skills`
+//! override (a `PathBuf::join` of an absolute or `..`-bearing override
+//! escapes `plugin_dir` outright — code-critic PR #3547 review, CRITICAL 1)
+//! and [`is_valid_namespaced_name`] validates every caller-supplied
+//! `<plugin>:<local>` dispatch name (a raw local segment containing `/` or
+//! `..` escapes the plugin's `agents_dir`/`skills_dir` — CRITICAL 2 / HIGH
+//! 3) before [`agents::find_plugin_agent_config`]/
+//! [`skills::resolve_plugin_skill_body`] ever join it onto a directory.
 
 pub mod agents;
 pub mod skills;
@@ -145,11 +162,14 @@ pub fn discover_plugin_roots(project_root: &Path) -> Vec<PluginRoot> {
 /// the `agents`/`skills` directory convention (never an error — see the
 /// module doc's "no manifest" case). When a manifest IS present and
 /// declares any [`LATER_PHASE_MANIFEST_KEYS`], logs one aggregated
-/// `tracing::debug!` naming them.
+/// `tracing::debug!` naming them. `agents`/`skills` overrides route through
+/// [`safe_plugin_subdir`] — `plugin.json` is hostile input (#3547).
 /// Test: `tests::discover_plugin_roots_honors_manifest_name_override`,
 /// `tests::discover_plugin_roots_honors_path_overrides`,
 /// `tests::discover_plugin_roots_falls_back_without_manifest`,
-/// `tests::discover_plugin_roots_warns_on_later_phase_keys`.
+/// `tests::discover_plugin_roots_warns_on_later_phase_keys`,
+/// `tests::load_plugin_root_rejects_absolute_agents_override`,
+/// `tests::load_plugin_root_rejects_dotdot_skills_override`.
 fn load_plugin_root(plugin_dir: &Path, dir_name: &str) -> PluginRoot {
     let manifest_path = plugin_dir.join(".claude-plugin").join("plugin.json");
     let manifest: Option<PluginManifest> = std::fs::read_to_string(&manifest_path)
@@ -160,14 +180,15 @@ fn load_plugin_root(plugin_dir: &Path, dir_name: &str) -> PluginRoot {
         .as_ref()
         .and_then(|m| m.name.clone())
         .unwrap_or_else(|| dir_name.to_string());
-    let agents_rel = manifest
-        .as_ref()
-        .and_then(|m| m.agents.clone())
-        .unwrap_or_else(|| "agents".to_string());
-    let skills_rel = manifest
-        .as_ref()
-        .and_then(|m| m.skills.clone())
-        .unwrap_or_else(|| "skills".to_string());
+
+    let agents_dir = match manifest.as_ref().and_then(|m| m.agents.clone()) {
+        Some(rel) => safe_plugin_subdir(plugin_dir, &rel, "agents", &name, "agents"),
+        None => plugin_dir.join("agents"),
+    };
+    let skills_dir = match manifest.as_ref().and_then(|m| m.skills.clone()) {
+        Some(rel) => safe_plugin_subdir(plugin_dir, &rel, "skills", &name, "skills"),
+        None => plugin_dir.join("skills"),
+    };
 
     if let Some(m) = &manifest {
         let later_phase: Vec<&str> = LATER_PHASE_MANIFEST_KEYS
@@ -185,10 +206,113 @@ fn load_plugin_root(plugin_dir: &Path, dir_name: &str) -> PluginRoot {
     }
 
     PluginRoot {
-        agents_dir: plugin_dir.join(agents_rel),
-        skills_dir: plugin_dir.join(skills_rel),
+        agents_dir,
+        skills_dir,
         root: plugin_dir.to_path_buf(),
         name,
+    }
+}
+
+/// Validate and resolve a `plugin.json` `agents`/`skills` path override
+/// against `plugin_dir`, rejecting anything that could escape it
+/// (code-critic PR #3547 review, CRITICAL 1).
+///
+/// Why: `plugin.json` is THIRD-PARTY, caller-controlled content.
+/// `PathBuf::join` REPLACES the base entirely when the joined component is
+/// absolute (`plugin_dir.join("/etc")` == `/etc`), and a relative
+/// `../../..` override escapes upward even though it isn't absolute —
+/// either lets a malicious `plugin.json` point `agents`/`skills` at an
+/// arbitrary host directory (e.g. `~/.ssh`), which discovery would then
+/// scan and load `.md`/`SKILL.md` files out of.
+/// What: rejects `rel` outright (before any join) when it is absolute or
+/// contains a `..` component — this alone blocks every practical escape and
+/// keeps the warning specific about which shape failed. As defense in
+/// depth, the accepted candidate is additionally required to canonicalize
+/// to a path contained within `plugin_dir`'s own canonicalization (this
+/// also catches a symlink planted inside `plugin_dir` that resolves
+/// outside it). Any rejection logs one `tracing::warn!` naming the plugin,
+/// field, and offending value, and falls back to `plugin_dir.join(default)`
+/// — the un-overridden convention — rather than ever returning the
+/// untrusted path. `default` itself (`"agents"`/`"skills"`, never
+/// attacker-controlled) is never routed through this validation.
+/// Test: `tests::load_plugin_root_rejects_absolute_agents_override`,
+/// `tests::load_plugin_root_rejects_dotdot_skills_override`,
+/// `tests::discover_plugin_roots_honors_path_overrides`.
+fn safe_plugin_subdir(
+    plugin_dir: &Path,
+    rel: &str,
+    default: &str,
+    plugin_name: &str,
+    field: &str,
+) -> PathBuf {
+    let fallback = || plugin_dir.join(default);
+
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute()
+        || rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        tracing::warn!(
+            "plugin '{plugin_name}' plugin.json '{field}' override {rel:?} is absolute or \
+             contains '..' — rejected as a path-traversal attempt, falling back to the \
+             default '{default}' convention (#3547)"
+        );
+        return fallback();
+    }
+
+    let joined = plugin_dir.join(rel);
+    match (plugin_dir.canonicalize(), joined.canonicalize()) {
+        (Ok(canon_root), Ok(canon_joined)) if canon_joined.starts_with(&canon_root) => joined,
+        _ => {
+            tracing::warn!(
+                "plugin '{plugin_name}' plugin.json '{field}' override {rel:?} does not resolve \
+                 within the plugin directory — rejected, falling back to the default \
+                 '{default}' convention (#3547)"
+            );
+            fallback()
+        }
+    }
+}
+
+/// Whether `name` is a well-formed `<plugin>:<local>` namespaced dispatch
+/// name — the ONE shape every plugin-aware caller (`agents::resolve_agent`,
+/// `plugins::agents::find_plugin_agent_config`,
+/// `plugins::skills::resolve_plugin_skill_body`,
+/// `skills::FsSkillResolver::resolve`, `tools::delegate::DelegateToAgentTool`,
+/// the CLI's `run-task` validation, `runner::agent_config_exists`) accepts
+/// (code-critic PR #3547 review, CRITICAL 2 / HIGH 3 / HIGH 4).
+///
+/// Why: a namespaced name's `local` segment is joined onto a plugin's
+/// `agents_dir`/`skills_dir` — e.g. `plugins::skills::resolve_plugin_skill_body`
+/// builds `skills_dir.join(skill_name).join("SKILL.md")` directly from the
+/// caller-supplied (and, via `use_skill`, LLM-supplied) segment. Restricting
+/// BOTH segments to `agents::protocol::validate_agent_name`'s existing safe
+/// charset (`[a-z0-9-]+`, 1-64 chars — reused, not re-derived, so the two
+/// concepts of "a safe catalog name" never drift apart) makes a traversal
+/// payload like `foo:../../../../x` or `foo:/etc/passwd` syntactically
+/// impossible to construct: the charset contains no `/` and no `.` at all,
+/// so no join built from a validated segment can ever leave the directory
+/// it was joined onto, regardless of what the discovered catalog happens to
+/// list (closes the residual gap where a plugin's own frontmatter could
+/// declare a spoofed `name:` that would otherwise appear "known").
+/// What: `true` only for EXACTLY two `:`-separated segments, each accepted
+/// by `agents::protocol::validate_agent_name`. Zero or one segment (a plain
+/// name), more than two (multiple colons), or either segment failing the
+/// charset/length check all return `false`.
+/// Test: `tests::is_valid_namespaced_name_accepts_two_safe_segments`,
+/// `tests::is_valid_namespaced_name_rejects_traversal_segment`,
+/// `tests::is_valid_namespaced_name_rejects_absolute_segment`,
+/// `tests::is_valid_namespaced_name_rejects_plain_name`,
+/// `tests::is_valid_namespaced_name_rejects_extra_colon`.
+pub fn is_valid_namespaced_name(name: &str) -> bool {
+    let segments: Vec<&str> = name.splitn(3, ':').collect();
+    match segments.as_slice() {
+        [plugin, local] => {
+            crate::agents::protocol::validate_agent_name(plugin).is_ok()
+                && crate::agents::protocol::validate_agent_name(local).is_ok()
+        }
+        _ => false,
     }
 }
 

@@ -183,6 +183,66 @@ mod tests {
         assert!(result.content().contains("missing required argument"));
     }
 
+    /// `use_skill` rejects a path-traversal payload in a namespaced
+    /// `<plugin>:<name>` argument end-to-end — through the REAL
+    /// `skills::FsSkillResolver` (not the in-memory `StubResolver` the
+    /// other tests here use), which is what actually backs this tool in
+    /// production (code-critic PR #3547 review, CRITICAL 2).
+    ///
+    /// Why: `UseSkillTool::execute` forwards the LLM's raw `name` argument
+    /// straight to `resolver.resolve()` with no validation of its own — the
+    /// guard must live in the resolver, and this test proves it actually
+    /// does, using the exact production wiring. A real "secret" file sits
+    /// at the traversal target outside the plugin's `skills_dir`; if the
+    /// guard did not fire, both payloads would resolve to it.
+    /// What: a tempdir shaped `<root>/.claude/skills` (empty) +
+    /// `<root>/.claude/plugins/my-plugin/skills/demo-skill/SKILL.md`;
+    /// `name: "my-plugin:../../secret"` and `name: "my-plugin:.."` both
+    /// error, and the returned error never contains the secret's content.
+    /// Test: this test.
+    #[tokio::test]
+    async fn use_skill_rejects_plugin_traversal_end_to_end() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let skills_dir = tmp.path().join(".claude").join("skills");
+        std::fs::create_dir_all(&skills_dir).expect("mkdir skills");
+
+        let plugin_skills_dir = tmp
+            .path()
+            .join(".claude")
+            .join("plugins")
+            .join("my-plugin")
+            .join("skills");
+        std::fs::create_dir_all(plugin_skills_dir.join("demo-skill")).expect("mkdir");
+        std::fs::write(
+            plugin_skills_dir.join("demo-skill").join("SKILL.md"),
+            "---\nname: demo-skill\n---\n\nDemo body.\n",
+        )
+        .expect("write demo skill");
+
+        // The traversal target, one level above `.claude/plugins/my-plugin/skills/`.
+        let secret_dir = tmp.path().join(".claude").join("plugins").join("secret");
+        std::fs::create_dir_all(&secret_dir).expect("mkdir secret");
+        std::fs::write(
+            secret_dir.join("SKILL.md"),
+            "---\nname: secret\n---\n\nSHOULD NEVER BE READ.\n",
+        )
+        .expect("write secret");
+
+        let resolver: Arc<dyn SkillResolver> =
+            Arc::new(crate::skills::FsSkillResolver::new(skills_dir));
+        let tool = UseSkillTool::new(resolver);
+
+        for payload in ["my-plugin:../secret", "my-plugin:.."] {
+            let result = tool.execute(json!({"name": payload})).await;
+            assert!(result.is_error(), "payload {payload:?} must be rejected");
+            assert!(
+                !result.content().contains("SHOULD NEVER BE READ"),
+                "payload {payload:?} must never read the secret file, got: {}",
+                result.content()
+            );
+        }
+    }
+
     /// `name()` and the schema's `function.name` both match
     /// `USE_SKILL_TOOL_NAME` — no drift between the constant and the wire
     /// name (#2070 depends on this identifying skill outputs for pinning).

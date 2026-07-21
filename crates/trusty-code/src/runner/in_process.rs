@@ -497,21 +497,45 @@ impl AgentRunner for InProcessAgentRunner {
 }
 
 /// Convenience: discover whether an agent config exists for `name` under
-/// `dir`, on disk OR in the embedded default roster (#3046).
+/// `dir`, on disk, in the embedded default roster (#3046), OR as a plugin
+/// agent (issue #3539/#3547).
 ///
 /// Why: Callers (e.g. `tools::delegate::DelegateToAgentTool::execute`'s
 /// pre-flight gate) sometimes need to pre-check an agent name without
-/// constructing a runner; exposing the same disk-then-embedded rule
-/// [`crate::agents::resolve_agent`] uses keeps the two in lockstep — a
+/// constructing a runner; exposing the same disk-then-embedded(-then-plugin)
+/// rule [`crate::agents::resolve_agent`] uses keeps the two in lockstep — a
 /// pre-flight check that only saw disk would reject a real embedded roster
-/// name (e.g. `rust-engineer`) before the runner ever got a chance to
-/// resolve it.
-/// What: Returns `true` iff `<dir>/<name>.md` exists (#2897 Slice D —
-/// `.toml` is no longer a loadable source) OR `name` matches an entry in
-/// `crate::assets::DEFAULT_AGENTS`.
+/// name (e.g. `rust-engineer`) — or, as of #3539, a real plugin agent —
+/// before the runner ever got a chance to resolve it. Before this fix, a
+/// namespaced `<plugin>:<name>` always failed here (neither join matched),
+/// so `delegate_to_agent`'s pre-flight gate rejected every plugin agent as
+/// "unknown" even though `resolve_agent` could resolve it — plugin agents
+/// were listed but never actually dispatchable (code-critic PR #3547
+/// review, HIGH 4).
+/// What: a namespaced `name` (containing `:`) is routed to
+/// `plugins::agents::find_plugin_agent_config` — gated first by
+/// `plugins::is_valid_namespaced_name` (the traversal guard; also
+/// redundantly enforced inside `find_plugin_agent_config` itself, issue
+/// #3547 HIGH 3) and by recovering a project root from `dir` via
+/// `plugins::project_root_two_levels_up`. `true` iff that resolves to
+/// `Some` (found on disk, whether or not it parsed cleanly — mirrors the
+/// plain-name path below, which is also a bare existence check, not a
+/// parseability one). Otherwise, unchanged: `true` iff `<dir>/<name>.md`
+/// exists (#2897 Slice D — `.toml` is no longer a loadable source) OR
+/// `name` matches an entry in `crate::assets::DEFAULT_AGENTS`.
 /// Test: `runner::tests::agent_config_exists_detects_present_and_absent`,
-/// `runner::tests::agent_config_exists_detects_embedded_default`.
+/// `runner::tests::agent_config_exists_detects_embedded_default`,
+/// `runner::tests::agent_config_exists_detects_plugin_agent`,
+/// `runner::tests::agent_config_exists_rejects_plugin_traversal_name`.
 pub fn agent_config_exists(dir: &Path, name: &str) -> bool {
+    if let Some((plugin, local)) = name.split_once(':') {
+        if !crate::plugins::is_valid_namespaced_name(name) {
+            return false;
+        }
+        return crate::plugins::project_root_two_levels_up(dir)
+            .and_then(|root| crate::plugins::agents::find_plugin_agent_config(&root, plugin, local))
+            .is_some();
+    }
     dir.join(format!("{name}.md")).exists()
         || crate::assets::DEFAULT_AGENTS
             .iter()

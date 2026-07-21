@@ -230,3 +230,44 @@ fn find_plugin_agent_config_unknown_agent_is_none() {
 
     assert!(find_plugin_agent_config(tmp.path(), "my-plugin", "ghost").is_none());
 }
+
+/// A traversal payload in the local `agent_name` segment is rejected
+/// BEFORE any path is built — even when a file that would satisfy the
+/// naive `<dir>/<name>.md` join actually exists on disk outside the
+/// plugin's `agents_dir` (code-critic PR #3547 review, HIGH 3).
+///
+/// Why: this is the exact repro shape the review flagged —
+/// `agents_dir.join(format!("{agent_name}.md"))` built directly from a
+/// caller-supplied segment. Planting a REAL file at the escape target and
+/// asserting it is never read proves the guard fires before the
+/// filesystem is ever touched with the unsafe path, not merely that the
+/// (possibly nonexistent) target happens to miss.
+/// Test: this test.
+#[test]
+fn find_plugin_agent_config_rejects_traversal_name() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugins_dir = tmp.path().join(".claude").join("plugins");
+    write_plugin_agent(
+        &plugins_dir,
+        "my-plugin",
+        "reviewer",
+        "---\nname: reviewer\n---\n\nBody.\n",
+    );
+    // A real file at the traversal target — if the guard did not fire, this
+    // is exactly what `agents_dir.join("../../secret.md")` would resolve to
+    // and successfully load.
+    std::fs::write(
+        tmp.path().join("secret.md"),
+        "---\nname: secret\n---\n\nSHOULD NEVER BE READ.\n",
+    )
+    .expect("write secret");
+
+    assert!(
+        find_plugin_agent_config(tmp.path(), "my-plugin", "../../secret").is_none(),
+        "a traversal payload in agent_name must be rejected, not resolved"
+    );
+    assert!(
+        find_plugin_agent_config(tmp.path(), "my-plugin", "/etc/passwd").is_none(),
+        "an absolute-path-shaped agent_name must be rejected"
+    );
+}

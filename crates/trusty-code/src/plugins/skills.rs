@@ -86,25 +86,54 @@ fn discover_one_plugin_skills(root: &PluginRoot) -> Vec<SkillMetadata> {
 ///
 /// Why: `skills::FsSkillResolver::resolve`'s namespaced-name entry point —
 /// the "on invoke" half of progressive disclosure for a plugin skill,
-/// mirroring `skills::load_skill_body`'s lazy-load contract.
-/// What: finds the [`PluginRoot`] whose resolved `name` equals `plugin`;
-/// reads `<skills_dir>/<skill_name>/SKILL.md`; strips the frontmatter fence
-/// via `skills::frontmatter::strip_frontmatter` (the same generic stripper
-/// project/embedded skill bodies use). `None` on any miss (unknown plugin,
-/// unknown skill, unreadable file) — the resolver trait's `Option`-returning
-/// API has no separate error channel, matching `FsSkillResolver::resolve`'s
-/// existing unknown-name handling.
+/// mirroring `skills::load_skill_body`'s lazy-load contract. This is the
+/// LLM-reachable path — `tools::skill::UseSkillTool::execute` forwards the
+/// model's raw `name` argument straight through
+/// `skills::FsSkillResolver::resolve` to here — so `skill_name` is HOSTILE
+/// input (code-critic PR #3547 review, CRITICAL 2).
+/// What: validates `plugin:skill_name` via `plugins::is_valid_namespaced_name`
+/// FIRST, before any path is built — rejects a traversal/unsafe-charset
+/// payload like `skill_name = "../../../../x"` outright (this alone makes
+/// escaping `skills_dir` syntactically impossible, since the accepted
+/// charset contains no `/` or `.`). Then finds the [`PluginRoot`] whose
+/// resolved `name` equals `plugin`; as a second, independent guard,
+/// additionally requires `<plugin>:<skill_name>` to be a name
+/// [`discover_plugin_skills`] actually found on disk this scan — mirroring
+/// `skills::load_skill_body`'s "reject anything not in `known`" contract —
+/// which also closes the residual gap where a plugin's own `SKILL.md`
+/// frontmatter could declare a spoofed `name:` that passed the charset
+/// check but was never a real, scanned skill. Only once both guards pass
+/// does it read `<skills_dir>/<skill_name>/SKILL.md` and strip the
+/// frontmatter fence via `skills::frontmatter::strip_frontmatter` (the same
+/// generic stripper project/embedded skill bodies use). `None` on any miss
+/// (failed validation, unknown plugin, unknown skill, unreadable file) —
+/// the resolver trait's `Option`-returning API has no separate error
+/// channel, matching `FsSkillResolver::resolve`'s existing unknown-name
+/// handling.
 /// Test: `tests::resolve_plugin_skill_body_returns_body`,
 /// `tests::resolve_plugin_skill_body_unknown_plugin_is_none`,
-/// `tests::resolve_plugin_skill_body_unknown_skill_is_none`.
+/// `tests::resolve_plugin_skill_body_unknown_skill_is_none`,
+/// `tests::resolve_plugin_skill_body_rejects_traversal_name`.
 pub fn resolve_plugin_skill_body(
     project_root: &Path,
     plugin: &str,
     skill_name: &str,
 ) -> Option<String> {
+    if !super::is_valid_namespaced_name(&format!("{plugin}:{skill_name}")) {
+        return None;
+    }
     let root = discover_plugin_roots(project_root)
         .into_iter()
         .find(|p| p.name == plugin)?;
+
+    let namespaced = format!("{}:{skill_name}", root.name);
+    if !discover_one_plugin_skills(&root)
+        .iter()
+        .any(|m| m.name == namespaced)
+    {
+        return None;
+    }
+
     let raw = std::fs::read_to_string(root.skills_dir.join(skill_name).join("SKILL.md")).ok()?;
     Some(
         crate::skills::frontmatter::strip_frontmatter(&raw)

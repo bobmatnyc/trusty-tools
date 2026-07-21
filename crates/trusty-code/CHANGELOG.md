@@ -26,7 +26,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   dropped with a warning rather than failing the load; an `extends:` chain
   is treated as leaf-only (warned, not composed). Phase 1 is local-directory
   agents + skills only — no marketplace/git fetch, no commands/hooks/MCP
-  (later phases, tracked against #3539).
+  (later phases, tracked against #3539). Plugin content is treated as
+  HOSTILE input throughout (code-critic PR #3547 review): a `plugin.json`
+  `agents`/`skills` override that is absolute, contains `..`, or resolves
+  outside the plugin directory is rejected and falls back to the default
+  convention; every namespaced `<plugin>:<name>` dispatch/resolution path
+  (`use_skill`, `delegate_to_agent`, `agent_config_exists`, `tcode run-task`)
+  validates both segments against the existing `[a-z0-9-]+`
+  (<= 64 chars) safe charset before ever building a filesystem path, making
+  a traversal payload syntactically impossible to construct. A namespaced
+  plugin agent is also now genuinely delegatable end-to-end — the PM's
+  `delegate_to_agent` tool, the CLI, and the pre-flight existence gate all
+  accept the `<plugin>:<name>` shape (previously only `agents::resolve_agent`
+  itself could resolve one; every caller in front of it rejected `:`
+  outright).
 - **Markdown transcript endpoint for dev observability (issue #3526).** New
   `GET /sessions/{id}/transcript.md` (`crate::serve::rest::sessions`) renders
   a session's full transcript as a readable `text/markdown` document —
