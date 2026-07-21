@@ -132,6 +132,31 @@ pub fn register(router: &mut Router, state: AgentsCatalogState) {
     );
 }
 
+/// Whether `name` names one of the 5 `BASE-*` composition-template agents
+/// (`base-agent`, `base-engineer`, `base-ops`, `base-qa`, `base-research` —
+/// see [`crate::assets::BASE_AGENT_NAMES`]) rather than a real, dispatchable
+/// agent.
+///
+/// Why: these 5 templates exist ONLY to be `extends:`-ed by concrete agents
+/// (`agents::resolve_agent`/`agents::md_loader::load_md_agent` must keep
+/// resolving them by name — that is how composition works) and are NEVER
+/// meant to be dispatched directly. [`crate::assets::DEFAULT_AGENTS`]
+/// already never includes them (Slice E3, #2958's roster decision — see
+/// `assets::tests::base_templates_are_never_dispatchable`), but a real
+/// project's disk `.claude/agents/` dir can legitimately contain
+/// `BASE-*.md` files (trusty-mpm's own bundle installs them verbatim —
+/// `crates/trusty-mpm/src/core/bundle_all.rs`), so [`agents_list`]'s disk
+/// half must filter them out itself — this is that single filter, not a
+/// scattered `starts_with` check per call site.
+/// What: case-insensitive membership in [`crate::assets::BASE_AGENT_NAMES`]
+/// — the disk filename convention is `BASE-QA.md` (uppercase stem) while
+/// the frontmatter `name:`/`extends:` convention is lowercase `base-qa`, so
+/// this must tolerate either.
+/// Test: `tests::list_excludes_base_agents_but_resolve_agent_still_finds_them`.
+fn is_base_agent(name: &str) -> bool {
+    crate::assets::BASE_AGENT_NAMES.contains(&name.to_ascii_lowercase().as_str())
+}
+
 /// Wire shape for one catalog entry — shared by `agents.list`'s embedded and
 /// disk halves so the two are indistinguishable to a client beyond `tier`.
 fn entry_json(cfg: &AgentConfig, tier: &str) -> Value {
@@ -160,10 +185,19 @@ fn entry_json(cfg: &AgentConfig, tier: &str) -> Value {
 /// (code-critic PR #3465 review, MEDIUM). A broken entry keeps the delete
 /// affordance: removing the bad file is exactly the repair path. Sorted by
 /// name.
+///
+/// The 5 `BASE-*` composition-template agents ([`is_base_agent`]) are
+/// excluded from this list entirely — on either tier — because they are
+/// extends-sources only and never meant to be dispatched (issue #3465
+/// follow-up). This is a LISTING-only filter: [`super::resolve_agent`] and
+/// `md_loader::load_md_agent` are untouched, so composition (a leaf agent's
+/// `extends: base-engineer`) keeps working exactly as before — only the
+/// user-facing catalog an operator browses/picks from hides them.
 /// Test: `tests::list_returns_embedded_when_disk_empty`,
 /// `tests::list_disk_override_wins_and_suppresses_embedded`,
 /// `tests::list_disk_only_entries_are_additive`,
-/// `tests::list_marks_unparseable_disk_override_as_broken`.
+/// `tests::list_marks_unparseable_disk_override_as_broken`,
+/// `tests::list_excludes_base_agents_but_resolve_agent_still_finds_them`.
 async fn agents_list(
     state: &AgentsCatalogState,
     _params: Value,
@@ -171,10 +205,14 @@ async fn agents_list(
 ) -> Result<Value, RpcError> {
     let mut by_name: Vec<(String, Value)> = load_embedded_default_agents()
         .iter()
+        .filter(|cfg| !is_base_agent(&cfg.agent.name))
         .map(|cfg| (cfg.agent.name.clone(), entry_json(cfg, "embedded")))
         .collect();
 
     for (name, path) in discover_agents(&state.dir) {
+        if is_base_agent(&name) {
+            continue;
+        }
         let entry = match md_loader::load_md_agent(&path) {
             Ok(cfg) => entry_json(&cfg, state.tier),
             Err(e) => {
@@ -505,6 +543,61 @@ mod tests {
                 .expect("description")
                 .contains("unparseable"),
         );
+    }
+
+    /// `agents.list` excludes every `BASE-*` composition-template name —
+    /// even when a real file exists on disk, as trusty-mpm's own bundle
+    /// installs (frontmatter `name: base-agent`, `role: base` — see
+    /// `crates/trusty-mpm/src/assets/agents/BASE-AGENT.md`) — while
+    /// `resolve_agent` (the dispatch/composition path) still finds it by
+    /// name, since composing a leaf agent's `extends: base-agent` chain
+    /// depends on it (issue #3465 follow-up).
+    ///
+    /// Why: pins the LISTING-only nature of the filter — [`is_base_agent`]
+    /// must never leak into `resolve_agent`/`load_md_agent`, only into
+    /// `agents_list`. [`is_base_agent`]'s case-insensitivity (needed
+    /// because the real bundle's on-disk filename is uppercase
+    /// `BASE-AGENT.md`) is covered directly by its own doc/the
+    /// `assets::BASE_AGENT_NAMES` contract; this test uses the lowercase
+    /// filename so the same file also exercises `resolve_agent`'s exact-name
+    /// path join without relying on filesystem case-folding, which is not
+    /// portable (case-sensitive on Linux CI, case-insensitive by default on
+    /// macOS).
+    /// What: writes `base-agent.md` and a normal `engineer.md`; asserts the
+    /// list has no `base-agent` entry but does have `engineer`, then asserts
+    /// `super::super::resolve_agent` still resolves `base-agent` by name.
+    /// Test: this test.
+    #[tokio::test]
+    async fn list_excludes_base_agents_but_resolve_agent_still_finds_them() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("base-agent.md"),
+            "---\nname: base-agent\nrole: base\n---\n\nBase instructions.\n",
+        )
+        .expect("write");
+        std::fs::write(
+            tmp.path().join("engineer.md"),
+            "---\nname: engineer\n---\n\nBody.\n",
+        )
+        .expect("write");
+
+        let s = state(tmp.path(), true);
+        let result = agents_list(&s, Value::Null, ctx()).await.expect("list");
+        let agents = result["agents"].as_array().expect("array");
+        assert!(
+            !agents
+                .iter()
+                .any(|a| a["name"].as_str().is_some_and(is_base_agent)),
+            "no BASE-* composition template may appear in the listing, got: {agents:?}"
+        );
+        assert!(
+            agents.iter().any(|a| a["name"] == "engineer"),
+            "a real dispatchable agent must still be listed, got: {agents:?}"
+        );
+
+        let resolved = super::super::resolve_agent(tmp.path(), "base-agent")
+            .expect("resolve_agent must still resolve a base template by name");
+        assert_eq!(resolved.agent.name, "base-agent");
     }
 
     #[tokio::test]

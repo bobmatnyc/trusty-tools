@@ -8,6 +8,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Workstream/agents UX corrections: hide base agents, PM-only agent choice, immutable project (refs #3465).**
+  - The Agents tab and the start-working agent selector no longer list the 5
+    `BASE-*` composition-template agents (`base-agent`, `base-engineer`,
+    `base-ops`, `base-qa`, `base-research`) — they exist only to be
+    `extends:`-ed by concrete agents and were never meant to be dispatched.
+    Fixed at the source: `GET /agents` (`crate::agents::protocol::agents_list`,
+    see the trusty-code changelog) no longer includes them.
+  - **Removed the user-facing agent selector from the start-working bar
+    (`StartWorkingForm.svelte`).** "We don't choose agents, the PM does" (Bob).
+    The `agent:` dropdown (issue #3449) — and its `agentRoster`/`selectedAgent`
+    state and mount-time `GET /agents` fetch — are gone; every `POST /tasks`
+    call now omits `agent_name` entirely, so the daemon defaults every run to
+    its PM entry agent (`task::protocol::task_run`'s own default, #3437),
+    which delegates as needed. The Agents tab itself is unaffected — it still
+    lists agents for viewing/managing, this only removes the per-submit picker.
+  - **A workstream's project is now locked once the conversation is bound to
+    it.** "Once we choose a project for a workstream, we don't change it. New
+    workstream if we want to change projects" (Bob). The start-working bar's
+    "choose project"/"clear" controls are now shown only BEFORE this
+    conversation's first successful submit; once bound (a session or
+    continuation-workstream id exists) the project is displayed read-only —
+    start a new workstream to use a different project. The daemon already
+    enforces the underlying invariant (`task::protocol::task_run` rejects a
+    `project` that mismatches an existing session's persisted binding), so
+    this is a GUI-only change: the control is removed rather than left to be
+    rejected.
+
 ### Added
 
 - **Download workstream transcript as Markdown (closes #3526).** The active

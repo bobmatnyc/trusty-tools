@@ -91,17 +91,17 @@ export interface CreateWorkstreamBody {
  * `crate::serve::rest::tasks::RunTaskBody`. `session_id` is issue #3446's
  * chat-continuation addition — see [`buildRunTaskBody`]'s own doc for why
  * it and `workstream_id` are mutually exclusive on the wire. `agent_name`
- * is optional and omitted unless the caller explicitly picks one — issue
- * #3449 closed the "no pre-session roster route" gap this module's doc
- * previously carried (`GET /agents`, `lib/agent-roster.ts`), so
- * `StartWorkingForm.svelte` can now offer a selector; omitting the field
- * still means "daemon default" exactly as before (`task::protocol`'s own
- * `agent_name` default, #3437). Unlike `session_id`/`workstream_id`,
- * `agent_name` is NOT exclusive with either — `task::protocol::task_run`
- * applies it per-CALL, not just at session mint, so it is sent alongside a
- * `session_id` reuse too (see [`buildRunTaskBody`]'s doc): otherwise a
- * resumed session's per-run agent would silently reset to the daemon
- * default on every follow-up turn. */
+ * is optional and mirrors `task::protocol::task_run`'s own field (issue
+ * #3449 originally added a `GET /agents`-backed selector here so an
+ * operator could pick one per submit — a later product correction removed
+ * it: "we don't choose agents, the PM does" (Bob). No GUI caller passes
+ * this field anymore; `StartWorkingForm.svelte` always omits it, so every
+ * run defaults to the daemon's PM entry agent (`task::protocol`'s
+ * `DEFAULT_TASK_RUN_AGENT_NAME = "pm"`, #3437), which itself delegates. The
+ * field stays on the wire type (and [`buildRunTaskBody`] still accepts it)
+ * because it is a genuine, still-supported `task.run` parameter — a future
+ * non-GUI caller, or a deliberate re-introduction, should not need to
+ * re-widen this type. */
 export interface RunTaskBody {
   task_description: string;
   project?: string;
@@ -177,14 +177,16 @@ export function buildCreateWorkstreamBody(name: string): CreateWorkstreamBody {
  * restating it explicitly would be redundant at best. `workstreamId` is
  * only ever sent on the MINT path (`sessionId` absent).
  * `agentName` is NOT exclusive with either, unlike `sessionId`/
- * `workstreamId` — it is included whenever passed and non-empty regardless
- * of which of those two is set, because `task::protocol::task_run` applies
+ * `workstreamId` — when passed and non-empty it is included regardless of
+ * which of those two is set, because `task::protocol::task_run` applies
  * `agent_name` per-CALL (`spawn_task_run`'s `task_params.agent_name`), not
- * only at session mint; omitting it on a `sessionId` reuse call would
- * silently reset a resumed conversation's per-run agent back to the daemon
- * default on every follow-up turn. An omitted/empty `agentName` (the
- * selector's "daemon default" option) means the daemon applies its own
- * default exactly as before issue #3449.
+ * only at session mint. No current caller passes it, though — `StartWorkingForm.svelte`
+ * calls this with `agentName` omitted on every path (issue #3449 originally
+ * added a GUI selector for it; a later product correction removed that
+ * selector — "we don't choose agents, the PM does"), so every call's body
+ * omits `agent_name` and the daemon applies its own PM-entry default. The
+ * parameter stays on this function because it is a real, still-supported
+ * `task.run` field, not because any caller uses it today.
  * Test: `new-workstream.test.ts::buildRunTaskBody`.
  */
 export function buildRunTaskBody(

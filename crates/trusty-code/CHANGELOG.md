@@ -63,6 +63,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`agents.list`/`GET /agents` no longer surfaces the 5 `BASE-*` composition-template agents (issue #3465 follow-up).** `base-agent`, `base-engineer`,
+  `base-ops`, `base-qa`, `base-research` exist only to be `extends:`-ed by
+  concrete agents and were never meant to be dispatched — they were leaking
+  into the Foundry GUI's Agents tab and the start-working agent selector
+  whenever a project's disk `.claude/agents/` dir had real `BASE-*.md` files
+  on it (trusty-mpm's own bundle installs them verbatim). New
+  `agents::protocol::is_base_agent` (backed by a single centralized
+  `crate::assets::BASE_AGENT_NAMES` list, matched case-insensitively) filters
+  both the embedded and disk halves of the listing; `resolve_agent`/
+  `load_md_agent` are untouched, so a leaf agent's `extends: base-engineer`
+  chain still composes exactly as before — only the user-facing catalog an
+  operator browses hides them.
 - **`CodeEngine`'s workstream-event SSE loop no longer stalls silently or loops forever (Slice 6, closes #3418, part of epic #3411).**
   - `pump_session_events` reset its reconnect-attempt counter on every merely-successful TRANSPORT-level reconnect, before the inner loop ever observed whether the STREAM made progress. Against a daemon that accepts the connection but closes the stream immediately with no data every time, that made the retry budget un-exhaustible: the function looped forever and `handle_input` never returned. The counter now only resets on genuine progress (an actual data payload), so `SESSION_STREAM_MAX_RECONNECTS` is a real bound again.
   - Every exhaustion path in `pump_session_events` (a non-2xx status, a transport error, a clean-but-premature stream close, an idle timeout) now sends a `done: true, is_error: true` `AssistantOutput` before returning, instead of some paths (the clean-close case) silently returning `Ok(())` — indistinguishable from a genuinely successful turn. This is the epic #3411 deferred Slice 3 review item: a terminal SSE failure now surfaces a visible error in the TUI rather than a stalled spinner with no error text.
