@@ -5,6 +5,47 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **HIGH: SIGTERM could hang the sidecar, needing SIGKILL.** The previous
+  `SIGTERM` handler called `sys.stdin.close()` from inside the handler while
+  the main thread was blocked in `sidecar.serve`'s `for line in stdin:` read —
+  a reentrant call into the same (non-reentrant) `BufferedReader`, which raised
+  a `RuntimeError` *inside the handler* that was swallowed by a bare
+  `except Exception`, leaving the read (and process) hung forever. The handler
+  now raises a dedicated `_ShutdownRequested` exception instead of touching
+  stdin; per PEP 475 this propagates cleanly out of the interrupted blocking
+  read, and `serve()`'s existing `finally` (drain the queue, join the worker)
+  still runs during the unwind. Added a real-signal regression test
+  (`test_signal_shutdown.py`) that spawns the sidecar as a subprocess with
+  stdin held open and asserts a real `SIGTERM` produces a prompt, clean exit —
+  the prior conformance suite only covered EOF via an in-memory `StringIO`,
+  never a real signal.
+
+### Added
+
+- **Bounded worker-join on shutdown.** `sidecar.py`'s shutdown path now joins
+  the encode-worker thread with a 10s timeout instead of an unbounded `join()`;
+  if the worker is wedged (e.g. a hung MPS `encode()` mid-batch) the process
+  force-exits (`os._exit(1)`) rather than hanging indefinitely.
+- **`TOKENIZERS_PARALLELISM=false` by default.** Set (via `setdefault`, so an
+  operator override is never clobbered) before `sentence_transformers`/
+  `transformers` are ever imported, eliminating the extra
+  `multiprocessing.resource_tracker` child HuggingFace tokenizers otherwise
+  spawns and the associated "leaked semaphore" shutdown noise — a simpler
+  process tree with one fewer orphan-prone child.
+- **`.ready` sentinel re-verification.** `bootstrap.rs`'s `ensure_venv()` no
+  longer trusts a `.ready` sentinel forever: on every fast-path hit it now runs
+  a cheap import-only smoke check (`<venv>/bin/python -c "import
+  sentence_transformers"`, bounded to 10s) before reusing the venv. A venv that
+  fails the recheck (corrupted native `.so`, ABI shift after an OS/Xcode
+  upgrade, half-deleted directory) is rebuilt instead of silently serving from
+  a broken interpreter; if the rebuild itself fails, the error propagates so
+  `commands/start/embedder.rs`'s existing fall-back-to-ort path fires.
+
+---
 ## [0.1.0] — 2026-07-20
 
 Initial release — opt-in Python/MPS embedding sidecar launcher for

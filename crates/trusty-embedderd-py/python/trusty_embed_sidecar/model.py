@@ -22,6 +22,19 @@ from __future__ import annotations
 import os
 from typing import Callable, List
 
+# Disable HuggingFace tokenizers' internal (Rust-side) parallelism before
+# `sentence_transformers`/`transformers` are ever imported — the library reads
+# this env var once, at import time, so it must be set here at module load
+# (this module is imported eagerly by `__main__`, well before `build_encoder`
+# performs its lazy `import torch` / `from sentence_transformers import ...`
+# below). Why: without it, tokenizers spawns a `multiprocessing.resource_tracker`
+# helper process to back parallel tokenization the sidecar never benefits from
+# (one request encoded at a time by the single worker thread — see
+# `sidecar.py`), leaving an extra orphan-prone child in the process tree plus
+# spurious "leaked semaphore" warnings on shutdown. `setdefault` so an
+# operator's explicit env override is never clobbered.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 # Pin the model to a specific HuggingFace revision so a bootstrapped venv always
 # downloads bit-identical weights (reproducibility — the analogue of the pinned

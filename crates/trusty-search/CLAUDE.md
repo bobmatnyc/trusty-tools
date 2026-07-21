@@ -645,10 +645,22 @@ environment variable (issue #110 Phase 2):
 | `TRUSTY_EMBEDDER` value | Behaviour |
 |-------------------------|-----------|
 | unset / `auto` / `stdio` | **Default.** Arms a `LazyEmbedderHandle` at boot (issue #315 — deferred spawn). `trusty-embedderd --stdio` is spawned on the **first embed request** (reindex, hybrid search, `context_inference`), not at daemon startup. `trusty-embedderd` is a **required runtime dependency** — binary discovery still runs at boot and fails fast with an install hint if the binary is missing. **`cargo install trusty-search` installs `trusty-embedderd` automatically.** |
+| `python`                | **Opt-in Python/MPS sidecar (epic #3524).** Eagerly bootstraps a pinned `uv`-managed venv (torch + sentence-transformers) at `start`, then lazy-spawns `trusty-embedderd-py` speaking the exact same stdio JSON-RPC 2.0 protocol as the Rust sidecar. On Apple Silicon this embeds ~2.4x faster than the ort path with numerically identical (>=0.999 cosine) results. On ANY bootstrap or launcher-discovery failure, falls back to the Rust ort stdio sidecar so search never hard-fails — see "Python/MPS sidecar tuning" below. **Default-off**; requires `uv` installed (or `TRUSTY_UV_BIN` set) and ~3 GB free disk on first use. |
 | `in-process` / `local`  | Explicit escape hatch — in-process ONNX embedding. Use for tests, debugging, or environments where the sidecar cannot be installed. **Never activated silently**: you must set this variable explicitly to use the in-process path. |
 | `http://…`              | HTTP remote — `POST /embed` to a manually-managed `trusty-embedderd` HTTP listener. |
 | `unix:/path/to/sock`    | UDS remote — JSON-RPC 2.0 to a manually-managed `trusty-embedderd --socket` listener. |
 | `candle`                | Candle Metal backend (requires `--features candle`). |
+
+### Python/MPS sidecar tuning (`TRUSTY_EMBEDDER=python` path only)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TRUSTY_UV_BIN` | — (PATH search) | Explicit path to the `uv` binary used to bootstrap the venv (`uv python install`, `uv venv`, `uv export`, `uv pip sync`). Must point to an existing file if set; otherwise `uv` is located on `PATH`. Missing `uv` is a bootstrap failure that triggers the ort fallback. |
+| `TRUSTY_EMBEDDERD_PY_BIN` | — (sibling/PATH search) | Explicit path to the `trusty-embedderd-py` launcher binary. Overrides the sibling-binary/PATH discovery `locate_launcher_binary` performs. |
+| `TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS` | `600` | Bounded timeout applied to each individual `uv` bootstrap step (python install, venv create, export, pip sync) and to the post-build import+embed smoke test. Each step gets one retry on a transient failure. |
+| `TRUSTY_DEVICE` | `auto` | Device selection inside the sidecar: `auto` (MPS if available, else CUDA, else CPU), `gpu` (same as `auto` but logs a warning if it falls back to CPU), or `cpu` (force CPU). |
+| `TRUSTY_PY_EMBED_FP16` | unset (fp32) | Set to `1`/`true`/`yes`/`on` to opt into fp16 on MPS/CUDA (~1.3x faster; cosine similarity still >= 0.9999 vs the fp32 reference per the spike). fp32 is the default everywhere, including MPS/CUDA. |
+| `TRUSTY_PY_EMBED_BATCH_SIZE` | unset | Python-sidecar-specific batch-size override; wins over the forwarded `TRUSTY_EMBED_BATCH_SIZE`. Clamped to at most 512 on MPS (Apple Silicon unified memory) and to at least 1 everywhere; falls back to 256 when unset and nothing is forwarded. |
 
 ### Supervisor tuning (stdio-sidecar path only)
 

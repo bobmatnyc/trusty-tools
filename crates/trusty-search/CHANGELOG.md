@@ -23,6 +23,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   embedder** so search never hard-fails. The Rust build does not require
   torch/venv. Default-on-Apple-Silicon is a later slice.
 
+### Documentation
+
+- CLAUDE.md's "Embedder Configuration" table now documents the `python`
+  `TRUSTY_EMBEDDER` value, plus a new "Python/MPS sidecar tuning" reference
+  block for `TRUSTY_UV_BIN`, `TRUSTY_EMBEDDERD_PY_BIN`,
+  `TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS`, `TRUSTY_DEVICE`, `TRUSTY_PY_EMBED_FP16`,
+  and `TRUSTY_PY_EMBED_BATCH_SIZE` (epic #3524 fast-follow).
+
 ## [0.36.1] — 2026-07-20
 
 ### Changed

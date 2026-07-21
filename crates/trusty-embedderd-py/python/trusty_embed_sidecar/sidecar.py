@@ -15,11 +15,13 @@ stderr (see ``log``). We flush stdout after every frame so the client's
 ``read_line`` returns promptly.
 
 Clean shutdown: EOF on stdin (or SIGTERM handled by the caller) stops the
-reader, drains any queued work, joins the worker, and returns.
+reader, drains any queued work, joins the worker (bounded — see
+``_WORKER_JOIN_TIMEOUT_SECS``), and returns.
 """
 
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
@@ -35,6 +37,15 @@ def log(msg: str) -> None:
 
 # Sentinel enqueued to tell the worker to stop after draining.
 _STOP = object()
+
+# Bound on how long shutdown waits for the worker thread to drain and exit.
+#
+# Why: a hung ``encode()`` call (e.g. an MPS driver stall) combined with a
+# simultaneous daemon-initiated shutdown must not wedge this process
+# forever — an unbounded ``join()`` would. Ten seconds is generous for the
+# normal case (drain a small queue, finish an in-flight batch) while still
+# bounding the pathological one.
+_WORKER_JOIN_TIMEOUT_SECS = 10.0
 
 
 def serve(
@@ -79,9 +90,20 @@ def serve(
             # read loop is never blocked by a slow/large encode (multi-flight).
             work.put(line)
     finally:
-        # Drain outstanding work, then stop the worker and join it so all
-        # queued replies are flushed before we exit.
+        # Drain outstanding work, then stop the worker and join it (bounded)
+        # so all queued replies are flushed before we exit in the normal case.
         work.put(_STOP)
-        worker_thread.join()
+        worker_thread.join(timeout=_WORKER_JOIN_TIMEOUT_SECS)
+        if worker_thread.is_alive():
+            # The worker is wedged (e.g. a hung MPS encode) and will never
+            # drain. Waiting longer risks the process itself becoming the
+            # next thing that needs SIGKILL; force-exit immediately instead —
+            # bypasses further Python-level cleanup by design, which is
+            # correct here since there is nothing left to clean up safely.
+            log(
+                f"worker did not exit within {_WORKER_JOIN_TIMEOUT_SECS}s of "
+                "shutdown (hung encode?) — forcing process exit"
+            )
+            os._exit(1)
 
     log("stdin EOF — exiting cleanly")

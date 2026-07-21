@@ -126,18 +126,41 @@ fn bootstrap_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Bound on the cheap post-`.ready` import recheck (see [`verify_import_smoke`]).
+/// Independent of, and much shorter than, `bootstrap_timeout()` — this runs on
+/// every `ensure_venv()` fast-path hit, not just at build time.
+const READY_RECHECK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Ensure a ready venv exists and return its layout.
 ///
-/// Fast path (no lock): if `.ready` matches the current lock and the venv
-/// python exists, return immediately. Otherwise flock the base dir and build.
-/// Idempotent and safe under concurrent callers.
+/// Fast path (no lock): if `.ready` matches the current lock, the venv python
+/// exists, AND the venv still imports cleanly (see [`verify_import_smoke`]),
+/// return immediately. Otherwise flock the base dir and (re)build. Idempotent
+/// and safe under concurrent callers.
 pub fn ensure_venv() -> Result<VenvLayout> {
     let layout = resolve_layout()?;
 
     // Fast path — already built for this lock.
+    //
+    // Why the extra `verify_import_smoke` beyond `is_ready`: `.ready` is a
+    // sentinel written once, at the end of a successful build, and trusted
+    // forever after. If the venv is corrupted *after* that (a broken native
+    // `.so`, an ABI shift from an OS/Xcode upgrade, a half-deleted directory)
+    // the stale sentinel would keep routing real embed traffic to a broken
+    // interpreter instead of falling back to the Rust ort path. This recheck
+    // is a fast IMPORT-ONLY smoke test (no model load, no torch device init —
+    // see `verify_import_smoke`), so it stays cheap enough to run on every
+    // `ensure_venv()` call, not just the initial build.
     if is_ready(&layout) {
-        tracing::debug!(venv = %layout.venv_dir.display(), "py-embedder venv already ready");
-        return Ok(layout);
+        if verify_import_smoke(&layout) {
+            tracing::debug!(venv = %layout.venv_dir.display(), "py-embedder venv already ready");
+            return Ok(layout);
+        }
+        tracing::warn!(
+            venv = %layout.venv_dir.display(),
+            "py-embedder: `.ready` sentinel present but the venv failed an \
+             import smoke-check (possibly corrupted) — rebuilding"
+        );
     }
 
     fs::create_dir_all(&layout.base)
@@ -157,7 +180,7 @@ pub fn ensure_venv() -> Result<VenvLayout> {
 
     // Double-checked: another process may have finished while we waited.
     let result = (|| {
-        if is_ready(&layout) {
+        if is_ready(&layout) && verify_import_smoke(&layout) {
             tracing::info!("py-embedder: venv became ready while awaiting lock — reusing");
             return Ok(());
         }
@@ -167,6 +190,60 @@ pub fn ensure_venv() -> Result<VenvLayout> {
     let _ = FileExt::unlock(&lock_file);
     result?;
     Ok(layout)
+}
+
+/// Cheap import-only recheck of an already-`.ready` venv.
+///
+/// What: runs `<venv>/bin/python -c "import sentence_transformers"` — an
+/// import only, NOT a full embed (no model download/load, no torch device
+/// init) — bounded by [`READY_RECHECK_TIMEOUT`]. Returns `true` only on a
+/// clean, successful exit; any spawn failure, non-zero exit, or timeout
+/// returns `false` so the caller treats the venv as not-ready and rebuilds
+/// (and if the rebuild itself fails, that error propagates so
+/// `commands/start/embedder.rs`'s fall-back-to-ort path fires — the venv is
+/// never trusted on a failed recheck).
+///
+/// Deliberately does NOT set `current_dir`/`PYTHONPATH` to `project_dir` (unlike
+/// [`smoke_test`], which imports our own bundled `trusty_embed_sidecar`
+/// package): this only imports the venv's own installed `sentence_transformers`
+/// from site-packages, so it stays correct even if `project_dir` were ever
+/// missing (e.g. manually deleted) while the venv itself is intact.
+fn verify_import_smoke(layout: &VenvLayout) -> bool {
+    let mut cmd = Command::new(&layout.venv_python);
+    cmd.args(["-c", "import sentence_transformers"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("py-embedder: ready-recheck failed to spawn venv python: {e}");
+            return false;
+        }
+    };
+
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= READY_RECHECK_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::warn!(
+                        "py-embedder: ready-recheck timed out after {}s",
+                        READY_RECHECK_TIMEOUT.as_secs()
+                    );
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                tracing::warn!("py-embedder: ready-recheck poll failed: {e}");
+                return false;
+            }
+        }
+    }
 }
 
 /// The full build (called under the flock, after the ready re-check failed).
