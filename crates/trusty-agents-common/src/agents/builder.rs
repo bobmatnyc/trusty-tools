@@ -623,7 +623,7 @@ fn needs_quoting(value: &str) -> bool {
 /// [`escape_yaml_double_quoted`] — the same quoting style `initialPrompt`
 /// already used, so `split_frontmatter`'s existing `unescape_yaml_double_quoted`
 /// decode (now applied to these fields too) round-trips it.
-/// Test: `compose_description_with_colon_is_quoted`,
+/// Test: `compose_description_with_colon_is_quoted_and_strict_yaml_valid`,
 /// `compose_description_without_colon_is_unquoted` in builder_tests.rs.
 fn render_scalar(value: &str) -> String {
     if needs_quoting(value) {
