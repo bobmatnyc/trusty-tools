@@ -1,3 +1,17 @@
+# SCOPE NOTE (PR A, epic #3052): this legacy standalone persona is NOT
+# granted `delegate_to_agent` and does NOT extend `assistant` — it has no
+# delegation capability, so it carries no internal specialist-routing list
+# and no full black-box "NEVER reveal internal mechanics" section (unlike
+# `assistant`/`izzie`/`cto-assistant`, which all gained the tool + the
+# black-box prose this PR). It already had its `mcp_list`/`mcp_enable`/
+# `mcp_disable` tool-grant leak stripped (see `[tools]` below) and its two
+# most direct prose leaks fixed (the `mcp_list`/"trusty-agents' engineer
+# agents" mentions in `content`). Porting the rest of the black-box section
+# here is intentionally deferred — this file is a pre-#3054 predecessor of
+# `izzie/agent.toml` (same display name, distinct config) and a fuller
+# black-box pass belongs with whatever follow-up decides its fate (keep,
+# merge into izzie, or retire) rather than duplicating persona prose into a
+# file that may not be long for this world.
 [agent]
 name = "personal-assistant"
 role = "assistant"

@@ -21,11 +21,25 @@
 # PR A / epic #3052's black-box tool strip), the base file
 # (`../assistant/agent.toml`) is the single source of truth — this list does
 # not need to be kept byte-identical, only a safe subset.
-
-# Inherit the base productivity assistant (resolved by #3055/#3106).
-extends = "assistant"
+#
+# BUG FIX (PR A code-critic follow-up, #3052): `extends = "assistant"` was
+# previously placed BEFORE the `[agent]` table header, making it a TOP-LEVEL
+# TOML key. `AgentConfig` has no top-level `extends` field (only
+# `AgentInfo::extends`, i.e. `[agent].extends`) and doesn't
+# `deny_unknown_fields`, so serde silently DROPPED it — `agent.extends` was
+# always `None` and this package NEVER actually inherited anything from the
+# base (no prose concatenation, no tool/skill union); every prior "izzie
+# inherits from the base" claim in this file's comments was aspirational,
+# not actual, until this fix. Caught by
+# `assistant_tier_persona_carries_curated_worker_routing_list`
+# (`crates/trusty-agents/src/agents/tests/loading.rs`), which failed because
+# the base's persona body (added by PR A) never reached izzie's resolved
+# content. `extends` now lives inside `[agent]` below, where the schema
+# expects it.
 
 [agent]
+# Inherit the base productivity assistant (resolved by #3055/#3106).
+extends = "assistant"
 name = "izzie"
 role = "assistant"
 # #3358: no `runner` — falls back to the default (Subprocess), routing off
