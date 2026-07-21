@@ -30,6 +30,7 @@
 pub mod error;
 pub mod in_process;
 pub mod remote;
+mod spawn_retry;
 pub mod stdio;
 pub mod supervisor;
 pub mod types;

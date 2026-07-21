@@ -56,10 +56,10 @@ use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{RwLock, watch};
 
-use super::{EmbedderClient, StdioEmbedderClient};
+use super::{EmbedderClient, StdioEmbedderClient, spawn_retry};
 
 // Config and batch-size tuning live in `supervisor_config.rs` (issue #3524
 // slice 5 CI follow-up — split to stay under the 500-SLOC production cap).
@@ -324,38 +324,31 @@ impl SupervisorHandle {
 ///
 /// Why: extracted so both the initial spawn and the respawn path call the same
 /// code.
-/// What: `Command::new(binary_path).arg("--stdio")` with piped stdin/stdout
-/// and inherited stderr. When `config.sidecar_batch_size` is `Some(n)`, sets
-/// `TRUSTY_EMBED_BATCH_SIZE=n` (issue #747 Fix C).
+/// What: delegates command construction and the bounded ETXTBSY retry (#3570)
+/// to `spawn_retry::spawn_embedderd`, then runs the startup probe.
 /// Test: called by `spawn_stdio` and the supervision loop.
 async fn spawn_child(
     binary_path: &Path,
     config: &SupervisorConfig,
 ) -> Result<(Child, StdioEmbedderClient)> {
-    use std::process::Stdio;
-
-    let mut cmd = Command::new(binary_path);
-    cmd.arg("--stdio")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-
     // Forward resolved ONNX batch size (issue #747 Fix C).
     if let Some(bs) = config.sidecar_batch_size {
-        cmd.env("TRUSTY_EMBED_BATCH_SIZE", bs.to_string());
         tracing::debug!(
             bs,
             "EmbedderSupervisor: forwarding TRUSTY_EMBED_BATCH_SIZE={bs}"
         );
     }
 
-    let mut child = cmd.spawn().with_context(|| {
-        format!(
-            "spawn trusty-embedderd --stdio from {}",
-            binary_path.display()
-        )
-    })?;
+    // Command construction + the bounded ETXTBSY retry (#3570 / #1634) both
+    // live in `spawn_retry` to keep this file under the 500-SLOC prod cap.
+    let mut child = spawn_retry::spawn_embedderd(binary_path, config)
+        .await
+        .with_context(|| {
+            format!(
+                "spawn trusty-embedderd --stdio from {}",
+                binary_path.display()
+            )
+        })?;
 
     let stdin = child
         .stdin
