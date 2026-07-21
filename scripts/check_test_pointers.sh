@@ -56,13 +56,7 @@
 #   if none is found) — citing a whole test MODULE (e.g.
 #   `` `ctrl::tests::pm_task_tests` ``) is an established convention in this
 #   codebase, just as valid as citing a single `fn`. No match = a dangling
-#   pointer, reported as `file:line: cites <name> (crate <dir>)`. If the
-#   final segment DOES resolve but the citation is `::`-qualified with a
-#   named path segment before it (e.g. the `piped_native_tests` in
-#   `super::super::piped_native_tests::foo`), that segment must ALSO match a
-#   real `mod` declared somewhere in the crate (issue #3581 blind spot 3) —
-#   otherwise the citation is flagged as a bad-module-path dangling pointer
-#   even though its final name happens to exist somewhere unrelated.
+#   pointer, reported as `file:line: cites <name> (crate <dir>)`.
 #
 # PRECISION LIMITS (documented per issue #2458, "pragmatic grep is
 #   acceptable"; blind spots closed by issue #3581):
@@ -85,15 +79,6 @@
 #     NOT verify the function is under `#[test]` / `#[cfg(test)]`. A
 #     dangling pointer that happens to collide with a same-named production
 #     function will be missed (false negative).
-#   - the module-path check (blind spot 3) only verifies that the stated
-#     parent module NAME exists somewhere in the crate, not that the cited
-#     item is actually nested inside it — true containment checking would
-#     require a real Rust module-tree resolver (mod-to-file resolution,
-#     `#[path]` attributes, cfg-gated mods), out of reach for a
-#     pragmatic-grep gate. A citation whose final name AND whose (wrong,
-#     unrelated) parent module both happen to exist somewhere in the crate
-#     will be missed (false negative) — narrower than the original bug
-#     (which had zero path checking at all), but still a known gap.
 #   - "same crate" is filesystem-nearest-Cargo.toml, not `cargo metadata`
 #     dependency resolution — a citation naming a test in a *different*
 #     crate than the one containing the doc comment will be flagged even if
@@ -198,36 +183,15 @@ extract_test_blocks() {
 }
 
 # ---------------------------------------------------------------------------
-# candidate_names: given a Test: blob, print one "<KIND>\t<value>\t<parent>"
-# row per candidate (or "ERR\t<message>" for a parse error) found — may print
-# duplicates; caller de-dupes if it cares. KIND is one of:
+# candidate_names: given a Test: blob, print one "<KIND>\t<value>" row per
+# candidate/error found (may print duplicates; caller de-dupes if it cares).
+# KIND is one of:
 #   NAME  — an exact lowercase snake_case final-segment candidate.
 #   GLOB  — a final segment shaped like NAME but containing `*` wildcard(s);
 #           resolved by pattern match, not exact match, by the caller.
 #   ERR   — the annotation could not be interpreted (unterminated backtick or
 #           parenthetical). The caller must treat this as a hard failure, not
 #           a skip — this is the failure mode issue #3581 exists to close.
-# <parent> (NAME/GLOB rows only) is the nearest `::`-qualified path segment
-# before the final name that ISN'T `super`/`self`/`crate` and looks like a
-# plausible lowercase module identifier — e.g. for
-# `super::super::piped_native_tests::foo`, parent = "piped_native_tests".
-# Empty when the citation has no such segment (a bare name, or only
-# super/self/crate before it). issue #3581 blind spot 3 (reported
-# independently against PR #3562's `piped_native_tests` vs the real
-# `native_tests`): the pre-fix scan validated only the FINAL segment against
-# a crate-wide name set, so a citation with the right final name but a
-# WRONG stated module path was invisible — the wrong path was simply never
-# looked at. The caller additionally requires `mod <parent>` to exist
-# somewhere in the crate (see module_exists_in_crate) when parent is
-# non-empty. This is deliberately weaker than true nesting verification
-# (it does not confirm the final name is actually DEFINED inside that
-# module, only that a module by that name exists somewhere in the crate) —
-# implementing real containment checking would require a genuine Rust
-# module-tree resolver (mod-to-file resolution, `#[path]` attributes,
-# cfg-gated mods), which is out of reach for a pragmatic-grep gate. It still
-# catches the concrete bug that motivated it (a module name that doesn't
-# exist AT ALL anywhere in the crate) while staying a no-op for ubiquitous
-# parent names like `tests` that exist in nearly every file.
 #
 # Critically, this only walks the LEADING run of the citation list
 # immediately after "Test:": backtick-quoted spans, each optionally followed
@@ -255,23 +219,13 @@ extract_test_blocks() {
 # before (see "trailing prose after real name" in the self-test fixture).
 # ---------------------------------------------------------------------------
 CANDIDATES_AWK='
-function find_parent(parts, k,    i, p) {
-  for (i = k - 1; i >= 1; i--) {
-    p = parts[i]
-    if (p == "super" || p == "self" || p == "crate" || p == "") continue
-    if (p ~ /^[a-z][a-z0-9_]*$/) return p
-    return ""
-  }
-  return ""
-}
-function emit(nm,    parts, k, final, parent) {
+function emit(nm,    parts, k, final) {
   k = split(nm, parts, "::")
   final = parts[k]
   if (final == "") return
-  parent = find_parent(parts, k)
-  if (final ~ /^[a-z][a-z0-9_]*$/ && final ~ /_/) { print "NAME\t" final "\t" parent; return }
+  if (final ~ /^[a-z][a-z0-9_]*$/ && final ~ /_/) { print "NAME\t" final; return }
   if (final ~ /^[a-z][a-z0-9_*]*$/ && index(final, "*") > 0 && final ~ /_/) {
-    print "GLOB\t" final "\t" parent
+    print "GLOB\t" final
     return
   }
   # Not a candidate shape at all (bare module/type ref, CamelCase, no
@@ -434,44 +388,6 @@ name_glob_exists_in_crate() {
 }
 
 # ---------------------------------------------------------------------------
-# mod_cache_file / ensure_mod_cache / module_exists_in_crate: a SEPARATE
-# cache of `mod <name>` declarations only (unlike ensure_crate_cache's
-# combined fn+mod set) — issue #3581 blind spot 3's parent-module check
-# must not be satisfied by a same-named `fn`, only a real `mod`.
-# ---------------------------------------------------------------------------
-mod_cache_file() {
-  local crate="$1" key
-  key="$(printf '%s' "$crate" | tr -c 'A-Za-z0-9' '_')"
-  printf '%s/%s.mods\n' "$CRATE_FN_CACHE_DIR" "$key"
-}
-
-ensure_mod_cache() {
-  local crate="$1" cache
-  cache="$(mod_cache_file "$crate")"
-  if [ ! -f "$cache" ]; then
-    git grep -ohE 'mod[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[;{]' -- "${crate}/*.rs" 2>/dev/null \
-      | sed -E -e 's/^mod[[:space:]]+//' -e 's/[[:space:]]*[;{]$//' \
-      | sort -u > "$cache" || : > "$cache"
-  fi
-  printf '%s\n' "$cache"
-}
-
-# ---------------------------------------------------------------------------
-# module_exists_in_crate: 0 (true) if `mod <name>` is declared anywhere
-# among tracked .rs files under crate root $1. Used for the parent-module
-# check ONLY (see candidate_names' find_parent doc comment) — deliberately
-# weaker than true containment (does not confirm the cited item is actually
-# nested inside this module), but catches a stated module path that does
-# not exist AT ALL anywhere in the crate, which is invisible to the
-# final-segment-only check that shipped originally.
-# ---------------------------------------------------------------------------
-module_exists_in_crate() {
-  local crate="$1" name="$2" cache
-  cache="$(ensure_mod_cache "$crate")"
-  grep -qxF "$name" "$cache"
-}
-
-# ---------------------------------------------------------------------------
 # EXCLUDE_PREFIXES: repo-relative path prefixes skipped entirely by the
 # scan. These are directories whose own Cargo.toml declares a standalone
 # (non-member) `[workspace]` table — i.e. they explicitly opt OUT of the
@@ -492,13 +408,11 @@ is_excluded_path() {
 
 # ---------------------------------------------------------------------------
 # scan: run the full lint over the git repo rooted at cwd. Writes violation
-# lines ("<path>\t<line>\t<name>\t<crate>\t<detail>", line kept only for the
-# FAIL message's file:line pointer; detail is empty for an ordinary dangling
-# name/glob, or "badpath:<parent>" when the final name resolves but the
-# cited module path doesn't — see blind spot 3 above) to the file named by
-# $1, stale-allowlist-entry lines ("<path>\t<name>") to $2, and hard
-# parse-error lines ("<path>\t<line>\t<message>") to $3. All three files are
-# truncated first. Returns nothing (caller inspects the files).
+# lines ("<path>\t<line>\t<name>\t<crate>", line kept only for the FAIL
+# message's file:line pointer) to the file named by $1, stale-allowlist-entry
+# lines ("<path>\t<name>") to $2, and hard parse-error lines
+# ("<path>\t<line>\t<message>") to $3. All three files are truncated first.
+# Returns nothing (caller inspects the files).
 #
 # Parse errors (unterminated backtick/parenthetical — see candidate_names)
 # are NEVER allowlist-suppressible: they represent syntax the parser could
@@ -544,7 +458,7 @@ scan() {
       [ -n "${line:-}" ] || continue
       local seen_file
       seen_file="$(mktemp "${TMPDIR:-/tmp}/tpseen.XXXXXX")"
-      candidate_names "$blob" | while IFS=$'\t' read -r kind name parent; do
+      candidate_names "$blob" | while IFS=$'\t' read -r kind name; do
         [ -n "$kind" ] || continue
         case "$kind" in
           ERR)
@@ -557,20 +471,13 @@ scan() {
         if grep -qxF "${kind}:${name}" "$seen_file" 2>/dev/null; then continue; fi
         printf '%s\n' "${kind}:${name}" >> "$seen_file"
         if [ "$kind" = "GLOB" ]; then
-          name_ok=1
-          name_glob_exists_in_crate "$crate" "$name" || name_ok=0
+          if ! name_glob_exists_in_crate "$crate" "$name"; then
+            printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
+          fi
         else
-          name_ok=1
-          name_exists_in_crate "$crate" "$name" || name_ok=0
-        fi
-        if [ "$name_ok" = "0" ]; then
-          printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" "" >> "$raw"
-        elif [ -n "$parent" ] && ! module_exists_in_crate "$crate" "$parent"; then
-          # issue #3581 blind spot 3: the final segment resolves, but the
-          # citation's stated module path does not exist anywhere in the
-          # crate — the pre-fix scan never looked at the path, only the
-          # final name, so this was invisible even though the path is wrong.
-          printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" "badpath:$parent" >> "$raw"
+          if ! name_exists_in_crate "$crate" "$name"; then
+            printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
+          fi
         fi
       done
       rm -f "$seen_file"
@@ -585,12 +492,12 @@ scan() {
 
     # Violations = raw dangling citations whose (path, name) key is NOT
     # allowlisted.
-    while IFS=$'\t' read -r p l n c detail; do
+    while IFS=$'\t' read -r p l n c; do
       [ -n "${p:-}" ] || continue
       if grep -F -q -x -- "$(printf '%s\t%s' "$p" "$n")" "$allow_keys"; then
         : # allowlisted — suppress
       else
-        printf '%s\t%s\t%s\t%s\t%s\n' "$p" "$l" "$n" "$c" "$detail" >> "$viol_out"
+        printf '%s\t%s\t%s\t%s\n' "$p" "$l" "$n" "$c" >> "$viol_out"
       fi
     done < "$raw"
 
@@ -747,22 +654,6 @@ pub fn malformed_unterminated_backtick() {}
 /// one real citation, zero parse errors.
 pub fn nested_parens_inside_parenthetical_is_not_a_parse_error() {}
 
-/// Test: `wrong_module_path_tests::real_test_exists` claims real_test_exists
-/// lives under a module that was never declared anywhere in this crate.
-///
-/// Issue #3581 blind spot 3 (found independently against PR #3562's
-/// `piped_native_tests` vs the real `native_tests`): the final segment
-/// (`real_test_exists`) DOES resolve — it's a real test — but the stated
-/// module path (`wrong_module_path_tests`) does not exist anywhere in the
-/// crate. Pre-blind-spot-3 fix, only the final segment was ever checked, so
-/// this citation passed clean despite naming a module that doesn't exist.
-pub fn bad_module_path_citation() {}
-
-/// Test: `tests::real_test_exists` — properly `::`-qualified with a module
-/// path that DOES exist, to prove the blind-spot-3 fix doesn't false-positive
-/// on correctly-qualified citations.
-pub fn correctly_qualified_path_citation() {}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -791,20 +682,16 @@ EOF
   err="$(mktemp "${TMPDIR:-/tmp}/tpself.err.XXXXXX")"
   ( cd "$tmp" && scan "$viol" "$stale" "$err" )
 
-  # Expect exactly seven violations: dangling_test_missing (fn citation),
+  # Expect exactly six violations: dangling_test_missing (fn citation),
   # nonexistent_module_tests (mod citation), glob_dangling_nothing_matches_*
   # (dangling glob, issue #3581 blind spot 1, isolated from any parenthetical),
   # dangling_after_paren_test (blind spot 2 isolated from any glob — a plain
-  # exact citation after a parenthetical aside), the two dangling citations
-  # from the combined glob+parenthetical annotation that mirrors the real
-  # PR #3562 shape (disclaimed_combo_spawn_* and
-  # disclaimed_combo_native_missing_test), and the blind-spot-3 bad-module-path
-  # citation (real_test_exists resolves, but under a module path —
-  # wrong_module_path_tests — that doesn't exist). Nothing else — not a
-  # bare real_test_exists (only the badpath-qualified one), not
-  # glob_matches_real_test_* (glob resolves to glob_matches_real_test_case_a),
-  # not correctly_qualified_path_citation's `tests::real_test_exists` (the
-  # parent module `tests` DOES exist), not the glob/module-ref/prose-only
+  # exact citation after a parenthetical aside), and the two dangling
+  # citations from the combined glob+parenthetical annotation that mirrors
+  # the real PR #3562 shape (disclaimed_combo_spawn_* and
+  # disclaimed_combo_native_missing_test). Nothing else — not
+  # real_test_exists, not glob_matches_real_test_* (glob resolves to
+  # glob_matches_real_test_case_a), not the glob/module-ref/prose-only
   # annotation, not the trailing-prose patterns (field mentions,
   # self-referential tool names, or symbols named after the real leading
   # test name) that a naive whole-blob backtick scan would misfire on, and
@@ -812,8 +699,8 @@ EOF
   # citation must resolve, not just `fn` citations (this is exactly the case
   # that shipped broken: module citations only ever passed via the
   # allowlist, never verified for real).
-  if [ "$(wc -l < "$viol" | tr -d ' ')" != "7" ]; then
-    echo "self-test FAIL: expected exactly 7 violations, got:" >&2
+  if [ "$(wc -l < "$viol" | tr -d ' ')" != "6" ]; then
+    echo "self-test FAIL: expected exactly 6 violations, got:" >&2
     cat "$viol" >&2
     ok=0
   elif ! grep -q "dangling_test_missing" "$viol"; then
@@ -840,16 +727,8 @@ EOF
     echo "self-test FAIL: expected a dangling NAME violation citing disclaimed_combo_native_missing_test — the second citation after a parenthetical aside (blind spot 2: pre-fix the '(' broke the scan before this citation was ever reached), got:" >&2
     cat "$viol" >&2
     ok=0
-  elif ! grep -qF "badpath:wrong_module_path_tests" "$viol"; then
-    echo "self-test FAIL: expected a badpath violation for bad_module_path_citation — real_test_exists resolves but wrong_module_path_tests is not a real module anywhere in the crate (issue #3581 blind spot 3), got:" >&2
-    cat "$viol" >&2
-    ok=0
-  elif grep -qE 'field_name|Widget|hint_|self_referential|unrelated_field|other_symbol|module_style_tests|glob_matches_real_test_\*' "$viol"; then
+  elif grep -qE 'real_test_exists|field_name|Widget|hint_|self_referential|unrelated_field|other_symbol|module_style_tests|glob_matches_real_test_\*' "$viol"; then
     echo "self-test FAIL: a trailing-prose symbol, the valid module_style_tests citation, or the resolvable glob_matches_real_test_* was incorrectly flagged as dangling:" >&2
-    cat "$viol" >&2
-    ok=0
-  elif grep "real_test_exists" "$viol" | grep -qv "badpath:"; then
-    echo "self-test FAIL: real_test_exists was flagged as dangling outside the blind-spot-3 badpath case — either a real citation regressed, or correctly_qualified_path_citation's tests::real_test_exists (valid parent module) was wrongly flagged:" >&2
     cat "$viol" >&2
     ok=0
   elif [ "$(wc -l < "$err" | tr -d ' ')" != "1" ] || ! grep -q "unterminated backtick" "$err"; then
@@ -1027,17 +906,9 @@ fi
 # ----- check mode -----
 violations=0
 if [ -s "$VIOL" ]; then
-  while IFS=$'\t' read -r p l n c detail; do
+  while IFS=$'\t' read -r p l n c; do
     [ -n "$p" ] || continue
-    case "$detail" in
-      badpath:*)
-        parent="${detail#badpath:}"
-        echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` under module path \`${parent}\` — \`${n}\` exists somewhere in crate \`${c}\`, but no \`mod ${parent}\` does (issue #3581: the stated module path was never verified)." >&2
-        ;;
-      *)
-        echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` — no \`fn ${n}(\` or \`mod ${n}\` found in crate \`${c}\`." >&2
-        ;;
-    esac
+    echo "FAIL: ${p}:${l}: Test: pointer cites \`${n}\` — no \`fn ${n}(\` or \`mod ${n}\` found in crate \`${c}\`." >&2
     violations=$((violations + 1))
   done < "$VIOL"
 fi
