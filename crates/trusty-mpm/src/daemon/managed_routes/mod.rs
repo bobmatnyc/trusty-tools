@@ -76,8 +76,8 @@ pub use resume_error::ResumeManagedError;
 pub use session_summary::SessionSummary;
 pub use summary::record_to_json;
 use summary::{
-    attach_cmd_for, numbered_summaries, parse_id, reconcile_against_tmux, record_to_summary,
-    record_to_summary_checked,
+    attach_cmd_for, checked_summaries, numbered_summaries, parse_id, reconcile_against_tmux,
+    record_to_summary, record_to_summary_checked,
 };
 
 // ── Request / Response shapes ─────────────────────────────────────────────────

@@ -911,6 +911,8 @@ fn ls_test_session(
         unresumable: false,
         stale_assets: false,
         attached: false,
+        slot: 0,
+        deleted: false,
     }
 }
 

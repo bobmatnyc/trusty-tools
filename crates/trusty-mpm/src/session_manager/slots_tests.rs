@@ -10,7 +10,13 @@
 //! `SessionManager` (create → list → numbered_snapshot → delete →
 //! numbered_snapshot again) so the "deleted" concept — derived purely from
 //! store membership, not a dedicated deletion hook — is proven against the
-//! real `delete_record` path.
+//! real `delete_record` path. `delete_record` (#2012/#3302) is itself a SOFT
+//! delete (the record stays in the store, marked `Deleted`) — a genuine slot
+//! TOMBSTONE only appears once the record has left the store entirely, so
+//! `numbered_snapshot_tombstones_deleted_slot` additionally calls
+//! `compact_record` after deleting, mirroring the real two-step CLI path
+//! (`tm sessions delete` then `tm sessions prune --state deleted`, which
+//! calls the same primitive internally).
 //! What: three tests: slot stability across a delete, tombstone
 //! representation of the deleted slot, and no-reuse of a deleted number for a
 //! session created afterward.
@@ -110,13 +116,25 @@ async fn numbered_snapshot_tombstones_deleted_slot() {
     assert_eq!(before.len(), 1);
     assert!(before[0].record.is_some());
 
+    // #3044 reconciliation: `delete_record` (#2012/#3302) is a SOFT delete —
+    // it marks the record `Deleted` but deliberately leaves it in the store
+    // (so `tm sessions delete` never makes a row silently vanish). A #3034
+    // slot TOMBSTONE (`record: None`) instead represents a record that has
+    // left the store ENTIRELY — the permanent-removal primitive
+    // `compact_record` (what `prune_managed`'s own `Deleted`/`Decommissioned`
+    // compaction path calls internally). Use it directly to reach that state,
+    // mirroring the real CLI two-step (`delete` then `prune`) rather than
+    // asserting a tombstone straight off a soft-delete alone.
     mgr.delete_record(&a.id, true).await.expect("delete");
+    mgr.compact_record(&a.id)
+        .await
+        .expect("compact the soft-deleted record out of the store");
     let after = mgr.numbered_snapshot(&mgr.list().await).await;
     assert_eq!(after.len(), 1, "the tombstoned slot must still be reported");
     assert_eq!(after[0].slot, before[0].slot);
     assert!(
         after[0].record.is_none(),
-        "a deleted session's slot must report no record"
+        "a session pruned out of the store must report no record at its slot"
     );
 }
 

@@ -297,12 +297,21 @@ async fn execute_health_excludes_deleted_tombstones_from_managed_total() {
         )
         .await
         .expect("create session to delete");
-    // Observe both into the slot registry, then delete `gone` so the next list
-    // renders it as a `deleted: true` tombstone at its reserved slot.
+    // Observe both into the slot registry, then delete AND compact `gone` so
+    // the next list renders it as a `deleted: true` tombstone at its
+    // reserved slot. `delete_record` alone (#2012/#3302) is a SOFT delete —
+    // the record stays in the store, marked `Deleted` — so a genuine #3034
+    // slot tombstone (`record: None`) additionally requires the permanent-
+    // removal primitive `compact_record`, mirroring the real two-step CLI
+    // path (`tm sessions delete` then `tm sessions prune --state deleted`,
+    // which calls the same primitive internally).
     mgr.numbered_snapshot(&mgr.list().await).await;
     mgr.delete_record(&gone.id, true)
         .await
         .expect("delete gone session");
+    mgr.compact_record(&gone.id)
+        .await
+        .expect("compact the soft-deleted session out of the store");
 
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Health).await {

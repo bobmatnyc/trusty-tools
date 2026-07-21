@@ -1731,44 +1731,67 @@ fn picker_filter_live_state_excludes_decommissioned() {
     // Why (#1809): `is_live_session_state` is the canonical predicate for
     // "should this session appear in the picker / sessions list by default?".
     // Test: concrete state → expected bool, not derived from the same expression.
+    // None of these are #3034 slot tombstones, so `is_slot_tombstone` is `false`
+    // throughout — it is only consulted when `state == "deleted"`.
     assert!(
-        !is_live_session_state("decommissioned"),
+        !is_live_session_state("decommissioned", false),
         "decommissioned must be excluded from default view"
     );
     // Active sessions must always be visible.
     assert!(
-        is_live_session_state("active"),
+        is_live_session_state("active", false),
         "active must be included in default view"
     );
     // Stopped/errored sessions can still be resumed — they must show.
     assert!(
-        is_live_session_state("stopped"),
+        is_live_session_state("stopped", false),
         "stopped must be included in default view"
     );
     assert!(
-        is_live_session_state("errored"),
+        is_live_session_state("errored", false),
         "errored must be included in default view"
     );
     // Provisioning sessions are in-flight — they must show.
     assert!(
-        is_live_session_state("provisioning"),
+        is_live_session_state("provisioning", false),
         "provisioning must be included in default view"
     );
 }
 
 #[test]
-fn is_live_session_state_excludes_deleted() {
-    // code-critic CRITICAL: a `--deleted--` tombstone is TERMINAL — it must be
-    // excluded from the default picker/list exactly like `decommissioned`, so it
-    // is never offered as a resume target (which would resurrect it).
+fn is_live_session_state_excludes_soft_deleted_record() {
+    // Reconciles the #3302 hardening commit (51243ea5, code-critic CRITICAL)
+    // with #3034/#3044: a `"deleted"` row backed by a REAL, still-in-store
+    // record (soft-deleted via `tm sessions delete`, #2012 — NOT a #3034
+    // numbered-slot tombstone, so `is_slot_tombstone` is `false`) must stay
+    // excluded from the default picker/list exactly like `decommissioned`, so
+    // it is never offered as a resume target (which would resurrect it).
     assert!(
-        !is_live_session_state("deleted"),
-        "deleted must be excluded from the default picker/list view"
+        !is_live_session_state("deleted", false),
+        "a soft-deleted, still-in-store record must be excluded from the \
+         default picker/list view"
     );
-    // Both terminal tombstones are excluded; every live state is kept.
-    assert!(!is_live_session_state("decommissioned"));
-    assert!(is_live_session_state("active"));
-    assert!(is_live_session_state("stopped"));
+    assert!(!is_live_session_state("decommissioned", false));
+    assert!(is_live_session_state("active", false));
+    assert!(is_live_session_state("stopped", false));
+}
+
+#[test]
+fn is_live_session_state_keeps_slot_tombstone_visible() {
+    // Why (#3034/#3044): a stable-numbering SLOT tombstone — the daemon's
+    // `tombstone_summary` placeholder for a slot whose record left the store
+    // entirely — is ALSO rendered with wire `state == "deleted"`, but it must
+    // stay VISIBLE at its slot in the default view, or the entire point of
+    // stable numbering (an operator seeing exactly why a captured number no
+    // longer resolves) is defeated. `is_slot_tombstone == true` is what
+    // distinguishes it from the soft-deleted-record case above.
+    assert!(
+        is_live_session_state("deleted", true),
+        "a #3034 slot tombstone must remain visible in the default view"
+    );
+    // Resurrection-safety for this visible row is NOT this predicate's job —
+    // see `guided_resume_tests`/`session_picker.rs`'s `decide_for_index` for
+    // the separate guards that keep it non-resumable regardless.
 }
 
 #[test]
@@ -1851,6 +1874,41 @@ fn picker_filter_all_decommissioned_returns_empty() {
     assert!(
         filtered.is_empty(),
         "all-decommissioned input must produce empty list"
+    );
+}
+
+#[test]
+fn picker_filter_keeps_slot_tombstone_hides_soft_deleted_record() {
+    // Why (#3034/#3044 reconciliation): both rows below serialize wire
+    // `state == "deleted"`, but only the slot-tombstone row sets the
+    // dedicated `deleted: bool` field — `filter_live_sessions` must tell them
+    // apart via that field rather than the state string alone.
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "a1", "name": "sess-active", "state": "active" },
+            // #3034 numbered-slot tombstone — must stay visible.
+            { "id": "", "name": "", "state": "deleted", "slot": 2, "deleted": true },
+            // #3302 soft-deleted, still-in-store record — must stay hidden.
+            { "id": "b2", "name": "sess-soft-deleted", "state": "deleted" },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+
+    assert_eq!(
+        filtered.len(),
+        2,
+        "exactly the active session and the slot tombstone must survive"
+    );
+    assert!(
+        filtered.iter().any(|s| s.deleted),
+        "the slot tombstone (deleted: true) must survive the filter"
+    );
+    assert!(
+        !filtered
+            .iter()
+            .any(|s| s.state == "deleted" && !s.deleted),
+        "the soft-deleted, still-in-store record (deleted: false) must be excluded"
     );
 }
 

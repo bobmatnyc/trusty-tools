@@ -132,7 +132,16 @@ async fn list_assigns_stable_slot_numbers_and_tombstones_deleted_one() {
 
     // Delete session A; session B must keep its EXACT slot, and A's old slot
     // must reappear as a tombstone rather than being handed to B or vanishing.
+    // `delete_record` alone (#2012/#3302) is a SOFT delete — the record stays
+    // in the store, marked `Deleted` — so producing a genuine #3034 slot
+    // tombstone (`record: None`) additionally requires the permanent-removal
+    // primitive `compact_record`, mirroring the real two-step CLI path
+    // (`tm sessions delete` then `tm sessions prune --state deleted`, which
+    // calls the same primitive internally).
     mgr.delete_record(&id_a, true).await.expect("delete A");
+    mgr.compact_record(&id_a)
+        .await
+        .expect("compact the soft-deleted record out of the store");
 
     let (status, body) = decode_response(
         list_managed_sessions(

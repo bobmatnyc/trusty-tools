@@ -239,6 +239,7 @@ pub(super) fn tombstone_summary(slot: u32) -> SessionSummary {
         id: String::new(),
         name: String::new(),
         state: "deleted".to_string(),
+        persisted_state: String::new(),
         workspace_path: None,
         repo_url: None,
         branch: None,
