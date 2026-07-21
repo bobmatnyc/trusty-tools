@@ -117,8 +117,9 @@ pub struct PluginRoot {
 /// `commands`/`hooks`/`mcpServers`) is captured in `other` purely so
 /// [`load_plugin_root`] can detect and log the later-phase ones, never to
 /// drive behavior.
-/// Test: `tests::manifest_parses_name_and_overrides`,
-/// `tests::manifest_flattens_unknown_keys`.
+/// Test: `tests::discover_plugin_roots_honors_manifest_name_override`,
+/// `tests::discover_plugin_roots_honors_path_overrides`,
+/// `tests::discover_plugin_roots_warns_on_later_phase_keys`.
 #[derive(Debug, Default, Deserialize)]
 struct PluginManifest {
     #[serde(default)]
