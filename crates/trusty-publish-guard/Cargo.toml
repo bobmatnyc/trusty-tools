@@ -1,0 +1,45 @@
+[package]
+name = "trusty-publish-guard"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Detects unpublished source drift under an already-published crate version across the trusty-tools workspace (issue #3366)."
+keywords = ["release", "publish", "ci", "guard"]
+categories = ["development-tools"]
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+# Internal CI/release tool, never itself published to crates.io — publishing
+# it would just create a second instance of the exact defect it exists to
+# catch (a tool crate nobody depends on, going stale under its own version).
+publish = false
+
+# Library half: the pure, unit-testable drift-detection engine. All network
+# access is isolated behind the `PublishedFetcher` trait (src/fetch.rs) so
+# this half never needs a live crates.io connection in tests (issue #3366
+# "isolated behind a seam you CAN test").
+[lib]
+name = "trusty_publish_guard"
+path = "src/lib.rs"
+
+# Binary half: the thin CLI wrapper that walks crates/*/Cargo.toml and reports
+# per-crate parity status.
+[[bin]]
+name = "publish-guard"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+toml = { workspace = true }
+walkdir = { workspace = true }
+# Only the blocking client is needed — this is a synchronous CLI tool, not an
+# async service; pulling in a tokio runtime for a handful of sequential HTTP
+# calls would be unjustified weight.
+reqwest = { workspace = true, features = ["blocking"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

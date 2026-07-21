@@ -69,6 +69,18 @@ downgrades both guard failures to a loud warning and exits 0. Only use this
 when you have a specific, understood reason to publish from an unmerged
 commit — the default path is always "merge to main first, then publish."
 
+**Also now enforced independently of any human running a script (issue
+#3366)**: `.github/workflows/release.yml`'s `preflight` job verifies the SAME
+rule mechanically for the tag-triggered binary-release pipeline — a real
+ancestry check (`git merge-base --is-ancestor` against a full-history clone
+of the tagged commit vs. `origin/main`), not a naive ref-string comparison
+(which would never match on a tag push and would silently disable every
+release). A tag pushed from an unmerged branch now fails that job loudly and
+the entire pipeline (build/release/homebrew-bump AND the publish-dry-run job
+below) is skipped — this is a second, independent enforcement point, not a
+replacement for running `check-publish-ready.sh` yourself before `cargo
+publish`.
+
 ## Step 5: Identity + Clean-Tree + Version-Not-Live Guard (MANDATORY, closes the 2026-07-08 collision)
 
 🔴 **Run `scripts/preflight-publish.sh` immediately before every `cargo publish`
@@ -103,6 +115,35 @@ assuming you're mid-publish — use it to preview status. `--help` documents
 the rare, logged `PREFLIGHT_ALLOW_DETACHED=1` override for check 1 (validated
 release worktrees only — misuse of it is exactly how the incident happened).
 No override exists for the identity check.
+
+## Step 6: Version-Parity Guard (MANDATORY, issue #3366)
+
+Before bumping a crate's version to publish, confirm the crate ISN'T already
+drifted — i.e. that its CURRENT (pre-bump) Cargo.toml version, if already
+live on crates.io, still matches the local `src/` tree. This is the
+`trusty-common`/`trusty-agents-common` incident: several commits of source
+changes landed on `main` without a version bump while the old version number
+was already published, so `cargo publish --dry-run` for a downstream crate
+failed with "symbol not found" for symbols that only existed in the drifted,
+unpublished source.
+
+```bash
+make version-parity-check
+# or directly:
+scripts/check-version-parity.sh
+```
+
+This also runs automatically on every push to `main`
+(`.github/workflows/version-parity.yml`) so drift is caught right after it
+merges rather than discovered as a release blocker. See
+`crates/trusty-publish-guard` for the underlying check (fails closed: a
+crate whose live/local comparison can't be verified is treated as a failure,
+never a silent pass).
+
+For the RELATED but distinct cross-crate ordering hazard (publishing a crate
+before a sibling it depends on is live — the 2026-07-20 incident), see
+`scripts/publish-dry-run-order.sh` in "Cross-Crate Publish Ordering" below —
+it now computes the dependency order mechanically instead of by hand.
 
 ## Worktree Discipline (MANDATORY)
 
@@ -222,6 +263,39 @@ registry — the same view downstream consumers will see.
 "dependency not found" because crates.io doesn't yet have A at the new version.
 
 ## Cross-Crate Publish Ordering (RED — Common Pitfall)
+
+**Automated and CI-enforced (issue #3366)**: `scripts/publish-dry-run-order.sh`
+computes the dependency order mechanically from `cargo metadata` and runs
+`cargo publish --dry-run -p <crate>` for every publishable crate in that
+order (dependencies before dependents), stopping at the first failure — this
+replaces re-deriving the manual recipe below by hand.
+
+This now ALSO runs automatically, with no human action required: every
+`*-v*` tag push runs `.github/workflows/release.yml`'s `publish-dry-run` job,
+which invokes this script scoped to just the tagged crate + its publishable
+dependency closure. A human forgetting to run the manual command below no
+longer means an unsafe publish goes unnoticed — the tag push itself proves
+(or disproves) publish-safety, independent of whether anyone remembered the
+manual step. See that job's header comment for why it is scoped
+per-tag/per-crate rather than full-workspace-per-PR (cost, registry rate
+limits), and why it is deliberately independent of (not blocking) the binary
+build/release jobs.
+
+For a partial-release dry run before you've even tagged anything, or to dry
+run a set of crates together, use the script directly. Pass specific crate
+names to restrict it (it still includes any publishable crate they depend
+on, in order):
+
+```bash
+scripts/publish-dry-run-order.sh --list-only          # print the order, run nothing
+scripts/publish-dry-run-order.sh                      # dry-run every publishable crate, in order
+scripts/publish-dry-run-order.sh trusty-search trusty-common
+```
+
+The manual recipe below remains useful for reasoning about WHY a given order
+is correct, and the crate list in "Dependency Publish Order" further down is
+historical/illustrative rather than mechanically maintained — trust the
+script's computed order, not that hand-written list.
 
 ### The Recipe
 
@@ -455,16 +529,34 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p <crate>
 cargo check --workspace
 
-# 5. If UI changes (trusty-search, trusty-memory), check for stale artifacts
+# 5. If UI changes (trusty-search, trusty-memory, trusty-analyze, trusty-console),
+#    check for stale artifacts AND stale bundle content (issue #3568)
 git status  # Look for node_modules/ or pnpm-workspace.yaml
 git clean -fdX  # If present
+#    Freshness (not just presence) matters: verify the COMMITTED ui-dist/ /
+#    ui/dist/ bundle actually reflects current ui/src — cargo publish cannot
+#    catch this for you (see step 7 note). Rebuild and diff:
+#      cd crates/<crate>/ui && pnpm install --frozen-lockfile && pnpm run build
+#      # trusty-search only: also copy ui/dist/* into ../ui-dist/ (or `make release-prep`)
+#    If the rebuild differs from what's committed, commit the regenerated
+#    bundle before continuing. `.github/workflows/release.yml`'s
+#    ui-freshness-check job does this same check automatically once you tag
+#    (step 9) — but catching it here, before tagging, is cheaper.
 
 # 6. Commit version bump
 git add -A
 git commit -m "chore: bump <crate> to v<version>"
 
 # 7. Dry run (essential — catches dependency issues early)
-cargo publish --dry-run -p <crate>
+# UI-embedding crates (trusty-search, trusty-memory, trusty-analyze,
+# trusty-console) REQUIRE SKIP_UI_BUILD=1 here — and this is not optional for
+# trusty-search/trusty-console specifically: their Cargo.toml `include` list
+# ships only the pre-built bundle, never `ui/src` (verified via `cargo
+# package --list`), so cargo has nothing to rebuild from during packaging
+# either way. This dry-run therefore verifies the RUST package publishes
+# cleanly — it provides NO signal on UI bundle freshness (that's step 5 /
+# ui-freshness-check, a structurally separate concern).
+SKIP_UI_BUILD=1 cargo publish --dry-run -p <crate>
 
 # 8. If dry-run fails:
 #    - Read the error (usually "dependency X version Y not found on crates.io")
@@ -478,8 +570,9 @@ git tag <crate>-v<version>
 # 10. Push tag to origin
 git push -u origin <crate>-v<version>
 
-# 11. Publish to crates.io
-cargo publish -p <crate>
+# 11. Publish to crates.io (same SKIP_UI_BUILD=1 requirement as step 7, for
+#     the same reason)
+SKIP_UI_BUILD=1 cargo publish -p <crate>
 
 # 12. Verification step
 sleep 100

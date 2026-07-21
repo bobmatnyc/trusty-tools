@@ -620,6 +620,138 @@ jobs:
               f.write(f"matrix={result}\n")
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 1b: preflight (issue #3366)
+  #
+  # WHY: this workflow triggers on ANY push of a `*-v*` tag, from ANY branch —
+  #   there was no check that the tagged commit actually came from merged
+  #   main. This project's hard rule (see scripts/check-publish-ready.sh,
+  #   .claude/skills/cargo-publish/SKILL.md) is "publish only from merged main
+  #   or a release tag on main"; until now that rule was enforced only for a
+  #   human running check-publish-ready.sh by hand before `cargo publish` —
+  #   nothing stopped a tag pushed from an unmerged branch from firing this
+  #   entire binary-release pipeline (issue #2209 was exactly this class of
+  #   mistake, just for `cargo publish` directly rather than a tag push).
+  #
+  #   A naive `if: github.ref == 'refs/heads/main'` guard would NEVER match on
+  #   a tag push (`github.ref` is `refs/tags/<tag>` here, not a branch ref) and
+  #   would silently disable every release — so this instead verifies REAL
+  #   ancestry: the tagged commit must be reachable from `origin/main` via
+  #   `git merge-base --is-ancestor`. That check is only trustworthy against a
+  #   FULL clone (`fetch-depth: 0`) — a shallow checkout can make ancestry
+  #   checks lie (report "not an ancestor" for a commit that truly is, simply
+  #   because the shallow history horizon doesn't reach far enough back to
+  #   find the merge-base), so this job always fetches full history.
+  #
+  # WHAT: single job, runs first (before build/release/homebrew-bump), and
+  #   everything else now depends on it:
+  #     1. Full-history checkout.
+  #     2. On a real tag push: fetch the true `origin/main` tip and assert the
+  #        tagged commit (dereferenced via `HEAD^{commit}`, which resolves an
+  #        annotated tag object to its underlying commit — never trust
+  #        `github.sha` blindly here) is an ancestor of it. Fails loudly and
+  #        stops the entire pipeline (build/release/homebrew-bump AND the new
+  #        publish-dry-run job below all `need` this job) if not.
+  #     3. On workflow_dispatch (no tag exists): this is a deliberate manual
+  #        invocation already gated by repo write access, so the ancestry
+  #        check is a no-op (documented, not silently skipped — it prints why).
+  #     4. Resolves this tag's crate's crates.io package identity directly
+  #        from `crates/<crate>/Cargo.toml` (`name`, `publish`) — independent
+  #        of the binary-release allowlist in the `config` step above, because
+  #        library-only crates (e.g. trusty-common) are `bundled=true` there
+  #        but are very much real crates.io packages and exactly the ones
+  #        #3366 was about.
+  # ─────────────────────────────────────────────────────────────────────────────
+  preflight:
+    name: Verify tag ancestry + resolve publish identity (issue #3366)
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      pkg_name:     ${{ steps.pkg.outputs.pkg_name }}
+      publishable:  ${{ steps.pkg.outputs.publishable }}
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit is reachable from origin/main
+        shell: bash
+        # TAG is passed via `env:` rather than interpolated directly into the
+        # script (as `.claude/skills/cargo-publish/SKILL.md`-documented issue
+        # #3568 review flagged: raw `${{ github.ref_name }}` interpolation is
+        # a shell-injection hazard — a ref name can contain `$`, backticks,
+        # quotes, parens) and always referenced quoted (`"$TAG"`). Matches the
+        # `homebrew-bump` job's existing `env: TAG: ${{ github.ref_name }}`
+        # pattern below — one convention for this file, not two.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            echo "workflow_dispatch invocation (no tag) — the merged-main ancestry"
+            echo "check only applies to real tag pushes; this is a deliberate manual"
+            echo "invocation already gated by repo write access. Skipping (not a gap:"
+            echo "there is no tag/commit here to verify ancestry for)."
+            exit 0
+          fi
+
+          git fetch origin main --quiet
+          # `HEAD^{commit}` dereferences an annotated tag object to the commit
+          # it points at; using this instead of `${{ github.sha }}` directly
+          # avoids ever comparing/trusting a tag-object SHA as if it were a
+          # commit SHA.
+          TAGGED_SHA="$(git rev-parse 'HEAD^{commit}')"
+          MAIN_SHA="$(git rev-parse origin/main)"
+          echo "Tag:            ${TAG}"
+          echo "Tagged commit:  ${TAGGED_SHA}"
+          echo "origin/main:    ${MAIN_SHA}"
+
+          if git merge-base --is-ancestor "${TAGGED_SHA}" "${MAIN_SHA}"; then
+            echo "OK — tagged commit is reachable from origin/main."
+          else
+            echo "::error::Tag '${TAG}' points at commit ${TAGGED_SHA}, which is NOT reachable from origin/main (${MAIN_SHA}). This project publishes only from merged main / a release tag on main (see scripts/check-publish-ready.sh and .claude/skills/cargo-publish/SKILL.md). Refusing to run the release pipeline for this tag — merge to main first, then re-tag from a checkout of merged main."
+            exit 1
+          fi
+
+      - name: Resolve crates.io package identity
+        id: pkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          CRATE="${{ needs.setup.outputs.crate }}"
+          MANIFEST="crates/${CRATE}/Cargo.toml"
+          if [[ ! -f "${MANIFEST}" ]]; then
+            echo "::error::No Cargo.toml found at ${MANIFEST} for crate '${CRATE}'."
+            exit 1
+          fi
+
+          PKG_NAME="$(grep -m1 -E '^name[[:space:]]*=[[:space:]]*"' "${MANIFEST}" \
+            | sed -E 's/^name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')"
+          if [[ -z "${PKG_NAME}" ]]; then
+            echo "::error::Could not read 'name' from ${MANIFEST}"
+            exit 1
+          fi
+
+          # `publish = false` is the only thing that makes a crate NOT a real
+          # crates.io package; anything else (absent, or a registry allowlist
+          # array) is publishable. Deliberately independent of the `bundled`
+          # binary-release-allowlist flag above — a library-only crate like
+          # trusty-common is bundled=true (no standalone binary) but IS a real,
+          # publishable crates.io package, and is exactly what #3366 was about.
+          if grep -qE '^publish[[:space:]]*=[[:space:]]*false' "${MANIFEST}"; then
+            PUBLISHABLE="false"
+          else
+            PUBLISHABLE="true"
+          fi
+
+          {
+            echo "pkg_name=${PKG_NAME}"
+            echo "publishable=${PUBLISHABLE}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Resolved: crate=${CRATE} pkg_name=${PKG_NAME} publishable=${PUBLISHABLE}"
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # JOB 2: build
   #
   # Fan-out matrix job.  Each entry builds one crate × platform × variant.
@@ -633,7 +765,10 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   build:
     name: Build ${{ matrix.crate }} ${{ matrix.asset_suffix }}
-    needs: setup
+    # `preflight` added (issue #3366): its ancestry check must pass (default
+    # `success()` on `needs`) before any binary is built, cascading the guard
+    # through release/homebrew-bump via their own existing `needs: build`.
+    needs: [setup, preflight]
     # Skip entirely for bundled crates — they have no standalone binary target.
     if: needs.setup.outputs.bundled != 'true'
     runs-on: ${{ matrix.runner }}
@@ -987,6 +1122,225 @@ jobs:
             ${{ steps.package.outputs.asset_checksum }}
           retention-days: 7
           if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2b: publish-dry-run (issue #3366)
+  #
+  # WHY: this workflow's whole `setup`/`build`/`release` chain governs the
+  #   GitHub binary release (tarballs + Homebrew formula) — it never actually
+  #   ran `cargo publish` or `--dry-run` anywhere. The separate crates.io
+  #   `cargo publish` step is a MANUAL action a human runs around the same
+  #   time as pushing this tag (.claude/skills/cargo-publish/SKILL.md); "always
+  #   dry-run first, in dependency order" existed only as tribal knowledge in
+  #   that skill file, not as anything actually enforced. This job converts it
+  #   into an automatic, un-skippable, always-fires check: the moment the tag
+  #   for a real crates.io package is pushed, this job independently proves
+  #   (or disproves) that `cargo publish --dry-run` succeeds for that crate
+  #   AND every publishable sibling it transitively depends on, resolved
+  #   against the LIVE crates.io registry (the same mechanism that would have
+  #   caught the 2026-07-20 half-published incident) — in dependency order, so
+  #   a crate is never dry-run-checked before the sibling versions it needs.
+  #
+  # SCOPE / COST (why this is workable where a full-workspace-per-PR gate
+  #   would not be): this does NOT run on every PR, and does NOT dry-run the
+  #   whole workspace — only the ONE crate this tag names, plus whatever
+  #   publishable crates it transitively depends on (scripts/publish-dry-run-order.sh
+  #   computes and filters to that closure). It runs exactly once, exactly
+  #   when a tag is pushed — i.e. exactly when a release is actually
+  #   happening, so its cost is bounded by what a real release naturally
+  #   requires anyway, unlike gating every PR (which would burn crates.io
+  #   registry calls/rate limit on changes that were never going to publish
+  #   anything) or a full-workspace run (which would dry-run ~17 crates for a
+  #   one-crate tag).
+  #
+  # BLOCKING vs INDEPENDENT (deliberate — read before changing): this job
+  #   `needs: [setup, preflight]` (so an unmerged-branch tag never reaches it
+  #   either) but is intentionally NOT a dependency of `build`/`release`
+  #   below. A failing dry-run means "this crate is not safe to `cargo
+  #   publish` right now" — it says nothing about whether the GitHub binary
+  #   tarball is safe to build and distribute, since building/shipping a
+  #   binary release touches crates.io not at all. Coupling them would also
+  #   import crates.io's own documented propagation lag (this repo's
+  #   Cross-Crate Publish Ordering notes 60-120s after an upstream publish)
+  #   into the binary-release path as pure flakiness with no corresponding
+  #   safety benefit. Kept independent, this job still FAILS LOUDLY on its own
+  #   — a failure turns the whole tag's workflow run red and is visible on the
+  #   commit/PR checks — it just doesn't also block the unrelated binary
+  #   artifact from being built. If a genuinely unified pre-publish gate is
+  #   wanted later, make `release` additionally `need` this job — deliberately
+  #   not done here to avoid coupling two failure domains that have never
+  #   actually been coupled in this project's process.
+  #
+  # NEVER runs a real `cargo publish` — `--dry-run` only, always.
+  #
+  # DOES NOT COVER UI BUNDLE FRESHNESS (issue #3568 review finding, HIGH):
+  #   this job's `cargo publish --dry-run` runs with `SKIP_UI_BUILD=1` (set by
+  #   scripts/publish-dry-run-order.sh) for the UI-embedding crates
+  #   (trusty-search, trusty-memory, trusty-analyze, trusty-console) — NOT as
+  #   a shortcut, but because it is the ONLY thing that works: `trusty-search`
+  #   and `trusty-console` explicitly `include = [...]` only their pre-built
+  #   `ui-dist/`/`ui/dist/` in the published package (verified via `cargo
+  #   package --list` — `ui/src` is not even in the tarball), so build.rs has
+  #   nothing to rebuild from during package verification regardless of this
+  #   flag. This matches the documented human recipe exactly
+  #   (docs/reference/release-workflow.md's "UI-embedding crates" note) — it
+  #   is not a divergence from it. Consequently this job provides ZERO signal
+  #   about whether the COMMITTED UI bundle is stale relative to current
+  #   `ui/src` — that is the separate `ui-freshness-check` job below.
+  # ─────────────────────────────────────────────────────────────────────────────
+  publish-dry-run:
+    name: crates.io publish dry-run, dependency-ordered (issue #3366)
+    needs: [setup, preflight]
+    # Skip cleanly for crates that are not real crates.io packages
+    # (`publish = false`, e.g. trusty-agents-common's INTERNAL sibling crates,
+    # the Tauri GUIs) — there is nothing to dry-run.
+    if: needs.preflight.outputs.publishable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust (MSRV 1.91)
+        uses: dtolnay/rust-toolchain@1.91
+
+      - name: Cache cargo registry + artefacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: publish-dry-run-${{ needs.preflight.outputs.pkg_name }}
+
+      - name: cargo publish --dry-run (dependency order)
+        run: bash scripts/publish-dry-run-order.sh "${{ needs.preflight.outputs.pkg_name }}"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2c: ui-freshness-check (issue #3568 review finding, HIGH)
+  #
+  # WHY: `publish-dry-run` above (and a real `cargo publish`) both necessarily
+  #   use the COMMITTED `ui-dist/`/`ui/dist/` bundle — they cannot rebuild it
+  #   during packaging even in principle for `trusty-search`/`trusty-console`,
+  #   whose `Cargo.toml` `include` list excludes `ui/src` from the package
+  #   entirely (confirmed via `cargo package --list`). A dry-run "PASS" was
+  #   therefore silently giving zero coverage of whether that committed
+  #   bundle actually reflects current `ui/src` — the exact "guard exists but
+  #   doesn't guard" failure mode. This is not hypothetical: at the time this
+  #   job was added, `crates/trusty-search/ui-dist/` was last regenerated
+  #   2026-07-07 (commit `28648d38`), but `crates/trusty-search/ui/src` was
+  #   changed afterward by the Foundry v2 token migration (commit `972171e8`)
+  #   — confirmed via `git log 28648d38..HEAD -- crates/trusty-search/ui/src`
+  #   — so the published bundle has been stale in a real, verifiable sense.
+  #
+  # WHY NOT "install pnpm and let `cargo publish` rebuild it" (the OTHER
+  #   option considered): structurally impossible for `trusty-search` /
+  #   `trusty-console` (source isn't packaged, see above) — this is not a
+  #   convention that could be relaxed, it is what `Cargo.toml` `include`
+  #   already enforces. `trusty-memory`/`trusty-analyze` (no `include`
+  #   override) technically DO package `ui/src` and so COULD rebuild
+  #   in-process, but doing this two different ways for four crates that are
+  #   meant to behave identically (issue #987's canonical-build.rs-block
+  #   invariant) is worse than one uniform check applied the same way to all
+  #   four — this job does that.
+  #
+  # WHY NOT hash-filename diffing being treated as automatically flaky and
+  #   skipped: `.github/workflows/ci.yml`'s `ui-checks` job (issue #3508,
+  #   merged the same day as this one) explicitly considered and rejected
+  #   REBUILD-THEN-DIFF for these same crates, reasoning that Vite's
+  #   content-hashed filenames (`index-CPNos4BT.js`) can legitimately change
+  #   across a toolchain patch bump with no real behavior change, making a
+  #   naive diff a flaky false-failure generator, and left a "hash-normalizing
+  #   comparator" as unbuilt future work. That risk is real and NOT solved
+  #   here either — but `pnpm install --frozen-lockfile` pins the exact
+  #   dependency versions from the committed lockfile, which bounds (does not
+  #   eliminate) that risk to Node-runtime-version drift specifically, and the
+  #   remedy on a false positive is the same safe action as a true positive
+  #   (regenerate and commit the bundle) — so this job fails CLOSED (diff ==
+  #   fail) rather than skip the check entirely while that gap exists. If a
+  #   false positive is ever observed, that is the trigger to build the
+  #   hash-normalizing comparator `ci.yml` deferred — not a reason to make
+  #   this check advisory.
+  #
+  # WHAT: for each of the four UI-embedding crates ONLY (skips cleanly, not
+  #   silently, for every other crate), snapshots the currently-committed
+  #   embed directory, runs a REAL `pnpm install --frozen-lockfile && pnpm
+  #   run build` from current `ui/src` (same toolchain-setup pattern as
+  #   `ci.yml`'s `ui-checks` job), then `diff -rq`s the snapshot against the
+  #   fresh build output. Any difference — including a build FAILURE, which
+  #   is the more common and more dangerous form of drift — fails the job
+  #   loudly with the diff and a remedy command.
+  # ─────────────────────────────────────────────────────────────────────────────
+  ui-freshness-check:
+    name: UI bundle freshness check (issue #3568)
+    needs: [setup, preflight]
+    if: contains(fromJson('["trusty-search","trusty-console","trusty-memory","trusty-analyze"]'), needs.setup.outputs.crate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: crates/${{ needs.setup.outputs.crate }}/ui/pnpm-lock.yaml
+
+      - name: Rebuild ui/src and diff against the committed bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          CRATE="${{ needs.setup.outputs.crate }}"
+          UI_DIR="crates/${CRATE}/ui"
+
+          # trusty-search embeds from a separate crate-root `ui-dist/`
+          # (build.rs copies `ui/dist -> ui-dist`, issue #109); the other
+          # three embed directly from `ui/dist`. See this job's header
+          # comment for how this was confirmed per-crate.
+          if [[ "${CRATE}" == "trusty-search" ]]; then
+            COMMITTED_DIR="crates/${CRATE}/ui-dist"
+          else
+            COMMITTED_DIR="${UI_DIR}/dist"
+          fi
+
+          if [[ ! -d "${COMMITTED_DIR}" ]]; then
+            echo "::error::Expected committed UI bundle directory ${COMMITTED_DIR} does not exist."
+            exit 1
+          fi
+
+          SNAPSHOT="$(mktemp -d)/committed"
+          cp -r "${COMMITTED_DIR}" "${SNAPSHOT}"
+
+          (cd "${UI_DIR}" && pnpm install --frozen-lockfile && pnpm run build)
+
+          FRESH_DIR="${UI_DIR}/dist"
+
+          echo "Comparing committed (${COMMITTED_DIR}, snapshotted before rebuild) against a fresh build (${FRESH_DIR})..."
+          if diff -rq "${SNAPSHOT}" "${FRESH_DIR}" > /tmp/ui-freshness.diff; then
+            echo "OK — committed bundle matches a fresh build from current ui/src."
+          else
+            echo "::error::UI bundle drift detected for ${CRATE}: the committed ${COMMITTED_DIR} does NOT match a fresh 'pnpm run build' from current ui/src."
+            cat /tmp/ui-freshness.diff
+            echo ""
+            echo "Remedy: (cd ${UI_DIR} && pnpm install --frozen-lockfile && pnpm run build)"
+            if [[ "${CRATE}" == "trusty-search" ]]; then
+              echo "  then copy ui/dist/* into ui-dist/ (or run 'make release-prep')."
+            fi
+            echo "  Commit the regenerated bundle, then re-tag."
+            echo ""
+            echo "NOTE: a false positive here (build succeeds, content genuinely differs" \
+                 "only due to a toolchain version difference between this runner and" \
+                 "whatever machine last produced the committed bundle) is possible — see" \
+                 "this job's header comment / ci.yml's ui-checks job for the known,"\
+                 "not-yet-solved content-hash-filename-churn risk. If you believe that is" \
+                 "what happened here, verify locally with the same pinned lockfile before" \
+                 "assuming this check is wrong; the safe remedy is identical either way" \
+                 "(regenerate and commit)."
+            exit 1
+          fi
 
   # ─────────────────────────────────────────────────────────────────────────────
   # JOB 3: release

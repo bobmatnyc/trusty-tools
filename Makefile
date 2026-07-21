@@ -11,7 +11,7 @@
 # they are deleted and the target exits 0.  Run it again on a clean tree
 # and assert it still exits 0 (idempotent).
 
-.PHONY: check clean-runtime e2e-docker install-search-signed install-mpm-signed publish-check
+.PHONY: check clean-runtime e2e-docker install-search-signed install-mpm-signed publish-check version-parity-check publish-dry-run-order
 
 # Remove per-crate runtime artefacts that accumulate during development.
 #
@@ -145,3 +145,44 @@ publish-check:
 		exit 2; \
 	fi
 	bash scripts/check-publish-ready.sh $(CRATE)
+
+# Version-parity drift gate (issue #3366).
+#
+# Why: detects a crate whose Cargo.toml version is already live on crates.io
+# but whose local src/ tree no longer matches what was published under that
+# version — the defect that turned `cargo publish -p trusty-mpm --dry-run`
+# into a release blocker. Wired into CI on push to main
+# (.github/workflows/version-parity.yml); this target is the same check,
+# runnable locally/on demand.
+#
+# What: delegates to scripts/check-version-parity.sh, which builds and runs
+# the `publish-guard` binary (crates/trusty-publish-guard) against every
+# publishable workspace crate.
+#
+# Test: `make version-parity-check` against a clean checkout of merged main
+# reports each crate's parity status and exits non-zero the moment any crate
+# shows drift or could not be verified against the live registry.
+version-parity-check:
+	bash scripts/check-version-parity.sh
+
+# Dependency-ordered `cargo publish --dry-run` preflight (issue #3366).
+#
+# Why: publishing a crate before a sibling it depends on is live on
+# crates.io is the class of mistake behind the 2026-07-20 half-published
+# incident. `cargo publish --dry-run` resolves against the LIVE registry and
+# catches exactly this — but only if run for every affected crate, in
+# dependency order, immediately before a release.
+#
+# What: delegates to scripts/publish-dry-run-order.sh, which computes a
+# topological publish order from `cargo metadata` and runs
+# `cargo publish --dry-run -p <crate>` for each publishable crate in that
+# order, stopping at the first failure. Pass CRATES="a b" to restrict to a
+# subset (+ their publishable dependencies); pass LIST_ONLY=1 to print the
+# order without running anything.
+#
+# Usage:
+#   make publish-dry-run-order
+#   make publish-dry-run-order CRATES="trusty-search trusty-common"
+#   make publish-dry-run-order LIST_ONLY=1
+publish-dry-run-order:
+	bash scripts/publish-dry-run-order.sh $(if $(LIST_ONLY),--list-only) $(CRATES)
