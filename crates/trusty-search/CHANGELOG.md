@@ -18,18 +18,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `EmbedderStallTracker`, and swaps `SwitchableEmbedder` back to a fresh ort
   backend if the python sidecar is ever confirmed dead beyond recovery —
   search never degrades permanently, with no daemon restart required.
-  - **The swap-back predicate is deliberately conservative**: it fires only
-    when the active backend is python, its pid slot reads `0` (no live
-    child), AND at least one embed attempt has failed since the last success
-    (`EmbedderStallTracker::recent_timeout_count() > 0`), confirmed across 2
-    consecutive polling ticks (15s apart). Bare pid-zero is NOT the trigger —
-    it also occurs on ordinary idle-shutdown (`LazyEmbedderHandle`'s own idle
-    watchdog), whose respawn resets `recent_timeout_count` to `0` on its next
-    successful embed, keeping the predicate false. Only a genuinely dead
-    sidecar (the underlying `EmbedderSupervisor` exhausted
-    `TRUSTY_EMBEDDERD_MAX_RESTARTS`) keeps failing every subsequent embed
-    attempt, since `LazyEmbedderHandle`'s own spawn gate is never reset in
-    that case.
+  - **The swap-back predicate uses a DEFINITIVE supervisor signal, not a
+    heuristic (post-merge-review fix — code-critic BLOCK on PR #3584).** The
+    first version of this predicate fired on `active.kind == Python &&
+    pid_slot == 0 && recent_timeout_count > 0`, debounced across 2 polling
+    ticks. Code-critic caught a real false-positive window before merge: an
+    ordinary idle-shutdown ALSO zeros the pid slot, and a stale non-zero
+    `recent_timeout_count` left over from an earlier TRANSIENT failure is
+    never cleared by idle-shutdown (only a subsequent successful embed clears
+    it) — so a quiet period with zero further embed traffic after an
+    idle-shutdown could satisfy the heuristic and PERMANENTLY swap away a
+    perfectly healthy sidecar. Fixed by adding
+    `trusty-common`'s new `EmbedderSupervisor::terminated_signal()` (see that
+    crate's changelog) — an `Arc<AtomicBool>` the supervision loop sets ONLY
+    at the instant it exhausts `max_restarts` / a wedge-restart storm, never
+    on a clean exit or an intentional shutdown. `LazyEmbedderHandle::is_confirmed_terminated()`
+    exposes this (via the extended `PythonAdapterTeardown` trait), and the
+    predicate is now simply `active.kind == Python &&
+    is_confirmed_terminated()` — no debounce needed, since the flag is
+    monotonic and unambiguous the instant it's observed. The regression test
+    `swap_back_does_not_fire_on_stale_timeout_count_plus_idle_shutdown`
+    reproduces the exact scenario code-critic named and fails against the
+    pre-fix heuristic.
   - On confirmed death: builds a fresh ort backend via the same
     `build_ort_stdio_sidecar()` the daemon's default path uses, hot-swaps
     `SwitchableEmbedder` to it (`ActiveBackend { kind: Ort, bootstrap:

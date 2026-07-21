@@ -9,6 +9,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`EmbedderSupervisor::terminated_signal()` (epic #3524 slice 6 PR-4
+  follow-up, code-critic BLOCK on trusty-search PR #3584).** A new
+  `Arc<AtomicBool>` accessor, captured the same way `child_pid_slot` is
+  captured from `spawn_stdio`'s return tuple — before
+  `start_supervisor_task()` consumes `self`. The supervision loop sets it to
+  `true` at the exact instant, and ONLY the instant, it decides to give up
+  permanently (`should_give_up`: exhausted `max_restarts` or a wedge-restart
+  storm) — never on a clean exit, an intentional cooperative `shutdown()`,
+  or an ordinary respawn. Gives callers (trusty-search's swap-back watchdog)
+  a DEFINITIVE "this supervised process is unrecoverably dead" signal instead
+  of inferring it from `child_pid_slot == 0`, which is also `0` during an
+  ordinary intentional shutdown and therefore ambiguous on its own.
+  - Test: `supervisor_terminated_signal_fires_after_exhausting_max_restarts`
+    (a real, always-crashing mock child with `max_restarts: 1`),
+    `supervisor_terminated_signal_stays_false_on_intentional_shutdown` (a
+    real cooperative `shutdown()` must never set it).
 - **`ExecutionProvider::Mps` + `resolve_expected_python_provider` (epic #3524
   slice 6, PR 2/5, refs #3530, #3493 P1)** — a new `Mps` variant on
   `embedder::ExecutionProvider` for the opt-in Python/MPS embedding sidecar

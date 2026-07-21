@@ -812,4 +812,100 @@ exit 1
              persistent crash loop with max_restarts=1"
         );
     }
+
+    /// The definitive death signal (epic #3524 slice 6 PR-4 follow-up,
+    /// code-critic BLOCK on PR #3584) must flip to `true` when the supervisor
+    /// actually exhausts `max_restarts` — never respawning again.
+    ///
+    /// Why: this is the regression the swap-back watchdog now depends on
+    /// instead of the ambiguous `pid==0` + stall-tracker heuristic that could
+    /// false-trigger against a healthy sidecar recovering from an ordinary
+    /// idle-shutdown (see `trusty-search`'s `swap_back_watchdog` module doc
+    /// for the full false-positive analysis this signal replaces).
+    /// What: a mock child that always crashes after answering exactly one
+    /// startup probe (`write_mock_embedderd_crash_once`), `max_restarts: 1`
+    /// so exhaustion is fast, `backoff_max_secs: 1` to keep the test itself
+    /// fast. Captures `terminated_signal()` BEFORE detaching (must happen
+    /// before `start_supervisor_task` consumes `self`), then polls it until
+    /// `true` or a generous timeout.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_terminated_signal_fires_after_exhausting_max_restarts() {
+        let (_dir, binary) = write_mock_embedderd_crash_once();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 1,
+            max_restarts: 1,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        // Must capture this BEFORE start_supervisor_task consumes `supervisor`.
+        let terminated = supervisor.terminated_signal();
+        assert!(
+            !terminated.load(Ordering::Acquire),
+            "must start false — nothing has failed yet"
+        );
+
+        let _handle = supervisor.start_supervisor_task();
+
+        let gave_up = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if terminated.load(Ordering::Acquire) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            gave_up.is_ok(),
+            "terminated_signal never flipped true within 10s of exhausting \
+             max_restarts=1 against an always-crashing mock child"
+        );
+        assert_eq!(
+            pid_slot.load(Ordering::Acquire),
+            0,
+            "pid_slot must also be 0 once the supervisor has given up"
+        );
+    }
+
+    /// The definitive death signal must NEVER flip true on an intentional,
+    /// cooperative `shutdown()` — only on genuine restart exhaustion.
+    ///
+    /// Why: this is the other half of the regression guard — a watchdog
+    /// gating on `terminated_signal()` must not fire just because the daemon
+    /// (or the idle-shutdown watchdog) deliberately stopped a perfectly
+    /// healthy sidecar.
+    /// What: a long-lived mock child, shut down cooperatively via
+    /// `SupervisorHandle::shutdown()`, asserts `terminated_signal()` stays
+    /// `false` throughout and after.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_terminated_signal_stays_false_on_intentional_shutdown() {
+        let (_dir, binary) = write_mock_embedderd();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        assert!(pid_slot.load(Ordering::Acquire) > 0);
+
+        let terminated = supervisor.terminated_signal();
+        let handle = supervisor.start_supervisor_task();
+
+        handle.shutdown().await;
+
+        assert!(
+            !terminated.load(Ordering::Acquire),
+            "an intentional cooperative shutdown must never set terminated_signal"
+        );
+        assert_eq!(pid_slot.load(Ordering::Acquire), 0);
+    }
 }

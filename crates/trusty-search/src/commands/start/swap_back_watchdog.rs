@@ -14,68 +14,68 @@
 //! `SwitchableEmbedder` back to a fresh ort backend so search never degrades
 //! permanently.
 //!
-//! ## The false-positive hazard — why "pid == 0" alone is not the trigger
+//! ## History: the pid+stall-tracker heuristic was UNSAFE (code-critic
+//! ## BLOCK on PR #3584) — fixed via a definitive supervisor signal
 //!
-//! The python sidecar's pid slot (`SearchAppState::current_embedderd_pid`)
-//! reads `0` (`None`) in TWO completely different situations:
+//! The first version of this module inferred death from
+//! `active.kind == Python && pid_slot == 0 && recent_timeout_count > 0`,
+//! debounced across a couple of polling ticks. That heuristic has a real
+//! false-positive window that code-critic caught before merge:
 //!
-//!   1. **Intentional idle-shutdown** — `LazyEmbedderHandle`'s own idle
-//!      watchdog (`embedder_supervisor::idle_watchdog`) killed the child
-//!      after `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS` of no requests, and
-//!      reset its internal spawn gate. The NEXT embed request transparently
-//!      triggers a fresh spawn and succeeds — this is normal, expected,
-//!      memory-saving behavior, not a failure.
-//!   2. **Genuine, unrecoverable death** — the `EmbedderSupervisor`'s
-//!      crash-restart loop exhausted `TRUSTY_EMBEDDERD_MAX_RESTARTS` and gave
-//!      up. Critically, `LazyEmbedderHandle`'s OWN spawn gate (the
-//!      `state: Arc<Mutex<Option<SpawnedState>>>` cell) is untouched in this
-//!      case — only the idle watchdog or `LazyEmbedderHandle::shutdown()`
-//!      ever clears it. So the handle keeps reusing the same, now-dead
-//!      `client_slot` on every subsequent embed call: every one of those
-//!      calls fails (the underlying stdio pipe is gone), and NONE of them
-//!      trigger a fresh respawn.
+//!   1. A single TRANSIENT embed failure leaves `recent_timeout_count > 0`
+//!      (and bumps `last_use`).
+//!   2. A genuine quiet period elapses with NO further embed traffic.
+//!   3. `LazyEmbedderHandle`'s own idle watchdog
+//!      (`embedder_supervisor::idle_watchdog`) kills the child at
+//!      `idle_shutdown_secs` (up to 1800s) — this is normal, expected,
+//!      memory-saving behavior, not a failure. It zeroes the pid slot AND
+//!      resets the spawn gate so the next request transparently respawns.
+//!      Critically, it does **not** touch `EmbedderStallTracker` —
+//!      `recent_timeout_count` is cleared to `0` ONLY by a subsequent
+//!      SUCCESSFUL embed (`EmbedderStallTracker::record_success`), and step 2
+//!      guarantees there isn't one.
+//!   4. The next two watchdog ticks (needing zero further traffic) then
+//!      observe `pid == 0 && recent_timeout_count > 0` and PERMANENTLY swap a
+//!      perfectly healthy, merely-idle sidecar to ort.
 //!
-//! Swapping back to ort on case 1 would be actively wrong — it would
-//! permanently abandon a perfectly healthy python sidecar just because it
-//! happened to be idle for a moment, thrashing the two backends back and
-//! forth. The predicate below is deliberately conservative to tell the two
-//! apart without adding any new signal: it composes the pid slot with
-//! [`EmbedderStallTracker::recent_timeout_count`] (`service/stall_tracker.rs`,
-//! already wired onto every embed call via `EmbedPool`).
+//! The fix replaces the heuristic with a DEFINITIVE signal from the
+//! supervisor itself: [`trusty_common::embedder_client::EmbedderSupervisor::terminated_signal`]
+//! is an `Arc<AtomicBool>` the supervision loop sets to `true` at the exact
+//! instant — and ONLY the instant — it decides to give up permanently
+//! (exhausted `max_restarts` or a wedge-restart storm). It is never set on a
+//! clean exit, an intentional `shutdown()` (which is exactly what
+//! idle-shutdown performs), or an ordinary respawn. `LazyEmbedderHandle`
+//! exposes this through `is_confirmed_terminated()` — which ALSO returns
+//! `false` whenever its own spawn gate has been reset (idle-shutdown or an
+//! explicit `shutdown()` already cleared `state` to `None`), so there is no
+//! window where a stale flag from a previous spawn generation could leak
+//! into a fresh, healthy one. This eliminates the ambiguity entirely: there
+//! is no longer a heuristic to fool with a quiet period, because idle-
+//! shutdown and genuine death now produce categorically different signals
+//! rather than the same "pid == 0" observation plus a stale side-counter.
 //!
-//! **The predicate**: `active.kind == Python && pid == 0 && recent_timeout_count > 0`,
-//! confirmed across [`CONFIRM_TICKS`] CONSECUTIVE polling ticks before acting.
-//!
-//! Why this composition is safe against case 1 (idle-shutdown): a successful
-//! embed call (the respawn succeeding) calls
-//! `EmbedderStallTracker::record_success`, which unconditionally resets
-//! `recent_timeout_count` to `0` — see `stall_tracker.rs`. So the moment an
-//! idle-shutdown's automatic respawn serves one successful request,
-//! `recent_timeout_count` drops back to `0` and the predicate goes false
-//! again, even though the pid slot may still read `0` for the brief window
-//! between the respawn starting and the pid-forwarder task's next tick. Only
-//! a SUSTAINED run of embed failures — which only happens in case 2, because
-//! case 1's respawn always succeeds cold-restart-cheaply — keeps
-//! `recent_timeout_count > 0` across multiple consecutive watchdog polls.
-//! The `CONFIRM_TICKS`-consecutive-poll debounce is an extra conservative
-//! margin on top of that: a single blip (one transient timeout right before
-//! a respawn lands) cannot trip the watchdog; it must observe the composed
-//! condition on `CONFIRM_TICKS` back-to-back ticks, `POLL_INTERVAL` apart.
+//! **The predicate is now simply**: `active.kind == Python &&
+//! python_teardown.is_confirmed_terminated()`. No debounce is needed — the
+//! flag is monotonic (set at most once, never reset) and unambiguous the
+//! instant it is observed `true`.
 //!
 //! ## Bounded and quiet
 //!
-//! The watchdog polls every [`POLL_INTERVAL`] (seconds, not milliseconds —
-//! this is a background health check, not a hot loop) and stops permanently
-//! the moment it either (a) observes `switchable`'s active backend is no
-//! longer `Python` (something else already moved it — nothing left to
-//! watch), or (b) it acts on confirmed death and swaps back itself. It never
-//! blocks the reactor: every step is either a cheap atomic load or an
-//! `.await`.
+//! The watchdog polls every [`POLL_INTERVAL_SECS`] (seconds, not
+//! milliseconds — this is a background health check, not a hot loop) and
+//! stops permanently the moment it either (a) observes `switchable`'s active
+//! backend is no longer `Python` (something else already moved it — nothing
+//! left to watch), or (b) it acts on confirmed death and swaps back itself.
+//! It never blocks the reactor: every step is either a cheap atomic load or
+//! an `.await`.
 //!
 //! Test: `swap_back_fires_on_confirmed_death`,
-//! `swap_back_does_not_fire_on_idle_shutdown_respawn`,
-//! `swap_back_does_not_fire_while_healthy`,
-//! `is_confirmed_dead_predicate_matrix` in `start/tests.rs`.
+//! `swap_back_does_not_fire_on_stale_timeout_count_plus_idle_shutdown`
+//! (THE false-positive regression code-critic named — stale
+//! `recent_timeout_count > 0` left over from a transient failure, then a
+//! real idle-shutdown to pid 0, then zero further embed traffic — must NOT
+//! fire, unlike the pre-fix heuristic), `swap_back_does_not_fire_while_healthy`,
+//! `swap_back_stops_watching_once_backend_already_moved` in `start/tests.rs`.
 
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
@@ -96,11 +96,6 @@ use super::graceful_bootstrap::PythonAdapterTeardown;
 /// the "no tight poll loop" convention this codebase follows elsewhere
 /// (`idle_watchdog`'s own 10s tick, the residency sweep, etc).
 const POLL_INTERVAL_SECS: u64 = 15;
-
-/// Number of CONSECUTIVE confirming polls required before the watchdog acts.
-/// A conservative debounce margin on top of the `recent_timeout_count`
-/// signal itself — see the module doc's false-positive-hazard section.
-const CONFIRM_TICKS: u32 = 2;
 
 /// Abstracts the one truly real/external step the swap-back path performs —
 /// standing up a fresh ort backend — so [`drive_swap_back_watchdog`] (the
@@ -135,35 +130,14 @@ pub(super) fn real_swap_back_ops() -> Arc<dyn SwapBackOps> {
     Arc::new(RealSwapBackOps)
 }
 
-/// Pure death predicate — see the module doc's "the predicate" section for
-/// the full reasoning.
-///
-/// Why: extracted as a pure function so the exact false-positive-avoidance
-/// logic (idle-shutdown vs. genuine death) has a small, deterministic,
-/// exhaustive unit test independent of the polling loop / real time.
-/// What: `true` only when the switchable's active backend is still `Python`,
-/// its pid slot reads `0` (no live child), AND at least one embed has failed
-/// since the last success (`recent_timeout_count > 0`). Any other
-/// combination — healthy python (pid > 0), or pid == 0 with no failures yet
-/// (idle-shutdown that hasn't been asked to respawn, or a respawn that
-/// already succeeded) — is `false`.
-/// Test: `is_confirmed_dead_predicate_matrix`.
-fn is_confirmed_dead(
-    active_kind: BackendKind,
-    python_pid: Option<u32>,
-    recent_timeout_count: u32,
-) -> bool {
-    active_kind == BackendKind::Python && python_pid.is_none() && recent_timeout_count > 0
-}
-
 /// Entry point spawned by `graceful_bootstrap::run_graceful_python_bootstrap`
 /// right after a successful ort→python hot-swap.
 ///
 /// Why: thin wrapper around [`drive_swap_back_watchdog`] that supplies the
-/// real timing constants, mirroring `graceful_bootstrap::run_graceful_python_bootstrap`'s
-/// own thin-wrapper-around-a-testable-driver shape.
-/// What: delegates to [`drive_swap_back_watchdog`] with [`POLL_INTERVAL_SECS`]
-/// and [`CONFIRM_TICKS`].
+/// real poll interval, mirroring
+/// `graceful_bootstrap::run_graceful_python_bootstrap`'s own
+/// thin-wrapper-around-a-testable-driver shape.
+/// What: delegates to [`drive_swap_back_watchdog`] with [`POLL_INTERVAL_SECS`].
 /// Test: `drive_swap_back_watchdog` (this function's callee) carries the
 /// actual test coverage — this wrapper has no independent branches.
 pub(super) async fn run_swap_back_watchdog(
@@ -178,7 +152,6 @@ pub(super) async fn run_swap_back_watchdog(
         python_teardown,
         ops,
         Duration::from_secs(POLL_INTERVAL_SECS),
-        CONFIRM_TICKS,
     )
     .await;
 }
@@ -191,15 +164,14 @@ pub(super) async fn run_swap_back_watchdog(
 /// `switchable.active()`: if it is no longer [`BackendKind::Python`],
 /// something else already moved the backend away — nothing left for this
 /// watchdog to do, so it returns immediately (bounded: never watches a
-/// backend it already abandoned). Otherwise composes
-/// [`is_confirmed_dead`] from the current pid slot
-/// (`SearchAppState::current_embedderd_pid`) and
-/// `state.embedder_stall_tracker.recent_timeout_count()`. A confirming tick
-/// increments a consecutive-ticks counter; a non-confirming tick resets it
-/// to `0`. Once the counter reaches `confirm_ticks`, builds a fresh ort
-/// backend via `ops.build_ort()`, hot-swaps `switchable` to it
-/// (`ActiveBackend { kind: Ort, bootstrap: FellBackToOrt, .. }`), installs
-/// the new ort pid slot on `state`, tears down the dead python handle via
+/// backend it already abandoned). Otherwise checks
+/// `python_teardown.is_confirmed_terminated()` — the DEFINITIVE signal from
+/// the underlying `EmbedderSupervisor` (see the module doc's history
+/// section for why this replaced the earlier pid+stall-tracker heuristic).
+/// The moment it observes `true`, builds a fresh ort backend via
+/// `ops.build_ort()`, hot-swaps `switchable` to it (`ActiveBackend { kind:
+/// Ort, bootstrap: FellBackToOrt, .. }`), installs the new ort pid slot on
+/// `state`, tears down the dead python handle via
 /// `python_teardown.teardown()` (cooperative — no orphan), logs loudly at
 /// `warn`, and returns (this watchdog's job is done — python was already
 /// abandoned, permanently, for this daemon's lifetime, matching PR-3's own
@@ -210,18 +182,16 @@ pub(super) async fn run_swap_back_watchdog(
 /// binary going missing at the exact moment the python one died), but never
 /// silently swallowed.
 /// Test: `swap_back_fires_on_confirmed_death`,
-/// `swap_back_does_not_fire_on_idle_shutdown_respawn`,
-/// `swap_back_does_not_fire_while_healthy`.
+/// `swap_back_does_not_fire_on_stale_timeout_count_plus_idle_shutdown`,
+/// `swap_back_does_not_fire_while_healthy`,
+/// `swap_back_stops_watching_once_backend_already_moved`.
 pub(super) async fn drive_swap_back_watchdog(
     switchable: Arc<SwitchableEmbedder>,
     state: SearchAppState,
     python_teardown: Arc<dyn PythonAdapterTeardown>,
     ops: Arc<dyn SwapBackOps>,
     poll_interval: Duration,
-    confirm_ticks: u32,
 ) {
-    let mut consecutive_confirms = 0u32;
-
     loop {
         tokio::time::sleep(poll_interval).await;
 
@@ -235,24 +205,11 @@ pub(super) async fn drive_swap_back_watchdog(
             return;
         }
 
-        let python_pid = state.current_embedderd_pid();
-        let recent_timeouts = state.embedder_stall_tracker.recent_timeout_count();
-
-        if is_confirmed_dead(active.kind, python_pid, recent_timeouts) {
-            consecutive_confirms += 1;
-        } else {
-            consecutive_confirms = 0;
-        }
-
-        if consecutive_confirms < confirm_ticks {
+        if !python_teardown.is_confirmed_terminated().await {
             continue;
         }
 
-        tracing::warn!(
-            "python/MPS sidecar unrecoverable — fell back to ort; search unaffected \
-             (recent_timeout_count={recent_timeouts}, confirmed over {confirm_ticks} \
-             consecutive checks)"
-        );
+        tracing::warn!("python/MPS sidecar unrecoverable — fell back to ort; search unaffected");
 
         match ops.build_ort() {
             Ok((ort_adapter, ort_pid_slot)) => {
@@ -294,35 +251,5 @@ pub(super) async fn drive_swap_back_watchdog(
         }
 
         return;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Exhaustive matrix over the predicate's three inputs — every
-    /// combination is spelled out explicitly rather than looped, so a
-    /// reviewer can see at a glance exactly which combination is/isn't a
-    /// confirmed death.
-    #[test]
-    fn is_confirmed_dead_predicate_matrix() {
-        // Healthy python, serving fine.
-        assert!(!is_confirmed_dead(BackendKind::Python, Some(1234), 0));
-        // Healthy python but a transient timeout blip (pid still alive) —
-        // not a death signal, the process itself is still up.
-        assert!(!is_confirmed_dead(BackendKind::Python, Some(1234), 3));
-        // Idle-shutdown, not yet asked to respawn (or respawn already
-        // succeeded and reset the counter) — pid 0, no failures recorded.
-        assert!(!is_confirmed_dead(BackendKind::Python, None, 0));
-        // THE confirmed-death case: pid 0 AND failures piling up.
-        assert!(is_confirmed_dead(BackendKind::Python, None, 1));
-        assert!(is_confirmed_dead(BackendKind::Python, None, 5));
-        // Never fires for any other active backend kind, regardless of the
-        // other two signals — this predicate only ever judges the python arm.
-        assert!(!is_confirmed_dead(BackendKind::Ort, None, 5));
-        assert!(!is_confirmed_dead(BackendKind::Remote, None, 5));
-        assert!(!is_confirmed_dead(BackendKind::InProcess, None, 5));
-        assert!(!is_confirmed_dead(BackendKind::Candle, None, 5));
     }
 }

@@ -69,18 +69,29 @@ const DEFAULT_BOOTSTRAP_RETRIES: u32 = 2;
 /// This trait is the seam that lets [`try_bootstrap_once`] force an
 /// IMMEDIATE, cooperative kill on every failure path that occurs after a
 /// handle may have spawned, before ever dropping it.
-/// What: one method, `teardown()`, async so the real implementation can
-/// await `SupervisorHandle::shutdown()`'s "confirmed dead" guarantee.
+/// What: `teardown()`, async so the real implementation can await
+/// `SupervisorHandle::shutdown()`'s "confirmed dead" guarantee; plus
+/// `is_confirmed_terminated()` (epic #3524 slice 6 PR-4 follow-up,
+/// code-critic BLOCK on PR #3584) — the DEFINITIVE "this python sidecar's
+/// supervisor gave up permanently" signal the swap-back watchdog gates on,
+/// replacing the earlier ambiguous pid==0 + stall-tracker heuristic. See
+/// `LazyEmbedderHandle::is_confirmed_terminated`'s doc for the full
+/// false-positive analysis that signal fixes.
 /// Test: see the module-level `Test:` pointer.
 #[async_trait::async_trait]
 pub(crate) trait PythonAdapterTeardown: Send + Sync {
     async fn teardown(&self);
+    async fn is_confirmed_terminated(&self) -> bool;
 }
 
 #[async_trait::async_trait]
 impl PythonAdapterTeardown for crate::service::embedder_supervisor::LazyEmbedderHandle {
     async fn teardown(&self) {
         self.shutdown().await;
+    }
+
+    async fn is_confirmed_terminated(&self) -> bool {
+        crate::service::embedder_supervisor::LazyEmbedderHandle::is_confirmed_terminated(self).await
     }
 }
 
