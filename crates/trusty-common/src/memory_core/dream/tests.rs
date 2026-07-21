@@ -4,6 +4,7 @@ use super::*;
 use crate::memory_core::palace::{Palace, PalaceId, RoomType};
 use crate::memory_core::retrieval::{PalaceHandle, seed_shared_embedder_with_mock};
 use chrono::{Duration as ChronoDuration, Utc};
+use serial_test::serial;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -766,6 +767,12 @@ async fn dream_cycle_semantic_consolidation_skips_task_drawers() {
 /// assert semantically_consolidated == 0 and the cycle succeeds.
 /// Test: This test itself.
 #[tokio::test]
+// Audit finding (same class as #3607/#3608): `OPENROUTER_API_KEY` is also
+// mutated by `inference::credentials::{resolver,dotenv}::tests` under
+// `#[serial(dotenv_credential_env)]`. This file's `EnvVarGuard` has no lock
+// of its own, so join that same serial group rather than relying on the
+// (false) assumption that this is the only mutator of the var.
+#[serial(dotenv_credential_env)]
 async fn dream_cycle_semantic_consolidation_no_inference() {
     // Ensure no env key is set for this test.
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
@@ -820,6 +827,7 @@ async fn dream_cycle_semantic_consolidation_no_inference() {
 /// second cycle short-circuited before rebuilding/retrying the backend.
 /// Test: This test itself.
 #[tokio::test]
+#[serial(dotenv_credential_env)]
 async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
 
@@ -879,6 +887,7 @@ async fn dream_cycle_semantic_consolidation_invalid_model_disables_once() {
 /// (build + attempt) proceeded unchanged.
 /// Test: This test itself.
 #[tokio::test]
+#[serial(dotenv_credential_env)]
 async fn dream_cycle_semantic_consolidation_valid_local_model_not_disabled() {
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
 
@@ -1548,6 +1557,7 @@ async fn consolidate_scoped_skips_task_drawers() {
 /// `consolidate_scoped_invalid_model_returns_err`) instead of a silent no-op.
 /// Test: this function.
 #[tokio::test]
+#[serial(dotenv_credential_env)]
 async fn consolidate_scoped_no_inference_is_noop() {
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
     let handle = open_test_handle("scoped-no-inference").await;
@@ -1574,6 +1584,7 @@ async fn consolidate_scoped_no_inference_is_noop() {
 /// misconfiguration. Asserts `consolidate_scoped` returns `Err` naming both
 /// the model and Ollama.
 #[tokio::test]
+#[serial(dotenv_credential_env)]
 async fn consolidate_scoped_invalid_model_returns_err() {
     let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
     let handle = open_test_handle("scoped-invalid-model").await;

@@ -34,6 +34,13 @@ fn sources_load_handles_malformed_file() {
 
 #[test]
 fn sources_resolved_paths_expands_tilde() {
+    // #3607-class: same HOME race — `resolved_paths()` calls
+    // `dirs::home_dir()` internally to expand the tilde, and this test calls
+    // it again directly below. Hold `HOME_LOCK` across both.
+    let _guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let project = TempDir::new().unwrap();
     let sources = vec![
         SkillSource {
@@ -107,6 +114,14 @@ fn sources_disabled_source_excluded() {
 
 #[test]
 fn remote_git_cache_path_computed_correctly() {
+    // #3607: `reg.resolved_paths()` calls `dirs::home_dir()` internally, and
+    // this test calls it again directly to build the expected value. Both
+    // calls must observe the same `$HOME` — hold `HOME_LOCK` for the whole
+    // body so no concurrent HOME-mutating test can change it in between.
+    let _guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let project = TempDir::new().unwrap();
     let sources = vec![SkillSource {
         source_type: SkillSourceType::RemoteGit,
@@ -135,6 +150,13 @@ fn remote_git_cache_path_computed_correctly() {
 
 #[test]
 fn remote_git_without_subdir_uses_cache_dir_directly() {
+    // #3607: same HOME race as `remote_git_cache_path_computed_correctly`
+    // above — hold `HOME_LOCK` across both the implicit `dirs::home_dir()`
+    // call inside `resolved_paths()` and the explicit one below.
+    let _guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let project = TempDir::new().unwrap();
     let sources = vec![SkillSource {
         source_type: SkillSourceType::RemoteGit,

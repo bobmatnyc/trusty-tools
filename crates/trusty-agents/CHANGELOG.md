@@ -157,6 +157,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Flaky `HOME`-race unit tests in `skills::sources::tests` fixed (#3607):**
+  `remote_git_without_subdir_uses_cache_dir_directly` and its siblings
+  `remote_git_cache_path_computed_correctly` /
+  `sources_resolved_paths_expands_tilde` each called `dirs::home_dir()`
+  twice — once implicitly inside `SkillSourceRegistry::resolved_paths()`,
+  once directly to build the expected value — without holding
+  `test_env::HOME_LOCK`, so a concurrent test's `$HOME` sandboxing could
+  change the value in between the two calls under `cargo test`'s default
+  multi-threaded runner. All three now hold `HOME_LOCK` for their full
+  body, matching the crate-wide convention documented in `test_env.rs`.
 - **`gworkspace` OpenRPC endpoint no longer silently discovers zero tools
   (#3577):** `DirectDriver::discover()` deserialized `rpc.discover`'s raw
   result directly into `EndpointManifest`, which expected a top-level
