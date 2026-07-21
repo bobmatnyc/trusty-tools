@@ -18,6 +18,7 @@
 
 mod daemon;
 mod embedder;
+mod graceful_bootstrap;
 mod restore;
 
 #[cfg(test)]

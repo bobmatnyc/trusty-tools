@@ -30,7 +30,7 @@ use crate::service::embedder_supervisor::{
 /// family space — only quantization (see [`quantized_from_env`]) differs.
 /// Purely informational: nothing in this PR reads it, PR-2's `/health` work
 /// will.
-const EMBEDDER_MODEL_NAME: &str = "all-MiniLM-L6-v2";
+pub(super) const EMBEDDER_MODEL_NAME: &str = "all-MiniLM-L6-v2";
 
 /// Best-effort mirror of `trusty_common::embedder::fast_embedder`'s private
 /// `resolve_default_embedding_model` env-var convention, for descriptive
@@ -76,6 +76,104 @@ pub(super) fn backend_respects_quantized_env(kind: BackendKind) -> bool {
     matches!(kind, BackendKind::Ort | BackendKind::InProcess)
 }
 
+/// Which arm `build_embedder_raw` should take for `TRUSTY_EMBEDDER` unset /
+/// `auto` (epic #3524 slice 6, PR 3/5).
+///
+/// Why: the unset/`auto` resolution needs to become platform-aware (Apple
+/// Silicon defaults to the graceful hot-swap path once ship-gated) without
+/// disturbing the explicit-value arms (`stdio`, `python`, `in-process`, …),
+/// which are unaffected by this enum and keep matching directly on the raw
+/// env string. Splitting resolution into its own pure function
+/// ([`resolve_default_embedder_mode_for`]) makes the platform/env precedence
+/// unit-testable without depending on the actual build target or process
+/// environment.
+/// What: one variant per arm `build_embedder_raw`'s `"" | "auto"` match takes.
+/// Test: `resolve_default_embedder_mode_for_*` in `start/tests.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DefaultEmbedderMode {
+    /// Build the ort stdio sidecar synchronously — unchanged pre-#3524
+    /// behavior. Selected on every non-Apple-Silicon host, and on Apple
+    /// Silicon whenever the graceful default is not ship-gated on
+    /// (`TRUSTY_PY_DEFAULT` unset/falsy).
+    Ort,
+    /// Apple Silicon + `TRUSTY_PY_DEFAULT` enabled: serve on ort immediately,
+    /// bootstrap the python/MPS sidecar in the background, then hot-swap
+    /// (this PR's new arm). **Default OFF** — see `TRUSTY_PY_DEFAULT`'s doc.
+    GracefulPython,
+    /// `TRUSTY_EMBEDDER_PYTHON_EAGER` truthy: the existing eager, blocking
+    /// `python` arm (identical to explicit `TRUSTY_EMBEDDER=python`) reached
+    /// via unset/`auto` instead of an explicit value. Not gated to Apple
+    /// Silicon — mirrors the explicit `python` arm, which has never been
+    /// platform-gated (useful for testing the sidecar on any host).
+    EagerPython,
+}
+
+/// Pure resolution logic for [`resolve_default_embedder_mode`] — unit
+/// testable without depending on `cfg!(target_arch/target_os)` or real
+/// process env vars.
+///
+/// Precedence: Apple-Silicon + the ship-gate flag enabled wins outright
+/// (→ [`DefaultEmbedderMode::GracefulPython`]); otherwise an explicit
+/// `TRUSTY_EMBEDDER_PYTHON_EAGER` opt-in wins (→
+/// [`DefaultEmbedderMode::EagerPython`], any platform); otherwise the
+/// unchanged ort default (→ [`DefaultEmbedderMode::Ort`]).
+///
+/// Note: `TRUSTY_EMBEDDER=stdio` (the permanent opt-out) never reaches this
+/// function at all — `build_embedder_raw`'s match dispatches it straight to
+/// `build_ort_stdio_sidecar()` before this resolution is consulted.
+pub(super) fn resolve_default_embedder_mode_for(
+    is_apple_silicon: bool,
+    py_default_enabled: bool,
+    eager_python: bool,
+) -> DefaultEmbedderMode {
+    if is_apple_silicon && py_default_enabled {
+        return DefaultEmbedderMode::GracefulPython;
+    }
+    if eager_python {
+        return DefaultEmbedderMode::EagerPython;
+    }
+    DefaultEmbedderMode::Ort
+}
+
+/// Resolve the `TRUSTY_EMBEDDER` unset/`auto` default, reading the real
+/// build target and process environment (epic #3524 slice 6, PR 3/5).
+///
+/// Why: on Apple Silicon a torch/MPS sidecar embeds ~2.4x faster than ort
+/// with numerically identical results (see the epic #3524 slice 2-4 spike);
+/// once soaked, this should become the transparent default with zero
+/// required user configuration. This PR wires the mechanism behind
+/// `TRUSTY_PY_DEFAULT` (default OFF) so it can ship and be verified without
+/// changing any real user's behavior — a later slice (PR-5) flips the
+/// default on after the soak.
+/// What: `cfg!(all(target_arch = "aarch64", target_os = "macos"))` for the
+/// platform check, `TRUSTY_PY_DEFAULT` for the ship-gate, and
+/// `TRUSTY_EMBEDDER_PYTHON_EAGER` for the eager escape hatch — delegates the
+/// actual precedence to [`resolve_default_embedder_mode_for`].
+/// Test: `resolve_default_embedder_mode_for_*` in `start/tests.rs` cover the
+/// pure precedence; this wrapper has no independent branches to test.
+pub(super) fn resolve_default_embedder_mode() -> DefaultEmbedderMode {
+    resolve_default_embedder_mode_for(
+        cfg!(all(target_arch = "aarch64", target_os = "macos")),
+        truthy_env("TRUSTY_PY_DEFAULT"),
+        truthy_env("TRUSTY_EMBEDDER_PYTHON_EAGER"),
+    )
+}
+
+/// Shared truthy-env-var parser: `1`/`true`/`yes`/`on` (case-insensitive,
+/// trimmed) → `true`; unset or anything else → `false`.
+/// Test: `truthy_env_*` in `start/tests.rs`.
+pub(super) fn truthy_env(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Resolve the embedder back-end, wrap it in a [`SwitchableEmbedder`], and
 /// return both the trait-object handle and the concrete switchable handle.
 ///
@@ -101,12 +199,21 @@ pub(super) fn backend_respects_quantized_env(kind: BackendKind) -> bool {
 /// Test: `build_embedder_raw`'s existing coverage (`lazy_adapter_reports_resolved_provider`,
 /// `uds_adapter_reports_resolved_provider`) is unaffected; `switchable.rs`
 /// unit tests cover the wrapper itself.
+///
+/// The 4th return element (epic #3524 slice 6, PR 3/5) is `true` only when
+/// `build_embedder_raw` took the new [`DefaultEmbedderMode::GracefulPython`]
+/// arm — the signal `commands::start::daemon` uses to decide whether to
+/// spawn the background bootstrap→hot-swap orchestrator right after
+/// installing the returned `switchable` handle. Every pre-existing arm
+/// returns `false`, so this PR ships as a no-op for every caller that
+/// doesn't opt in via `TRUSTY_PY_DEFAULT`.
 pub(super) async fn build_embedder() -> Result<(
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
     Arc<SwitchableEmbedder>,
+    bool,
 )> {
-    let (raw, pid_slot, kind) = build_embedder_raw().await?;
+    let (raw, pid_slot, kind, needs_graceful_bootstrap) = build_embedder_raw().await?;
     let provider = raw.provider();
     let active = ActiveBackend {
         kind,
@@ -116,12 +223,19 @@ pub(super) async fn build_embedder() -> Result<(
         // path actually honours `TRUSTY_EMBEDDER_MODEL` — see
         // `backend_respects_quantized_env`'s doc for why.
         quantized: backend_respects_quantized_env(kind) && quantized_from_env(),
-        bootstrap: BootstrapState::NotApplicable,
+        // Epic #3524 slice 6 PR-3: the graceful-python arm starts the
+        // background bootstrap immediately, so `/health` must report
+        // `Bootstrapping` from the very first read rather than `NotApplicable`.
+        bootstrap: if needs_graceful_bootstrap {
+            BootstrapState::Bootstrapping
+        } else {
+            BootstrapState::NotApplicable
+        },
     };
     let switchable = Arc::new(SwitchableEmbedder::new(raw, active));
     let embedder: Arc<dyn crate::core::Embedder> =
         Arc::clone(&switchable) as Arc<dyn crate::core::Embedder>;
-    Ok((embedder, pid_slot, switchable))
+    Ok((embedder, pid_slot, switchable, needs_graceful_bootstrap))
 }
 
 /// Resolve the embedder back-end and return the raw `Arc<dyn Embedder>` ready
@@ -150,20 +264,21 @@ pub(super) async fn build_embedder() -> Result<(
 /// first request is served, and `"spawning trusty-embedderd"` only when the
 /// first hybrid search or reindex arrives.
 ///
-/// Returns `(embedder, embedderd_pid_slot, kind)`. `embedderd_pid_slot` is
-/// `Some` only for the stdio-sidecar path and holds an `Arc<AtomicU32>` that
-/// the `LazyEmbedderHandle` keeps updated with the current child OS PID (0
-/// when no live process) so callers can sample the sidecar's RSS without
-/// holding any mutex. Non-stdio paths return `None`. `kind` (epic #3524
-/// slice 6) tags which [`BackendKind`] was constructed so [`build_embedder`]
-/// can build an accurate [`ActiveBackend`] snapshot around it.
+/// Returns `(embedder, embedderd_pid_slot, kind, needs_graceful_bootstrap)`.
+/// `embedderd_pid_slot` is `Some` only for the stdio-sidecar path and holds
+/// an `Arc<AtomicU32>` that the `LazyEmbedderHandle` keeps updated with the
+/// current child OS PID (0 when no live process) so callers can sample the
+/// sidecar's RSS without holding any mutex. Non-stdio paths return `None`.
+/// `kind` (epic #3524 slice 6) tags which [`BackendKind`] was constructed so
+/// [`build_embedder`] can build an accurate [`ActiveBackend`] snapshot around
+/// it. `needs_graceful_bootstrap` (PR 3/5) is `true` only for the
+/// `DefaultEmbedderMode::GracefulPython` arm — see [`build_embedder`]'s doc.
 async fn build_embedder_raw() -> Result<(
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
     BackendKind,
+    bool,
 )> {
-    use crate::service::embedder_supervisor::LazyEmbedderHandle;
-
     let trusty_embedder_env = std::env::var("TRUSTY_EMBEDDER").unwrap_or_default();
 
     // Issue #41 phase 4: candle Metal path (feature-gated, explicit opt-in).
@@ -176,13 +291,51 @@ async fn build_embedder_raw() -> Result<(
                     .map_err(|e| anyhow::anyhow!("candle embedder init task panicked: {e}"))??;
             let dim = candle.dimension();
             tracing::info!("embedder initialized: model=all-MiniLM-L6-v2 dim={dim} backend=candle");
-            return Ok((std::sync::Arc::new(candle), None, BackendKind::Candle));
+            return Ok((
+                std::sync::Arc::new(candle),
+                None,
+                BackendKind::Candle,
+                false,
+            ));
         }
     }
 
     match trusty_embedder_env.as_str() {
-        // ── Lazy-spawn stdio sidecar (issue #315 — deferred boot default) ──
-        "" | "auto" | "stdio" => build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort)),
+        // ── Explicit force-ort opt-out — the ONLY way to permanently pin
+        // the ort sidecar on Apple Silicon once TRUSTY_PY_DEFAULT ships on
+        // (epic #3524 slice 6, PR 3/5). Never routed through
+        // `resolve_default_embedder_mode` below.
+        "stdio" => build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort, false)),
+
+        // ── unset / `auto` — platform-aware resolution (epic #3524 slice 6,
+        // PR 3/5). `resolve_default_embedder_mode` decides between the
+        // unchanged ort default, the new graceful-python background path, and
+        // the existing eager-blocking python path (reachable here only via
+        // `TRUSTY_EMBEDDER_PYTHON_EAGER`, mirroring explicit
+        // `TRUSTY_EMBEDDER=python` below).
+        "" | "auto" => match resolve_default_embedder_mode() {
+            DefaultEmbedderMode::Ort => {
+                build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort, false))
+            }
+            DefaultEmbedderMode::EagerPython => build_eager_python_embedder()
+                .await
+                .map(|(e, p, k)| (e, p, k, false)),
+            DefaultEmbedderMode::GracefulPython => {
+                // Epic #3524 slice 6 (PR 3/5): serve on ort IMMEDIATELY — the
+                // exact same synchronous construction as the unchanged default
+                // path — while the caller (`build_embedder`) marks the
+                // resulting `ActiveBackend::bootstrap` `Bootstrapping` and
+                // `commands::start::daemon` spawns the background
+                // bootstrap→hot-swap orchestrator right after installing it.
+                // Nothing here blocks the HTTP listener or startup.
+                tracing::info!(
+                    "embedder mode: graceful Apple-Silicon default (TRUSTY_PY_DEFAULT) — \
+                     serving on the ort stdio sidecar immediately while the python/MPS \
+                     sidecar bootstraps in the background; hot-swaps in when ready"
+                );
+                build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort, true))
+            }
+        },
 
         // ── Opt-in Python/MPS sidecar (epic #3524, slices 2-4) — DEFAULT-OFF ──
         //
@@ -198,64 +351,15 @@ async fn build_embedder_raw() -> Result<(
         // bootstrap or launcher-discovery failure, log a loud actionable
         // warning and FALL BACK to the Rust ort path so search never
         // hard-fails.
-        "python" => {
-            // The bootstrap is a blocking, potentially minutes-long one-time
-            // build; run it off the async runtime. `ensure_venv_eager` (not the
-            // plain `ensure_venv` the per-respawn launcher binary uses) pays for
-            // the FULL torch-importing `.ready` recheck — worth it here since
-            // this call happens once per daemon lifetime, not once per respawn.
-            let bootstrap = tokio::task::spawn_blocking(trusty_embedderd_py::ensure_venv_eager)
-                .await
-                .map_err(|e| anyhow::anyhow!("py-embedder bootstrap task panicked: {e}"));
-
-            match bootstrap.and_then(|r| r.map_err(|e| e.context("py-embedder venv bootstrap"))) {
-                Ok(_layout) => match trusty_embedderd_py::locate_launcher_binary() {
-                    Ok(launcher) => {
-                        let config = resolve_python_supervisor_config();
-                        tracing::info!(
-                            "embedder mode: python/MPS sidecar lazy \
-                             (launcher={}, idle_shutdown_secs={})",
-                            launcher.display(),
-                            config.idle_shutdown_secs,
-                        );
-                        let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
-                        let pid_slot = handle.app_pid_slot();
-                        Ok((
-                            Arc::new(LazySlotEmbedderAdapter {
-                                handle,
-                                is_python: true,
-                            }),
-                            Some(pid_slot),
-                            BackendKind::Python,
-                        ))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "TRUSTY_EMBEDDER=python: could not locate the \
-                             trusty-embedderd-py launcher ({e:#}) — FALLING BACK to the \
-                             Rust ort stdio sidecar. Set TRUSTY_EMBEDDERD_PY_BIN or ensure \
-                             the launcher is on PATH to use the Python/MPS sidecar."
-                        );
-                        build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        "TRUSTY_EMBEDDER=python: venv bootstrap failed ({e:#}) — FALLING \
-                         BACK to the Rust ort stdio sidecar so search does not hard-fail. \
-                         Ensure `uv` is installed (or set TRUSTY_UV_BIN) and there is \
-                         ~3 GB free disk, then restart to retry the Python/MPS sidecar."
-                    );
-                    build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
-                }
-            }
-        }
+        "python" => build_eager_python_embedder()
+            .await
+            .map(|(e, p, k)| (e, p, k, false)),
 
         // ── In-process safety-valve ────────────────────────────────────────
         "in-process" | "local" => {
             tracing::info!("embedder mode: in-process (override via TRUSTY_EMBEDDER=in-process)");
             let embedder = build_in_process_embedder().await?;
-            Ok((embedder, None, BackendKind::InProcess))
+            Ok((embedder, None, BackendKind::InProcess, false))
         }
 
         // ── HTTP remote (manually managed embedderd) ───────────────────────
@@ -268,6 +372,7 @@ async fn build_embedder_raw() -> Result<(
                 }),
                 None,
                 BackendKind::Remote,
+                false,
             ))
         }
 
@@ -280,6 +385,7 @@ async fn build_embedder_raw() -> Result<(
                 Arc::new(UdsEmbedderAdapter { client }),
                 None,
                 BackendKind::Remote,
+                false,
             ))
         }
 
@@ -289,6 +395,78 @@ async fn build_embedder_raw() -> Result<(
              (opt-in Python/MPS sidecar), 'in-process', \
              'http://...', or 'unix:/path/to/socket'"
         ),
+    }
+}
+
+/// Eagerly bootstrap the python venv and arm a lazy-spawn `LazyEmbedderHandle`
+/// for the python/MPS sidecar, falling back to the ort stdio sidecar on ANY
+/// bootstrap or launcher-discovery failure so search never hard-fails.
+///
+/// Why: extracted from the former inline `"python"` match arm body (epic
+/// #3524 slices 2-4) so the exact same eager-blocking logic is reachable both
+/// from the explicit `TRUSTY_EMBEDDER=python` value AND from unset/`auto` +
+/// `TRUSTY_EMBEDDER_PYTHON_EAGER` (PR 3/5) without duplicating it.
+/// What: blocking `ensure_venv_eager` off the async runtime, then
+/// `locate_launcher_binary`, then arms a `LazyEmbedderHandle` exactly like
+/// `build_ort_stdio_sidecar` does for the ort binary.
+/// Test: unaffected by this extraction — same behavior, same call path,
+/// covered by the existing `lazy_adapter_python_reports_mps_provider`.
+async fn build_eager_python_embedder() -> Result<(
+    std::sync::Arc<dyn crate::core::Embedder>,
+    Option<Arc<AtomicU32>>,
+    BackendKind,
+)> {
+    use crate::service::embedder_supervisor::LazyEmbedderHandle;
+
+    // The bootstrap is a blocking, potentially minutes-long one-time
+    // build; run it off the async runtime. `ensure_venv_eager` (not the
+    // plain `ensure_venv` the per-respawn launcher binary uses) pays for
+    // the FULL torch-importing `.ready` recheck — worth it here since
+    // this call happens once per daemon lifetime, not once per respawn.
+    let bootstrap = tokio::task::spawn_blocking(trusty_embedderd_py::ensure_venv_eager)
+        .await
+        .map_err(|e| anyhow::anyhow!("py-embedder bootstrap task panicked: {e}"));
+
+    match bootstrap.and_then(|r| r.map_err(|e| e.context("py-embedder venv bootstrap"))) {
+        Ok(_layout) => match trusty_embedderd_py::locate_launcher_binary() {
+            Ok(launcher) => {
+                let config = resolve_python_supervisor_config();
+                tracing::info!(
+                    "embedder mode: python/MPS sidecar lazy \
+                     (launcher={}, idle_shutdown_secs={})",
+                    launcher.display(),
+                    config.idle_shutdown_secs,
+                );
+                let handle = Arc::new(LazyEmbedderHandle::new(launcher, config));
+                let pid_slot = handle.app_pid_slot();
+                Ok((
+                    Arc::new(LazySlotEmbedderAdapter {
+                        handle,
+                        is_python: true,
+                    }),
+                    Some(pid_slot),
+                    BackendKind::Python,
+                ))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "TRUSTY_EMBEDDER=python: could not locate the \
+                     trusty-embedderd-py launcher ({e:#}) — FALLING BACK to the \
+                     Rust ort stdio sidecar. Set TRUSTY_EMBEDDERD_PY_BIN or ensure \
+                     the launcher is on PATH to use the Python/MPS sidecar."
+                );
+                build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                "TRUSTY_EMBEDDER=python: venv bootstrap failed ({e:#}) — FALLING \
+                 BACK to the Rust ort stdio sidecar so search does not hard-fail. \
+                 Ensure `uv` is installed (or set TRUSTY_UV_BIN) and there is \
+                 ~3 GB free disk, then restart to retry the Python/MPS sidecar."
+            );
+            build_ort_stdio_sidecar().map(|(e, p)| (e, p, BackendKind::Ort))
+        }
     }
 }
 

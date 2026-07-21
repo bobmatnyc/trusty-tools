@@ -189,6 +189,30 @@ impl SwitchableEmbedder {
         self.active.load_full()
     }
 
+    /// Update only the [`BootstrapState`] of the descriptive snapshot,
+    /// leaving the live backend (`inner`) untouched (epic #3524 slice 6,
+    /// PR 3/5).
+    ///
+    /// Why: the graceful-default background orchestrator serves on ort
+    /// while a python bootstrap runs; on final bootstrap/probe failure it
+    /// must record `Failed` (so `/health` stops reporting `Bootstrapping`
+    /// forever) while explicitly staying on the still-installed ort
+    /// backend — i.e. `inner` must NOT change. [`Self::swap_to`] always
+    /// replaces both fields together, so it is the wrong tool here.
+    /// What: reads the current [`ActiveBackend`], clones every field except
+    /// `bootstrap`, and stores a fresh snapshot with `bootstrap` replaced.
+    /// Test: `set_bootstrap_state_leaves_inner_untouched`.
+    pub fn set_bootstrap_state(&self, new_state: BootstrapState) {
+        let current = self.active();
+        self.active.store(Arc::new(ActiveBackend {
+            kind: current.kind,
+            provider: current.provider,
+            model: current.model.clone(),
+            quantized: current.quantized,
+            bootstrap: new_state,
+        }));
+    }
+
     /// Snapshot the currently-installed backend itself.
     ///
     /// Why: shared by `embed`/`embed_batch` so both go through the same
@@ -299,6 +323,32 @@ mod tests {
         assert_eq!(sw.active().kind, BackendKind::Python);
         assert_eq!(sw.active().model, "test-model");
         assert_eq!(sw.active().bootstrap, BootstrapState::NotApplicable);
+    }
+
+    /// `set_bootstrap_state` must update only `active.bootstrap`, leaving the
+    /// installed backend (`inner`) — and every other `ActiveBackend` field —
+    /// unchanged. This is the mechanism the graceful-default orchestrator
+    /// (PR-3) uses to mark a failed python bootstrap `Failed` while staying
+    /// on the still-installed ort backend.
+    #[tokio::test]
+    async fn set_bootstrap_state_leaves_inner_untouched() {
+        let fake = Arc::new(FakeEmbedder::new());
+        let fake_dyn: Arc<dyn Embedder> = Arc::clone(&fake) as Arc<dyn Embedder>;
+        let mut active = test_active(BackendKind::Ort);
+        active.bootstrap = BootstrapState::Bootstrapping;
+        let sw = SwitchableEmbedder::new(fake_dyn, active);
+
+        sw.set_bootstrap_state(BootstrapState::Failed);
+
+        let after = sw.active();
+        assert_eq!(after.kind, BackendKind::Ort);
+        assert_eq!(after.bootstrap, BootstrapState::Failed);
+        assert_eq!(after.model, "test-model");
+
+        // The backend itself must still be the original fake — prove it by
+        // observing the call counter increment on a fresh embed call.
+        sw.embed("probe").await.expect("embed must still work");
+        assert_eq!(fake.calls.load(Ordering::Relaxed), 1);
     }
 
     /// Proves the wait-free-swap contract under load: many concurrent
