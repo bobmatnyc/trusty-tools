@@ -55,7 +55,7 @@ pub(super) async fn build_embedder() -> Result<(
     std::sync::Arc<dyn crate::core::Embedder>,
     Option<Arc<AtomicU32>>,
 )> {
-    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+    use crate::service::embedder_supervisor::LazyEmbedderHandle;
 
     let trusty_embedder_env = std::env::var("TRUSTY_EMBEDDER").unwrap_or_default();
 
@@ -101,7 +101,7 @@ pub(super) async fn build_embedder() -> Result<(
             match bootstrap.and_then(|r| r.map_err(|e| e.context("py-embedder venv bootstrap"))) {
                 Ok(_layout) => match trusty_embedderd_py::locate_launcher_binary() {
                     Ok(launcher) => {
-                        let config = SupervisorConfig::from_env();
+                        let config = resolve_python_supervisor_config();
                         tracing::info!(
                             "embedder mode: python/MPS sidecar lazy \
                              (launcher={}, idle_shutdown_secs={})",
@@ -167,6 +167,82 @@ pub(super) async fn build_embedder() -> Result<(
              (opt-in Python/MPS sidecar), 'in-process', \
              'http://...', or 'unix:/path/to/socket'"
         ),
+    }
+}
+
+/// Python-arm-only override of the shared 300s idle-shutdown default (fast-follow,
+/// epic #3524).
+///
+/// Why: the shared `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` default (300s / 5 min,
+/// issue #2315) is tuned for the lightweight Rust ort sidecar, whose cold
+/// restart is cheap. The Python/MPS sidecar's cold restart (torch import +
+/// model load + one MPS warmup) is only ~2.5-3s, but reclaiming it every 5
+/// minutes of think-time means a normal ~30 minute work session (edit, read,
+/// edit again) repeatedly pays that cost for no real memory benefit in
+/// between. Raising the DEFAULT to 1800s (30 min) — for the python arm only —
+/// keeps the sidecar warm through a typical session while still reclaiming
+/// its ~500 MB after genuine extended idle, which matters on the 16 GB
+/// minimum-spec tier. Operators on higher-RAM machines can set
+/// `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS=0` for always-warm (idle-shutdown
+/// disabled).
+///
+/// What: resolution precedence (see [`resolve_python_idle_shutdown_secs`] for
+/// the pure logic): `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS`, if set to a
+/// valid `u64` (including `0`), wins outright. Otherwise, if the operator
+/// explicitly set the SHARED `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` (present in
+/// the environment at all — any value, including `0`), that value is
+/// honoured: their intent must not be silently overridden. Otherwise the
+/// shared 300s `SupervisorConfig::from_env()` default is replaced with 1800
+/// for this arm only. The ort/default arm (`build_ort_stdio_sidecar`) still
+/// calls `SupervisorConfig::from_env()` directly and is completely unaffected.
+/// Test: `resolve_python_idle_shutdown_secs_*` in `start/tests.rs`.
+pub(super) fn resolve_python_supervisor_config(
+) -> crate::service::embedder_supervisor::SupervisorConfig {
+    use crate::service::embedder_supervisor::SupervisorConfig;
+
+    let mut config = SupervisorConfig::from_env();
+    config.idle_shutdown_secs = resolve_python_idle_shutdown_secs(
+        std::env::var("TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS").ok(),
+        std::env::var("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS").ok(),
+        config.idle_shutdown_secs,
+    );
+    config
+}
+
+/// Pure resolution logic for [`resolve_python_supervisor_config`] — unit
+/// testable without touching real process env vars.
+///
+/// `py_var` / `shared_var` are the RAW `std::env::var(..).ok()` results (so
+/// `None` means "not present at all", distinguishing "unset" from
+/// "explicitly set to the same value as the default" — `SupervisorConfig`
+/// alone cannot make that distinction). `shared_resolved` is the value
+/// `SupervisorConfig::from_env()` already computed for the shared var
+/// (300 when unset/malformed, or the operator's parsed value) — reused here
+/// so a malformed shared value falls back exactly like `parse_env_u64` does,
+/// without re-implementing that parsing.
+pub(super) fn resolve_python_idle_shutdown_secs(
+    py_var: Option<String>,
+    shared_var: Option<String>,
+    shared_resolved: u64,
+) -> u64 {
+    const PYTHON_IDLE_DEFAULT_SECS: u64 = 1800;
+
+    if let Some(raw) = py_var {
+        if let Ok(secs) = raw.trim().parse::<u64>() {
+            return secs;
+        }
+        // Malformed py-specific value: ignore it (matches `parse_env_u64`'s
+        // "malformed falls through" convention) and fall through to the
+        // shared-var-or-1800 resolution below.
+    }
+
+    match shared_var {
+        // Operator explicitly touched the shared var (any value, including a
+        // malformed one that resolved to 300 via `parse_env_u64`) — honour
+        // their intent rather than silently applying the python-specific
+        // default on top of it.
+        Some(_) => shared_resolved,
+        None => PYTHON_IDLE_DEFAULT_SECS,
     }
 }
 

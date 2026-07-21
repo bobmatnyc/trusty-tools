@@ -619,3 +619,164 @@ fn uds_adapter_reports_resolved_provider() {
         "uds adapter must report the sidecar's resolved provider, not the CPU default"
     );
 }
+
+// ── Python-arm idle-shutdown resolution (epic #3524 fast-follow) ───────────
+//
+// `resolve_python_idle_shutdown_secs` is pure (no env access), so these cover
+// the precedence table directly. `resolve_python_supervisor_config_*` below
+// additionally exercise the real-env wiring end to end.
+
+use super::embedder::{resolve_python_idle_shutdown_secs, resolve_python_supervisor_config};
+
+/// py-specific var, when set to a valid value, wins outright — even over an
+/// explicitly-set shared var.
+#[test]
+fn resolve_python_idle_shutdown_secs_py_var_wins_when_set() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(Some("60".to_string()), Some("300".to_string()), 300),
+        60,
+        "TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS must win over the shared var"
+    );
+}
+
+/// `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS=0` (always-warm) must be honoured,
+/// not treated as "unset".
+#[test]
+fn resolve_python_idle_shutdown_secs_py_var_zero_is_honored() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(Some("0".to_string()), None, 1800),
+        0,
+        "py-var 0 must disable idle-shutdown (always-warm), not fall through to 1800"
+    );
+}
+
+/// When the py-var is unset but the operator explicitly set the shared var,
+/// their intent must be honoured rather than silently overridden with 1800.
+#[test]
+fn resolve_python_idle_shutdown_secs_shared_explicit_is_honored_when_py_unset() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(None, Some("120".to_string()), 120),
+        120,
+        "explicit shared var must be honoured when the py-var is unset"
+    );
+}
+
+/// The shared var explicitly set to `0` must also be honoured (not silently
+/// promoted to the python default).
+#[test]
+fn resolve_python_idle_shutdown_secs_shared_explicit_zero_is_honored() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(None, Some("0".to_string()), 0),
+        0,
+        "explicit shared-var 0 must be honoured when the py-var is unset"
+    );
+}
+
+/// Neither var set: the python arm's own 1800s default applies (NOT the
+/// shared 300s default).
+#[test]
+fn resolve_python_idle_shutdown_secs_defaults_to_1800_when_neither_set() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(None, None, 300),
+        1800,
+        "python arm must default to 1800s, not the shared 300s default"
+    );
+}
+
+/// A malformed py-var value must be ignored (fall through to the
+/// shared-var-or-1800 resolution) rather than panicking or silently zeroing.
+#[test]
+fn resolve_python_idle_shutdown_secs_malformed_py_var_falls_through_to_shared() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(
+            Some("not_a_number".to_string()),
+            Some("90".to_string()),
+            90
+        ),
+        90,
+        "malformed py-var must fall through to the explicit shared value"
+    );
+}
+
+/// A malformed py-var value with no shared var set must fall all the way
+/// through to the python 1800s default.
+#[test]
+fn resolve_python_idle_shutdown_secs_malformed_py_var_and_no_shared_falls_through_to_1800() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(Some("bogus".to_string()), None, 300),
+        1800,
+        "malformed py-var with no shared override must fall through to 1800"
+    );
+}
+
+/// End-to-end wiring: with neither env var set, `resolve_python_supervisor_config`
+/// must return `idle_shutdown_secs=1800` while leaving every other
+/// `SupervisorConfig` field at the shared `from_env()` default.
+#[test]
+#[serial]
+fn resolve_python_supervisor_config_defaults_to_1800_and_preserves_other_fields() {
+    let _g1 = EnvGuard::remove("TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS");
+    let _g2 = EnvGuard::remove("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS");
+
+    let config = resolve_python_supervisor_config();
+    assert_eq!(config.idle_shutdown_secs, 1800);
+    assert_eq!(config.startup_timeout_secs, 30);
+    assert_eq!(config.max_restarts, 5);
+}
+
+/// End-to-end wiring: `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS=0` must produce
+/// an always-warm config through the real env-reading path, not just the pure
+/// helper.
+#[test]
+#[serial]
+fn resolve_python_supervisor_config_py_var_zero_is_always_warm() {
+    let _g1 = EnvGuard::set("TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS", "0");
+    let _g2 = EnvGuard::remove("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS");
+
+    let config = resolve_python_supervisor_config();
+    assert_eq!(config.idle_shutdown_secs, 0);
+}
+
+/// RAII guard that restores an env var to its original state on drop.
+///
+/// Why: env vars are global; leaking changes between tests causes flakiness
+/// in parallel runs. Mirrors `embedder_supervisor::tests::EnvGuard` — kept
+/// local here rather than shared, since that one is private to its module.
+struct EnvGuard {
+    key: String,
+    old: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &str, value: &str) -> Self {
+        let old = std::env::var(key).ok();
+        // SAFETY: `#[serial]` guarantees no other test mutates env concurrently.
+        unsafe { std::env::set_var(key, value) }
+        Self {
+            key: key.to_owned(),
+            old,
+        }
+    }
+
+    fn remove(key: &str) -> Self {
+        let old = std::env::var(key).ok();
+        // SAFETY: same invariant as above.
+        unsafe { std::env::remove_var(key) }
+        Self {
+            key: key.to_owned(),
+            old,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: test teardown; no workers live past the test body.
+        unsafe {
+            match &self.old {
+                Some(v) => std::env::set_var(&self.key, v),
+                None => std::env::remove_var(&self.key),
+            }
+        }
+    }
+}
