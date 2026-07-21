@@ -245,17 +245,27 @@ timeout_ms = 5000
 [[tool_registry.endpoints]]
 name = "gworkspace"
 driver = "direct"
-description = "Google Workspace — Gmail, Calendar, Drive, Docs, Sheets, Tasks"
+description = "Google Workspace — Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks"
 command = "trusty-gworkspace-mcp"
 args = []
 enabled = true
+# #3577: "google.slides.*" and "google.accounts.*" added alongside the
+# wire-format fix. Without them, the Slides tools (get_slides,
+# manage_slides, add_slide_content — Google's PRESENTATIONS OAuth scope)
+# and the local account-management tools (list_accounts, add_account,
+# remove_account, set_default_account — Google's USERINFO_PROFILE scope)
+# would parse correctly but then be dropped by scope filtering below,
+# reproducing a milder version of the same "endpoint contributes fewer
+# tools than it should" symptom this issue fixed.
 scopes = [
     "google.gmail.*",
     "google.calendar.*",
     "google.drive.*",
     "google.docs.*",
     "google.sheets.*",
+    "google.slides.*",
     "google.tasks.*",
+    "google.accounts.*",
 ]
 discovery_ttl_secs = 0
 eager_discovery = true

@@ -129,11 +129,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`gworkspace` OpenRPC endpoint no longer silently discovers zero tools
+  (#3577):** `DirectDriver::discover()` deserialized `rpc.discover`'s raw
+  result directly into `EndpointManifest`, which expected a top-level
+  `tools` array; every real server (`trusty-memory`, `trusty-search`,
+  `trusty-gworkspace`) actually emits standard OpenRPC's `methods` array.
+  Because `EndpointManifest.tools` carried `#[serde(default)]`, the shape
+  mismatch deserialized successfully with `tools: vec![]` instead of
+  erroring — the `gworkspace` endpoint (enabled by default since #3056)
+  contributed zero tools in production with no error anywhere. New
+  `discovery::parse_manifest` recognizes the real `methods` shape (and the
+  legacy `tools` shape), converts each OpenRPC method into a
+  `DiscoveredTool` (JSON Schema `input_schema`/`output_schema`
+  reconstructed from `params[]`/`result.schema`), and resolves scope from
+  `x-scopes` (dotted string, used as-is) or `x-google-scopes` (OAuth URLs,
+  mapped to a dotted scope via the new `google_scope` module — classified
+  by what the OAuth grant permits, not by today's per-tool behavior). A
+  payload with neither `methods` nor `tools` now returns a hard error
+  naming the endpoint and the keys actually present, instead of silently
+  producing an empty tool list; a manifest that parses successfully but
+  advertises zero tools now logs a loud warning naming the endpoint.
+  `default-config.toml`'s gworkspace endpoint scopes gained
+  `google.slides.*` and `google.accounts.*`, without which the Slides and
+  local-account-management tools would parse but then be dropped by scope
+  filtering.
+
 - **Test-isolation cluster: env-var and CWD races between concurrently-running tests (issues #3398, #3516).**
   - `ctrl/tests/tools_tests.rs`'s `detect_self_project_finds_via_env_var` / `detect_self_project_returns_none_when_no_marker` used to mutate the process-global `TAGENT_PROJECT_DIR` env var directly, with no `#[serial]` guard — but `workflow::engine::executor::tests::checkpoint_resume` mutates the SAME var under its own `#[serial]` convention, so the unguarded pair could clobber it mid-flight and produce a `CheckpointNotFound` failure in a completely unrelated test (#3398). `ctrl::util::detect_self_project` now delegates to a new `detect_self_project_with_hint(Option<&str>)`; the tests call the hinted version directly, so no env var is touched at all.
   - `telegram::tests::tempdir_for_test` hand-rolled tempdir "uniqueness" from `std::process::id()` (constant across every thread of one test binary) plus a nanosecond timestamp, which can collide under very high `--test-threads` if two threads sample the same clock tick — silently sharing one `telegram.pid` fixture between two of the `telegram_pid_guard_*` tests (#3516). Now uses `tempfile::tempdir()`, which guarantees a collision-free unique directory.
   - `default_bundled_config_dir`'s legacy-migration test (`env_compat.rs`) used to `std::env::set_current_dir` into a scratch tempdir under `#[serial]` — but CWD is process-global exactly like an env var, and `api::server::tests` handler tests resolve their own CWD-relative paths (`.trusty-agents/projects`, `.trusty-agents/agents`) while holding a *different* lock (`HOME_LOCK`), so `#[serial]` alone did not protect them from this CWD swap. `default_bundled_config_dir` now delegates to a new `default_bundled_config_dir_checking(&Path)` that roots its existence checks at an explicit parameter; the test points it at a tempdir directly, so no CWD mutation occurs at all.
   - Verified with the full `trusty-agents` lib suite run repeatedly at `--test-threads=64` and `128` (9 full runs total) with zero failures in `checkpoint_resume`, `telegram_pid_guard_*`, `get_project_config_falls_back_to_registry_when_toml_missing`, or `gather_specs_does_not_spawn_mcp_add_discover_bypass` — not proof the underlying rare flakes (#3514, #3516's second sub-issue) are fully eliminated, but no regression observed either.
+
 - **Assistant can now actually delegate to bundled worker agents (`engineer`,
   `qa-agent`, …) regardless of the invoking CWD (#3555 follow-up):** a live
   run (`tagent --direct assistant --task "have an engineer run cargo check
