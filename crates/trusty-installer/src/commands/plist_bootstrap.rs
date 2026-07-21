@@ -22,14 +22,36 @@
 //! 2. [`decide_downgrade`] refuses to replace an already-registered supervisor
 //!    with an older-or-equal version unless `force` is set — see
 //!    [`install_mpm_supervisor`]'s `force` parameter.
-//! 3. [`HOME_OVERRIDE_ENV`] / [`SKIP_LAUNCHCTL_ENV`] let a sandboxed test
-//!    exercise the plist-write + downgrade-guard decision without touching the
-//!    real user's `~/Library/LaunchAgents` or the real `gui/<uid>` launchd
-//!    domain.
+//!
+//! `#3551` hardening — the #3527 escape hatch above was two INDEPENDENT
+//! process-global env vars: one redirected the resolved home directory, the
+//! other separately skipped the `launchctl` subprocess calls. `resolve_uid()`
+//! (the `gui/<uid>` domain) was not namespaced by either — it always shelled
+//! out to the real `id -u`. A test (or a sandboxed E2E) that set only the
+//! home override, believing that was "isolated", still bootstrapped into the
+//! real, live `gui/<real-uid>` domain, because the domain and the launchctl
+//! calls were never actually gated by the home override at all. That is
+//! precisely what #3551 reported: `$HOME` isolation could not, by
+//! construction, isolate the launchd bootstrap.
+//!
+//! The fix replaces both env vars with one injected parameter,
+//! [`SupervisorTarget`], bundling the three things that must always move
+//! together: `home` (plist/log paths), `domain` (the `launchctl` target,
+//! `gui/<uid>` in production), and `launchctl` (a [`LaunchctlPort`] —
+//! [`RealLaunchctl`] shells out for real, [`StubLaunchctl`] records calls and
+//! never spawns a process). [`install_mpm_supervisor_for`] takes this
+//! parameter explicitly, so a caller cannot accidentally isolate only one of
+//! the three and leave the domain live — there is no env var to forget to
+//! set, and no shared mutable process state a parallel test could race.
+//! [`install_mpm_supervisor`] (the production entry point `install.rs` calls)
+//! builds [`SupervisorTarget::production`] and is otherwise unchanged.
 //!
 //! Test: `tests` covers the placeholder replacement, the downgrade-guard
-//! decision table, and the registered-binary-path parser as pure functions (no
-//! launchctl calls in tests unless `SKIP_LAUNCHCTL_ENV` is set).
+//! decision table, the registered-binary-path parser, and (via
+//! [`StubLaunchctl`]) the full write path — all as pure functions with no
+//! subprocess ever spawned in-test.
+
+use std::path::{Path, PathBuf};
 
 /// The plist label for the trusty-mpm supervisor.
 ///
@@ -41,28 +63,160 @@
 /// Test: `tests::label_constant_matches_plist`.
 pub const PLIST_LABEL: &str = "com.trusty.mpm.supervisor";
 
-/// Test/E2E escape hatch: overrides the home directory used to resolve the
-/// plist path, the log directory, and the `__HOME__` template token (#3527).
+/// Abstraction over the two `launchctl` subcommands this module drives, so
+/// the supervisor bootstrap can be exercised in tests against a stub that
+/// never spawns the real `launchctl` binary and never touches the live
+/// `gui/<uid>` domain (#3551).
 ///
-/// Why: a sandboxed installer E2E needs to exercise the plist-write +
-/// downgrade-guard decision without writing into the real user's
-/// `~/Library/LaunchAgents`. Mirrors the `TRUSTY_DATA_DIR_OVERRIDE` pattern
-/// already used by `ensure::project_setup` for the same reason.
+/// Why: a parameter-injected trait removes the env-mutation hazard the old
+/// `SKIP_LAUNCHCTL_ENV` had — a test simply constructs a [`StubLaunchctl`]
+/// and passes it via [`SupervisorTarget`]; there is no process-global flag to
+/// remember to set (or unset, or race with another test over).
 ///
-/// **Intended for tests only** — never set in production.
+/// What: [`bootout`](LaunchctlPort::bootout) mirrors `launchctl bootout
+/// <domain> <plist_path>` (idempotent unload — the caller always ignores the
+/// result, since it may legitimately fail when nothing is loaded yet).
+/// [`bootstrap`](LaunchctlPort::bootstrap) mirrors `launchctl bootstrap
+/// <domain> <plist_path>`, returning `Err(stderr)` on a nonzero exit or spawn
+/// failure.
 ///
-/// Test: `tests::resolve_home_honours_override`.
-pub const HOME_OVERRIDE_ENV: &str = "TCTL_MPM_SUPERVISOR_HOME_OVERRIDE";
+/// Test: exercised by every `tests::install_mpm_supervisor_for_*` test via
+/// [`StubLaunchctl`]; [`RealLaunchctl`] is exercised only by a real install.
+pub trait LaunchctlPort {
+    /// `launchctl bootout <domain> <plist_path>`.
+    fn bootout(&self, domain: &str, plist_path: &Path);
+    /// `launchctl bootstrap <domain> <plist_path>`.
+    fn bootstrap(&self, domain: &str, plist_path: &Path) -> Result<(), String>;
+}
 
-/// Test/E2E escape hatch: when set (to any value), skips the actual
-/// `launchctl bootout`/`bootstrap` subprocess calls — the plist is still
-/// written to disk (so the write + downgrade-guard logic is exercised) but the
-/// real `gui/<uid>` launchd domain is never touched (#3527).
+/// Production [`LaunchctlPort`]: shells out to the real `launchctl` binary.
 ///
-/// **Intended for tests only** — never set in production.
+/// Test: not exercised directly by tests (it IS the thing #3551 forbids
+/// tests from calling) — every test uses [`StubLaunchctl`] instead.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RealLaunchctl;
+
+impl LaunchctlPort for RealLaunchctl {
+    fn bootout(&self, domain: &str, plist_path: &Path) {
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", domain, plist_path.to_str().unwrap_or("")])
+            .output();
+    }
+
+    fn bootstrap(&self, domain: &str, plist_path: &Path) -> Result<(), String> {
+        let out = std::process::Command::new("launchctl")
+            .args(["bootstrap", domain, plist_path.to_str().unwrap_or("")])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        }
+    }
+}
+
+/// Test-only [`LaunchctlPort`]: records every call it receives and never
+/// spawns a process (#3551).
 ///
-/// Test: `tests::install_mpm_supervisor_writes_plist_and_skips_launchctl`.
-pub const SKIP_LAUNCHCTL_ENV: &str = "TCTL_MPM_SUPERVISOR_SKIP_LAUNCHCTL";
+/// Why: proves — by construction, not by inference from an absence of
+/// crashes or from diffing the live supervisor before/after — that a test
+/// run can never reach the real launchd domain: this type has no code path
+/// that can invoke `Command::new("launchctl")` at all.
+///
+/// What: `calls()` returns every `"bootout <domain> <path>"` /
+/// `"bootstrap <domain> <path>"` invocation in order, for tests that assert
+/// on exactly what would have been sent to launchd. `fail_bootstrap`, when
+/// set, makes `bootstrap` return that error instead of `Ok(())` (for
+/// exercising the bootstrap-failure narration path in `install.rs`).
+///
+/// Test: `tests::install_mpm_supervisor_for_writes_plist_and_never_touches_real_launchctl`
+/// and the other `install_mpm_supervisor_for_*` tests.
+#[derive(Debug, Default)]
+pub struct StubLaunchctl {
+    calls: std::sync::Mutex<Vec<String>>,
+    /// When `Some`, `bootstrap` returns this as `Err` instead of `Ok(())`.
+    pub fail_bootstrap: Option<String>,
+}
+
+impl StubLaunchctl {
+    /// A stub whose `bootstrap` always succeeds.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every call recorded so far, in order, as `"bootout <domain> <path>"` /
+    /// `"bootstrap <domain> <path>"` strings.
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl LaunchctlPort for StubLaunchctl {
+    fn bootout(&self, domain: &str, plist_path: &Path) {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("bootout {domain} {}", plist_path.display()));
+    }
+
+    fn bootstrap(&self, domain: &str, plist_path: &Path) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("bootstrap {domain} {}", plist_path.display()));
+        match &self.fail_bootstrap {
+            Some(e) => Err(e.clone()),
+            None => Ok(()),
+        }
+    }
+}
+
+/// The full injected target for [`install_mpm_supervisor_for`]: where the
+/// plist/log files land (`home`), which launchd domain to bootstrap into
+/// (`domain`), and how to actually talk to launchd (`launchctl`) (#3551).
+///
+/// Why bundle all three: `home` and `domain` must always be overridden
+/// together for isolation to hold — the #3551 bug was exactly a home
+/// override that was NOT paired with a domain/launchctl override, so the
+/// (correctly) redirected plist was still bootstrapped into the real,
+/// live `gui/<real-uid>` domain. One struct makes "override one, forget the
+/// other" impossible to express.
+///
+/// What: [`SupervisorTarget::production`] resolves the real values: the real
+/// home directory, `gui/<real uid>`, and [`RealLaunchctl`]. Tests construct
+/// one directly with a tempdir `home`, a synthetic `domain` string, and a
+/// [`StubLaunchctl`].
+///
+/// Test: `tests::install_mpm_supervisor_for_*`.
+pub struct SupervisorTarget<'a> {
+    /// Home directory used to resolve the plist path, the log directory, and
+    /// the `__HOME__` template token.
+    pub home: PathBuf,
+    /// The `launchctl` domain, e.g. `gui/501` in production.
+    pub domain: String,
+    /// How to actually talk to launchd.
+    pub launchctl: &'a dyn LaunchctlPort,
+}
+
+impl<'a> SupervisorTarget<'a> {
+    /// The real, live production target: the real home directory,
+    /// `gui/<real uid>`, and [`RealLaunchctl`].
+    ///
+    /// Test: not exercised directly (it IS the live target #3551 exists to
+    /// keep tests away from) — covered indirectly by
+    /// `tests::resolve_uid_returns_nonzero_on_real_system`.
+    pub fn production(launchctl: &'a RealLaunchctl) -> anyhow::Result<Self> {
+        let home = dirs::home_dir().ok_or_else(|| {
+            anyhow::anyhow!("cannot determine home directory for plist bootstrap")
+        })?;
+        Ok(Self {
+            home,
+            domain: format!("gui/{}", resolve_uid()),
+            launchctl,
+        })
+    }
+}
 
 /// The embedded plist template with `__HOME__` and `__TM_BINARY_PATH__` tokens.
 ///
@@ -140,14 +294,14 @@ pub fn fill_template(home: &str, tm_path: &str) -> String {
 /// the daemon starts at login and restarts on exit. The installer performs this
 /// step so the operator does not need to follow the README manually.
 ///
-/// What: On macOS only (cfg gate): resolves home dir and tm binary path, fills
-/// the template, creates the log directory, applies the [`decide_downgrade`]
+/// What: On macOS only (cfg gate): builds [`SupervisorTarget::production`]
+/// and delegates to [`install_mpm_supervisor_for`], which fills the
+/// template, creates the log directory, applies the [`decide_downgrade`]
 /// guard against a previously-registered plist, writes the plist to
 /// `~/Library/LaunchAgents/com.trusty.mpm.supervisor.plist`, and runs
 /// `launchctl bootstrap gui/<uid> <plist>` (booting out first if the label is
-/// already loaded) — unless [`SKIP_LAUNCHCTL_ENV`] is set, in which case the
-/// plist is written but launchd is never touched. On non-macOS: prints a short
-/// hint toward the systemd unit and returns Ok(()).
+/// already loaded). On non-macOS: prints a short hint toward the systemd unit
+/// and returns Ok(()).
 ///
 /// `force` (#3527) bypasses the downgrade guard — see [`decide_downgrade`].
 /// The caller (`install::install_all`) is responsible for gating whether this
@@ -166,18 +320,16 @@ pub fn fill_template(home: &str, tm_path: &str) -> String {
 /// against itself and refused to update the supervisor. Taking the path as a
 /// parameter instead of a lookup makes this call site immune to PATH order.
 ///
-/// Test: `tests` covers template filling, the downgrade decision, and the
-/// registered-binary parser (all pure); the plist write + `launchctl` calls are
-/// side-effecting — `tests::install_mpm_supervisor_writes_plist_and_skips_launchctl`
-/// exercises the full write path via [`HOME_OVERRIDE_ENV`] / [`SKIP_LAUNCHCTL_ENV`]
-/// without touching the real user domain;
-/// `tests::install_mpm_supervisor_candidate_version_ignores_path_shadow`
-/// (#3554) proves the candidate-version comparison uses `tm_path` and is
-/// unaffected by a decoy binary placed earlier on `$PATH`.
-pub fn install_mpm_supervisor(force: bool, tm_path: &std::path::Path) -> anyhow::Result<()> {
+/// Test: not exercised directly (it IS the live production path #3551 exists
+/// to keep tests away from) — [`install_mpm_supervisor_for`], which holds
+/// every bit of this function's logic, is covered by
+/// `tests::install_mpm_supervisor_for_*` via [`StubLaunchctl`].
+pub fn install_mpm_supervisor(force: bool, tm_path: &Path) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        install_mpm_supervisor_macos(force, tm_path)
+        let launchctl = RealLaunchctl;
+        let target = SupervisorTarget::production(&launchctl)?;
+        install_mpm_supervisor_for(&target, force, tm_path)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -188,24 +340,6 @@ pub fn install_mpm_supervisor(force: bool, tm_path: &std::path::Path) -> anyhow:
         );
         Ok(())
     }
-}
-
-/// Resolve the home directory used for the plist/log paths, honouring
-/// [`HOME_OVERRIDE_ENV`] (#3527 sandboxed-E2E escape hatch).
-///
-/// Why: extracted so the override check is exercised by
-/// [`install_mpm_supervisor_macos`] without duplicating the env lookup.
-/// What: returns the override when set and non-empty, else `dirs::home_dir()`.
-/// Test: `tests::resolve_home_honours_override`.
-#[cfg(target_os = "macos")]
-fn resolve_home() -> anyhow::Result<std::path::PathBuf> {
-    if let Some(v) = std::env::var_os(HOME_OVERRIDE_ENV) {
-        if !v.is_empty() {
-            return Ok(std::path::PathBuf::from(v));
-        }
-    }
-    dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot determine home directory for plist bootstrap"))
 }
 
 /// The downgrade-guard verdict (#3527).
@@ -293,11 +427,41 @@ pub fn extract_program_path(plist_xml: &str) -> Option<String> {
     Some(rest[start..end].to_owned())
 }
 
-#[cfg(target_os = "macos")]
-fn install_mpm_supervisor_macos(force: bool, tm_path: &std::path::Path) -> anyhow::Result<()> {
+/// The injectable core of the supervisor bootstrap (#3551): every bit of
+/// logic [`install_mpm_supervisor`] runs, parameterised over WHERE it writes
+/// and HOW (or whether) it talks to launchd via `target`.
+///
+/// Why not cfg-gated to macOS: nothing in this function's body is actually
+/// macOS-specific — the `~/Library/LaunchAgents` path is just a path, and the
+/// `launchctl` calls go through the injected [`LaunchctlPort`] rather than
+/// shelling out directly. Leaving it portable lets
+/// `tests::install_mpm_supervisor_for_*` run on every CI runner (`ci.yml`'s
+/// `test` job is `ubuntu-latest`), not only on a macOS development machine —
+/// the previous `#[cfg(target_os = "macos")]` gate on this logic meant the
+/// #3527/#3554 regression tests silently never ran in CI at all. Only
+/// [`install_mpm_supervisor`] (the production entry point, which decides
+/// WHETHER to call this at all) stays macOS-gated, matching real launchd's
+/// actual platform restriction.
+///
+/// What: fills the template, creates the log directory, applies the
+/// [`decide_downgrade`] guard against a previously-registered plist, writes
+/// the plist under `target.home`, then calls `target.launchctl.bootout` /
+/// `.bootstrap` against `target.domain` — idempotent bootout first (errors
+/// ignored — it may not be loaded), hard error on a failed bootstrap.
+///
+/// Test: `tests::install_mpm_supervisor_for_writes_plist_and_never_touches_real_launchctl`,
+/// `tests::install_mpm_supervisor_for_proceeds_when_existing_binary_unprobeable`,
+/// `tests::install_mpm_supervisor_for_candidate_version_ignores_path_shadow`,
+/// `tests::install_mpm_supervisor_for_refuses_downgrade_without_force`,
+/// `tests::install_mpm_supervisor_for_surfaces_bootstrap_failure`.
+pub fn install_mpm_supervisor_for(
+    target: &SupervisorTarget<'_>,
+    force: bool,
+    tm_path: &Path,
+) -> anyhow::Result<()> {
     use anyhow::Context;
 
-    let home = resolve_home()?;
+    let home = &target.home;
     let home_str = home
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("home directory path is not valid UTF-8"))?;
@@ -347,47 +511,21 @@ fn install_mpm_supervisor_macos(force: bool, tm_path: &std::path::Path) -> anyho
     std::fs::write(&plist_path, &plist_content)
         .with_context(|| format!("writing plist to {}", plist_path.display()))?;
 
-    // #3527: sandboxed E2E escape hatch — the plist above is still written
-    // (so the write + downgrade-guard logic is exercised) but the real
-    // `gui/<uid>` launchd domain is never touched.
-    if std::env::var_os(SKIP_LAUNCHCTL_ENV).is_some() {
-        eprintln!(
-            "trusty-mpm supervisor: plist written to {} ({SKIP_LAUNCHCTL_ENV} set — launchctl skipped).",
-            plist_path.display()
-        );
-        return Ok(());
-    }
-
-    // Resolve the current user UID for launchctl gui/<uid>.
-    let uid = resolve_uid();
-
-    // Idempotent load: bootout first (ignore errors — it may not be loaded).
-    let _ = std::process::Command::new("launchctl")
-        .args([
-            "bootout",
-            &format!("gui/{uid}"),
-            plist_path.to_str().unwrap_or(""),
-        ])
-        .output();
-
-    // Bootstrap.
-    let out = std::process::Command::new("launchctl")
-        .args([
-            "bootstrap",
-            &format!("gui/{uid}"),
-            plist_path.to_str().unwrap_or(""),
-        ])
-        .output()
-        .with_context(|| "running launchctl bootstrap")?;
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        anyhow::bail!("launchctl bootstrap failed: {stderr}");
-    }
+    // #3551: idempotent load, bootout first (ignore errors — it may not be
+    // loaded), then bootstrap — both via the INJECTED `target.launchctl` /
+    // `target.domain`, never a hardcoded `RealLaunchctl` / `id -u` lookup.
+    // In production this is `RealLaunchctl` against `gui/<real uid>`; in
+    // tests it is a `StubLaunchctl` that never spawns a process at all.
+    target.launchctl.bootout(&target.domain, &plist_path);
+    target
+        .launchctl
+        .bootstrap(&target.domain, &plist_path)
+        .map_err(|stderr| anyhow::anyhow!("launchctl bootstrap failed: {stderr}"))?;
 
     eprintln!(
-        "trusty-mpm supervisor: plist written to {} and bootstrapped (launchd label: {PLIST_LABEL}).",
-        plist_path.display()
+        "trusty-mpm supervisor: plist written to {} and bootstrapped (launchd label: {PLIST_LABEL}, domain: {}).",
+        plist_path.display(),
+        target.domain
     );
     Ok(())
 }
@@ -438,398 +576,5 @@ pub fn resolve_uid() -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Process-wide lock serialising tests that mutate [`HOME_OVERRIDE_ENV`] /
-    /// [`SKIP_LAUNCHCTL_ENV`] (process-global env vars would otherwise race
-    /// across parallel test threads — mirrors `ensure::ENV_TEST_LOCK`).
-    ///
-    /// Only referenced by the macOS-only tests below — cfg-gated so a non-macOS
-    /// CI run (where those tests don't exist) doesn't hit `-D dead_code`.
-    #[cfg(target_os = "macos")]
-    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Why: The template must contain the two placeholder tokens so fill_template
-    /// has something to replace.
-    /// What: Asserts both `__HOME__` and `__TM_BINARY_PATH__` appear in the raw
-    /// template string.
-    /// Test: This is the test.
-    #[test]
-    fn template_contains_placeholders() {
-        assert!(
-            PLIST_TEMPLATE.contains("__HOME__"),
-            "template missing __HOME__ placeholder"
-        );
-        assert!(
-            PLIST_TEMPLATE.contains("__TM_BINARY_PATH__"),
-            "template missing __TM_BINARY_PATH__ placeholder"
-        );
-    }
-
-    /// Why: `fill_template` must replace every occurrence of both tokens.
-    /// What: Fills with synthetic home + path; asserts neither token survives
-    /// and both replacement values appear in the result.
-    /// Test: This is the test.
-    #[test]
-    fn fill_template_replaces_all_tokens() {
-        let filled = fill_template("/home/testuser", "/usr/local/bin/tm");
-        assert!(!filled.contains("__HOME__"), "unfilled __HOME__ token");
-        assert!(
-            !filled.contains("__TM_BINARY_PATH__"),
-            "unfilled __TM_BINARY_PATH__ token"
-        );
-        assert!(filled.contains("/home/testuser"), "home not in output");
-        assert!(
-            filled.contains("/usr/local/bin/tm"),
-            "tm path not in output"
-        );
-        // Log paths must contain the substituted home.
-        assert!(
-            filled.contains("/home/testuser/.trusty-mpm/logs/supervisor.out.log"),
-            "stdout log path wrong"
-        );
-        assert!(
-            filled.contains("/home/testuser/.trusty-mpm/logs/supervisor.err.log"),
-            "stderr log path wrong"
-        );
-    }
-
-    /// Why: The label constant must match what the plist embeds (label-mismatch
-    /// would cause launchctl to fail with a confusing error).
-    /// What: Asserts PLIST_LABEL appears in the template.
-    /// Test: This is the test.
-    #[test]
-    fn label_constant_matches_plist() {
-        assert!(
-            PLIST_TEMPLATE.contains(PLIST_LABEL),
-            "PLIST_LABEL not found in template"
-        );
-    }
-
-    /// Why: `resolve_tm_binary` must return a non-empty path even when `tm` is
-    /// not installed (fallback path).
-    /// What: Calls with a synthetic home dir; asserts the result is non-empty.
-    /// Test: This is the test.
-    #[test]
-    fn resolve_tm_binary_fallback() {
-        let home = std::path::Path::new("/tmp/fake-home-for-test");
-        let p = resolve_tm_binary(home);
-        assert!(!p.as_os_str().is_empty());
-        // On a system where `tm` is not installed the fallback must not reference `__HOME__`.
-        assert!(!p.to_string_lossy().contains("__"), "placeholder in path");
-    }
-
-    /// Why: `resolve_uid` must return a sensible UID (non-zero in typical CI).
-    /// What: Calls it and asserts the value is parseable (we get an integer back).
-    /// Test: This is the test.
-    #[test]
-    fn resolve_uid_returns_nonzero_on_real_system() {
-        // On macOS and Linux the UID of the test runner is always non-zero in CI
-        // (root-as-UID-0 can run but is unusual in CI; we just assert it is a u32).
-        let uid = resolve_uid();
-        // uid is always a valid u32 — the function never panics.
-        let _ = uid; // just confirm it compiled and ran without panic
-    }
-
-    // ── decide_downgrade (#3527) ─────────────────────────────────────────────
-
-    /// Why: `--force` is the explicit operator override; it must always win
-    /// regardless of the version comparison.
-    /// What: A strictly-older candidate with `force = true` still proceeds.
-    /// Test: This is the test.
-    #[test]
-    fn decide_downgrade_force_always_proceeds() {
-        assert_eq!(
-            decide_downgrade(Some("2.0.0"), Some("1.0.0"), true),
-            DowngradeDecision::Proceed
-        );
-    }
-
-    /// Why: with nothing currently registered (or its version undeterminable),
-    /// there is nothing to guard against — a fresh install must proceed.
-    /// What: `current = None` proceeds regardless of the candidate.
-    /// Test: This is the test.
-    #[test]
-    fn decide_downgrade_no_current_proceeds() {
-        assert_eq!(
-            decide_downgrade(None, Some("0.1.0"), false),
-            DowngradeDecision::Proceed
-        );
-    }
-
-    /// Why: the core happy path — a strictly newer candidate must always
-    /// proceed without needing `--force`.
-    /// What: candidate > current → Proceed.
-    /// Test: This is the test.
-    #[test]
-    fn decide_downgrade_newer_proceeds() {
-        assert_eq!(
-            decide_downgrade(Some("0.19.27"), Some("0.20.0"), false),
-            DowngradeDecision::Proceed
-        );
-    }
-
-    /// Why: THE #3527 regression this guard exists for — an older candidate
-    /// (e.g. a stale GitHub release) must be refused without `--force`.
-    /// What: candidate < current → Refuse.
-    /// Test: This is the test.
-    #[test]
-    fn decide_downgrade_older_refuses() {
-        assert_eq!(
-            decide_downgrade(Some("0.19.27"), Some("0.16.0"), false),
-            DowngradeDecision::Refuse
-        );
-    }
-
-    /// Why: "older-or-equal" per the #3527 spec — a same-version reinstall
-    /// must also be refused (no-op re-bootstrap is not worth a live daemon
-    /// bootout/bootstrap cycle).
-    /// What: candidate == current → Refuse.
-    /// Test: This is the test.
-    #[test]
-    fn decide_downgrade_equal_refuses() {
-        assert_eq!(
-            decide_downgrade(Some("0.19.27"), Some("0.19.27"), false),
-            DowngradeDecision::Refuse
-        );
-    }
-
-    /// Why: an unparseable version string means we cannot PROVE a downgrade;
-    /// failing open avoids blocking a legitimate install on a version-string
-    /// quirk. Also covers a leading `v` prefix being stripped correctly.
-    /// What: unparseable current/candidate → Proceed; `v`-prefixed versions
-    /// parse and compare normally.
-    /// Test: This is the test.
-    #[test]
-    fn decide_downgrade_unparseable_proceeds() {
-        assert_eq!(
-            decide_downgrade(Some("not-a-version"), Some("0.1.0"), false),
-            DowngradeDecision::Proceed
-        );
-        assert_eq!(
-            decide_downgrade(Some("0.1.0"), Some("not-a-version"), false),
-            DowngradeDecision::Proceed
-        );
-        // `v`-prefixed versions must still compare correctly (not treated as
-        // unparseable).
-        assert_eq!(
-            decide_downgrade(Some("v0.19.27"), Some("v0.16.0"), false),
-            DowngradeDecision::Refuse
-        );
-    }
-
-    // ── extract_program_path (#3527) ─────────────────────────────────────────
-
-    /// Why: the downgrade guard parses the EXISTING on-disk plist to find which
-    /// binary is currently registered; pin the happy path against a real
-    /// filled template.
-    /// What: fills the template with a synthetic path and asserts the parser
-    /// recovers it exactly.
-    /// Test: This is the test.
-    #[test]
-    fn extract_program_path_finds_binary() {
-        let filled = fill_template("/home/testuser", "/home/testuser/.local/bin/tm");
-        assert_eq!(
-            extract_program_path(&filled),
-            Some("/home/testuser/.local/bin/tm".to_owned())
-        );
-    }
-
-    /// Why: a plist missing the `ProgramArguments` key (malformed / unexpected
-    /// content) must not panic — the guard should just skip the comparison.
-    /// What: asserts `None` on XML without the key.
-    /// Test: This is the test.
-    #[test]
-    fn extract_program_path_missing_key_is_none() {
-        assert_eq!(extract_program_path("<plist><dict></dict></plist>"), None);
-    }
-
-    // ── resolve_home (#3527) ──────────────────────────────────────────────────
-
-    /// Why: the sandboxed-E2E escape hatch must actually redirect the resolved
-    /// home directory when set.
-    /// What: sets [`HOME_OVERRIDE_ENV`] to a temp dir; asserts `resolve_home`
-    /// returns it verbatim.
-    /// Test: This is the test.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn resolve_home_honours_override() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var(HOME_OVERRIDE_ENV, tmp.path());
-        let resolved = resolve_home().expect("resolve_home");
-        std::env::remove_var(HOME_OVERRIDE_ENV);
-        assert_eq!(resolved, tmp.path());
-    }
-
-    // ── install_mpm_supervisor end-to-end (macOS, sandboxed) ────────────────
-
-    /// Why: the full write path (home resolution, plist write, downgrade
-    /// guard) must be exercisable WITHOUT touching the real user's
-    /// `~/Library/LaunchAgents` or the real `gui/<uid>` launchd domain — the
-    /// whole point of the #3527 sandboxed-E2E escape hatches.
-    /// What: with both `HOME_OVERRIDE_ENV` (a temp dir) and
-    /// `SKIP_LAUNCHCTL_ENV` set, calls `install_mpm_supervisor(false, tm_path)`
-    /// and asserts it succeeds and the plist actually landed under the temp
-    /// home — never under the real home directory. `tm_path` is a synthetic,
-    /// non-existent path (#3554: no longer re-derived via `which tm`, so it
-    /// need not exist for this write-path test — no existing plist means the
-    /// downgrade guard's version probe is never reached).
-    /// Test: This is the test.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn install_mpm_supervisor_writes_plist_and_skips_launchctl() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var(HOME_OVERRIDE_ENV, tmp.path());
-        std::env::set_var(SKIP_LAUNCHCTL_ENV, "1");
-
-        let tm_path = tmp.path().join("local-bin").join("tm");
-        let result = install_mpm_supervisor(false, &tm_path);
-
-        std::env::remove_var(HOME_OVERRIDE_ENV);
-        std::env::remove_var(SKIP_LAUNCHCTL_ENV);
-
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-        let plist_path = tmp
-            .path()
-            .join("Library")
-            .join("LaunchAgents")
-            .join(format!("{PLIST_LABEL}.plist"));
-        assert!(
-            plist_path.exists(),
-            "plist should have been written under the overridden home"
-        );
-    }
-
-    /// Why: when a plist is ALREADY registered but its `ProgramArguments`
-    /// binary no longer exists (so its `--version` cannot be probed), there is
-    /// no PROVABLE downgrade — the guard must fail open rather than block a
-    /// legitimate install on an unprobeable predecessor. Seeding the existing
-    /// plist by hand (rather than depending on whatever `tm` happens to be on
-    /// the test machine's PATH) keeps this hermetic and deterministic
-    /// regardless of the host environment.
-    /// What: writes a plist whose `ProgramArguments[0]` points at a
-    /// guaranteed-nonexistent path, then calls
-    /// `install_mpm_supervisor(false, tm_path)` with a likewise-nonexistent
-    /// `tm_path`; asserts it proceeds (`Ok`).
-    /// Test: This is the test.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn install_mpm_supervisor_proceeds_when_existing_binary_unprobeable() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var(HOME_OVERRIDE_ENV, tmp.path());
-        std::env::set_var(SKIP_LAUNCHCTL_ENV, "1");
-
-        // Seed an existing plist by hand, pointing at a binary that cannot
-        // possibly exist, so `installed_version` deterministically returns
-        // `None` for the "current" side of the comparison.
-        let agents_dir = tmp.path().join("Library").join("LaunchAgents");
-        std::fs::create_dir_all(&agents_dir).expect("create LaunchAgents dir");
-        let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
-        let seeded = fill_template(
-            &tmp.path().to_string_lossy(),
-            "/nonexistent/fake-tm-binary-for-test-xyz",
-        );
-        std::fs::write(&plist_path, seeded).expect("seed plist");
-
-        let candidate_path = tmp.path().join("nonexistent-candidate-tm");
-        let result = install_mpm_supervisor(false, &candidate_path);
-
-        std::env::remove_var(HOME_OVERRIDE_ENV);
-        std::env::remove_var(SKIP_LAUNCHCTL_ENV);
-
-        assert!(
-            result.is_ok(),
-            "an unprobeable existing binary must not block the install: {result:?}"
-        );
-    }
-
-    /// Write a minimal executable shell script at `path` that echoes
-    /// `version_line` on `--version` and exits 0 — a real, probeable binary
-    /// (unlike the "unprobeable" tests above, which deliberately point at
-    /// nonexistent paths).
-    #[cfg(target_os = "macos")]
-    fn write_fake_tm(path: &std::path::Path, version_line: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("mkdir fake tm parent");
-        }
-        std::fs::write(path, format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
-            .expect("write fake tm binary");
-        let mut perms = std::fs::metadata(path)
-            .expect("stat fake tm binary")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).expect("chmod fake tm binary");
-    }
-
-    /// THE #3554 regression, at the `install_mpm_supervisor` level: the
-    /// CANDIDATE-version comparison must come from the passed `tm_path` —
-    /// never re-derived via a `which tm` PATH lookup — even when a decoy
-    /// `tm` sits EARLIER on `$PATH` than the real candidate.
-    ///
-    /// Proven causally, not just by absence of a crash: the registered
-    /// ("current") version (0.19.27) sits strictly BETWEEN the decoy's
-    /// version (0.19.20) and the real candidate's version (0.19.29). If this
-    /// function regressed to re-resolve the candidate via PATH (finding the
-    /// OLDER decoy), [`decide_downgrade`] would REFUSE (0.19.20 <=
-    /// 0.19.27) — exactly the #3554 symptom ("registered version is not
-    /// older than the candidate version"). Using the real, passed `tm_path`
-    /// (0.19.29, strictly newer) it must PROCEED and write a plist
-    /// referencing `tm_path`, not the decoy.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn install_mpm_supervisor_candidate_version_ignores_path_shadow() {
-        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::env::set_var(HOME_OVERRIDE_ENV, tmp.path());
-        std::env::set_var(SKIP_LAUNCHCTL_ENV, "1");
-
-        // Registered ("current") binary — a real, probeable fake binary at
-        // 0.19.27, referenced by a hand-seeded existing plist.
-        let registered_bin = tmp.path().join("registered-tm");
-        write_fake_tm(&registered_bin, "trusty-mpm 0.19.27");
-        let agents_dir = tmp.path().join("Library").join("LaunchAgents");
-        std::fs::create_dir_all(&agents_dir).expect("create LaunchAgents dir");
-        let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
-        let seeded = fill_template(
-            &tmp.path().to_string_lossy(),
-            registered_bin.to_str().expect("utf8 path"),
-        );
-        std::fs::write(&plist_path, seeded).expect("seed plist");
-
-        // Decoy binary EARLIER on $PATH — OLDER than the registered version.
-        let decoy_dir = tmp.path().join("decoy-early-path");
-        write_fake_tm(&decoy_dir.join("tm"), "trusty-mpm 0.19.20");
-        let prev_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{prev_path}", decoy_dir.display()));
-
-        // The REAL just-installed candidate — NEWER than registered — at a
-        // path that is NOT first on $PATH (mirrors #3554: `~/.local/bin`
-        // shadowed by an earlier `~/.cargo/bin`).
-        let candidate_bin = tmp.path().join("local-bin").join("tm");
-        write_fake_tm(&candidate_bin, "trusty-mpm 0.19.29");
-
-        let result = install_mpm_supervisor(false, &candidate_bin);
-
-        std::env::set_var("PATH", prev_path);
-        std::env::remove_var(HOME_OVERRIDE_ENV);
-        std::env::remove_var(SKIP_LAUNCHCTL_ENV);
-
-        assert!(
-            result.is_ok(),
-            "must proceed using the passed candidate (0.19.29 > registered 0.19.27); \
-             a failure here means the candidate was re-resolved via the PATH-shadowed \
-             decoy (0.19.20 <= 0.19.27, which would refuse): {result:?}"
-        );
-        let written = std::fs::read_to_string(&plist_path).expect("read written plist");
-        assert_eq!(
-            extract_program_path(&written).as_deref(),
-            Some(candidate_bin.to_str().expect("utf8 path")),
-            "the written plist must reference the passed tm_path, never a PATH-resolved one"
-        );
-    }
-}
+#[path = "plist_bootstrap_tests.rs"]
+mod tests;
