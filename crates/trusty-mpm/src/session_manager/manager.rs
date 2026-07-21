@@ -31,6 +31,7 @@ use crate::core::sm::control::Submit;
 
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::resume_workdir;
+use super::slots::SlotRegistry;
 use super::store::{SessionStore, StoreError};
 
 /// Errors produced by the session manager.
@@ -183,6 +184,11 @@ pub struct SessionManager {
     /// tmux driver; `pub(crate)` for the decommission / adopt sibling modules.
     pub(crate) tmux: Arc<dyn ManagedTmuxDriver>,
     data_dir: PathBuf,
+    /// Stable `tm ls` slot numbering (#3034) — in-memory ONLY, deliberately
+    /// never persisted. See [`SlotRegistry`]'s doc for why a fresh instance
+    /// per daemon process is exactly the "reset numbering on restart"
+    /// requirement. `pub(crate)` for the sibling `numbering.rs`.
+    pub(crate) slots: RwLock<SlotRegistry>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -213,6 +219,7 @@ impl SessionManager {
             store: Arc::new(RwLock::new(store)),
             tmux,
             data_dir: data_dir.to_owned(),
+            slots: RwLock::new(SlotRegistry::new()),
         })
     }
 
@@ -347,6 +354,11 @@ impl SessionManager {
             }
         }
     }
+
+    // `numbered_snapshot` (#3034) lives in the sibling `numbering.rs` — see
+    // this file's module doc for why sibling extraction keeps this file
+    // under the 500-SLOC cap (the same pattern `reactivate.rs`/`reconcile.rs`
+    // already use for `mark_reactivated`/`reconcile_on_boot`).
 
     /// Inject text into a live session's tmux pane (Enter-submit variant).
     ///

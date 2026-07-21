@@ -310,6 +310,8 @@ fn decommission_workspace_removed_reflects_ownership() {
         unresumable: false,
         stale_assets: false,
         attached: false,
+        slot: 0,
+        deleted: false,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -347,6 +349,8 @@ fn decommission_workspace_removed_reflects_ownership() {
         unresumable: false,
         stale_assets: false,
         attached: false,
+        slot: 0,
+        deleted: false,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,

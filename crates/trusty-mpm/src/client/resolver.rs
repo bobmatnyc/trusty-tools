@@ -191,6 +191,8 @@ mod tests {
             unresumable: false,
             stale_assets: false,
             attached: false,
+            slot: 0,
+            deleted: false,
         };
         let items = vec![summary("m-1", "tmpm-red-owl"), summary("m-2", "api")];
         assert_eq!(

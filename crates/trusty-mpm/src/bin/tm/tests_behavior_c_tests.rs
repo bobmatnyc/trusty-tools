@@ -36,7 +36,6 @@ use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
     ResumeAction, is_zombie, needs_restart, plan_resume, resume_classification_state,
 };
-use crate::commands::managed::{filter_live_sessions, is_live_session_state};
 // The picker decision enum + parser moved to the shared `session_picker` module.
 use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
 
@@ -46,11 +45,11 @@ use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
 fn guided_picker_bare_enter_no_sessions_launches_new() {
     // Why: bare Enter with no sessions must launch a new session, not hang.
     assert_eq!(
-        parse_picker_choice("", 0, false, &[]),
+        parse_picker_choice("", &[], false),
         PickerDecision::LaunchNew
     );
     assert_eq!(
-        parse_picker_choice("  \t", 0, false, &[]),
+        parse_picker_choice("  \t", &[], false),
         PickerDecision::LaunchNew
     );
 }
@@ -61,11 +60,11 @@ fn guided_picker_bare_enter_live_session_resumes_first() {
     // restart) must resume it directly — attaching to a live pane is safe,
     // it never destroys anything (#2148).
     assert_eq!(
-        parse_picker_choice("", 1, false, &[]),
+        parse_picker_choice("", &picker_fixture(1, &[]), false),
         PickerDecision::Resume(0)
     );
     assert_eq!(
-        parse_picker_choice("  ", 3, false, &[]),
+        parse_picker_choice("  ", &picker_fixture(3, &[]), false),
         PickerDecision::Resume(0)
     );
 }
@@ -75,11 +74,11 @@ fn guided_picker_bare_enter_stopped_session_requires_confirm() {
     // #2148: bare Enter must NOT silently restart (kill+recreate the tmux pane
     // of) a stopped/errored session — the operator must type the number.
     assert_eq!(
-        parse_picker_choice("", 1, true, &[]),
+        parse_picker_choice("", &picker_fixture(1, &[]), true),
         PickerDecision::ConfirmRestart(0)
     );
     assert_eq!(
-        parse_picker_choice("  ", 3, true, &[]),
+        parse_picker_choice("  ", &picker_fixture(3, &[]), true),
         PickerDecision::ConfirmRestart(0)
     );
 }
@@ -92,11 +91,11 @@ fn guided_picker_bare_enter_unresumable_session_blocked() {
     // `ConfirmRestart` (`first_needs_restart=true` here too — a dead session
     // is ALWAYS stopped/errored, so both flags are set; `Unresumable` must win).
     assert_eq!(
-        parse_picker_choice("", 1, true, &[true]),
+        parse_picker_choice("", &picker_fixture(1, &[true]), true),
         PickerDecision::Unresumable(0)
     );
     assert_eq!(
-        parse_picker_choice("  ", 3, true, &[true, false, false]),
+        parse_picker_choice("  ", &picker_fixture(3, &[true, false, false]), true),
         PickerDecision::Unresumable(0)
     );
 }
@@ -107,52 +106,121 @@ fn guided_picker_numeric_unresumable_session_blocked() {
     // dead session — the pre-#2595 comment on the numeric branch ("always
     // restarts/resumes directly") is no longer true for this one case.
     assert_eq!(
-        parse_picker_choice("2", 3, false, &[false, true, false]),
+        parse_picker_choice("2", &picker_fixture(3, &[false, true, false]), false),
         PickerDecision::Unresumable(1)
     );
     // A live session at a DIFFERENT index must still resume normally even
     // when another slot in the same menu is dead.
     assert_eq!(
-        parse_picker_choice("1", 3, false, &[false, true, false]),
+        parse_picker_choice("1", &picker_fixture(3, &[false, true, false]), false),
         PickerDecision::Resume(0)
     );
 }
 
 #[test]
-fn guided_picker_delete_parses_d_prefix() {
-    // #2304: `d<N>` / `d <N>` selects the Nth session (0-based) for deletion.
+fn guided_picker_numeric_deleted_slot_blocked() {
+    // #3034: typing a slot number the daemon reports as deleted must be a
+    // clear, explicit outcome — never a silent fallthrough to whichever
+    // session now occupies a neighboring row.
+    let sessions = vec![
+        at_slot(make_session("s1", "active", None), 1),
+        deleted_slot(2),
+        at_slot(make_session("s3", "active", None), 3),
+    ];
     assert_eq!(
-        parse_picker_choice("d1", 1, false, &[]),
+        parse_picker_choice("2", &sessions, false),
+        PickerDecision::SlotDeleted(1)
+    );
+    // A live neighbor's number must still resolve normally.
+    assert_eq!(
+        parse_picker_choice("3", &sessions, false),
+        PickerDecision::Resume(2)
+    );
+}
+
+#[test]
+fn guided_picker_bare_enter_on_deleted_first_slot_blocked() {
+    // #3034: if slot 1 itself was deleted, bare Enter (which defaults to the
+    // first displayed row) must report the tombstone, never silently resume
+    // whatever now happens to be first in the vec.
+    let sessions = vec![
+        deleted_slot(1),
+        at_slot(make_session("s2", "active", None), 2),
+    ];
+    assert_eq!(
+        parse_picker_choice("", &sessions, false),
+        PickerDecision::SlotDeleted(0)
+    );
+}
+
+#[test]
+fn guided_picker_delete_prefix_on_deleted_slot_blocked() {
+    // #3034: `d<N>` on an already-deleted slot must not double-delete or
+    // silently no-op — it resolves to the same clear `SlotDeleted` outcome.
+    let sessions = vec![
+        at_slot(make_session("s1", "active", None), 1),
+        deleted_slot(2),
+    ];
+    assert_eq!(
+        parse_picker_choice("d2", &sessions, false),
+        PickerDecision::SlotDeleted(1)
+    );
+}
+
+#[test]
+fn guided_picker_launch_new_uses_highest_slot_with_gaps() {
+    // #3034: the "launch new" marker must be (highest DISPLAYED slot) + 1,
+    // not `sessions.len() + 1` — a tombstoned/filtered gap must not shift it.
+    let sessions = vec![
+        at_slot(make_session("s1", "active", None), 1),
+        deleted_slot(5),
+    ];
+    assert_eq!(
+        parse_picker_choice("6", &sessions, false),
+        PickerDecision::LaunchNew
+    );
+    // The old `len()+1` value (3) must NOT be treated as launch-new here.
+    assert_eq!(
+        parse_picker_choice("3", &sessions, false),
+        PickerDecision::Unrecognised
+    );
+}
+
+#[test]
+fn guided_picker_delete_parses_d_prefix() {
+    // #2304: `d<N>` / `d <N>` selects the session whose stable slot is N.
+    assert_eq!(
+        parse_picker_choice("d1", &picker_fixture(1, &[]), false),
         PickerDecision::Delete(0)
     );
     assert_eq!(
-        parse_picker_choice("d2", 3, true, &[]),
+        parse_picker_choice("d2", &picker_fixture(3, &[]), true),
         PickerDecision::Delete(1)
     );
     assert_eq!(
-        parse_picker_choice("D3\n", 3, false, &[]),
+        parse_picker_choice("D3\n", &picker_fixture(3, &[]), false),
         PickerDecision::Delete(2)
     );
     assert_eq!(
-        parse_picker_choice("d 2", 3, false, &[]),
+        parse_picker_choice("d 2", &picker_fixture(3, &[]), false),
         PickerDecision::Delete(1)
     );
 }
 
 #[test]
 fn guided_picker_delete_out_of_range_unrecognised() {
-    // A `d`-prefixed choice outside 1..=session_count (or non-numeric) is
+    // A `d`-prefixed choice matching no displayed slot (or non-numeric) is
     // rejected — never falls through to the resume/launch branches.
     assert_eq!(
-        parse_picker_choice("d4", 3, false, &[]),
+        parse_picker_choice("d4", &picker_fixture(3, &[]), false),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("d0", 3, false, &[]),
+        parse_picker_choice("d0", &picker_fixture(3, &[]), false),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("dx", 3, false, &[]),
+        parse_picker_choice("dx", &picker_fixture(3, &[]), false),
         PickerDecision::Unrecognised
     );
 }
@@ -160,81 +228,78 @@ fn guided_picker_delete_out_of_range_unrecognised() {
 #[test]
 fn guided_picker_q_returns_quit() {
     // Why: "q" must quit cleanly without touching tmux or the daemon.
+    assert_eq!(parse_picker_choice("q", &[], false), PickerDecision::Quit);
     assert_eq!(
-        parse_picker_choice("q", 0, false, &[]),
+        parse_picker_choice("q", &picker_fixture(3, &[]), true),
         PickerDecision::Quit
     );
-    assert_eq!(parse_picker_choice("q", 3, true, &[]), PickerDecision::Quit);
 }
 
 #[test]
 fn guided_picker_q_uppercase_returns_quit() {
     // Why: "Q" must be treated identically to "q" (case-insensitive).
     assert_eq!(
-        parse_picker_choice("Q", 2, false, &[]),
+        parse_picker_choice("Q", &picker_fixture(2, &[]), false),
         PickerDecision::Quit
     );
-    assert_eq!(
-        parse_picker_choice("Q\n", 0, false, &[]),
-        PickerDecision::Quit
-    );
+    assert_eq!(parse_picker_choice("Q\n", &[], false), PickerDecision::Quit);
 }
 
 #[test]
 fn guided_picker_numeric_valid_resumes() {
-    // Why: "[N]" where 1 <= N <= session_count must resume the Nth session
-    // (0-based) — an EXPLICIT numeric choice always dispatches directly,
-    // regardless of `first_needs_restart` (that flag only gates bare Enter).
+    // Why: "[N]" matching a live session's slot must resume it — an EXPLICIT
+    // numeric choice always dispatches directly, regardless of
+    // `first_needs_restart` (that flag only gates bare Enter).
     assert_eq!(
-        parse_picker_choice("1", 1, true, &[]),
+        parse_picker_choice("1", &picker_fixture(1, &[]), true),
         PickerDecision::Resume(0)
     );
     assert_eq!(
-        parse_picker_choice("1", 3, true, &[]),
+        parse_picker_choice("1", &picker_fixture(3, &[]), true),
         PickerDecision::Resume(0)
     );
     assert_eq!(
-        parse_picker_choice("2", 3, false, &[]),
+        parse_picker_choice("2", &picker_fixture(3, &[]), false),
         PickerDecision::Resume(1)
     );
     assert_eq!(
-        parse_picker_choice("3", 3, false, &[]),
+        parse_picker_choice("3", &picker_fixture(3, &[]), false),
         PickerDecision::Resume(2)
     );
     // With newline (as stdin read_line returns)
     assert_eq!(
-        parse_picker_choice("2\n", 3, false, &[]),
+        parse_picker_choice("2\n", &picker_fixture(3, &[]), false),
         PickerDecision::Resume(1)
     );
 }
 
 #[test]
 fn guided_picker_numeric_launch_new() {
-    // Why: "[session_count+1]" must always launch a new session.
+    // Why: "[highest slot + 1]" must always launch a new session.
     assert_eq!(
-        parse_picker_choice("1", 0, false, &[]),
+        parse_picker_choice("1", &[], false),
         PickerDecision::LaunchNew
     );
     assert_eq!(
-        parse_picker_choice("4", 3, false, &[]),
+        parse_picker_choice("4", &picker_fixture(3, &[]), false),
         PickerDecision::LaunchNew
     );
 }
 
 #[test]
 fn guided_picker_out_of_range_unrecognised() {
-    // Why: a number out of range (>session_count+1) must not silently
-    // resume or launch — it must be rejected cleanly.
+    // Why: a number matching no displayed slot and not the launch-new marker
+    // must not silently resume or launch — it must be rejected cleanly.
     assert_eq!(
-        parse_picker_choice("5", 3, false, &[]),
+        parse_picker_choice("5", &picker_fixture(3, &[]), false),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("100", 1, false, &[]),
+        parse_picker_choice("100", &picker_fixture(1, &[]), false),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("0", 3, false, &[]),
+        parse_picker_choice("0", &picker_fixture(3, &[]), false),
         PickerDecision::Unrecognised
     );
 }
@@ -243,15 +308,15 @@ fn guided_picker_out_of_range_unrecognised() {
 fn guided_picker_non_numeric_unrecognised() {
     // Why: arbitrary text input must be rejected without panicking.
     assert_eq!(
-        parse_picker_choice("abc", 2, false, &[]),
+        parse_picker_choice("abc", &picker_fixture(2, &[]), false),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("exit", 0, false, &[]),
+        parse_picker_choice("exit", &[], false),
         PickerDecision::Unrecognised
     );
     assert_eq!(
-        parse_picker_choice("1a", 3, false, &[]),
+        parse_picker_choice("1a", &picker_fixture(3, &[]), false),
         PickerDecision::Unrecognised
     );
 }
@@ -865,6 +930,8 @@ fn make_session(
         unresumable: false,
         stale_assets: false,
         attached: false,
+        slot: 0,
+        deleted: false,
     }
 }
 
@@ -882,6 +949,50 @@ fn make_session_with_persisted_state(
         persisted_state: Some(persisted_state.to_string()),
         ..make_session(name, displayed_state, None)
     }
+}
+
+/// Build `count` LIVE sessions with sequential stable slots `1..=count`, for
+/// `parse_picker_choice` tests (#3034) — the daemon-assigned numbering the
+/// picker resolves typed input against, rather than a recomputed positional
+/// index.
+///
+/// Why: pre-#3034 tests called `parse_picker_choice` with a bare
+/// `session_count: usize`; the daemon-numbered rewrite takes the full
+/// `&[ManagedSessionSummary]` menu instead, so every test needs a slotted
+/// fixture. `unresumable[i]` (when present) flags that session dead, matching
+/// the old tests' `&[bool]` parameter.
+fn picker_fixture(
+    count: usize,
+    unresumable: &[bool],
+) -> Vec<trusty_mpm::client::ManagedSessionSummary> {
+    (0..count)
+        .map(|i| {
+            let mut s = make_session(&format!("s{}", i + 1), "active", None);
+            s.slot = (i + 1) as u32;
+            s.unresumable = unresumable.get(i).copied().unwrap_or(false);
+            s
+        })
+        .collect()
+}
+
+/// Build a tombstoned (`deleted: true`) row at `slot`, for the #3034
+/// slot-resolution tests.
+fn deleted_slot(slot: u32) -> trusty_mpm::client::ManagedSessionSummary {
+    let mut s = make_session("gone", "deleted", None);
+    s.slot = slot;
+    s.deleted = true;
+    s
+}
+
+/// Set `slot` on a `ManagedSessionSummary` fixture and return it, for tests
+/// that build a hand-assembled menu with tombstones interspersed among live
+/// rows (#3034) rather than using the uniform [`picker_fixture`].
+fn at_slot(
+    mut s: trusty_mpm::client::ManagedSessionSummary,
+    slot: u32,
+) -> trusty_mpm::client::ManagedSessionSummary {
+    s.slot = slot;
+    s
 }
 
 // ── needs_restart (#1742) ─────────────────────────────────────────────────────
@@ -1612,135 +1723,11 @@ fn guided_non_github_refusal_message_reassures_live_checkout_untouched() {
     );
 }
 
-// ── #1809: decommissioned-tombstone filter ────────────────────────────────────
-
-#[test]
-fn picker_filter_live_state_excludes_decommissioned() {
-    // Why (#1809): `is_live_session_state` is the canonical predicate for
-    // "should this session appear in the picker / sessions list by default?".
-    // Test: concrete state → expected bool, not derived from the same expression.
-    assert!(
-        !is_live_session_state("decommissioned"),
-        "decommissioned must be excluded from default view"
-    );
-    // Active sessions must always be visible.
-    assert!(
-        is_live_session_state("active"),
-        "active must be included in default view"
-    );
-    // Stopped/errored sessions can still be resumed — they must show.
-    assert!(
-        is_live_session_state("stopped"),
-        "stopped must be included in default view"
-    );
-    assert!(
-        is_live_session_state("errored"),
-        "errored must be included in default view"
-    );
-    // Provisioning sessions are in-flight — they must show.
-    assert!(
-        is_live_session_state("provisioning"),
-        "provisioning must be included in default view"
-    );
-}
-
-#[test]
-fn is_live_session_state_excludes_deleted() {
-    // code-critic CRITICAL: a `--deleted--` tombstone is TERMINAL — it must be
-    // excluded from the default picker/list exactly like `decommissioned`, so it
-    // is never offered as a resume target (which would resurrect it).
-    assert!(
-        !is_live_session_state("deleted"),
-        "deleted must be excluded from the default picker/list view"
-    );
-    // Both terminal tombstones are excluded; every live state is kept.
-    assert!(!is_live_session_state("decommissioned"));
-    assert!(is_live_session_state("active"));
-    assert!(is_live_session_state("stopped"));
-}
-
-#[test]
-fn picker_filter_excludes_decommissioned_keeps_active() {
-    // Why (#1809): `filter_live_sessions` must drop decommissioned tombstones and
-    // retain all other states. We construct a mixed slice and assert concrete counts
-    // and membership — not the same expression used to compute the filter.
-    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
-        serde_json::from_value(serde_json::json!([
-            { "id": "a1", "name": "sess-active",        "state": "active" },
-            { "id": "b2", "name": "sess-dead-1",        "state": "decommissioned" },
-            { "id": "c3", "name": "sess-stopped",       "state": "stopped" },
-            { "id": "d4", "name": "sess-dead-2",        "state": "decommissioned" },
-            { "id": "e5", "name": "sess-provisioning",  "state": "provisioning" },
-        ]))
-        .expect("test data must deserialize");
-
-    let filtered = filter_live_sessions(sessions);
-
-    // Exactly 3 of the 5 sessions survive the filter.
-    assert_eq!(
-        filtered.len(),
-        3,
-        "filter must keep exactly 3 live sessions (active, stopped, provisioning)"
-    );
-    // Active session must be present.
-    assert!(
-        filtered.iter().any(|s| s.state == "active"),
-        "active session must survive filter"
-    );
-    // Stopped session must be present (can be resumed).
-    assert!(
-        filtered.iter().any(|s| s.state == "stopped"),
-        "stopped session must survive filter"
-    );
-    // Provisioning session must be present (in-flight).
-    assert!(
-        filtered.iter().any(|s| s.state == "provisioning"),
-        "provisioning session must survive filter"
-    );
-    // Neither decommissioned session must appear.
-    assert!(
-        !filtered.iter().any(|s| s.state == "decommissioned"),
-        "decommissioned tombstones must be excluded"
-    );
-}
-
-#[test]
-fn picker_filter_all_live_sessions_unchanged() {
-    // Why: when no sessions are decommissioned, `filter_live_sessions` must
-    // return all sessions unchanged — no unexpected truncation.
-    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
-        serde_json::from_value(serde_json::json!([
-            { "id": "x1", "name": "sess-a", "state": "active" },
-            { "id": "x2", "name": "sess-b", "state": "stopped" },
-            { "id": "x3", "name": "sess-c", "state": "errored" },
-        ]))
-        .expect("test data must deserialize");
-
-    let filtered = filter_live_sessions(sessions);
-    assert_eq!(
-        filtered.len(),
-        3,
-        "all-live input must pass through unchanged (3 sessions)"
-    );
-}
-
-#[test]
-fn picker_filter_all_decommissioned_returns_empty() {
-    // Why: if every session is decommissioned, the picker must show an empty list
-    // (not crash or return some sessions).
-    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
-        serde_json::from_value(serde_json::json!([
-            { "id": "z1", "name": "old-1", "state": "decommissioned" },
-            { "id": "z2", "name": "old-2", "state": "decommissioned" },
-        ]))
-        .expect("test data must deserialize");
-
-    let filtered = filter_live_sessions(sessions);
-    assert!(
-        filtered.is_empty(),
-        "all-decommissioned input must produce empty list"
-    );
-}
+// `picker_filter_*` / `is_live_session_state_*` (#1809, #3034/#3044) moved to
+// `tests_behavior_e_tests.rs` (#1916-style line-cap rebalance) — this file
+// was pushed over the 1500-SLOC test cap by the #3044 reconciliation's added
+// coverage; that sibling file had headroom under the same split convention
+// this repo already uses for `tests_behavior_c/d/e`.
 
 // ── #1808: daily banner uses two-panel renderer ───────────────────────────────
 

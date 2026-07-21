@@ -538,6 +538,34 @@ pub struct ManagedSessionSummary {
     /// Test: rendered by the `tm ls` picker/table.
     #[serde(default)]
     pub attached: bool,
+    /// Stable, daemon-lifetime `tm ls` slot number (additive; issue #3034).
+    /// Mirrors `daemon::managed_routes::SessionSummary::slot` field-for-field.
+    ///
+    /// Why: renumbering sessions on every fetch let an operator (or PM agent)
+    /// holding a number from an earlier listing act on the WRONG session once
+    /// a delete shifted every later row down. The daemon now assigns each
+    /// session a number once, for the life of the daemon process, and never
+    /// reuses it — every by-number CLI surface (the picker, `d<N>` delete)
+    /// must read THIS field rather than recomputing a positional index.
+    /// `#[serde(default)]` keeps the client tolerant of an older daemon that
+    /// omits the field — it deserializes to `0`, an otherwise-unassigned
+    /// sentinel (slots are 1-based).
+    /// Test: `managed_session_summary_deserializes_slot_and_deleted`.
+    #[serde(default)]
+    pub slot: u32,
+    /// True when this row is a tombstone placeholder for a deleted slot
+    /// (additive; issue #3034). Mirrors
+    /// `daemon::managed_routes::SessionSummary::deleted` field-for-field.
+    ///
+    /// Why: Bob's requirement — a deleted session's slot renders as
+    /// `-- deleted --` instead of disappearing, so the operator never mistakes
+    /// a shifted neighbor for the session they meant. Every other field is
+    /// blank when this is `true`.
+    /// What: `#[serde(default)]` keeps the client tolerant of an older daemon
+    /// that omits the field — it deserializes to `false`.
+    /// Test: `managed_session_summary_deserializes_slot_and_deleted`.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

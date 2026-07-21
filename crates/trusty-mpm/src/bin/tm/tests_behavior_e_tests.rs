@@ -14,12 +14,19 @@
 //! What: parse round-trips for `Command::Sessions` and a full sweep of every
 //! `SessionAction` verb asserting `tm session <verb>` and `tm sessions <verb>`
 //! parse to the identical action.
+//!
+//! Also carries the `#1809`/`#3034`/`#3044` decommissioned/deleted-tombstone
+//! picker-filter coverage (`is_live_session_state_*`, `picker_filter_*`),
+//! moved here from `tests_behavior_c_tests.rs` when the #3044 reconciliation's
+//! added tests pushed that file over the 1500-SLOC test cap — this file had
+//! headroom under the same `tests_behavior_c/d/e` split convention.
 //! Test: `cargo test -p trusty-mpm` runs this file as part of the `tm` binary
 //! test suite.
 
 use clap::Parser;
 
 use crate::cli::{Cli, Command, SessionAction};
+use crate::commands::managed::{filter_live_sessions, is_live_session_state};
 
 #[test]
 fn cli_parses_sessions_plural_canonical() {
@@ -237,5 +244,191 @@ fn truncate_for_display_caps_long_bodies() {
         result.ends_with("… (truncated)"),
         "a truncated body must be marked as such, got tail: {:?}",
         &result[result.len().saturating_sub(20)..]
+    );
+}
+
+// ── #1809: decommissioned-tombstone filter ────────────────────────────────────
+
+#[test]
+fn picker_filter_live_state_excludes_decommissioned() {
+    // Why (#1809): `is_live_session_state` is the canonical predicate for
+    // "should this session appear in the picker / sessions list by default?".
+    // Test: concrete state → expected bool, not derived from the same expression.
+    // None of these are #3034 slot tombstones, so `is_slot_tombstone` is `false`
+    // throughout — it is only consulted when `state == "deleted"`.
+    assert!(
+        !is_live_session_state("decommissioned", false),
+        "decommissioned must be excluded from default view"
+    );
+    // Active sessions must always be visible.
+    assert!(
+        is_live_session_state("active", false),
+        "active must be included in default view"
+    );
+    // Stopped/errored sessions can still be resumed — they must show.
+    assert!(
+        is_live_session_state("stopped", false),
+        "stopped must be included in default view"
+    );
+    assert!(
+        is_live_session_state("errored", false),
+        "errored must be included in default view"
+    );
+    // Provisioning sessions are in-flight — they must show.
+    assert!(
+        is_live_session_state("provisioning", false),
+        "provisioning must be included in default view"
+    );
+}
+
+#[test]
+fn is_live_session_state_excludes_soft_deleted_record() {
+    // Reconciles the #3302 hardening commit (51243ea5, code-critic CRITICAL)
+    // with #3034/#3044: a `"deleted"` row backed by a REAL, still-in-store
+    // record (soft-deleted via `tm sessions delete`, #2012 — NOT a #3034
+    // numbered-slot tombstone, so `is_slot_tombstone` is `false`) must stay
+    // excluded from the default picker/list exactly like `decommissioned`, so
+    // it is never offered as a resume target (which would resurrect it).
+    assert!(
+        !is_live_session_state("deleted", false),
+        "a soft-deleted, still-in-store record must be excluded from the \
+         default picker/list view"
+    );
+    assert!(!is_live_session_state("decommissioned", false));
+    assert!(is_live_session_state("active", false));
+    assert!(is_live_session_state("stopped", false));
+}
+
+#[test]
+fn is_live_session_state_keeps_slot_tombstone_visible() {
+    // Why (#3034/#3044): a stable-numbering SLOT tombstone — the daemon's
+    // `tombstone_summary` placeholder for a slot whose record left the store
+    // entirely — is ALSO rendered with wire `state == "deleted"`, but it must
+    // stay VISIBLE at its slot in the default view, or the entire point of
+    // stable numbering (an operator seeing exactly why a captured number no
+    // longer resolves) is defeated. `is_slot_tombstone == true` is what
+    // distinguishes it from the soft-deleted-record case above.
+    assert!(
+        is_live_session_state("deleted", true),
+        "a #3034 slot tombstone must remain visible in the default view"
+    );
+    // Resurrection-safety for this visible row is NOT this predicate's job —
+    // see `guided_resume_tests`/`session_picker.rs`'s `decide_for_index` for
+    // the separate guards that keep it non-resumable regardless.
+}
+
+#[test]
+fn picker_filter_excludes_decommissioned_keeps_active() {
+    // Why (#1809): `filter_live_sessions` must drop decommissioned tombstones and
+    // retain all other states. We construct a mixed slice and assert concrete counts
+    // and membership — not the same expression used to compute the filter.
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "a1", "name": "sess-active",        "state": "active" },
+            { "id": "b2", "name": "sess-dead-1",        "state": "decommissioned" },
+            { "id": "c3", "name": "sess-stopped",       "state": "stopped" },
+            { "id": "d4", "name": "sess-dead-2",        "state": "decommissioned" },
+            { "id": "e5", "name": "sess-provisioning",  "state": "provisioning" },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+
+    // Exactly 3 of the 5 sessions survive the filter.
+    assert_eq!(
+        filtered.len(),
+        3,
+        "filter must keep exactly 3 live sessions (active, stopped, provisioning)"
+    );
+    // Active session must be present.
+    assert!(
+        filtered.iter().any(|s| s.state == "active"),
+        "active session must survive filter"
+    );
+    // Stopped session must be present (can be resumed).
+    assert!(
+        filtered.iter().any(|s| s.state == "stopped"),
+        "stopped session must survive filter"
+    );
+    // Provisioning session must be present (in-flight).
+    assert!(
+        filtered.iter().any(|s| s.state == "provisioning"),
+        "provisioning session must survive filter"
+    );
+    // Neither decommissioned session must appear.
+    assert!(
+        !filtered.iter().any(|s| s.state == "decommissioned"),
+        "decommissioned tombstones must be excluded"
+    );
+}
+
+#[test]
+fn picker_filter_all_live_sessions_unchanged() {
+    // Why: when no sessions are decommissioned, `filter_live_sessions` must
+    // return all sessions unchanged — no unexpected truncation.
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "x1", "name": "sess-a", "state": "active" },
+            { "id": "x2", "name": "sess-b", "state": "stopped" },
+            { "id": "x3", "name": "sess-c", "state": "errored" },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+    assert_eq!(
+        filtered.len(),
+        3,
+        "all-live input must pass through unchanged (3 sessions)"
+    );
+}
+
+#[test]
+fn picker_filter_all_decommissioned_returns_empty() {
+    // Why: if every session is decommissioned, the picker must show an empty list
+    // (not crash or return some sessions).
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "z1", "name": "old-1", "state": "decommissioned" },
+            { "id": "z2", "name": "old-2", "state": "decommissioned" },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+    assert!(
+        filtered.is_empty(),
+        "all-decommissioned input must produce empty list"
+    );
+}
+
+#[test]
+fn picker_filter_keeps_slot_tombstone_hides_soft_deleted_record() {
+    // Why (#3034/#3044 reconciliation): both rows below serialize wire
+    // `state == "deleted"`, but only the slot-tombstone row sets the
+    // dedicated `deleted: bool` field — `filter_live_sessions` must tell them
+    // apart via that field rather than the state string alone.
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "a1", "name": "sess-active", "state": "active" },
+            // #3034 numbered-slot tombstone — must stay visible.
+            { "id": "", "name": "", "state": "deleted", "slot": 2, "deleted": true },
+            // #3302 soft-deleted, still-in-store record — must stay hidden.
+            { "id": "b2", "name": "sess-soft-deleted", "state": "deleted" },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+
+    assert_eq!(
+        filtered.len(),
+        2,
+        "exactly the active session and the slot tombstone must survive"
+    );
+    assert!(
+        filtered.iter().any(|s| s.deleted),
+        "the slot tombstone (deleted: true) must survive the filter"
+    );
+    assert!(
+        !filtered.iter().any(|s| s.state == "deleted" && !s.deleted),
+        "the soft-deleted, still-in-store record (deleted: false) must be excluded"
     );
 }

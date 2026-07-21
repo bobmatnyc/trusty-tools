@@ -216,6 +216,8 @@ mod tests {
             unresumable: false,
             stale_assets: false,
             attached: false,
+            slot: 0,
+            deleted: false,
         }
     }
 

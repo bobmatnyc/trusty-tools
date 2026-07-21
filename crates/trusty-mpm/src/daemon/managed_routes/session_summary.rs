@@ -186,4 +186,33 @@ pub struct SessionSummary {
     /// end-to-end coverage in the `session_lifecycle` integration suite.
     #[serde(default)]
     pub attached: bool,
+    /// Stable, daemon-lifetime `tm ls` slot number (issue #3034).
+    ///
+    /// Why: renumbering sessions on every fetch let an operator (or PM agent)
+    /// holding a number from an earlier listing act on the WRONG session once
+    /// a delete shifted every later row down. `0` (the default) means "no
+    /// slot assigned" — only [`super::list_managed_sessions`] computes a real
+    /// slot via `SessionManager::numbered_snapshot`; every other handler that
+    /// builds a `SessionSummary` via `record_to_summary` leaves it at `0`,
+    /// since slot numbers are meaningful only on the numbered listing surface.
+    /// What: 1-based; assigned once per session id for the life of the daemon
+    /// process and never reused, even after the session is deleted.
+    /// Test: `numbered_snapshot_keeps_slot_stable_across_delete` (session
+    /// manager); `list_assigns_stable_slot_numbers_and_tombstones_deleted_one`
+    /// (handler integration test, `tests/session_manager_slots.rs`).
+    #[serde(default)]
+    pub slot: u32,
+    /// True when this row is a tombstone placeholder for a slot whose session
+    /// no longer exists in the store (issue #3034).
+    ///
+    /// Why: Bob's requirement — a deleted session's slot renders as
+    /// `-- deleted --` rather than disappearing (which would let the next
+    /// session silently inherit its number). Every other field is blank when
+    /// this is `true`.
+    /// What: `false` for every session `record_to_summary` builds directly;
+    /// only [`super::list_managed_sessions`]' tombstone rows set it `true`.
+    /// Test: `list_assigns_stable_slot_numbers_and_tombstones_deleted_one`
+    /// (handler integration test, `tests/session_manager_slots.rs`).
+    #[serde(default)]
+    pub deleted: bool,
 }
