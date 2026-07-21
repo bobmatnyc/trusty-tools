@@ -7,6 +7,67 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **`delegate_to_agent` no longer leaks internal agent names (PR A code-critic
+  fix, epic #3052):** granting `delegate_to_agent` to assistant-tier personas
+  (see below) exposed two leaks in the shared tool implementation
+  (`src/tools/delegate.rs`), sent to the LLM on every turn / every failed
+  delegation regardless of caller:
+  - The tool's schema `description` hardcoded concrete internal agent-name
+    examples (`'engineer', 'python-engineer', 'qa-agent'`) — generalized to
+    describe the parameter generically ("the specialist to hand this task
+    to"). `pm` is unaffected: it gets its roster via its own system prompt's
+    `{{available_agents}}` template substitution
+    (`agents::registry::roster::inject_roster_into_prompt`), independent of
+    this schema.
+  - An unknown `agent_name` returned "Unknown agent 'x'. Available agents:
+    &lt;full on-disk roster&gt;." — the roster enumeration is now dropped;
+    the error just names the caller's own rejected input ("'x' is not a
+    recognized specialist. Check your own instructions...") without
+    enumerating the config directory. The now-unused `available_agents()`
+    roster-listing helper was removed.
+  - **Functional companion fix:** the black-box strip left the assistant
+    with `delegate_to_agent` but no idea which `agent_name` values are
+    legitimate. `assistant/persona.md` gains a curated "Internal specialist
+    routing" list — `engineer`, `python-engineer`, `qa-agent`,
+    `research-agent`, `docs-agent`, `local-ops-agent`, `plan-agent` (the
+    general-purpose WORKER agents; excludes meta/infra agents `ctrl`/`pm`/
+    `observe-agent`/`postmortem-agent` and model-variant engineers
+    `bedrock-engineer`/`claude-code-engineer`/`code-agent`/`gpt-engineer`/
+    `gpt5-codex-engineer`) — marked explicitly as internal-only knowledge:
+    the assistant may use these names to decide who to call, but must refer
+    to the user only by role ("an engineer", "a QA specialist"), never by
+    the internal name. The same list + the full black-box "NEVER reveal
+    internal mechanics" section were ported into the two shadow-fallback
+    files (`izzie.toml`, `cto-assistant.toml`) that previously got the tool
+    grant + mcp-strip but not the black-box prose; `personal-assistant.toml`
+    (no `delegate_to_agent` grant, doesn't `extend` `assistant`) gets a
+    scope-note comment instead, documenting the deferral rather than leaving
+    it ambiguous.
+  - **Bug found + fixed along the way:** `izzie/agent.toml`'s
+    `extends = "assistant"` key was placed BEFORE the `[agent]` table
+    header, making it a top-level TOML key. `AgentConfig` has no top-level
+    `extends` field (only `AgentInfo::extends`) and doesn't
+    `deny_unknown_fields`, so serde silently dropped it — `izzie` never
+    actually inherited anything from the base (no prose concatenation, no
+    tool/skill union) despite every comment in the file claiming otherwise;
+    it "worked" only because izzie's own redundant declarations happened to
+    duplicate the base's values. Moved `extends` inside `[agent]`, where the
+    schema expects it — caught by a new pinning test that failed exactly
+    because the base's persona body (this PR's routing list) never reached
+    izzie's resolved content.
+  - New/updated tests: `unknown_agent_is_rejected_without_naming_the_agent_or_roster`
+    (`src/tools/delegate.rs`, invokes `DelegateToAgentTool::execute()` with a
+    bad name against a config dir seeded with a realistic worker + meta/infra
+    roster, asserts none of it leaks),
+    `assistant_tier_persona_carries_curated_worker_routing_list`
+    (`src/agents/tests/loading.rs`, resolves `assistant`/`izzie`/
+    `cto-assistant` and asserts the routing list + black-box reminder are
+    present), and `izzie_overlay_package_parses_with_personal_deltas`
+    corrected to assert the NOW-CORRECT real-inheritance behavior (it
+    previously asserted the absence of inheritance, which was the bug).
+
 ### Changed
 
 - **Assistant delegates to specialists + peers; black-boxes internal tooling
