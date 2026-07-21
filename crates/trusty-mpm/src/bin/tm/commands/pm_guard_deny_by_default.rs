@@ -28,20 +28,35 @@
 //! `GET /api/v1/sessions/managed/{id}` endpoint (via [`trusty_mpm::client::DaemonClient`],
 //! the same typed call `guided.rs`'s `nested_session_guard` already uses) with a
 //! tight connect+total timeout so an unreachable/slow daemon degrades to
-//! `Ambiguous` (allow) rather than hanging the hook. [`classify_persona_status`]
+//! `Ambiguous` (allow) rather than hanging the hook. Issue #3600: that env var
+//! is tmux SESSION-scoped, not pane-scoped, so a sibling pane can inherit an
+//! identical value and this lookup would otherwise resolve a DIFFERENT
+//! session's state as if it were this pane's own; [`persona_status_for_session`]
+//! now cross-checks the resolved record's own `pane_id` against this
+//! process's current tmux pane (via the shared
+//! [`crate::commands::pane_identity::EnvSessionIdentity`] check `guided.rs`
+//! already uses) before ever trusting the resolved `state` — a mismatch OR an
+//! unresolvable pane id both discard the resolved state entirely and fall
+//! back to [`PersonaStatus::Ambiguous`], never [`PersonaStatus::ExplicitlyFailed`]
+//! (this is NOT "trust the env var": the state is simply never treated as
+//! evidence when identity isn't confirmed, consistent with the existing
+//! #2172 permissive-default doctrine below). [`classify_persona_status`]
 //! is the pure decision core: no session id at all is [`PersonaStatus::NotManaged`];
 //! a resolved `state == "errored"` is [`PersonaStatus::ExplicitlyFailed`]; any
 //! other resolved state is [`PersonaStatus::Confirmed`]; a lookup that could not
-//! be resolved (daemon unreachable, id unknown, malformed id) is
-//! [`PersonaStatus::Ambiguous`]. [`PersonaStatus::should_deny`] is the ONLY
-//! place that maps a status to a gating decision — `true` solely for
-//! `ExplicitlyFailed`, so every other branch (including every error path)
-//! resolves to allow.
+//! be resolved (daemon unreachable, id unknown, malformed id, OR an
+//! unconfirmed pane identity) is [`PersonaStatus::Ambiguous`].
+//! [`PersonaStatus::should_deny`] is the ONLY place that maps a status to a
+//! gating decision — `true` solely for `ExplicitlyFailed`, so every other
+//! branch (including every error path) resolves to allow.
 //! Test: `is_truthy_*`, `classify_persona_status_*`,
 //! `persona_status_for_session_not_managed_when_session_id_absent`,
 //! `persona_status_for_session_ambiguous_when_daemon_unreachable`,
+//! `persona_status_for_session_ambiguous_when_pane_mismatch`,
+//! `persona_status_for_session_ambiguous_when_pane_unavailable`,
 //! `persona_status_should_deny_only_for_explicitly_failed`.
 
+use crate::commands::pane_identity::EnvSessionIdentity;
 use trusty_mpm::client::DaemonClient;
 
 /// Opt-in env var (issue #2231): when truthy (see [`is_truthy`]), a native
@@ -163,7 +178,9 @@ fn classify_persona_status(session_id_present: bool, state: Option<&str>) -> Per
     }
 }
 
-/// Best-effort daemon lookup of a managed session's lifecycle-state word.
+/// Best-effort daemon lookup of a managed session's lifecycle-state word AND
+/// its own captured `pane_id` (issue #3600: the latter is required to
+/// cross-check pane identity before the former is trusted as evidence).
 ///
 /// Why: the daemon's `sessions.json`-backed `SessionRecord::state` is the
 /// only place a genuine `Errored` verdict is recorded; this hook process must
@@ -172,61 +189,93 @@ fn classify_persona_status(session_id_present: bool, state: Option<&str>) -> Per
 /// typed HTTP call `guided.rs`'s `nested_session_guard` already makes,
 /// with its own short-lived, tightly-timed client (mirrors
 /// `pm_guard::audit_denied_tool`'s connect/total timeout budget).
-/// What: `Some(state)` (e.g. `"active"`, `"errored"`) on a successful
-/// `GET /api/v1/sessions/managed/{id}`; `None` on ANY failure — client-build
-/// error, connect/timeout, non-2xx, or malformed body — so a down daemon
-/// degrades to [`PersonaStatus::Ambiguous`], never a hang or a deny.
+/// What: `Some((state, pane_id))` (e.g. `("active", Some("%5"))`) on a
+/// successful `GET /api/v1/sessions/managed/{id}`; `None` on ANY failure —
+/// client-build error, connect/timeout, non-2xx, or malformed body — so a
+/// down daemon degrades to [`PersonaStatus::Ambiguous`], never a hang or a
+/// deny.
 /// Test: exercised end to end (unreachable daemon → `None`) via
 /// `persona_status_for_session_ambiguous_when_daemon_unreachable`.
-async fn lookup_session_state(url: &str, session_id: &str) -> Option<String> {
+async fn lookup_session_state_and_pane(
+    url: &str,
+    session_id: &str,
+) -> Option<(String, Option<String>)> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_millis(500))
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .ok()?;
     let daemon = DaemonClient::with_client(client, url);
-    daemon
-        .get_managed_session(session_id)
-        .await
-        .ok()
-        .map(|s| s.state)
+    let summary = daemon.get_managed_session(session_id).await.ok()?;
+    Some((summary.state, summary.pane_id))
 }
 
-/// Resolve [`PersonaStatus`] given an explicit (test-injectable) session id.
+/// Resolve [`PersonaStatus`] given an explicit (test-injectable) session id
+/// AND this process's current tmux pane id (issue #3600).
 ///
-/// Why: separating the session-id SOURCE from the resolution logic lets tests
-/// drive every branch (present/absent, reachable/unreachable daemon) without
-/// mutating process-global env state.
+/// Why: separating the session-id/pane-id SOURCE from the resolution logic
+/// lets tests drive every branch (present/absent, reachable/unreachable
+/// daemon, pane confirmed/mismatched/unresolvable) without mutating
+/// process-global env state or a live tmux server.
 /// What: `None`/empty `raw_session_id` short-circuits to
 /// [`classify_persona_status`]`(false, None)` (= `NotManaged`) with no network
-/// call at all; otherwise awaits [`lookup_session_state`] and classifies the
-/// result.
+/// call at all. Otherwise awaits [`lookup_session_state_and_pane`]; on lookup
+/// failure, classifies `(true, None)` (= `Ambiguous`) same as before. On a
+/// successful lookup, cross-checks `current_pane_id` against the resolved
+/// record's own `pane_id` via [`EnvSessionIdentity::evaluate`] — only a
+/// CONFIRMED match lets the resolved `state` be classified at all; a
+/// `Mismatch` or `Unavailable` outcome discards the resolved state entirely
+/// (classifies `(true, None)` = `Ambiguous`) rather than treating it as
+/// evidence of either `Confirmed` or `ExplicitlyFailed` for a session this
+/// pane cannot prove it owns.
 /// Test: `persona_status_for_session_not_managed_when_session_id_absent`,
-/// `persona_status_for_session_ambiguous_when_daemon_unreachable`.
+/// `persona_status_for_session_ambiguous_when_daemon_unreachable`,
+/// `persona_status_for_session_confirmed_for_active_state`,
+/// `persona_status_for_session_explicitly_failed_for_errored_state`,
+/// `persona_status_for_session_ambiguous_when_pane_mismatch`,
+/// `persona_status_for_session_ambiguous_when_pane_unavailable`.
 pub(crate) async fn persona_status_for_session(
     raw_session_id: Option<&str>,
+    current_pane_id: Option<&str>,
     url: &str,
 ) -> PersonaStatus {
     let Some(session_id) = raw_session_id.map(str::trim).filter(|s| !s.is_empty()) else {
         return classify_persona_status(false, None);
     };
-    let state = lookup_session_state(url, session_id).await;
-    classify_persona_status(true, state.as_deref())
+    let Some((state, record_pane_id)) = lookup_session_state_and_pane(url, session_id).await else {
+        return classify_persona_status(true, None);
+    };
+    if EnvSessionIdentity::evaluate(current_pane_id, record_pane_id.as_deref()).is_confirmed() {
+        classify_persona_status(true, Some(&state))
+    } else {
+        // Mismatch or Unavailable: this pane cannot prove it owns
+        // `session_id`, so its resolved state must not be trusted as
+        // evidence of anything — fall back to the existing #2172
+        // permissive default (Ambiguous = allow) rather than judging THIS
+        // pane's dispatch by a DIFFERENT session's recorded failure.
+        classify_persona_status(true, None)
+    }
 }
 
 /// Resolve [`PersonaStatus`] for the CURRENT pane by reading
-/// [`MANAGED_SESSION_ID_ENV`] from the process environment.
+/// [`MANAGED_SESSION_ID_ENV`] and this process's own tmux `pane_id` from the
+/// live environment.
 ///
 /// Why: this is the production entry point `pm_guard`'s Guard 4 calls; the
-/// pane-env read is the ONLY place this module touches `std::env` for the
-/// session id, keeping [`persona_status_for_session`] fully test-injectable.
-/// What: thin wrapper delegating to [`persona_status_for_session`].
+/// pane-env and tmux-pane reads are the ONLY places this module touches
+/// live process/tmux state, keeping [`persona_status_for_session`] fully
+/// test-injectable.
+/// What: thin wrapper delegating to [`persona_status_for_session`], with
+/// `current_pane_id` resolved via [`super::tmux_attach::current_tmux_pane_id`]
+/// (issue #3600) — the same primitive `guided.rs`'s nested-session guard
+/// uses.
 /// Test: covered by the `persona_status_for_session_*` tests (this adds only
-/// the env read, which mirrors the well-established `TM_MANAGED_SESSION_ID`
-/// read in `guided.rs::nested_session_guard`).
+/// the env/tmux reads, which mirror the well-established
+/// `TM_MANAGED_SESSION_ID`/pane-id reads in `guided.rs::nested_session_guard`).
 pub(crate) async fn persona_status(url: &str) -> PersonaStatus {
     let raw = std::env::var(MANAGED_SESSION_ID_ENV).ok();
-    persona_status_for_session(raw.as_deref(), url).await
+    let current_pane_id = super::tmux_attach::current_tmux_pane_id();
+    persona_status_for_session(raw.as_deref(), current_pane_id.as_deref(), url).await
 }
 
 #[cfg(test)]
@@ -313,7 +362,7 @@ mod tests {
     async fn persona_status_for_session_not_managed_when_session_id_absent() {
         // Case (iv, unmanaged branch): no id at all — allowed, and no network
         // call is even attempted (a bogus unroutable URL would otherwise hang).
-        let status = persona_status_for_session(None, "http://127.0.0.1:1").await;
+        let status = persona_status_for_session(None, None, "http://127.0.0.1:1").await;
         assert_eq!(status, PersonaStatus::NotManaged);
     }
 
@@ -323,6 +372,7 @@ mod tests {
         // to Ambiguous (allow), never hang and never deny.
         let status = persona_status_for_session(
             Some("11111111-1111-1111-1111-111111111111"),
+            Some("%5"),
             "http://127.0.0.1:1",
         )
         .await;
@@ -331,8 +381,11 @@ mod tests {
 
     /// Spawn a one-shot HTTP mock daemon that replies to the
     /// `GET /api/v1/sessions/managed/{id}` request with a canned
-    /// [`trusty_mpm::client::ManagedSessionSummary`]-shaped JSON body (issue
-    /// #2231, live-round-trip coverage for cases ii/iii).
+    /// [`trusty_mpm::client::ManagedSessionSummary`]-shaped JSON body,
+    /// carrying `pane_id: "%5"` (issue #2231, live-round-trip coverage for
+    /// cases ii/iii; the fixed `pane_id` lets #3600's pane cross-check tests
+    /// drive both the confirmed match, `Some("%5")`, and a mismatch,
+    /// `Some("%9")`).
     ///
     /// Why: the unreachable-daemon test above only covers the fail-open
     /// branch; `persona_status_for_session`'s daemon-REACHABLE branch (state
@@ -345,10 +398,12 @@ mod tests {
     /// the library crate.
     /// What: binds an ephemeral port, accepts ONE connection, drains the
     /// request (a bare GET has no body, so one read suffices), writes a fixed
-    /// 200 JSON response carrying `state`, and shuts down. Returns the bound
-    /// `http://127.0.0.1:PORT` base URL.
+    /// 200 JSON response carrying `state` and `pane_id: "%5"`, and shuts
+    /// down. Returns the bound `http://127.0.0.1:PORT` base URL.
     /// Test: used by `persona_status_for_session_confirmed_for_active_state`,
-    /// `persona_status_for_session_explicitly_failed_for_errored_state`.
+    /// `persona_status_for_session_explicitly_failed_for_errored_state`,
+    /// `persona_status_for_session_ambiguous_when_pane_mismatch`,
+    /// `persona_status_for_session_ambiguous_when_pane_unavailable`.
     async fn spawn_mock_daemon(state: &str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -356,7 +411,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         let body = format!(
-            r#"{{"id":"11111111-1111-1111-1111-111111111111","name":"tmpm-test","state":"{state}"}}"#
+            r#"{{"id":"11111111-1111-1111-1111-111111111111","name":"tmpm-test","state":"{state}","pane_id":"%5"}}"#
         );
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.expect("accept");
@@ -376,21 +431,63 @@ mod tests {
     #[tokio::test]
     async fn persona_status_for_session_confirmed_for_active_state() {
         // Case (ii): managed session, deployment succeeded — a live daemon
-        // reporting `state: "active"` must resolve to Confirmed (allow).
+        // reporting `state: "active"` AND a matching pane id must resolve to
+        // Confirmed (allow), proving the legitimate path still works.
         let url = spawn_mock_daemon("active").await;
-        let status =
-            persona_status_for_session(Some("11111111-1111-1111-1111-111111111111"), &url).await;
+        let status = persona_status_for_session(
+            Some("11111111-1111-1111-1111-111111111111"),
+            Some("%5"),
+            &url,
+        )
+        .await;
         assert_eq!(status, PersonaStatus::Confirmed);
     }
 
     #[tokio::test]
     async fn persona_status_for_session_explicitly_failed_for_errored_state() {
-        // Case (iii): managed session with a positive, recorded failure — a
-        // live daemon reporting `state: "errored"` must resolve to
-        // ExplicitlyFailed (deny).
+        // Case (iii): managed session with a positive, recorded failure AND a
+        // matching pane id — a live daemon reporting `state: "errored"` must
+        // resolve to ExplicitlyFailed (deny).
+        let url = spawn_mock_daemon("errored").await;
+        let status = persona_status_for_session(
+            Some("11111111-1111-1111-1111-111111111111"),
+            Some("%5"),
+            &url,
+        )
+        .await;
+        assert_eq!(status, PersonaStatus::ExplicitlyFailed);
+    }
+
+    #[tokio::test]
+    async fn persona_status_for_session_ambiguous_when_pane_mismatch() {
+        // Causality proof (issue #3600): against PRE-FIX code (no pane
+        // check), a sibling pane holding the SAME inherited
+        // `TM_MANAGED_SESSION_ID` for a session recorded `"errored"` would
+        // resolve ExplicitlyFailed and wrongly DENY a delegated edit in THIS
+        // (unrelated) pane. The daemon's record pane_id is "%5"; this
+        // process's own current pane is "%9" — a genuine mismatch — so the
+        // resolved `"errored"` state must be discarded and classified
+        // Ambiguous (allow), never ExplicitlyFailed.
+        let url = spawn_mock_daemon("errored").await;
+        let status = persona_status_for_session(
+            Some("11111111-1111-1111-1111-111111111111"),
+            Some("%9"),
+            &url,
+        )
+        .await;
+        assert_eq!(status, PersonaStatus::Ambiguous);
+    }
+
+    #[tokio::test]
+    async fn persona_status_for_session_ambiguous_when_pane_unavailable() {
+        // Not inside tmux (or the tmux query failed) — pane identity cannot
+        // be verified at all. Must NOT degrade into trusting the env var's
+        // resolved (positively "errored") state — falls back to Ambiguous,
+        // same as the mismatch case above.
         let url = spawn_mock_daemon("errored").await;
         let status =
-            persona_status_for_session(Some("11111111-1111-1111-1111-111111111111"), &url).await;
-        assert_eq!(status, PersonaStatus::ExplicitlyFailed);
+            persona_status_for_session(Some("11111111-1111-1111-1111-111111111111"), None, &url)
+                .await;
+        assert_eq!(status, PersonaStatus::Ambiguous);
     }
 }
