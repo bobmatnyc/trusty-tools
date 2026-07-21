@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`session_context_catchup` + `session_context_pause` MCP tools** ([#3543](https://github.com/bobmatnyc/trusty-tools/issues/3543)): the PM's `/tm-session-pause` and `/tm-session-resume` skills now call two new internal MCP tools instead of shelling out to `git log`/`git status` and hand-written snapshot files. `session_context_catchup` returns a structured (JSON) resume digest — paused sessions, recent commits, recent memory-palace activity, `resolved_snapshot`, and `watermark_advanced` (always `false`, a manual peek that never advances the incremental-catchup watermark). `session_context_pause` writes the `session-YYYYMMDD-HHMMSS.md` snapshot in the exact section format the existing reader parses, appends the pause entry to `sessions-log.jsonl`, and by default prunes orphaned managed-session git worktrees in-process (the same engine `tm session prune-worktrees` uses). The `tm session catchup` CLI command is unchanged — the tools are additive.
+
 ## [0.19.28] — 2026-07-20
 
 ### Added

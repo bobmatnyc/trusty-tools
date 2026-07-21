@@ -13,9 +13,11 @@
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
 pub mod git;
+pub mod json;
 pub mod mpm_registry;
 pub mod mpm_session;
 pub mod palace;
+pub mod pause;
 pub mod session_finder;
 pub mod session_log;
 pub mod state;
@@ -23,6 +25,8 @@ pub mod state;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+
+pub use json::{CatchupJson, PausedSessionJson, RecentMemoryJson, generate_catchup_json};
 
 use self::{
     git::git_commits_since,

@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-31 tools.
+33 tools.
 
 ## `session_list`
 
@@ -161,6 +161,32 @@ Prune managed sessions by state and compact tombstones. `state` selects which re
 | `dry_run` | `boolean` | no |
 | `include_active` | `boolean` | no |
 | `state` | `string` | yes |
+
+## `session_context_catchup`
+
+Return a STRUCTURED (JSON, not prose) resume digest for `project_dir`: paused sessions (native trusty-mpm + legacy claude-mpm formats), recent git commits, and recent memory-palace activity — the same three sources `tm session catchup` renders as markdown, restructured as typed fields. This is a manual PEEK: it NEVER advances the incremental-catchup watermark (only automatic session-start injection does that), so calling it repeatedly is always safe and `watermark_advanced` in the result is always `false`.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `all_projects` | `boolean` | no |
+| `full` | `boolean` | no |
+| `project_dir` | `string` | yes |
+| `session_id` | `string` | no |
+
+## `session_context_pause`
+
+Write a session-pause snapshot for `project_dir`: a `session-YYYYMMDD-HHMMSS.md` file in the SAME section format the catch-up reader already parses (`## Summary` / `## Completed` / `## In Progress` / `## Next Steps` / `## Git Context` / `## Tmux Window`), plus an appended `pause` line in the append-only `sessions-log.jsonl`. Also prunes orphaned managed-session git worktrees in-process (same engine as `tm session prune-worktrees`) unless `prune_worktrees` is set to `false`. Does NOT touch tmux — window realignment on resume stays a PM-side `tmux select-window` step.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `completed` | `array` | no |
+| `in_progress` | `array` | no |
+| `next_steps` | `array` | no |
+| `project_dir` | `string` | yes |
+| `prune_worktrees` | `boolean` | no |
+| `session_id` | `string` | yes |
+| `summary` | `string` | yes |
+| `tmux_window` | `string` | no |
 
 ## `console_metrics`
 

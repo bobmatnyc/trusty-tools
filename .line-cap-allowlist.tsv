@@ -12,6 +12,5 @@ crates/trusty-git-analytics/src/collect/collector.rs	766
 crates/trusty-mpm/src/daemon/api.rs	1272
 crates/trusty-mpm/src/daemon/api/control_routes.rs	543
 crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	1231
-crates/trusty-mpm/src/daemon/mcp_backend.rs	566
 crates/trusty-search/src/main.rs	664
 crates/trusty-search/src/service/walker.rs	1167
