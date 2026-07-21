@@ -5,7 +5,16 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.37.1] — 2026-07-21
+
+### Fixed
+
+- **Regenerated the `ui-dist` bundle** (#3590, `b76e08ea`): the published
+  0.37.0 tarball shipped a stale prebuilt dashboard bundle that predated the
+  Foundry v2 dark-mode migration, so the installed dashboard was missing the
+  dark-mode feature entirely. The bundle under `ui-dist/` is rebuilt from the
+  current `ui/` source so a fresh install/upgrade gets the dark-themed
+  dashboard. No Rust source changes.
 
 ### Added
 

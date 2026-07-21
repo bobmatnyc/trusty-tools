@@ -60,8 +60,8 @@ trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memor
 #      `default-features = false` drops the `axum-server` feature so we don't
 #      compile the trusty-memory HTTP daemon code paths just to pick up a
 #      zero-sized service descriptor.
-trusty-memory = { path = "../trusty-memory", version = "0.19.0", default-features = false }
-trusty-search = { path = "../trusty-search", version = "0.37.0" }
+trusty-memory = { path = "../trusty-memory", version = "0.20.0", default-features = false }
+trusty-search = { path = "../trusty-search", version = "0.37.1" }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
 serde = { version = "1", features = ["derive"] }
@@ -149,7 +149,7 @@ lru = "0.16"
 #      Cargo edge was cut deliberately, ahead of cto-assistant's planned
 #      migration directly into `trusty-agents`. This `install_plugins`
 #      mechanism remains available for any future private launcher.
-trusty-agents-common = { path = "../trusty-agents-common", version = "0.2.0" }
+trusty-agents-common = { path = "../trusty-agents-common", version = "0.3.0" }
 
 # [patch.crates-io] moved to workspace root Cargo.toml (Cargo requires
 # [patch] tables to live in the workspace root; see #460 for context).

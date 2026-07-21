@@ -5,14 +5,12 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
-
-### Added
-
-- establish channels crate topology + wire Slack auth ([#2638](https://github.com/bobmatnyc/trusty-tools/pull/2638)) ([#2706](https://github.com/bobmatnyc/trusty-tools/pull/2706)) ([`9f2275b`](https://github.com/bobmatnyc/trusty-tools/commit/9f2275b6487296a08fc99de469e6b641992bc46d))
+## [2.9.4] — 2026-07-21
 
 ### Fixed
 
+- doc-comment `Test:` pointer citation in `collect::git::reachability` corrected to a resolving glob (`tests::glob_*`) by the workspace-wide sweep in #3588 — no functional change, but it moved this crate's published `src/` out of parity with the still-current `2.9.3` version number (issue #3366); this release re-aligns them.
+- establish channels crate topology + wire Slack auth ([#2638](https://github.com/bobmatnyc/trusty-tools/pull/2638)) ([#2706](https://github.com/bobmatnyc/trusty-tools/pull/2706)) ([`9f2275b`](https://github.com/bobmatnyc/trusty-tools/commit/9f2275b6487296a08fc99de469e6b641992bc46d))
 - bound external-source enrichment concurrency to fix mid-run classify stall (closes #2719) ([#2720](https://github.com/bobmatnyc/trusty-tools/pull/2720)) ([`96d0cba`](https://github.com/bobmatnyc/trusty-tools/commit/96d0cbaf6922acb3febcedf483a6866207211ed0))
 - SLOC-counter /* trap + stray conflict markers (closes #2489, #2509, #2390) ([#2561](https://github.com/bobmatnyc/trusty-tools/pull/2561)) ([`e4aed64`](https://github.com/bobmatnyc/trusty-tools/commit/e4aed64cfffff0eee3593669879b0cf136188137))
 

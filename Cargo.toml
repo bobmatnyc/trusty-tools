@@ -94,32 +94,32 @@ trusty-code = { path = "crates/trusty-code" }
 # shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.2.1" }
-trusty-common = { path = "crates/trusty-common", version = "0.23.2" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.3.0" }
+trusty-common = { path = "crates/trusty-common", version = "0.24.0" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.8" }
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
 # trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
 # trusty-memory so `cargo install trusty-memory` produces both binaries from
 # one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
 trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.1.3" }
 # tga: trusty-git-analytics — developer productivity analytics.
 # Referenced by trusty-review for contributor-profile data pipeline (#558).
-tga = { path = "crates/trusty-git-analytics", version = "2.9.0" }
+tga = { path = "crates/trusty-git-analytics", version = "2.9.4" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
-trusty-mpm = { path = "crates/trusty-mpm", version = "0.15.0" }
+trusty-mpm = { path = "crates/trusty-mpm", version = "0.20.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).
-trusty-review = { path = "crates/trusty-review", version = "0.9.0" }
+trusty-review = { path = "crates/trusty-review", version = "0.10.0" }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
 # published library crate; the path entry remains so any local lib consumers
 # resolve in-tree.
-trusty-console = { path = "crates/trusty-console", version = "0.4.0" }
+trusty-console = { path = "crates/trusty-console", version = "0.5.0" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.1.1" }
