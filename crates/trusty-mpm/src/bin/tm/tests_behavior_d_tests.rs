@@ -893,6 +893,7 @@ fn ls_test_session(
         id: format!("{name}-id"),
         name: name.to_string(),
         state: state.to_string(),
+        persisted_state: None,
         workspace_path: None,
         repo_url: None,
         branch: None,

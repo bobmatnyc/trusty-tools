@@ -96,6 +96,11 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         id: r.id.to_string(),
         name: r.tmux_name.clone(),
         state: r.state.to_string(),
+        // #3531: captured once, here, BEFORE any later display-only
+        // reconciliation (`reconcile_live_state`) can overwrite `state` above
+        // — see `SessionSummary::persisted_state`'s doc for why resume/restart
+        // decisions must key off this instead.
+        persisted_state: r.state.to_string(),
         workspace_path: r
             .workspace_path
             .as_ref()
@@ -138,9 +143,17 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
 /// are left as persisted — a live tmux name must never resurrect a
 /// deleted/decommissioned record's label, and `errored`/`provisioning` carry
 /// information a bare liveness probe would erase.
+///
+/// Deliberately NEVER touches `summary.persisted_state` (#3531): that field is
+/// the CLI's one reliable signal for what the daemon's own `/resume` endpoint
+/// will actually validate against — collapsing it into this same
+/// display-only reconciliation would silently reintroduce the zombie
+/// misclassification this field exists to fix (an `Active`-but-tmux-dead
+/// record would again read identically to a genuinely `Stopped` one).
 /// Test: `reconcile_live_state_flips_stopped_to_active_when_alive`,
-/// `reconcile_live_state_leaves_terminal_states` in `super::tests`; end-to-end
-/// coverage in the `session_lifecycle` integration suite.
+/// `reconcile_live_state_leaves_terminal_states`,
+/// `reconcile_live_state_leaves_persisted_state_untouched` in `super::tests`;
+/// end-to-end coverage in the `session_lifecycle` integration suite.
 pub(super) fn reconcile_live_state(
     summaries: &mut [SessionSummary],
     records: &[SessionRecord],

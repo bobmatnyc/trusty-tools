@@ -27,8 +27,39 @@ pub struct SessionSummary {
     pub id: String,
     /// tmux session name.
     pub name: String,
-    /// Lifecycle state.
+    /// Lifecycle state (#3302: reconciled against LIVE tmux for DISPLAY by
+    /// [`super::summary::reconcile_live_state`] when this summary came from
+    /// the list/get endpoints — an `Active`/`Stopped` record whose tmux
+    /// session is absent/present is shown as `stopped`/`active` regardless of
+    /// what is actually persisted). Use [`Self::persisted_state`], not this
+    /// field, for any RESUME/RESTART decision — see that field's doc (#3531).
     pub state: String,
+    /// The RAW, un-reconciled lifecycle state exactly as persisted in the
+    /// store — set once at [`super::summary::record_to_summary`] and never
+    /// touched by the later display-only tmux reconciliation that may
+    /// overwrite [`Self::state`] (#3531).
+    ///
+    /// Why: the daemon's own `/resume` endpoint
+    /// ([`crate::session_manager::SessionManager::resume`]) validates a
+    /// restart against the PERSISTED state only — it has no idea a caller's
+    /// copy of `state` was display-reconciled. Before this field existed, a
+    /// zombie session (record still `Active`/`Provisioning` but its tmux
+    /// pane gone) had its displayed `state` collapsed to `stopped` by
+    /// [`super::summary::reconcile_live_state`] — indistinguishable, from the
+    /// CLI's point of view, from a session that is GENUINELY `Stopped`. The
+    /// CLI's own zombie auto-reconcile (#2001,
+    /// `bin/tm/commands/guided_resume::plan_resume`) then misclassified the
+    /// zombie as a plain `Restart` instead of `ReconcileThenRestart`, and the
+    /// daemon's `/resume` rejected it with a 409 ("cannot resume a session in
+    /// state 'active'") — the exact dead-end #3531 reported. Restart/resume
+    /// decisions must key off THIS field so they always agree with what the
+    /// daemon's own state-gate will actually check.
+    /// What: identical to `state` for every summary NOT produced by
+    /// `list_managed_sessions`/`get_managed_session` (nothing reconciles it);
+    /// for those two, it is the value `state` held BEFORE reconciliation.
+    /// Test: `reconcile_live_state_leaves_persisted_state_untouched` in
+    /// `super::tests`.
+    pub persisted_state: String,
     /// Provisioned workspace path.
     pub workspace_path: Option<String>,
     /// Repository URL.

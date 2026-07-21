@@ -33,7 +33,9 @@ use crate::commands::guided::{
     tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
-use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
+use crate::commands::guided_resume::{
+    ResumeAction, is_zombie, needs_restart, plan_resume, resume_classification_state,
+};
 use crate::commands::managed::{filter_live_sessions, is_live_session_state};
 // The picker decision enum + parser moved to the shared `session_picker` module.
 use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
@@ -845,6 +847,7 @@ fn make_session(
         id: format!("{name}-id"),
         name: name.to_string(),
         state: state.to_string(),
+        persisted_state: None,
         workspace_path: None,
         repo_url: None,
         branch: None,
@@ -862,6 +865,22 @@ fn make_session(
         unresumable: false,
         stale_assets: false,
         attached: false,
+    }
+}
+
+/// Construct a `ManagedSessionSummary` with a DISPLAYED `state` that diverges
+/// from the daemon's `persisted_state` (#3531) — the exact zombie shape the
+/// #3302 display-reconciliation can produce: an `active`/`provisioning`
+/// record whose tmux pane is gone reads `state = "stopped"` for display while
+/// `persisted_state` still carries the true, authoritative value.
+fn make_session_with_persisted_state(
+    name: &str,
+    displayed_state: &str,
+    persisted_state: &str,
+) -> trusty_mpm::client::ManagedSessionSummary {
+    trusty_mpm::client::ManagedSessionSummary {
+        persisted_state: Some(persisted_state.to_string()),
+        ..make_session(name, displayed_state, None)
     }
 }
 
@@ -1066,6 +1085,67 @@ fn guided_resume_plan_stopped_with_stale_tmux_still_restarts() {
         plan_resume("stopped", true),
         ResumeAction::Restart,
         "stopped + stale live tmux must still take the Restart path, not reconcile"
+    );
+}
+
+// ── resume_classification_state / persisted_state (#3531) ────────────────────
+// Root cause: #3302 made the list/get endpoints reconcile the DISPLAYED
+// `state` against live tmux — an `active`-but-tmux-dead zombie then reads
+// `state = "stopped"`, identical to a session that is GENUINELY stopped.
+// Classifying off that display value made `is_zombie` unable to tell the two
+// apart, so the interactive picker's "restart (stopped)" selection fell
+// through to a plain `Restart` that the daemon's `/resume` (validated against
+// the REAL persisted state) rejected with a 409. These tests pin the fix:
+// classification must always run on `persisted_state`, not `state`.
+
+#[test]
+fn resume_classification_state_prefers_persisted_state() {
+    // The exact #3531 repro shape: displayed state says "stopped" (tmux is
+    // absent, so the list endpoint reconciled it that way), but the daemon's
+    // authoritative persisted state is still "active".
+    let session = make_session_with_persisted_state("tm-writing-01", "stopped", "active");
+    assert_eq!(
+        resume_classification_state(&session),
+        "active",
+        "classification must use persisted_state, not the display-reconciled state"
+    );
+}
+
+#[test]
+fn resume_classification_state_falls_back_to_display_state_when_absent() {
+    // An older daemon that predates `persisted_state` sends `None` — fall back
+    // to `state` (pre-#3531 behavior), never panic or silently misclassify.
+    let session = make_session("tm-legacy-01", "stopped", None);
+    assert_eq!(
+        resume_classification_state(&session),
+        "stopped",
+        "must fall back to display state when persisted_state is absent"
+    );
+}
+
+#[test]
+fn guided_resume_plan_resume_prefers_persisted_state_over_display_state() {
+    // #3531 end-to-end (still pure): feeding `resume_classification_state`'s
+    // output into `plan_resume` for the zombie repro shape must select
+    // ReconcileThenRestart, not a plain Restart that would 409 against the
+    // daemon's authoritative state.
+    let session = make_session_with_persisted_state("tm-writing-01", "stopped", "active");
+    let tmux_live = false; // the picker's "(stopped)" label implies tmux is gone
+    let action = plan_resume(resume_classification_state(&session), tmux_live);
+    assert_eq!(
+        action,
+        ResumeAction::ReconcileThenRestart,
+        "a zombie session displayed as 'stopped' but persisted 'active' must \
+         reconcile then restart, never a plain Restart that 409s"
+    );
+
+    // Sanity check: classifying off the (buggy, pre-#3531) DISPLAY state alone
+    // reproduces the reported dead-end — proving this test would have caught
+    // the regression.
+    assert_eq!(
+        plan_resume(&session.state, tmux_live),
+        ResumeAction::Restart,
+        "classifying off the display-reconciled state alone reproduces the bug"
     );
 }
 
