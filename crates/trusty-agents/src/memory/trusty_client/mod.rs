@@ -61,7 +61,22 @@ use crate::memory::redb_usearch::RedbUsearchStore;
 use crate::memory::store::{MemoryResult, MemoryStore, Segment};
 
 /// Default address of the trusty-memory daemon for local-dev installs.
-pub const DEFAULT_TRUSTY_URL: &str = "http://127.0.0.1:7775";
+///
+/// Why (issue #3336): this used to be a standalone literal (`7775`) that
+/// silently drifted from `trusty_memory::DEFAULT_HTTP_PORT` (`7070`, the
+/// daemon's actual bind default) — auto-detection probed a port nothing
+/// listens on, so every install with the daemon up on its default port
+/// fell back to the embedded store instead of using the richer HTTP
+/// backend. Deriving the port from `trusty-memory`'s own constant (already
+/// a dependency of this crate, and re-exported unconditionally — it is not
+/// gated behind the `axum-server` feature this crate deliberately disables,
+/// see the `default-features = false` comment in `Cargo.toml`) makes this a
+/// single source of truth instead of a value that can drift again.
+/// What: `http://127.0.0.1:{trusty_memory::DEFAULT_HTTP_PORT}`.
+/// Test: `default_trusty_url_port_matches_trusty_memory_default`.
+pub fn default_trusty_url() -> String {
+    format!("http://127.0.0.1:{}", trusty_memory::DEFAULT_HTTP_PORT)
+}
 
 /// Connect timeout for the auto-detect health probe. Kept short so startup
 /// never noticeably stalls when the daemon is down.
@@ -478,7 +493,7 @@ pub enum MemoryBackend {
 impl MemoryBackend {
     /// Auto-detect at the default daemon URL.
     pub async fn auto_detect(local_store: Arc<RedbUsearchStore>) -> Self {
-        Self::auto_detect_with_url(DEFAULT_TRUSTY_URL, local_store).await
+        Self::auto_detect_with_url(&default_trusty_url(), local_store).await
     }
 
     /// Auto-detect at `base_url`. Falls back to `local_store` if the daemon
