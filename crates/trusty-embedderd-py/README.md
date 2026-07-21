@@ -37,7 +37,39 @@ TRUSTY_EMBEDDER=python trusty-search start
 ```
 
 Requires `uv` on `PATH` (or `TRUSTY_UV_BIN`) and ~3 GB free disk for the
-one-time torch + sentence-transformers download.
+one-time torch + sentence-transformers download. The launcher binary must be
+installed **alongside** `trusty-search` (a sibling of `current_exe()`) or on
+`PATH` — that is how `EmbedderSupervisor` discovers it. Override with
+`TRUSTY_EMBEDDERD_PY_BIN`.
+
+## How it works
+
+1. **Bootstrap** (`bootstrap.rs`): materializes the embedded `python/` project
+   (via `include_dir!`), locates `uv`, installs a pinned CPython 3.11, creates a
+   venv in the trusty-search **data dir** keyed by the `uv.lock` content hash,
+   `uv pip sync`s a hashed requirements file, runs an import+embed smoke test,
+   and writes a `.ready` sentinel. Disk precheck + bounded timeout + one retry +
+   `flock` against concurrent bootstraps. A two-tier `.ready` recheck rebuilds a
+   corrupted venv rather than serving from a broken interpreter.
+2. **Launch** (`launcher.rs` / `main.rs`): the supervisor spawns
+   `trusty-embedderd-py --stdio`; the launcher ensures the venv (cheap
+   torch-free `.ready` recheck on respawn) then **`exec`s** the venv's
+   `python -m trusty_embed_sidecar --stdio`, inheriting stdio and env.
+3. **Serve** (`python/trusty_embed_sidecar`): a newline-JSON-RPC-2.0 stdio
+   server speaking the EXACT `trusty-embedderd` wire protocol — reader/worker
+   split (multi-flight safe, MPS-serialized), id echoed verbatim, stdout =
+   frames only / logs to stderr, empty batch → `[]`, EOF/SIGTERM → clean exit
+   under a progress-aware shutdown watchdog.
+
+Because the sidecar impersonates `trusty-embedderd` byte-for-byte, trusty-search
+drives it through the unchanged `EmbedderSupervisor` / `StdioEmbedderClient` /
+`LazyEmbedderHandle` — **zero** supervisor/stdio/protocol wire-code changes.
+
+**Full architecture, device selection, idle-shutdown lifecycle, Linux-CUDA
+build notes, and validated benchmark numbers:**
+[`docs/trusty-search/research/python-mps-embedder-sidecar-2026-07-20.md`](../../docs/trusty-search/research/python-mps-embedder-sidecar-2026-07-20.md).
+User-facing env reference: trusty-search `CLAUDE.md` → "Python/MPS sidecar
+tuning".
 
 ### Environment
 

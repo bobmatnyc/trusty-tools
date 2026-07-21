@@ -7,6 +7,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.37.0] — 2026-07-20
+
+Minor release: opt-in Python/MPS embedding sidecar (`TRUSTY_EMBEDDER=python`),
+a new default-off capability that embeds ~2.4x faster than the Rust ort path on
+Apple Silicon with numerically identical results, and falls back to ort on any
+failure. Unset/`auto`/`stdio` behaviour is unchanged. Epic #3524 (refs #3498,
+#3493); paired with the first release of the `trusty-embedderd-py` launcher
+crate (v0.1.0).
+
 ### Added
 
 - **Opt-in Python/MPS embedding sidecar (`TRUSTY_EMBEDDER=python`)** — epic
