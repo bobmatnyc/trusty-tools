@@ -96,3 +96,42 @@ async fn health_reports_switchable_ort_backend_info() {
         );
     }
 }
+
+/// `HealthResponse::embedder_bootstrap` must mirror every
+/// `BootstrapState` variant `ActiveBackend::bootstrap` can carry, not just
+/// the two values the switchable-backend tests above happen to exercise
+/// (`Ready` / `NotApplicable`) — covers `Bootstrapping`, `Failed`, and
+/// `FellBackToOrt` too.
+/// What: installs a `SwitchableEmbedder` with each `BootstrapState` variant
+/// in turn and asserts `/health`'s `embedder_bootstrap` field via
+/// `bootstrap_state_str`'s mapping.
+/// Test: this test.
+#[tokio::test]
+async fn health_reports_embedder_bootstrap_state() {
+    for (bootstrap, expected) in [
+        (BootstrapState::NotApplicable, "n/a"),
+        (BootstrapState::Bootstrapping, "bootstrapping"),
+        (BootstrapState::Ready, "ready"),
+        (BootstrapState::Failed, "failed"),
+        (BootstrapState::FellBackToOrt, "fell_back_to_ort"),
+    ] {
+        let state = SearchAppState::new(IndexRegistry::new());
+        let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(384));
+        let active = ActiveBackend {
+            kind: BackendKind::Ort,
+            provider: trusty_common::embedder::ExecutionProvider::Cpu,
+            model: "all-MiniLM-L6-v2".to_string(),
+            quantized: false,
+            bootstrap,
+        };
+        let switchable = Arc::new(SwitchableEmbedder::new(inner, active));
+        state.install_switchable_embedder(Arc::clone(&switchable));
+
+        let state_arc = Arc::new(state);
+        let Json(resp) = health_handler(State(state_arc)).await;
+        assert_eq!(
+            resp.embedder_bootstrap, expected,
+            "BootstrapState::{bootstrap:?} must report {expected:?}"
+        );
+    }
+}

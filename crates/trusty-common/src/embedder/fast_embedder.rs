@@ -241,7 +241,7 @@ pub(super) fn resolve_default_embedding_model() -> EmbeddingModel {
 /// variant (never selected by [`resolve_default_embedding_model`] or the
 /// fallback logic in [`FastEmbedder::with_cache_size`]) falls back to
 /// `"unknown"` rather than panicking.
-/// Test: `embedding_model_name_*` in `mod.rs`.
+/// Test: `embedding_model_name_*` in `provider_tests.rs`.
 pub(super) fn embedding_model_name(model: &EmbeddingModel) -> &'static str {
     match model {
         EmbeddingModel::AllMiniLML6V2 => "all-MiniLM-L6-v2",

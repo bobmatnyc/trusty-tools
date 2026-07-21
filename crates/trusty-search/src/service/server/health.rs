@@ -149,8 +149,9 @@ pub(super) struct HealthResponse {
 /// `SwitchableEmbedder` handle is installed (see
 /// `SearchAppState::current_switchable_embedder`'s ordering note).
 /// Test: `health_includes_embedder_info_when_ready` (fallback path, no
-/// switchable installed), `health_reports_switchable_backend_info` (ort and
-/// python `ActiveBackend`s via the switchable path).
+/// switchable installed); `health_reports_switchable_python_backend_info` and
+/// `health_reports_switchable_ort_backend_info` (ort and python
+/// `ActiveBackend`s via the switchable path).
 #[derive(Serialize)]
 pub(super) struct EmbedderInfo {
     /// Vector dimensionality reported by the embedder (384 for all-MiniLM-L6).
@@ -635,4 +636,43 @@ pub(super) async fn upgrade_handler(
 
 fn bool_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `backend_kind_str` must cover every `BackendKind` variant with a
+    /// distinct, stable, lowercase tag — a missing/renamed arm would fail to
+    /// compile (the match is exhaustive), but this pins the exact strings
+    /// `/health` consumers parse against regressions from an innocuous
+    /// rename.
+    /// Test: this test.
+    #[test]
+    fn backend_kind_str_maps_every_variant() {
+        assert_eq!(backend_kind_str(BackendKind::Ort), "ort");
+        assert_eq!(backend_kind_str(BackendKind::Python), "python");
+        assert_eq!(backend_kind_str(BackendKind::Remote), "remote");
+        assert_eq!(backend_kind_str(BackendKind::InProcess), "in_process");
+        assert_eq!(backend_kind_str(BackendKind::Candle), "candle");
+    }
+
+    /// `bootstrap_state_str` must cover every `BootstrapState` variant with
+    /// a distinct, stable string — same rationale as
+    /// `backend_kind_str_maps_every_variant`.
+    /// Test: this test.
+    #[test]
+    fn bootstrap_state_str_maps_every_variant() {
+        assert_eq!(bootstrap_state_str(BootstrapState::NotApplicable), "n/a");
+        assert_eq!(
+            bootstrap_state_str(BootstrapState::Bootstrapping),
+            "bootstrapping"
+        );
+        assert_eq!(bootstrap_state_str(BootstrapState::Ready), "ready");
+        assert_eq!(bootstrap_state_str(BootstrapState::Failed), "failed");
+        assert_eq!(
+            bootstrap_state_str(BootstrapState::FellBackToOrt),
+            "fell_back_to_ort"
+        );
+    }
 }

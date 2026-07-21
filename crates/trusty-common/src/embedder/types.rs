@@ -361,7 +361,8 @@ pub fn resolve_expected_provider() -> ExecutionProvider {
 /// prediction function.
 ///
 /// Test: `resolve_expected_python_provider_forces_cpu`,
-/// `resolve_expected_python_provider_default_matches_platform` in `mod.rs`.
+/// `resolve_expected_python_provider_default_matches_platform` in
+/// `provider_tests.rs`.
 pub fn resolve_expected_python_provider() -> ExecutionProvider {
     let force_cpu = std::env::var("TRUSTY_DEVICE")
         .map(|v| v.eq_ignore_ascii_case("cpu"))
