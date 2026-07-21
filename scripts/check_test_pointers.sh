@@ -86,6 +86,31 @@
 #     pointers are meant to name in-crate tests; cross-crate citations
 #     should name the crate in prose (outside the leading backtick run, so
 #     it is never scanned) rather than as a bare backtick span.
+#   - the `::`-qualified path PREFIX of a citation (e.g. the
+#     `piped_native_tests` in `super::super::piped_native_tests::foo`) is
+#     NEVER verified — only the final segment is checked against the
+#     crate's name set. A test that keeps its bare name but moves to a
+#     different (or renamed) module is invisible no matter how wrong the
+#     stated path is; this is exactly how PR #3562's `piped_native_tests`
+#     citation (the real module is `native_tests`) passed clean. issue
+#     #3581 tried adding a `mod <prefix>`-exists check for this (candidate
+#     path segments were extracted and independently verified) and reverted
+#     it after CI found 145 false positives: this codebase has a
+#     widespread, DELIBERATE convention of citing
+#     `` `some_domain_tests::specific_fn` `` where `some_domain_tests` is a
+#     human-readable LABEL for "the tests covering this file" — e.g.
+#     `crates/trusty-common/src/inference/credentials/dotenv.rs:44` reads
+#     "Test: `dotenv_tests` (sibling file)." while the actual declaration
+#     is a plain `mod tests;` — NOT a literal module path, plus at least
+#     one citation of an external-crate path
+#     (`` `serde_json::from_str` `` in
+#     `crates/trusty-git-analytics/src/classify/tiers/llm_tests.rs:282`)
+#     that was never a local-module claim at all. The identical `foo_tests`
+#     shape is a genuine module-path assertion in the rare case (PR #3562)
+#     and a descriptive label in the dominant one (this codebase), with no
+#     cheap lexical signal telling them apart — see issue #3595 for the
+#     full writeup and why this is likely out of reach for a pragmatic-grep
+#     gate rather than a bug to patch.
 #
 # ALLOWLIST (ratchet, can only shrink — mirrors .line-cap-allowlist.tsv):
 #   `.test-pointer-allowlist.tsv`, one `<path><TAB><name>` row per
