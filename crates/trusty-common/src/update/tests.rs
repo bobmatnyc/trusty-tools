@@ -527,6 +527,114 @@ fn is_launchd_supervised_returns_false_in_test_env() {
     );
 }
 
+// ── verify_installed_binary_at_path (issue #3554) ─────────────────────────
+//
+// The #3554 regression: the name-based `verify_installed_binary` can be
+// fooled by a stale binary that resolves EARLIER than the just-installed one
+// (via `candidate_bin_dirs`'s priority order, or a bare-name PATH `which`).
+// `verify_installed_binary_at_path` takes the concrete path directly, so it
+// must read the exact binary at that path regardless of what else exists.
+
+/// Write a minimal executable shell script at `path` that echoes
+/// `version_line` on `--version` and exits 0.
+#[cfg(unix)]
+fn write_versioned_binary(path: &std::path::Path, version_line: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
+        .expect("write versioned fake binary");
+    let mut perms = std::fs::metadata(path)
+        .expect("stat fake binary")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).expect("chmod fake binary");
+}
+
+/// THE #3554 regression shape: an isolated `$HOME`/`$CARGO_HOME` that ALSO
+/// contains a stale, OLDER binary in `~/.cargo/bin` (checked FIRST by
+/// `candidate_bin_dirs`) while the just-installed, NEWER binary lives in
+/// `~/.local/bin` — exactly Bob's repro (cargo-install `tm` 0.19.26 shadowing
+/// a freshly-downloaded 0.19.29 at `~/.local/bin/tm`).
+///
+/// Why this reproduces the bug (not a false-pass): first we prove the OLD
+/// name-based `verify_installed_binary` reads the STALE `~/.cargo/bin` copy
+/// in this exact shape (mirroring the pre-#3554 installer code path), then
+/// we prove `verify_installed_binary_at_path` — pointed directly at the
+/// concrete `~/.local/bin` file the installer actually just wrote — reads the
+/// correct NEW version instead. A test that only exercised a clean `$HOME`
+/// (no `~/.cargo/bin` entry) would pass either way and would NOT have caught
+/// #3554; this one fails against the pre-fix code path.
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_installed_binary_at_path_reads_exact_binary_despite_path_shadow() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // Stale binary at `~/.cargo/bin/tm` — 0.19.26.
+    let cargo_bin = tmp.path().join(".cargo").join("bin");
+    std::fs::create_dir_all(&cargo_bin).expect("mkdir .cargo/bin");
+    write_versioned_binary(&cargo_bin.join("tm"), "trusty-mpm 0.19.26");
+
+    // Just-installed binary at `~/.local/bin/tm` — 0.19.29.
+    let local_bin = tmp.path().join(".local").join("bin");
+    std::fs::create_dir_all(&local_bin).expect("mkdir .local/bin");
+    let install_path = local_bin.join("tm");
+    write_versioned_binary(&install_path, "trusty-mpm 0.19.29");
+
+    let snapshot = set_home_env(tmp.path(), None);
+
+    // Sanity: the OLD name-based resolver reads the STALE binary in this
+    // exact shape — proving the shape reproduces #3554's mechanism.
+    let stale = super::verify_installed_binary("tm").await;
+    // verify_installed_binary only confirms success/failure (not the
+    // version), so probe the version it would have health-gated directly to
+    // show it is the cargo-bin (stale) copy, not the local-bin (new) one.
+    let stale_bin_path = super::upgrade::candidate_bin_dirs(Some(tmp.path()), None)
+        .into_iter()
+        .map(|d| d.join("tm"))
+        .find(|p| p.exists())
+        .expect("candidate_bin_dirs must find a `tm` binary");
+    restore_home_env(snapshot);
+
+    assert!(
+        stale.is_ok(),
+        "the stale binary must itself be a healthy exit 0"
+    );
+    assert_eq!(
+        stale_bin_path,
+        cargo_bin.join("tm"),
+        "name-based resolution must pick ~/.cargo/bin FIRST (the #3554 mechanism) \
+         — got {stale_bin_path:?}"
+    );
+
+    // THE fix: pointed at the concrete install path, the health gate reads
+    // the NEW version — never the stale shadowing copy.
+    let reported = super::verify_installed_binary_at_path(&install_path)
+        .await
+        .expect("health gate must pass against the concrete install path");
+    assert!(
+        reported.contains("0.19.29"),
+        "must read the NEW binary's version even though an older copy exists \
+         at a higher-priority path; got: {reported:?}"
+    );
+    assert!(
+        !reported.contains("0.19.26"),
+        "must NOT read the stale shadowed binary; got: {reported:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_installed_binary_at_path_fails_for_missing_binary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing = tmp.path().join("does-not-exist").join("tm");
+
+    let result = super::verify_installed_binary_at_path(&missing).await;
+
+    assert!(
+        result.is_err(),
+        "a missing binary must be a hard error, not a silent pass"
+    );
+}
+
 // ── live crates.io integration test (requires network) ───────────────────────
 // Tagged #[ignore] so it is skipped in normal CI runs.
 

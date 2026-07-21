@@ -17,9 +17,10 @@
 use super::*;
 
 /// Build an `InstallOutcome` with the pre-#2566 default service state
-/// (not attempted — `service_ok: true`, empty detail), so tests that only
-/// care about the binary-install dimension don't have to repeat the two
-/// new fields at every call site.
+/// (not attempted — `service_ok: true`, empty detail) and the pre-#3554
+/// default shadow state (clear — `shadow_ok: true`, empty detail), so tests
+/// that only care about the binary-install dimension don't have to repeat
+/// those fields at every call site.
 fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
     InstallOutcome {
         member: member.to_owned(),
@@ -27,6 +28,8 @@ fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
         detail: detail.to_owned(),
         service_ok: true,
         service_detail: String::new(),
+        shadow_ok: true,
+        shadow_detail: String::new(),
     }
 }
 
@@ -70,6 +73,8 @@ fn report_all_ok_reflects_service_failure() {
         detail: "installed".to_owned(),
         service_ok: false,
         service_detail: "service bootstrap failed (non-fatal): boom".to_owned(),
+        shadow_ok: true,
+        shadow_detail: String::new(),
     }]);
     assert!(
         !failed.all_ok,
@@ -83,12 +88,48 @@ fn report_all_ok_reflects_service_failure() {
         detail: "installed".to_owned(),
         service_ok: true,
         service_detail: "launchd plist already present — left untouched".to_owned(),
+        shadow_ok: true,
+        shadow_detail: String::new(),
     }]);
     assert!(
         skipped.all_ok,
         "a skipped (not failed) service bootstrap must not flip all_ok"
     );
     assert_eq!(skipped.exit_code(), 0);
+}
+
+/// Why: #3554 — a just-installed binary that is provably PATH-shadowed by a
+/// stale copy is a genuine "looks installed, actually not live" failure; the
+/// report must not claim `all_ok: true` in that case, mirroring the
+/// service-bootstrap-failure precedent above.
+/// What: one member with `ok: true, shadow_ok: false` → `all_ok == false`
+/// and exit code 2; a `shadow_ok: true` (clear) member → `all_ok == true`.
+/// Test: this is the test.
+#[test]
+fn report_all_ok_reflects_shadow_failure() {
+    let shadowed = InstallReport::build(vec![InstallOutcome {
+        member: "trusty-mpm".to_owned(),
+        ok: true,
+        detail: "installed".to_owned(),
+        service_ok: true,
+        service_detail: String::new(),
+        shadow_ok: false,
+        shadow_detail: "PATH SHADOWED: installed trusty-mpm 0.19.29 to /x/.local/bin/tm, but \
+                         the shell resolves `tm` to /x/.cargo/bin/tm (0.19.26)"
+            .to_owned(),
+    }]);
+    assert!(
+        !shadowed.all_ok,
+        "a genuine PATH-shadow condition must flip all_ok to false"
+    );
+    assert_eq!(shadowed.exit_code(), 2);
+
+    let clear = InstallReport::build(vec![outcome("trusty-mpm", true, "installed")]);
+    assert!(
+        clear.all_ok,
+        "a clear (non-shadowed) install must not flip all_ok"
+    );
+    assert_eq!(clear.exit_code(), 0);
 }
 
 /// Why: #3527 — trusty-mpm's supervisor bootstrap must respect the SAME

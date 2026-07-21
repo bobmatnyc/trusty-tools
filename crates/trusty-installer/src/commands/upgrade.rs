@@ -363,7 +363,7 @@ async fn upgrade_one(c: &UpdateCandidate) -> anyhow::Result<String> {
     let outcome = download::try_install_prebuilt(&c.crate_name, &install_dir).await;
 
     match outcome {
-        Outcome::Installed { version, .. } => {
+        Outcome::Installed { paths, version } => {
             tracing::info!(crate_name = %c.crate_name, %version, "upgraded from prebuilt");
             if c.daemon {
                 // Binary is now on disk at install_dir; trigger a daemon restart.
@@ -371,12 +371,30 @@ async fn upgrade_one(c: &UpdateCandidate) -> anyhow::Result<String> {
                 // restart protocol (SIGTERM + drain + launchd KeepAlive) is followed.
                 // The `perform_upgrade` step inside upgrade_and_restart is a no-op
                 // if the binary is already current, so this is safe.
+                //
+                // NOTE (#3554): `upgrade_and_restart` health-gates by NAME
+                // internally (shared with trusty-memory/trusty-search's own
+                // self-upgrade tool, in `trusty-common`) — the daemon-restart
+                // path is intentionally NOT switched to a concrete-path probe
+                // here; doing so would mean changing that shared primitive's
+                // signature, a materially larger/riskier change affecting
+                // those other callers. Tracked as deliberate follow-up scope,
+                // not part of this fix (see the #3554 PR description).
                 let hint = trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
                     .await
                     .map(|h| h.unwrap_or_else(|| "restarted".to_owned()))?;
                 Ok(hint)
             } else {
-                trusty_common::update::verify_installed_binary(&c.binary).await?;
+                // #3554: health-gate the CONCRETE just-placed binary — the
+                // exact path `download::try_install_prebuilt` reports having
+                // written — never a name re-resolved afterward (mirrors
+                // `install::install_one`'s fix for the same bug class).
+                let bin_path = paths
+                    .iter()
+                    .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(c.binary.as_str()))
+                    .cloned()
+                    .unwrap_or_else(|| install_dir.join(&c.binary));
+                trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
                 Ok(format!("upgraded to {version}"))
             }
         }
@@ -391,18 +409,43 @@ async fn upgrade_one(c: &UpdateCandidate) -> anyhow::Result<String> {
                 )
             })?;
             if c.daemon {
+                // See the #3554 NOTE above — daemon restart intentionally
+                // keeps the shared, name-based `upgrade_and_restart` path.
                 trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
                     .await
                     .map(|hint| hint.unwrap_or_else(|| "restarted".to_owned()))
             } else {
                 match trusty_common::update::perform_upgrade(&c.crate_name).await {
-                    Ok(()) => trusty_common::update::verify_installed_binary(&c.binary)
-                        .await
-                        .map(|()| format!("upgraded to {}", c.latest)),
+                    Ok(()) => {
+                        // #3554: `cargo install` always lands in the cargo bin
+                        // dir — resolve that CONCRETE destination directly
+                        // rather than a name lookup.
+                        let bin_path = cargo_bin_dir_for_upgrade()
+                            .unwrap_or_else(|| install_dir.clone())
+                            .join(&c.binary);
+                        trusty_common::update::verify_installed_binary_at_path(&bin_path)
+                            .await
+                            .map(|_| format!("upgraded to {}", c.latest))
+                    }
                     Err(e) => Err(e),
                 }
             }
         }
+    }
+}
+
+/// Resolve the cargo binary install directory (#3554).
+///
+/// Why: `cargo install` honours `CARGO_HOME`; a small local helper (mirroring
+/// `install::cargo_bin_dir`) avoids cross-module coupling for this one call
+/// site while keeping the concrete-path health gate accurate under a custom
+/// `CARGO_HOME` (e.g. CI).
+/// What: `<CARGO_HOME>/bin` when set and non-empty, else `~/.cargo/bin`.
+fn cargo_bin_dir_for_upgrade() -> Option<std::path::PathBuf> {
+    let cargo_home = std::env::var("CARGO_HOME").ok();
+    match cargo_home {
+        Some(home) if !home.is_empty() => Some(std::path::PathBuf::from(home).join("bin")),
+        _ => dirs::home_dir().map(|h| h.join(".cargo").join("bin")),
     }
 }
 

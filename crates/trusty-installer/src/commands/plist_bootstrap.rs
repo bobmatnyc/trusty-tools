@@ -154,19 +154,34 @@ pub fn fill_template(home: &str, tm_path: &str) -> String {
 /// function is called at all (`--no-service` / `TCTL_NO_SERVICE_BOOTSTRAP`);
 /// this function itself never re-checks that opt-out.
 ///
+/// `tm_path` (#3554) is the CONCRETE, already-known path of the `tm` binary
+/// this install just placed on disk (`install::install_one`'s return value).
+/// It is used verbatim as the CANDIDATE side of the [`decide_downgrade`]
+/// version comparison and embedded in the plist's `ProgramArguments`.
+/// Previously this function re-derived the path itself via
+/// [`resolve_tm_binary`], which tries a bare-name `which tm` FIRST — exactly
+/// the #3554 mechanism: on a host with an earlier-PATH `~/.cargo/bin/tm`,
+/// that lookup silently returned the STALE binary as the install's own
+/// "candidate" version, so the downgrade guard compared the old version
+/// against itself and refused to update the supervisor. Taking the path as a
+/// parameter instead of a lookup makes this call site immune to PATH order.
+///
 /// Test: `tests` covers template filling, the downgrade decision, and the
 /// registered-binary parser (all pure); the plist write + `launchctl` calls are
 /// side-effecting — `tests::install_mpm_supervisor_writes_plist_and_skips_launchctl`
 /// exercises the full write path via [`HOME_OVERRIDE_ENV`] / [`SKIP_LAUNCHCTL_ENV`]
-/// without touching the real user domain.
-pub fn install_mpm_supervisor(force: bool) -> anyhow::Result<()> {
+/// without touching the real user domain;
+/// `tests::install_mpm_supervisor_candidate_version_ignores_path_shadow`
+/// (#3554) proves the candidate-version comparison uses `tm_path` and is
+/// unaffected by a decoy binary placed earlier on `$PATH`.
+pub fn install_mpm_supervisor(force: bool, tm_path: &std::path::Path) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        install_mpm_supervisor_macos(force)
+        install_mpm_supervisor_macos(force, tm_path)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = force;
+        let _ = (force, tm_path);
         eprintln!(
             "trusty-mpm supervisor: on Linux, install the systemd unit \
              at `crates/trusty-mpm/deploy/supervisor/trusty-mpm-supervisor.service`."
@@ -279,7 +294,7 @@ pub fn extract_program_path(plist_xml: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn install_mpm_supervisor_macos(force: bool) -> anyhow::Result<()> {
+fn install_mpm_supervisor_macos(force: bool, tm_path: &std::path::Path) -> anyhow::Result<()> {
     use anyhow::Context;
 
     let home = resolve_home()?;
@@ -287,8 +302,9 @@ fn install_mpm_supervisor_macos(force: bool) -> anyhow::Result<()> {
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("home directory path is not valid UTF-8"))?;
 
-    // Resolve the `tm` binary path.
-    let tm_path = resolve_tm_binary(&home);
+    // #3554: `tm_path` is the CONCRETE path the caller just installed — never
+    // re-derived here via a PATH lookup (see this function's doc / the
+    // `install_mpm_supervisor` doc for why that was the #3554 bug).
     let tm_path_str = tm_path.to_str().unwrap_or("tm");
 
     // Fill the plist template.
@@ -654,9 +670,12 @@ mod tests {
     /// `~/Library/LaunchAgents` or the real `gui/<uid>` launchd domain — the
     /// whole point of the #3527 sandboxed-E2E escape hatches.
     /// What: with both `HOME_OVERRIDE_ENV` (a temp dir) and
-    /// `SKIP_LAUNCHCTL_ENV` set, calls `install_mpm_supervisor(false)` and
-    /// asserts it succeeds and the plist actually landed under the temp home
-    /// — never under the real home directory.
+    /// `SKIP_LAUNCHCTL_ENV` set, calls `install_mpm_supervisor(false, tm_path)`
+    /// and asserts it succeeds and the plist actually landed under the temp
+    /// home — never under the real home directory. `tm_path` is a synthetic,
+    /// non-existent path (#3554: no longer re-derived via `which tm`, so it
+    /// need not exist for this write-path test — no existing plist means the
+    /// downgrade guard's version probe is never reached).
     /// Test: This is the test.
     #[test]
     #[cfg(target_os = "macos")]
@@ -666,7 +685,8 @@ mod tests {
         std::env::set_var(HOME_OVERRIDE_ENV, tmp.path());
         std::env::set_var(SKIP_LAUNCHCTL_ENV, "1");
 
-        let result = install_mpm_supervisor(false);
+        let tm_path = tmp.path().join("local-bin").join("tm");
+        let result = install_mpm_supervisor(false, &tm_path);
 
         std::env::remove_var(HOME_OVERRIDE_ENV);
         std::env::remove_var(SKIP_LAUNCHCTL_ENV);
@@ -691,8 +711,9 @@ mod tests {
     /// the test machine's PATH) keeps this hermetic and deterministic
     /// regardless of the host environment.
     /// What: writes a plist whose `ProgramArguments[0]` points at a
-    /// guaranteed-nonexistent path, then calls `install_mpm_supervisor(false)`;
-    /// asserts it proceeds (`Ok`).
+    /// guaranteed-nonexistent path, then calls
+    /// `install_mpm_supervisor(false, tm_path)` with a likewise-nonexistent
+    /// `tm_path`; asserts it proceeds (`Ok`).
     /// Test: This is the test.
     #[test]
     #[cfg(target_os = "macos")]
@@ -714,7 +735,8 @@ mod tests {
         );
         std::fs::write(&plist_path, seeded).expect("seed plist");
 
-        let result = install_mpm_supervisor(false);
+        let candidate_path = tmp.path().join("nonexistent-candidate-tm");
+        let result = install_mpm_supervisor(false, &candidate_path);
 
         std::env::remove_var(HOME_OVERRIDE_ENV);
         std::env::remove_var(SKIP_LAUNCHCTL_ENV);
@@ -722,6 +744,92 @@ mod tests {
         assert!(
             result.is_ok(),
             "an unprobeable existing binary must not block the install: {result:?}"
+        );
+    }
+
+    /// Write a minimal executable shell script at `path` that echoes
+    /// `version_line` on `--version` and exits 0 — a real, probeable binary
+    /// (unlike the "unprobeable" tests above, which deliberately point at
+    /// nonexistent paths).
+    #[cfg(target_os = "macos")]
+    fn write_fake_tm(path: &std::path::Path, version_line: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir fake tm parent");
+        }
+        std::fs::write(path, format!("#!/bin/sh\necho '{version_line}'\nexit 0\n"))
+            .expect("write fake tm binary");
+        let mut perms = std::fs::metadata(path)
+            .expect("stat fake tm binary")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod fake tm binary");
+    }
+
+    /// THE #3554 regression, at the `install_mpm_supervisor` level: the
+    /// CANDIDATE-version comparison must come from the passed `tm_path` —
+    /// never re-derived via a `which tm` PATH lookup — even when a decoy
+    /// `tm` sits EARLIER on `$PATH` than the real candidate.
+    ///
+    /// Proven causally, not just by absence of a crash: the registered
+    /// ("current") version (0.19.27) sits strictly BETWEEN the decoy's
+    /// version (0.19.20) and the real candidate's version (0.19.29). If this
+    /// function regressed to re-resolve the candidate via PATH (finding the
+    /// OLDER decoy), [`decide_downgrade`] would REFUSE (0.19.20 <=
+    /// 0.19.27) — exactly the #3554 symptom ("registered version is not
+    /// older than the candidate version"). Using the real, passed `tm_path`
+    /// (0.19.29, strictly newer) it must PROCEED and write a plist
+    /// referencing `tm_path`, not the decoy.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn install_mpm_supervisor_candidate_version_ignores_path_shadow() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::env::set_var(HOME_OVERRIDE_ENV, tmp.path());
+        std::env::set_var(SKIP_LAUNCHCTL_ENV, "1");
+
+        // Registered ("current") binary — a real, probeable fake binary at
+        // 0.19.27, referenced by a hand-seeded existing plist.
+        let registered_bin = tmp.path().join("registered-tm");
+        write_fake_tm(&registered_bin, "trusty-mpm 0.19.27");
+        let agents_dir = tmp.path().join("Library").join("LaunchAgents");
+        std::fs::create_dir_all(&agents_dir).expect("create LaunchAgents dir");
+        let plist_path = agents_dir.join(format!("{PLIST_LABEL}.plist"));
+        let seeded = fill_template(
+            &tmp.path().to_string_lossy(),
+            registered_bin.to_str().expect("utf8 path"),
+        );
+        std::fs::write(&plist_path, seeded).expect("seed plist");
+
+        // Decoy binary EARLIER on $PATH — OLDER than the registered version.
+        let decoy_dir = tmp.path().join("decoy-early-path");
+        write_fake_tm(&decoy_dir.join("tm"), "trusty-mpm 0.19.20");
+        let prev_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{prev_path}", decoy_dir.display()));
+
+        // The REAL just-installed candidate — NEWER than registered — at a
+        // path that is NOT first on $PATH (mirrors #3554: `~/.local/bin`
+        // shadowed by an earlier `~/.cargo/bin`).
+        let candidate_bin = tmp.path().join("local-bin").join("tm");
+        write_fake_tm(&candidate_bin, "trusty-mpm 0.19.29");
+
+        let result = install_mpm_supervisor(false, &candidate_bin);
+
+        std::env::set_var("PATH", prev_path);
+        std::env::remove_var(HOME_OVERRIDE_ENV);
+        std::env::remove_var(SKIP_LAUNCHCTL_ENV);
+
+        assert!(
+            result.is_ok(),
+            "must proceed using the passed candidate (0.19.29 > registered 0.19.27); \
+             a failure here means the candidate was re-resolved via the PATH-shadowed \
+             decoy (0.19.20 <= 0.19.27, which would refuse): {result:?}"
+        );
+        let written = std::fs::read_to_string(&plist_path).expect("read written plist");
+        assert_eq!(
+            extract_program_path(&written).as_deref(),
+            Some(candidate_bin.to_str().expect("utf8 path")),
+            "the written plist must reference the passed tm_path, never a PATH-resolved one"
         );
     }
 }
