@@ -184,19 +184,32 @@ pub fn load_daemon_env() {
     }
 }
 
-/// Path to `~/.trusty-search/http_addr` — the canonical address-discovery
-/// file used by `trusty-search dashboard` and other client tools to locate
-/// the running daemon. Distinct from the legacy `daemon.port` file (which
-/// stores only the port number under the platform-specific data-local dir).
+/// Path to the canonical address-discovery file used by `trusty-search
+/// dashboard` and other client tools to locate the running daemon. Distinct
+/// from the legacy `daemon.port` file (which stores only the port number
+/// under the platform-specific data-local dir).
 ///
 /// Why: aligns trusty-search with the trusty-memory address-discovery
-/// contract — both daemons write a fully-qualified `host:port` line to
-/// `~/.trusty-*/http_addr`. Clients can read either file to discover the
-/// daemon without DNS or service registration.
-/// What: returns `$HOME/.trusty-search/http_addr` (creating the parent
-/// directory on demand is the caller's responsibility).
-/// Test: with HOME=/tmp/xyz → returns "/tmp/xyz/.trusty-search/http_addr".
+/// contract — both daemons write a fully-qualified `host:port` line to a
+/// well-known file. Clients can read it to discover the daemon without DNS or
+/// service registration.
+///
+/// Issue #3545: when `TRUSTY_DATA_DIR` is set (by `--data-dir` or the env
+/// var), the file lives *inside* that directory instead of the fixed
+/// `$HOME/.trusty-search/` location, mirroring [`daemon_dir`]'s precedence.
+/// Before this fix, an isolated daemon still wrote its address to the one
+/// shared `$HOME/.trusty-search/http_addr` file regardless of `TRUSTY_DATA_DIR`,
+/// clobbering the production daemon's discovery file with the isolated
+/// instance's port (and vice versa on the next production restart).
+/// What: returns `$TRUSTY_DATA_DIR/http_addr` when the env var is set,
+/// otherwise `$HOME/.trusty-search/http_addr` (unchanged default, preserving
+/// the existing cross-crate discovery contract for the production daemon).
+/// Test: `http_addr_path_respects_trusty_data_dir` below; with `HOME=/tmp/xyz`
+/// and no override → returns "/tmp/xyz/.trusty-search/http_addr".
 pub fn http_addr_path() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("TRUSTY_DATA_DIR") {
+        return Some(PathBuf::from(dir).join("http_addr"));
+    }
     dirs::home_dir().map(|h| h.join(".trusty-search").join("http_addr"))
 }
 
@@ -710,6 +723,36 @@ mod tests {
         assert!(
             port.starts_with(&override_path),
             "port path {port:?} should be under override {override_path:?}"
+        );
+    }
+
+    /// Regression for issue #3545: `http_addr_path()` must respect
+    /// `TRUSTY_DATA_DIR` exactly like `daemon_dir()`/`daemon_port_path()` do,
+    /// so an isolated daemon's discovery file never lands in the shared
+    /// `$HOME/.trusty-search/http_addr` location used by the production daemon.
+    /// What: set `TRUSTY_DATA_DIR` to a tempdir; assert the returned path is
+    /// `{tempdir}/http_addr`, not the `$HOME`-relative default.
+    /// Test: `http_addr_path_respects_trusty_data_dir` (this test).
+    ///
+    /// `#[serial]` for the same reason as the other `TRUSTY_DATA_DIR` tests in
+    /// this module: the env var is process-global.
+    #[test]
+    #[serial]
+    fn http_addr_path_respects_trusty_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let override_path = tmp.path().to_path_buf();
+        unsafe {
+            std::env::set_var("TRUSTY_DATA_DIR", &override_path);
+        }
+        let path = http_addr_path();
+        unsafe {
+            std::env::remove_var("TRUSTY_DATA_DIR");
+        }
+        let path = path.expect("http_addr_path should resolve with TRUSTY_DATA_DIR set");
+        assert_eq!(
+            path,
+            override_path.join("http_addr"),
+            "http_addr_path should land under the TRUSTY_DATA_DIR override, not $HOME"
         );
     }
 }
