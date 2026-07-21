@@ -128,7 +128,7 @@ async fn switchable_embedder_installed_alongside_embedder() {
 
     let state = SearchAppState::new(IndexRegistry::new());
     // Nothing installed yet.
-    assert!(state.current_switchable_embedder().await.is_none());
+    assert!(state.current_switchable_embedder().is_none());
 
     let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
     let active = ActiveBackend {
@@ -139,13 +139,10 @@ async fn switchable_embedder_installed_alongside_embedder() {
         bootstrap: BootstrapState::NotApplicable,
     };
     let switchable = Arc::new(SwitchableEmbedder::new(inner, active));
-    state
-        .install_switchable_embedder(Arc::clone(&switchable))
-        .await;
+    state.install_switchable_embedder(Arc::clone(&switchable));
 
     let installed = state
         .current_switchable_embedder()
-        .await
         .expect("switchable embedder must be installed");
     assert_eq!(installed.active().kind, BackendKind::Ort);
 }

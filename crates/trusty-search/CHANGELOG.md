@@ -9,6 +9,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **`/health` reports the true active embedder backend + MPS provider (epic
+  #3524 slice 6, PR 2/5, closes #3530, #3493 P1)** — `GET /health` now sources
+  `embedder_info` (`provider`, `quantized`, new `model` and `backend` fields)
+  from the REAL installed `ActiveBackend` via
+  `SearchAppState::current_switchable_embedder()` (epic #3524 PR-1's
+  `SwitchableEmbedder`) instead of inferring: the previous `quantized:
+  dimension == 384` check was always `true` regardless of the actual model,
+  and the Python/MPS sidecar reported `provider=CoreML` even though it never
+  touches ONNX Runtime. A new top-level `embedder_bootstrap` field
+  (`"n/a"`/`"bootstrapping"`/`"ready"`/`"failed"`/`"fell_back_to_ort"`) mirrors
+  `ActiveBackend::bootstrap`. Falls back gracefully to the old
+  prediction-based path when no `SwitchableEmbedder` handle is installed yet
+  (e.g. very early boot) — never panics or 500s.
+  - Fixed an ordering gap from PR-1: `commands/start/daemon.rs`'s init task
+    now installs the `SwitchableEmbedder` handle BEFORE flipping embedder
+    readiness, so `/health` can never observe `is_embedder_ready() == true`
+    while the switchable handle is still absent.
+  - `LazySlotEmbedderAdapter::provider()` (`commands/start/embedder.rs`) now
+    distinguishes the ort stdio sidecar from the Python/MPS sidecar (both use
+    the same adapter type) and predicts through the matching resolver —
+    `trusty_common::embedder::resolve_expected_python_provider` for the
+    Python arm — instead of always using the ORT-oriented resolver.
+  - `ActiveBackend::quantized` is no longer set from `TRUSTY_EMBEDDER_MODEL`
+    for every backend: only the ort/in-process `FastEmbedder` path actually
+    honours that env var (see `backend_respects_quantized_env`); the Python
+    sidecar and a manually managed remote sidecar always report `false`
+    rather than inheriting an unrelated `int8` setting.
+  - Fixed the `(Q)` startup-log hardcode (`embedder initialized:
+    model=AllMiniLML6V2(Q) ...`) to report the real resolved model name via
+    the new `FastEmbedder::model_name()` (trusty-common).
+  - `SearchAppState::switchable_embedder` is now backed by
+    `arc_swap::ArcSwapOption` instead of `tokio::sync::RwLock` — `/health`
+    reads it wait-free (`load_full`), matching the non-blocking-`/health`
+    invariant from issue #1006.
+  - Forward-note (low priority, not implemented here): `BackendKind::Remote`
+    still collapses HTTP and UDS into one `"remote"` `/health` tag — see
+    `backend_kind_str`'s doc for the split-out path if a consumer ever needs
+    to distinguish them.
+
 - **`SwitchableEmbedder` plumbing (epic #3524 slice 6, PR 1/5)** — pure
   refactor, no behavior change. `build_embedder()` now wraps whatever backend
   it constructs (ort stdio sidecar, opt-in Python/MPS sidecar, in-process,

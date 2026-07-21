@@ -380,6 +380,11 @@ fn timeout_stall_hint(provider: ExecutionProvider) -> &'static str {
         ExecutionProvider::CoreML | ExecutionProvider::CoreMLAne => {
             "CoreML/ANE session-init or oversized-batch stall?"
         }
+        // Issue #3524: the Python/MPS sidecar's stall mode is a torch/MPS
+        // unified-memory pressure or first-batch MPS-compile stall — the
+        // same category of "oversized batch on a shared memory pool" issue
+        // as CoreML/ANE above, but never an ONNX Runtime CoreML EP.
+        ExecutionProvider::Mps => "MPS session-init or oversized-batch stall?",
         ExecutionProvider::Cpu => "embedder sidecar stall?",
     }
 }

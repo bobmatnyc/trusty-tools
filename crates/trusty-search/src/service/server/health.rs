@@ -11,6 +11,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::core::embed::Embedder as _;
+use crate::service::embedder_supervisor::{BackendKind, BootstrapState};
+
 use super::state::{ReconcileSummary, SearchAppState, WarmBootSummary};
 
 /// Response shape for `GET /health` (issue #34 + #35 + #38 + #282 + #537 +
@@ -110,29 +113,97 @@ pub(super) struct HealthResponse {
     /// What: `WatcherManager::network_degraded_count()` at poll time.
     /// Test: `health_surfaces_watcher_network_degraded_count`.
     pub(super) indexes_watcher_network_degraded: usize,
+    /// Backend hot-swap bootstrap status (epic #3524 slice 6 — PR 2/5,
+    /// closes #3530 / #3493 P1).
+    ///
+    /// Why: PR-3's hot-swap orchestrator will drive a Python/MPS sidecar
+    /// through a multi-second venv-bootstrap window before it can serve a
+    /// request; operators need a machine-readable signal for "still
+    /// bootstrapping" vs "bootstrap failed and fell back to ort" instead of
+    /// grepping logs.
+    /// What: one of `"n/a"` (no bootstrap applies — every backend in PR-1/
+    /// PR-2, and the common case whenever the currently-installed backend
+    /// needed no bootstrap step), `"bootstrapping"`, `"ready"`, `"failed"`,
+    /// or `"fell_back_to_ort"` — mirrors
+    /// [`crate::service::embedder_supervisor::BootstrapState`]. `"n/a"` when
+    /// no [`SwitchableEmbedder`] handle is installed yet (the same
+    /// deferred-init gap `embedder_info` falls back for — see
+    /// `current_switchable_embedder`'s ordering note).
+    /// Test: `health_reports_embedder_bootstrap_state`.
+    pub(super) embedder_bootstrap: &'static str,
 }
 
-/// Embedding-model metadata surfaced by `GET /health` (issue #38).
+/// Embedding-model metadata surfaced by `GET /health` (issue #38; reworked
+/// epic #3524 slice 6 — PR 2/5, closes #3530 / #3493 P1).
 ///
 /// Why: the redesigned web UI's Health view shows which model is loaded, its
-/// output dimension, and whether ONNX is dispatching to CPU / CoreML / CUDA.
-/// Operators previously had to read the daemon startup log for this.
-/// What: a small serialisable struct derived from the live `Arc<dyn Embedder>`
-/// — `dimension` comes from `Embedder::dimension()`, `provider` from
-/// `Embedder::provider()`, and `quantized` is inferred from the provider-
-/// agnostic default model (the daemon ships the INT8 `AllMiniLML6V2Q`).
-/// Test: `health_includes_embedder_info_when_ready` builds a state with a
-/// `MockEmbedder` and asserts the block is present with a 384-dim value.
+/// output dimension, and which execution provider (CPU / CoreML / CUDA / MPS)
+/// is active. Before this PR every field except `dimension` was a PREDICTION
+/// (`resolve_expected_provider()`, `dimension == 384`) rather than the truth —
+/// e.g. the Python/MPS sidecar reported `provider=CoreML` (it never touches
+/// ONNX Runtime) and `quantized` was unconditionally `true` (`dimension ==
+/// 384` holds for every backend this crate ever builds, quantized or not).
+/// What: sourced from `SwitchableEmbedder::active()` (the REAL installed
+/// backend, epic #3524 PR-1) when available; falls back to the old
+/// prediction-based path only in the brief window before a
+/// `SwitchableEmbedder` handle is installed (see
+/// `SearchAppState::current_switchable_embedder`'s ordering note).
+/// Test: `health_includes_embedder_info_when_ready` (fallback path, no
+/// switchable installed), `health_reports_switchable_backend_info` (ort and
+/// python `ActiveBackend`s via the switchable path).
 #[derive(Serialize)]
 pub(super) struct EmbedderInfo {
     /// Vector dimensionality reported by the embedder (384 for all-MiniLM-L6).
     dimension: usize,
-    /// Active ONNX execution provider: `"CPU"`, `"CoreML"`, or `"CUDA"`.
+    /// Active execution provider: `"CPU"`, `"CoreML"`, `"CoreML(ANE)"`,
+    /// `"CUDA"`, or `"MPS"`.
     provider: String,
-    /// Whether the loaded model is the INT8-quantized variant. The daemon
-    /// defaults to `AllMiniLML6V2Q` (quantized); a missing quantized model
-    /// falls back to full precision.
+    /// Whether the loaded model is the INT8-quantized variant.
     quantized: bool,
+    /// Human-readable model identifier (e.g. `"all-MiniLM-L6-v2"`).
+    model: String,
+    /// Which backend implementation is serving embeddings: `"ort"`,
+    /// `"python"`, `"remote"` (HTTP or UDS — see the `BackendKind::Remote`
+    /// forward-note on `backend_kind_str`), `"in_process"`, `"candle"`, or
+    /// `"unknown"` (the pre-switchable fallback path, which cannot
+    /// distinguish backends).
+    backend: String,
+}
+
+/// `BackendKind` → the `backend` string `/health` reports.
+///
+/// Why: kept as a standalone pure function so the mapping is unit-testable
+/// without constructing a full `HealthResponse`.
+/// What: one lowercase tag per variant.
+///
+/// Forward-note (PR-1 review, low priority): `BackendKind::Remote` collapses
+/// HTTP and UDS remotes into one variant, so this always reports `"remote"`
+/// for both transports. Splitting into `RemoteHttp`/`RemoteUnix` (or adding a
+/// sub-label) would let `/health` distinguish them — deferred as low
+/// priority since neither has resolution-order or safety implications.
+/// Test: `backend_kind_str_maps_every_variant`.
+fn backend_kind_str(kind: BackendKind) -> &'static str {
+    match kind {
+        BackendKind::Ort => "ort",
+        BackendKind::Python => "python",
+        BackendKind::Remote => "remote",
+        BackendKind::InProcess => "in_process",
+        BackendKind::Candle => "candle",
+    }
+}
+
+/// `BootstrapState` → the `embedder_bootstrap` string `/health` reports.
+///
+/// Why: standalone pure function, same rationale as [`backend_kind_str`].
+/// Test: `bootstrap_state_str_maps_every_variant`.
+fn bootstrap_state_str(state: BootstrapState) -> &'static str {
+    match state {
+        BootstrapState::NotApplicable => "n/a",
+        BootstrapState::Bootstrapping => "bootstrapping",
+        BootstrapState::Ready => "ready",
+        BootstrapState::Failed => "failed",
+        BootstrapState::FellBackToOrt => "fell_back_to_ort",
+    }
 }
 
 pub(super) async fn health_handler(
@@ -228,25 +299,59 @@ pub(super) async fn health_handler(
     // `memory_limit_mb()` returns `None` when no limit is configured.
     let rss_limit_mb = crate::core::memguard::memory_limit_mb().unwrap_or(0);
     let disk_bytes = state.disk_bytes.load(std::sync::atomic::Ordering::Relaxed);
-    // Issue #38: surface model detail (dimension + provider) once the embedder
-    // is wired so the admin UI's Health view doesn't need a separate request.
+    // Issue #38 / epic #3524 slice 6 (PR 2/5, closes #3530 / #3493 P1):
+    // surface model detail (dimension, provider, quantized, model, backend)
+    // once the embedder is wired so the admin UI's Health view doesn't need a
+    // separate request.
     //
-    // Issue #1006 — Option B: use `try_current_embedder()` (non-blocking
-    // `try_read()`) instead of `current_embedder().await`. When the write lock
-    // is held by `install_embedder` during init/hot-swap, fall back to `None`
-    // and return no `embedder_info` block — the status field already carries
-    // the readiness signal. This is correct: the client can re-poll /health on
-    // the next cycle to pick up the info once init completes.
-    let embedder_info = state.try_current_embedder().map(|e| {
-        let dimension = e.dimension();
-        EmbedderInfo {
-            dimension,
-            provider: e.provider().as_str().to_string(),
-            // The daemon defaults to the INT8-quantized AllMiniLML6V2Q model;
-            // a 384-dim embedder is the quantized all-MiniLM-L6 variant.
-            quantized: dimension == trusty_common::embedder::EMBED_DIM,
-        }
-    });
+    // Primary path: read the REAL installed backend off the
+    // `SwitchableEmbedder` (epic #3524 PR-1) via `current_switchable_embedder`
+    // — `ArcSwapOption::load_full` is wait-free, so this never risks the
+    // issue #1006 stall a blocking read could cause.
+    //
+    // Fallback path: `current_switchable_embedder()` briefly returns `None`
+    // between `install_switchable_embedder` and `install_embedder` in the
+    // daemon's init task (PR-2 reordered those two calls so the gap is now on
+    // the OTHER side — see that method's ordering note — but a defensive
+    // fallback costs nothing and covers any other future ordering). When
+    // `None`, fall back to the pre-PR-2 provider-inference path via
+    // `try_current_embedder()` (issue #1006's non-blocking `try_read()`) so
+    // `/health` never panics or 500s and the client can simply re-poll once
+    // the switchable handle lands.
+    let switchable = state.current_switchable_embedder();
+    let embedder_info = if let Some(sw) = switchable.as_ref() {
+        let active = sw.active();
+        Some(EmbedderInfo {
+            dimension: sw.dimension(),
+            provider: active.provider.as_str().to_string(),
+            quantized: active.quantized,
+            model: active.model.clone(),
+            backend: backend_kind_str(active.kind).to_string(),
+        })
+    } else {
+        state.try_current_embedder().map(|e| {
+            let dimension = e.dimension();
+            EmbedderInfo {
+                dimension,
+                provider: e.provider().as_str().to_string(),
+                // Best-effort fallback ONLY (no ActiveBackend to read yet):
+                // every backend this crate builds embeds at 384-dim
+                // regardless of quantization, so this predicate does not
+                // actually distinguish fp32 from INT8 — it is retained only
+                // because some dimension is better than none while genuinely
+                // no better source exists. The primary (switchable) path
+                // above reports the real `ActiveBackend::quantized` and does
+                // not have this limitation.
+                quantized: dimension == trusty_common::embedder::EMBED_DIM,
+                model: "all-MiniLM-L6-v2".to_string(),
+                backend: "unknown".to_string(),
+            }
+        })
+    };
+    let embedder_bootstrap = switchable
+        .as_ref()
+        .map(|sw| bootstrap_state_str(sw.active().bootstrap))
+        .unwrap_or("n/a");
     // Issue #282: sample the sidecar's current RSS (None when not running).
     let embedderd_rss_mb = state
         .current_embedderd_pid()
@@ -417,6 +522,7 @@ pub(super) async fn health_handler(
         warmboot_summary,
         boot_reconcile,
         indexes_watcher_network_degraded,
+        embedder_bootstrap,
     })
 }
 

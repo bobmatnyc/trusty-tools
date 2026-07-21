@@ -6,6 +6,7 @@
 //! What: struct definition + builder methods; see also `state_impl.rs` for
 //! the full `impl` block.
 //! Test: see `../tests` and the handler test modules.
+use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use serde::Serialize;
 use std::sync::Arc;
@@ -470,15 +471,18 @@ pub struct SearchAppState {
     /// `Embedder` trait, so a trait object alone can't reach them without an
     /// `Any`-downcast. Stashing the concrete `Arc` here avoids that.
     /// What: `None` until `install_switchable_embedder` runs (mirrors the
-    /// `embedder_slot` deferred-init timing exactly — both are populated by
-    /// the same background init task in the same call). `RwLock` because the
-    /// same background task installs it once and later hot-swap orchestrator
-    /// calls only ever *read* through it (swap_to is a method on the
-    /// SwitchableEmbedder itself, not on this field).
+    /// `embedder_slot` deferred-init timing — see the ordering note on
+    /// `install_switchable_embedder` for the one-instant gap between the two).
+    /// Backed by [`ArcSwapOption`] rather than a `tokio::sync::RwLock`
+    /// (epic #3524 slice 6 — PR 2/5, issue #1006's non-blocking-`/health`
+    /// precedent): `/health` reads this on every 2 s external probe poll and
+    /// must never park on a lock — `ArcSwapOption::load_full` is wait-free
+    /// with respect to a concurrent `store`, so there is no `try_read()`
+    /// contention-fallback branch to reason about here at all.
     /// Test: `switchable_embedder_installed_alongside_embedder` in
     /// `tests_state.rs`.
     pub switchable_embedder:
-        Arc<RwLock<Option<Arc<crate::service::embedder_supervisor::SwitchableEmbedder>>>>,
+        Arc<ArcSwapOption<crate::service::embedder_supervisor::SwitchableEmbedder>>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.

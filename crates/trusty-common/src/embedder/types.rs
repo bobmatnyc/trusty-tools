@@ -246,6 +246,14 @@ pub enum ExecutionProvider {
     /// New default on Apple Silicon as of trusty-search 0.3.55.
     CoreMLAne,
     Cuda,
+    /// Apple `torch.backends.mps` (Metal Performance Shaders) — the device
+    /// the opt-in Python/MPS sidecar (`trusty-embedderd-py`, epic #3524)
+    /// resolves to on Apple Silicon. Distinct from `CoreML`/`CoreMLAne`
+    /// (this crate's own ONNX Runtime CoreML EP): the Python sidecar embeds
+    /// via `sentence-transformers`/`torch`, which never touches ONNX
+    /// Runtime or the CoreML EP at all — reporting `CoreML` for that path
+    /// (the pre-#3493 bug) was actively wrong, not just imprecise.
+    Mps,
 }
 
 impl ExecutionProvider {
@@ -255,6 +263,7 @@ impl ExecutionProvider {
             ExecutionProvider::CoreML => "CoreML",
             ExecutionProvider::CoreMLAne => "CoreML(ANE)",
             ExecutionProvider::Cuda => "CUDA",
+            ExecutionProvider::Mps => "MPS",
         }
     }
 }
@@ -315,6 +324,60 @@ pub fn resolve_expected_provider() -> ExecutionProvider {
             Some("all") | Some("cpu_gpu") | Some("cpuandgpu") => ExecutionProvider::CoreML,
             _ => ExecutionProvider::CoreMLAne,
         };
+    }
+
+    #[allow(unreachable_code)]
+    ExecutionProvider::Cpu
+}
+
+/// Predict the execution provider the Python/MPS sidecar
+/// (`trusty-embedderd-py`, epic #3524) will resolve, from build cfg +
+/// environment alone — without constructing a `torch` device or spawning the
+/// sidecar.
+///
+/// Why: issue #3493 P1. The Python sidecar's own device resolver
+/// (`trusty_embed_sidecar.model.resolve_device`) picks MPS on Apple Silicon,
+/// then CUDA, then CPU — a torch/`sentence-transformers` decision that never
+/// touches ONNX Runtime or this crate's CoreML EP at all. Before this fix,
+/// the parent's `LazySlotEmbedderAdapter::provider()` (`trusty-search`
+/// `commands/start/embedder.rs`) called the ORT-oriented
+/// [`resolve_expected_provider`] for *every* stdio-sidecar backend,
+/// including the Python one, so `/health` reported `CoreML` for a sidecar
+/// that never runs CoreML — the `(Q)` observability bug's provider half
+/// (issue #3530 / #3493 P1). This function mirrors the Python resolver in
+/// the same precedence order so the parent can predict the correct answer
+/// without an RPC round-trip, exactly as [`resolve_expected_provider`] does
+/// for the ORT sidecar.
+///
+/// What: `TRUSTY_DEVICE=cpu` (case-insensitive) forces `Cpu`; otherwise
+/// Apple Silicon (`aarch64` + `macos`) yields `Mps` (torch's MPS backend is
+/// available on every supported Apple Silicon host); otherwise an
+/// `embedder-cuda` build yields `Cuda`; every other host yields `Cpu`. Like
+/// [`resolve_expected_provider`], this deliberately does **not** probe
+/// whether `torch.backends.mps.is_available()` actually returns `true` at
+/// runtime — the sidecar's own startup log is the source of truth for a
+/// runtime fallback (e.g. an Apple Silicon host with a torch build that
+/// lacks MPS support), matching the existing convention for the ORT
+/// prediction function.
+///
+/// Test: `resolve_expected_python_provider_forces_cpu`,
+/// `resolve_expected_python_provider_default_matches_platform` in `mod.rs`.
+pub fn resolve_expected_python_provider() -> ExecutionProvider {
+    let force_cpu = std::env::var("TRUSTY_DEVICE")
+        .map(|v| v.eq_ignore_ascii_case("cpu"))
+        .unwrap_or(false);
+    if force_cpu {
+        return ExecutionProvider::Cpu;
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    {
+        return ExecutionProvider::Mps;
+    }
+
+    #[cfg(feature = "embedder-cuda")]
+    {
+        return ExecutionProvider::Cuda;
     }
 
     #[allow(unreachable_code)]

@@ -7,6 +7,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`ExecutionProvider::Mps` + `resolve_expected_python_provider` (epic #3524
+  slice 6, PR 2/5, refs #3530, #3493 P1)** — a new `Mps` variant on
+  `embedder::ExecutionProvider` for the opt-in Python/MPS embedding sidecar
+  (`trusty-embedderd-py`), plus a pure `resolve_expected_python_provider()`
+  function mirroring the sidecar's own device resolver
+  (`trusty_embed_sidecar.model.resolve_device`): `TRUSTY_DEVICE=cpu` → `Cpu`;
+  else aarch64-macOS → `Mps`; else an `embedder-cuda` build → `Cuda`; else
+  `Cpu`. Lets the parent `trusty-search` process predict the sidecar's
+  provider without an RPC round-trip, the same pattern
+  `resolve_expected_provider` already uses for the ORT sidecar — fixes
+  `/health` reporting `CoreML` for a sidecar that never touches ONNX Runtime.
+- **`FastEmbedder::model_name()` (issue #3530 — the `(Q)` observability
+  bug)** — `FastEmbedder` now stores the RESOLVED `EmbeddingModel` variant at
+  construction (tracking the primary→CPU-retry→fallback-model chain in
+  `with_cache_size`) and exposes it via `model_name()` — one of
+  `"all-MiniLM-L6-v2"` (fp32 default) or `"all-MiniLM-L6-v2-int8"` (the
+  `TRUSTY_EMBEDDER_MODEL=int8` opt-in). Lets `trusty-search` and
+  `trusty-embedderd` report the true loaded model instead of the stale
+  hardcoded `"AllMiniLML6V2Q"` string that predated the fp32-default flip
+  (#3486 / #3493 P0).
+
 ## [0.23.7] — 2026-07-21
 
 Publishes the `catchup::{pause, generate_catchup_json}` API to crates.io.

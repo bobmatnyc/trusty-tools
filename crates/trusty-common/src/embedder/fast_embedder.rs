@@ -227,6 +227,29 @@ pub(super) fn resolve_default_embedding_model() -> EmbeddingModel {
     }
 }
 
+/// Human-readable name for the two `EmbeddingModel` variants this crate ever
+/// selects (issue #3530 — the `(Q)` observability bug).
+///
+/// Why: `FastEmbedder::model_name()` and `trusty-embedderd`'s startup
+/// log / `/health` JSON need to report which model variant is ACTUALLY
+/// loaded rather than a hardcoded `"AllMiniLML6V2Q"` — a name that stayed
+/// wrong after the default flipped to fp32 (issue #3486 / #3493 P0).
+/// What: `AllMiniLML6V2` → `"all-MiniLM-L6-v2"` (the fp32 default, matching
+/// the Python sidecar's identical HuggingFace model name);
+/// `AllMiniLML6V2Q` → `"all-MiniLM-L6-v2-int8"` (the explicit
+/// `TRUSTY_EMBEDDER_MODEL=int8` opt-in). Any other `fastembed::EmbeddingModel`
+/// variant (never selected by [`resolve_default_embedding_model`] or the
+/// fallback logic in [`FastEmbedder::with_cache_size`]) falls back to
+/// `"unknown"` rather than panicking.
+/// Test: `embedding_model_name_*` in `mod.rs`.
+pub(super) fn embedding_model_name(model: &EmbeddingModel) -> &'static str {
+    match model {
+        EmbeddingModel::AllMiniLML6V2 => "all-MiniLM-L6-v2",
+        EmbeddingModel::AllMiniLML6V2Q => "all-MiniLM-L6-v2-int8",
+        _ => "unknown",
+    }
+}
+
 /// Outcome of a single execution-provider init attempt, used to decide
 /// whether to fall back to CPU and whether to poison [`COREML_KNOWN_BAD`].
 ///
@@ -286,6 +309,12 @@ pub struct FastEmbedder {
     cache: Arc<Mutex<LruCache<String, Vec<f32>>>>,
     dim: usize,
     provider: ExecutionProvider,
+    /// Human-readable name of the `EmbeddingModel` variant that actually
+    /// ended up loaded — resolved once at construction and never mutated
+    /// (issue #3530). May differ from the PRIMARY model requested by
+    /// [`resolve_default_embedding_model`] when the primary failed to
+    /// initialise and the two-model fallback net kicked in.
+    model_name: &'static str,
 }
 
 impl FastEmbedder {
@@ -304,6 +333,27 @@ impl FastEmbedder {
     /// Test: covered by the public-surface compile check.
     pub fn provider(&self) -> ExecutionProvider {
         self.provider
+    }
+
+    /// Human-readable name of the embedding model variant actually loaded.
+    ///
+    /// Why (issue #3530 — the `(Q)` observability bug): both
+    /// `trusty-search`'s startup log and `trusty-embedderd`'s startup log /
+    /// `/health` JSON hardcoded `"AllMiniLML6V2Q"` even after the default
+    /// flipped to the fp32 `AllMiniLML6V2` variant (issue #3486 / #3493 P0),
+    /// so operators saw a stale, actively-wrong model name. Exposing the
+    /// RESOLVED name (captured once at construction, in
+    /// [`Self::with_cache_size`]) lets every caller report the truth instead
+    /// of a compile-time guess.
+    /// What: one of `"all-MiniLM-L6-v2"` (fp32, the default) or
+    /// `"all-MiniLM-L6-v2-int8"` (the `TRUSTY_EMBEDDER_MODEL=int8` opt-in) —
+    /// see [`embedding_model_name`]. Reflects whichever model actually
+    /// initialised, including after the primary→CPU-retry→fallback-model
+    /// chain in [`Self::with_cache_size`].
+    /// Test: `fast_embedder_model_name_*` (`#[ignore]` — they download a
+    /// real ONNX model).
+    pub fn model_name(&self) -> &'static str {
+        self.model_name
     }
 
     /// Build `TextInitOptions` for the given model, attempting to register
@@ -546,8 +596,8 @@ impl FastEmbedder {
         let capacity =
             NonZeroUsize::new(capacity.max(1)).expect("capacity.max(1) is always non-zero");
 
-        let (model, provider) =
-            tokio::task::spawn_blocking(|| -> Result<(TextEmbedding, ExecutionProvider)> {
+        let (model, provider, resolved_model) = tokio::task::spawn_blocking(
+            || -> Result<(TextEmbedding, ExecutionProvider, EmbeddingModel)> {
                 // Commit the ORT global thread pool (intra=platform/EP-
                 // conditional, spinning=off by default) BEFORE fastembed
                 // creates any session, so the per-session
@@ -577,8 +627,9 @@ impl FastEmbedder {
                 };
 
                 let (q_opts, q_provider) = Self::init_options(primary_model.clone());
-                let (m, provider) = match Self::try_new_bounded(q_opts, q_provider) {
-                    Ok(m) => (m, q_provider),
+                let (m, provider, resolved_model) = match Self::try_new_bounded(q_opts, q_provider)
+                {
+                    Ok(m) => (m, q_provider, primary_model.clone()),
                     Err(q_err) => {
                         if q_provider != ExecutionProvider::Cpu && !require_gpu {
                             tracing::error!(
@@ -602,7 +653,7 @@ impl FastEmbedder {
                             let (cpu_opts, cpu_provider) =
                                 Self::init_options(primary_model.clone());
                             match TextEmbedding::try_new(cpu_opts) {
-                                Ok(m) => (m, cpu_provider),
+                                Ok(m) => (m, cpu_provider, primary_model.clone()),
                                 Err(cpu_err) => {
                                     tracing::warn!(
                                         "{primary_model:?} init failed on CPU ({cpu_err:#}), \
@@ -613,7 +664,7 @@ impl FastEmbedder {
                                     let m = TextEmbedding::try_new(fb_opts).context(format!(
                                         "failed to initialise fastembed (tried CUDA→CPU on {primary_model:?}, then {fallback_model:?})"
                                     ))?;
-                                    (m, fb_provider)
+                                    (m, fb_provider, fallback_model.clone())
                                 }
                             }
                         } else if require_gpu {
@@ -629,7 +680,7 @@ impl FastEmbedder {
                             let m = TextEmbedding::try_new(fb_opts).context(format!(
                                 "failed to initialise fastembed (tried {primary_model:?} and {fallback_model:?})"
                             ))?;
-                            (m, fb_provider)
+                            (m, fb_provider, fallback_model.clone())
                         }
                     }
                 };
@@ -645,14 +696,17 @@ impl FastEmbedder {
                 let _ = m
                     .embed(warmup, None)
                     .context("fastembed warmup batch failed")?;
-                Ok((m, provider))
-            })
-            .await
-            .context("spawn_blocking joined with error during embedder init")??;
+                Ok((m, provider, resolved_model))
+            },
+        )
+        .await
+        .context("spawn_blocking joined with error during embedder init")??;
 
+        let model_name = embedding_model_name(&resolved_model);
         tracing::info!(
-            "trusty-embedder: FastEmbedder ready (provider={}, dim={})",
+            "trusty-embedder: FastEmbedder ready (provider={}, model={}, dim={})",
             provider,
+            model_name,
             EMBED_DIM
         );
 
@@ -661,6 +715,7 @@ impl FastEmbedder {
             cache: Arc::new(Mutex::new(LruCache::new(capacity))),
             dim: EMBED_DIM,
             provider,
+            model_name,
         })
     }
 }

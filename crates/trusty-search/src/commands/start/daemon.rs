@@ -358,12 +358,19 @@ pub async fn handle_start(
                 if let Some(slot) = pid_slot {
                     install_state.install_embedderd_pid_slot(slot).await;
                 }
+                // Epic #3524 slice 6 (PR 2/5 ordering fix): stash the concrete
+                // SwitchableEmbedder handle BEFORE flipping embedder
+                // readiness, so a reader can never observe
+                // `is_embedder_ready() == true` while
+                // `current_switchable_embedder()` is still `None` — closes
+                // the gap PR-1 left open (`/health` handles a `None` read
+                // gracefully regardless, but there is no reason to leave the
+                // gap open when installing in the other order removes it
+                // entirely). A later slice's hot-swap orchestrator and
+                // `/health` both reach `swap_to`/`active()` through this
+                // handle without downcasting the trait object.
+                install_state.install_switchable_embedder(switchable);
                 install_state.install_embedder(Arc::clone(&embedder)).await;
-                // Epic #3524 slice 6: stash the concrete SwitchableEmbedder
-                // handle so a later slice's hot-swap orchestrator and /health
-                // work can reach `swap_to`/`active()` without downcasting the
-                // trait object.
-                install_state.install_switchable_embedder(switchable).await;
                 // Issue #41: worker pool — priority-aware dispatch, bounded queue.
                 let tracker = Arc::clone(&install_state.embedder_stall_tracker);
                 use crate::service::embed_pool::EmbedPool;
