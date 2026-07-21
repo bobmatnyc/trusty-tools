@@ -75,6 +75,15 @@ allow = [
     "modify_gmail_messages",
     "create_draft",
 ]
+# OpenRPC over stdio scopes (#3208). This is the `extends`-shadow-fallback
+# safety net (see the header note) and does NOT use `extends`, so it must
+# declare its own complete scope surface rather than inheriting it — unlike
+# the package form (`cto-assistant/agent.toml`), which gets this from
+# `assistant` via `extends`. Without this, the gworkspace-backed tools in
+# `allow` above (Gmail triage, Google Tasks) would be silently denied at
+# dispatch the moment scope enforcement is active, even though they're
+# allowlisted by name.
+scopes = ["memory.read", "memory.write", "search.read", "google.gmail.*", "google.tasks.*"]
 
 [system_prompt]
 # #256: Skill files live in `.trusty-agents/skills/<name>.md` and are resolved
