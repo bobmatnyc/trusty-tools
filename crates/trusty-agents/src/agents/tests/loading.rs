@@ -672,6 +672,149 @@ fn assistant_tier_grants_delegation_and_blackboxes_internal_tools() {
     }
 }
 
+/// PR A follow-up (#3052): pins the resolved `[llm]` `temperature`/
+/// `max_tokens` for every bundled assistant-tier agent, proving the per-key
+/// `extends` inheritance fix (a) restores `cto-assistant`'s tuned sampling
+/// (the #469 regression) and (b) leaves `assistant`/`izzie` — which don't
+/// override either field — resolving to EXACTLY the base's values, unchanged
+/// from before this fix (no unintended drift for agents that inherit
+/// wholesale).
+/// What: Loads `assistant`, `izzie`, and `cto-assistant` via the real
+/// `AgentConfig::by_name` dispatch loader and asserts each resolved
+/// `(temperature, max_tokens)` pair.
+/// Test: This function IS the test.
+#[test]
+fn assistant_tier_llm_sampling_params_pin_per_key_extends_inheritance() {
+    let _guard = ENV_LOCK.blocking_lock();
+
+    // (agent name, expected temperature, expected max_tokens)
+    let cases: [(&str, f32, u32); 3] = [
+        // Base: declares its own values directly (not an extends child) —
+        // must be completely unaffected by the per-key merge change.
+        ("assistant", 0.7, 1024),
+        // izzie: extends "assistant" and declares a REDUNDANT [llm] block
+        // matching the base's values (see izzie/agent.toml's header note) —
+        // must resolve identically to the base, whether via its own
+        // declaration or via inheritance.
+        ("izzie", 0.7, 1024),
+        // cto-assistant: extends "assistant" and declares ONLY temperature/
+        // max_tokens as deltas — must resolve to ITS tuned values (#469),
+        // not the base's, restoring the pre-`extends`-conversion behavior.
+        ("cto-assistant", 0.3, 4096),
+    ];
+
+    for (agent_name, expected_temperature, expected_max_tokens) in cases {
+        clear_model_env(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{agent_name}' must resolve: {e}"));
+
+        assert_eq!(
+            cfg.llm.temperature, expected_temperature,
+            "'{agent_name}' resolved temperature mismatch"
+        );
+        assert_eq!(
+            cfg.llm.max_tokens, expected_max_tokens,
+            "'{agent_name}' resolved max_tokens mismatch"
+        );
+    }
+}
+
+/// PR A follow-up (#3052): a root (non-`extends`) agent TOML that omits
+/// `[llm]` `temperature`/`max_tokens` must be REJECTED at load time — the
+/// UNSET-sentinel serde defaults exist so an `extends` CHILD can omit them,
+/// not so a root agent can silently ship with `NaN`/`u32::MAX` sampling
+/// params reaching the LLM provider.
+/// Test: This function IS the test.
+#[test]
+fn llm_required_fields_missing_on_root_agent_is_rejected() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path();
+    std::fs::write(
+        dir.join("bad-root.toml"),
+        r#"
+[agent]
+name = "bad-root"
+role = "agent"
+model = "anthropic/claude-sonnet-4-6"
+description = "root agent missing llm fields"
+
+[llm]
+
+[system_prompt]
+content = "BODY"
+"#,
+    )
+    .expect("write bad-root.toml");
+
+    let err = AgentConfig::load(&dir.join("bad-root.toml"))
+        .expect_err("a root agent omitting [llm] temperature/max_tokens must fail to load");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("temperature") && msg.contains("max_tokens"),
+        "error should name both missing fields, got: {msg}"
+    );
+}
+
+/// PR A follow-up (#3052): the SAME omitted-`[llm]` shape that
+/// [`llm_required_fields_missing_on_root_agent_is_rejected`] rejects for a
+/// root agent must load cleanly — and inherit the base's values — for an
+/// `extends` child, exercised end-to-end through `AgentConfig::by_name`.
+/// Test: This function IS the test.
+#[test]
+fn llm_omitted_fields_allowed_on_extends_child() {
+    let _guard = ENV_LOCK.blocking_lock();
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let dir = tmp.path();
+    write_flat_toml_base(dir, "researcher", "BASE INSTRUCTIONS");
+    // write_flat_toml_base declares temperature = 0.0 / max_tokens = 1024.
+    std::fs::write(
+        dir.join("my-researcher.toml"),
+        r#"
+[agent]
+name = "my-researcher"
+role = "agent"
+model = ""
+description = ""
+extends = "researcher"
+
+[llm]
+
+[system_prompt]
+content = "CHILD PROSE"
+"#,
+    )
+    .expect("write child toml");
+
+    clear_model_env("my-researcher");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", dir);
+    }
+    let cfg = AgentConfig::by_name("my-researcher");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let cfg = cfg.expect("extends child omitting [llm] fields must still resolve");
+
+    assert_eq!(
+        cfg.llm.temperature, 0.0,
+        "must inherit the base's temperature"
+    );
+    assert_eq!(
+        cfg.llm.max_tokens, 1024,
+        "must inherit the base's max_tokens"
+    );
+}
+
 // --- #3055 `extends` end-to-end loader tests -----------------------------
 //
 // These exercise the REAL dispatch loaders (`AgentConfig::by_name` /
