@@ -72,6 +72,33 @@ pub trait Embedder: Send + Sync {
     fn resolved_provider_label(&self) -> Option<String> {
         None
     }
+
+    /// Non-blocking readback: has the supervisor backing this embedder
+    /// permanently given up respawning its sidecar? (Review finding, PR
+    /// #3560 HIGH fix.)
+    ///
+    /// Why: `FallbackEmbedderAdapter` (`commands/start/embedder_fallback.rs`)
+    /// needs to trip its one-way latch on the SAME condition its module doc
+    /// claims to mirror — the supervisor's own `max_restarts` give-up
+    /// ceiling (`should_give_up` in
+    /// `trusty_common::embedder_client::supervisor`) — rather than an
+    /// independently-counted, faster-firing proxy at the request layer. The
+    /// Python sidecar is multi-flight (the epic's own design): several
+    /// concurrent requests can fail against the same stale client during a
+    /// SINGLE crash episode, and a request-count threshold could previously
+    /// cross that count well before the supervisor itself had exhausted its
+    /// restart budget.
+    /// What: default `false` — no supervisor to observe (remote HTTP/UDS
+    /// adapters, in-process, the Rust ort fallback embedder itself, and test
+    /// doubles). The Python-sidecar `LazySlotEmbedderAdapter` overrides this
+    /// to forward `LazyEmbedderHandle::supervisor_gave_up()`, which in turn
+    /// forwards `SupervisorHandle::has_given_up()`.
+    /// Test: `supervisor_gave_up_defaults_to_false_and_is_overridable` in
+    /// this module's `tests`; the lazy-adapter override is covered by
+    /// `lazy_python_adapter_reports_supervisor_gave_up` in `start/tests.rs`.
+    fn supervisor_gave_up(&self) -> bool {
+        false
+    }
 }
 
 /// Adapter: every shared `trusty_common::embedder::Embedder` automatically implements
@@ -215,6 +242,40 @@ mod tests {
         assert_eq!(
             Embedder::resolved_provider_label(&FakeRealReadback),
             Some("MPS".to_string()),
+            "an override must be honoured"
+        );
+    }
+
+    /// `supervisor_gave_up()` defaults to `false` for any embedder that
+    /// doesn't override it (review finding, PR #3560 HIGH fix) — callers
+    /// (`FallbackEmbedderAdapter`) must never trip on an embedder with no
+    /// supervisor to observe, and an explicit override must be honoured.
+    #[test]
+    fn supervisor_gave_up_defaults_to_false_and_is_overridable() {
+        let mock = MockEmbedder::new(8);
+        assert!(
+            !Embedder::supervisor_gave_up(&mock),
+            "default supervisor_gave_up() must be false"
+        );
+
+        struct FakeGivenUp;
+        #[async_trait]
+        impl Embedder for FakeGivenUp {
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                unimplemented!()
+            }
+            async fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+                unimplemented!()
+            }
+            fn dimension(&self) -> usize {
+                8
+            }
+            fn supervisor_gave_up(&self) -> bool {
+                true
+            }
+        }
+        assert!(
+            Embedder::supervisor_gave_up(&FakeGivenUp),
             "an override must be honoured"
         );
     }

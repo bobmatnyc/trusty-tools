@@ -52,6 +52,13 @@ pub async fn handle_doctor(fix: bool) -> Result<()> {
 
 /// Run the three auto-repair branches: stale lockfile removal, reindex of
 /// zero-chunk indexes, informational note for missing models.
+// Fix 5's `fixed_any = true` is a dead store today (PR #3560 review, LOW
+// fix): Fix 5 is currently the LAST branch, so nothing reads it afterward.
+// It is set anyway, for symmetry with Fixes 1-4 and so a future Fix 6 does
+// not silently reintroduce the double-printed-"Fixing issues..."-header bug
+// this PR fixed for Fix 4. `unused_assignments` would otherwise fail
+// `-D warnings` on that currently-provably-dead write.
+#[allow(unused_assignments)]
 async fn apply_fixes(checks: &[CheckResult], empty_indexes: &[EmptyIndex]) {
     let mut fixed_any = false;
 
@@ -145,6 +152,7 @@ async fn apply_fixes(checks: &[CheckResult], empty_indexes: &[EmptyIndex]) {
     if has_python_venv_warn {
         if !fixed_any {
             println!("\nFixing issues...");
+            fixed_any = true;
         }
         fix_python_venv();
     }

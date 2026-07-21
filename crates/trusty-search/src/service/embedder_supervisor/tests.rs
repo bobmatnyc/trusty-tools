@@ -412,6 +412,54 @@ async fn lazy_handle_no_watchdog_when_idle_secs_is_zero() {
     );
 }
 
+/// `supervisor_gave_up()` must be `false` before any spawn, and `false` (not
+/// panic) for a hand-seeded `SpawnedState` with `supervisor_handle: None`
+/// (review finding, PR #3560 HIGH fix).
+///
+/// Why: this is the non-blocking accessor `FallbackEmbedderAdapter` uses to
+/// observe the supervisor's REAL give-up ceiling instead of an independently
+/// counted request-failure proxy — it must never panic or deadlock. The
+/// "flips to `true` once the real supervisor gives up" half of the contract
+/// needs an actual crash-looping subprocess to exercise `should_give_up`
+/// honestly; that end-to-end proof lives in
+/// `embedder_fallback.rs`'s `fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up`
+/// test, which drives real concurrent `embed_via` calls against a real (mock
+/// binary) crash loop.
+/// What: assert `None` pre-spawn, then hand-seed `state` with
+/// `supervisor_handle: None` (mirrors the existing hand-seeded tests in this
+/// file) and assert it stays `false` rather than panicking on the `None`.
+/// Test: this test.
+#[tokio::test]
+async fn lazy_handle_supervisor_gave_up_reflects_handle_state() {
+    use tokio::sync::RwLock;
+
+    let handle = LazyEmbedderHandle::new(
+        PathBuf::from("/nonexistent/trusty-embedderd"),
+        SupervisorConfig::default(),
+    );
+    assert!(
+        !handle.supervisor_gave_up(),
+        "must be false before any spawn"
+    );
+
+    let client: Arc<dyn trusty_common::embedder_client::EmbedderClient> = Arc::new(StubClient);
+    let client_slot = Arc::new(RwLock::new(client));
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    *handle.state.lock().await = Some(SpawnedState {
+        client_slot,
+        supervisor_handle: None,
+        shutdown_tx,
+        pid_slot: Arc::new(AtomicU32::new(0)),
+    });
+
+    assert!(
+        !handle.supervisor_gave_up(),
+        "must be false (not panic) when supervisor_handle is None — a real \
+         spawn via do_spawn always populates it; this only covers the \
+         hand-seeded test-state shape"
+    );
+}
+
 // ── In-flight guard + eviction decision (issue #2315) ───────────────────
 
 /// `InFlightGuard` must increment on construction and decrement on drop.

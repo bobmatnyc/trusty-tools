@@ -752,4 +752,64 @@ exit 1
              closed shutdown channel must not wedge ongoing supervision"
         );
     }
+
+    /// PR #3560 review HIGH fix: `SupervisorHandle::has_given_up()` must flip
+    /// to `true` exactly when `supervision_loop`'s own `should_give_up` check
+    /// trips — this is the REAL signal trusty-search's
+    /// `FallbackEmbedderAdapter` now observes instead of an independently
+    /// counted request-failure proxy (see `embedder_fallback.rs`'s module
+    /// doc in trusty-search for the full rationale).
+    ///
+    /// Why: without a test pinning this transition, the give-up signal could
+    /// silently stop firing (e.g. a future refactor moves the `return` above
+    /// the `send`) and nothing would catch it — `FallbackEmbedderAdapter`
+    /// would then never trip at all, which is the OPPOSITE failure mode of
+    /// the bug this fix closes (search would hard-fail forever instead of
+    /// latching to the Rust ort fallback).
+    /// What: uses `write_mock_embedderd_crash_once` — every spawned instance
+    /// answers its own startup probe, then exits non-zero — so EVERY respawn
+    /// attempt counts as a fresh crash. With `max_restarts: 1` and
+    /// `backoff_max_secs: 0` (near-instant respawns), the loop crosses
+    /// `should_give_up`'s `consecutive_failures > max_restarts` ceiling after
+    /// the second crash. Asserts the flag is still `false` immediately after
+    /// the first spawn, then polls `has_given_up()` under a bounded timeout
+    /// (never a fixed sleep-and-hope) until it flips.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_gives_up_after_max_restarts_flips_has_given_up() {
+        let (_dir, binary) = write_mock_embedderd_crash_once();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 0,
+            max_restarts: 1,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, _pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+
+        let handle = supervisor.start_supervisor_task();
+
+        assert!(
+            !handle.has_given_up(),
+            "must not be given up immediately after the first spawn — the \
+             supervisor has not even observed the first crash yet"
+        );
+
+        let gave_up = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if handle.has_given_up() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            gave_up.is_ok(),
+            "has_given_up() never flipped to true within 10s of a \
+             persistent crash loop with max_restarts=1"
+        );
+    }
 }

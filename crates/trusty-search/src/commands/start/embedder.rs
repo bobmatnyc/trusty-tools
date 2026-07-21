@@ -885,6 +885,19 @@ impl crate::core::Embedder for LazySlotEmbedderAdapter {
     fn resolved_provider_label(&self) -> Option<String> {
         self.handle.last_reported_device()
     }
+
+    /// Real give-up-signal override (review finding, PR #3560 HIGH fix).
+    ///
+    /// Why: `FallbackEmbedderAdapter` needs the SAME supervisor's actual
+    /// give-up decision, not a proxy reconstructed at the request layer —
+    /// see `Embedder::supervisor_gave_up`'s trait-default doc comment for the
+    /// full rationale.
+    /// What: forwards to `LazyEmbedderHandle::supervisor_gave_up()`.
+    /// Test: `lazy_python_adapter_reports_supervisor_gave_up_default_false`
+    /// in `start/tests.rs`.
+    fn supervisor_gave_up(&self) -> bool {
+        self.handle.supervisor_gave_up()
+    }
 }
 
 /// When the resolved execution provider is a GPU, retune `TRUSTY_MAX_BATCH_SIZE`

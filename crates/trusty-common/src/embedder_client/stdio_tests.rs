@@ -159,6 +159,7 @@ async fn reader_task_captures_wire_device() {
     let (unhealthy_tx, _unhealthy_rx) = watch::channel(false);
     let timeout_tracker = Arc::new(TimeoutTracker::new());
     let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let device_capture_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = tokio::spawn(reader_task(
         reader,
         Arc::clone(&pending),
@@ -166,6 +167,7 @@ async fn reader_task_captures_wire_device() {
         timeout_tracker,
         unhealthy_tx,
         Arc::clone(&last_device),
+        Arc::clone(&device_capture_attempted),
     ));
 
     let (tx, rx) = oneshot::channel();
@@ -194,6 +196,99 @@ async fn reader_task_captures_wire_device() {
         last_device.lock().unwrap().clone(),
         Some("mps".to_string()),
         "reader_task must capture the wire-reported device"
+    );
+
+    drop(writer);
+    let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+}
+
+/// Review finding (PR #3560 MEDIUM fix): `reader_task` must parse for the
+/// `device` field on the FIRST successful response frame only, never again —
+/// the resolved device is set once at model build and cannot change for the
+/// life of the sidecar process, so re-parsing every frame was pure wasted CPU
+/// on the hot multi-flight embed path.
+///
+/// Why: `reader_task_captures_wire_device` above proves the field is captured
+/// at all, but would pass even with the old per-frame re-parse. This test
+/// proves the SHORT-CIRCUIT specifically: deliver a second frame claiming a
+/// different device and assert `last_device` did NOT change — if the reader
+/// were still re-parsing every frame, it would have overwritten "mps" with
+/// "cpu".
+/// What: sends frame 1 with `device: "mps"`, waits for capture, then sends
+/// frame 2 (a different pending id) with `device: "cpu"`; asserts
+/// `last_device` is still `Some("mps")` after frame 2 is fully processed.
+/// Test: this test.
+#[tokio::test]
+async fn reader_task_captures_device_once_and_never_reparses() {
+    use tokio::io::{AsyncWriteExt, duplex};
+    use tokio::sync::oneshot;
+
+    let (mut writer, reader_end) = duplex(4096);
+    let reader = tokio::io::BufReader::new(reader_end);
+
+    let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+    let (unhealthy_tx, _unhealthy_rx) = watch::channel(false);
+    let timeout_tracker = Arc::new(TimeoutTracker::new());
+    let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let device_capture_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = tokio::spawn(reader_task(
+        reader,
+        Arc::clone(&pending),
+        Duration::from_secs(30),
+        timeout_tracker,
+        unhealthy_tx,
+        Arc::clone(&last_device),
+        Arc::clone(&device_capture_attempted),
+    ));
+
+    let (tx1, rx1) = oneshot::channel();
+    pending.lock().await.insert(
+        1,
+        PendingRequest {
+            sent: 1,
+            reply: tx1,
+        },
+    );
+
+    let frame1 =
+        b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.1]],\"device\":\"mps\"},\"id\":1}\n";
+    writer.write_all(frame1).await.unwrap();
+    writer.flush().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), rx1)
+        .await
+        .expect("rx1 timed out")
+        .expect("channel closed unexpectedly")
+        .expect("frame 1 must decode successfully");
+    assert_eq!(
+        last_device.lock().unwrap().clone(),
+        Some("mps".to_string()),
+        "must capture device from the first frame"
+    );
+
+    let (tx2, rx2) = oneshot::channel();
+    pending.lock().await.insert(
+        2,
+        PendingRequest {
+            sent: 1,
+            reply: tx2,
+        },
+    );
+    let frame2 =
+        b"{\"jsonrpc\":\"2.0\",\"result\":{\"embeddings\":[[0.2]],\"device\":\"cpu\"},\"id\":2}\n";
+    writer.write_all(frame2).await.unwrap();
+    writer.flush().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), rx2)
+        .await
+        .expect("rx2 timed out")
+        .expect("channel closed unexpectedly")
+        .expect("frame 2 must decode successfully");
+
+    assert_eq!(
+        last_device.lock().unwrap().clone(),
+        Some("mps".to_string()),
+        "device must NOT be overwritten by a later frame — reader_task must \
+         only ever parse for the device field once, on the first successful \
+         frame"
     );
 
     drop(writer);
@@ -296,6 +391,7 @@ async fn reader_task_survives_timeout_and_serves_next_request() {
     let (unhealthy_tx, _unhealthy_rx) = watch::channel(false);
     let timeout_tracker = Arc::new(TimeoutTracker::new());
     let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let device_capture_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = tokio::spawn(reader_task(
         reader,
         pending_clone,
@@ -303,6 +399,7 @@ async fn reader_task_survives_timeout_and_serves_next_request() {
         timeout_tracker,
         unhealthy_tx,
         Arc::clone(&last_device),
+        Arc::clone(&device_capture_attempted),
     ));
 
     // ── Request A (id=1): push a oneshot, wait for the timeout to fire ────
@@ -518,6 +615,7 @@ async fn reader_panic_drains_pending_and_signals_unhealthy() {
         Arc::clone(&pending),
         long_timeout,
         Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     // Mirrors `_unhealthy_rx_keepalive` on the real client: keep the sender
     // alive so `send(true)` in the monitor task doesn't silently no-op
@@ -569,6 +667,7 @@ async fn reader_eof_exit_also_signals_unhealthy() {
         Arc::clone(&pending),
         Duration::from_secs(30),
         Arc::new(std::sync::Mutex::new(None)),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
     );
     let _keepalive_tx = unhealthy_tx;
 
@@ -677,6 +776,7 @@ async fn wedge_threshold_fires_after_consecutive_timeouts() {
     let (unhealthy_tx, mut unhealthy_rx) = watch::channel(false);
     let timeout_tracker = Arc::new(TimeoutTracker::new());
     let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let device_capture_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = tokio::spawn(reader_task(
         reader,
         Arc::clone(&pending),
@@ -684,6 +784,7 @@ async fn wedge_threshold_fires_after_consecutive_timeouts() {
         Arc::clone(&timeout_tracker),
         unhealthy_tx,
         Arc::clone(&last_device),
+        Arc::clone(&device_capture_attempted),
     ));
 
     tokio::time::timeout(Duration::from_secs(5), unhealthy_rx.changed())
@@ -744,6 +845,7 @@ async fn wedge_threshold_resets_on_success() {
     let (unhealthy_tx, unhealthy_rx) = watch::channel(false);
     let timeout_tracker = Arc::new(TimeoutTracker::new());
     let last_device: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let device_capture_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = tokio::spawn(reader_task(
         reader,
         Arc::clone(&pending),
@@ -751,6 +853,7 @@ async fn wedge_threshold_resets_on_success() {
         Arc::clone(&timeout_tracker),
         unhealthy_tx,
         Arc::clone(&last_device),
+        Arc::clone(&device_capture_attempted),
     ));
 
     // Condition-poll until the first `below` entries have all timed out and

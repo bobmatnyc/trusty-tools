@@ -285,12 +285,18 @@ impl StdioEmbedderClient {
         let timeout = embed_call_timeout();
         let last_device: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
+        // PR #3560 MEDIUM fix: not retained on the struct — only
+        // `spawn_reader_with_monitor`/`reader_task` need it, to short-circuit
+        // the device-field parse after the first successful frame. See
+        // `reader_task`'s `Ok(Ok(_))` arm for the full rationale.
+        let device_capture_attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let (unhealthy_tx, unhealthy_rx_keepalive) = spawn_reader_with_monitor(
             BufReader::new(stdout),
             Arc::clone(&pending),
             timeout,
             Arc::clone(&last_device),
+            device_capture_attempted,
         );
 
         Self {
@@ -344,6 +350,7 @@ fn spawn_reader_with_monitor<R>(
     pending: PendingMap,
     timeout: Duration,
     last_device: Arc<std::sync::Mutex<Option<String>>>,
+    device_capture_attempted: Arc<std::sync::atomic::AtomicBool>,
 ) -> (watch::Sender<bool>, watch::Receiver<bool>)
 where
     R: AsyncBufRead + Unpin + Send + 'static,
@@ -358,6 +365,7 @@ where
         Arc::clone(&timeout_tracker),
         unhealthy_tx.clone(),
         last_device,
+        device_capture_attempted,
     ));
 
     let monitor_pending = pending;
@@ -433,6 +441,7 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
     timeout_tracker: Arc<TimeoutTracker>,
     unhealthy_tx: watch::Sender<bool>,
     last_device: Arc<std::sync::Mutex<Option<String>>>,
+    device_capture_attempted: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut line = String::new();
 
@@ -557,11 +566,19 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
                 // consecutive-timeout wedge counter.
                 timeout_tracker.record_success();
                 // Epic #3524 slice 5 / issue #3493 P1: capture the real
-                // backend device if this frame carries one (only the
-                // Python/MPS sidecar sends it). Recorded from every frame,
-                // matched or stale, so `/health` reflects the sidecar's
-                // actual current device even under request churn.
-                if let Some(device) = extract_response_device(line.trim()) {
+                // backend device from the FIRST successful response frame
+                // only (review finding, PR #3560 MEDIUM fix). The resolved
+                // device is set once at model build (`model.py` sets
+                // `encode.device` once) and never changes for the life of
+                // the process, so a frame's device — present or absent — is
+                // the same for every subsequent frame too. Re-parsing on
+                // every frame wasted a full JSON parse on this hot
+                // multi-flight path for the entire connection lifetime,
+                // including unconditionally on the Rust ort transport, which
+                // never carries the field at all.
+                if !device_capture_attempted.swap(true, Ordering::AcqRel)
+                    && let Some(device) = extract_response_device(line.trim())
+                {
                     *last_device.lock().unwrap() = Some(device);
                 }
             }

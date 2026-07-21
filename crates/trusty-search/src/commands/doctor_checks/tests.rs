@@ -263,19 +263,32 @@ fn fake_layout(base: std::path::PathBuf) -> trusty_embedderd_py::VenvLayout {
     }
 }
 
+// `#[serial]` (bare — the crate-wide default lock, matching the convention
+// established elsewhere in this crate, e.g. `start/tests.rs`'s
+// `missing_binary_fails_fast_with_install_hint`): these three tests mutate
+// the process-global `TRUSTY_EMBEDDER` env var, which `doctor_pipeline.rs`'s
+// `PythonEmbedderCheck` tests also mutate — without `#[serial]` here, `cargo
+// test`'s default parallel threads race on the same env var across the two
+// files and can flip a "disabled" assertion into an "enabled" one (or vice
+// versa) depending on scheduling (caught by CI, PR #3560).
+use serial_test::serial;
+
 #[test]
+#[serial]
 fn python_embedder_enabled_true_only_for_python_value() {
     let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "python");
     assert!(python_embedder_enabled());
 }
 
 #[test]
+#[serial]
 fn python_embedder_enabled_false_when_unset() {
     let _g = EnvVarGuard::remove("TRUSTY_EMBEDDER");
     assert!(!python_embedder_enabled());
 }
 
 #[test]
+#[serial]
 fn python_embedder_enabled_false_for_other_values() {
     let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "stdio");
     assert!(!python_embedder_enabled());

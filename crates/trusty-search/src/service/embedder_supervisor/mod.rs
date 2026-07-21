@@ -382,6 +382,37 @@ impl LazyEmbedderHandle {
         client.last_reported_device()
     }
 
+    /// Non-blocking readback: has the supervisor for the currently (or most
+    /// recently) spawned sidecar permanently given up respawning it? (Review
+    /// finding, PR #3560 HIGH fix.)
+    ///
+    /// Why: `FallbackEmbedderAdapter` (`commands/start/embedder_fallback.rs`)
+    /// must trip its one-way latch on the supervisor's OWN give-up decision
+    /// (`EmbedderSupervisor`'s `should_give_up`), not an independently
+    /// counted request-failure proxy that could fire early under concurrent
+    /// load. This mirrors the `try_lock`/non-blocking discipline of
+    /// `last_reported_device` — the fallback adapter is on the hot embed
+    /// path and must never block on a contended lock.
+    /// What: `try_lock`s `self.state`; if spawned and a `supervisor_handle`
+    /// is present, forwards to `SupervisorHandle::has_given_up()`. Returns
+    /// `false` when unspawned, lock-contended, or in the rare hand-seeded
+    /// test states with `supervisor_handle: None` (a real spawn via
+    /// `do_spawn` always populates it).
+    /// Test: `lazy_handle_supervisor_gave_up_reflects_handle_state` in the
+    /// `tests` submodule.
+    pub fn supervisor_gave_up(&self) -> bool {
+        let Ok(guard) = self.state.try_lock() else {
+            return false;
+        };
+        let Some(spawned) = guard.as_ref() else {
+            return false;
+        };
+        spawned
+            .supervisor_handle
+            .as_ref()
+            .is_some_and(trusty_common::embedder_client::SupervisorHandle::has_given_up)
+    }
+
     /// Get (or lazily spawn) the live embed-client, then execute `op`.
     ///
     /// Why: inlining the single-flight logic into every embed path would

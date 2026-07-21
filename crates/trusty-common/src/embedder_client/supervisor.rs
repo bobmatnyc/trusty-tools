@@ -46,7 +46,9 @@
 //! Test: `supervisor_shutdown_kills_child`,
 //! `supervisor_shutdown_handle_is_reachable_and_stops_child`,
 //! `supervisor_intentional_shutdown_does_not_respawn`,
-//! `stdio_eof_terminates_child` in this module's `tests` submodule.
+//! `stdio_eof_terminates_child`,
+//! `supervisor_gives_up_after_max_restarts_flips_has_given_up` (PR #3560
+//! HIGH fix) in this module's `tests` submodule.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -381,6 +383,14 @@ impl EmbedderSupervisor {
     /// `supervisor_intentional_shutdown_does_not_respawn`.
     pub fn start_supervisor_task(self) -> SupervisorHandle {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // PR #3560 HIGH fix: a second one-way `watch` flag, flipped from
+        // inside `supervision_loop` the moment its own `should_give_up`
+        // check trips. `SupervisorHandle::has_given_up()` exposes this as a
+        // non-blocking readback so callers (trusty-search's
+        // `FallbackEmbedderAdapter`) can observe the supervisor's REAL
+        // give-up ceiling instead of reconstructing an independent, faster-
+        // firing proxy at the request layer. See `SupervisorHandle::has_given_up`.
+        let (gave_up_tx, gave_up_rx) = watch::channel(false);
         let join = tokio::spawn(supervision_loop(
             self.binary_path,
             self.child,
@@ -389,8 +399,13 @@ impl EmbedderSupervisor {
             self.unhealthy_signal,
             self.config,
             shutdown_rx,
+            gave_up_tx,
         ));
-        SupervisorHandle { shutdown_tx, join }
+        SupervisorHandle {
+            shutdown_tx,
+            join,
+            gave_up_rx,
+        }
     }
 
     /// Terminate the sidecar and stop supervising.
@@ -437,6 +452,9 @@ impl EmbedderSupervisor {
 pub struct SupervisorHandle {
     shutdown_tx: watch::Sender<bool>,
     join: tokio::task::JoinHandle<()>,
+    /// One-way "the supervision loop has permanently given up respawning"
+    /// flag (PR #3560 HIGH fix). See `has_given_up`.
+    gave_up_rx: watch::Receiver<bool>,
 }
 
 impl SupervisorHandle {
@@ -464,6 +482,33 @@ impl SupervisorHandle {
         if let Err(e) = self.join.await {
             tracing::warn!("EmbedderSupervisor: supervision task join error on shutdown: {e}");
         }
+    }
+
+    /// Non-blocking readback: has the supervision loop permanently given up
+    /// respawning (crossed `max_restarts` on the crash-storm or wedge-storm
+    /// counter — see `should_give_up`) and returned without a further
+    /// restart? (PR #3560 HIGH fix.)
+    ///
+    /// Why: trusty-search's `FallbackEmbedderAdapter` previously approximated
+    /// this by counting consecutive embed failures at the request layer —
+    /// which, under the epic's own multi-flight design, could cross its
+    /// threshold from several concurrent requests failing against one stale
+    /// client during a SINGLE crash episode, well before the supervisor's own
+    /// restart budget was exhausted. Exposing the supervisor's actual
+    /// give-up decision as a signal callers can observe makes that decision
+    /// exact, no matter how many requests happen to be in flight when a crash
+    /// occurs.
+    /// What: `true` once `supervision_loop`'s own `should_give_up` check
+    /// trips and it returns without scheduling another respawn; `false`
+    /// before that (including while mid-respawn or mid-backoff) and for the
+    /// entire lifetime of a healthy or still-recovering sidecar. One-way —
+    /// never resets back to `false`, matching the loop's own give-up
+    /// semantics (a fresh `SupervisorHandle` only comes from a fresh
+    /// `start_supervisor_task` call, i.e. a whole new supervision run).
+    /// Test: `supervisor_gives_up_after_max_restarts_flips_has_given_up` in
+    /// `supervisor_tests.rs`.
+    pub fn has_given_up(&self) -> bool {
+        *self.gave_up_rx.borrow()
     }
 }
 
@@ -657,6 +702,13 @@ fn should_give_up(
 pub(crate) static SUPERVISION_LOOP_ITERATIONS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+// Each parameter is a distinct piece of shared state this internal (private,
+// not part of any public API) orchestration loop threads through — spawn
+// target, live child/client slots, the two independent signal channels
+// (unhealthy, shutdown) plus the new one-way give-up signal (PR #3560 HIGH
+// fix), and config. Bundling them into a struct would not reduce complexity,
+// only relocate it.
+#[allow(clippy::too_many_arguments)]
 async fn supervision_loop(
     binary_path: PathBuf,
     child_slot: Arc<tokio::sync::Mutex<Option<Child>>>,
@@ -665,6 +717,7 @@ async fn supervision_loop(
     mut unhealthy_signal: watch::Receiver<bool>,
     config: SupervisorConfig,
     mut shutdown_rx: watch::Receiver<bool>,
+    gave_up_tx: watch::Sender<bool>,
 ) {
     let mut consecutive_failures: u32 = 0;
     let mut consecutive_wedge_restarts: u32 = 0;
@@ -836,6 +889,11 @@ async fn supervision_loop(
                     "process-exit crash storm"
                 },
             );
+            // PR #3560 HIGH fix: flip the one-way give-up signal so callers
+            // (e.g. trusty-search's `FallbackEmbedderAdapter`) can observe
+            // the REAL give-up ceiling instead of an independently-counted
+            // proxy. `send` on a channel with no live receiver is harmless.
+            let _ = gave_up_tx.send(true);
             return;
         }
 
