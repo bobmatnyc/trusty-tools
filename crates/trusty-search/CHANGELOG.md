@@ -23,6 +23,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (mirroring `daemon_dir()`), and every CLI call site reads/writes through
   that single resolver instead of the generic one, so `start` and every
   client subcommand always agree on which daemon they mean.
+  - **Follow-up (code-critic review):** the first cut of this fix removed
+    the only writer of the generic `trusty_common::write_daemon_addr`
+    registry without replacing it, silently breaking two other consumers
+    that still read it exclusively — `trusty_common::monitor::search_client`
+    (`trusty-search monitor status`/`monitor indexes`/`monitor tui`, whose
+    `[r]` hotkey reindexes via that resolved address) and trusty-installer's
+    `ensure` (register-index + readiness-poll stages). `run_daemon()` now
+    also populates that registry, but **only for the default
+    (`TRUSTY_DATA_DIR`-unset) instance** — an isolated instance still never
+    writes it, preserving the original fix's isolation guarantee. The CLI's
+    reachability-probe refresh write also now goes through the same atomic
+    tmp+rename helper the daemon itself uses, instead of a bare
+    `std::fs::write` that could race a torn read.
 
 ### Added
 

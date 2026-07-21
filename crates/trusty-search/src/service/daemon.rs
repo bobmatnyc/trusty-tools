@@ -452,10 +452,13 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // Atomically write the port file (write + rename).
     write_port_file(&port_path, port)?;
 
-    // Write ~/.trusty-search/http_addr (host:port) for client discovery.
+    // Write the http_addr discovery file (host:port) for client discovery.
     // Issue #117: unconditional write corrects stale files from crashed daemons.
+    // Issue #3545: this path honors TRUSTY_DATA_DIR so an isolated instance
+    // never clobbers the default instance's file (or vice versa).
+    let addr_string = addr.to_string();
     let http_addr_written = match http_addr_path() {
-        Some(path) => match write_http_addr_file(&path, &addr) {
+        Some(path) => match write_http_addr_file(&path, &addr_string) {
             Ok(()) => Some(path),
             Err(e) => {
                 tracing::warn!("could not write {}: {e}", path.display());
@@ -464,6 +467,16 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
         },
         None => None,
     };
+
+    // Issue #3602 review (post-#3545): also populate the generic,
+    // TRUSTY_DATA_DIR-oblivious discovery registry that predates
+    // http_addr_path()'s TRUSTY_DATA_DIR-awareness -- trusty-common's monitor
+    // dashboard client (`resolve_search_url`) and trusty-installer's `ensure`
+    // (`resolve_base_url`) still read it via
+    // `trusty_common::read_daemon_addr("trusty-search")` and have no other
+    // way to discover the daemon. Gated to the default instance only; see
+    // `register_shared_discovery`'s doc for why.
+    register_shared_discovery(&addr);
 
     // Startup banner (stderr only — stdout is JSON-RPC transport).
     eprintln!(
@@ -541,6 +554,7 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     if let Some(path) = http_addr_written {
         let _ = std::fs::remove_file(&path);
     }
+    deregister_shared_discovery();
 
     serve_result.map_err(|e| DaemonError::Server(e.to_string()))?;
     drop(lock_file);
@@ -552,14 +566,20 @@ pub use crate::service::shutdown_flush::{
     flush_all_indexes_on_shutdown, shutdown_flush_timeout_override,
 };
 
-/// Write the canonical `host:port` discovery line to `~/.trusty-search/http_addr`.
+/// Write the canonical `host:port` discovery line to the given `http_addr`
+/// path, atomically.
 ///
 /// Why: separate from `write_port_file` because the format and location differ
 /// — port file stores `12345`, http_addr stores `127.0.0.1:12345`. Both write
-/// atomically via tmp-file + rename so partial reads are impossible.
+/// atomically via tmp-file + rename so partial reads are impossible. Exported
+/// (issue #3602 review) so `commands::daemon_utils::daemon_base_url()`'s
+/// reachability-probe refresh writes through the same atomic path instead of
+/// a bare `std::fs::write`, which could tear a concurrent reader's view of the
+/// file that `trusty-console`/`trusty-mpm`'s daemon discovery trust as ground
+/// truth.
 /// What: creates parent directory if missing; writes via temp + rename.
 /// Test: with a fresh tempdir, write addr → read back → matches `host:port`.
-fn write_http_addr_file(path: &Path, addr: &SocketAddr) -> Result<(), DaemonError> {
+pub fn write_http_addr_file(path: &Path, addr: &str) -> Result<(), DaemonError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -571,6 +591,58 @@ fn write_http_addr_file(path: &Path, addr: &SocketAddr) -> Result<(), DaemonErro
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Populate the generic, non-`TRUSTY_DATA_DIR`-aware discovery registry
+/// (`trusty_common::write_daemon_addr("trusty-search", …)`) for the DEFAULT
+/// daemon instance only.
+///
+/// Why (issue #3602 review, following #3545): `http_addr_path()` and
+/// `daemon_port_path()` are `TRUSTY_DATA_DIR`-aware, but two older consumers
+/// predate that and only know how to read the generic, per-app registry at
+/// `trusty_common::resolve_data_dir("trusty-search")` via
+/// `trusty_common::read_daemon_addr`: the monitor dashboard client
+/// (`trusty_common::monitor::search_client::resolve_search_url`, backing
+/// `trusty-search monitor status`/`monitor indexes`/`monitor tui`) and
+/// trusty-installer's `ensure` (`resolve_base_url`, backing its
+/// register-index and readiness-poll stages). #3545's first cut removed the
+/// only writer of that file (a CLI-side reachability-probe cache) without
+/// replacing it, silently breaking both. This restores a writer -- the
+/// daemon itself, which is the one place that unambiguously knows its own
+/// bound address -- but ONLY for the default instance: an isolated
+/// `TRUSTY_DATA_DIR` instance must never overwrite this shared,
+/// non-isolated registry with its own address, which is the exact
+/// cross-instance pollution #3545 fixed for `http_addr_path()`. Any I/O
+/// failure is logged, not propagated -- this registry is best-effort
+/// back-compat, never load-bearing for the daemon's own operation.
+/// What: no-ops when `TRUSTY_DATA_DIR` is set; otherwise calls
+/// `trusty_common::write_daemon_addr("trusty-search", addr)`.
+/// Test: `register_shared_discovery_writes_when_default_instance`,
+/// `register_shared_discovery_noop_when_isolated`.
+fn register_shared_discovery(addr: &SocketAddr) {
+    if std::env::var("TRUSTY_DATA_DIR").is_ok() {
+        return;
+    }
+    if let Err(e) = trusty_common::write_daemon_addr("trusty-search", &addr.to_string()) {
+        tracing::warn!("could not write shared discovery registry entry: {e:#}");
+    }
+}
+
+/// Shutdown-time mirror of [`register_shared_discovery`].
+///
+/// Why: cleaning up the generic registry on graceful shutdown matches the
+/// existing `http_addr_written` cleanup a few lines above, so a stopped
+/// default instance never leaves a stale, unreachable address behind for
+/// `resolve_search_url`/`resolve_base_url` to hand out.
+/// What: no-ops when `TRUSTY_DATA_DIR` is set; otherwise calls
+/// `trusty_common::remove_daemon_addr("trusty-search")`, ignoring any error
+/// (best-effort, same as the sibling `http_addr_path` removal).
+/// Test: `deregister_shared_discovery_removes_when_default_instance`.
+fn deregister_shared_discovery() {
+    if std::env::var("TRUSTY_DATA_DIR").is_ok() {
+        return;
+    }
+    let _ = trusty_common::remove_daemon_addr("trusty-search");
 }
 
 fn write_port_file(path: &PathBuf, port: u16) -> Result<(), DaemonError> {
@@ -585,174 +657,5 @@ fn write_port_file(path: &PathBuf, port: u16) -> Result<(), DaemonError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serial_test::serial;
-    use std::net::TcpListener as StdTcpListener;
-
-    #[test]
-    fn http_addr_file_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("http_addr");
-        let addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
-        write_http_addr_file(&path, &addr).unwrap();
-        let read = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(read.trim(), "127.0.0.1:54321");
-    }
-
-    #[test]
-    fn port_file_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.port");
-        write_port_file(&path, 12345).unwrap();
-        let read = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(read.trim(), "12345");
-    }
-
-    #[test]
-    fn pid_alive_current_process_is_alive() {
-        // Why: smoke-test the PID-aliveness predicate so the launchd
-        // crash-loop fix has explicit coverage. Our own PID must register
-        // as alive; a clearly-invalid PID must not.
-        assert!(pid_alive(std::process::id()));
-        // Find a clearly-dead PID. macOS `pid_max` defaults to 99999 and
-        // Linux to 4194304; on both, a value just under i32::MAX is well
-        // beyond the legal range and `kill(pid, 0)` returns ESRCH.
-        // (u32::MAX would narrow to -1 on i32 cast, which `kill` interprets
-        // as "every process the caller can signal" — never ESRCH.)
-        assert!(!pid_alive(2_000_000_000));
-    }
-
-    #[test]
-    fn read_lockfile_pid_parses_pid() {
-        // Why: `running_daemon_pid` depends on this parser. A malformed
-        // file must return None rather than panic.
-        let dir = tempfile::tempdir().unwrap();
-        let good = dir.path().join("good.lock");
-        std::fs::write(&good, "12345\n").unwrap();
-        assert_eq!(read_lockfile_pid(&good), Some(12345));
-
-        let bad = dir.path().join("bad.lock");
-        std::fs::write(&bad, "not-a-pid").unwrap();
-        assert_eq!(read_lockfile_pid(&bad), None);
-    }
-
-    #[test]
-    fn lockfile_contention_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("daemon.lock");
-        let _first = acquire_lock(&path).unwrap();
-        let err = acquire_lock(&path).unwrap_err();
-        assert!(matches!(err, DaemonError::AlreadyRunning(_)));
-    }
-
-    #[tokio::test]
-    async fn auto_port_walks_forward() {
-        // Bind a port, then ask the auto-port allocator to start there.
-        let occupied = StdTcpListener::bind("127.0.0.1:0").unwrap();
-        let occupied_port = occupied.local_addr().unwrap().port();
-        let next = bind_with_auto_port(occupied_port, 64).await.unwrap();
-        assert_ne!(next.local_addr().unwrap().port(), occupied_port);
-    }
-
-    #[tokio::test]
-    async fn auto_port_zero_uses_os() {
-        // Note: port 0 is special — the shared helper delegates to the OS.
-        let l = bind_with_auto_port(0, 1).await.unwrap();
-        assert!(l.local_addr().unwrap().port() > 0);
-    }
-
-    /// Why: `daemon_dir()` must respect `TRUSTY_DATA_DIR` so an isolated daemon
-    /// can run alongside the production daemon without lockfile conflicts (#281).
-    /// What: set env var to a tempdir path; assert `daemon_dir()` returns it.
-    /// Test: `daemon_dir_respects_trusty_data_dir_env_var` (this test).
-    ///
-    /// `#[serial]` is required because this test mutates the `TRUSTY_DATA_DIR`
-    /// process env var; running it concurrently with other `TRUSTY_DATA_DIR`
-    /// mutations in `daemon_paths_under_data_dir_override` or the `start.rs`
-    /// auto-discover tests causes a flaky race condition.
-    #[test]
-    #[serial]
-    fn daemon_dir_respects_trusty_data_dir_env_var() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_path = tmp.path().to_path_buf();
-        // SAFETY: test-only, single-threaded portion; no other thread reads
-        // TRUSTY_DATA_DIR in this test binary at the same time.
-        unsafe {
-            std::env::set_var("TRUSTY_DATA_DIR", &override_path);
-        }
-        let result = daemon_dir();
-        unsafe {
-            std::env::remove_var("TRUSTY_DATA_DIR");
-        }
-        let dir = result.expect("daemon_dir with TRUSTY_DATA_DIR should succeed");
-        assert_eq!(dir, override_path, "daemon_dir should return the override");
-        assert!(dir.exists(), "daemon_dir should create the directory");
-    }
-
-    /// Why: `daemon_lock_path()` and `daemon_port_path()` (service side) must
-    /// land under the override directory, not the platform default.
-    /// What: set env var, call both path functions, confirm they start with the
-    /// override root rather than the default data-local dir.
-    /// Test: `daemon_paths_under_data_dir_override` (this test).
-    ///
-    /// `#[serial]` is required because this test mutates the `TRUSTY_DATA_DIR`
-    /// process env var; running it concurrently with other `TRUSTY_DATA_DIR`
-    /// mutations (e.g. `daemon_dir_respects_trusty_data_dir_env_var` or the
-    /// `start.rs` auto-discover tests) causes a flaky race on the env-var read
-    /// inside `daemon_dir()`.
-    #[test]
-    #[serial]
-    fn daemon_paths_under_data_dir_override() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_path = tmp.path().to_path_buf();
-        unsafe {
-            std::env::set_var("TRUSTY_DATA_DIR", &override_path);
-        }
-        let lock = daemon_lock_path();
-        let port = daemon_port_path();
-        unsafe {
-            std::env::remove_var("TRUSTY_DATA_DIR");
-        }
-        let lock = lock.expect("lock path must resolve");
-        let port = port.expect("port path must resolve");
-        assert!(
-            lock.starts_with(&override_path),
-            "lock path {lock:?} should be under override {override_path:?}"
-        );
-        assert!(
-            port.starts_with(&override_path),
-            "port path {port:?} should be under override {override_path:?}"
-        );
-    }
-
-    /// Regression for issue #3545: `http_addr_path()` must respect
-    /// `TRUSTY_DATA_DIR` exactly like `daemon_dir()`/`daemon_port_path()` do,
-    /// so an isolated daemon's discovery file never lands in the shared
-    /// `$HOME/.trusty-search/http_addr` location used by the production daemon.
-    /// What: set `TRUSTY_DATA_DIR` to a tempdir; assert the returned path is
-    /// `{tempdir}/http_addr`, not the `$HOME`-relative default.
-    /// Test: `http_addr_path_respects_trusty_data_dir` (this test).
-    ///
-    /// `#[serial]` for the same reason as the other `TRUSTY_DATA_DIR` tests in
-    /// this module: the env var is process-global.
-    #[test]
-    #[serial]
-    fn http_addr_path_respects_trusty_data_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let override_path = tmp.path().to_path_buf();
-        unsafe {
-            std::env::set_var("TRUSTY_DATA_DIR", &override_path);
-        }
-        let path = http_addr_path();
-        unsafe {
-            std::env::remove_var("TRUSTY_DATA_DIR");
-        }
-        let path = path.expect("http_addr_path should resolve with TRUSTY_DATA_DIR set");
-        assert_eq!(
-            path,
-            override_path.join("http_addr"),
-            "http_addr_path should land under the TRUSTY_DATA_DIR override, not $HOME"
-        );
-    }
-}
+#[path = "daemon_tests.rs"]
+mod tests;

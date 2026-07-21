@@ -67,13 +67,15 @@ pub fn daemon_base_url() -> String {
 
     // Refresh the discovery file so subsequent calls skip the TCP probe.
     // Best-effort: a write failure (no $HOME, read-only fs) is non-fatal.
+    // Issue #3602 review: route through the same atomic tmp+rename helper
+    // `run_daemon()` uses (`write_http_addr_file`), not a bare `std::fs::write`
+    // -- a false-positive reachability probe here must never tear a
+    // concurrent reader's view of the file that trusty-console/trusty-mpm's
+    // discovery trusts as ground truth.
     let live_addr = format!("127.0.0.1:{port}");
     if address_reachable_blocking(&live_addr) {
         if let Some(path) = trusty_search::service::http_addr_path() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(&path, &live_addr);
+            let _ = trusty_search::service::write_http_addr_file(&path, &live_addr);
         }
     }
     format!("http://{live_addr}")
