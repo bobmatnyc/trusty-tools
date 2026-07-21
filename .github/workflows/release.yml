@@ -1000,17 +1000,38 @@ jobs:
     name: Create / update GitHub Release
     needs: [setup, build]
     runs-on: ubuntu-latest
-    # Why: `build` may report result='failure' when the AL2023 leg fails even
-    # though continue-on-error prevents it from failing sibling legs — GitHub
-    # Actions marks a matrix job as failed when any non-continue-on-error entry
-    # fails, but here ALL non-continue-on-error entries succeed.  We explicitly
-    # allow result='failure' on `build` (AL2023 case) while still requiring
-    # it didn't get cancelled outright.  The Tier-1 artifacts (macOS arm64 +
-    # linux-gnu) will be present in the artifact store regardless.
+    # TOLERATED-FAILURE BEHAVIOR (issue #3540):
+    #
+    # `needs.build.result` is 'failure' whenever ANY non-continue-on-error
+    # matrix leg fails — that includes the Tier-1 x86_64-unknown-linux-gnu
+    # leg, not just the best-effort AL2023/aarch64-linux legs. A prior version
+    # of this `if:` only listed plain comparisons against
+    # `needs.build.outputs`/`needs.build.result` with NO status-check function
+    # (success()/failure()/cancelled()/always()) anywhere in the expression.
+    # GitHub Actions implicitly ANDs such an expression with `success()`
+    # UNLESS one of those functions is present — so that condition silently
+    # evaluated to false and this whole job (and homebrew-bump downstream)
+    # was SKIPPED any time a Linux leg failed, even though the primary macOS
+    # artifact had built fine. That is the confirmed root cause of
+    # trusty-mpm's GitHub binary release being frozen at v0.16.0 (openssl-sys
+    # zigbuild-cross-link failures on both real Linux legs, tracked
+    # separately — NOT fixed here).
+    #
+    # Fix: `!cancelled()` is a real status-check function, so it overrides the
+    # implicit success() wrap and lets this job run even when `build` reports
+    # result='failure' (Linux legs down) — while still skipping outright on a
+    # genuine workflow cancellation. We do NOT gate on `needs.build.result`
+    # being success/failure at all here: a missing PRIMARY (macOS) artifact is
+    # instead caught explicitly by the "Require primary macOS artifact" step
+    # below, which fails the job loudly rather than publishing an empty/partial
+    # release. Net effect: release IS created whenever the macOS leg succeeded
+    # (regardless of Linux leg outcome); release is NOT created (job fails
+    # red) when the macOS leg itself failed or when `build` was skipped/the
+    # workflow was cancelled.
     if: >-
+      !cancelled() &&
       needs.setup.outputs.bundled != 'true' &&
       needs.setup.outputs.dry_run != 'true' &&
-      needs.build.result != 'cancelled' &&
       needs.build.result != 'skipped'
     timeout-minutes: 15
 
@@ -1041,6 +1062,22 @@ jobs:
         run: |
           echo "Assets to upload:"
           find release-assets -type f | sort
+
+      # ── Require the primary macOS artifact (issue #3540) ──
+      # This job's `if:` above (!cancelled()) now runs even when a Linux build
+      # leg failed. That is intentional — see the job-level comment — but we
+      # must never publish a release with NO usable binary in it. The macOS
+      # (aarch64-apple-darwin) leg is Tier-1/required and is the one artifact
+      # every release must contain. If it is missing here, the macOS build
+      # itself must have failed, so fail this job LOUDLY (red, clear error)
+      # instead of silently creating an empty/partial release.
+      - name: Require primary macOS artifact
+        run: |
+          if ! find release-assets -type f -name '*-aarch64-apple-darwin.tar.gz' | grep -q .; then
+            echo "::error::Primary macOS artifact (*-aarch64-apple-darwin.tar.gz) not found in release-assets/. The required macOS build leg must have failed — refusing to create an empty/partial release. See needs.build result and the aarch64-apple-darwin job log for the real failure."
+            exit 1
+          fi
+          echo "Primary macOS artifact present — proceeding (any Linux leg failures are tolerated)."
 
       - name: Detect prerelease
         id: prerelease
@@ -1105,6 +1142,15 @@ jobs:
           # commits, RELEASE_NOTES.md is empty — that is intentional and softprops
           # handles an empty body_path file fine (empty release body).
           body_path: RELEASE_NOTES.md
+          # fail_on_unmatched_files is safe under Linux-leg-failure tolerance:
+          # these are GLOB patterns, not fixed per-platform filenames, so each
+          # pattern is satisfied as long as ANY asset matches it (e.g. just the
+          # macOS .tar.gz/.sha256) — a missing Linux tarball does not trip
+          # this. Only a totally empty release-assets/ (no artifacts at all)
+          # would, and the "Require primary macOS artifact" step above already
+          # fails the job before reaching here in that case. Net effect:
+          # whatever assets actually built (macOS always, Linux legs
+          # best-effort) get uploaded; nothing errors on a partial set.
           fail_on_unmatched_files: true
           files: |
             release-assets/**/*.tar.gz
