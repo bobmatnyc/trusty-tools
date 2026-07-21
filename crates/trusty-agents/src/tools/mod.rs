@@ -29,6 +29,8 @@ pub mod native_memory;
 pub mod native_search;
 pub mod native_ticketing;
 pub mod phase_audit;
+pub mod pm_bridge;
+pub mod pm_bridge_backend;
 pub mod registry;
 pub mod run_bash;
 pub mod shell;

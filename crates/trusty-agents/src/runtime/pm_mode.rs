@@ -63,7 +63,10 @@ use agents::AgentConfig;
 use subprocess::SubprocessAgentRunner;
 use tools::{ToolRegistry, delegate::DelegateToAgentTool};
 
+use crate::rbac::ServiceTier;
 use crate::subprocess;
+use crate::tools::pm_bridge::PmBridgeTool;
+use crate::tools::pm_bridge_backend::ProcessPmBridge;
 
 /// PM mode: interactive orchestrator.
 pub(super) async fn run_pm() -> Result<()> {
@@ -91,6 +94,15 @@ pub(super) async fn run_pm() -> Result<()> {
     let runner: Arc<dyn tools::AgentRunner> = Arc::new(SubprocessAgentRunner::new());
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(DelegateToAgentTool::new(runner)));
+    // #3052 PR B (lane 3): the opaque tm<->tcode bridge, distinct from lane 2
+    // (`delegate_to_agent` above). RBAC-locked to deny ReadOnly + Analytics.
+    {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        registry.register(Arc::new(
+            PmBridgeTool::new(Arc::new(ProcessPmBridge::from_project(cwd)))
+                .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics]),
+        ));
+    }
     // #304: Coordinator-facing shell executor — see `tools::run_bash`.
     {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));

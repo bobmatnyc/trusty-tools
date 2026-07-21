@@ -7,6 +7,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`dispatch_task` — the opaque tm<->tcode PM bridge tool (epic #3052, PR
+  B, lane 3):** a new tool, distinct from lane 2's `delegate_to_agent`
+  in-process sub-agent delegation, that routes a unit of work to either
+  `tm` (orchestration / project / session / issue / PR / multi-agent work)
+  or `tcode` (direct coding in a repo) via a deterministic, pure-function
+  router (`intent::route::route_task`) — no LLM call, same input always
+  routes the same way. The tool's name, schema, and results are fully
+  black-boxed: neither backend's identity, nor `trusty-mpm`/`trusty-code`,
+  is ever named in the schema, and the full backend transcript is run
+  through `tools::pm_bridge::scrub_branding` (strips standalone
+  `tm`/`tcode`/`trusty-mpm`/`trusty-code` tokens and redacts
+  session-id-shaped artifacts) before returning, on both the success and
+  error paths. RBAC-locked to deny `ServiceTier::ReadOnly` AND
+  `ServiceTier::Analytics` — registered in the interactive assistant
+  registry (`ctrl::pm_task::dispatch::history`) and the PM CLI registry
+  (`runtime::pm_mode`), mirroring `delegate_to_agent`'s registration.
+  Backend dispatch: `tcode` runs as a one-shot blocking subprocess
+  (`tcode run-task pm <task> --project <dir> --json`), which itself blocks
+  until its daemon-owned session reaches a terminal state; `tm` spawns
+  `tm serve --stdio` and drives the managed-session lifecycle
+  (`session_new` / `session_activity` / `session_decommission`) with a
+  bounded poll, since tm has no synchronous "run this task headlessly"
+  RPC (`agent_delegate` is explicitly a tracking/gating companion, NOT an
+  execution path) — a documented MVP scope limit, flagged for a follow-up
+  RPC.
+
 ### Security
 
 - **Assistant no longer leaks internal orchestration or disclaims delegating
