@@ -6,6 +6,15 @@
 #   test     – cargo test --workspace (stable, SKIP_UI_BUILD=1, full clone for git tests)
 #   msrv     – cargo check --workspace (toolchain 1.91, SKIP_UI_BUILD=1)
 #   agents-ui – cargo clippy -p trusty-agents-ui (stable, WebKit2GTK-enabled runner)
+#   embedder-cuda-check – cargo check -p trusty-common --features embedder-cuda
+#                         (issue #3508: compile-check the deadlock-safety
+#                         invariant test that is otherwise never compiled)
+#   ui-checks – matrix job running each of the 7 UI crates' OWN existing
+#               test/build scripts (issue: SKIP_UI_BUILD=1 means pnpm is never
+#               invoked anywhere else in CI)
+#   notify-main-failure – file/refresh a tracking issue when `push: main` CI
+#                         goes red (post-merge breakage was detected but never
+#                         alerted)
 #
 # trusty-mpm-gui, trusty-code-gui, and trusty-agents-ui are excluded from the
 # headless workspace jobs (clippy/test/msrv): all three are Tauri desktop apps
@@ -554,6 +563,187 @@ jobs:
         run: cargo clippy -p trusty-agents-ui --all-targets -- -D warnings
 
   # --------------------------------------------------------------------------
+  # embedder-cuda-check: compile-check the `embedder-cuda` feature (issue
+  # #3508). The deadlock-safety invariant test
+  # (ort_intra_threads_default_pinned_under_cuda_feature,
+  # crates/trusty-common/src/embedder/mod.rs, guarding the PR #1668 CUDA
+  # barrier deadlock) is `#[cfg(feature = "embedder-cuda")]`-gated, and no
+  # workflow previously built with that feature at all — `grep -r cuda
+  # .github/workflows/` returned zero hits — so the invariant had zero
+  # automated tripwire.
+  #
+  # WHY nvcc IS REQUIRED (this is NOT just "no GPU needed"): `embedder-cuda`
+  # forwards to `fastembed/cuda`, which turns on `candle-core/cuda` (fastembed
+  # 5.13.4 bundles an optional Candle backend). `candle-core/cuda` pulls in
+  # `candle-kernels`, whose build.rs compiles real `.cu` kernel sources via
+  # `nvcc` unconditionally. This was verified empirically while building this
+  # job: setting `CUDARC_CUDA_VERSION` only bypasses cudarc's OWN `nvcc
+  # --version` probe (cudarc itself uses dynamic *loading*, no toolkit
+  # needed) — it does NOT help candle-kernels, which has no override and
+  # hard-fails with `NvccNotFound` if the compiler isn't on PATH. So this job
+  # installs nvcc ONLY (no driver, no GPU, no cudart/cublas/curand runtime
+  # libraries) from NVIDIA's official apt repo: compiling `.cu` sources to
+  # PTX/cubin is a pure host-side compilation step and does not require a
+  # physical CUDA-capable device.
+  #
+  # SCOPE: `cargo check`, not `cargo test` — matching issue #3508's own
+  # explicit ask ("Scope to cargo check ... since full CUDA runtime isn't
+  # available on GitHub runners"). `cargo check` never invokes the linker, so
+  # nothing beyond the compiler itself needs installing. `--all-targets`
+  # activates `#[cfg(test)]`, so this actually type-checks the gated test
+  # function — a job that builds the lib but never compiles the test target
+  # would be theater. Full `cargo test` execution (issue #3508's stretch
+  # goal) was investigated and is intentionally left for a follow-up: running
+  # the binary would need to link against a real `libcuda.so`, which on a
+  # hosted non-GPU runner is only reliably available as a build-time stub,
+  # not something guaranteed loadable at process start — exactly the
+  # "full CUDA runtime isn't available" risk the issue itself flagged.
+  # --------------------------------------------------------------------------
+  embedder-cuda-check:
+    name: embedder-cuda compile check (#3508)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev
+
+      # nvcc ONLY — see the job-level comment above for why the compiler
+      # (not a GPU, not a driver) is a genuine, unavoidable requirement here.
+      - name: Install nvcc (CUDA 12.8 compiler only; no driver, no GPU)
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          rm -f cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cuda-nvcc-12-8
+          echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
+
+      - name: Verify nvcc is on PATH
+        run: nvcc --version
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: embedder-cuda-check
+
+      - name: cargo check -p trusty-common --features embedder-cuda --all-targets
+        run: cargo check -p trusty-common --features embedder-cuda --all-targets
+
+  # --------------------------------------------------------------------------
+  # ui-checks: run each UI crate's OWN existing test/build scripts. Issue:
+  # SKIP_UI_BUILD=1 (set globally above) means the Rust build.rs Svelte
+  # pipelines never invoke pnpm, and no other workflow anywhere runs pnpm /
+  # vitest / playwright / eslint / tsc — so CI ships whatever bundle is
+  # already committed under `ui-dist/` / `ui/dist/` via
+  # include_dir!/include_str! with ZERO automated verification.
+  #
+  # There are SEVEN `ui/` directories in this workspace, not six — verified
+  # by direct inspection of each package.json (the originating audit
+  # undercounted; token-drift.yml's own header independently confirms "all 7
+  # UI crates"). This job does NOT invent new test suites; it wires up
+  # exactly what each crate's package.json already declares:
+  #   trusty-search    -> vitest run                          (real tests)
+  #   trusty-agents    -> vitest run (test:unit) + svelte-check (check)
+  #   trusty-code-gui  -> vitest run                          (real tests)
+  #   trusty-mpm-gui   -> vite build (build:web)   — NO test/lint/typecheck
+  #                        scripts exist in package.json at all; build:web is
+  #                        the cheapest meaningful floor (catches compile-time
+  #                        Svelte/TS errors) without inventing a test suite
+  #   trusty-memory    -> vite build (build)       — same: no test scripts
+  #   trusty-console   -> vite build (build)       — same: no test scripts
+  #   trusty-analyze   -> vite build (build)       — same: no test scripts
+  #
+  # trusty-agents/ui's `test` script (playwright e2e) is intentionally NOT
+  # run here: it needs a built app plus browser binaries, a materially
+  # heavier job than the other six legs — left for a follow-up issue rather
+  # than bolted onto this fast matrix.
+  #
+  # check:tokens (scripts/check_token_drift.mjs) is deliberately NOT
+  # duplicated here — it already runs across all 7 crates directly (not via
+  # each package.json's script) in token-drift.yml.
+  #
+  # Committed `ui-dist`/`ui/dist` bundle verification (rebuild-then-diff
+  # against the committed artefact) was considered and NOT implemented:
+  # trusty-search/trusty-memory/trusty-console/trusty-analyze commit
+  # Vite-built bundles with content-hashed filenames (e.g.
+  # `index-CPNos4BT.js`). A rebuild in CI has no guaranteed byte-for-byte
+  # stability against whatever machine/toolchain last produced the committed
+  # bundle — any patch-level Vite/Rollup/Node drift between that machine and
+  # this job's pinned versions can legitimately change the hash with no
+  # underlying behavior change, which would make a straight diff a flaky
+  # false-failure generator rather than a real gate. The `vite build` step
+  # above for those four crates already catches the higher-value case (the
+  # bundle fails to build at all); byte-exact drift detection would need a
+  # hash-normalizing comparator, which is a real feature in its own right —
+  # left for a follow-up issue, not shipped half-built here.
+  #
+  # Kept OUT of the slow `test` job (16-32 min observed) and off the
+  # Tauri-excluded clippy/test/msrv path: this is Node/pnpm tooling, not
+  # Rust, and runs as its own fast, parallel matrix.
+  # --------------------------------------------------------------------------
+  ui-checks:
+    name: UI checks (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: trusty-search
+            dir: crates/trusty-search/ui
+            command: pnpm run test
+          - name: trusty-agents
+            dir: crates/trusty-agents/ui
+            command: pnpm run test:unit && pnpm run check
+          - name: trusty-code-gui
+            dir: crates/trusty-code-gui/ui
+            command: pnpm run test
+          - name: trusty-mpm-gui
+            dir: crates/trusty-mpm-gui/ui
+            command: pnpm run build:web
+          - name: trusty-memory
+            dir: crates/trusty-memory/ui
+            command: pnpm run build
+          - name: trusty-console
+            dir: crates/trusty-console/ui
+            command: pnpm run build
+          - name: trusty-analyze
+            dir: crates/trusty-analyze/ui
+            command: pnpm run build
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: ${{ matrix.dir }}/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.dir }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Run checks
+        working-directory: ${{ matrix.dir }}
+        run: ${{ matrix.command }}
+
+  # --------------------------------------------------------------------------
   # search-daemon-smoke: build the trusty-search release binary and verify
   # that the HTTP daemon starts and answers /health with status=ok.
   #
@@ -691,3 +881,85 @@ jobs:
             echo "Killing daemon PID ${PID}"
             kill "${PID}" 2>/dev/null || true
           fi
+
+  # --------------------------------------------------------------------------
+  # notify-main-failure: file/refresh a tracking GitHub issue when CI goes red
+  # on a `push` to `main` (post-merge breakage). ci.yml already re-runs on
+  # push: branches: [main], so breakage IS detected — but nothing alerted
+  # anyone. Confirmed instance: main went red on 2026-07-20 and was cleared
+  # incidentally ~42 minutes later by an unrelated merge, not by anyone
+  # reacting to the failure; anyone branching off main in that window
+  # inherited the breakage silently.
+  #
+  # MECHANISM: the bundled `actions/github-script` action, authenticated with
+  # the default `GITHUB_TOKEN` (scoped to `issues: write` on this job only).
+  # No Slack webhook or other notification integration exists in this repo —
+  # `grep -r secrets\. .github/workflows/*.yml` turns up only
+  # `secrets.HF_TOKEN` and `secrets.HOMEBREW_TAP_TOKEN` — so filing/updating a
+  # GitHub issue is the only alerting channel available without inventing a
+  # credential this repo doesn't have. No new secret is required.
+  #
+  # IDEMPOTENCY: searches for an OPEN issue labeled `ci-red-main` first. A
+  # repeat failure adds a comment (with the new run's link) to that existing
+  # issue instead of spawning a duplicate. Nothing here auto-closes the
+  # issue when main goes green again — a later unrelated merge clearing the
+  # symptom (exactly what happened on 2026-07-20) is not the same as the
+  # breakage having been diagnosed and handled, so closing stays a human
+  # call.
+  #
+  # `needs` lists every hard-gating job so `contains(needs.*.result,
+  # 'failure')` catches a red run from any of them; `search-daemon-smoke` is
+  # deliberately excluded (continue-on-error: true — see its own header
+  # comment — its job `result` never surfaces as `failure`).
+  # --------------------------------------------------------------------------
+  notify-main-failure:
+    name: Notify on red main
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [fmt, clippy, test, msrv, agents-ui, embedder-cuda-check, ui-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: File or update tracking issue on failure
+        if: contains(needs.*.result, 'failure')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = 'ci-red-main';
+            const title = 'CI red on main';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `CI failed on a push to \`main\` at ${context.sha}.`,
+              '',
+              `Run: ${runUrl}`,
+              '',
+              'Anyone branching off `main` right now inherits this breakage.',
+            ].join('\n');
+
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: label,
+            });
+
+            if (existing.data.length > 0) {
+              const issue = existing.data[0];
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body,
+              });
+              core.notice(`Updated existing tracking issue #${issue.number}`);
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: [label],
+              });
+              core.notice(`Filed new tracking issue #${created.data.number}`);
+            }
