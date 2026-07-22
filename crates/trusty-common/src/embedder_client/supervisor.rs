@@ -556,6 +556,26 @@ fn is_restart_storm_trigger(trigger: &RestartTrigger) -> bool {
 /// process-exit crash-loop case (#3631) — one shared reset window, since both
 /// represent the same underlying condition: sustained real-world health since
 /// the last forced restart.
+///
+/// Timing note (inherited from the #1450 design, made explicit for #3631):
+/// `supervision_loop` calls this exactly once per loop iteration, at
+/// iteration entry — synchronously, immediately after the PREVIOUS
+/// iteration's respawn completes, with no further `.await` before it. So
+/// `elapsed_since_last_restart` at that call is anchored to time elapsed
+/// SINCE the last storm restart's OWN cycle (its back-off delay plus its
+/// respawn), not to "how long the sidecar has been sitting healthy waiting
+/// for the current iteration's next trigger" — a health period that unfolds
+/// entirely INSIDE one iteration's blocking wait is only observed by the
+/// NEXT iteration's check, i.e. after whatever restart ends that health
+/// period has already been counted. This is a deliberate, inherited
+/// tradeoff, not a defect: it means a crash cadence slower than
+/// `wedge_reset_secs` legitimately never accumulates (each restart's own
+/// back-off usually provides more than enough elapsed time for the
+/// following check to reset), while a genuinely tight loop — successive
+/// forced restarts closer together than `wedge_reset_secs` — correctly
+/// keeps escalating. See `supervisor_single_transient_crash_then_health_does_not_give_up`
+/// in `supervisor_tests.rs` for a worked example (and a mutation-verified
+/// proof) of exactly which elapsed window this check can and cannot see.
 /// Test: `restart_storm_should_reset_*` in `supervisor_tests.rs`.
 fn restart_storm_should_reset(
     elapsed_since_last_restart: Option<Duration>,

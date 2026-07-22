@@ -37,10 +37,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     classification for a real killed process non-deterministic; fails
     against unfixed code, passes with the fix),
     `supervisor_single_transient_crash_then_health_does_not_give_up` (new —
-    guards against over-correction: one kill + sustained health must NOT
-    give up), plus `is_restart_storm_trigger_*` and
-    `should_give_up_restart_storm_trips_ceiling_even_with_failures_reset`
+    guards against over-correction: TWO forced restarts separated by more
+    than `wedge_reset_secs`, via the first restart's own back-off delay,
+    must NOT give up; mutation-verified against a disabled reset call site
+    to confirm it actually fails when the reset is broken — a naive
+    one-kill-then-sleep version of this test cannot ever fail regardless of
+    whether the reset works, since `max_restarts: 1` with a single kill can
+    never exceed the ceiling either way), plus `is_restart_storm_trigger_*`
+    and `should_give_up_restart_storm_trips_ceiling_even_with_failures_reset`
     pure-function unit tests.
+  - Note: the reset window is anchored to the LAST forced restart's own
+    cycle (its back-off delay plus respawn), not to a live/ticking clock —
+    `restart_storm_should_reset` is evaluated once per loop iteration, at
+    iteration entry, so a health period that unfolds entirely inside one
+    iteration's blocking wait is only observed by the restart that ends it,
+    one iteration late. In practice this means a crash cadence slower than
+    `wedge_reset_secs` legitimately never accumulates (each restart's own
+    back-off provides the elapsed time the following check needs), while a
+    genuinely tight loop keeps escalating. See `restart_storm_should_reset`'s
+    doc comment in `supervisor.rs` for the full explanation.
 
 ---
 ## [0.24.1] — 2026-07-21

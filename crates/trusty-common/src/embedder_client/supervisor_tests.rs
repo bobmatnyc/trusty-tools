@@ -1114,29 +1114,61 @@ exit 1
         );
     }
 
-    /// Guards against over-correcting #3631's fix: a single transient
-    /// `ProcessExit`, followed by sustained health for the full
-    /// `wedge_reset_secs` window, must NOT trip give-up — only a *sustained*
-    /// crash-loop should.
+    /// Guards against over-correcting #3631's fix: TWO forced restarts, each
+    /// separated by enough real elapsed time for `restart_storm_should_reset`
+    /// to have fired in between, must NOT trip give-up — only a *sustained*
+    /// crash-loop (restarts recurring FASTER than the reset window) should.
     ///
-    /// Why: the fix for #3631 makes `ProcessExit` feed the same
-    /// non-resetting restart-storm counter as `Unhealthy` restarts. Without
-    /// this test, a regression that forgot the sustained-health reset
-    /// condition (e.g. making the counter never reset at all) would make
-    /// every sidecar permanently one crash away from a false give-up,
-    /// defeating the entire point of automatic respawn.
-    /// What: a short `wedge_reset_secs` (1s) so the test itself stays fast.
-    /// Kills the mock exactly once, confirms it respawns (a fresh non-zero
-    /// PID), then waits comfortably longer than `wedge_reset_secs` and
-    /// asserts `has_given_up()` is still `false` — proving the one-off kill
-    /// did not accumulate toward the ceiling.
+    /// Why — and why this is NOT the same shape as the original (defective)
+    /// version of this test: a code-critic mutation audit on PR #3645 proved
+    /// the original version (one kill, then an external `tokio::time::sleep`
+    /// in the TEST before asserting) could never fail even with the reset
+    /// call site fully disabled (`if false && restart_storm_should_reset(...)`
+    /// at supervisor.rs) — with `max_restarts: 1` and only ONE kill,
+    /// `consecutive_restart_storm` can only ever reach 1, and `should_give_up`
+    /// requires `> max_restarts`, so `has_given_up()` was `false` whether or
+    /// not the reset worked. The deeper reason a sleep AFTER observing the
+    /// respawn can never matter: `supervision_loop`'s reset-check
+    /// (supervisor.rs, top of the `loop`) runs exactly ONCE per iteration, at
+    /// iteration entry — i.e. synchronously, immediately after the PREVIOUS
+    /// iteration's respawn completes, with NO further `.await` before it. By
+    /// the time a test's poll notices the fresh PID (already past that
+    /// synchronous check) and starts sleeping, the reset decision for THIS
+    /// iteration has already been made and cannot be revisited — a sleep
+    /// injected afterward is invisible to it. The ONLY wall-clock gap that
+    /// check can ever observe is the elapsed time accumulated INSIDE the
+    /// PRECEDING iteration, i.e. its own exponential back-off delay
+    /// (`1 << consecutive_restart_storm`, capped at `backoff_max_secs`) —
+    /// that delay is a `.await` point BEFORE the respawn, so real time
+    /// genuinely passes there before the next iteration's check runs.
+    /// What: `max_restarts: 1`, `wedge_reset_secs: 1`, `backoff_max_secs: 5`
+    /// (uncapped for a 2s delay). First kill escalates
+    /// `consecutive_restart_storm` 0→1, whose back-off is
+    /// `1 << 1 = 2s` — comfortably longer than `wedge_reset_secs` (1s), so a
+    /// CORRECT reset fires at the very next iteration's entry (right after
+    /// that 2s back-off + the respawn that follows it), zeroing the counter
+    /// BEFORE the second kill is ever processed. The test waits for that
+    /// second respawn (proving the 2s cycle completed), then kills
+    /// immediately: a correct reset means this second kill only brings the
+    /// counter to 1 (not 2) — well under `max_restarts: 1` — so
+    /// `has_given_up()` must stay `false`. A broken/disabled reset leaves the
+    /// counter at 1 from the first kill, so the second kill pushes it to 2,
+    /// tripping give-up — which is exactly what the mutation check below
+    /// confirms.
+    /// Mutation-verified (issue #3631 PR #3645 review round 1): with the
+    /// reset call site disabled, this test fails (`has_given_up()` is
+    /// unexpectedly `true`); restored, it passes. See the PR body for both
+    /// raw runs.
     /// Test: this test.
     #[tokio::test]
     async fn supervisor_single_transient_crash_then_health_does_not_give_up() {
         let (_dir, binary) = write_mock_embedderd_pipe_survives_kill();
         let cfg = SupervisorConfig {
             startup_timeout_secs: 5,
-            backoff_max_secs: 0,
+            // Deliberately NOT clamped below the 2s delay the first kill's
+            // back-off computes (`1 << 1`) — that delay is the mechanism
+            // under test; see this test's doc comment.
+            backoff_max_secs: 5,
             max_restarts: 1,
             wedge_reset_secs: 1,
             ..SupervisorConfig::default()
@@ -1149,38 +1181,50 @@ exit 1
 
         let handle = supervisor.start_supervisor_task();
 
+        // First kill: escalates consecutive_restart_storm 0 -> 1, which
+        // computes a 2s back-off (1 << 1) before the respawn that follows.
         std::process::Command::new("kill")
             .args(["-9", &initial_pid.to_string()])
             .status()
-            .expect("kill -9 mock child");
+            .expect("kill -9 mock child (first)");
 
-        // Condition-based wait for the respawn to complete (fresh non-zero
-        // PID), not a fixed sleep-and-hope.
-        let respawned = tokio::time::timeout(Duration::from_secs(10), async {
+        // Condition-based wait for the SECOND respawn — a fresh non-zero PID
+        // distinct from `initial_pid`. By the time this resolves, the 2s
+        // back-off has elapsed and `supervision_loop`'s reset-check for the
+        // new iteration has already run synchronously (see doc comment) —
+        // a correct reset has already zeroed the counter at this point.
+        let second_pid = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let pid = pid_slot.load(Ordering::Acquire);
                 if pid != 0 && pid != initial_pid {
-                    return;
+                    return pid;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
-        .await;
-        assert!(
-            respawned.is_ok(),
-            "supervisor never respawned after the single kill within 10s"
-        );
+        .await
+        .expect("supervisor never respawned after the first kill within 10s");
 
-        // Sit past the sustained-health reset window (1s) comfortably —
-        // long enough that a correctly-implemented fix has reset the
-        // restart-storm counter, but short enough to keep the test fast.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Second kill, immediately — no sleep needed or wanted here: the
+        // reset decision that matters was already made (or not) the instant
+        // the loop re-entered after the first kill's back-off, strictly
+        // BEFORE this second kill is even sent.
+        std::process::Command::new("kill")
+            .args(["-9", &second_pid.to_string()])
+            .status()
+            .expect("kill -9 mock child (second)");
+
+        // Bounded window for the second kill to be observed and processed
+        // (well under its own back-off delay, so this does not race a THIRD
+        // respawn).
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
         assert!(
             !handle.has_given_up(),
-            "a single transient crash followed by sustained health past \
-             wedge_reset_secs must NOT trip give-up — only a sustained \
-             crash-loop should"
+            "two forced restarts separated by more than wedge_reset_secs \
+             (via the first restart's own back-off delay) must NOT trip \
+             give-up — the reset must have fired between them, leaving the \
+             second kill well under max_restarts=1"
         );
     }
 }
