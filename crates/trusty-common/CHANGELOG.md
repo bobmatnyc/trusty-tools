@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [0.24.2] — 2026-07-22
+
+Patch release closing unpublished source drift under the already-published
+0.24.1 (issue #3366 defect class): five commits landed on `main` *after*
+0.24.1 was published to crates.io without a version bump, so the live 0.24.1
+tarball does not contain them — most notably the `search_index::ensure_project_indexed`
+signature change below, which blocked `trusty-mpm` 0.20.0 from publishing
+against the live registry. This release carries all five.
+
 ### Fixed
 
 - **Flaky env-mutation-race unit test fixed (#3608), plus an audit sweep
