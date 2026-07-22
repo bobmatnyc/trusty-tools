@@ -55,6 +55,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     accident via the sibling wedge counter),
     `supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up`.
 
+- **De-flaked `supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up`
+  (test-only follow-up to #3635, no product-code change).** The test added
+  above observed the first (deliberate) crash by polling `pid_slot` for a
+  zero-crossing under a bounded wall-clock timeout — racing the same
+  scheduler-dependent `child.wait()`/reader-task-EOF timing #3635 itself
+  documents, and intermittently timed out on a slower/more-contended CI
+  runner. It no longer tries to observe that intermediate transition at
+  all: since the mock is deterministic by construction (first invocation
+  always crashes after its own probe; every later invocation is healthy),
+  the test now retries a real `embed_batch` call in a loop until one
+  succeeds — a genuine successful response, not a timing-dependent
+  observation of an intermediate signal, absorbing any amount of internal
+  crash-detection/respawn latency.
+
 - **`search_index::ensure_project_indexed` no longer hardcodes
   `allow_sensitive_path: true` (issue #2914).** The parameter is now explicit
   per caller: trusty-code's task-start caller still opts in (its `directory`
