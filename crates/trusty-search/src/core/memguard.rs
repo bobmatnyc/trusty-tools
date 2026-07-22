@@ -332,6 +332,53 @@ pub fn over_memory_limit() -> bool {
     }
 }
 
+/// Return freed heap pages to the OS after a bulk in-memory cache eviction
+/// (issue #3657).
+///
+/// Why: production observed the daemon's RSS climb from 20.3 to 26.4 GiB over
+/// ~5 hours while the idle-eviction ticker logged `evicted 315423 in-memory
+/// chunks after 60s idle` on a repeating rehydrate/evict cycle — the "evicted"
+/// accounting was real (the `chunks`/`bm25`/`entities` maps genuinely emptied;
+/// every value is owned data, not an `Arc` aliased elsewhere) but RSS never
+/// dropped. Root cause: the Linux release binary links glibc's default
+/// allocator (no jemalloc/mimalloc — see `Cargo.toml`), which only returns
+/// freed memory to the OS via `brk`/`sbrk` when the freed region is at the
+/// very top of the heap, or via `munmap` for individually-mmap'd large
+/// allocations (`> M_MMAP_THRESHOLD`, ~128 KB). A `HashMap::clear()` dropping
+/// ~300K small, discontiguous `RawChunk` string/vec allocations frees memory
+/// scattered throughout the arena — none of it at the break — so it sits in
+/// glibc's free lists (fastbins/tcache/unsorted bins) available for *reuse*
+/// but never released back to the kernel, and a restart (which drops the
+/// whole heap) was the only thing that ever reclaimed it. `malloc_trim(0)`
+/// asks glibc to walk those free lists and hand back whatever it can via
+/// `sbrk`/`madvise(MADV_DONTNEED)` right after a bulk free, closing exactly
+/// that gap.
+/// What: `libc::malloc_trim(0)` on Linux; a no-op everywhere else (macOS's
+/// allocator already returns freed pages promptly and does not expose
+/// `malloc_trim`; the function doesn't exist there). Safe to call at any
+/// time — it never invalidates a live allocation, only walks already-freed
+/// regions, so callers do not need to hold any particular lock. Cheap
+/// relative to the bulk clear it follows (a single heap-free-list walk, not a
+/// stop-the-world pause) but not free, so callers should only invoke it right
+/// after a bulk eviction/reclaim sweep — not on every request.
+/// Test: `tests::test_trim_heap_does_not_panic` (all platforms). The
+/// allocation-release proof (that a bulk eviction of small allocations
+/// followed by `trim_heap()` actually drops RSS on Linux) lives in
+/// `core::indexer::tests_idle_evict::bulk_eviction_trim_releases_rss_on_linux`.
+pub fn trim_heap() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `malloc_trim` is a glibc extension. It takes a `pad` byte
+        // count (0 = trim as aggressively as possible) and is documented as
+        // safe to call at any time from any thread — it only ever releases
+        // memory that is already on a free list, never memory backing a live
+        // allocation, so it cannot invalidate any pointer the caller holds.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Steady-state memory-limit ENFORCEMENT (issue #2846)
 //
@@ -575,6 +622,75 @@ mod tests {
                 "self-restart must default OFF so an unsupervised daemon never self-terminates"
             );
         }
+    }
+
+    /// `trim_heap()` must be callable at any time without panicking, on every
+    /// platform — a no-op on non-Linux, a real `malloc_trim(0)` call on Linux.
+    ///
+    /// Why: this is the function the idle-evict ticker and the memory-pressure
+    /// reclaim sweep call immediately after a bulk cache clear (issue #3657).
+    /// A panic here would take down a background ticker task.
+    /// What: call it twice in a row (idempotent — trimming an already-trimmed
+    /// heap must still be safe) with no assertions beyond "did not panic".
+    /// Test: this test.
+    #[test]
+    fn test_trim_heap_does_not_panic() {
+        trim_heap();
+        trim_heap();
+    }
+
+    /// On Linux, `trim_heap()` must never INCREASE RSS after freeing a large
+    /// batch of small, discontiguous heap allocations — the OS-level half of
+    /// the #3657 root cause (the Rust-level half — that eviction actually
+    /// drops the backing `HashMap` allocation — is pinned by
+    /// `core::indexer::tests_idle_evict::idle_eviction_releases_chunk_map_backing_allocation`).
+    ///
+    /// Why: production traced RSS climbing 20.3 → 26.4 GiB to glibc's default
+    /// allocator not returning freed small-object heap to the OS on its own.
+    /// This test reproduces that shape at a small scale: ~200k individually
+    /// heap-allocated buffers (mirrors the ~300K discontiguous `RawChunk`
+    /// string/vec allocations the production `chunks` map held — NOT one
+    /// giant contiguous allocation, which glibc already `munmap`s on free
+    /// regardless of `malloc_trim` once it crosses `M_MMAP_THRESHOLD`).
+    /// What: allocate then drop ~200k small `Vec<u8>` buffers, sample RSS,
+    /// call `trim_heap()`, sample again. Asserts only the deterministic,
+    /// platform-safe invariant (`after <= before` — trim can only release
+    /// memory, never grow RSS) rather than a specific MB delta, which would
+    /// be flaky across CI kernels/glibc versions with different heap tuning.
+    /// The actual before/after numbers are printed so a real run's log shows
+    /// the genuine reclaim in practice.
+    /// Test: this test (Linux-only — `malloc_trim` doesn't exist on macOS,
+    /// whose allocator already returns freed pages far more eagerly, so there
+    /// is no platform-specific behaviour to prove there).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_trim_heap_never_increases_rss_after_bulk_free() {
+        // Vary allocation size across a small range so allocations land in
+        // several glibc size-classes, matching real chunk-content variability
+        // instead of one uniform, easily-coalesced size.
+        let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(200_000);
+        for i in 0..200_000u32 {
+            let len = 150 + (i % 100) as usize;
+            buffers.push(vec![0u8; len]);
+        }
+        let rss_peak = current_rss_mb();
+        drop(buffers);
+        let rss_before_trim = current_rss_mb();
+
+        trim_heap();
+        let rss_after_trim = current_rss_mb();
+
+        if let (Some(before), Some(after)) = (rss_before_trim, rss_after_trim) {
+            assert!(
+                after <= before,
+                "trim_heap() must never increase RSS: {before} MB before trim, \
+                 {after} MB after trim"
+            );
+        }
+        eprintln!(
+            "trim_heap RSS smoke: peak={rss_peak:?}MB before_trim={rss_before_trim:?}MB \
+             after_trim={rss_after_trim:?}MB"
+        );
     }
 
     #[test]

@@ -203,6 +203,10 @@ which = { workspace = true }
 
 # ── Process memory introspection (TRUSTY_MEMORY_LIMIT_MB, peak RSS log) ────
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+# `malloc_trim(0)` on Linux (issue #3657): the daemon links glibc's default
+# allocator (no jemalloc/mimalloc), which does not return freed small-object
+# heap to the OS on its own — see `core::memguard::trim_heap`.
+libc = { workspace = true }
 
 # ── Metrics / Prometheus exporter (issue #41 Phase 1) ──────────────────────
 # Why: production observability for multi-user deployments — counters for

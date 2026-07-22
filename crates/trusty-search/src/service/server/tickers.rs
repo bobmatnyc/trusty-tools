@@ -145,14 +145,37 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
                 continue;
             }
             let threshold = Duration::from_secs(secs);
+            let rss_before = crate::core::memguard::current_rss_mb();
+            let mut total_evicted = 0usize;
             for id in state.registry.list() {
                 let Some(handle) = state.registry.get(&id) else {
                     continue;
                 };
                 let indexer = handle.indexer.read().await;
-                indexer.evict_chunks_if_idle(threshold).await;
-                indexer.evict_bm25_entities_if_idle(threshold).await;
+                total_evicted += indexer.evict_chunks_if_idle(threshold).await;
+                total_evicted += indexer.evict_bm25_entities_if_idle(threshold).await;
                 indexer.demote_vector_store_if_idle(threshold).await;
+            }
+            // Issue #3657: per-index eviction above genuinely empties the
+            // `chunks`/`bm25`/`entities` maps (no lingering `Arc` holder — see
+            // `CodeIndexer::clear_in_memory_chunks` / `clear_bm25_entities`),
+            // but the Linux release binary's default glibc allocator does not
+            // return freed small-object heap to the OS on its own; production
+            // observed the "evicted N chunks" log fire repeatedly on a
+            // rehydrate/evict cycle while RSS never dropped. Trim once per
+            // sweep (not per-index — `malloc_trim` walks the whole arena, so
+            // calling it once after every index has been evicted is enough)
+            // and log the actual RSS delta so this claim can be verified
+            // instead of assumed.
+            if total_evicted > 0 {
+                crate::core::memguard::trim_heap();
+                let rss_after = crate::core::memguard::current_rss_mb();
+                tracing::info!(
+                    total_evicted,
+                    rss_before_mb = rss_before,
+                    rss_after_mb = rss_after,
+                    "idle-eviction sweep complete"
+                );
             }
         }
     });
@@ -506,6 +529,15 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
         };
         reclaimed += handle.indexer.read().await.reclaim_memory_now().await;
     }
+
+    // Issue #3657: `reclaim_memory_now` empties the in-memory maps (a genuine
+    // Rust-level free — no lingering `Arc` holder), but the Linux release
+    // binary's default glibc allocator does not hand freed small-object heap
+    // back to the OS on its own; RSS previously stayed flat here even though
+    // `reclaimed` was nonzero. Trimming right after the sweep, before the
+    // re-sample below, is what makes `rss_after_mb` an honest number instead
+    // of one that always equals `rss_before_mb`.
+    memguard::trim_heap();
 
     // Re-sample so the log (and /health) reflect the post-reclaim footprint and
     // the self-restart gate decides on current reality, not the pre-reclaim RSS.

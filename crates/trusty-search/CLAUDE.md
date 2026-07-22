@@ -721,7 +721,17 @@ values; precedence is **shell env > `daemon.env` > tier default**.
 > values per tier. Set `TRUSTY_MEMORY_LIMIT_MB` to override.
 
 `MemoryPolicy::detect()` reads `hw.memsize` (macOS) or `/proc/meminfo`
-(Linux) at daemon startup and selects one of five tiers:
+(Linux) at daemon startup and selects one of five tiers. **Issue #3657:** on
+Linux, if this process is confined to a smaller ceiling by a cgroup
+(systemd `MemoryMax=`/`MemoryHigh=`, Docker `--memory`, Kubernetes resource
+limits) — `/proc/meminfo` reports the HOST's total RAM, not the cgroup's —
+the detector also reads `/sys/fs/cgroup/memory.max` (cgroup v2) or
+`/sys/fs/cgroup/memory/memory.limit_in_bytes` (cgroup v1) and uses whichever
+ceiling is smaller. Without this, a host with far more physical RAM than the
+cgroup allows this one service could auto-tune `TRUSTY_MEMORY_LIMIT_MB`
+*above* the cgroup's actual hard limit, silently defeating the issue #2846
+enforcement ticker (its high-water check would never cross before the
+kernel's cgroup OOM-killer fires).
 
 | Tier | Total RAM | `MEMORY_LIMIT_MB` | `MAX_CHUNKS` | `EMBEDDING_CACHE` | `MAX_BATCH_SIZE` | `BM25_CORPUS_CAP` | `MAX_KG_NODES` |
 |------|-----------|-------------------|--------------|-------------------|------------------|-------------------|----------------|
