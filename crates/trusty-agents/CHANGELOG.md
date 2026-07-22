@@ -9,6 +9,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Fireworks AI is reachable as an inference provider (#2410 Step 3, epic
+  #2400):** `fireworks/<model>` now resolves to a dedicated
+  `FireworksAdapter` (new `Provider::Fireworks` / `AuthSource::Fireworks`)
+  instead of falling through to `GenericAdapter`, which unconditionally
+  sent the request to OpenRouter carrying a Fireworks-native model id that
+  OpenRouter does not recognize. The credential resolves through the same
+  shared env > `.env.local` > secure-store resolver every other provider in
+  this crate uses, the routing prefix is stripped before the request body is
+  built (matching the `ollama/` treatment), and
+  `reachable_today(ProviderId::Fireworks)` flips to `true`.
+- **Missing-credential errors name the real provider:**
+  `send_raw_completion` previously reported `"openrouter credential not
+  found"` regardless of which adapter was actually in play; a Fireworks-routed
+  call with no `FIREWORKS_API_KEY` now says so. The usage-log `runner` field
+  likewise reports `"fireworks"` rather than defaulting to `"openrouter"`.
+
 - **`dispatch_task` — the opaque tm<->tcode PM bridge tool (epic #3052, PR
   B, lane 3):** a new tool, distinct from lane 2's `delegate_to_agent`
   in-process sub-agent delegation, that routes a unit of work to either
