@@ -31,20 +31,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   owned data, never `Arc`-aliased elsewhere), but the Linux release binary's
   default glibc allocator never handed the freed small-object heap back to
   the OS. Both the idle-eviction ticker and the issue #2846 memory-pressure
-  reclaim sweep now call `libc::malloc_trim(0)` (Linux-only; no-op
-  elsewhere) right after a bulk clear, and log the observed RSS
-  before/after so "evicted N chunks" claims are independently verifiable
-  instead of assumed.
+  reclaim sweep now call `libc::malloc_trim(0)` on a `spawn_blocking` task
+  (Linux-only; no-op elsewhere — and moved off the tokio worker thread since
+  a trim over a many-GiB fragmented heap can hold the malloc arena lock for
+  tens to hundreds of milliseconds) right after a bulk clear, and log the
+  observed RSS before/after so "evicted N chunks" claims are independently
+  verifiable instead of assumed.
 - **`TRUSTY_MEMORY_LIMIT_MB` auto-tune now respects cgroup memory ceilings
-  on Linux (issue #3657 follow-up on #2846).** RAM detection previously read
-  only `/proc/meminfo` (the HOST's total physical RAM), so on a host with far
-  more RAM than a systemd `MemoryMax=`/Docker `--memory`/Kubernetes limit
-  allows this one process, the 25%-of-RAM auto-tuned soft ceiling could land
-  ABOVE the actual enforced cgroup limit — silently defeating the #2846
-  memory-pressure enforcement ticker before the kernel's cgroup OOM-killer
-  fires. Detection now also reads `/sys/fs/cgroup/memory.max` (cgroup v2) or
-  `/sys/fs/cgroup/memory/memory.limit_in_bytes` (cgroup v1) and uses
-  whichever ceiling is smaller.
+  on Linux, including NESTED systemd/Docker/Kubernetes cgroups (issue #3657
+  follow-up on #2846).** RAM detection previously read only `/proc/meminfo`
+  (the HOST's total physical RAM), so on a host with far more RAM than a
+  cgroup allows this one process, the 25%-of-RAM auto-tuned soft ceiling
+  could land ABOVE the actual enforced cgroup limit — silently defeating the
+  #2846 memory-pressure enforcement ticker before the kernel's cgroup
+  OOM-killer fires. Detection now resolves this process's own cgroup path
+  from `/proc/self/cgroup` (not just the cgroupfs root — a systemd-managed
+  service like `trusty-search.service` lives at a nested path such as
+  `/system.slice/trusty-search.service`, which the root's own `memory.max`/
+  `memory.limit_in_bytes` does not reflect) and reads the ceiling at that
+  nested location for both cgroup v2 (`memory.max`) and v1
+  (`memory.limit_in_bytes`), using whichever ceiling (cgroup or host RAM) is
+  smaller.
 
 ---
 ## [0.38.0] — 2026-07-21

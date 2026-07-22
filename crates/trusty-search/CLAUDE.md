@@ -725,13 +725,17 @@ values; precedence is **shell env > `daemon.env` > tier default**.
 Linux, if this process is confined to a smaller ceiling by a cgroup
 (systemd `MemoryMax=`/`MemoryHigh=`, Docker `--memory`, Kubernetes resource
 limits) — `/proc/meminfo` reports the HOST's total RAM, not the cgroup's —
-the detector also reads `/sys/fs/cgroup/memory.max` (cgroup v2) or
-`/sys/fs/cgroup/memory/memory.limit_in_bytes` (cgroup v1) and uses whichever
-ceiling is smaller. Without this, a host with far more physical RAM than the
-cgroup allows this one service could auto-tune `TRUSTY_MEMORY_LIMIT_MB`
-*above* the cgroup's actual hard limit, silently defeating the issue #2846
-enforcement ticker (its high-water check would never cross before the
-kernel's cgroup OOM-killer fires).
+the detector resolves THIS process's own cgroup path from
+`/proc/self/cgroup` (a systemd-managed service like `trusty-search.service`
+lives at a NESTED path such as `/system.slice/trusty-search.service`, not
+the cgroupfs root) and reads `memory.max` (cgroup v2) or
+`memory.limit_in_bytes` (cgroup v1) at that nested location, using whichever
+ceiling is smaller (falling back to the cgroupfs root only when
+`/proc/self/cgroup` itself is unreadable). Without this, a host with far
+more physical RAM than the cgroup allows this one service could auto-tune
+`TRUSTY_MEMORY_LIMIT_MB` *above* the cgroup's actual hard limit, silently
+defeating the issue #2846 enforcement ticker (its high-water check would
+never cross before the kernel's cgroup OOM-killer fires).
 
 | Tier | Total RAM | `MEMORY_LIMIT_MB` | `MAX_CHUNKS` | `EMBEDDING_CACHE` | `MAX_BATCH_SIZE` | `BM25_CORPUS_CAP` | `MAX_KG_NODES` |
 |------|-----------|-------------------|--------------|-------------------|------------------|-------------------|----------------|
