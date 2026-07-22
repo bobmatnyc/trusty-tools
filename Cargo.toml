@@ -95,7 +95,7 @@ trusty-code = { path = "crates/trusty-code" }
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.3.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.24.1" }
+trusty-common = { path = "crates/trusty-common", version = "0.24.2" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
