@@ -1,6 +1,6 @@
 # ADR Index — Accepted Decisions
 
-**Last updated:** 2026-07-21 | **Format version:** 1.0
+**Last updated:** 2026-07-22 | **Format version:** 1.0
 
 This index is the **single source of truth** for the ADR corpus. It serves as a quick reference for **consistency vetting** (see DOC-46 §3, "Related Decisions" protocol) and as a discoverability surface for understanding the architectural decision landscape.
 
@@ -27,6 +27,7 @@ This index is the **single source of truth** for the ADR corpus. It serves as a 
 | [0017](./0017-shared-ingress-via-console-tailscale-funnel.md) | Shared webhook ingress via trusty-console + Tailscale Funnel | Proposed | External webhooks flow through one /api/webhooks/{source} endpoint, reverse-proxied by trusty-console, exposed publicly via Tailscale Funnel | Workspace |
 | [0018](./0018-loopback-only-doctrine.md) | Loopback-only doctrine: `trusty-console` is the sole off-loopback HTTP surface | Accepted | trusty-console is the only daemon allowed to bind off-loopback; sibling daemons may run loopback-only HTTP for CLI/stdio-bridge/GUI use (amends 0011) | Workspace |
 | [0019](./0019-unified-ipc-messaging-on-event-bus.md) | Unified IPC messaging on the event-driven control bus | Accepted | Single durable IPC channel for all cross-PM and cross-agent messaging, built on the event bus with explicit delivery acknowledgment | Workspace |
+| [0020](./0020-session-owned-worktrees.md) | Session-owned worktrees: ownership registry + owner-gated reclamation | Accepted | Worktree sentinels + `SessionRecord.worktree_owner` registry field record an owning session; orphan-GC and `decommission` never reclaim an owner-unknown or live-owned worktree; zero migration for legacy worktrees | crate `trusty-mpm` |
 
 ## Notes
 

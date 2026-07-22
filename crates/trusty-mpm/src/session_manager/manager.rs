@@ -141,6 +141,33 @@ pub enum ManagedError {
          state with `tmux list-panes`"
     )]
     PaneGone(String, String),
+
+    /// A `caller`-identified decommission was refused because the target's
+    /// worktree has a KNOWN owner that disagrees with the caller, and the
+    /// owner is not provably ownerless (#3649, Option B).
+    ///
+    /// Why: session-owned worktrees must not be reclaimable by an arbitrary
+    /// peer session — only the recorded owner (or an operator/daemon-internal
+    /// caller, which passes `caller = None` and is never subject to this
+    /// gate) may tear it down, unless the owner is provably gone (no
+    /// resolvable record, or a terminal-state record — see
+    /// `SessionManager::resolve_ownerless`).
+    /// What: `(caller, owner, target)` — all three ids, rendered so the
+    /// operator can see exactly who tried to touch whose worktree.
+    #[error(
+        "session {caller} refused to decommission {target}'s worktree — it is owned by \
+         session {owner}, which is neither the caller nor provably ownerless; only the \
+         owner (or an operator) may decommission it"
+    )]
+    WorktreeOwnerMismatch {
+        /// The session that attempted the decommission.
+        caller: ManagedSessionId,
+        /// The session recorded (via registry field or sentinel) as owning
+        /// the target's worktree.
+        owner: ManagedSessionId,
+        /// The session whose decommission was refused.
+        target: ManagedSessionId,
+    },
 }
 
 // [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the

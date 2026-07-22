@@ -1160,16 +1160,17 @@ async fn redirect_to_managed_clone(
     // UUID-named worktree here. Only the daemon's `spawn_managed_inproject`
     // path (`daemon::managed_routes::lifecycle`) uses the new semantic-name
     // worktree layout.
-    let worktree = match inproject::create_session_worktree(&base, &session_id.to_string()) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "tm: could not create per-session worktree: {e}\n\
+    let worktree =
+        match inproject::create_session_worktree(&base, &session_id.to_string(), &session_id) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "tm: could not create per-session worktree: {e}\n\
                  Start the daemon first with `tm start`, then run `tm` again."
-            );
-            anyhow::bail!("failed to create session worktree: {e}");
-        }
-    };
+                );
+                anyhow::bail!("failed to create session worktree: {e}");
+            }
+        };
 
     eprintln!(
         "tm: launching in protected workspace (live checkout at {} is untouched)\n\

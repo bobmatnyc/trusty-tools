@@ -481,7 +481,7 @@ async fn reserve_inproject_worktree(
         .await
         .map_err(|e| format!("name resolution failed for session {session_id}: {e}"))?;
 
-    let worktree = super::inproject::create_session_worktree(base, &reserved_name)
+    let worktree = super::inproject::create_session_worktree(base, &reserved_name, session_id)
         .map_err(|e| format!("worktree creation failed for session {session_id}: {e}"))?;
 
     // #2196: best-effort sync of the operator's allowlisted untracked/secret
@@ -620,6 +620,15 @@ async fn spawn_managed_cloned(
             warn!(id = %session_id, "spawn_managed: session create failed: {e}");
             e.to_string()
         })?;
+
+    // #3649: record this session as the owner of its own provisioned
+    // worktree — a session owns its own workspace by construction, so
+    // `owner == session_id` always. Best-effort/non-fatal, mirroring
+    // `set_source_id` below: a failure here leaves the record owner-unknown
+    // (the safe legacy default), never blocking the spawn.
+    if let Err(e) = mgr.set_worktree_owner(&session_id, session_id).await {
+        warn!(id = %session_id, "spawn_managed: set_worktree_owner failed (non-fatal): {e}");
+    }
 
     // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
     //
@@ -914,6 +923,13 @@ async fn spawn_managed_inproject(
     let source_id = format!("{owner}/{repo}");
     if let Err(e) = mgr.set_source_id(session_id, &source_id).await {
         warn!(id = %session_id, "spawn_managed (inproject): set_source_id failed: {e}");
+    }
+
+    // #3649: record this session as the owner of its own provisioned
+    // worktree, mirroring `spawn_managed_cloned`'s identical call. Best-effort
+    // — a failure leaves the record owner-unknown (the safe legacy default).
+    if let Err(e) = mgr.set_worktree_owner(session_id, *session_id).await {
+        warn!(id = %session_id, "spawn_managed (inproject): set_worktree_owner failed (non-fatal): {e}");
     }
 
     // Front gate with the original repo_url so GitHub identity is parseable.

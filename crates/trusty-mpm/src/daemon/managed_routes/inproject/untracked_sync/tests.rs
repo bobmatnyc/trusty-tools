@@ -285,8 +285,12 @@ fn copied_files_are_added_to_shared_worktree_exclude() {
     let base = base_tmp.path();
     init_base_repo(base);
 
-    let worktree = super::super::create_session_worktree(base, "untracked-sync-exclude-test")
-        .expect("create_session_worktree must succeed against a real, committed base repo");
+    let worktree = super::super::create_session_worktree(
+        base,
+        "untracked-sync-exclude-test",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed against a real, committed base repo");
     assert!(
         worktree.join(".git").is_file(),
         "sanity: a linked worktree's .git must be a FILE (gitlink), not a directory"
@@ -332,8 +336,12 @@ fn append_to_git_exclude_is_idempotent() {
     let base_tmp = tempfile::TempDir::new().expect("base tmp dir");
     let base = base_tmp.path();
     init_base_repo(base);
-    let worktree = super::super::create_session_worktree(base, "untracked-sync-idempotent-test")
-        .expect("create_session_worktree must succeed");
+    let worktree = super::super::create_session_worktree(
+        base,
+        "untracked-sync-idempotent-test",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed");
 
     append_to_git_exclude(&worktree, &[".env".to_string()]).expect("first append");
     append_to_git_exclude(&worktree, &[".env".to_string()]).expect("second append");

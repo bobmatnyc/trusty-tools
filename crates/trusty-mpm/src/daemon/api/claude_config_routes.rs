@@ -498,6 +498,7 @@ mod restart_pane_selection_tests {
             deliverable_id: None,
             pane_id: pane_id.map(str::to_owned),
             injection_status: Default::default(),
+            worktree_owner: None,
         }
     }
 

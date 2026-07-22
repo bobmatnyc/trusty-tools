@@ -775,7 +775,7 @@ async fn reconcile_managed_store_on_delete(state: &Arc<DaemonState>, tmux_name: 
         ) {
             continue;
         }
-        if let Err(e) = mgr.decommission(&record.id).await {
+        if let Err(e) = mgr.decommission(&record.id, None).await {
             tracing::warn!(
                 name = %tmux_name,
                 "DELETE reconcile: decommission of managed record failed (may already be gone): {e}"

@@ -262,13 +262,19 @@ fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
 /// walk logic can be tested independently of the full session-manager setup,
 /// and reused by the `doctor.rs` worktree health probe without duplicating the
 /// filesystem walk.
-/// What: walks `<repos_root>/<owner>/<repo>/.worktrees/` (two levels deep);
-/// any leaf directory whose canonicalized path is NOT in `active_set` is
+/// What: walks BOTH known worktree-store shapes (#3649) under each
+/// `<repos_root>/<owner>/<repo>/`: the in-project shape
+/// (`.worktrees/<name>`, added #1840) AND the clone-based shared-base-checkout
+/// shape (`.base/.worktrees/<session-id>`, added #3649 — this walk previously
+/// covered ONLY the in-project shape, so every `.base/.worktrees` dir was
+/// invisible to both this scan and the doctor/dry-run surfaces built on it).
+/// Any leaf directory whose canonicalized path is NOT in `active_set` is
 /// collected as an orphan. Using a `HashSet` with canonicalized paths avoids
 /// O(n×m) linear scan and correctly handles symlinked workspace paths. A
 /// non-existent or unreadable `repos_root` returns an empty vec.
 /// Test: `prune_orphaned_worktrees_spares_active`,
-///       `prune_orphaned_worktrees_removes_orphan`.
+///       `prune_orphaned_worktrees_removes_orphan`,
+///       `find_orphaned_worktrees_covers_base_worktrees_shape` (#3649).
 pub(crate) fn find_orphaned_worktrees(
     repos_root: &std::path::Path,
     active_set: &std::collections::HashSet<std::path::PathBuf>,
@@ -286,34 +292,141 @@ pub(crate) fn find_orphaned_worktrees(
             continue;
         };
         for repo_entry in repo_entries.flatten() {
-            let wt_dir = repo_entry.path().join(".worktrees");
-            if !wt_dir.is_dir() {
-                continue;
-            }
-            let Ok(wt_entries) = std::fs::read_dir(&wt_dir) else {
-                continue;
-            };
-            for wt_entry in wt_entries.flatten() {
-                let wt_path = wt_entry.path();
-                if !wt_path.is_dir() {
-                    continue;
-                }
-                // Item 8 (#1845): skip if the path cannot be canonicalized.
-                // A dangling symlink or a deletion race makes the path
-                // unresolvable; we cannot safely compare it against the active
-                // set, so we leave it untouched rather than risk misclassifying
-                // a live-but-partially-deleted worktree as an orphan.
-                let canonical_wt = match std::fs::canonicalize(&wt_path) {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                if !active_set.contains(&canonical_wt) {
-                    orphans.push(wt_path);
-                }
-            }
+            let repo_path = repo_entry.path();
+            // Shape 1 (#1840): in-project worktrees at `<repo>/.worktrees/<name>`.
+            scan_worktree_shape(&repo_path.join(".worktrees"), active_set, &mut orphans);
+            // Shape 2 (#3649): clone-based shared-base-checkout worktrees at
+            // `<repo>/.base/.worktrees/<session-id>` (see
+            // `provisioner::workspace::WorkspaceProvisioner::provision_in`).
+            scan_worktree_shape(
+                &repo_path.join(".base").join(".worktrees"),
+                active_set,
+                &mut orphans,
+            );
         }
     }
     orphans
+}
+
+/// Scan one `.worktrees`-shaped directory for leaf dirs not in `active_set`,
+/// appending any found to `orphans` (#3649 extraction — shared by both
+/// worktree-store shapes [`find_orphaned_worktrees`] walks).
+///
+/// Why: `find_orphaned_worktrees` originally inlined this loop for the single
+/// in-project shape it knew about; #3649 adds a second shape
+/// (`.base/.worktrees`) that must apply the IDENTICAL leaf-dir/canonicalize/
+/// active-set logic, so the loop body is extracted rather than duplicated.
+/// What: no-ops if `wt_dir` is not a directory; otherwise lists its immediate
+/// children, skips non-directories and paths that fail to canonicalize (#1845
+/// item 8 — a dangling symlink or deletion race must not be misclassified),
+/// and appends every canonicalized-but-not-active leaf to `orphans`.
+/// Test: `prune_orphaned_worktrees_collects_orphan`,
+///       `find_orphaned_worktrees_covers_base_worktrees_shape` (#3649).
+fn scan_worktree_shape(
+    wt_dir: &std::path::Path,
+    active_set: &std::collections::HashSet<std::path::PathBuf>,
+    orphans: &mut Vec<std::path::PathBuf>,
+) {
+    if !wt_dir.is_dir() {
+        return;
+    }
+    let Ok(wt_entries) = std::fs::read_dir(wt_dir) else {
+        return;
+    };
+    for wt_entry in wt_entries.flatten() {
+        let wt_path = wt_entry.path();
+        if !wt_path.is_dir() {
+            continue;
+        }
+        // Item 8 (#1845): skip if the path cannot be canonicalized.
+        // A dangling symlink or a deletion race makes the path
+        // unresolvable; we cannot safely compare it against the active
+        // set, so we leave it untouched rather than risk misclassifying
+        // a live-but-partially-deleted worktree as an orphan.
+        let canonical_wt = match std::fs::canonicalize(&wt_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !active_set.contains(&canonical_wt) {
+            orphans.push(wt_path);
+        }
+    }
+}
+
+/// Outcome of an orphaned-worktree sweep (#3649): which candidates were (or
+/// would be, under `dry_run`) removed vs. skipped because ownership could not
+/// be established.
+///
+/// Why: the #3649 safe default — an owner-unknown worktree is NEVER
+/// auto-deleted — must not just silently vanish from the caller's view; the
+/// daemon's orphan-GC log line and `tm session prune-worktrees` both need to
+/// see this count so operators know legacy worktrees are being conservatively
+/// left in place for `tm doctor` / `--dry-run` review, not merely "not found".
+/// What: `removed` — paths actually removed (or that WOULD be removed under
+/// `dry_run`); `owner_unknown` — paths whose ownership sentinel had no
+/// resolvable owner (absent, empty/legacy, or unparsable content).
+/// Test: `prune_orphaned_worktrees_skips_owner_unknown`,
+///       `prune_orphaned_worktrees_reclaims_terminal_owner`.
+#[derive(Debug, Clone, Default)]
+pub struct OrphanSweepOutcome {
+    /// Paths actually removed (or that would be removed under `dry_run`).
+    pub removed: Vec<std::path::PathBuf>,
+    /// Paths skipped because their sentinel's owner could not be resolved —
+    /// never auto-deleted; surfaced here for `tm doctor`/manual review.
+    pub owner_unknown: Vec<std::path::PathBuf>,
+}
+
+/// Best-effort cross-check: does `git worktree list` on the checkout owning
+/// `candidate` agree that `candidate` is a real, currently-registered git
+/// worktree (#3649)?
+///
+/// Why: the sentinel + store-ownerless checks establish WHO owned this
+/// directory and whether that owner is provably gone, but neither confirms
+/// git's OWN bookkeeping still recognises the path as a worktree at all — a
+/// belt-and-suspenders safety net against deleting a directory that merely
+/// LOOKS like a worktree (e.g. its git worktree entry was already pruned by
+/// something else, or the shape matched by coincidence). A disagreement is
+/// treated conservatively: skip rather than delete.
+/// What: runs `git -C <repo_root> worktree list --porcelain`, where
+/// `repo_root` is `candidate`'s grandparent directory — the SAME derivation
+/// `decommission::remove_session_worktree` uses, which works identically for
+/// both worktree-store shapes (`<repo>/.worktrees/<name>` and
+/// `<repo>/.base/.worktrees/<id>`, since either way the grandparent of the
+/// worktree leaf is the git checkout root). Returns `true` (agree — deletion
+/// may proceed, subject to the caller's other checks) when the git command
+/// cannot be run or fails outright — this check is an ADDITIONAL safety net
+/// on top of the sentinel/store checks, not a replacement for them, so a
+/// missing `git` binary or a transient failure never blocks a deletion those
+/// checks already approved. Returns `true` only when `candidate`'s
+/// canonicalized path appears among the porcelain output's `worktree <path>`
+/// lines.
+/// Test: `git_worktree_list_agrees_true_for_real_worktree`,
+///       `git_worktree_list_agrees_false_for_untracked_dir`.
+fn git_worktree_list_agrees(candidate: &std::path::Path) -> bool {
+    let Some(repo_root) = candidate.parent().and_then(|p| p.parent()) else {
+        return true;
+    };
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "list", "--porcelain"])
+        .output();
+    let Ok(out) = out else {
+        return true; // best-effort: git unavailable must never block a delete
+    };
+    if !out.status.success() {
+        return true;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let canonical_candidate =
+        std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("worktree "))
+        .any(|p| {
+            let pb = std::path::PathBuf::from(p);
+            std::fs::canonicalize(&pb).unwrap_or(pb) == canonical_candidate
+        })
 }
 
 impl SessionManager {
@@ -333,8 +446,10 @@ impl SessionManager {
     pub async fn decommission_all_ephemeral(&self) -> Result<usize, ManagedError> {
         // Ephemeral sessions are throwaway by definition: include running ones so a
         // panicking test that left an Active ephemeral session is still cleaned up.
+        // `caller: None` — this is an operator/daemon-internal bulk sweep, never a
+        // session acting on its own behalf; the #3649 owner gate does not apply.
         let outcome = self
-            .prune_managed(PruneFilter::Ephemeral, false, true)
+            .prune_managed(PruneFilter::Ephemeral, false, true, None)
             .await?;
         Ok(outcome.count())
     }
@@ -368,11 +483,20 @@ impl SessionManager {
     /// `prune_by_state_never_touches_active` (Stopped→Decommissioned + the
     /// running-state safety gate), `prune_decommissioned_compacts` (compaction),
     /// `prune_all_targets_non_running`, `prune_dry_run_reports_without_mutating`.
+    ///
+    /// `caller` (#3649, Option B): threaded straight through to
+    /// [`decommission`](Self::decommission) for each non-tombstone target —
+    /// `None` (every current call site: CLI, HTTP route, MCP tool,
+    /// `decommission_all_ephemeral`) preserves full pre-#3649 authority.
+    /// `Some(id)` applies the owner gate per-target, so a fleet-wide prune
+    /// invoked on behalf of a specific session still cannot reclaim a peer
+    /// session's actively-owned worktree.
     pub async fn prune_managed(
         &self,
         filter: PruneFilter,
         dry_run: bool,
         include_active: bool,
+        caller: Option<ManagedSessionId>,
     ) -> Result<PruneOutcome, ManagedError> {
         // Snapshot the full set ONCE (reloads-on-read so out-of-process writes are
         // seen). We then mutate per record below, each of which re-reads/saves.
@@ -415,7 +539,7 @@ impl SessionManager {
                         warn!(id = %record.id, "prune: compaction remove failed: {e}; skipping");
                         continue;
                     }
-                } else if let Err(e) = self.decommission(&record.id).await {
+                } else if let Err(e) = self.decommission(&record.id, caller).await {
                     warn!(id = %record.id, "prune: decommission failed: {e}; skipping");
                     continue;
                 }
@@ -495,19 +619,40 @@ impl SessionManager {
     /// What: Phase 1 calls [`find_orphaned_worktrees`] inside `spawn_blocking`
     /// (the filesystem walk is blocking); panics are propagated as `Err`. Phase 2
     /// (real-delete only) takes ONE fresh `self.store` snapshot, then per candidate:
-    /// canonicalize (skip on error — item 8), check against snapshot, then call
-    /// `remove_session_worktree` in its own `spawn_blocking`. Returns the paths
-    /// removed (or that would be removed under dry-run).
+    /// canonicalize (skip on error — item 8), check against snapshot, apply the
+    /// #3649 OWNERSHIP GATE (below), then call `remove_session_worktree` in its
+    /// own `spawn_blocking`. Returns an [`OrphanSweepOutcome`] rather than a bare
+    /// path list (#3649) so a caller can see BOTH what was (or would be) removed
+    /// AND what was conservatively skipped for owner-unknown review.
+    ///
+    /// #3649 OWNERSHIP GATE (applied to every candidate, including under
+    /// `dry_run` — so a preview matches what a real run would do): read the
+    /// candidate's ownership sentinel via
+    /// [`super::worktree_ownership::read_sentinel_owner`].
+    /// - Owner UNKNOWN (legacy zero-byte sentinel, absent sentinel, or
+    ///   unparsable content) → NEVER delete; counted in
+    ///   [`OrphanSweepOutcome::owner_unknown`] so it keeps surfacing via
+    ///   `tm doctor` / `--dry-run` until a human acts (zero-migration, ADR-0020).
+    /// - Owner KNOWN → delete only if [`SessionManager::resolve_ownerless`]
+    ///   says the owner is provably ownerless (no resolvable record, or a
+    ///   terminal-state record) AND `git worktree list` on the owning checkout
+    ///   agrees the path is a real worktree ([`git_worktree_list_agrees`]) —
+    ///   a disagreement is skipped conservatively, never deleted.
+    ///
     /// Test: `prune_orphaned_worktrees_removes_orphan`,
-    ///       `prune_orphaned_worktrees_spares_active`,
-    ///       `prune_orphaned_worktrees_store_snapshot_blocks_deletion` (item 1).
+    /// `prune_orphaned_worktrees_spares_active`,
+    /// `prune_orphaned_worktrees_store_snapshot_blocks_deletion` (item 1),
+    /// `prune_orphaned_worktrees_skips_owner_unknown`,
+    /// `prune_orphaned_worktrees_reclaims_terminal_owner`,
+    /// `prune_orphaned_worktrees_spares_live_owner` (#3649).
     pub async fn prune_orphaned_worktrees(
         &self,
         repos_root: &std::path::Path,
         active_workspace_paths: &[std::path::PathBuf],
         dry_run: bool,
-    ) -> Result<Vec<std::path::PathBuf>, anyhow::Error> {
+    ) -> Result<OrphanSweepOutcome, anyhow::Error> {
         use super::decommission::remove_session_worktree;
+        use super::worktree_ownership::SentinelOwner;
         use std::collections::HashSet;
 
         let repos_root = repos_root.to_path_buf();
@@ -527,11 +672,51 @@ impl SessionManager {
         .await
         .map_err(|e| anyhow::anyhow!("prune-worktrees: orphan scan panicked: {e}"))?;
 
+        // Phase 1.5 (#3649): classify every candidate by ownership BEFORE any
+        // deletion decision — applied identically under dry-run and real runs
+        // so a preview reflects reality.
+        let mut owner_unknown = Vec::new();
+        let mut reclaimable = Vec::new();
+        for candidate in candidates {
+            match super::worktree_ownership::read_sentinel_owner(&candidate) {
+                SentinelOwner::Unknown => {
+                    info!(
+                        path = %candidate.display(),
+                        "prune-worktrees: owner-unknown sentinel — never auto-deleting; \
+                         run `tm doctor` or inspect manually (#3649)"
+                    );
+                    owner_unknown.push(candidate);
+                }
+                SentinelOwner::Known(owner) => {
+                    if !self.resolve_ownerless(owner).await {
+                        info!(
+                            path = %candidate.display(),
+                            owner = %owner,
+                            "prune-worktrees: owner is still live/resumable — skipping (#3649)"
+                        );
+                        continue;
+                    }
+                    if !git_worktree_list_agrees(&candidate) {
+                        warn!(
+                            path = %candidate.display(),
+                            "prune-worktrees: git worktree list disagrees this path is a \
+                             worktree — skipping conservatively (#3649)"
+                        );
+                        continue;
+                    }
+                    reclaimable.push(candidate);
+                }
+            }
+        }
+
         if dry_run {
-            for p in &candidates {
+            for p in &reclaimable {
                 info!(path = %p.display(), "prune-worktrees (dry-run): would remove orphaned worktree");
             }
-            return Ok(candidates);
+            return Ok(OrphanSweepOutcome {
+                removed: reclaimable,
+                owner_unknown,
+            });
         }
 
         // Phase 2 (real-delete path): ONE fresh snapshot immediately before the
@@ -563,7 +748,7 @@ impl SessionManager {
         };
 
         let mut removed = Vec::new();
-        for candidate in candidates {
+        for candidate in reclaimable {
             // Item 8 (#1845): skip on canonicalize failure — a path that can't be
             // resolved is left untouched rather than risk incorrect deletion.
             let canonical_candidate = match std::fs::canonicalize(&candidate) {
@@ -603,7 +788,10 @@ impl SessionManager {
                 removed.push(candidate);
             }
         }
-        Ok(removed)
+        Ok(OrphanSweepOutcome {
+            removed,
+            owner_unknown,
+        })
     }
 
     /// Auto-reap orphaned per-session worktree dirs using the manager's own live
@@ -626,7 +814,7 @@ impl SessionManager {
     pub async fn reap_orphaned_worktrees(
         &self,
         repos_root: &std::path::Path,
-    ) -> Result<Vec<std::path::PathBuf>, anyhow::Error> {
+    ) -> Result<OrphanSweepOutcome, anyhow::Error> {
         let active: Vec<std::path::PathBuf> = self
             .list()
             .await
@@ -672,7 +860,7 @@ impl SessionManager {
 
         let mut reaped = 0usize;
         for record in stale {
-            match self.decommission(&record.id).await {
+            match self.decommission(&record.id, None).await {
                 Ok(_) => {
                     reaped += 1;
                     info!(
@@ -878,6 +1066,7 @@ mod orphan_tests {
             deliverable_id: None,
             pane_id: None,
             injection_status: Default::default(),
+            worktree_owner: None,
         };
         mgr.store
             .write()
@@ -887,16 +1076,299 @@ mod orphan_tests {
             .expect("upsert test record");
 
         // Phase 1 will see an empty initial set → worktree is a candidate.
-        // Phase 2 fresh snapshot reads the store → finds the record → skips deletion.
-        let removed = mgr
+        // #3649: the dir has no ownership sentinel, so it is classified
+        // owner-unknown and skipped BEFORE the Phase 2 fresh-active check ever
+        // runs — still never removed, now for the #3649 safe-default reason
+        // rather than (only) the #1845 TOCTOU fresh-snapshot reason.
+        let outcome = mgr
             .prune_orphaned_worktrees(repos_tmp.path(), &[], false)
             .await
             .expect("prune must not error");
 
         assert!(
-            removed.is_empty(),
-            "worktree backed by a live store record must NOT be removed; got: {removed:?}"
+            outcome.removed.is_empty(),
+            "worktree backed by a live store record must NOT be removed; got: {:?}",
+            outcome.removed
         );
         assert!(wt_path.exists(), "worktree dir must survive the prune");
+    }
+
+    // ── #3649: extended `.base/.worktrees` walk + ownership gating ──────────
+
+    /// `find_orphaned_worktrees` must ALSO discover the clone-based
+    /// `.base/.worktrees/<id>` shape, not just the in-project `.worktrees/<name>`
+    /// shape (#3649 item 4a — this walk previously covered ONLY the latter, so
+    /// the entire `provisioner::workspace` worktree store was invisible to the
+    /// orphan-GC, `tm doctor`, and `--dry-run`).
+    #[test]
+    fn find_orphaned_worktrees_covers_base_worktrees_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let base_wt = root
+            .join("owner")
+            .join("repo")
+            .join(".base")
+            .join(".worktrees")
+            .join("session-abc");
+        std::fs::create_dir_all(&base_wt).unwrap();
+        let empty_active: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
+        let orphans = find_orphaned_worktrees(root, &empty_active);
+        assert!(
+            orphans.contains(&base_wt),
+            "the .base/.worktrees shape must be discovered as a candidate; got {orphans:?}"
+        );
+    }
+
+    /// A candidate whose ownership sentinel is absent (no `.trusty-mpm-worktree`
+    /// file at all — the pre-#3649/legacy shape) is NEVER auto-deleted, and is
+    /// counted in [`OrphanSweepOutcome::owner_unknown`] (#3649 item 4b).
+    #[tokio::test]
+    async fn prune_orphaned_worktrees_skips_owner_unknown() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let repos = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::new(
+            store_dir.path(),
+            crate::session_manager::tests::FakeTmuxDriver::new(),
+        )
+        .await
+        .expect("manager");
+
+        let wt = repos
+            .path()
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("legacy-no-sentinel");
+        std::fs::create_dir_all(&wt).unwrap();
+        // Deliberately NO sentinel file written — simulates a legacy worktree.
+
+        let outcome = mgr
+            .prune_orphaned_worktrees(repos.path(), &[], false)
+            .await
+            .expect("prune must not error");
+
+        assert!(
+            outcome.removed.is_empty(),
+            "an owner-unknown candidate must never be auto-deleted; got {:?}",
+            outcome.removed
+        );
+        assert!(
+            outcome.owner_unknown.iter().any(|p| p == &wt),
+            "an owner-unknown candidate must be counted for doctor surfacing; got {:?}",
+            outcome.owner_unknown
+        );
+        assert!(
+            wt.exists(),
+            "the untouched legacy worktree must survive on disk"
+        );
+    }
+
+    /// A candidate whose sentinel names an owner with NO resolvable session
+    /// record (deleted / never registered) is provably ownerless and IS
+    /// reclaimed (#3649 item 5 — "sentinel owner id does not resolve to any
+    /// record").
+    #[tokio::test]
+    async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let repos = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::new(
+            store_dir.path(),
+            crate::session_manager::tests::FakeTmuxDriver::new(),
+        )
+        .await
+        .expect("manager");
+
+        let wt = repos
+            .path()
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("ownerless-gone");
+        std::fs::create_dir_all(&wt).unwrap();
+        let never_registered_owner = ManagedSessionId::new();
+        std::fs::write(
+            wt.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+            crate::session_manager::worktree_ownership::sentinel_payload_bytes(
+                never_registered_owner,
+            ),
+        )
+        .expect("write sentinel");
+
+        let outcome = mgr
+            .prune_orphaned_worktrees(repos.path(), &[], false)
+            .await
+            .expect("prune must not error");
+
+        assert!(
+            outcome.removed.iter().any(|p| p == &wt),
+            "a candidate whose owner has no resolvable record must be reclaimed; got {:?}",
+            outcome.removed
+        );
+        assert!(
+            !wt.exists(),
+            "the reclaimed worktree must be removed from disk"
+        );
+    }
+
+    /// A candidate whose sentinel names an owner with a LIVE (`Active`) record
+    /// is NEVER reclaimed, even though the directory itself is not in the
+    /// caller's active-path set (#3649 item 5 — "a live/Stopped/Errored owner's
+    /// worktree is NEVER ownerless").
+    #[tokio::test]
+    async fn prune_orphaned_worktrees_spares_live_owner() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let repos = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::new(
+            store_dir.path(),
+            crate::session_manager::tests::FakeTmuxDriver::new(),
+        )
+        .await
+        .expect("manager");
+
+        let wt = repos
+            .path()
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("live-owner-elsewhere");
+        std::fs::create_dir_all(&wt).unwrap();
+
+        // Register the owner as a LIVE record whose workspace_path points
+        // somewhere else entirely — so `wt` is NOT in `active_workspace_paths`
+        // (it looks orphaned by the path-only check) but its sentinel's owner
+        // is still genuinely alive.
+        let owner_id = ManagedSessionId::new();
+        let owner_record = mgr
+            .create_with_id(
+                owner_id,
+                "task".into(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                crate::runtime::RuntimeKind::default(),
+                false,
+                false,
+            )
+            .await
+            .expect("create owner record");
+        assert_eq!(owner_record.state, ManagedSessionState::Provisioning);
+
+        std::fs::write(
+            wt.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+            crate::session_manager::worktree_ownership::sentinel_payload_bytes(owner_id),
+        )
+        .expect("write sentinel");
+
+        let outcome = mgr
+            .prune_orphaned_worktrees(repos.path(), &[], false)
+            .await
+            .expect("prune must not error");
+
+        assert!(
+            !outcome.removed.iter().any(|p| p == &wt),
+            "a candidate whose owner is live must NEVER be reclaimed; got {:?}",
+            outcome.removed
+        );
+        assert!(wt.exists(), "the live-owned worktree must survive on disk");
+    }
+
+    // ── git_worktree_list_agrees (#3649 item 5) ──────────────────────────────
+
+    /// `git_worktree_list_agrees` returns `true` for a path that is genuinely
+    /// registered as a git worktree.
+    #[test]
+    fn git_worktree_list_agrees_true_for_real_worktree() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let base = base_dir.path();
+        let init_ok = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(base)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !init_ok {
+            eprintln!("git_worktree_list_agrees_true_for_real_worktree: git unavailable, skipping");
+            return;
+        }
+        let _ = std::process::Command::new("git")
+            .args([
+                "-C",
+                base.to_str().unwrap(),
+                "config",
+                "user.email",
+                "ci@test.invalid",
+            ])
+            .status();
+        let _ = std::process::Command::new("git")
+            .args(["-C", base.to_str().unwrap(), "config", "user.name", "CI"])
+            .status();
+        let commit_ok = std::process::Command::new("git")
+            .args([
+                "-C",
+                base.to_str().unwrap(),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !commit_ok {
+            eprintln!("git_worktree_list_agrees_true_for_real_worktree: commit failed, skipping");
+            return;
+        }
+        let wt_dir = base.join(".worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+        let wt_path = wt_dir.join("agree-test");
+        let add_ok = std::process::Command::new("git")
+            .args([
+                "-C",
+                base.to_str().unwrap(),
+                "worktree",
+                "add",
+                "-b",
+                "session/agree-test",
+            ])
+            .arg(&wt_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(add_ok, "git worktree add must succeed in this test fixture");
+
+        assert!(
+            git_worktree_list_agrees(&wt_path),
+            "a genuinely registered git worktree must agree"
+        );
+    }
+
+    /// `git_worktree_list_agrees` returns `false` for a directory git has no
+    /// record of as a worktree (a plain dir sitting under `.worktrees/`).
+    #[test]
+    fn git_worktree_list_agrees_false_for_untracked_dir() {
+        let base_dir = tempfile::tempdir().unwrap();
+        let base = base_dir.path();
+        let init_ok = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(base)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !init_ok {
+            eprintln!(
+                "git_worktree_list_agrees_false_for_untracked_dir: git unavailable, skipping"
+            );
+            return;
+        }
+        let untracked = base.join(".worktrees").join("never-added-to-git");
+        std::fs::create_dir_all(&untracked).unwrap();
+
+        assert!(
+            !git_worktree_list_agrees(&untracked),
+            "a directory git never registered as a worktree must disagree"
+        );
     }
 }

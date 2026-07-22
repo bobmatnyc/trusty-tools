@@ -313,8 +313,9 @@ fn session_worktree_path_uses_dot_prefix() {
 
     // Call the production function.
     let name = "tm-test-repo-01";
-    let worktree_path = create_session_worktree(base, name)
-        .expect("create_session_worktree must succeed on a real git repo");
+    let worktree_path =
+        create_session_worktree(base, name, &crate::session_manager::ManagedSessionId::new())
+            .expect("create_session_worktree must succeed on a real git repo");
 
     // (a) Path must be under <base>/.worktrees/ — hardcoded, not from production.
     let expected_parent = base.join(".worktrees");
@@ -389,7 +390,12 @@ fn worktree_name_collides_detects_existing_dir_and_branch() {
     );
 
     // (b) After creating the worktree, the SAME name must collide.
-    create_session_worktree(base, "tm-fresh-01").expect("create_session_worktree");
+    create_session_worktree(
+        base,
+        "tm-fresh-01",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree");
     assert!(
         worktree_name_collides(base, "tm-fresh-01"),
         "an in-use name (dir + branch both exist) must collide"
@@ -461,10 +467,19 @@ fn create_session_worktree_rejects_existing_worktree_dir() {
         .expect("git commit");
     assert!(commit.success(), "git commit failed");
 
-    let first = create_session_worktree(base, "tm-dup-01").expect("first create must succeed");
+    let first = create_session_worktree(
+        base,
+        "tm-dup-01",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("first create must succeed");
     assert!(first.is_dir(), "first worktree must exist");
 
-    let second = create_session_worktree(base, "tm-dup-01");
+    let second = create_session_worktree(
+        base,
+        "tm-dup-01",
+        &crate::session_manager::ManagedSessionId::new(),
+    );
     assert!(
         second.is_err(),
         "creating a worktree for an already-existing name must error, not clobber"
@@ -733,8 +748,12 @@ fn create_session_worktree_sets_pull_upstream_and_worktree_scoped_push() {
     }
 
     // 4. Call the production function under test.
-    let worktree_path =
-        create_session_worktree(&base, "tm-pull-01").expect("create_session_worktree must succeed");
+    let worktree_path = create_session_worktree(
+        &base,
+        "tm-pull-01",
+        &crate::session_manager::ManagedSessionId::new(),
+    )
+    .expect("create_session_worktree must succeed");
 
     // (a) `git pull` must work: @{u} resolves to origin/main.
     let upstream = std::process::Command::new("git")

@@ -88,7 +88,10 @@ fn default_dry_run() -> bool {
 /// that belongs to an active session.
 /// What: collects active workspace paths and the managed workspace root, then
 /// delegates to [`SessionManager::prune_orphaned_worktrees`]. Returns
-/// `{ dry_run, paths: ["..."] }`. Dry-run is the default.
+/// `{ dry_run, paths: ["..."], owner_unknown_paths: ["..."] }` (#3649 adds the
+/// second field: worktrees conservatively skipped because their ownership
+/// sentinel had no resolvable owner — never auto-deleted, surfaced here for
+/// operator review). Dry-run is the default.
 /// Test: `prune_worktrees_route_dry_run`.
 pub async fn prune_worktrees_route(
     State(state): State<Arc<DaemonState>>,
@@ -108,12 +111,23 @@ pub async fn prune_worktrees_route(
         .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, req.dry_run)
         .await
     {
-        Ok(removed) => {
-            let paths: Vec<String> = removed
+        Ok(outcome) => {
+            let paths: Vec<String> = outcome
+                .removed
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
-            Json(serde_json::json!({ "dry_run": req.dry_run, "paths": paths })).into_response()
+            let owner_unknown_paths: Vec<String> = outcome
+                .owner_unknown
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            Json(serde_json::json!({
+                "dry_run": req.dry_run,
+                "paths": paths,
+                "owner_unknown_paths": owner_unknown_paths,
+            }))
+            .into_response()
         }
         Err(e) => {
             warn!("prune-worktrees route: orphan scan failed: {e}");
@@ -149,8 +163,10 @@ pub async fn prune_managed_route(
         }
     };
     let mgr = state.session_manager().await;
+    // `caller: None` — the HTTP route is an operator surface, never a session
+    // acting on its own behalf; the #3649 owner gate does not apply here.
     match mgr
-        .prune_managed(filter, req.dry_run, req.include_active)
+        .prune_managed(filter, req.dry_run, req.include_active, None)
         .await
     {
         Ok(outcome) => Json(outcome).into_response(),
