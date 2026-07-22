@@ -160,7 +160,7 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 
 **Closing a workstream is THE trigger for resource cleanup.**
 
-**Stable workstream-ownership mapping:** Issue #3649 (session-owned worktrees) requires ownership tracking via `owner_session_id` sentinel. Because the 1:1 binding invariant (§2.1) establishes exactly one session per workstream, workstream_id is the stable durable key; `owner_session_id` resolves to it through an explicit 1:1 mapping maintained at close time. This mapping satisfies ADR-0019's "never key on fragile session_id" principle (ADR-0019 forbids `session_id`-keyed addressing to avoid #3396 pane-ID drift): `workstream_id` is the permanent identifier; the session binding it points to may change over the workstream's lifetime (only at creation and closure), but the mapping is always consistent with the workstream's state.
+**Stable workstream-ownership mapping:** Issue #3649 (session-owned worktrees) requires ownership tracking via `owner_session_id` sentinel. Because the 1:1 binding invariant (§2.1) establishes exactly one session per workstream, workstream_id is the stable durable key; `owner_session_id` resolves to it through an explicit 1:1 mapping. This mapping satisfies ADR-0019's "never key on fragile session_id" principle (ADR-0019 forbids `session_id`-keyed addressing to avoid #3396 pane-ID drift): the mapping is *established* at workstream creation and *finalized* (marked terminal) at workstream closure; the session identity itself never changes, only its liveness state transitions from active to terminal.
 
 **Reclamation process (issue #2919):**
 - Closing a workstream triggers the auto-reclamation of its worktree (trusty-mpm) or build artifacts (trusty-code).
@@ -213,7 +213,7 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 - **Multi-user workstreams:** This spec addresses single-operator workstreams. Team collaboration is future scope.
 - **Cross-project workstreams:** Workstreams are project-scoped (one project per workstream in trusty-code; one branch per workstream in trusty-mpm).
 - **Enforcement implementation:** Concurrency caps, scope overlap, and staleness nudge logic are specified as behavior contracts; implementation details (where the checks live, how they're surfaced, CLI/API shape) are implementation follow-ups.
-- **Migration of existing workstreams:** Existing workstreams (pre-this spec) that violate 1:1 binding (e.g., sessions previously rebound to different workstreams) are not retroactively migrated. The spec applies to new workstreams; existing ones deprecate gracefully.
+- **Migration of existing workstreams:** Existing workstreams (pre-this spec) that violate 1:1 binding (e.g., accumulated multiple sessions via append-only `session_ids: Vec`) are not retroactively migrated. The spec applies to new workstreams; existing ones deprecate gracefully.
 
 ---
 
@@ -221,7 +221,7 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 
 | Spec | Relationship |
 |---|---|
-| DOC-48 (tcode Workstreams) | **OVERRIDES** DOC-48's append-only `session_ids: Vec` model (§2.1, §4.1) with 1:1 binding, effective for new workstreams. DOC-48's daemon-scoped activation (§6) and SSE fan-out (§5.3) remain unchanged; only the session-binding cardinality is overridden here. Existing persisted arrays with >1 entries are grandfathered (read-only). DOC-48 §11 should add a normative note that its append-only-many semantics are superseded for new workstreams by DOC-52. |
+| DOC-48 (tcode Workstreams) | **OVERRIDES** DOC-48's append-only `session_ids: Vec` model (§2.1, §4.1) with 1:1 binding, effective for new workstreams. DOC-48's daemon-scoped activation (§6) and SSE fan-out (§5.3) remain unchanged; only the session-binding cardinality is overridden here. Existing persisted arrays with >1 entries are grandfathered (read-only). DOC-48 §11.1 (added by this PR) records the normative override note. |
 | DOC-39 (trusty-code Harness UI) | Defines workstream as "the unit of work… an infinite thread… you pick up." This spec makes precise what "infinite" means in a 1:1 session-binding context: infinite turns within one session; new work after closure starts a new workstream. |
 | ADR-0019 (Unified IPC) | Specifies workstream-keyed addressing for cross-PM messaging. This spec's 1:1 binding eliminates the "which session?" ambiguity in ADR-0019's message routing. |
 | #3649 (Session-owned worktrees) | Proposes session-id-keyed ownership via `owner_session_id` sentinel. This spec equates that with workstream_id internally, settling how the two identifiers relate. |
