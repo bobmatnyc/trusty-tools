@@ -364,8 +364,10 @@ impl GitBackend for RealGitBackend {
     /// have finished cloning while this one was waiting) before cloning. If the
     /// path is then found occupied by a non-empty stale/broken (non-bare)
     /// directory, returns an actionable [`stale_base_dir_error`] naming the
-    /// exact path and the `rm -rf` command to clear it — rather than a cryptic
-    /// clone failure or a destructive auto-delete (issue #1937 item 1).
+    /// exact path and a non-destructive `mv`-aside quarantine command — rather
+    /// than a cryptic clone failure, a destructive auto-delete, or a suggested
+    /// recursive delete of this project's SHARED base (issues #1937 item 1,
+    /// #3605).
     /// Test: `ensure_base_checkout_recovers_from_concurrent_race` (spawns
     /// real threads racing on the same `base_dir`, asserts every one returns
     /// `Ok` and exactly one valid bare checkout results),
@@ -411,9 +413,11 @@ impl GitBackend for RealGitBackend {
         // stale/broken directory (crashed mid-clone leftover, or a pre-#1935
         // non-bare clone) a `git clone --bare` here would fail with an opaque
         // "destination path already exists" message. Surface an actionable
-        // error naming the exact path + the `rm -rf` command instead (issue
-        // #1937 item 1). We do NOT auto-delete: removing operator data is too
-        // destructive for an advisory recovery path.
+        // error naming the exact path + a non-destructive `mv`-aside quarantine
+        // command instead (issue #1937 item 1). We neither auto-delete nor
+        // SUGGEST a delete: this base is shared by every worktree of the
+        // project, and the suggested command is executed verbatim by agents
+        // (issue #3605).
         if let Some(err) = stale_base_dir_error(base_dir) {
             return Err(err);
         }

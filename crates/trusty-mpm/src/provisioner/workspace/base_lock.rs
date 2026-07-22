@@ -17,10 +17,13 @@
 //! / [`write_fake_bare_checkout`] let `FakeGitBackend` mirror the real backend's
 //! `rev-parse`-based validity semantics rather than a superficial file-exists
 //! probe (issue #1937 item 3).
+//! [`stale_base_quarantine_path`] backs that error's non-destructive recovery
+//! hint (issue #3605: the hint used to be a literal `rm -rf`).
 //! Test: `ensure_base_checkout_recovers_from_concurrent_race`,
 //! `ensure_base_checkout_rejects_stale_non_bare_directory`,
 //! `base_checkout_lock_recovers_stale_lock_marker`,
-//! `fake_ensure_base_checkout_rejects_stale_non_bare_directory`, all in
+//! `fake_ensure_base_checkout_rejects_stale_non_bare_directory`,
+//! `stale_base_dir_error_suggests_quarantine_not_deletion`, all in
 //! `provisioner/workspace/tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -63,6 +66,26 @@ pub(super) fn is_established_bare_checkout(dir: &Path) -> bool {
     }
 }
 
+/// Build the timestamped sibling path a stale base directory should be
+/// QUARANTINED to (moved aside), rather than deleted.
+///
+/// Why: the recovery hint in [`stale_base_dir_error`] is read and executed
+/// verbatim by autonomous agents, so it must name a concrete destination —
+/// an agent handed `mv <path> <somewhere-you-choose>` will improvise, and an
+/// agent handed a shell-substitution (`$(date …)`) may mangle it. Emitting a
+/// fully-resolved path keeps the suggested command copy-pasteable while
+/// keeping it non-destructive. The timestamp suffix means repeated recoveries
+/// never collide, so an earlier quarantine is never clobbered by a later one.
+/// What: `<base_dir>.stale-<UTC YYYYmmdd-HHMMSS>`, a sibling of `base_dir`
+/// (same parent, so the `mv` is a cheap same-filesystem rename).
+/// Test: `stale_base_dir_error_suggests_quarantine_not_deletion`.
+pub(super) fn stale_base_quarantine_path(base_dir: &Path) -> PathBuf {
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let mut name = base_dir.as_os_str().to_os_string();
+    name.push(format!(".stale-{stamp}"));
+    PathBuf::from(name)
+}
+
 /// Build an actionable error for a base-checkout path occupied by a broken,
 /// non-bare directory — or return `None` when the path is safe to clone into.
 ///
@@ -70,20 +93,33 @@ pub(super) fn is_established_bare_checkout(dir: &Path) -> bool {
 /// that is not a valid bare checkout (a leftover from a crashed mid-clone, or a
 /// stale non-bare directory), but the resulting failure used to be an opaque
 /// `git clone --bare` "destination path already exists" message that gives the
-/// operator no recovery path (issue #1937 item 1). We deliberately do NOT
-/// auto-remediate (delete + re-clone): silently `rm -rf`-ing a directory the
-/// daemon did not create is too destructive for an advisory recovery path.
-/// Instead we surface the exact path and the exact command to clear it, and let
-/// the human decide.
+/// operator no recovery path (issue #1937 item 1). This error is, however,
+/// consumed almost exclusively by an autonomous agent, which executes a
+/// suggested command verbatim — so the message's own recovery hint is a
+/// privileged instruction channel, not advice. The original hint was a literal
+/// `rm -rf <path>` and is the most plausible trigger of the 2026-07-21 incident
+/// (issue #3605) in which `<project>/.base` was destroyed and ~70 worktrees were
+/// orphaned machine-wide, each then emitting phantom git-discovery test
+/// failures. `.base` is SHARED by every worktree of the project, so deleting it
+/// is never a local, recoverable act. The hint is therefore QUARANTINE
+/// (`mv` aside to [`stale_base_quarantine_path`]) — matching this crate's
+/// existing corrupt-state convention (`core::mcp_config`,
+/// `core::standalone::trust_seed` both rename rather than delete) — and the
+/// message states the shared-ownership blast radius explicitly, which is the
+/// context whose absence made the destructive hint look safe to follow.
 /// What: returns `None` when `base_dir` is absent or empty (either is safe —
 /// `git clone --bare` accepts a missing or empty target); otherwise returns
-/// `Some(ProvisionError::Git(..))` whose message names the exact path and the
-/// literal `rm -rf <path>` command to run before retrying. Callers MUST invoke
-/// this only AFTER confirming the path is not already a valid bare checkout
-/// (via [`is_established_bare_checkout`]) so a healthy base is never flagged.
-/// Test: `ensure_base_checkout_rejects_stale_non_bare_directory` and
+/// `Some(ProvisionError::Git(..))` whose message names the exact path, warns
+/// that the path is shared across sessions, and gives a single non-destructive
+/// `mv <path> <path>.stale-<timestamp>` command. It never emits a recursive
+/// delete. Callers MUST invoke this only AFTER confirming the path is not
+/// already a valid bare checkout (via [`is_established_bare_checkout`]) so a
+/// healthy base is never flagged.
+/// Test: `ensure_base_checkout_rejects_stale_non_bare_directory`,
 /// `fake_ensure_base_checkout_rejects_stale_non_bare_directory` (both assert
-/// the returned message contains the path and the `rm -rf` hint).
+/// the message names the path and carries the quarantine hint), and
+/// `stale_base_dir_error_suggests_quarantine_not_deletion` (asserts the message
+/// contains NO destructive command — the #3605 regression guard).
 pub(super) fn stale_base_dir_error(base_dir: &Path) -> Option<ProvisionError> {
     // A missing dir (NotFound) or an empty dir (no entries) is fine: `git clone
     // --bare` clones cleanly into either. Only a NON-empty dir that is not a
@@ -102,10 +138,21 @@ pub(super) fn stale_base_dir_error(base_dir: &Path) -> Option<ProvisionError> {
     }
     Some(ProvisionError::Git(format!(
         "base checkout path {path} exists but is not a valid bare git checkout \
-         (likely a leftover from a crashed clone, or a stale non-bare directory). \
-         trusty-mpm will not delete it automatically. To allow re-provisioning, \
-         remove it manually and retry:\n    rm -rf {path}",
-        path = base_dir.display()
+         (likely a leftover from a crashed clone, or a stale non-bare directory).\n\
+         \n\
+         WARNING: this path is the SHARED git base for EVERY trusty-mpm worktree of \
+         this project, and other sessions may be using it right now. Destroying it \
+         orphans every existing worktree, which then fails with phantom \
+         git-discovery errors (issue #3605). Do NOT recursively delete it.\n\
+         \n\
+         trusty-mpm will not modify it automatically. Recover by QUARANTINING it — \
+         move it aside, never delete it — then retry provisioning:\n\
+         \x20   mv {path} {quarantine}\n\
+         \n\
+         The quarantined copy stays intact so an orphaned worktree can be repointed \
+         at it, or so it can be inspected before anyone decides to discard it.",
+        path = base_dir.display(),
+        quarantine = stale_base_quarantine_path(base_dir).display()
     )))
 }
 
