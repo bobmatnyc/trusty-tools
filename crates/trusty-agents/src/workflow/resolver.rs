@@ -9,6 +9,9 @@
 //! collects a map of `rel_path -> Vec<(label, bytes)>`, writes single-owner
 //! files through unchanged, resolves conflicts via git / LLM / first-writer-
 //! wins, and emits a `merge-report.md` in the target dir.
+//! Conflict resolution never yields fewer bytes than it was given: every
+//! branch returns either a real merge or one agent's full version, so a git
+//! failure degrades to first-writer-wins rather than to an empty file.
 //! Test: `merge_single_owner_files_pass_through` and `merge_two_identical_is_noop`.
 
 use std::collections::HashMap;
@@ -108,15 +111,37 @@ impl ConflictResolver {
     ///
     /// Why: We prefer structural merge (git merge-file) over LLM so the
     /// common case (non-overlapping edits) costs nothing. LLM is the last
-    /// line of defense when git leaves `<<<<<<<` markers.
-    /// What: For exactly 2 versions: 3-way merge with empty base. If no
-    /// markers, return the merge output; otherwise call LLM; otherwise
-    /// return first agent's version. For 3+ versions: take first, log.
+    /// line of defense when git leaves `<<<<<<<` markers. Every path here
+    /// must return *some* agent's bytes: this function's output is written
+    /// straight over the merged tree, so returning nothing destroys work.
+    /// What: Identical versions short-circuit to those bytes. For exactly 2
+    /// differing versions: 3-way merge with empty base, classified by git's
+    /// exit status — clean merge returns git's output, a conflicted merge
+    /// goes to the LLM, and a git *failure* falls back to the first agent's
+    /// version. For 3+ versions: take first, log.
+    /// Test: `merge_two_identical_is_noop`,
+    /// `merge_conflicting_versions_falls_back_to_first_agent`.
     async fn resolve_conflict(
         &self,
         path: &Path,
         versions: &[(String, Vec<u8>)],
     ) -> anyhow::Result<Vec<u8>> {
+        debug_assert!(
+            versions.len() >= 2,
+            "resolve_conflict is only called for paths with >= 2 versions"
+        );
+        let Some((_, first)) = versions.first() else {
+            anyhow::bail!("no versions to resolve for {}", path.display());
+        };
+
+        // Merging N byte-identical copies is a no-op by definition. Answering
+        // it here keeps the common case (both agents left an input file
+        // untouched) free of a subprocess spawn, and independent of whether
+        // `git merge-file` is usable at all.
+        if versions.iter().all(|(_, bytes)| bytes == first) {
+            return Ok(first.clone());
+        }
+
         if versions.len() == 2 {
             let tmp = tempfile_dir();
             tokio::fs::create_dir_all(&tmp).await?;
@@ -142,10 +167,19 @@ impl ConflictResolver {
             let _ = tokio::fs::remove_dir_all(&tmp).await;
 
             let merged = out.stdout;
-            let has_conflicts = merged.windows(7).any(|w| w == b"<<<<<<<");
-
-            if !has_conflicts {
-                return Ok(merged);
+            match classify_merge_status(out.status.code()) {
+                MergeVerdict::Clean => return Ok(merged),
+                MergeVerdict::Conflicted => {}
+                MergeVerdict::Failed => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    tracing::warn!(
+                        path = %path.display(),
+                        status = ?out.status.code(),
+                        stderr = %stderr.trim(),
+                        "git merge-file failed; falling back to first agent's version"
+                    );
+                    return Ok(first.clone());
+                }
             }
 
             if !self.api_key.is_empty() {
@@ -162,7 +196,7 @@ impl ConflictResolver {
                 }
             }
 
-            return Ok(versions[0].1.clone());
+            return Ok(first.clone());
         }
 
         tracing::warn!(
@@ -170,7 +204,7 @@ impl ConflictResolver {
             count = versions.len(),
             "3+ versions in conflict; taking first agent's version"
         );
-        Ok(versions[0].1.clone())
+        Ok(first.clone())
     }
 
     /// LLM-driven conflict resolution via OpenRouter.
@@ -217,6 +251,36 @@ impl ConflictResolver {
             .as_str()
             .unwrap_or("")
             .to_string())
+    }
+}
+
+/// What `git merge-file`'s exit status says about the bytes it printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeVerdict {
+    /// Clean merge; stdout is the merged content.
+    Clean,
+    /// Git merged but left conflict markers in stdout.
+    Conflicted,
+    /// Git itself failed; stdout is meaningless (in practice, empty).
+    Failed,
+}
+
+/// Classify a `git merge-file` exit status.
+///
+/// Why: git reports *three* distinct outcomes through one integer, and the
+/// failure outcome comes with empty stdout. Treating that empty stdout as a
+/// clean merge silently truncates both agents' work to zero bytes — which is
+/// exactly what happened whenever git could not do repository discovery
+/// (corrupt worktree, `safe.directory` refusal, bad `GIT_DIR`).
+/// What: Per `git-merge-file(1)`, exit 0 is a clean merge, 1..=127 is the
+/// number of conflict regions, and anything else (128/255, or `None` for a
+/// signal-killed child) is an error.
+/// Test: `classify_merge_status_maps_git_exit_codes`.
+fn classify_merge_status(code: Option<i32>) -> MergeVerdict {
+    match code {
+        Some(0) => MergeVerdict::Clean,
+        Some(1..=127) => MergeVerdict::Conflicted,
+        _ => MergeVerdict::Failed,
     }
 }
 
@@ -341,5 +405,43 @@ mod tests {
         let body = tokio::fs::read(out.join("f.txt")).await.unwrap();
         assert_eq!(&body[..], b"hello\n");
         assert!(report.contains("Total files: 1"));
+    }
+
+    /// Regression: a genuine conflict must still write one agent's *full*
+    /// version, never git's marker-laden stdout and never an empty file.
+    #[tokio::test]
+    async fn merge_conflicting_versions_falls_back_to_first_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        let out = tmp.path().join("out");
+        tokio::fs::create_dir_all(&a).await.unwrap();
+        tokio::fs::create_dir_all(&b).await.unwrap();
+        tokio::fs::write(a.join("f.txt"), b"alpha\n").await.unwrap();
+        tokio::fs::write(b.join("f.txt"), b"beta\n").await.unwrap();
+
+        let results = vec![mk_result("a", a), mk_result("b", b)];
+        // Empty API key disables the LLM fallback -> first-agent-wins.
+        let resolver = ConflictResolver::new(String::new());
+        let report = resolver.merge(&results, &out).await.unwrap();
+
+        let body = tokio::fs::read(out.join("f.txt")).await.unwrap();
+        assert_eq!(&body[..], b"alpha\n");
+        assert!(report.contains("Conflicts resolved: 1"));
+    }
+
+    /// Regression for the silent-truncation bug: git reports failure through
+    /// an exit code >127 while printing nothing, so classifying that as a
+    /// clean merge would write a zero-byte file over both agents' work.
+    #[test]
+    fn classify_merge_status_maps_git_exit_codes() {
+        assert_eq!(classify_merge_status(Some(0)), MergeVerdict::Clean);
+        assert_eq!(classify_merge_status(Some(1)), MergeVerdict::Conflicted);
+        assert_eq!(classify_merge_status(Some(127)), MergeVerdict::Conflicted);
+        // 128 = "fatal: not a git repository" / dubious ownership.
+        assert_eq!(classify_merge_status(Some(128)), MergeVerdict::Failed);
+        assert_eq!(classify_merge_status(Some(255)), MergeVerdict::Failed);
+        // `None` = killed by a signal before it could print anything.
+        assert_eq!(classify_merge_status(None), MergeVerdict::Failed);
     }
 }

@@ -157,6 +157,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Parallel-phase conflict resolution no longer silently truncates files to
+  zero bytes when `git merge-file` fails (#3652):**
+  `ConflictResolver::resolve_conflict` read the merge subprocess's stdout
+  while ignoring its exit status. `git merge-file` signals three distinct
+  outcomes through one integer — `0` clean, `1..=127` conflict count, and
+  anything above that a git *error* — and on error it prints nothing. So any
+  condition that broke git's repository discovery (corrupt worktree,
+  `safe.directory` "dubious ownership" refusal, a stale `GIT_DIR`) produced
+  empty stdout, which the marker scan then read as a clean merge, and the
+  resolver wrote a zero-byte file over both sub-agents' work. Exit status is
+  now classified explicitly via `classify_merge_status`, a git failure
+  degrades to first-agent-wins instead of to an empty file, and byte-identical
+  versions short-circuit before git is spawned at all — so merging N copies of
+  the same file is a true no-op regardless of the ambient git environment.
 - **Flaky `HOME`-race unit tests in `skills::sources::tests` fixed (#3607):**
   `remote_git_without_subdir_uses_cache_dir_directly` and its siblings
   `remote_git_cache_path_computed_correctly` /
