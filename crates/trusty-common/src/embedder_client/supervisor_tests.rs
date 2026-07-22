@@ -900,25 +900,56 @@ exit 1
     /// covered in isolation by `wedge_counter_should_reset_after_window_resets`
     /// and friends above, which `consecutive_failures`'s reset reuses
     /// verbatim (see supervisor.rs's post-trigger reset check).
+    ///
+    /// De-flaking note (CI follow-up on #3646): an earlier version of this
+    /// test observed the FIRST crash by polling `pid_slot` for a
+    /// zero-crossing under a 45s bound — that polls the exact same
+    /// scheduler-dependent `child.wait()`/reader-task-EOF race described
+    /// above and above `write_mock_embedderd_crash_once`'s doc comment, and
+    /// intermittently timed out on a slower/more-contended CI runner
+    /// (`supervisor_tests.rs:960: supervisor never observed the first
+    /// (deliberate) crash within 45s`, twice on the same PR). This version
+    /// never tries to OBSERVE that intermediate transition at all: the mock
+    /// is deterministic BY CONSTRUCTION (first invocation always crashes
+    /// after answering its own probe; every later invocation is healthy),
+    /// so instead of racing a wall-clock bound against one specific signal,
+    /// it retries a REAL `embed_batch` call in a loop until one succeeds.
+    /// Retrying absorbs ANY amount of internal crash-detection/respawn
+    /// latency: a call against the about-to-crash/already-dead first
+    /// process fails FAST by construction (`StdioEmbedderClient::embed_batch`
+    /// fails immediately if already known unhealthy, and otherwise races the
+    /// reply against the unhealthy signal — see `stdio.rs`'s
+    /// `await_reply_or_unhealthy` — so it never blocks for long), so the
+    /// loop just spins past it and succeeds as soon as the healthy
+    /// second-generation process is in place, however long the internal
+    /// detection took. The completion condition is a genuine successful
+    /// response — not a timing-dependent observation of an intermediate,
+    /// racy signal.
     /// What: `write_mock_embedderd_crash_once_then_healthy` crashes exactly
     /// once, then answers requests indefinitely on every later invocation.
     /// `max_restarts: 1` means a single crash is normal and must never trip
     /// give-up by itself, regardless of which counter happens to observe it.
     /// `wedge_reset_secs: 1` keeps the health-window wait short. Sequence:
-    ///   1. Spawn (crashes immediately after its own startup probe) —
-    ///      `supervision_loop` observes the crash and respawns (the second
-    ///      invocation, which is healthy). Two-phase zero-then-nonzero
-    ///      `pid_slot` polling (rather than comparing pids by inequality)
-    ///      avoids a PID-reuse race under load.
+    ///   1. Spawn (crashes immediately after its own startup probe). Retry
+    ///      `embed_batch` in a loop (bounded, 45s) until it succeeds —
+    ///      proving the supervisor has already processed the crash and
+    ///      respawned a genuinely live, responsive process, regardless of
+    ///      how long that took.
     ///   2. Assert `has_given_up()` is `false` — a single tolerated crash at
     ///      `max_restarts: 1` must never trip give-up.
     ///   3. Sleep comfortably longer than `wedge_reset_secs` while the
     ///      respawned process idles untouched (the sustained-health window
     ///      the fix's reset gate is keyed on).
-    ///   4. Issue a REAL `embed_batch` call through the live `client_slot`
-    ///      and assert it succeeds — proving the sidecar is genuinely
-    ///      operational after the health window, not merely "hasn't crashed
-    ///      by luck yet".
+    ///   4. Issue ANOTHER real `embed_batch` call through the live
+    ///      `client_slot` and assert it succeeds — proving the sidecar is
+    ///      STILL genuinely operational after the health window, not merely
+    ///      "hasn't crashed again by luck". Also confirms `pid_slot` now
+    ///      reports a genuinely new process (safe to read directly at this
+    ///      point — the respawn that produced it completed well over a
+    ///      second ago, alongside the client swap this step's successful
+    ///      call already proves happened, so there is no remaining window
+    ///      for `pid_slot`'s store — which lands after the client swap in
+    ///      the respawn code — to still be pending).
     ///   5. Assert `has_given_up()` is still `false`.
     /// Test: this test.
     #[tokio::test]
@@ -940,42 +971,28 @@ exit 1
 
         let handle = supervisor.start_supervisor_task();
 
-        // Step 1: wait for the first (deliberate) crash to be observed
-        // (`pid_slot` clears to 0), then for the healthy respawn to complete
-        // (`pid_slot` goes non-zero again). 45s ceiling matches the
-        // established convention in this file (see
-        // `supervisor_gives_up_after_max_restarts_flips_has_given_up`'s doc
-        // comment) — generous headroom so a loaded/contended host cannot
-        // false-fail; the poll interval is short (5ms) so a passing run
-        // still returns in milliseconds.
-        let crash_observed = tokio::time::timeout(Duration::from_secs(45), async {
+        // Step 1: retry a real embed call until the supervisor has
+        // processed the (deterministic, by construction) first crash and
+        // respawned a genuinely live process — see the de-flaking note
+        // above for why this replaces a `pid_slot`-zero-crossing poll.
+        let first_success = tokio::time::timeout(Duration::from_secs(45), async {
             loop {
-                if pid_slot.load(Ordering::Acquire) == 0 {
+                let client = client_slot.read().await.clone();
+                if client
+                    .embed_batch(vec!["post-crash liveness probe".to_string()])
+                    .await
+                    .is_ok()
+                {
                     return;
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await;
         assert!(
-            crash_observed.is_ok(),
-            "supervisor never observed the first (deliberate) crash within 45s"
-        );
-        let healthy_pid = tokio::time::timeout(Duration::from_secs(45), async {
-            loop {
-                let pid = pid_slot.load(Ordering::Acquire);
-                if pid != 0 {
-                    return pid;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("supervisor never completed the post-crash respawn within 45s");
-        assert_ne!(
-            healthy_pid, initial_pid,
-            "the post-crash respawn must be a genuinely new process, not the \
-             original (already-crashed) one"
+            first_success.is_ok(),
+            "supervisor never became responsive again after the first \
+             (deliberate) crash within 45s"
         );
 
         // Step 2.
@@ -989,9 +1006,9 @@ exit 1
         // sustained-health gate has unambiguously elapsed.
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
-        // Step 4: prove the sidecar is genuinely operational, not merely
-        // "hasn't crashed again by luck" — a real embed call through the
-        // live client must still succeed after the health window.
+        // Step 4: prove the sidecar is STILL genuinely operational, not
+        // merely "hasn't crashed again by luck" — a real embed call through
+        // the live client must still succeed after the health window.
         let client = client_slot.read().await.clone();
         let embed_result = client
             .embed_batch(vec!["post-health-window liveness check".to_string()])
@@ -1000,6 +1017,12 @@ exit 1
             embed_result.is_ok(),
             "sidecar must still be genuinely responsive after the \
              sustained-health window: {embed_result:?}"
+        );
+        let healthy_pid = pid_slot.load(Ordering::Acquire);
+        assert!(
+            healthy_pid != 0 && healthy_pid != initial_pid,
+            "pid_slot must report a genuinely new, live process by now (was \
+             {initial_pid}, now {healthy_pid})"
         );
 
         // Step 5.
