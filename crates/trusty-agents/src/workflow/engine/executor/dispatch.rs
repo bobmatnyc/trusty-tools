@@ -90,10 +90,25 @@ impl WorkflowEngine {
                     let api_key = trusty_common::inference::credentials::resolve_key("openrouter")
                         .unwrap_or_default();
                     let resolver = ConflictResolver::new(api_key);
-                    let merge_report = resolver
-                        .merge(&results, &phase_out_dir)
-                        .await
-                        .unwrap_or_else(|e| format!("merge failed: {e:#}"));
+                    // #3671: `merge()` only returns `Err` for a genuine I/O
+                    // fault (create_dir_all/read_dir/read/write) — every
+                    // recoverable conflict (git failure, LLM failure) is
+                    // already degraded to `Ok` with a reason recorded in the
+                    // report body (see `resolver.rs`'s `resolve_conflict`
+                    // invariant). So an `Err` here means the merged tree on
+                    // disk is genuinely incomplete/nondeterministic (the
+                    // collection loop walks a `HashMap` and bails partway
+                    // through), and MUST fail the phase rather than be
+                    // folded into a success string that downstream phases
+                    // would consume as if the tree were whole.
+                    let merge_report =
+                        resolver
+                            .merge(&results, &phase_out_dir)
+                            .await
+                            .map_err(|source| WorkflowError::PhaseFailed {
+                                phase: phase.name.clone(),
+                                source,
+                            })?;
 
                     // Aggregate combined content + usage across sub-agents.
                     let mut combined = String::new();

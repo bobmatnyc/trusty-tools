@@ -51,6 +51,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   execution path) — a documented MVP scope limit, flagged for a follow-up
   RPC.
 
+### Fixed
+
+- **A parallel phase could not fail when its merge failed (#3671):**
+  `executor::dispatch` folded `ConflictResolver::merge`'s `Err` into a
+  `"merge failed: ..."` string appended to the phase's content and returned
+  `Ok(AgentOutput)` regardless. `merge()` only errors on a genuine I/O fault
+  (`create_dir_all`/`read_dir`/`read`/`write`) — every recoverable conflict
+  (a failed `git merge-file`, a failed LLM fallback) is already degraded to
+  `Ok` with the reason recorded in the merge report. So a real `Err` meant the
+  merged tree on disk was incomplete and nondeterministic (the collection
+  loop walks a `HashMap` and can bail partway through), yet downstream phases
+  consumed it as if it were whole, with the failure visible only as a buried
+  string. `merge`'s `Err` now propagates as `WorkflowError::PhaseFailed`,
+  failing the phase/workflow instead. Sibling of #3652/#3653/#3675 (the same
+  "silent success" bug class).
+
 ### Security
 
 - **Assistant no longer leaks internal orchestration or disclaims delegating
