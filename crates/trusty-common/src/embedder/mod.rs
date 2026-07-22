@@ -13,8 +13,11 @@
 //! feature.
 //!
 //! Test: `cargo test -p trusty-common --features embedder,embedder-test-support`
-//! covers shape, cache hits, and the mock embedder. ONNX-backed tests are
-//! `#[ignore]` to keep CI under one cargo-feature umbrella.
+//! covers shape, cache hits, and the mock embedder. Most ONNX-backed tests
+//! are `#[ignore]` to keep CI under one cargo-feature umbrella; the
+//! numerical-accuracy gate `default_model_matches_sentence_transformers_reference`
+//! is the deliberate exception (issue #3493 P0 part 2) — CI pre-seeds its
+//! model so it runs on every PR instead of being silently skipped forever.
 
 // Issue #54: opt-in Candle BERT backend. Lives in its own submodule behind
 // the `embedder-candle` feature so the default fastembed/ORT build never
@@ -413,6 +416,9 @@ mod tests {
         assert_eq!(resolve_expected_provider(), ExecutionProvider::Cpu);
     }
 
+    /// Why: issue #3493 P0 (part 2) — CPU is now the default execution
+    /// provider on every platform, including Apple Silicon; CoreML no longer
+    /// activates just because `TRUSTY_DEVICE` is unset.
     #[test]
     fn resolve_expected_provider_default_matches_platform() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -423,16 +429,7 @@ mod tests {
 
         #[cfg(feature = "embedder-cuda")]
         let expected = ExecutionProvider::Cuda;
-        #[cfg(all(
-            not(feature = "embedder-cuda"),
-            target_arch = "aarch64",
-            target_os = "macos"
-        ))]
-        let expected = ExecutionProvider::CoreMLAne;
-        #[cfg(all(
-            not(feature = "embedder-cuda"),
-            not(all(target_arch = "aarch64", target_os = "macos"))
-        ))]
+        #[cfg(not(feature = "embedder-cuda"))]
         let expected = ExecutionProvider::Cpu;
 
         assert_eq!(
@@ -441,12 +438,25 @@ mod tests {
         );
     }
 
+    /// Why: issue #3493 P0 (part 2) — CoreML is opt-in via `TRUSTY_DEVICE=gpu`
+    /// on Apple Silicon; unset/`cpu` must predict plain `Cpu` regardless of
+    /// `TRUSTY_COREML_COMPUTE_UNITS`, and `gpu` must predict the CoreML
+    /// variant selected by `TRUSTY_COREML_COMPUTE_UNITS`.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[cfg(not(feature = "embedder-cuda"))]
     #[test]
     fn resolve_expected_provider_coreml_units() {
         let _g = ENV_LOCK.lock().unwrap();
-        let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
+        {
+            let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
+            let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", Some("all"));
+            assert_eq!(
+                resolve_expected_provider(),
+                ExecutionProvider::Cpu,
+                "TRUSTY_DEVICE unset must predict Cpu even with compute units set"
+            );
+        }
+        let _d = EnvVarGuard::apply("TRUSTY_DEVICE", Some("gpu"));
         {
             let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", Some("all"));
             assert_eq!(resolve_expected_provider(), ExecutionProvider::CoreML);
@@ -581,10 +591,12 @@ mod tests {
     /// mean cosine similarity against `REFERENCE_VECTORS` is `>= 0.999`
     /// (matching the experiment's fp32/fp16 threshold, well above INT8's
     /// measured 0.9897).
-    /// Test: this test (`#[ignore]` — downloads/loads a real ONNX model, like
-    /// the other fastembed-backed tests in this module).
+    /// Test: this test. NOT `#[ignore]`d (issue #3493 P0 part 2 — this is the
+    /// correctness gate that would have caught the CoreML-default accuracy
+    /// regression had it been wired into CI; see `ci.yml`'s `test` job for
+    /// the fastembed-model pre-seed step that makes this safe to run on every
+    /// PR without HuggingFace-download flakiness).
     #[tokio::test]
-    #[ignore]
     async fn default_model_matches_sentence_transformers_reference() {
         fn cosine(a: &[f32], b: &[f32]) -> f64 {
             let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
@@ -617,6 +629,9 @@ mod tests {
         );
     }
 
+    /// Why: issue #3493 P0 (part 2) — `TRUSTY_DEVICE=cpu` must keep working as
+    /// an explicit-CPU escape hatch even though CPU is now the default
+    /// anyway, in case the opt-in precedence ever changes again.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
     fn trusty_device_cpu_disables_coreml_on_apple_silicon() {
@@ -640,9 +655,15 @@ mod tests {
         }
     }
 
+    /// Why: issue #3493 P0 (part 2) — CoreML measurably degraded embedding
+    /// accuracy (~0.99 mean cosine vs 1.000000 on CPU — see
+    /// `default_model_matches_sentence_transformers_reference`), so CPU is
+    /// now the DEFAULT execution provider on Apple Silicon, not CoreML. This
+    /// replaces the old `default_apple_silicon_uses_coreml_ane` test, which
+    /// asserted the opposite (now-reverted) default.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
-    fn default_apple_silicon_uses_coreml_ane() {
+    fn default_apple_silicon_uses_cpu() {
         use crate::embedder::fast_embedder::FastEmbedder as FE;
         let _guard = ENV_LOCK.lock().unwrap();
 
@@ -656,8 +677,9 @@ mod tests {
         let (_opts, provider) = FE::init_options(fastembed::EmbeddingModel::AllMiniLML6V2Q);
         assert_eq!(
             provider,
-            ExecutionProvider::CoreMLAne,
-            "default behaviour on Apple Silicon must register CoreML(ANE) — the OOM-safe replacement for CoreML(All)"
+            ExecutionProvider::Cpu,
+            "default behaviour on Apple Silicon must be CPU — CoreML is opt-in via \
+             TRUSTY_DEVICE=gpu (issue #3493 P0 part 2)"
         );
 
         unsafe {
@@ -672,6 +694,9 @@ mod tests {
         }
     }
 
+    /// Why: issue #3493 P0 (part 2) — CoreML must still be reachable as an
+    /// explicit opt-in (`TRUSTY_DEVICE=gpu`), and `TRUSTY_COREML_COMPUTE_UNITS`
+    /// must still select the CoreML(All) tag once opted in.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
     fn coreml_compute_units_all_opt_in() {
@@ -681,7 +706,7 @@ mod tests {
         let prev_device = std::env::var("TRUSTY_DEVICE").ok();
         let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
         unsafe {
-            std::env::remove_var("TRUSTY_DEVICE");
+            std::env::set_var("TRUSTY_DEVICE", "gpu");
             std::env::set_var("TRUSTY_COREML_COMPUTE_UNITS", "all");
         }
 
@@ -689,7 +714,43 @@ mod tests {
         assert_eq!(
             provider,
             ExecutionProvider::CoreML,
-            "TRUSTY_COREML_COMPUTE_UNITS=all must select the CoreML(All) tag"
+            "TRUSTY_DEVICE=gpu + TRUSTY_COREML_COMPUTE_UNITS=all must select the CoreML(All) tag"
+        );
+
+        unsafe {
+            match prev_device {
+                Some(v) => std::env::set_var("TRUSTY_DEVICE", v),
+                None => std::env::remove_var("TRUSTY_DEVICE"),
+            }
+            match prev_units {
+                Some(v) => std::env::set_var("TRUSTY_COREML_COMPUTE_UNITS", v),
+                None => std::env::remove_var("TRUSTY_COREML_COMPUTE_UNITS"),
+            }
+        }
+    }
+
+    /// Why: issue #3493 P0 (part 2) — `TRUSTY_DEVICE=gpu` is the explicit
+    /// opt-in that re-enables CoreML on Apple Silicon (mirroring the same
+    /// value's meaning for the CUDA branch and the `require_gpu` hard-fail
+    /// check in `with_cache_size`).
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn trusty_device_gpu_enables_coreml_on_apple_silicon() {
+        use crate::embedder::fast_embedder::FastEmbedder as FE;
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let prev_device = std::env::var("TRUSTY_DEVICE").ok();
+        let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
+        unsafe {
+            std::env::set_var("TRUSTY_DEVICE", "gpu");
+            std::env::remove_var("TRUSTY_COREML_COMPUTE_UNITS");
+        }
+
+        let (_opts, provider) = FE::init_options(fastembed::EmbeddingModel::AllMiniLML6V2Q);
+        assert_eq!(
+            provider,
+            ExecutionProvider::CoreMLAne,
+            "TRUSTY_DEVICE=gpu must opt back into CoreML(ANE) — the OOM-safe default variant"
         );
 
         unsafe {

@@ -77,6 +77,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   workspace is never an OS-temp path — closing the ephemeral test/self-heal
   index leak into the production trusty-search index set.
 
+- **CoreML is now opt-in, not the default, execution provider on Apple
+  Silicon (issue #3493 P0 part 2).** CoreML measurably degraded embedding
+  accuracy (~0.99 mean cosine similarity vs a genuine
+  `sentence-transformers` reference, vs 1.000000 on the CPU EP), silently
+  erasing the fp32 default-model accuracy fix from #3486. `FastEmbedder`
+  now defaults to CPU on every platform, including Apple Silicon; set
+  `TRUSTY_DEVICE=gpu` to explicitly opt back into CoreML acceleration
+  (`TRUSTY_COREML_COMPUTE_UNITS` still selects the CoreML variant once
+  opted in). `TRUSTY_DEVICE=cpu` keeps working as before. Local
+  measurement on Apple Silicon showed no consistent throughput cost from
+  the CPU default (CPU and CoreML(ANE) landed within noise of each other,
+  ~127-141 texts/sec on a 300-text batch).
+- **`default_model_matches_sentence_transformers_reference` is no longer
+  `#[ignore]`d (issue #3493 P0 part 2).** This is the correctness gate that
+  would have caught the CoreML-default accuracy regression; CI now
+  pre-seeds its fp32 `Qdrant/all-MiniLM-L6-v2-onnx` model alongside the
+  existing quantized-model pre-seed so it runs on every PR without
+  HuggingFace-download flakiness.
+
+---
 ## [0.24.1] — 2026-07-21
 
 Patch release closing unpublished source drift under the already-published
