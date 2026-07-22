@@ -7,6 +7,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **Detached, deduplicated corpus rehydrate — stops the 408 livelock (issue
+  #3683 slice 1).** BM25/chunk rehydration after idle eviction used to run
+  the redb scan AND the map-publish/flag-clear inline inside the caller's
+  own awaited future — including interactive query handlers wrapped in
+  `apply_query_timeout`'s `tokio::time::timeout`. On expiry that whole
+  future was cancelled, discarding completed rehydrate work and leaving the
+  index cold, so the next query paid the full O(corpus) scan again
+  (self-sustaining livelock under repeated timeouts on a large corpus — 27s+
+  observed on a 315K-chunk NFS-backed index). Rehydration now runs as a
+  detached, per-index-deduplicated `tokio::spawn` task (mirroring the
+  #3659 `open_guard` pattern) that commits regardless of how many callers
+  time out waiting for it; `ensure_chunks_loaded` / `ensure_bm25_entities_loaded`
+  are now thin, bounded-wait wrappers around one consolidated scan (also
+  killing a pre-existing double `load_all_chunks()` scan for queries that
+  touch both lanes).
+- **Deterministic BM25 corpus-cap selection across evict/rehydrate cycles
+  (issue #3684).** The rehydrate scan (and warm-boot restore) now sort
+  chunks by their stable id before the cap-truncated BM25 upsert loop, so
+  which subset of an over-cap corpus is lexically searchable no longer
+  shifts with redb's B-tree iteration order between cycles. Cap drops during
+  a rehydrate now log a per-rebuild dropped-count (via
+  `Bm25Index::upsert_document_reporting`) and emit a
+  `trusty_bm25_docs_dropped` gauge, instead of relying on trusty-common's
+  process-wide log-once latch.
+
 ---
 ## [0.38.1] — 2026-07-22
 

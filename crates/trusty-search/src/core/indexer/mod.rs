@@ -169,6 +169,14 @@ pub struct CodeIndexer {
     /// / [`Self::ensure_bm25_entities_loaded`] in `idle_evict.rs`.
     pub(super) bm25_entities_evicted: Arc<AtomicBool>,
 
+    /// Dedup guard for the detached corpus-rehydrate task (issue #3683 slice
+    /// 1). `Some(notify)` while a rehydrate is in flight for this index;
+    /// `None` otherwise. See `idle_evict::ensure_corpus_rehydrated` for the
+    /// full design — this field only needs to exist once per indexer, unlike
+    /// `open_guard`'s path-keyed global registry, because a `CodeIndexer` is
+    /// already one-per-index.
+    pub(super) rehydrate_inflight: Arc<tokio::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+
     /// Issue #1158: `true` when the redb corpus file existed but could NOT be
     /// opened on this boot (e.g. incompatible page format, corruption).
     ///
@@ -285,6 +293,7 @@ impl CodeIndexer {
             last_activity_ms: Arc::new(AtomicU64::new(0)),
             chunks_evicted: Arc::new(AtomicBool::new(false)),
             bm25_entities_evicted: Arc::new(AtomicBool::new(false)),
+            rehydrate_inflight: Arc::new(tokio::sync::Mutex::new(None)),
             corpus_open_failed: false,
             hnsw_load_failed: false,
             skip_kg: false,
@@ -398,44 +407,26 @@ impl CodeIndexer {
     /// Repopulate the in-memory `chunks` map from the durable corpus if it was
     /// previously evicted while idle.
     ///
-    /// Why: the in-memory readers must observe a populated map; after an idle
-    /// eviction the map is empty and `chunks_evicted` is set.
-    /// What: a fast no-op (single relaxed atomic load) when the map was never
-    /// evicted. When evicted, reloads every chunk from `CorpusStore` on a
-    /// blocking worker and refills the map, then clears the flag.
-    /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`.
+    /// Why (issue #3683 slice 1): this used to run the redb scan + map
+    /// publish inline, awaited directly by the caller — including interactive
+    /// query handlers wrapped in `apply_query_timeout`'s
+    /// `tokio::time::timeout`. On a query-deadline cancellation the whole
+    /// awaited future (scan + publish) was dropped mid-flight, discarding
+    /// completed work and leaving the index cold for the next query
+    /// (livelock under repeated timeouts on a large corpus — see
+    /// `idle_evict::ensure_corpus_rehydrated`). It's also the exact same
+    /// `load_all_chunks()` scan `ensure_bm25_entities_loaded` independently
+    /// re-ran, doubling the O(corpus) cost for a query that touches both
+    /// lanes.
+    /// What: thin wrapper delegating to `idle_evict::ensure_corpus_rehydrated`,
+    /// the single consolidated rehydrate path shared with
+    /// `ensure_bm25_entities_loaded` — one detached, deduplicated scan
+    /// populates chunks + BM25 + entities and survives this caller's own
+    /// cancellation.
+    /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`;
+    /// `detached_rehydrate_survives_caller_cancellation` (issue #3683).
     pub(super) async fn ensure_chunks_loaded(&self) {
-        if !self.chunks_evicted.load(Ordering::Relaxed) {
-            return;
-        }
-        let Some(corpus) = self.corpus.clone() else {
-            self.chunks_evicted.store(false, Ordering::Relaxed);
-            return;
-        };
-        let index_id = self.index_id.clone();
-        let loaded = tokio::task::spawn_blocking(move || corpus.load_all_chunks()).await;
-        match loaded {
-            Ok(Ok(chunks)) => {
-                let n = chunks.len();
-                let mut map = self.chunks.write().await;
-                for chunk in chunks {
-                    map.insert(chunk.id.clone(), chunk);
-                }
-                drop(map);
-                self.chunks_evicted.store(false, Ordering::Relaxed);
-                tracing::info!(
-                    "index '{index_id}': rehydrated {n} chunks from redb after idle eviction"
-                );
-            }
-            Ok(Err(e)) => tracing::warn!(
-                "index '{index_id}': failed to rehydrate chunks from redb ({e}); \
-                 will retry on next access"
-            ),
-            Err(e) => tracing::warn!(
-                "index '{index_id}': chunk rehydration task panicked ({e}); \
-                 will retry on next access"
-            ),
-        }
+        self.ensure_corpus_rehydrated().await;
     }
 
     /// Builder-style setter for the per-index domain vocabulary.

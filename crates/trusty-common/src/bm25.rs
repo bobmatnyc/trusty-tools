@@ -292,23 +292,51 @@ impl BM25Index {
     /// `TRUSTY_BM25_CORPUS_CAP` (default 50 000) **and** this is a brand-new
     /// `doc_id`, the upsert is dropped. Updates to existing documents are
     /// always honoured — they don't grow the corpus. A single tracing warn
-    /// is emitted the first time the cap is hit; subsequent drops are
-    /// silent to avoid log spam during full reindexes of oversized corpora.
+    /// is emitted the first time the cap is hit (per process); subsequent
+    /// drops are silent to avoid log spam during full reindexes of oversized
+    /// corpora. A bulk caller that wants a per-rebuild dropped-count instead
+    /// of this one-time latch (e.g. a rehydrate rebuild — issue #3684) should
+    /// use [`Self::upsert_document_reporting`] directly and own its own
+    /// logging.
     pub fn upsert_document(&mut self, doc_id: &str, text: &str) {
+        if !self.upsert_document_reporting(doc_id, text)
+            && !BM25_CAP_LOGGED.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                cap = bm25_corpus_cap(),
+                live_docs = self.live_docs,
+                "BM25 corpus cap reached — dropping further new documents \
+                 (override with TRUSTY_BM25_CORPUS_CAP)"
+            );
+        }
+    }
+
+    /// Insert-or-update `doc_id`, reporting whether it was accepted rather
+    /// than logging a process-wide latch (issue #3684).
+    ///
+    /// Why: [`Self::upsert_document`]'s cap enforcement logs via a
+    /// process-wide "log once ever" latch, which is right for the steady
+    /// incremental-ingest path (one call per changed chunk, spread over the
+    /// process lifetime) but wrong for a bulk rebuild — idle-evict rehydrate
+    /// (`trusty-search::core::indexer::idle_evict`) or warm-boot restore
+    /// (`trusty-search::core::indexer::persist::load_chunks_from_redb`) — which
+    /// re-runs the entire cap-truncation decision on every rebuild and wants
+    /// a fresh per-rebuild dropped-count, not a single one-time warning that
+    /// went stale after the first rebuild.
+    /// What: identical cap/tokenize/insert logic to `upsert_document`, minus
+    /// the static latch/log — returns `true` when the document was inserted
+    /// or updated, `false` when a brand-new `doc_id` was dropped because
+    /// `live_docs >= TRUSTY_BM25_CORPUS_CAP`. The caller owns counting drops
+    /// and logging a summary.
+    /// Test: `upsert_document_reporting_returns_false_when_capped`,
+    /// `upsert_document_delegates_to_reporting_and_still_logs_once`.
+    pub fn upsert_document_reporting(&mut self, doc_id: &str, text: &str) -> bool {
         if self.id_to_slot.contains_key(doc_id) {
             self.remove_document(doc_id);
         } else {
             let cap = bm25_corpus_cap();
             if self.live_docs >= cap {
-                if !BM25_CAP_LOGGED.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        cap,
-                        live_docs = self.live_docs,
-                        "BM25 corpus cap reached — dropping further new documents \
-                         (override with TRUSTY_BM25_CORPUS_CAP)"
-                    );
-                }
-                return;
+                return false;
             }
         }
         let slot = self.allocate_slot(doc_id);
@@ -334,6 +362,7 @@ impl BM25Index {
                 .push((slot, count));
         }
         self.doc_terms[slot] = Some(tokens);
+        true
     }
 
     /// Legacy slot-based add. Retained so the in-tree `score(query, doc_id)`
@@ -535,7 +564,17 @@ impl Default for BM25Index {
 mod tests {
     use super::*;
 
+    // Why `#[serial_test::serial]` on this and the other BM25Index-building
+    // tests below (issue #3684 follow-up): `TRUSTY_BM25_CORPUS_CAP` is
+    // process-wide env state. `bm25_corpus_cap_env_override` and the two
+    // `upsert_document_reporting_*` tests below deliberately set it to tiny
+    // values (0/123/1/2); without serializing against every OTHER test that
+    // builds a `BM25Index` and assumes the ~50k default cap, cargo's default
+    // multi-threaded test runner can interleave them and truncate an
+    // unrelated test's corpus mid-run — an env-mutation race (same class as
+    // #3629).
     #[test]
+    #[serial_test::serial]
     fn bm25_scores_relevant_doc_higher() {
         let mut idx = BM25Index::new();
         idx.add_document(0, "authentication login password secure");
@@ -597,6 +636,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn bm25_incremental_upsert_and_remove() {
         let mut idx = BM25Index::new();
         idx.upsert_document("a", "authentication login password");
@@ -618,6 +658,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn bm25_upsert_replaces_existing_doc() {
         // Re-upserting an existing doc_id must not double-count terms.
         let mut idx = BM25Index::new();
@@ -630,6 +671,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn score_query_all_returns_sorted_unique_results() {
         let mut idx = BM25Index::new();
         idx.upsert_document("a", "search rust async tokio");
@@ -654,6 +696,7 @@ mod tests {
     /// the filter — and has real lexical overlap with the query — is never
     /// lost just because it ranks outside the UNFILTERED top `top_k`.
     #[test]
+    #[serial_test::serial]
     fn score_query_all_with_filter_recovers_match_beyond_top_k() {
         let mut idx = BM25Index::new();
         // 5 filler docs with higher term frequency (all outrank the target).
@@ -697,6 +740,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn bm25_corpus_cap_env_override() {
         // Why: confirm `TRUSTY_BM25_CORPUS_CAP=0` falls back to the default
         // (not "no cap"), and a positive override is honoured. This pins the
@@ -720,6 +764,74 @@ mod tests {
             std::env::set_var("TRUSTY_BM25_CORPUS_CAP", "123");
         }
         assert_eq!(bm25_corpus_cap(), 123, "positive value must be honoured");
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", v) },
+            None => unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") },
+        }
+    }
+
+    /// Why (issue #3684): a bulk rebuild caller (idle-evict rehydrate, warm
+    /// boot) needs a per-call signal for "was this doc_id dropped by the
+    /// cap", not the process-wide `BM25_CAP_LOGGED` latch `upsert_document`
+    /// uses — so it can count drops for ITS OWN rebuild and log/emit a
+    /// metric with an accurate count, instead of a stale one-time warning.
+    /// What: caps at 2, inserts 2 new ids (both accepted), then a 3rd new id
+    /// must be reported `false` (dropped) while an UPDATE to an existing id
+    /// is still always accepted regardless of the cap.
+    /// Test: this test.
+    #[test]
+    #[serial_test::serial]
+    fn upsert_document_reporting_returns_false_when_capped() {
+        let prev = std::env::var("TRUSTY_BM25_CORPUS_CAP").ok();
+        unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", "2") };
+
+        let mut idx = BM25Index::new();
+        assert!(idx.upsert_document_reporting("a", "alpha one"));
+        assert!(idx.upsert_document_reporting("b", "beta two"));
+        assert!(
+            !idx.upsert_document_reporting("c", "gamma three"),
+            "a brand-new doc_id past the cap must be reported as dropped"
+        );
+        assert_eq!(idx.len(), 2, "the dropped doc must not grow the corpus");
+
+        // An update to an existing doc_id is always honoured, cap or not.
+        assert!(
+            idx.upsert_document_reporting("a", "alpha one updated"),
+            "updates to an existing doc_id must never be dropped by the cap"
+        );
+        assert_eq!(idx.len(), 2);
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", v) },
+            None => unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") },
+        }
+    }
+
+    /// Why: `upsert_document` must keep its existing external behaviour
+    /// (log-once-per-process, corpus growth capped) after being refactored
+    /// to delegate to `upsert_document_reporting` — this pins that the
+    /// refactor is behavior-preserving for the pre-existing incremental-ingest
+    /// call sites.
+    /// What: caps at 1, inserts one doc (accepted), then upserts a second new
+    /// doc_id (dropped, corpus size unchanged).
+    /// Test: this test.
+    #[test]
+    #[serial_test::serial]
+    fn upsert_document_delegates_to_reporting_and_still_logs_once() {
+        let prev = std::env::var("TRUSTY_BM25_CORPUS_CAP").ok();
+        unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", "1") };
+
+        let mut idx = BM25Index::new();
+        idx.upsert_document("only", "the one doc that fits");
+        assert_eq!(idx.len(), 1);
+
+        idx.upsert_document("dropped", "this one does not fit");
+        assert_eq!(
+            idx.len(),
+            1,
+            "a brand-new doc past the cap must still be silently dropped via upsert_document"
+        );
+
         match prev {
             Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", v) },
             None => unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") },

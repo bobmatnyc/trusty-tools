@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`Bm25Index::upsert_document_reporting`** (issue #3684, trusty-search
+  #3683 slice 1): identical cap/tokenize/insert semantics to
+  `upsert_document`, but returns whether the document was accepted or
+  dropped by the corpus cap instead of relying on a process-wide log-once
+  latch — for bulk rebuild callers (idle-evict rehydrate, warm boot) that
+  want a fresh per-rebuild dropped-count. `upsert_document` itself is
+  unchanged behaviorally; it now delegates to this method internally.
+
 ---
 ## [0.24.2] — 2026-07-22
 
