@@ -157,6 +157,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Migrated specialists no longer lose their entire tool surface (#3466,
+  follow-up to #3458):** taking 12 agents off `runner = "claude-code"` also
+  took away the `claude` CLI's built-in Read/Write/Edit/Bash tools, and
+  `build_registry_for_agent` had no `match` arm for `engineer`,
+  `postmortem-agent`, or `ticketing-agent` — all three silently fell through
+  to the catch-all branch and resolved a three-tool registry (`load_skill`,
+  `list_skills`, `advance_workflow_phase`). `engineer` is the `code` phase of
+  `prescriptive.json` (`produces_files = true`), so combined with its newly
+  enabled `use_finish_task` it reported success on turn 0 having written
+  nothing. Each now has a dedicated arm registering the file tools its prompt
+  and `[tools] allowed` actually name. `python-engineer` deliberately keeps
+  the skills-only registry — its prompt mandates prose `## File: <path>`
+  sections that `ipc::parse_file_sections` extracts after the turn — and that
+  choice is now pinned by a test rather than left implicit.
+- **`[tools] ast_native = true` is no longer a silent no-op on the subprocess
+  runner (#3466):** the AST bundle (`get_symbol` / `edit_symbol` /
+  `insert_symbol` / `add_import` / `validate_syntax` / `apply_patch`) was only
+  registered by `InProcessAgentRunner`. Agents declaring the flag were all on
+  the claude-code runner, which masked the gap until #3458 moved them to
+  `SubprocessAgentRunner`. `subagent_mode.rs` now honors the flag (and the
+  `--ast-native` process override) on that path too, matching the in-process
+  runner exactly.
+- **`ticketing-agent`'s 12 native ticketing tools are now registered on the
+  subagent path (#3466):** `ticketing_tools()` was wired into `pm_mode.rs`
+  only, so the agent's whole declared `[tools] allowed` list resolved to
+  nothing once it left the claude-code runner. Registration is gated on the
+  agent's own `[tools] scopes = ["ticketing.*"]` declaration rather than its
+  name, so no other agent inherits ticket-mutation tools.
+- **QA phase no longer reports a false failure on every run (#3466):**
+  `is_allowed_pytest` was a strict prefix match, but both the `qa-agent`
+  prompt (STEP 1) and `prescriptive.json`'s QA template mandate
+  `cd <project_dir> && <test_command> 2>&1`, and their Python branch mandates
+  `PYTHONPATH=src:. python3 -m pytest -v` — neither matched any prefix, so
+  `pytest_exec` refused, and the prompt maps a refusal onto `status: "fail"`.
+  The command is now normalized before the check (at most one leading
+  `cd <path> &&` whose target contains no shell metacharacters, plus leading
+  `VAR=value` assignments drawn from a fixed allowlist of inert variable
+  names) so the string actually vetted is still a bare test-runner
+  invocation. The allowlist itself is unchanged: `cd /tmp && rm -rf /` and
+  `LD_PRELOAD=/tmp/evil.so cargo test` remain refused.
+- **`qa-agent` can perform its own STEP 0 stack detection (#3466):**
+  `read_file` and `list_dir` added to both its registry arm and its `[tools]
+  allowed` list. Its prompt tells it to inspect the project directory for
+  `Cargo.toml` / `package.json` / `go.mod` / `pyproject.toml` before choosing
+  a runner and explicitly forbids guessing, which was impossible with no
+  filesystem tools.
+- **The OAuth-only credential break is now documented (#3466):**
+  `pick_credentials` returns `LlmCredentials::ClaudeCode` only when the
+  `claude-code` credential resolves AND `runner == ClaudeCode`. After #3358
+  and #3458 that is false for every agent except `claude-code-engineer`, so a
+  machine whose only credential is `CLAUDE_CODE_OAUTH_TOKEN` — which
+  `crates/trusty-agents/CLAUDE.md` calls the primary local-dev credential —
+  loses the entire specialist roster. It already failed loudly; the
+  Environment Variables section now explains why and names the fix
+  (`ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`).
 - **Flaky `HOME`-race unit tests in `skills::sources::tests` fixed (#3607):**
   `remote_git_without_subdir_uses_cache_dir_directly` and its siblings
   `remote_git_cache_path_computed_correctly` /

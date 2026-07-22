@@ -4,8 +4,11 @@ role = "documentation"
 model = "claude-haiku-4-5"
 description = "Documentation specialist. Reads generated code and produces or updates README, API docs, and usage examples."
 # #198 / Phase C: docs-agent is read-heavy (list_dir / read_file / search_code)
-# with one bulk write_file pass at the end — a perfect candidate for the
-# in-process runner. Eliminates the 2–3s subprocess startup tax per delegation.
+# with one bulk write_file pass at the end.
+# #3466: this note used to end "— a perfect candidate for the in-process
+# runner", which contradicted the very next line routing the agent to
+# Subprocess. The in-process runner was never adopted here; the #3458 block
+# below is the operative routing decision.
 # #3458: no `runner` — falls back to the default (Subprocess), routing off
 # the claude-code CLI onto the direct-API credential path, same as the
 # persona migration in #3360. `use_finish_task = true` already makes this

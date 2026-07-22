@@ -187,7 +187,20 @@ no second tool call beyond the recovery cases above.
 """
 
 [tools]
-allowed = ["pytest_exec", "load_skill", "list_skills", "advance_workflow_phase"]
+# #3466: `read_file` + `list_dir` added — STEP 0 above tells this agent to
+# inspect the project directory for Cargo.toml / package.json / go.mod /
+# pyproject.toml before picking a runner, and explicitly forbids guessing.
+# Under `runner = "claude-code"` the CLI supplied Read/LS natively; after the
+# #3458 migration the tool registry is the only source, so without these the
+# stack-detection step was impossible.
+allowed = [
+    "pytest_exec",
+    "read_file",
+    "list_dir",
+    "load_skill",
+    "list_skills",
+    "advance_workflow_phase",
+]
 
 [agent.capabilities]
 roles = ["qa"]

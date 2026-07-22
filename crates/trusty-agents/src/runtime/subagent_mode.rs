@@ -354,6 +354,80 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         reg.register(Arc::new(tools::finish_task::FinishTaskTool::new()));
     }
 
+    // #3466: register the AST-native tool bundle when the agent asks for it.
+    //
+    // Why: `[tools] ast_native = true` (engineer.toml, #347) was only ever
+    // honored by `InProcessAgentRunner::build_safe_registry`. Agents on the
+    // subprocess path used to be on `runner = "claude-code"`, where the
+    // `claude` CLI supplied its own Edit/Write surface, so the omission was
+    // invisible. #3458 moved them here, at which point the flag became a
+    // silent no-op. Mirrors `in_process_runner.rs` exactly — same flag, same
+    // `--ast-native` process override (#348) — so the two runner paths agree
+    // on what `ast_native` means.
+    // What: appends get_symbol / edit_symbol / insert_symbol / add_import /
+    // validate_syntax / apply_patch to whatever the name-keyed registry built.
+    // Test: `engineer_registry_includes_ast_bundle_when_declared`.
+    if cfg.tools.effective_ast_native() || crate::ast::is_ast_native_overridden() {
+        let reg = registry.get_or_insert_with(ToolRegistry::new);
+        for t in tools::ast_tools::ast_native_tools() {
+            reg.register(t);
+        }
+        tracing::debug!(agent = %name, "registered AST-native tool bundle");
+    }
+
+    // #3466: register the native ticketing bundle for agents that declare the
+    // `ticketing.*` scope (currently `ticketing-agent`, whose `[tools]
+    // allowed` names all 12 tools).
+    //
+    // Why: `ticketing_tools()` was wired into `pm_mode.rs` only, so the
+    // ticketing-agent's entire declared tool surface resolved to nothing once
+    // #3458 took it off the claude-code runner. Gated on the agent's own
+    // declared scope rather than its name so the coupling is config-driven and
+    // no other agent silently inherits ticket-mutation tools.
+    // What: same construction as `pm_mode.rs` — GitHub identity from
+    // `~/.trusty-agents/config.toml`; absent/failed config is a non-fatal warn,
+    // matching the PM's behavior.
+    // Test: `ticketing_agent_declares_the_scope_that_gates_its_tools`.
+    if cfg
+        .tools
+        .scopes
+        .as_ref()
+        .is_some_and(|s| s.iter().any(|scope| scope == "ticketing.*"))
+    {
+        let global = mcp::config::GlobalConfig::load().await;
+        if let Some(identity) = global.github_identity(None)
+            && let Some(tk_cfg) = identity.to_ticketing_config()
+        {
+            match tk_cfg.build_client().await {
+                Ok(client_box) => {
+                    let client: Arc<dyn ticketing::TicketingClient> = Arc::from(client_box);
+                    let actions = ticketing::actions::build_actions_client(
+                        identity.token().as_deref(),
+                        identity.repo().as_deref(),
+                    )
+                    .await;
+                    let reg = registry.get_or_insert_with(ToolRegistry::new);
+                    for tool in tools::native_ticketing::ticketing_tools(client, actions) {
+                        reg.register(tool);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %name,
+                        error = %e,
+                        "ticketing client build failed; agent running without ticketing tools"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                agent = %name,
+                "agent declares scope ticketing.* but no [github] identity is configured; \
+                 running without ticketing tools"
+            );
+        }
+    }
+
     // #3238: live-discover MCP servers (`[[mcp.services]] discover = true`
     // and `.mcp.json`) and register whatever tools they advertise, using the
     // same `tools::mcp_live::live_mcp_tool_executors` construction helper

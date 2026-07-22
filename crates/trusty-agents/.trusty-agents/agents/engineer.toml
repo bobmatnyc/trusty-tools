@@ -96,7 +96,15 @@ Examples:
 # #347: AST-native tool bundle — surgical, syntax-validated edits in place
 # of whole-file write_file rewrites. The bundle adds get_symbol /
 # edit_symbol / insert_symbol / add_import / validate_syntax / apply_patch.
-# Only the in-process runner registers these; the claude-code subprocess
-# runner exposes its own native edit tools.
+#
+# #3466: the previous note here ("Only the in-process runner registers these;
+# the claude-code subprocess runner exposes its own native edit tools") is no
+# longer true and was actively misleading after #3458 took this agent off
+# `runner = "claude-code"`. There is no claude CLI supplying edit tools any
+# more, and this flag was a silent no-op on the subprocess path until #3466
+# wired the bundle into `subagent_mode.rs` alongside the name-keyed registry.
+# The agent's base file tools (read_file / write_file / list_dir /
+# grep_files) now come from the `"engineer"` arm of
+# `build_registry_for_agent`; this flag layers the AST bundle on top.
 [tools]
 ast_native = true

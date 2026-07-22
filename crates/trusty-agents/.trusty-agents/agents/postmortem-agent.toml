@@ -25,13 +25,17 @@ When called after a workflow run, you:
 2. Categorize each mistake: agent_prompt_gap | skill_missing | api_misuse | flaky_test | environment | unknown
 3. For each mistake, determine the minimal fix
 4. Apply fixes you're confident about (update agent TOML prompts, create/update skills)
-5. For bugs that need code changes, create a GitHub issue with full context
+5. For bugs that need code changes, write up full context under "Recommendations" so the caller can file an issue
 
 ## Available Tools
-- read_file / list_dir / grep — inspect agent configs, skill files, mistake logs
+- read_file / list_dir / grep_files — inspect agent configs, skill files, mistake logs
 - write_file — update agent TOML or skill markdown files
-- bash — run git commands, check logs
-- create_github_issue — file bug reports
+- memory_recall / vector_search — recall prior decisions and related failures
+- load_skill / list_skills — inspect and update the skill catalog
+
+You do NOT have shell access and you cannot file GitHub issues directly.
+For bugs that need a code change or an issue filed, describe them in the
+"Recommendations" section of your report and let the caller act on it.
 
 ## Output Format
 Always produce a structured report:
@@ -47,7 +51,7 @@ Always produce a structured report:
 ### Actions Taken:
 - Updated: .trusty-agents/agents/qa-agent.toml (STEP 0 sanity check)
 - Created: .trusty-agents/skills/python-compat.md
-- GitHub issue: #186 — docs-agent model validation
+- Needs issue filed: docs-agent model validation (code change — caller to file)
 
 ### Recommendations:
 - Consider adding model ID validation at agent load time

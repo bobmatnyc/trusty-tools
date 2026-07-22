@@ -197,6 +197,24 @@ Credential priority (highest → lowest, applied per-agent at dispatch time — 
    deliberate holdout is `claude-code-engineer`, whose entire purpose is
    exercising the `claude` CLI/OAuth path; it keeps `runner = "claude-code"`
    permanently.
+
+   > **⚠️ Breaking change for OAuth-only environments (#3458 / #3466).**
+   > `pick_credentials` (`src/llm/credentials.rs`) returns
+   > `LlmCredentials::ClaudeCode` only when the `claude-code` credential
+   > resolves **AND** `runner == ClaudeCode`. Both #3358 and #3458 removed
+   > that runner from every agent except `claude-code-engineer`, so the
+   > `claude_code && runner_is_claude_code` branch is now false for all of
+   > them. **A machine whose only configured credential is
+   > `CLAUDE_CODE_OAUTH_TOKEN` — the "primary local-dev credential" named
+   > above — can no longer run any agent except `claude-code-engineer`.**
+   > It fails loudly (`missing_credentials_error()`, listing all three
+   > options) rather than silently degrading, but the failure is otherwise
+   > unexplained, hence this note.
+   >
+   > To keep the full roster working locally, configure `ANTHROPIC_API_KEY`
+   > (a console.anthropic.com key — the OAuth token is rejected with 401 on
+   > `api.anthropic.com`) or `OPENROUTER_API_KEY`, via env var, `.env.local`,
+   > or `tagent config keys set <provider>`.
 2. **`ANTHROPIC_API_KEY`** — when set AND the agent TOML has
    `[llm] use_anthropic_direct = true`, the harness POSTs directly to
    `api.anthropic.com` with `x-api-key`. Lower latency than OpenRouter; requires

@@ -329,6 +329,117 @@ pub(super) fn build_registry_for_agent(
             register_skill_tools(&mut reg);
             register_timer_tools(&mut reg);
             reg.register(Arc::new(ShellExecTool::new()));
+            // #3466: STEP 0 of the qa-agent prompt ("Detect the project
+            // stack") tells the agent to inspect the project directory for
+            // Cargo.toml / package.json / go.mod / pyproject.toml before it
+            // picks a test runner. That is impossible without read-only
+            // filesystem tools — the agent could only guess, and its prompt
+            // explicitly forbids guessing ("If you genuinely cannot determine
+            // the stack, return a fail-status JSON"). Under the claude-code
+            // runner the `claude` CLI supplied Read/LS natively; after the
+            // #3458 migration this registry is the only source.
+            reg.register(Arc::new(ReadFileTool::new()));
+            reg.register(Arc::new(ListDirTool::new()));
+            if let Some(dir) = out_dir {
+                reg.register(Arc::new(PhaseAuditTool::new(dir.to_path_buf())));
+            }
+            Some(reg)
+        }
+        "engineer" => {
+            // #3466: Before #3458 this agent ran on `runner = "claude-code"`,
+            // so the `claude` CLI supplied its own Read/Write/Edit/Bash tool
+            // surface and `build_registry_for_agent` never needed an arm.
+            // Migrating it to the native subprocess path silently dropped it
+            // into the catch-all branch below (`load_skill` + `list_skills`
+            // only) — yet `prescriptive.json`'s `code` phase routes to
+            // `agent: engineer` with `produces_files = true`. Combined with
+            // `use_finish_task = true` that turns "agent cannot work" into
+            // "agent reports success having written nothing".
+            //
+            // Mirrors the `code-agent` arm above: read-only exploration plus
+            // `write_file` rooted at `code_root`. The AST-native bundle
+            // (`[tools] ast_native = true` in engineer.toml) is registered by
+            // the async caller in `subagent_mode.rs`, which is the only place
+            // with access to the parsed `AgentConfig`.
+            let mut reg = ToolRegistry::new();
+            register_skill_tools(&mut reg);
+            register_memory_tools(&mut reg);
+            register_timer_tools(&mut reg);
+            reg.register(Arc::new(ReadFileTool::new()));
+            reg.register(Arc::new(ListDirTool::new()));
+            reg.register(Arc::new(GrepFilesTool::new()));
+            if let Some(dir) = code_root {
+                // #88: honor the per-file wave-loop restriction the same way
+                // `code-agent` does, so an engineer invoked inside a wave can
+                // only touch its assigned path.
+                let mut write_tool = WriteFileTool::new(dir.to_path_buf());
+                if let Some(assigned) =
+                    crate::env_compat::env_var_os("TAGENT_ASSIGNED_FILE", "OPEN_MPM_ASSIGNED_FILE")
+                {
+                    write_tool = write_tool.with_allowed_path(PathBuf::from(assigned));
+                }
+                reg.register(Arc::new(write_tool));
+            } else {
+                let fallback = std::env::current_dir().unwrap_or_default();
+                reg.register(Arc::new(WriteFileTool::new(fallback)));
+            }
+            if let Some(dir) = out_dir {
+                reg.register(Arc::new(PhaseAuditTool::new(dir.to_path_buf())));
+            }
+            Some(reg)
+        }
+        "postmortem-agent" => {
+            // #3466: same claude-code-runner regression as `engineer`. This
+            // agent's own prompt has an "## Available Tools" section naming
+            // `read_file / list_dir / grep` and `write_file` ("update agent
+            // TOML or skill markdown files") — its entire job is reading
+            // mistake logs and applying fixes to agent/skill files. Under the
+            // catch-all it had neither.
+            //
+            // Deliberately NOT registered: the prompt also mentions `bash` and
+            // `create_github_issue`. Neither exists as a native tool (the
+            // former was the claude CLI's Bash; the latter never existed at
+            // all), so the prompt has been corrected rather than the shell
+            // surface widened for an analysis-role agent.
+            let mut reg = ToolRegistry::new();
+            register_skill_tools(&mut reg);
+            register_memory_tools(&mut reg);
+            reg.register(Arc::new(ReadFileTool::new()));
+            reg.register(Arc::new(ListDirTool::new()));
+            reg.register(Arc::new(GrepFilesTool::new()));
+            if let Some(dir) = out_dir {
+                reg.register(Arc::new(WriteFileTool::new(dir.to_path_buf())));
+                reg.register(Arc::new(PhaseAuditTool::new(dir.to_path_buf())));
+            } else {
+                // Postmortem edits live agent/skill files under the project's
+                // `.trusty-agents/` tree, so CWD is the correct root when no
+                // workflow out_dir is supplied.
+                let fallback = std::env::current_dir().unwrap_or_default();
+                reg.register(Arc::new(WriteFileTool::new(fallback)));
+            }
+            Some(reg)
+        }
+        "ticketing-agent" => {
+            // #3466: this agent declares 12 ticketing tools in `[tools]
+            // allowed`, but `ticketing_tools()` was only ever registered in
+            // `pm_mode.rs` — never here. Building those tools needs an async
+            // GitHub client (`GlobalConfig::load().await` →
+            // `to_ticketing_config()` → `build_client().await`) and this
+            // function is synchronous and called directly by ~15 `#[test]`s,
+            // so the ticketing bundle is registered by the async caller in
+            // `subagent_mode.rs` — the same reason the MCP-live discovery
+            // step lives there rather than being folded in here.
+            //
+            // What this arm contributes is the read-only context the agent
+            // needs to write a useful ticket body, plus skills. `finish_task`
+            // is auto-registered by the caller (`use_finish_task = true`).
+            let mut reg = ToolRegistry::new();
+            register_skill_tools(&mut reg);
+            register_memory_tools(&mut reg);
+            register_timer_tools(&mut reg);
+            reg.register(Arc::new(ReadFileTool::new()));
+            reg.register(Arc::new(ListDirTool::new()));
+            reg.register(Arc::new(GrepFilesTool::new()));
             if let Some(dir) = out_dir {
                 reg.register(Arc::new(PhaseAuditTool::new(dir.to_path_buf())));
             }
@@ -380,6 +491,20 @@ pub(super) fn build_registry_for_agent(
             // exposes `list_skills` and `load_skill`, plus the phase-audit
             // tool when a workflow out_dir is available. Per-agent allowlists
             // still govern whether any of these can actually be called.
+            //
+            // ⚠️ #3466: this branch is a SILENT DEGRADATION, not a safe
+            // default. Before #3458 most agents ran on `runner =
+            // "claude-code"`, where the `claude` CLI supplied Read/Write/
+            // Edit/Bash regardless of what this function returned, so landing
+            // here was harmless. That is no longer true: for any agent on the
+            // native path this function is the ONLY source of tools, and
+            // falling through here yields an agent that can neither read nor
+            // write a file — while still happily calling `finish_task` and
+            // reporting success. Four agents (`engineer`, `postmortem-agent`,
+            // `ticketing-agent`, and nearly `qa-agent`) hit exactly that.
+            // If you migrate an agent off the claude-code runner, add an arm
+            // above AND a row in
+            // `migrated_agents_resolve_their_declared_tool_surface`.
             let mut reg = ToolRegistry::new();
             register_skill_tools(&mut reg);
             if let Some(dir) = out_dir {

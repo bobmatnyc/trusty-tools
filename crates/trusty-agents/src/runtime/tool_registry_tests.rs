@@ -146,6 +146,13 @@ fn all_known_agents_get_skill_tools() {
         "qa-agent",
         "local-ops-agent",
         "docs-agent",
+        // #3466: these four were migrated off the claude-code runner by
+        // #3458 but were missing from this list, so nothing noticed that
+        // they had silently dropped to the catch-all branch.
+        "engineer",
+        "python-engineer",
+        "postmortem-agent",
+        "ticketing-agent",
         // Unknown agent name: default branch also registers skill tools.
         "unknown-agent",
     ] {
@@ -585,5 +592,148 @@ fn deployed_assistant_config_survives_scoping_with_delegate_to_agent() {
         kept.iter().any(|n| n == "delegate_to_agent"),
         "delegate_to_agent must survive the refresh -> deployed-config -> \
          registry-scoping chain, got: {kept:?}"
+    );
+}
+
+// --- #3466 follow-up: TOOL SURFACE regression guard -----------------------
+//
+// Why: PR #3466 migrated 12 specialists off `runner = "claude-code"` onto the
+// native `SubprocessAgentRunner` path. Under the claude-code runner the
+// `claude` CLI supplied its own Read/Write/Edit/Bash surface, so
+// `build_registry_for_agent` never had to. After the migration the ONLY tool
+// surface an agent has is what that function registers — and four migrated
+// agents (`engineer`, `python-engineer`, `postmortem-agent`,
+// `ticketing-agent`) had no `match` arm, silently dropping to the catch-all
+// (`load_skill` + `list_skills` only). The PR's own tests passed because they
+// asserted CONFIG SHAPE (`runner != ClaudeCode`, `strict_tool_discipline()`)
+// and never the resolved registry, so 11 green CI checks sat on top of an
+// `engineer` that could not write a file.
+//
+// What: a table of (agent, role, must-have tools, must-NOT-have tools) driven
+// straight off each agent's prompt contract and `[tools] allowed` list. New
+// migrations must add a row here; a future edit that removes a `match` arm
+// fails loudly instead of degrading to a three-tool agent.
+//
+// Test: this function IS the test surface.
+#[test]
+fn migrated_agents_resolve_their_declared_tool_surface() {
+    // (agent name, agent role, tools that MUST be present, tools that MUST NOT be)
+    let cases: &[(&str, &str, &[&str], &[&str])] = &[
+        // #3466 CRITICAL: `engineer` is the `code` phase of prescriptive.json
+        // (`produces_files = true`) — without write_file it reports success
+        // having written nothing.
+        (
+            "engineer",
+            "engineer",
+            &["read_file", "write_file", "list_dir", "grep_files"],
+            &[],
+        ),
+        // #3466 CRITICAL: postmortem-agent's own prompt names
+        // "read_file / list_dir / grep" and "write_file" under "Available Tools".
+        (
+            "postmortem-agent",
+            "analysis",
+            &["read_file", "write_file", "list_dir", "grep_files"],
+            &[],
+        ),
+        // #3466: `python-engineer` is DELIBERATELY tool-light. Its prompt
+        // mandates returning every file as a prose `## File: <path>` +
+        // code-fence section, which `ipc::parse_file_sections` extracts to
+        // disk after the turn. Handing it write_file would invite it to call
+        // a tool instead of honoring that contract, so the catch-all
+        // (skills-only) registry is CORRECT here — pinned so nobody "fixes"
+        // it by adding file tools without also rewriting the prompt.
+        (
+            "python-engineer",
+            "engineer",
+            &["load_skill", "list_skills"],
+            &["write_file"],
+        ),
+        // #3466: qa-agent's STEP 0 tells it to inspect the project directory
+        // for Cargo.toml / package.json / go.mod before choosing a runner —
+        // impossible without read_file + list_dir.
+        (
+            "qa-agent",
+            "qa",
+            &["pytest_exec", "read_file", "list_dir"],
+            &[],
+        ),
+        // Pre-existing arms, pinned so the table is the single source of truth.
+        ("code-agent", "engineer", &["read_file", "write_file"], &[]),
+        (
+            "docs-agent",
+            "documentation",
+            &["read_file", "write_file"],
+            &[],
+        ),
+        (
+            "research-agent",
+            "researcher",
+            &["read_file", "grep_files", "web_search"],
+            &[],
+        ),
+    ];
+
+    for (name, role, required, forbidden) in cases {
+        let reg = build_registry_for_agent(
+            name,
+            role,
+            None,
+            None,
+            empty_skill_registry(),
+            empty_tag_registry(),
+        )
+        .unwrap_or_else(|| panic!("{name}: must build a registry"));
+
+        for tool in *required {
+            assert!(
+                reg.contains(tool),
+                "{name}: `{tool}` missing from the resolved tool surface. \
+                 Since #3466 moved this agent off the claude-code runner, \
+                 `build_registry_for_agent` is the ONLY source of its tools."
+            );
+        }
+        for tool in *forbidden {
+            assert!(
+                !reg.contains(tool),
+                "{name}: `{tool}` must NOT be registered — see the table comment"
+            );
+        }
+    }
+}
+
+/// #3466: `ticketing-agent` declares 12 ticketing tools in `[tools] allowed`,
+/// but they were only ever registered in `pm_mode.rs` — never in
+/// `build_registry_for_agent`. Registering them needs an async GitHub client,
+/// so it happens at the async `subagent_mode.rs` call site (same pattern the
+/// MCP-live and finish_task steps already use). What this test can pin
+/// synchronously is that the agent is no longer silently indistinguishable
+/// from an unknown-name agent: it must at minimum resolve a registry and
+/// declare the ticketing scope that gates the async registration step.
+/// Test: this function IS the test surface.
+#[test]
+fn ticketing_agent_declares_the_scope_that_gates_its_tools() {
+    let reg = build_registry_for_agent(
+        "ticketing-agent",
+        "ticketing",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+    )
+    .expect("ticketing-agent must build a registry");
+    assert!(
+        reg.contains("load_skill"),
+        "ticketing-agent: load_skill missing"
+    );
+
+    let cfg = crate::agents::AgentConfig::by_name("ticketing-agent")
+        .expect("bundled ticketing-agent must load");
+    let scopes = cfg.tools.scopes.clone().unwrap_or_default();
+    assert!(
+        scopes.iter().any(|s| s == "ticketing.*"),
+        "ticketing-agent must declare [tools] scopes = [\"ticketing.*\"] — \
+         that declaration is what gates native ticketing-tool registration \
+         on the subagent path (#3466). Got: {scopes:?}"
     );
 }
