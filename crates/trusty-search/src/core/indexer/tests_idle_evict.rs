@@ -615,3 +615,60 @@ async fn memory_pressure_reclaim_now_is_noop_without_corpus() {
         "BM25 must be untouched when there is no corpus to rehydrate from"
     );
 }
+
+/// Idle eviction must not just empty the in-memory `chunks` map's entries but
+/// actually release its backing table allocation — proving the eviction path
+/// genuinely frees memory rather than merely `clear()`-ing while retaining a
+/// large reserved buffer for reuse (issue #3657).
+///
+/// Why: the production incident (RSS climbing 20.3 → 26.4 GiB while the
+/// daemon repeatedly logged `evicted N in-memory chunks after 60s idle`)
+/// raised two hypotheses: (a) a lingering secondary holder keeps the freed
+/// chunks' data alive (a true Rust-level leak), or (b) the allocations are
+/// genuinely dropped but the OS allocator never returns the pages. `RawChunk`
+/// (`core::chunker::types::RawChunk`) owns every field directly (`String`s
+/// and `Vec`s, never `Arc`), so no secondary holder exists — ruling out (a)
+/// at the Rust level. This test pins that half of the story deterministically:
+/// `clear_in_memory_chunks` must call `HashMap::shrink_to_fit()` (not just
+/// `clear()`), so the table's own backing allocation drops to zero capacity
+/// — i.e. the eviction path holds up its end before any OS-level allocator
+/// behaviour (hypothesis (b), fixed by `core::memguard::trim_heap()` and
+/// covered by `memguard::tests::test_trim_heap_does_not_panic`) even enters
+/// the picture.
+/// What: index 64 files (well past any small-map inline capacity), assert
+/// the `chunks` map has nonzero reserved capacity, force an eviction, then
+/// assert capacity has dropped to exactly 0 — a deterministic, timing-free
+/// check (no RSS sampling, no allocator introspection needed here).
+/// Test: this test.
+#[tokio::test]
+async fn idle_eviction_releases_chunk_map_backing_allocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+    let idx = make_indexer_with_corpus(&redb_path);
+
+    let files: Vec<(String, String)> = (0..64)
+        .map(|i| (format!("src/file_{i}.rs"), format!("fn f_{i}() {{}}")))
+        .collect();
+    idx.index_files_batch(&files).await.expect("index batch");
+
+    let resident_before = idx.in_memory_chunk_count().await;
+    assert!(resident_before >= 64, "expected >= 64 resident chunks");
+    assert!(
+        idx.chunks.read().await.capacity() > 0,
+        "map must have reserved backing capacity before eviction"
+    );
+
+    let evicted = idx
+        .evict_chunks_if_idle(std::time::Duration::from_nanos(1))
+        .await;
+    assert_eq!(evicted, resident_before, "eviction should drop every chunk");
+
+    assert_eq!(
+        idx.chunks.read().await.capacity(),
+        0,
+        "eviction must shrink_to_fit — release the map's backing allocation \
+         entirely, not just clear() its entries while keeping the reserved \
+         capacity resident (the root cause the #3657 incident traced past \
+         this point and into OS-level allocator retention)"
+    );
+}

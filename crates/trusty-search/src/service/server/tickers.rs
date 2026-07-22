@@ -145,14 +145,51 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
                 continue;
             }
             let threshold = Duration::from_secs(secs);
+            let rss_before = crate::core::memguard::current_rss_mb();
+            let mut total_evicted = 0usize;
             for id in state.registry.list() {
                 let Some(handle) = state.registry.get(&id) else {
                     continue;
                 };
                 let indexer = handle.indexer.read().await;
-                indexer.evict_chunks_if_idle(threshold).await;
-                indexer.evict_bm25_entities_if_idle(threshold).await;
+                total_evicted += indexer.evict_chunks_if_idle(threshold).await;
+                total_evicted += indexer.evict_bm25_entities_if_idle(threshold).await;
                 indexer.demote_vector_store_if_idle(threshold).await;
+            }
+            // Issue #3657: per-index eviction above genuinely empties the
+            // `chunks`/`bm25`/`entities` maps (no lingering `Arc` holder — see
+            // `CodeIndexer::clear_in_memory_chunks` / `clear_bm25_entities`),
+            // but the Linux release binary's default glibc allocator does not
+            // return freed small-object heap to the OS on its own; production
+            // observed the "evicted N chunks" log fire repeatedly on a
+            // rehydrate/evict cycle while RSS never dropped. Trim once per
+            // sweep (not per-index — `malloc_trim` walks the whole arena, so
+            // calling it once after every index has been evicted is enough)
+            // and log the actual RSS delta so this claim can be verified
+            // instead of assumed.
+            //
+            // `malloc_trim` walks glibc's free lists under the malloc arena
+            // lock(s); on a heap that has grown to many GiB (exactly the
+            // production shape this fixes) that walk can take tens to
+            // hundreds of milliseconds. Running it inline would block this
+            // tokio worker thread for that whole span, stalling every other
+            // task multiplexed onto it. `spawn_blocking` (already the
+            // pattern this file uses for other blocking work — see
+            // `spawn_disk_size_ticker` and the orphan-reaper walk below)
+            // moves it to the blocking-pool instead.
+            if total_evicted > 0 {
+                let rss_after = tokio::task::spawn_blocking(|| {
+                    crate::core::memguard::trim_heap();
+                    crate::core::memguard::current_rss_mb()
+                })
+                .await
+                .unwrap_or(None);
+                tracing::info!(
+                    total_evicted,
+                    rss_before_mb = rss_before,
+                    rss_after_mb = rss_after,
+                    "idle-eviction sweep complete"
+                );
             }
         }
     });
@@ -507,9 +544,34 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
         reclaimed += handle.indexer.read().await.reclaim_memory_now().await;
     }
 
-    // Re-sample so the log (and /health) reflect the post-reclaim footprint and
-    // the self-restart gate decides on current reality, not the pre-reclaim RSS.
-    let after = memguard::current_rss_mb().unwrap_or(rss);
+    // Issue #3657: `reclaim_memory_now` empties the in-memory maps (a genuine
+    // Rust-level free — no lingering `Arc` holder), but the Linux release
+    // binary's default glibc allocator does not hand freed small-object heap
+    // back to the OS on its own; RSS previously stayed flat here even though
+    // `reclaimed` was nonzero. Trimming right after the sweep, before the
+    // re-sample below, is what makes `rss_after_mb` an honest number instead
+    // of one that always equals `rss_before_mb`.
+    //
+    // This tick fires exactly when the box is under memory pressure — i.e.
+    // exactly when the heap is largest and most fragmented, so `malloc_trim`
+    // walking glibc's free lists under the arena lock(s) can take tens to
+    // hundreds of milliseconds here. Run it on the blocking pool (matching
+    // this file's existing pattern — see `spawn_disk_size_ticker` and the
+    // orphan-reaper's `spawn_blocking` walk) instead of stalling this tokio
+    // worker thread, and sample RSS inside the same blocking closure so the
+    // before/after delta stays honest (no other allocation activity can slip
+    // in between the trim and the sample on a different thread).
+    let after = tokio::task::spawn_blocking(|| {
+        memguard::trim_heap();
+        memguard::current_rss_mb()
+    })
+    .await
+    .unwrap_or(None)
+    .unwrap_or(rss);
+
+    // Store the post-reclaim footprint so the log (and /health) and the
+    // self-restart gate below decide on current reality, not the
+    // pre-reclaim RSS.
     state.last_rss_mb.store(after, Ordering::Relaxed);
     // Record the hysteresis baseline for the NEXT tick, regardless of whether
     // `after` is still over the high-water mark — a sweep that didn't fully
