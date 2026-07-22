@@ -356,21 +356,27 @@ impl FastEmbedder {
         self.model_name
     }
 
-    /// Build `TextInitOptions` for the given model, attempting to register
-    /// the CoreML execution provider at runtime when on Apple Silicon.
+    /// Build `TextInitOptions` for the given model. CPU is the default
+    /// execution provider everywhere, including Apple Silicon; CoreML is an
+    /// explicit opt-in (`TRUSTY_DEVICE=gpu`).
     ///
-    /// Why: We want zero-friction GPU/ANE acceleration on Apple Silicon
-    /// without forcing users to pass `--features coreml`. fastembed-rs accepts
-    /// a `Vec<ExecutionProviderDispatch>` via `with_execution_providers`, and
-    /// our `ort` dep (pinned to the exact `=2.0.0-rc.12` fastembed uses) has
-    /// the `coreml` feature on by default on macOS, so we can always try to
-    /// build and register CoreML at runtime. On non-Apple platforms, or if
-    /// CoreML registration fails for any reason, we transparently fall back
-    /// to the default CPU provider.
+    /// Why: issue #3493 P0 (part 2) — CoreML was previously the unconditional
+    /// default on Apple Silicon, but it measurably degrades embedding
+    /// accuracy (~0.99 mean cosine similarity vs a genuine
+    /// `sentence-transformers` reference, vs 1.000000 on the CPU EP — see
+    /// `default_model_matches_sentence_transformers_reference`), silently
+    /// erasing the fp32 accuracy win from the #3486 default-model fix. CoreML
+    /// acceleration is still available for operators who explicitly want it
+    /// (`TRUSTY_DEVICE=gpu`) — our `ort` dep (pinned to the exact
+    /// `=2.0.0-rc.12` fastembed uses) has the `coreml` feature on by default
+    /// on macOS, so we can always build and register it at runtime on
+    /// request. On non-Apple platforms, or if CoreML registration fails for
+    /// any reason, we transparently fall back to the default CPU provider.
     /// What: returns `(TextInitOptions, ExecutionProvider)` where the tag
     /// reflects which backend was actually wired in.
-    /// Test: on an M-series Mac the tag is `CoreML`; on Intel/Linux/Windows
-    /// (or if CoreML build fails) the tag is `Cpu`.
+    /// Test: on an M-series Mac the tag is `Cpu` unless `TRUSTY_DEVICE=gpu`
+    /// is set (then `CoreML`/`CoreMLAne`); on Intel/Linux/Windows the tag is
+    /// always `Cpu`.
     pub(super) fn init_options(model: EmbeddingModel) -> (TextInitOptions, ExecutionProvider) {
         use ort::execution_providers::ExecutionProviderDispatch;
 
@@ -438,10 +444,24 @@ impl FastEmbedder {
 
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         {
-            let force_cpu = std::env::var("TRUSTY_DEVICE")
-                .map(|v| v.eq_ignore_ascii_case("cpu"))
+            // Issue #3493 P0 (part 2): CoreML is OPT-IN, not the default, on
+            // Apple Silicon. `TRUSTY_DEVICE=gpu` is the explicit escape hatch
+            // (reusing the same value the CUDA branch above and the
+            // `require_gpu` check in `with_cache_size` already treat as "the
+            // operator explicitly wants acceleration" — see the doc comment
+            // on `TRUSTY_DEVICE=gpu` there). Anything else — unset, `cpu`, or
+            // any other value — resolves to plain CPU via the fallthrough
+            // block below, restoring the 1.000000 cosine accuracy the CPU EP
+            // reaches (vs ~0.99 under CoreML — see the correctness gate
+            // `default_model_matches_sentence_transformers_reference`).
+            // `TRUSTY_DEVICE=cpu` keeps working exactly as before: it was
+            // already a no-op once CoreML stops being the default, but the
+            // check is kept so any explicit `cpu` value is still honoured if
+            // this precedence ever changes again.
+            let enable_coreml = std::env::var("TRUSTY_DEVICE")
+                .map(|v| v.eq_ignore_ascii_case("gpu"))
                 .unwrap_or(false);
-            if !force_cpu {
+            if enable_coreml {
                 use ort::ep::coreml::{ComputeUnits, SpecializationStrategy};
 
                 let (units, units_tag) = match std::env::var("TRUSTY_COREML_COMPUTE_UNITS")
@@ -490,7 +510,10 @@ impl FastEmbedder {
                 return (opts.with_execution_providers(providers), units_tag);
             }
             tracing::info!(
-                "trusty-embedder: TRUSTY_DEVICE=cpu set — skipping CoreML EP registration (Apple Silicon)"
+                "trusty-embedder: CoreML EP not registered — CPU is the default execution \
+                 provider on Apple Silicon (issue #3493 P0: CoreML degraded embedding \
+                 accuracy to ~0.99 mean cosine vs 1.000000 on CPU). Set TRUSTY_DEVICE=gpu \
+                 to opt back into CoreML acceleration."
             );
         }
 

@@ -44,6 +44,15 @@
 # intermittent HTTP 429 failures from HuggingFace that were causing ~31
 # trusty-memory tests to fail spuriously on cold runners.
 #
+# Issue #3493 P0 part 2 extends this to also pre-seed the fp32
+# Qdrant/all-MiniLM-L6-v2-onnx model (~90 MB, AllMiniLML6V2 — the default
+# model since #3486/#3493 P0): the accuracy correctness gate
+# `default_model_matches_sentence_transformers_reference`
+# (crates/trusty-common/src/embedder/mod.rs) was un-`#[ignore]`d so it
+# actually runs as a real CI gate against the CoreML-default regression
+# class, and it constructs the default `FastEmbedder` — see the "Pre-seed
+# fastembed models" step below for the download logic.
+#
 # The 7 env-sensitive trusty-memory tests (project_slug_returns_none_without_markers,
 # project_slug_at_returns_none_without_markers, cwd_palace_slug_falls_back_to_basename,
 # palace_slug_from_stdin_cwd_uses_stdin_path, resolve_palace_for_log_prefers_stdin_cwd,
@@ -281,20 +290,36 @@ jobs:
       #       to repo secrets fall back to the previous anonymous behavior.
       #   (b) The whole step is now fail-SOFT: any failure (rate limit,
       #       network blip, etc.) prints a ::warning:: annotation and lets
-      #       the job continue instead of hard-failing. This is safe because
-      #       the only tests that require the real downloaded model are
-      #       #[ignore]-gated (crates/trusty-common/src/embedder/mod.rs
+      #       the job continue instead of hard-failing. This is safe for
+      #       almost every real-model test — the vast majority require the
+      #       downloaded model are #[ignore]-gated
+      #       (crates/trusty-common/src/embedder/mod.rs
       #       fastembed_returns_correct_dim / fastembed_cache_hit_is_idempotent,
       #       crates/trusty-search/tests/migration_e2e.rs, crates/trusty-search/
       #       tests/embedder_supervisor_e2e.rs, crates/trusty-embedderd/tests/
       #       bit_identical.rs) and are never run by the plain `cargo test
-      #       --workspace` step below. Every non-ignored test that touches
-      #       the shared embedder pre-seeds a MockEmbedder instead via
+      #       --workspace` step below. Every other non-ignored test that
+      #       touches the shared embedder pre-seeds a MockEmbedder instead via
       #       seed_shared_embedder_with_mock() (issue #850,
       #       crates/trusty-common/src/memory_core/retrieval/embedder.rs), so
-      #       cargo test never needs HuggingFace network access — this step
-      #       is a best-effort latency/flake optimisation, not a correctness
-      #       dependency, and must not be allowed to fail the job.
+      #       cargo test never needs HuggingFace network access for those.
+      #
+      #       ONE exception (issue #3493 P0 part 2):
+      #       `default_model_matches_sentence_transformers_reference`
+      #       (crates/trusty-common/src/embedder/mod.rs) is the accuracy
+      #       correctness gate that would have caught the CoreML-default
+      #       regression, and is deliberately NOT `#[ignore]`d — it DOES run
+      #       under the plain `cargo test --workspace` step and DOES need the
+      #       real default (fp32, Qdrant/all-MiniLM-L6-v2-onnx) model. The
+      #       Qdrant pre-seed block above exists specifically to make that
+      #       test's model available from cache on every PR. Fail-soft is
+      #       still kept here rather than hard-failing the pre-seed step
+      #       itself: on a genuine HuggingFace outage the test will attempt
+      #       its own direct download at test time (fastembed's normal
+      #       cache-miss behaviour) and may then flake/fail for the same
+      #       underlying reason — that failure surfaces as a real, visible
+      #       `cargo test` failure rather than this optional latency step
+      #       aborting the whole job.
       #
       #       PR #2981 code-critic fix: fail-soft MUST NOT invoke seed_models
       #       directly as an `if`/`while` condition. Bash disables `errexit`
@@ -406,6 +431,67 @@ jobs:
               curl_retry \
                 "${HF_BASE}/${XENOVA_REPO}/resolve/${XENOVA_REV}/onnx/model_quantized.onnx" \
                 "${ONNX_DEST}"
+            fi
+
+            # ── Qdrant/all-MiniLM-L6-v2-onnx (AllMiniLML6V2 — fp32, the
+            # DEFAULT model since issue #3486 / #3493 P0, resolved by
+            # `resolve_default_embedding_model()`) ──
+            #
+            # Issue #3493 P0 part 2: the accuracy correctness gate
+            # `default_model_matches_sentence_transformers_reference`
+            # (crates/trusty-common/src/embedder/mod.rs) is no longer
+            # `#[ignore]`d — it runs as part of the plain `cargo test
+            # --workspace` step below and constructs the DEFAULT
+            # `FastEmbedder`, which downloads this fp32 model, not the
+            # Xenova quantized one above. Same resolution strategy as
+            # Xenova: try the classic `/resolve/<hash>/` redirect first: this
+            # repo actually serves gated files via a `resolve-cache` URL that
+            # does NOT match that pattern, so this intentionally falls
+            # through to the HF API sha lookup on every run — kept as the
+            # first attempt anyway so a future HF storage-backend change that
+            # restores the classic redirect is picked up for free without
+            # touching this script.
+            QDRANT_REPO="Qdrant/all-MiniLM-L6-v2-onnx"
+            QDRANT_DIR="${CACHE_DIR}/models--Qdrant--all-MiniLM-L6-v2-onnx"
+
+            mkdir -p "${QDRANT_DIR}/refs" "${QDRANT_DIR}/blobs"
+
+            echo "Resolving Qdrant/all-MiniLM-L6-v2-onnx HEAD revision …"
+            QDRANT_REV=$(curl -fsSL "${CURL_AUTH[@]}" \
+              "${HF_BASE}/${QDRANT_REPO}/resolve/main/tokenizer.json" \
+              -o /dev/null -w '%{url_effective}' | grep -oP '(?<=/resolve/)[^/]+' || true)
+
+            if [ -z "${QDRANT_REV}" ] || [ "${QDRANT_REV}" = "main" ]; then
+              QDRANT_REV=$(curl -fsSL "${CURL_AUTH[@]}" \
+                "https://huggingface.co/api/models/${QDRANT_REPO}?full=false" \
+                | grep -oP '"sha":"[^"]{40}"' | head -1 | grep -oP '[0-9a-f]{40}' || true)
+            fi
+
+            # Last-resort pinned hash (verified against the live repo while
+            # writing this step; matches fastembed 5.13.4's model registry).
+            QDRANT_REV="${QDRANT_REV:-5f1b8cd78bc4fb444dd171e59b18f3a3af89a079}"
+            echo "Using Qdrant/all-MiniLM-L6-v2-onnx revision: ${QDRANT_REV}"
+
+            echo "${QDRANT_REV}" > "${QDRANT_DIR}/refs/main"
+            QDRANT_SNAP_DIR="${QDRANT_DIR}/snapshots/${QDRANT_REV}"
+            mkdir -p "${QDRANT_SNAP_DIR}"
+
+            for FILE in tokenizer.json tokenizer_config.json special_tokens_map.json config.json; do
+              DEST="${QDRANT_SNAP_DIR}/${FILE}"
+              if [ ! -f "${DEST}" ]; then
+                echo "Downloading ${QDRANT_REPO}/${FILE} …"
+                curl_retry \
+                  "${HF_BASE}/${QDRANT_REPO}/resolve/${QDRANT_REV}/${FILE}" \
+                  "${DEST}"
+              fi
+            done
+
+            QDRANT_ONNX_DEST="${QDRANT_SNAP_DIR}/model.onnx"
+            if [ ! -f "${QDRANT_ONNX_DEST}" ]; then
+              echo "Downloading ${QDRANT_REPO}/model.onnx (~90 MB) …"
+              curl_retry \
+                "${HF_BASE}/${QDRANT_REPO}/resolve/${QDRANT_REV}/model.onnx" \
+                "${QDRANT_ONNX_DEST}"
             fi
 
             echo "fastembed model pre-seed complete."

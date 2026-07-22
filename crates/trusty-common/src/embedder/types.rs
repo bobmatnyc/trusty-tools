@@ -289,41 +289,51 @@ impl std::fmt::Display for ExecutionProvider {
 /// RPC round-trip or any change to the wire protocol.
 ///
 /// What: mirrors the provider-selection branches of `init_options` in the same
-/// precedence order — `TRUSTY_DEVICE=cpu` forces `Cpu`; otherwise an
-/// `embedder-cuda` build yields `Cuda`; otherwise Apple Silicon yields a
-/// `CoreML*` tag derived from `TRUSTY_COREML_COMPUTE_UNITS` (default
-/// `CoreMLAne`); every other host yields `Cpu`. It deliberately does **not**
-/// probe whether a CUDA device actually initialises — that runtime fallback is
-/// reflected by the in-process path's own `provider()` and, for the sidecar,
-/// is reported by the sidecar's startup log.
+/// precedence order — an `embedder-cuda` build yields `Cuda` unless
+/// `TRUSTY_DEVICE=cpu` forces `Cpu`; otherwise, on Apple Silicon, CoreML is
+/// only predicted when explicitly requested via `TRUSTY_DEVICE=gpu` (issue
+/// #3493 P0 part 2 — CoreML is opt-in, not the default; it measurably
+/// degraded embedding accuracy, see
+/// `default_model_matches_sentence_transformers_reference`), in which case the
+/// `CoreML*` tag is derived from `TRUSTY_COREML_COMPUTE_UNITS` (default
+/// `CoreMLAne`); every other case — including `TRUSTY_DEVICE` unset or `cpu`
+/// — yields `Cpu`. It deliberately does **not** probe whether a CUDA device
+/// actually initialises — that runtime fallback is reflected by the
+/// in-process path's own `provider()` and, for the sidecar, is reported by
+/// the sidecar's startup log.
 ///
 /// Test: `resolve_expected_provider_forces_cpu`,
 /// `resolve_expected_provider_default_matches_platform`, and (Apple Silicon)
 /// `resolve_expected_provider_coreml_units` below.
 pub fn resolve_expected_provider() -> ExecutionProvider {
-    let force_cpu = std::env::var("TRUSTY_DEVICE")
-        .map(|v| v.eq_ignore_ascii_case("cpu"))
-        .unwrap_or(false);
-    if force_cpu {
-        return ExecutionProvider::Cpu;
-    }
-
     #[cfg(feature = "embedder-cuda")]
     {
+        let force_cpu = std::env::var("TRUSTY_DEVICE")
+            .map(|v| v.eq_ignore_ascii_case("cpu"))
+            .unwrap_or(false);
+        if force_cpu {
+            return ExecutionProvider::Cpu;
+        }
         return ExecutionProvider::Cuda;
     }
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     {
-        return match std::env::var("TRUSTY_COREML_COMPUTE_UNITS")
-            .ok()
-            .as_deref()
-            .map(|s| s.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("all") | Some("cpu_gpu") | Some("cpuandgpu") => ExecutionProvider::CoreML,
-            _ => ExecutionProvider::CoreMLAne,
-        };
+        let enable_coreml = std::env::var("TRUSTY_DEVICE")
+            .map(|v| v.eq_ignore_ascii_case("gpu"))
+            .unwrap_or(false);
+        if enable_coreml {
+            return match std::env::var("TRUSTY_COREML_COMPUTE_UNITS")
+                .ok()
+                .as_deref()
+                .map(|s| s.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("all") | Some("cpu_gpu") | Some("cpuandgpu") => ExecutionProvider::CoreML,
+                _ => ExecutionProvider::CoreMLAne,
+            };
+        }
+        return ExecutionProvider::Cpu;
     }
 
     #[allow(unreachable_code)]
