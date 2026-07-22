@@ -52,6 +52,8 @@ pub(crate) use ingest::PROGRESS_CHUNK_INTERVAL;
 #[cfg(test)]
 pub(crate) use search::KG_REFINE_THRESHOLD;
 #[cfg(test)]
+mod rehydrate_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_cursor;
