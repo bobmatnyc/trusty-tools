@@ -5,6 +5,27 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **Panic-safe, serialized redb corpus open on concurrent warm-boot (issue
+  #3659).** Warm-boot (eager restore), lazy-load, `POST /indexes`
+  create/relocate, and the reindex atomic-swap re-open could all reach
+  `CorpusStore::open` for the SAME `index.redb` at once before an index is
+  registered — nothing serialized them. A torn concurrent read of a
+  half-written file doesn't always surface as a classified `DatabaseError`
+  (the #702/#703 guarantee); it can trip an internal assertion inside redb's
+  `page_manager` and panic. `core::corpus::open_guard::open_serialized` now
+  serializes every corpus open per-canonical-path (at most one opener in
+  flight for a given file) and converts any panic into a typed `Err` via
+  `spawn_blocking` + `catch_unwind`, so the existing migration/rebuild retry
+  ladder always sees a normal `Result`. A wedged opener (e.g. a TCC-denied
+  volume, issue #718) times out instead of hanging its caller forever, and
+  the path is then marked permanently refused so later callers fail fast
+  rather than queue behind it.
+
+---
 ## [0.38.0] — 2026-07-21
 
 Ships the epic #3524 slice 6 default flip. Depends on trusty-embedderd-py
