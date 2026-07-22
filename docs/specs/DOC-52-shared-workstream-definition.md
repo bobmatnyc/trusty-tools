@@ -1,17 +1,14 @@
 ---
 spec_refs:
-  - id: SPEC-SHAREDWS-01~draft
-    path: docs/specs/DOC-52-shared-workstream-definition.md
-    anchor: SPEC-SHAREDWS-01~draft
-  - id: SPEC-SHAREDWS-02~draft
-    path: docs/specs/DOC-52-shared-workstream-definition.md
-    anchor: SPEC-SHAREDWS-02~draft
-  - id: SPEC-SHAREDWS-03~draft
-    path: docs/specs/DOC-52-shared-workstream-definition.md
-    anchor: SPEC-SHAREDWS-03~draft
-  - id: SPEC-SHAREDWS-04~draft
-    path: docs/specs/DOC-52-shared-workstream-definition.md
-    anchor: SPEC-SHAREDWS-04~draft
+  - id: SPEC-WS-02~draft
+    path: docs/specs/DOC-48-tcode-workstreams.md
+    anchor: SPEC-WS-02~draft
+  - id: SPEC-WS-04~draft
+    path: docs/specs/DOC-48-tcode-workstreams.md
+    anchor: SPEC-WS-04~draft
+  - id: SPEC-TCUI-08~draft
+    path: docs/specs/trusty-code-harness-ui.md
+    anchor: SPEC-TCUI-08~draft
 ---
 
 # DOC-52 — Shared Workstream Definition: Cross-Harness Session Binding and Resource Governance
@@ -29,8 +26,8 @@ spec_refs:
 - Issue #3649 (session-owned worktrees) and #2919 (auto-reclamation) — resource lifecycle tied to workstream/session ownership
 
 **Supersedes/Clarifies:**
-- DOC-48 §2.2 ("workstreams are NOT sessions…") — this spec extends that, defining exactly how sessions bind to workstreams: 1:1 per owner decision (not many sessions over time)
-- DOC-39 §3.1 ("an infinite thread") — this spec defines the boundary conditions: when a workstream closes, its session is terminal; a closed workstream is not reopened
+- DOC-48 §2.1 and §4.1 (session-binding model) — **OVERRIDES** DOC-48's append-only `session_ids: Vec<SessionId>` (which permits many sessions per workstream over time, per DOC-48 §2.1 line 81 and Phase C++ code) with a stricter 1:1 invariant per the 2026-07-22 owner decision, effective for new workstreams going forward. Persisted schema compatibility: keep the `session_ids: Vec` field shape; new workstreams enforce `len(session_ids) == 1`; existing arrays with >1 entries are grandfathered as historical lineage (read-only, never migrated destructively).
+- DOC-39 §3.1 ("an infinite thread") — clarifies boundary conditions: when a workstream closes, its session is terminal; a closed workstream is NOT reopened (new work creates a new workstream)
 
 ---
 
@@ -39,26 +36,24 @@ spec_refs:
 **ID:** SPEC-SHAREDWS-01~draft
 **Status:** Draft
 
-### 1.1 The problem — many-sessions-over-time vs. persistent-unit ambiguity
+### 1.1 The override — DOC-48's many-sessions model vs. 1:1 binding
 
-DOC-48 (tcode workstreams) establishes that **workstreams are NOT sessions** and defines the daemon-scoped, single-active model for trusty-code. DOC-39 (harness UI) defines the workstream as "the unit of work… an infinite thread… you *pick up*, never 'start over'".
+DOC-48 §1.2 and §2.1 establish that **workstreams are NOT sessions** (DOC-48 §1.2, line 54). DOC-48 §2.1 and §4.1 define the domain model: workstreams hold an append-only `session_ids: Vec<SessionId>` — "Sessions are never removed from the list; only new ones are added" (DOC-48:81). Phase C++ shipped code (`pickActiveSessionInWorkstream`, DOC-48:593) selects among multiple sessions in that vector.
 
-But DOC-48 remains silent on a critical binding question: **How many sessions can bind to a single workstream over its lifetime?**
+**This spec OVERRIDES that model.** DOC-48's append-only-many semantics were the original design; the 2026-07-22 owner decision mandates a stricter, backward-incompatible change: exactly ONE session per workstream, created and destroyed together, effective for new workstreams going forward.
 
-Two readings are possible:
-1. **Many sessions over time** (historical): a workstream is a labeled container that accumulates many sessions as the operator revisits it
-2. **Exactly one session per workstream, terminal closure** (owner decision): there is exactly ONE session per workstream; when that session ends, the workstream closes; opening new work after closure creates a NEW workstream
+**Why the override was necessary:**
+- **Resource lifecycle clarity:** Who owns the worktree (issue #3649)? With many sessions per workstream, the answer is ambiguous. With 1:1, the session owns the worktree for its lifetime; workstream closure is the reclamation trigger.
+- **Auto-reclamation:** Issue #2919 requires a clear close-trigger. With 1:1, closing the workstream closes the session and triggers cleanup. With many sessions, cleanup semantics are underspecified.
+- **Cross-PM messaging:** ADR-0019 specifies workstream-keyed addressing. With 1:1 binding, "address this workstream" unambiguously means "address its one session." With many sessions, the route is unclear.
 
-This ambiguity has consequences:
-- **Resource lifecycle:** Who owns the worktree (issue #3649)? Is it tied to the workstream or the session? If many sessions share one workstream, which session owns the worktree?
-- **Auto-reclamation:** When does cleanup happen (issue #2919)? After the last session ends, or when the workstream is explicitly closed?
-- **Workstream identity in cross-PM messaging:** ADR-0019 specifies workstream-keyed addressing. If many sessions can rebind to one workstream, which session's state does a message address?
+**Schema compatibility consequence:** Persisted workstreams may already have `session_ids` arrays with >1 entries (created under the old model). These are grandfathered as historical artifacts (read-only; never migrated destructively). New workstreams enforce the 1:1 invariant: `len(session_ids) == 1` at all times.
 
 **Owner decision (2026-07-22, stated precisely):**
 
 > **There is exactly ONE session per workstream — the session is the workstream's persistent runtime substrate; they are created and destroyed together.** Access uses tmux semantics: users/clients *connect* to an active workstream; any connection can propel it (send input/drive work), and the resulting state is reflected across ALL active connections simultaneously (multi-client mirror, like several tmux clients attached to one tmux session). "Single-user" = one owning user; that user may hold N concurrent connections (GUI, terminal, channels). Connections never own anything.
 
-This ends the ambiguity. This spec is the normative statement of that decision for both trusty-mpm and trusty-code.
+This spec is the normative statement of that decision for both trusty-mpm and trusty-code.
 
 ### 1.2 Scope — the shared concept
 
@@ -165,11 +160,11 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 
 **Closing a workstream is THE trigger for resource cleanup.**
 
-**Connection:** issue #3649 (session-owned worktrees) uses a sentinel JSON payload `{owner_session_id, created_at}` to track ownership. Because workstream↔session is 1:1, the **workstream_id IS the owner identifier** for reclamation purposes. The `owner_session_id` in #3649 should resolve to workstream_id internally.
+**Stable workstream-ownership mapping:** Issue #3649 (session-owned worktrees) requires ownership tracking via `owner_session_id` sentinel. Because the 1:1 binding invariant (§2.1) establishes exactly one session per workstream, workstream_id is the stable durable key; `owner_session_id` resolves to it through an explicit 1:1 mapping maintained at close time. This mapping satisfies ADR-0019's "never key on fragile session_id" principle (ADR-0019 forbids `session_id`-keyed addressing to avoid #3396 pane-ID drift): `workstream_id` is the permanent identifier; the session binding it points to may change over the workstream's lifetime (only at creation and closure), but the mapping is always consistent with the workstream's state.
 
 **Reclamation process (issue #2919):**
 - Closing a workstream triggers the auto-reclamation of its worktree (trusty-mpm) or build artifacts (trusty-code).
-- Worktree deletion is owner-gated via #3649's sentinel; no unowned worktrees are deleted.
+- Worktree deletion is owner-gated via #3649's sentinel (`owner_session_id` → `workstream_id` mapping); no unowned worktrees are deleted.
 - Reclamation is non-destructive at the git level — the branch may remain in the remote (for audit/history); the local worktree and its artifacts are cleaned up.
 
 ---
@@ -197,9 +192,11 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 
 **AC-2.3** Expected-conflict files (root Cargo.toml, lockfiles, CHANGELOG) are exempt from overlap gate. Touching them widens scope with confirmation.
 
-**AC-2.4** Staleness nudges (>20 commits behind main, >7 days idle) are informational. No enforcement.
+**AC-2.4** A commit touching files outside the declared scope (not on the expected-conflict list and not overlapping another open workstream's scope) WARNS but is never refused. Scope warnings encourage explicit scope refinement.
 
-**AC-2.5** Workstream closure triggers auto-reclamation (worktree cleanup for trusty-mpm; artifact cleanup for trusty-code).
+**AC-2.5** Staleness nudges (>20 commits behind main, >7 days idle) are informational. No enforcement.
+
+**AC-2.6** Workstream closure triggers auto-reclamation (worktree cleanup for trusty-mpm; artifact cleanup for trusty-code).
 
 ### AC-3: Cross-harness semantics
 
@@ -207,7 +204,7 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 
 **AC-3.2** Workstream-keyed addressing (ADR-0019) resolves to the single session bound to that workstream. There is no ambiguity about "which session" a message addresses.
 
-**AC-3.3** The #3649 session-ownership sentinel (`owner_session_id`) is equated with `workstream_id` internally. Reclamation uses workstream identity as the ownership key.
+**AC-3.3** The #3649 session-ownership sentinel (`owner_session_id`) maps to `workstream_id` via the 1:1 binding invariant. At close time, `owner_session_id` resolves to the workstream that owns it (1:1 cardinality guarantee). Reclamation uses the workstream identity (not the fragile session_id) as the stable ownership key, satisfying ADR-0019's stable-key principle.
 
 ---
 
@@ -224,7 +221,7 @@ A workstream "owns" a session in the sense that the workstream's lifecycle gover
 
 | Spec | Relationship |
 |---|---|
-| DOC-48 (tcode Workstreams) | This spec defines the SHARED binding model that DOC-48 adopts at a higher level. DOC-48 focuses on daemon-local activation and SSE fan-out; this spec settles the session-binding cardinality that DOC-48 §2 left open. DOC-48 should reference this spec (§2.2 clarification). |
+| DOC-48 (tcode Workstreams) | **OVERRIDES** DOC-48's append-only `session_ids: Vec` model (§2.1, §4.1) with 1:1 binding, effective for new workstreams. DOC-48's daemon-scoped activation (§6) and SSE fan-out (§5.3) remain unchanged; only the session-binding cardinality is overridden here. Existing persisted arrays with >1 entries are grandfathered (read-only). DOC-48 §11 should add a normative note that its append-only-many semantics are superseded for new workstreams by DOC-52. |
 | DOC-39 (trusty-code Harness UI) | Defines workstream as "the unit of work… an infinite thread… you pick up." This spec makes precise what "infinite" means in a 1:1 session-binding context: infinite turns within one session; new work after closure starts a new workstream. |
 | ADR-0019 (Unified IPC) | Specifies workstream-keyed addressing for cross-PM messaging. This spec's 1:1 binding eliminates the "which session?" ambiguity in ADR-0019's message routing. |
 | #3649 (Session-owned worktrees) | Proposes session-id-keyed ownership via `owner_session_id` sentinel. This spec equates that with workstream_id internally, settling how the two identifiers relate. |
@@ -256,8 +253,8 @@ Alice opens a workstream to fix a bug in `crates/trusty-search/src/indexer.rs`.
 
 Alice opened **Workstream: "CI optimization"** 10 days ago. It's been idle for 8 days (no turns since day 2).
 
-- **Nudge:** "Workstream 'CI optimization' (2026-07-12) has been idle 8 days. Ready to close? If continuing, update the task or reopen the workstream."
-- Alice may: (a) close it (merging if needed), triggering reclamation, or (b) re-open it by revisiting it, adding a new turn, which resets the idle counter.
+- **Nudge:** "Workstream 'CI optimization' (2026-07-12) has been idle 8 days. Ready to close? If continuing, update the task or resume the workstream."
+- Alice may: (a) close it (merging if needed), triggering reclamation, or (b) reactivate it by revisiting it, adding a new turn, which resets the idle counter.
 
 ---
 

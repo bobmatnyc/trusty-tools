@@ -652,8 +652,16 @@ monitor' — this doesn't make sense in the workstream context."*
 | DOC-39 (trusty-code Harness UI) | This spec implements [`SPEC-TCUI-08~draft`](./trusty-code-harness-ui.md#SPEC-TCUI-08~draft) §4B (Workstream durability — a prerequisite). DOC-39 defines the domain object; this spec implements its persistence and lifecycle. |
 | DOC-40 (Durable Background Agents) | This spec adopts [`SPEC-BGATTACH-04/05~draft`](./durable-background-agents.md#SPEC-BGATTACH-04~draft) "never silently multiplex" principle at the daemon level (§6.3): when the active workstream changes, all clients are informed explicitly. Per-agent leases (DOC-40) remain independent and unchanged. |
 | DOC-44 (Engineering Lead Twin Orchestration, merged code) | DOC-44's `trusty_agents_common::workstreams::Workstream` (PR #3260) is the cross-tool ledger entry. This spec defines tcode's native `trusty_code::workstreams::Workstream` domain object. **Disambiguation:** code must use qualified imports to distinguish them. DOC-44 ledger entries reference tcode workstream IDs; they are complementary, not redundant. |
-| DOC-52 (Shared Workstream Definition — Cross-Harness Session Binding) | This spec clarifies the session-binding cardinality that DOC-48 §2.2 left open: exactly 1:1 binding per owner decision (2026-07-22). DOC-48 defines daemon-local activation and lifecycle; DOC-52 settles the shared binding model that applies to both trusty-mpm and trusty-code. DOC-52 also ties resource governance (concurrency caps, scope-overlap rules, reclamation) to workstream closure. See DOC-52 §6 for full cross-reference. |
+| DOC-52 (Shared Workstream Definition — Cross-Harness Session Binding) | **OVERRIDES** this spec's append-only `session_ids: Vec<SessionId>` model (§2.1, §4.1) with 1:1 binding per owner decision (2026-07-22), effective for new workstreams. DOC-52 settles the shared binding model that applies to both trusty-mpm and trusty-code. Existing persisted arrays with >1 entries are grandfathered (read-only). See DOC-52 §6 for full cross-reference. |
 | DOC-38 (Spec-Linked Documentation) | This spec follows [`SPEC-SLD-02~draft`](./spec-linked-documentation.md#SPEC-SLD-02~draft) reference grammar, header block, anchoring, and catalog conventions. |
+
+### 11.1 Amendment: Session-binding cardinality override (2026-07-22)
+
+**Normative:** This spec's domain model defines `session_ids: Vec<SessionId>` as append-only (§2.1 line 81): "Sessions are never removed from the list; only new ones are added." That model permits **many sessions per workstream over time**.
+
+**DOC-52 (Shared Workstream Definition) OVERRIDES this with a stricter 1:1 invariant, effective for new workstreams going forward:** exactly ONE session binds to each workstream; when a workstream closes, its session is terminal; new work after closure creates a NEW workstream (never reopens a closed one).
+
+**Schema compatibility:** Persisted workstreams created under the old model may have `session_ids` arrays with >1 entries. These are grandfathered as historical artifacts (read-only; never migrated destructively). New workstreams enforce `len(session_ids) == 1` at all times.
 
 ---
 
