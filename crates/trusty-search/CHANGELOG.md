@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [0.38.1] — 2026-07-22
+
 ### Fixed
 
 - **Panic-safe, serialized redb corpus open on concurrent warm-boot (issue

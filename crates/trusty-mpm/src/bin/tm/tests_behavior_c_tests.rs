@@ -287,6 +287,65 @@ fn guided_picker_numeric_launch_new() {
 }
 
 #[test]
+fn guided_picker_stale_daemon_slots_render_distinct_incrementing_choices() {
+    // #3678: a daemon that predates #3034 omits `slot`/`deleted` from its
+    // response entirely, so `#[serde(default)]` decodes EVERY row's `slot`
+    // to the shared `0` sentinel — exactly the shape `make_session` produces
+    // by default (slot: 0) when nothing calls `at_slot`/`picker_fixture`.
+    // Before the #3678 fix, every choice below would have resolved to
+    // `Resume(0)` (the first row) and "launch new" would always sit at a
+    // fixed `[1]` regardless of list length. The picker must instead treat
+    // this as a stale-daemon menu and fall back to distinct, incrementing
+    // 1-based positions for this listing.
+    let sessions = vec![
+        make_session("s1", "active", None),
+        make_session("s2", "active", None),
+        make_session("s3", "active", None),
+    ];
+    assert_eq!(
+        parse_picker_choice("1", &sessions, false),
+        PickerDecision::Resume(0)
+    );
+    assert_eq!(
+        parse_picker_choice("2", &sessions, false),
+        PickerDecision::Resume(1)
+    );
+    assert_eq!(
+        parse_picker_choice("3", &sessions, false),
+        PickerDecision::Resume(2)
+    );
+    // "launch new" follows the last positional row (4 = count + 1), not a
+    // fixed `1` (the pre-fix `sessions.last().slot + 1 == 0 + 1` bug).
+    assert_eq!(
+        parse_picker_choice("4", &sessions, false),
+        PickerDecision::LaunchNew
+    );
+}
+
+#[test]
+fn guided_picker_stale_daemon_numeric_choice_resolves_correct_row() {
+    // #3678 selection-mapping regression: previously EVERY numeric choice
+    // resolved to the FIRST row, because every session's `.slot` decoded to
+    // the same `0` sentinel and the by-slot lookup (`Vec::position`) always
+    // returns the first match. Typing "2" must resolve to the SECOND row
+    // (index 1), never the first.
+    let sessions = vec![
+        make_session("s1", "active", None),
+        make_session("s2", "active", None),
+        make_session("s3", "active", None),
+    ];
+    assert_eq!(
+        parse_picker_choice("2", &sessions, false),
+        PickerDecision::Resume(1),
+        "typing 2 must resolve to the second row, not always the first"
+    );
+    assert_ne!(
+        parse_picker_choice("2", &sessions, false),
+        PickerDecision::Resume(0)
+    );
+}
+
+#[test]
 fn guided_picker_out_of_range_unrecognised() {
     // Why: a number matching no displayed slot and not the launch-new marker
     // must not silently resume or launch — it must be rejected cleanly.

@@ -394,8 +394,64 @@ pub(crate) async fn fetch_live_sessions(
 /// to the WRONG session merely because a neighboring slot disappeared.
 /// What: linear search (menus are small); returns the position or `None`.
 /// Test: exercised indirectly by every `guided_picker_numeric_*` test.
-fn find_slot(sessions: &[ManagedSessionSummary], n: u32) -> Option<usize> {
+pub(crate) fn find_slot(sessions: &[ManagedSessionSummary], n: u32) -> Option<usize> {
+    if slots_are_stale(sessions) {
+        // #3678: every row decoded to the shared `0` sentinel, so the real
+        // field can't disambiguate rows — resolve the same 1-based position
+        // the fallback render used instead (see `shown_slot`).
+        let idx = usize::try_from(n.checked_sub(1)?).ok()?;
+        return (idx < sessions.len()).then_some(idx);
+    }
     sessions.iter().position(|s| s.slot == n)
+}
+
+/// True when every session in a non-empty menu reports the unassigned `0`
+/// slot sentinel (issue #3678).
+///
+/// Why: a daemon that predates the #3034/#3044 stable-slot-numbering feature
+/// never emits the `slot`/`deleted` fields on `GET /sessions/managed` at
+/// all — `ManagedSessionSummary`'s `#[serde(default)]` on `slot` then
+/// silently decodes EVERY row to `0` instead of erroring, since that field
+/// was added additively for exactly this forward/backward-compat reason (see
+/// its doc comment in `client::http_client::types`). A daemon process is not
+/// restarted merely by installing a newer `tm` binary, so this is the normal
+/// shape of the window between a CLI upgrade and the operator's next `tm
+/// restart` (or daemon auto-restart) — not a corrupt response. Without this
+/// guard, [`find_slot`]'s by-slot lookup and the render loop's `[N]` label
+/// both collapse to the SAME value (`0`) for every row: the menu prints
+/// `[0]` on every line and typing any number resolves to the first row only
+/// (`Vec::position` returns the first match) — the exact symptom reported.
+/// A healthy daemon never produces this shape: slots are assigned 1-based
+/// and unique per session, so `0` on literally every row of a non-empty,
+/// single-GET response is conclusive, not a heuristic guess.
+/// What: `false` for an empty list; otherwise `true` only when EVERY
+/// session's `slot == 0`.
+/// Test: `slots_are_stale_true_when_all_zero`,
+/// `slots_are_stale_false_when_any_nonzero`,
+/// `slots_are_stale_false_when_empty`.
+pub(crate) fn slots_are_stale(sessions: &[ManagedSessionSummary]) -> bool {
+    !sessions.is_empty() && sessions.iter().all(|s| s.slot == 0)
+}
+
+/// The picker-menu number to print/accept for `sessions[idx]` (issue #3678).
+///
+/// Why: every render/prompt site needs the SAME fallback numbering when
+/// [`slots_are_stale`] is true, or the printed menu and the accepted input
+/// would drift apart again exactly like the bug this fixes.
+/// What: the real, stable `slot` field when the menu's slots are trustworthy;
+/// otherwise a locally-computed 1-based position (`idx + 1`) that is at
+/// least internally consistent for the lifetime of this one redisplay (it is
+/// NOT stable across a re-fetch, since it isn't backed by the daemon's
+/// registry — restarting the daemon is still required to restore real
+/// stable numbering).
+/// Test: covered via `run_tty_picker`'s render (manual/e2e) and indirectly by
+/// `find_slot`'s stale-fallback tests, which exercise the same arithmetic.
+pub(crate) fn shown_slot(sessions: &[ManagedSessionSummary], idx: usize) -> u32 {
+    if slots_are_stale(sessions) {
+        idx as u32 + 1
+    } else {
+        sessions[idx].slot
+    }
 }
 
 /// Decide a picker choice for the (already-located) session at `idx`.
@@ -487,7 +543,16 @@ pub(crate) fn parse_picker_choice(
     if choice.eq_ignore_ascii_case("q") {
         return PickerDecision::Quit;
     }
-    let next_slot = sessions.last().map(|s| s.slot + 1).unwrap_or(1);
+    // #3678: a stale (pre-#3034) daemon decodes every slot to `0`, so
+    // `sessions.last().slot + 1` would always be `1` regardless of how many
+    // rows are actually listed — use the same positional fallback the render
+    // side uses (see `shown_slot`) so "launch new" always follows the last
+    // displayed row.
+    let next_slot = if slots_are_stale(sessions) {
+        sessions.len() as u32 + 1
+    } else {
+        sessions.last().map(|s| s.slot + 1).unwrap_or(1)
+    };
     // #2304: `d<N>` / `d <N>` deletes the LIVE session at slot N. Parsed
     // before the numeric-resume branch so the `d` prefix is unambiguous.
     // Deleting a dead (unresumable, but not yet deleted) session is exactly
@@ -581,7 +646,21 @@ pub(crate) async fn run_tty_picker(
         // its slot in the printed menu too, so an operator who typed that
         // number from an earlier listing sees exactly why it no longer
         // resolves to a session, rather than it silently vanishing.
-        let new_idx = sessions.last().map(|s| s.slot + 1).unwrap_or(1);
+        //
+        // #3678: THAT guarantee only holds when the daemon actually reports
+        // real slots. A daemon process that predates #3034 (i.e. hasn't been
+        // restarted since the `tm` binary was upgraded) omits `slot`
+        // entirely, and `#[serde(default)]` silently decodes it to `0` for
+        // every row — `slots_are_stale` detects exactly that shape, and
+        // `shown_slot`/the `next_slot` fallback below keep the printed
+        // numbers distinct and incrementing (positional-only, not stable
+        // across a re-fetch) instead of every row printing `[0]`.
+        let stale_slots = slots_are_stale(&sessions);
+        let new_idx = if stale_slots {
+            sessions.len() as u32 + 1
+        } else {
+            sessions.last().map(|s| s.slot + 1).unwrap_or(1)
+        };
         // #2148: bare Enter must not silently restart (kill+recreate the tmux
         // pane of) a stopped/errored session — only used to pick the menu's
         // default hint and to gate `parse_picker_choice`'s bare-Enter branch.
@@ -595,21 +674,29 @@ pub(crate) async fn run_tty_picker(
             eprintln!("tm:   [Enter] launch new session");
             eprintln!("tm:   [q]     quit");
         } else {
-            for s in sessions.iter() {
+            if stale_slots {
+                eprintln!(
+                    "tm: warning — the running daemon appears to predate stable session \
+                     numbering (issue #3034); the numbers below are positional for this \
+                     listing only — run `tm restart` to restore permanent numbering."
+                );
+            }
+            for (i, s) in sessions.iter().enumerate() {
+                let num = shown_slot(&sessions, i);
                 if s.deleted {
                     // #3034: the slot stays reserved — never silently reused
                     // by a later session — so the operator sees exactly which
                     // number is now dead instead of it disappearing from the
                     // menu.
-                    eprintln!("tm:   [{}] -- deleted --", s.slot);
+                    eprintln!("tm:   [{num}] -- deleted --");
                     continue;
                 }
                 if s.unresumable {
                     // #2595: workspace is gone for good — never offer resume/restart;
                     // point straight at the delete remedy instead.
                     eprintln!(
-                        "tm:   [{}] {} ({}) — DEAD: workspace removed; use [d{}] to remove the record",
-                        s.slot, s.name, s.state, s.slot
+                        "tm:   [{num}] {} ({}) — DEAD: workspace removed; use [d{num}] to remove the record",
+                        s.name, s.state
                     );
                     continue;
                 }
@@ -625,27 +712,26 @@ pub(crate) async fn run_tty_picker(
                 } else {
                     s.state.as_str()
                 };
-                eprintln!("tm:   [{}] {} {} ({})", s.slot, verb, s.name, shown_state);
+                eprintln!("tm:   [{num}] {verb} {} ({shown_state})", s.name);
             }
             eprintln!("tm:   [{new_idx}] launch new session");
             eprintln!("tm:   [d<N>] delete session N (e.g. d1)");
             eprintln!("tm:   [q] quit");
             let first = &sessions[0];
+            let first_num = shown_slot(&sessions, 0);
             if first.deleted {
                 eprintln!("tm: [Enter] is a DELETED slot — type another number, or [q] to quit");
             } else if first.unresumable {
                 eprintln!(
-                    "tm: [Enter] is DEAD (workspace removed) — type [d{}] to remove it, or choose another",
-                    first.slot
+                    "tm: [Enter] is DEAD (workspace removed) — type [d{first_num}] to remove it, or choose another"
                 );
             } else if first_needs_restart {
                 // #2148: no implicit destructive default — an explicit number is required.
                 eprintln!(
-                    "tm: [Enter] does NOT restart — type [{}] to confirm the restart",
-                    first.slot
+                    "tm: [Enter] does NOT restart — type [{first_num}] to confirm the restart"
                 );
             } else {
-                eprintln!("tm: default: [{}] resume most recent", first.slot);
+                eprintln!("tm: default: [{first_num}] resume most recent");
             }
         }
         eprint!("tm: > ");
@@ -705,7 +791,7 @@ pub(crate) async fn run_tty_picker(
                 );
                 eprintln!(
                     "tm: type [{}] to confirm the restart, or [q] to quit.",
-                    sessions[i].slot
+                    shown_slot(&sessions, i)
                 );
                 continue;
             }
@@ -721,7 +807,7 @@ pub(crate) async fn run_tty_picker(
                 );
                 eprintln!(
                     "tm: run [d{}] to remove the record, or choose another session.",
-                    sessions[i].slot
+                    shown_slot(&sessions, i)
                 );
                 continue;
             }
@@ -733,7 +819,7 @@ pub(crate) async fn run_tty_picker(
             PickerDecision::SlotDeleted(i) => {
                 eprintln!(
                     "tm: session [{}] was deleted — choose another number, or [q] to quit.",
-                    sessions[i].slot
+                    shown_slot(&sessions, i)
                 );
                 continue;
             }
