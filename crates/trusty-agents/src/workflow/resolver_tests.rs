@@ -208,6 +208,19 @@ fn serve_once(status_line: &'static str, body: &'static str) -> String {
     format!("http://{addr}/chat/completions")
 }
 
+/// A resolver whose LLM fallback points at a local stub.
+///
+/// Built as a struct literal rather than through a setter: `completions_url`
+/// exists only so these HTTP paths are reachable, and this module is a child
+/// of `resolver`, so it can set the private field without the production type
+/// growing any API surface for tests.
+fn stub_resolver(url: String) -> ConflictResolver {
+    ConflictResolver {
+        api_key: "sk-test".to_string(),
+        completions_url: url,
+    }
+}
+
 /// Regression for the default-production path: an OpenRouter HTTP error must
 /// become `Err`, never an empty merged file. Before this fix every one of
 /// these returned `Ok("")`, and `merge()` wrote zero bytes over both agents'
@@ -238,8 +251,7 @@ async fn llm_resolve_rejects_http_error_bodies() {
     ];
 
     for (status_line, body, code) in cases {
-        let resolver = ConflictResolver::new("sk-test".to_string())
-            .with_completions_url(serve_once(status_line, body));
+        let resolver = stub_resolver(serve_once(status_line, body));
         let got = resolver
             .llm_resolve(Path::new("f.txt"), b"alpha\n", b"beta\n", b"<<<<<<<\n")
             .await;
@@ -262,7 +274,7 @@ async fn llm_resolve_rejects_http_error_bodies() {
 /// failures) must also be rejected — `error_for_status` alone is not enough.
 #[tokio::test]
 async fn llm_resolve_rejects_200_with_no_content() {
-    let resolver = ConflictResolver::new("sk-test".to_string()).with_completions_url(serve_once(
+    let resolver = stub_resolver(serve_once(
         "HTTP/1.1 200 OK",
         r#"{"id":"gen-1","choices":[]}"#,
     ));
@@ -277,7 +289,7 @@ async fn llm_resolve_rejects_200_with_no_content() {
 /// The happy path still works end to end through the HTTP client.
 #[tokio::test]
 async fn llm_resolve_accepts_normal_completion() {
-    let resolver = ConflictResolver::new("sk-test".to_string()).with_completions_url(serve_once(
+    let resolver = stub_resolver(serve_once(
         "HTTP/1.1 200 OK",
         r#"{"choices":[{"message":{"content":"alpha\nbeta\n"}}]}"#,
     ));
@@ -292,7 +304,7 @@ async fn llm_resolve_accepts_normal_completion() {
 /// This is the end-to-end shape of the CRITICAL finding.
 #[tokio::test]
 async fn conflict_with_failing_llm_degrades_to_first_agent_not_empty() {
-    let resolver = ConflictResolver::new("sk-test".to_string()).with_completions_url(serve_once(
+    let resolver = stub_resolver(serve_once(
         "HTTP/1.1 429 Too Many Requests",
         r#"{"error":{"message":"Rate limit exceeded","code":429}}"#,
     ));

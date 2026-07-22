@@ -39,9 +39,20 @@ pub struct ConflictResolver {
     /// OpenRouter API key for the LLM fallback. Empty string disables LLM
     /// resolution (we fall back to first-agent-wins in that case).
     pub api_key: String,
-    /// Chat-completions endpoint. Per-instance rather than a global/env
-    /// lookup so tests can point at a local stub without a process-wide
-    /// mutation that races other tests in the same binary.
+    /// Chat-completions endpoint. Always `OPENROUTER_COMPLETIONS_URL` in
+    /// production; private, with no setter, so it adds no API surface.
+    ///
+    /// It is a field rather than a hardcoded literal because the HTTP error
+    /// paths (401/402/429, malformed body) are exactly where the zero-byte
+    /// truncation lived, and they cannot be exercised without redirecting the
+    /// client at a stub. The tests are a child module and construct the struct
+    /// literal directly. Per-instance rather than a global or env lookup, so
+    /// concurrent tests in the same binary cannot interfere.
+    ///
+    /// This is deliberately NOT a configurable gateway feature. If routing
+    /// production traffic through a self-hosted OpenRouter-compatible endpoint
+    /// is ever wanted, it should ship as a real config key with docs and its
+    /// own coverage — not by widening this.
     completions_url: String,
 }
 
@@ -82,18 +93,6 @@ impl ConflictResolver {
             api_key,
             completions_url: OPENROUTER_COMPLETIONS_URL.to_string(),
         }
-    }
-
-    /// Point the LLM fallback at a different OpenRouter-compatible endpoint.
-    ///
-    /// Why: lets a caller route through a self-hosted gateway, and lets tests
-    /// drive the real HTTP error paths (401/429/malformed body) against a
-    /// local stub. Per-instance, so concurrent tests cannot interfere.
-    /// What: builder-style override of `completions_url`.
-    /// Test: `llm_resolve_rejects_http_error_bodies`.
-    pub fn with_completions_url(mut self, url: String) -> Self {
-        self.completions_url = url;
-        self
     }
 
     /// Merge file trees from all parallel sub-agent results into `out_dir`.
