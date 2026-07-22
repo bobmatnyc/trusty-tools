@@ -46,6 +46,28 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
     std::fs::create_dir_all(&live_wt).unwrap();
     std::fs::create_dir_all(&orphan_wt).unwrap();
 
+    // #3649: the auto-reaper now NEVER deletes an owner-unknown worktree (a
+    // dir with no sentinel, or a legacy zero-byte one). Write a valid
+    // ownership sentinel naming an id that resolves to NO session record at
+    // all, so `resolve_ownerless_with_grace` treats it as provably ownerless
+    // and the reaper still reclaims it — preserving this test's original
+    // "orphan with no matching record is removed" intent under the new
+    // ownership model. #3649 review fix: the sentinel's `created_at` must be
+    // OLDER than `OWNERLESS_GRACE`, or a never-registered-but-freshly-stamped
+    // owner is (correctly) treated as a creation race and spared, not reclaimed.
+    let aged = chrono::Utc::now()
+        - super::worktree_ownership::OWNERLESS_GRACE
+        - chrono::Duration::minutes(1);
+    std::fs::write(
+        orphan_wt.join(super::decommission::WORKTREE_SENTINEL_FILE),
+        serde_json::to_vec(&super::worktree_ownership::WorktreeSentinel {
+            owner_session_id: ManagedSessionId::new(),
+            created_at: aged,
+        })
+        .expect("serialize aged sentinel"),
+    )
+    .expect("write ownerless sentinel");
+
     // Register a live session whose workspace_path is the live worktree. Marked
     // unowned (in-project worktree, not a full clone), mirroring real sessions.
     let _record = mgr
@@ -64,10 +86,11 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
         .await
         .expect("create live record");
 
-    let removed = mgr
+    let outcome = mgr
         .reap_orphaned_worktrees(repos.path())
         .await
         .expect("reap must not error");
+    let removed = outcome.removed;
 
     // The orphan (no matching record) must be removed from disk.
     assert!(
@@ -87,5 +110,10 @@ async fn reap_orphaned_worktrees_removes_orphan_preserves_live() {
     assert!(
         !removed.iter().any(|p| p.ends_with("live-session")),
         "removed set must NOT include the live worktree; got {removed:?}"
+    );
+    assert!(
+        outcome.owner_unknown.is_empty(),
+        "no owner-unknown candidates expected in this fixture; got {:?}",
+        outcome.owner_unknown
     );
 }

@@ -197,6 +197,7 @@ pub(crate) async fn launch(
     let managed_path = trusty_mpm::daemon::managed_routes::inproject::create_session_worktree(
         &project_dir,
         &session_uuid.to_string(),
+        &session_uuid,
     )
     .map_err(|e| anyhow::anyhow!("failed to create session worktree: {e}"))?;
 

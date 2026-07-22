@@ -20,7 +20,7 @@ use trusty_common::migrations::{
 };
 
 use crate::core::{
-    corpus::CorpusStore,
+    corpus::{open_serialized, CorpusStore},
     embed::Embedder,
     indexer::{migrations::JsonCorpusToRedbMigration, CodeIndexer},
     store::{UsearchStore, VectorStore},
@@ -28,17 +28,34 @@ use crate::core::{
 
 use crate::service::persistence::{self, PersistedIndex};
 
-/// Open a `CorpusStore`, retrying once on `DatabaseAlreadyOpen` (issue #840).
+/// Open a `CorpusStore`, serialized per-path and panic-safe, retrying once on
+/// `DatabaseAlreadyOpen` (issues #840, #3659).
 ///
-/// Why: on a fast daemon restart the OS may not have released redb's file lock.
-/// A 50 ms async sleep avoids blocking a tokio worker thread during the retry.
-/// What: calls `CorpusStore::open`; on `DatabaseError::DatabaseAlreadyOpen`
-/// (matched via typed downcast) sleeps 50 ms and retries once. All other
-/// errors surface immediately.
+/// Why: on a fast daemon restart the OS may not have released redb's file lock
+/// (#840). Separately (#3659), warm-boot, lazy-load, and the `POST /indexes`
+/// create/relocate handlers can all reach this same corpus path concurrently
+/// before the index is registered — nothing else in the codebase can see an
+/// in-flight, not-yet-registered restore to prevent it. Routing every open
+/// through `open_serialized` (issue #3659) makes at most one such call
+/// actually touch the file at a time — everyone else awaits the same
+/// outcome — and converts a redb-internal panic (a torn concurrent read
+/// tripping `page_manager`'s internal assertions, distinct from the
+/// classified `DatabaseError` variants #702/#703 already handle) into a
+/// typed `Err` instead of letting it unwind into the caller.
+/// What: calls `CorpusStore::open` via `open_serialized`; on
+/// `DatabaseError::DatabaseAlreadyOpen` (matched via typed downcast) sleeps
+/// 50 ms and retries once, still under the same per-path serialization. All
+/// other errors (including a converted panic) surface immediately.
 /// Test: `corpus_recovery::tests::database_already_open_variant_is_stable`
-/// (pinning) + warm-boot tests in this module.
+/// (pinning) + `core::corpus::open_guard::tests` (the #3659 concurrency +
+/// panic-safety regression coverage) + warm-boot tests in this module.
 async fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
-    match CorpusStore::open(path) {
+    let owned = path.to_path_buf();
+    let first = {
+        let p = owned.clone();
+        open_serialized(&owned, move || CorpusStore::open(&p)).await
+    };
+    match first {
         Ok(store) => Ok(store),
         Err(e) => {
             // Typed downcast — redb error-message rewording cannot disable retry.
@@ -53,7 +70,8 @@ async fn open_corpus_with_retry(path: &Path) -> Result<CorpusStore> {
                     path.display()
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                CorpusStore::open(path)
+                let p = owned.clone();
+                open_serialized(&owned, move || CorpusStore::open(&p)).await
             } else {
                 Err(e)
             }
@@ -367,3 +385,8 @@ fn fresh_store(dim: usize) -> Result<Arc<dyn VectorStore>> {
 // convention already used elsewhere in this crate.
 #[cfg(test)]
 mod tests;
+// Issue #3659: a second test file (rather than growing `tests.rs`, already
+// near the 500-SLOC cap) covering the concurrent-warm-boot-open regression —
+// see the module doc on `open_corpus_with_retry` above.
+#[cfg(test)]
+mod tests_3659;

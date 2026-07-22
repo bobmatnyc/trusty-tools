@@ -821,15 +821,25 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         self.git
             .worktree_add(&base_dir, git_ref, &workspace_path, &branch_name)?;
 
-        // Item 5 mirror (#1845 / #1935): write the SM ownership sentinel so
-        // `remove_session_worktree` can confirm this worktree was TM-created
-        // before ever running `git worktree remove --force` against it.
-        // Best-effort: a failure here is a non-fatal warning — the worktree
-        // was created successfully and decommission's naming-convention
-        // fallback still recognises `.worktrees/<id>` paths.
+        // Item 5 mirror (#1845 / #1935; JSON payload added #3649): write the
+        // SM ownership sentinel so `remove_session_worktree` can confirm this
+        // worktree was TM-created before ever running `git worktree remove
+        // --force` against it, AND so the orphan-GC / `decommission` owner
+        // gate can resolve WHO owns it (#3649, Option B) — the sentinel now
+        // carries a JSON payload naming `session_id` as the owner, rather
+        // than the pre-#3649 zero-byte convention. Best-effort: a failure
+        // here is a non-fatal warning — the worktree was created successfully
+        // and decommission's naming-convention fallback still recognises
+        // `.worktrees/<id>` paths; the tolerant sentinel parser
+        // (`session_manager::worktree_ownership::read_sentinel_owner`) treats
+        // an absent/unwritten sentinel identically to a legacy one
+        // (owner-unknown), never as an error.
         let sentinel =
             workspace_path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
-        if let Err(e) = std::fs::write(&sentinel, b"") {
+        if let Err(e) = std::fs::write(
+            &sentinel,
+            crate::session_manager::worktree_ownership::sentinel_payload_bytes(*session_id),
+        ) {
             tracing::warn!(
                 session = %session_id,
                 path = %workspace_path.display(),

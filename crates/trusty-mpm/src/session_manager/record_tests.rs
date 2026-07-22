@@ -56,6 +56,7 @@ fn record_serde_round_trip() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -92,6 +93,7 @@ fn stopped_state_survives_serde() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -126,6 +128,7 @@ fn decommissioned_state_survives_serde() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -185,6 +188,7 @@ fn record_round_trips_tcode_runtime() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     record.runtime = crate::runtime::RuntimeKind::Tcode;
     let json = serde_json::to_string(&record).expect("serialize");
@@ -248,6 +252,7 @@ fn record_round_trips_ephemeral_true() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -341,6 +346,7 @@ fn record_round_trips_scrollback_fields() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -379,6 +385,7 @@ fn record_round_trips_workspace_owned_true() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -445,10 +452,75 @@ fn record_round_trips_deliverable_id() {
         deliverable_id: Some(did),
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     let json = serde_json::to_string(&record).expect("serialize");
     let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back.deliverable_id, Some(did));
+}
+
+#[test]
+fn record_without_worktree_owner_field_defaults_to_none() {
+    // Why (#3649): every pre-#3649 record has no `worktree_owner` key; it MUST
+    // deserialize as `None` (owner-unknown) — the safe default that never
+    // auto-enables GC deletion or blocks a caller-gated decommission.
+    let legacy_json = serde_json::json!({
+        "id": ManagedSessionId::new(),
+        "tmux_name": "tmpm-legacy",
+        "cwd": "/tmp",
+        "task": "legacy task",
+        "state": "active",
+        "created_at": Utc::now().to_rfc3339(),
+        "last_activity_at": null,
+        "workspace_path": null,
+        "repo_url": null,
+        "branch": null,
+        "pending_decision": null,
+        "proposed_default": null
+    })
+    .to_string();
+    let back: SessionRecord = serde_json::from_str(&legacy_json).expect("deserialize legacy");
+    assert!(
+        back.worktree_owner.is_none(),
+        "a record with no `worktree_owner` key must default to None (owner-unknown)"
+    );
+}
+
+#[test]
+fn record_round_trips_worktree_owner() {
+    // Why (#3649): a session provisioned after this field existed must
+    // persist its own id as `worktree_owner` so the owner gate and orphan-GC
+    // can resolve ownership from the registry without a disk read.
+    let owner = ManagedSessionId::new();
+    let record = SessionRecord {
+        id: owner,
+        tmux_name: "tmpm-owned".into(),
+        cwd: PathBuf::from("/tmp"),
+        task: "task".into(),
+        state: ManagedSessionState::Active,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: Default::default(),
+        worktree_owner: Some(owner),
+    };
+    let json = serde_json::to_string(&record).expect("serialize");
+    let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back.worktree_owner, Some(owner));
 }
 
 #[test]

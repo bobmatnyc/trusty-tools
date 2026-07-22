@@ -71,6 +71,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     }
 }
 
@@ -99,6 +100,7 @@ fn session_no_repo() -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     }
 }
 

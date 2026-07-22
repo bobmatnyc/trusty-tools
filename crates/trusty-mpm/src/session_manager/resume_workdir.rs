@@ -255,6 +255,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             injection_status: Default::default(),
+            worktree_owner: None,
         }
     }
 

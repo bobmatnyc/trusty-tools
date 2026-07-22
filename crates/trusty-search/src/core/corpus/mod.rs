@@ -25,11 +25,13 @@ pub mod contrib;
 mod corpus_ops;
 mod kg_ops;
 mod meta_ops;
+pub(crate) mod open_guard;
 mod store_impl;
 mod tables;
 #[cfg(test)]
 mod tests;
 mod types;
 
+pub(crate) use self::open_guard::open_serialized;
 pub use self::store_impl::CorpusStore;
 pub use self::types::PersistedKgNode;

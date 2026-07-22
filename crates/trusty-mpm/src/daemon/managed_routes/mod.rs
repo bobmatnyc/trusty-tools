@@ -839,7 +839,7 @@ pub async fn decommission_managed_session(
     let pre = mgr.get(&id).await.ok();
     let pre_owned = pre.as_ref().map(|r| r.workspace_owned).unwrap_or(false);
     let pre_ws = pre.and_then(|r| r.workspace_path);
-    match mgr.decommission(&id).await {
+    match mgr.decommission(&id, None).await {
         Ok((record, workspace_removed)) => {
             // workspace_path_was: only meaningful for owned sessions (those where
             // `decommission_with_root` might have removed the directory).

@@ -33,6 +33,7 @@ pub mod snapshot;
 pub mod store;
 pub mod task_inject;
 pub mod workspace_guard;
+pub(crate) mod worktree_ownership;
 
 #[cfg(test)]
 mod tests;

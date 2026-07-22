@@ -141,6 +141,12 @@ pub enum ManagedError {
          state with `tmux list-panes`"
     )]
     PaneGone(String, String),
+
+    /// A `caller`-identified decommission refused because the target's
+    /// worktree has a KNOWN, non-ownerless owner that disagrees with the
+    /// caller (#3649). `(caller, owner, target)`.
+    #[error("session {0} refused to decommission {2}'s worktree — owned by session {1}")]
+    WorktreeOwnerMismatch(ManagedSessionId, ManagedSessionId, ManagedSessionId),
 }
 
 // [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the

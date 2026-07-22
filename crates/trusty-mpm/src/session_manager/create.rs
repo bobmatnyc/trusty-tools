@@ -243,6 +243,15 @@ impl SessionManager {
             deliverable_id: None,
             pane_id,
             injection_status: Default::default(),
+            // #3649: owner-unknown by default. The two real provisioning call
+            // sites (`spawn_managed_cloned`, `spawn_managed_inproject` in
+            // `daemon::managed_routes::lifecycle`) call
+            // `SessionManager::set_worktree_owner` immediately after this
+            // constructor returns, mirroring the existing `set_workspace_owned`
+            // post-creation-setter precedent rather than threading yet another
+            // parameter through every `create_with_id`/`create_with_reserved_name`
+            // call site.
+            worktree_owner: None,
         };
 
         // Persist the record. On failure the freshly-created tmux session has

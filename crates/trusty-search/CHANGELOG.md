@@ -5,6 +5,55 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **Panic-safe, serialized redb corpus open on concurrent warm-boot (issue
+  #3659).** Warm-boot (eager restore), lazy-load, `POST /indexes`
+  create/relocate, and the reindex atomic-swap re-open could all reach
+  `CorpusStore::open` for the SAME `index.redb` at once before an index is
+  registered — nothing serialized them. A torn concurrent read of a
+  half-written file doesn't always surface as a classified `DatabaseError`
+  (the #702/#703 guarantee); it can trip an internal assertion inside redb's
+  `page_manager` and panic. `core::corpus::open_guard::open_serialized` now
+  serializes every corpus open per-canonical-path (at most one opener in
+  flight for a given file) and converts any panic into a typed `Err` via
+  `spawn_blocking` + `catch_unwind`, so the existing migration/rebuild retry
+  ladder always sees a normal `Result`. A wedged opener (e.g. a TCC-denied
+  volume, issue #718) times out instead of hanging its caller forever, and
+  the path is then marked permanently refused so later callers fail fast
+  rather than queue behind it.
+- **Idle-evicted chunk/BM25/entity caches now actually return memory to the
+  OS (issue #3657).** Production saw RSS climb 20.3 → 26.4 GiB over ~5 hours
+  toward an OOM-kill while the daemon repeatedly logged `evicted N in-memory
+  chunks after 60s idle` — the maps were genuinely emptied (every value is
+  owned data, never `Arc`-aliased elsewhere), but the Linux release binary's
+  default glibc allocator never handed the freed small-object heap back to
+  the OS. Both the idle-eviction ticker and the issue #2846 memory-pressure
+  reclaim sweep now call `libc::malloc_trim(0)` on a `spawn_blocking` task
+  (Linux-only; no-op elsewhere — and moved off the tokio worker thread since
+  a trim over a many-GiB fragmented heap can hold the malloc arena lock for
+  tens to hundreds of milliseconds) right after a bulk clear, and log the
+  observed RSS before/after so "evicted N chunks" claims are independently
+  verifiable instead of assumed.
+- **`TRUSTY_MEMORY_LIMIT_MB` auto-tune now respects cgroup memory ceilings
+  on Linux, including NESTED systemd/Docker/Kubernetes cgroups (issue #3657
+  follow-up on #2846).** RAM detection previously read only `/proc/meminfo`
+  (the HOST's total physical RAM), so on a host with far more RAM than a
+  cgroup allows this one process, the 25%-of-RAM auto-tuned soft ceiling
+  could land ABOVE the actual enforced cgroup limit — silently defeating the
+  #2846 memory-pressure enforcement ticker before the kernel's cgroup
+  OOM-killer fires. Detection now resolves this process's own cgroup path
+  from `/proc/self/cgroup` (not just the cgroupfs root — a systemd-managed
+  service like `trusty-search.service` lives at a nested path such as
+  `/system.slice/trusty-search.service`, which the root's own `memory.max`/
+  `memory.limit_in_bytes` does not reflect) and reads the ceiling at that
+  nested location for both cgroup v2 (`memory.max`) and v1
+  (`memory.limit_in_bytes`), using whichever ceiling (cgroup or host RAM) is
+  smaller.
+
+---
 ## [0.38.0] — 2026-07-21
 
 Ships the epic #3524 slice 6 default flip. Depends on trusty-embedderd-py

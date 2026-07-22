@@ -11,6 +11,7 @@ crates/trusty-common/src/embedder/mod.rs	595
 crates/trusty-git-analytics/src/collect/collector.rs	766
 crates/trusty-mpm/src/daemon/api.rs	1272
 crates/trusty-mpm/src/daemon/api/control_routes.rs	543
-crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	836
+crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	840
+crates/trusty-mpm/src/session_manager/tests.rs	1503
 crates/trusty-search/src/main.rs	658
 crates/trusty-search/src/service/walker.rs	1167

@@ -653,10 +653,26 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // gate (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.
                 let repos_root = managed_routes::inproject::repos_root();
                 match mgr.reap_orphaned_worktrees(&repos_root).await {
-                    Ok(removed) if !removed.is_empty() => {
-                        info!("orphan-GC reaped {} orphaned worktree dir(s)", removed.len());
+                    Ok(outcome) => {
+                        if !outcome.removed.is_empty() {
+                            info!(
+                                "orphan-GC reaped {} orphaned worktree dir(s)",
+                                outcome.removed.len()
+                            );
+                        }
+                        // #3649: owner-unknown worktrees are NEVER auto-deleted —
+                        // log the count so operators see them accumulating and
+                        // know to run `tm doctor` / `tm session prune-worktrees
+                        // --dry-run` for manual review, instead of silently
+                        // wondering why disk usage keeps growing.
+                        if !outcome.owner_unknown.is_empty() {
+                            info!(
+                                "orphan-GC left {} owner-unknown worktree dir(s) untouched \
+                                 (run `tm doctor` to review, #3649)",
+                                outcome.owner_unknown.len()
+                            );
+                        }
                     }
-                    Ok(_) => {}
                     Err(e) => tracing::warn!("orphan-GC worktree sweep failed: {e}"),
                 }
 

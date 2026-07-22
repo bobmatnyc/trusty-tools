@@ -176,7 +176,7 @@ impl SessionManager {
                 );
                 continue;
             }
-            match self.decommission(id).await {
+            match self.decommission(id, None).await {
                 Ok((rec, _removed)) => {
                     info!(
                         id = %id,

@@ -83,6 +83,7 @@ fn stub_record(
         claude_session_id: None, scrollback_path: None,
         last_cwd: None, deliverable_id: None,
         pane_id: None, injection_status: Default::default(),
+            worktree_owner: None,
     }
 }
 

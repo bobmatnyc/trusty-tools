@@ -321,7 +321,7 @@ async fn run_one_sweep<P: IdleVerdictProvider>(
             ReaperDecision::Decommission => {
                 info!(id = %record.id, name = %record.tmux_name, "idle-reaper: done threshold reached; decommissioning session");
                 state.remove(&record.id);
-                if let Err(e) = manager.decommission(&record.id).await {
+                if let Err(e) = manager.decommission(&record.id, None).await {
                     warn!(id = %record.id, "idle-reaper: decommission failed: {e}");
                 }
             }

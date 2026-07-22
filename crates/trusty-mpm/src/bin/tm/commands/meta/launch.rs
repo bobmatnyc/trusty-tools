@@ -285,7 +285,7 @@ pub(crate) async fn launch_and_wait(
         .capture_pane(&record.id, TRANSCRIPT_LINES)
         .await
         .unwrap_or_default();
-    if let Err(e) = mgr.decommission(&record.id).await {
+    if let Err(e) = mgr.decommission(&record.id, None).await {
         warn!(tmux = %record.tmux_name, "meta run: decommission failed (best-effort): {e}");
     }
 

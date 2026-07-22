@@ -11807,6 +11807,7 @@ dependencies = [
  "ignore",
  "include_dir",
  "indicatif 0.17.11",
+ "libc",
  "linfa",
  "linfa-clustering",
  "lru 0.16.4",

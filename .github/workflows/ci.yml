@@ -206,6 +206,23 @@ jobs:
       # natively by fastembed-rs via get_cache_dir() and also by the
       # resolve_fastembed_cache_dir() helper in trusty-common.
       FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
+      # 179+ statically-linked test binaries with full default debuginfo
+      # exhausted runner disk (~9 GB of binaries + the DWARF-driven share of
+      # ~18 GB of never-swept intermediate .rcgu.o codegen objects); Linux
+      # ELF embeds DWARF directly in the binary, unlike the macOS proxy.
+      # line-tables-only keeps file:line info in panic backtraces while
+      # dropping the bulk of debug records. See #3668.
+      #
+      # The workspace Cargo.toml has no [profile.test] override, so `cargo
+      # test` normally inherits dev's implicit debug level — but the `test`
+      # profile is the one actually selected by `cargo test`, and cargo
+      # honors CARGO_PROFILE_TEST_DEBUG directly for it (verified locally:
+      # this var alone changes the emitted debug info, no
+      # CARGO_PROFILE_DEV_DEBUG needed). Scoped to this job only: the
+      # clippy job's `--all-targets` run was checked and confirmed to build
+      # under the check-only `dev` profile with zero linked executables and
+      # zero .rcgu.o output, so it does not share this disk pressure.
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v5
         with:
@@ -516,6 +533,25 @@ jobs:
             rm -rf "${CACHE_DIR}"
             echo "::warning::fastembed model pre-seed failed (rc=${rc}; HuggingFace rate-limit/403 or network issue) — continuing WITHOUT a pre-seeded cache. This is non-fatal: cargo test --workspace never needs the real model (non-ignored tests use a MockEmbedder via seed_shared_embedder_with_mock(), issue #850; the tests that need the real model are #[ignore]-gated and are not run in this job). See issue #2554 for details."
           fi
+
+      # Build phase only (no test execution yet): links all ~179 test
+      # binaries so the intermediate .rcgu.o codegen objects below can be
+      # swept once linking is done and before the (disk-heavier) test
+      # execution phase runs. See #3668.
+      - name: cargo test --workspace --no-run (build phase)
+        run: cargo test --workspace --exclude trusty-mpm-gui --exclude trusty-code-gui --exclude trusty-agents-ui --no-run
+
+      # Sweep intermediate per-codegen-unit object files (#3668): once a
+      # test binary is linked, its .rcgu.o inputs are dead weight — cargo
+      # never reclaims them itself, and they made up ~18 GB of the runner's
+      # disk exhaustion. Verified locally that deleting them does not cause
+      # a subsequent `cargo test` invocation to relink (cargo's fingerprint
+      # tracking does not depend on these surviving).
+      - name: Sweep intermediate .rcgu.o codegen objects
+        run: |
+          echo "Before sweep:"; du -sh target/debug 2>/dev/null || true
+          find target/debug/deps -name '*.rcgu.o' -delete
+          echo "After sweep:"; du -sh target/debug 2>/dev/null || true
 
       - name: cargo test --workspace
         # Unset CI so trusty-common's update::check_throttled runs the

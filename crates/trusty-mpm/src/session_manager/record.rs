@@ -380,6 +380,32 @@ pub struct SessionRecord {
     /// tracked delivery status.
     #[serde(default)]
     pub injection_status: InjectionStatus,
+
+    /// The managed session that owns this record's on-disk worktree, if the
+    /// ownership registry established it (#3649, Option B).
+    ///
+    /// Why: three independent worktree stores exist (`.base/.worktrees/<id>`
+    /// clone-based, in-project `<repo>/.worktrees/<name>`, and the
+    /// out-of-scope harness `.claude/worktrees/`) and NOTHING previously
+    /// recorded who is entitled to reclaim a given worktree. The orphan-GC
+    /// sweep and a peer session's `decommission` call both need a fast,
+    /// non-filesystem way to ask "does this session own this worktree?"
+    /// without re-reading a sentinel file for every check. This field is set
+    /// to `Some(self.id)` immediately after a session's workspace is
+    /// provisioned via [`super::decommission::WORKTREE_SENTINEL_FILE`]'s
+    /// JSON-payload sentinel (`workspace.rs::provision_in`,
+    /// `inproject.rs::create_session_worktree`) — see
+    /// [`super::SessionManager::set_worktree_owner`].
+    ///
+    /// `#[serde(default)]` (→ `None`) keeps every pre-#3649 record
+    /// deserializable: legacy records load as OWNER-UNKNOWN. This is the safe
+    /// direction — an owner-unknown worktree is NEVER auto-reclaimed by the
+    /// orphan-GC and NEVER blocks a `caller`-gated decommission (the gate
+    /// only refuses when a KNOWN owner disagrees with the caller); it simply
+    /// surfaces forever via the existing `prune --dry-run`/doctor flows for
+    /// explicit human action (zero-migration by design — see ADR-0020).
+    #[serde(default)]
+    pub worktree_owner: Option<ManagedSessionId>,
 }
 
 /// Error types for session record operations.
