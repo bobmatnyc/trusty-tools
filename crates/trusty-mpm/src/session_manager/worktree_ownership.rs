@@ -13,11 +13,21 @@
 //! `daemon::managed_routes::inproject`), [`SentinelOwner`] +
 //! [`read_sentinel_owner`] (the TOLERANT parse: absent/empty/unparsable all
 //! read as [`SentinelOwner::Unknown`], never an error), and
-//! [`SessionManager::resolve_ownerless`] / [`SessionManager::set_worktree_owner`]
-//! (the store-backed "is this owner reclaimable?" check and the registry
-//! setter, respectively).
+//! [`SessionManager::resolve_ownerless`] / [`SessionManager::resolve_ownerless_with_grace`]
+//! / [`SessionManager::set_worktree_owner`] (the store-backed "is this owner
+//! reclaimable?" checks and the registry setter, respectively).
+//!
+//! Creation-race hardening (#3649 review fix): both real sentinel WRITE sites
+//! write the sentinel (naming the new session as owner) BEFORE that session's
+//! [`super::record::SessionRecord`] is persisted to the store — real I/O
+//! (git clone/worktree-add, `prepare_session`) happens in between. A
+//! not-yet-persisted owner is therefore indistinguishable from a
+//! genuinely-deleted one by a plain store lookup. [`OWNERLESS_GRACE`] plus
+//! [`SessionManager::resolve_ownerless_with_grace`] close that window: an
+//! absent-owner sentinel younger than the grace period is treated as
+//! "not yet provably ownerless" (skip, never reclaim) rather than ownerless.
 //! Test: `sentinel_owner_*` (parse matrix) and `resolve_ownerless_*` (terminal
-//! vs. live vs. absent owner) below.
+//! vs. live vs. absent-but-young vs. absent-and-aged owner) below.
 
 use std::path::Path;
 
@@ -86,17 +96,21 @@ pub(crate) fn sentinel_payload_bytes(owner: ManagedSessionId) -> Vec<u8> {
 /// crash a GC sweep or a decommission call. "Owner unknown" is also the
 /// SAFE default: an unknown owner is never auto-deleted and never blocks a
 /// `caller`-gated decommission (see `super::decommission`'s owner gate).
-/// What: [`Known`](Self::Known) wraps the resolved [`ManagedSessionId`];
-/// [`Unknown`](Self::Unknown) covers every other case (absent file, empty
-/// file, or a file whose content does not parse as [`WorktreeSentinel`]).
+/// What: [`Known`](Self::Known) wraps the resolved [`ManagedSessionId`] AND
+/// the sentinel's `created_at` (needed by [`SessionManager::resolve_ownerless_with_grace`]
+/// to distinguish a not-yet-persisted owner from a genuinely-deleted one —
+/// see the module doc); [`Unknown`](Self::Unknown) covers every other case
+/// (absent file, empty file, or a file whose content does not parse as
+/// [`WorktreeSentinel`] — since `WorktreeSentinel` has no optional fields, a
+/// `Known` result ALWAYS carries a valid timestamp too, by construction).
 /// Test: `sentinel_owner_absent_file_is_unknown`,
 /// `sentinel_owner_empty_file_is_unknown`,
 /// `sentinel_owner_garbage_file_is_unknown`,
 /// `sentinel_owner_round_trips_valid_payload`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SentinelOwner {
-    /// The sentinel parsed and named an owning session.
-    Known(ManagedSessionId),
+    /// The sentinel parsed and named an owning session, created at this time.
+    Known(ManagedSessionId, DateTime<Utc>),
     /// Absent, empty, or unparsable — legacy or corrupted; owner unknown.
     Unknown,
 }
@@ -122,10 +136,36 @@ pub(crate) fn read_sentinel_owner(worktree_path: &Path) -> SentinelOwner {
         return SentinelOwner::Unknown;
     }
     match serde_json::from_slice::<WorktreeSentinel>(&bytes) {
-        Ok(payload) => SentinelOwner::Known(payload.owner_session_id),
+        Ok(payload) => SentinelOwner::Known(payload.owner_session_id, payload.created_at),
         Err(_) => SentinelOwner::Unknown,
     }
 }
+
+/// Grace window (#3649 review fix): how young an ABSENT-owner sentinel must
+/// be before the orphan-GC is willing to treat it as provably ownerless.
+///
+/// Why: both real sentinel WRITE sites write the sentinel BEFORE the owning
+/// session's `SessionRecord` is persisted — real I/O (git clone/worktree-add,
+/// `prepare_session`) runs in between (`daemon::managed_routes::lifecycle::
+/// spawn_managed_cloned` and `spawn_managed_inproject`). An orphan-GC sweep
+/// landing in that window would see "owner not found" and, absent this
+/// grace window, wrongly conclude the brand-new worktree is ownerless and
+/// reclaim it out from under its own provisioning. 10 minutes is a fixed,
+/// self-contained constant (session_manager does not depend on the daemon's
+/// configurable `ORPHAN_GC_INTERVAL_SECS`, which defaults to 60s and can be
+/// overridden via `TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS`) chosen to comfortably
+/// exceed both that default sweep cadence AND the realistic worst-case
+/// provisioning duration (clone + prepare_session), by roughly an order of
+/// magnitude — a deliberately generous margin rather than a tight multiple
+/// of a value this module cannot see.
+/// What: 10 minutes. Applies ONLY to the "owner not found in the store"
+/// case; a FOUND owner in a terminal state is provably ownerless regardless
+/// of the sentinel's age (its existence is direct evidence the session did
+/// exist and has since finished, never a mid-creation race).
+/// Test: `resolve_ownerless_with_grace_spares_recent_absent_owner`,
+/// `resolve_ownerless_with_grace_reclaims_aged_absent_owner`,
+/// `resolve_ownerless_with_grace_true_for_terminal_owner_regardless_of_age`.
+pub(crate) const OWNERLESS_GRACE: chrono::Duration = chrono::Duration::minutes(10);
 
 impl SessionManager {
     /// Mark `id`'s record as OWNING its own worktree (#3649).
@@ -194,6 +234,38 @@ impl SessionManager {
         }
     }
 
+    /// [`Self::resolve_ownerless`], hardened with the [`OWNERLESS_GRACE`]
+    /// window for the sentinel-driven orphan-GC path (#3649 review fix).
+    ///
+    /// Why: unlike the `decommission` owner gate (which only ever calls
+    /// `resolve_ownerless` for an owner id it already fetched a live record
+    /// for — see `known_owner_of`'s doc), the orphan-GC sweep resolves
+    /// ownership PURELY from an on-disk sentinel it has no other proof about.
+    /// A `get()`-not-found result there is genuinely ambiguous: it could mean
+    /// the owner was deleted (safe to reclaim), OR that the owner's
+    /// `SessionRecord` simply has not been persisted YET because the
+    /// sentinel-write and the record-persist are not atomic (see the module
+    /// doc). Gating the not-found case on the sentinel's own age resolves
+    /// that ambiguity without needing to fix the creation ordering itself.
+    /// What: identical to [`Self::resolve_ownerless`] for a FOUND owner
+    /// (terminal → `true`, live/resumable → `false`, unconditionally on age).
+    /// For a NOT-found owner: `true` (ownerless, reclaim) only when
+    /// `sentinel_created_at` is OLDER than [`OWNERLESS_GRACE`]; `false`
+    /// (not yet provably ownerless, skip) while still within the window.
+    /// Test: `resolve_ownerless_with_grace_spares_recent_absent_owner`,
+    /// `resolve_ownerless_with_grace_reclaims_aged_absent_owner`,
+    /// `resolve_ownerless_with_grace_true_for_terminal_owner_regardless_of_age`.
+    pub(crate) async fn resolve_ownerless_with_grace(
+        &self,
+        owner: ManagedSessionId,
+        sentinel_created_at: DateTime<Utc>,
+    ) -> bool {
+        match self.get(&owner).await {
+            Ok(record) => record.state.is_terminal(),
+            Err(_) => Utc::now() - sentinel_created_at > OWNERLESS_GRACE,
+        }
+    }
+
     /// Resolve the KNOWN owner of `record`'s worktree, if any (#3649).
     ///
     /// Why: the `decommission` owner gate needs a single "does this target
@@ -217,7 +289,7 @@ impl SessionManager {
         }
         let ws = record.workspace_path.as_deref()?;
         match read_sentinel_owner(ws) {
-            SentinelOwner::Known(owner) => Some(owner),
+            SentinelOwner::Known(owner, _created_at) => Some(owner),
             SentinelOwner::Unknown => None,
         }
     }
@@ -260,12 +332,22 @@ mod tests {
     fn sentinel_owner_round_trips_valid_payload() {
         let dir = tempfile::tempdir().expect("tempdir");
         let owner = ManagedSessionId::new();
+        let before = Utc::now();
         std::fs::write(
             dir.path().join(WORKTREE_SENTINEL_FILE),
             sentinel_payload_bytes(owner),
         )
         .expect("write sentinel");
-        assert_eq!(read_sentinel_owner(dir.path()), SentinelOwner::Known(owner));
+        match read_sentinel_owner(dir.path()) {
+            SentinelOwner::Known(got_owner, created_at) => {
+                assert_eq!(got_owner, owner);
+                assert!(
+                    created_at >= before && created_at <= Utc::now(),
+                    "created_at must be freshly stamped at write time"
+                );
+            }
+            SentinelOwner::Unknown => panic!("expected Known, got Unknown"),
+        }
     }
 
     // ── resolve_ownerless (#3649) ────────────────────────────────────────────
@@ -358,6 +440,55 @@ mod tests {
         assert!(
             !mgr.resolve_ownerless(id).await,
             "a Stopped (resumable) owner must NEVER be treated as ownerless"
+        );
+    }
+
+    // ── resolve_ownerless_with_grace (#3649 review fix) ──────────────────────
+
+    /// A sentinel naming an owner with NO record at all, but stamped RECENTLY
+    /// (well within [`OWNERLESS_GRACE`]), must NOT be treated as ownerless —
+    /// this is the exact creation-race window the sentinel-before-record
+    /// ordering opens up.
+    #[tokio::test]
+    async fn resolve_ownerless_with_grace_spares_recent_absent_owner() {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let mgr = SessionManager::new(dir.path(), FakeTmuxDriver::new())
+            .await
+            .expect("SessionManager::new");
+        let never_existed = ManagedSessionId::new();
+        assert!(
+            !mgr.resolve_ownerless_with_grace(never_existed, Utc::now())
+                .await,
+            "a freshly-stamped absent owner must NOT be treated as ownerless \
+             (mid-creation race, #3649)"
+        );
+    }
+
+    /// A sentinel naming an owner with no record, stamped OLDER than
+    /// [`OWNERLESS_GRACE`], IS provably ownerless — this preserves the
+    /// legitimate "owner was purged" cleanup path.
+    #[tokio::test]
+    async fn resolve_ownerless_with_grace_reclaims_aged_absent_owner() {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let mgr = SessionManager::new(dir.path(), FakeTmuxDriver::new())
+            .await
+            .expect("SessionManager::new");
+        let never_existed = ManagedSessionId::new();
+        let aged = Utc::now() - OWNERLESS_GRACE - chrono::Duration::minutes(1);
+        assert!(
+            mgr.resolve_ownerless_with_grace(never_existed, aged).await,
+            "an absent owner older than the grace window must be reclaimable"
+        );
+    }
+
+    /// A FOUND terminal-state owner is ownerless regardless of the
+    /// sentinel's age — the grace window only ever gates the not-found case.
+    #[tokio::test]
+    async fn resolve_ownerless_with_grace_true_for_terminal_owner_regardless_of_age() {
+        let (mgr, id, _dir) = manager_with_record(ManagedSessionState::Decommissioned).await;
+        assert!(
+            mgr.resolve_ownerless_with_grace(id, Utc::now()).await,
+            "a terminal owner must be ownerless even with a freshly-stamped sentinel"
         );
     }
 

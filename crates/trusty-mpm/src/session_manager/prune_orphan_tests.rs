@@ -291,10 +291,30 @@ async fn prune_orphaned_worktrees_skips_owner_unknown() {
     );
 }
 
+/// Write a sentinel with an explicit `created_at`, bypassing
+/// `sentinel_payload_bytes`'s "now" default — needed to simulate a sentinel
+/// old enough to fall outside [`crate::session_manager::worktree_ownership::OWNERLESS_GRACE`]
+/// (#3649 review fix regression coverage).
+fn aged_sentinel_bytes(
+    owner: ManagedSessionId,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> Vec<u8> {
+    serde_json::to_vec(
+        &crate::session_manager::worktree_ownership::WorktreeSentinel {
+            owner_session_id: owner,
+            created_at,
+        },
+    )
+    .expect("serialize aged sentinel")
+}
+
 /// A candidate whose sentinel names an owner with NO resolvable session
-/// record (deleted / never registered) is provably ownerless and IS
-/// reclaimed (#3649 item 5 — "sentinel owner id does not resolve to any
-/// record").
+/// record (deleted / never registered) AND whose sentinel is OLDER than the
+/// creation-race grace window is provably ownerless and IS reclaimed (#3649
+/// item 5 — "sentinel owner id does not resolve to any record"; #3649 review
+/// fix — an aged timestamp is required here so this test exercises the
+/// legitimate "owner was purged" cleanup path rather than the creation-race
+/// bug a freshly-stamped absent owner would have masked).
 #[tokio::test]
 async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
     let store_dir = tempfile::tempdir().unwrap();
@@ -314,9 +334,12 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
         .join("ownerless-gone");
     std::fs::create_dir_all(&wt).unwrap();
     let never_registered_owner = ManagedSessionId::new();
+    let aged = chrono::Utc::now()
+        - crate::session_manager::worktree_ownership::OWNERLESS_GRACE
+        - chrono::Duration::minutes(1);
     std::fs::write(
         wt.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
-        crate::session_manager::worktree_ownership::sentinel_payload_bytes(never_registered_owner),
+        aged_sentinel_bytes(never_registered_owner, aged),
     )
     .expect("write sentinel");
 
@@ -327,12 +350,62 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
 
     assert!(
         outcome.removed.iter().any(|p| p == &wt),
-        "a candidate whose owner has no resolvable record must be reclaimed; got {:?}",
+        "a candidate whose owner has no resolvable record AND whose sentinel \
+         is aged past the grace window must be reclaimed; got {:?}",
         outcome.removed
     );
     assert!(
         !wt.exists(),
         "the reclaimed worktree must be removed from disk"
+    );
+}
+
+/// A candidate whose sentinel names an owner with NO resolvable session
+/// record, but whose sentinel was stamped RECENTLY (within the creation-race
+/// grace window), must NOT be reclaimed — this is the exact bug the #3649
+/// review fix closes: the sentinel is written before the owning session's
+/// `SessionRecord` is persisted, so a `get()`-not-found result during that
+/// window is ambiguous between "deleted" and "not created yet", and a
+/// freshly-stamped sentinel must resolve that ambiguity toward "not yet".
+#[tokio::test]
+async fn prune_orphaned_worktrees_spares_recent_unregistered_owner() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repos = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let wt = repos
+        .path()
+        .join("owner")
+        .join("repo")
+        .join(".worktrees")
+        .join("mid-creation-race");
+    std::fs::create_dir_all(&wt).unwrap();
+    let not_yet_persisted_owner = ManagedSessionId::new();
+    std::fs::write(
+        wt.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
+        crate::session_manager::worktree_ownership::sentinel_payload_bytes(not_yet_persisted_owner),
+    )
+    .expect("write sentinel");
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        !outcome.removed.iter().any(|p| p == &wt),
+        "a candidate whose owner is absent but whose sentinel is fresh must \
+         NEVER be reclaimed (mid-creation race, #3649); got {:?}",
+        outcome.removed
+    );
+    assert!(
+        wt.exists(),
+        "the mid-creation-race worktree must survive on disk"
     );
 }
 

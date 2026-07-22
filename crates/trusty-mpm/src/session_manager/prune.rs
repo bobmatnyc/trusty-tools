@@ -633,18 +633,23 @@ impl SessionManager {
     ///   unparsable content) → NEVER delete; counted in
     ///   [`OrphanSweepOutcome::owner_unknown`] so it keeps surfacing via
     ///   `tm doctor` / `--dry-run` until a human acts (zero-migration, ADR-0020).
-    /// - Owner KNOWN → delete only if [`SessionManager::resolve_ownerless`]
-    ///   says the owner is provably ownerless (no resolvable record, or a
-    ///   terminal-state record) AND `git worktree list` on the owning checkout
-    ///   agrees the path is a real worktree ([`git_worktree_list_agrees`]) —
-    ///   a disagreement is skipped conservatively, never deleted.
+    /// - Owner KNOWN → delete only if
+    ///   [`SessionManager::resolve_ownerless_with_grace`] says the owner is
+    ///   provably ownerless (a resolvable record in a terminal state, OR no
+    ///   resolvable record AND the sentinel is older than
+    ///   [`super::worktree_ownership::OWNERLESS_GRACE`] — see that constant's
+    ///   doc for why an absent-but-YOUNG owner is a creation race, not a
+    ///   deletion) AND `git worktree list` on the owning checkout agrees the
+    ///   path is a real worktree ([`git_worktree_list_agrees`]) — a
+    ///   disagreement is skipped conservatively, never deleted.
     ///
     /// Test: `prune_orphaned_worktrees_removes_orphan`,
     /// `prune_orphaned_worktrees_spares_active`,
     /// `prune_orphaned_worktrees_store_snapshot_blocks_deletion` (item 1),
     /// `prune_orphaned_worktrees_skips_owner_unknown`,
     /// `prune_orphaned_worktrees_reclaims_terminal_owner`,
-    /// `prune_orphaned_worktrees_spares_live_owner` (#3649).
+    /// `prune_orphaned_worktrees_spares_live_owner`,
+    /// `prune_orphaned_worktrees_spares_recent_unregistered_owner` (#3649).
     pub async fn prune_orphaned_worktrees(
         &self,
         repos_root: &std::path::Path,
@@ -687,12 +692,13 @@ impl SessionManager {
                     );
                     owner_unknown.push(candidate);
                 }
-                SentinelOwner::Known(owner) => {
-                    if !self.resolve_ownerless(owner).await {
+                SentinelOwner::Known(owner, created_at) => {
+                    if !self.resolve_ownerless_with_grace(owner, created_at).await {
                         info!(
                             path = %candidate.display(),
                             owner = %owner,
-                            "prune-worktrees: owner is still live/resumable — skipping (#3649)"
+                            "prune-worktrees: owner is still live/resumable, or the sentinel \
+                             is too young to rule out a creation race — skipping (#3649)"
                         );
                         continue;
                     }
