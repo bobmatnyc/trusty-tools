@@ -87,6 +87,8 @@ fn profile_show_then_set_round_trips() {
             "ada@example.com",
             "--timezone",
             "UTC",
+            "--location",
+            "New York, NY, USA",
         ])
         .env("HOME", home.path())
         .output()
@@ -110,4 +112,8 @@ fn profile_show_then_set_round_trips() {
         "got:\n{after_stdout}"
     );
     assert!(after_stdout.contains("UTC"), "got:\n{after_stdout}");
+    assert!(
+        after_stdout.contains("New York, NY, USA"),
+        "got:\n{after_stdout}"
+    );
 }

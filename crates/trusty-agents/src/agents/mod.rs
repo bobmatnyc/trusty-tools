@@ -27,7 +27,7 @@ pub mod prompt_builder;
 pub mod registry;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 // Re-export the config data shapes so `crate::agents::<Type>` keeps resolving
 // for every external consumer after the #358 file split.
@@ -52,3 +52,14 @@ pub use model::{FALLBACK_MODEL, ModelSource, resolve_model};
 pub(crate) use loader::agent_config_path;
 #[cfg(test)]
 pub(crate) use model::agent_env_suffix;
+
+// #3555 delegate-resolve follow-up: `agents_dir_candidates` (the
+// `[TAGENT_CONFIG_DIR`/project-local, `$HOME` fallback]` tier list
+// `AgentConfig::by_name` searches) and `agent_name_resolves` (the matching
+// existence predicate) are needed outside `agents::loader` — by
+// `tools::delegate::DelegateToAgentTool`'s pre-flight validation and by
+// `runtime::tool_registry::build_assistant_tier_registry`, so both use the
+// SAME resolution tiers the actual spawn uses instead of a hand-rolled,
+// cwd-only directory. `loader` itself stays a private submodule; only these
+// two items are widened to crate visibility.
+pub(crate) use loader::{agent_name_resolves, agents_dir_candidates};

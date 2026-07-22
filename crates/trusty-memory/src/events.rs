@@ -267,6 +267,37 @@ impl DaemonEvent {
 /// covers the discard branch; existing `AppState` construction tests cover
 /// the happy and tempdir-fallback paths.
 pub(crate) fn open_activity_log_with_fallback(data_root: &Path) -> Arc<ActivityLog> {
+    open_activity_log_with_fallback_in(data_root, &std::env::temp_dir())
+}
+
+/// Same as [`open_activity_log_with_fallback`], but the tempdir-fallback
+/// ROOT is an explicit parameter rather than always `std::env::temp_dir()`
+/// (issue #3434).
+///
+/// Why: the discard-path test needs to force BOTH the primary data root and
+/// the tempdir fallback to be unwritable. The previous version of that test
+/// did this by mutating the process-global `TMPDIR` env var for the
+/// duration of the test — but `cargo test` runs every test in this crate's
+/// lib binary as threads of ONE process, so any OTHER test that calls
+/// `tempfile::tempdir()` (which reads `$TMPDIR`) while the mutation was live
+/// would itself fail with `PermissionDenied`, for a reason entirely
+/// unrelated to its own code. Splitting the fallback root out into a
+/// parameter removes the shared mutable global from this path entirely —
+/// mirroring the same "thread it through instead of mutating the env var"
+/// fix already applied to `trusty-code`'s `catchup::pm_catchup_context`
+/// (#3003) and `session::memory_sink::TurnMemorySink` for the identical
+/// class of bug — so the test needs no lock, no restore-on-panic guard, and
+/// cannot leak state into any concurrently-running test.
+/// What: tries `ActivityLog::open(data_root)`; on error, retries against
+/// `<fallback_root>/trusty-memory-activity-<pid>/`; if that also fails,
+/// returns `ActivityLog::discard()`. Identical behaviour to
+/// [`open_activity_log_with_fallback`], which is now a thin wrapper passing
+/// `std::env::temp_dir()` as `fallback_root`.
+/// Test: `open_activity_log_with_fallback_returns_discard_when_unwritable`.
+pub(crate) fn open_activity_log_with_fallback_in(
+    data_root: &Path,
+    fallback_root: &Path,
+) -> Arc<ActivityLog> {
     match ActivityLog::open(data_root) {
         Ok(log) => Arc::new(log),
         Err(primary_err) => {
@@ -275,7 +306,7 @@ pub(crate) fn open_activity_log_with_fallback(data_root: &Path) -> Arc<ActivityL
                 data_root.display()
             );
             let fallback =
-                std::env::temp_dir().join(format!("trusty-memory-activity-{}", std::process::id()));
+                fallback_root.join(format!("trusty-memory-activity-{}", std::process::id()));
             match ActivityLog::open(&fallback) {
                 Ok(log) => Arc::new(log),
                 Err(fallback_err) => {

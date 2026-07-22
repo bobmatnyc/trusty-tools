@@ -95,6 +95,24 @@ repos:
         pass_filenames: false
         always_run: true
 
+  # Leaked AI-generation / tool-call artifact lint (issue #3579). Fails the
+  # commit when a raw `</content>`/`</invoke>`/`</parameter>`/
+  # `<function_calls>`/`</function_calls>` fragment is found bare on a line
+  # anywhere in a *.css/*.scss/*.less file, or as the last line of a
+  # *.md/*.mdx/*.txt/*.rst file (outside an unterminated fenced code block).
+  # Grandfathered pre-existing instances live in
+  # .generation-artifact-allowlist.tsv (ratchet). Runs against the whole
+  # tracked tree (pass_filenames: false), matching the line-cap hook's
+  # holistic scan.
+  - repo: local
+    hooks:
+      - id: generation-artifact-lint
+        name: "Leaked AI-generation / tool-call artifact lint"
+        entry: scripts/check_generation_artifacts.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
   # Empirical commit-effort scoring — appends Effort/Effort-Score/
   # Effort-Breakdown trailers to commit messages. Non-destructive: never
   # blocks a commit; computation failures log a warning and exit 0.

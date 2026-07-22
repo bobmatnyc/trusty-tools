@@ -95,11 +95,21 @@ pub(super) fn inject_trusty_search_mcp(
 /// when the daemon is reachable, always return the derived id so the stub is
 /// pinned even when the daemon is down, and never propagate an error (the
 /// session must still launch).
-/// What: delegates verbatim to
-/// [`trusty_common::search_index::ensure_project_indexed`].
+/// What: delegates to [`trusty_common::search_index::ensure_project_indexed`]
+/// with `allow_sensitive_path: false` (issue #2914). A trusty-mpm session
+/// workspace is always either the user's checked-out repository or a
+/// `.worktrees/<uuid>` leaf inside it — never a legitimate OS-temp path — so
+/// this caller, unlike trusty-code's task-start caller, has no reason to
+/// bypass the daemon's `SENSITIVE_PATH_PREFIXES` denylist. Before this fix the
+/// bypass was unconditional, so a session-launch test standing in a `tempfile`
+/// fixture for `project_root` (e.g. a workspace under `/var/folders/…`)
+/// silently registered that throwaway directory against whatever trusty-search
+/// daemon happened to be running on the developer/CI machine — the root cause
+/// of the ephemeral-index leak this issue reports.
 /// Test: `register_project_index_returns_derived_id` (derivation + daemon-down
-/// graceful path) in `tests.rs`; the promoted logic is unit-tested in
+/// graceful path) and `register_project_index_never_bypasses_sensitive_path_denylist`
+/// (issue #2914 regression) in `tests.rs`; the promoted logic is unit-tested in
 /// `trusty_common::search_index::tests`.
 pub(super) fn register_project_index(project_root: &Path) -> Option<String> {
-    trusty_common::search_index::ensure_project_indexed(project_root)
+    trusty_common::search_index::ensure_project_indexed(project_root, false)
 }

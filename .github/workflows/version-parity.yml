@@ -1,0 +1,47 @@
+# Version-parity drift gate for the trusty-tools workspace (issue #3366).
+#
+# Detects "unpublished source drift under an already-published version
+# number": a crate whose Cargo.toml version is already live on crates.io, but
+# whose local src/ tree no longer matches what was actually published under
+# that version — the defect class that turned `cargo publish -p trusty-mpm
+# --dry-run` into a release blocker (6 "symbol not found" errors) when
+# trusty-common and trusty-agents-common each drifted this way.
+#
+# Runs on PUSH TO MAIN ONLY (no pull_request trigger), per the issue's own
+# proposed design: this check compares against the LIVE crates.io registry,
+# so its result is only meaningful for what actually landed on main — a
+# feature branch's crate versions haven't been decided yet, and running a
+# registry-dependent check on every PR (including ones from parallel agent
+# worktrees) would be noisy without being actionable. Catching drift right
+# after it merges (a red commit status on main) is the goal: a merge-time
+# finding instead of a release-time surprise.
+name: Version parity
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: version-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version-parity:
+    name: Publish-version parity (issue #3366)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # MSRV floor is 1.91 (root Cargo.toml rust-version), matching ci.yml.
+      - name: Install Rust toolchain (1.91)
+        uses: dtolnay/rust-toolchain@1.91
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: version-parity
+
+      - name: Run version-parity guard
+        run: bash scripts/check-version-parity.sh

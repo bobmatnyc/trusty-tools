@@ -10,7 +10,7 @@
 //! `root_path` when they were parked at startup; if the path is gone they
 //! fall back gracefully.
 //!
-//! Test: `restore_index_on_demand_*` — unit tests in `lazy_loader::tests` drive
+//! Test: `get_or_load_index_*` — unit tests in `lazy_loader::tests` drive
 //! `get_or_load_index` with a mock restore_fn; integration coverage comes from
 //! the warm-boot integration tests.
 

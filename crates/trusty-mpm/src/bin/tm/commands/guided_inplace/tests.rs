@@ -437,6 +437,7 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
         id: TEST_ID.to_string(),
         name: "tm-test".to_string(),
         state: "stopped".to_string(),
+        persisted_state: None,
         workspace_path: Some(tmp.path().to_string_lossy().to_string()),
         repo_url: None,
         branch: None,
@@ -454,6 +455,8 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
         unresumable: false,
         stale_assets: false,
         attached: false,
+        slot: 0,
+        deleted: false,
     };
     let client = reqwest::Client::new();
 

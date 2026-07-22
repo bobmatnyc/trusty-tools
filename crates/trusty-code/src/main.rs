@@ -33,6 +33,7 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 
 use trusty_code::llm::{DispatchingLlmClient, LlmClientTrait};
+use trusty_code::plugins::is_valid_namespaced_name;
 use trusty_code::run_task::{ExitCode, RunTaskParams, execute_run_task};
 
 mod cli;
@@ -603,27 +604,46 @@ async fn run_serve(
     process::exit(1);
 }
 
-/// Validate that `agent_name` contains only safe filesystem characters.
+/// Validate that `agent_name` contains only safe filesystem characters —
+/// either a plain name, or a `<plugin>:<name>` namespaced plugin agent
+/// dispatch name (issue #3539/#3547).
 ///
 /// Why: The agent name is joined into a filesystem path
 /// (`<agents_dir>/<agent_name>.md`). Without this guard a crafted name such
 /// as `../../etc/passwd` escapes the agents directory and enables path
 /// traversal. Restricting to `[a-zA-Z0-9_-]` is safe, predictable, and covers
-/// every real agent name in use.
-/// What: Returns `Ok(())` when every character is ASCII alphanumeric, `_`, or
-/// `-`, and the name is non-empty. Returns `Err` with a descriptive message
-/// otherwise.
-/// Test: `validate_agent_name_rejects_traversal` and
-/// `validate_agent_name_accepts_valid` in this module.
+/// every real plain agent name in use. A namespaced plugin agent name
+/// (`<plugin>:<name>`) previously had no valid shape at all here — any name
+/// containing `:` was rejected outright, so a plugin agent could never be
+/// dispatched via `tcode run-task` even though `agents::resolve_agent`
+/// already resolves it (code-critic PR #3547 review, HIGH 4).
+/// What: a namespaced shape is checked FIRST via
+/// `trusty_code::plugins::is_valid_namespaced_name` (exactly two
+/// `:`-separated segments, each `[a-z0-9-]+` and ≤64 chars — the SAME
+/// charset `agents::protocol::validate_agent_name` already enforces for the
+/// disk-catalog write path, reused rather than re-derived) and accepted
+/// immediately if it matches; this is strictly stricter than the plain-name
+/// charset below (no need to also run the looser check). Otherwise, returns
+/// `Ok(())` when every character is ASCII alphanumeric, `_`, or `-`, and the
+/// name is non-empty (the original plain-name contract, unchanged). `Err`
+/// with a descriptive message otherwise.
+/// Test: `validate_agent_name_rejects_traversal`,
+/// `validate_agent_name_accepts_valid`,
+/// `validate_agent_name_accepts_namespaced_plugin_agent`,
+/// `validate_agent_name_rejects_namespaced_traversal` in this module.
 fn validate_agent_name(agent_name: &str) -> Result<()> {
+    if is_valid_namespaced_name(agent_name) {
+        return Ok(());
+    }
     if agent_name.is_empty()
         || !agent_name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         anyhow::bail!(
-            "invalid agent name '{agent_name}': \
-             agent names must be non-empty and contain only [a-zA-Z0-9_-]"
+            "invalid agent name '{agent_name}': agent names must be non-empty and contain \
+             only [a-zA-Z0-9_-], or be a namespaced <plugin>:<name> where both segments are \
+             [a-z0-9-]+ (<= 64 chars)"
         );
     }
     Ok(())
@@ -844,6 +864,34 @@ mod tests {
         assert!(
             validate_agent_name("A").is_ok(),
             "single ASCII letter must pass"
+        );
+    }
+
+    /// A well-formed `<plugin>:<name>` namespaced plugin agent dispatch
+    /// name is accepted (issue #3547 HIGH 4 — this is what actually enables
+    /// `tcode run-task <plugin>:<name>` to reach `resolve_agent` at all;
+    /// previously every namespaced name was rejected here before `run-task`
+    /// ever looked up an agent).
+    ///
+    /// Test: this test.
+    #[test]
+    fn validate_agent_name_accepts_namespaced_plugin_agent() {
+        assert!(validate_agent_name("my-plugin:reviewer").is_ok());
+        assert!(validate_agent_name("a:b").is_ok());
+    }
+
+    /// A traversal or malformed payload disguised as a namespaced name is
+    /// still rejected (issue #3547 HIGH 4 — accepting the `<plugin>:<name>`
+    /// shape must not reopen the traversal guard it sits next to).
+    ///
+    /// Test: this test.
+    #[test]
+    fn validate_agent_name_rejects_namespaced_traversal() {
+        assert!(validate_agent_name("my-plugin:../../etc/passwd").is_err());
+        assert!(validate_agent_name("../../etc:reviewer").is_err());
+        assert!(
+            validate_agent_name("my-plugin:a:b").is_err(),
+            "extra colon must be rejected"
         );
     }
 }

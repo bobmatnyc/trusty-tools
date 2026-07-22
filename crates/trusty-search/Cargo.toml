@@ -1,6 +1,6 @@
 [package]
 name = "trusty-search"
-version = "0.35.0"
+version = "0.38.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -54,7 +54,7 @@ path = "src/bin/trusty-embedderd.rs"
 
 [dependencies]
 # ── Shared trusty-common crates ────────────────────────────────────────────
-trusty-common = { version = "0.23.0", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client", "bm25", "migrations", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli"] }  # `config-cli` (#2405): implies `credentials`, giving both the shared `.env.local` loader `load_env_local_once` (retiring trusty-search's ad hoc dotenvy call) AND the embeddable `ConfigKeysCommand` nested under `trusty-search config keys …`  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164); `bm25` is the canonical lexical index (issue #156); `migrations` provides the shared schema-migration kernel (issue #179); `cli-help` provides the shared declarative CLI help + "did you mean?" suggester (issue #216); `update-check` provides throttled crates.io update notification; `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478); `console-metrics` provides ConsoleMetricsReport for the trusty-console dashboard (issue #1104)
+trusty-common = { version = "0.24.1", default-features = false, features = ["axum-server", "mcp", "embedder", "embedder-test-support", "symgraph", "monitor-tui", "embedder-client", "bm25", "migrations", "cli-help", "update-check", "bug-capture", "console-metrics", "config-cli"] }  # `config-cli` (#2405): implies `credentials`, giving both the shared `.env.local` loader `load_env_local_once` (retiring trusty-search's ad hoc dotenvy call) AND the embeddable `ConfigKeysCommand` nested under `trusty-search config keys …`  # `symgraph` enables only the contracts surface — no tree-sitter, no `links` conflict; `monitor-tui` powers `trusty-search monitor tui`; `embedder-client` provides EmbedderClient/RemoteEmbedderClient/UdsEmbedderClient (issue #164); `bm25` is the canonical lexical index (issue #156); `migrations` provides the shared schema-migration kernel (issue #179); `cli-help` provides the shared declarative CLI help + "did you mean?" suggester (issue #216); `update-check` provides throttled crates.io update notification; `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478); `console-metrics` provides ConsoleMetricsReport for the trusty-console dashboard (issue #1104)
 
 # ── Bundled sidecars ─────────────────────────────────────────────────────────
 # Why: the trusty-embedderd binary is a required runtime dependency (issue
@@ -78,9 +78,14 @@ trusty-common = { version = "0.23.0", default-features = false, features = ["axu
 # glibc-2.38-bound bundled ORT libs into the bundled trusty-embedderd binary.
 # The `bundled-ort`/`load-dynamic`/`cuda` features below forward this crate's
 # own ORT-mode selection down to `trusty-embedderd/*` explicitly.
-trusty-embedderd = { path = "../trusty-embedderd", version = "0.3.8", default-features = false, features = [
+trusty-embedderd = { path = "../trusty-embedderd", version = "0.3.10", default-features = false, features = [
     "http-server",
 ] }
+# Opt-in Python/MPS embedding sidecar launcher (epic #3524, slices 2-4). Pulls
+# in NO torch/ORT — it is a lightweight uv/venv bootstrapper + launcher used
+# only when `TRUSTY_EMBEDDER=python` selects it (DEFAULT-OFF). Building it does
+# not require a venv; that is all runtime.
+trusty-embedderd-py = { path = "../trusty-embedderd-py", version = "0.1.1" }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-search (single-owner-per-binary); the
 # standalone `trusty-console` crate is its sole producer.
@@ -130,6 +135,11 @@ redb = { workspace = true }
 redb2 = { package = "redb", version = "2.6" }
 dashmap = "5"
 petgraph = "0.6"
+# Lock-free `Arc` hot-swap backing `SwitchableEmbedder` (epic #3524 slice 6):
+# lets the embedder-supervisor swap the active backend (ort -> python) at
+# runtime without every embed-pool worker's captured `Arc<dyn Embedder>`
+# going stale.
+arc-swap = { workspace = true }
 lru = "0.16"
 # Clustering deps are only compiled when the `clustering` feature is enabled.
 # Why: linfa + ndarray pull in a deep BLAS/numerical stack that significantly
@@ -229,6 +239,11 @@ nix = { version = "0.29", features = ["signal", "user", "fs"] }
 [dev-dependencies]
 tempfile = "3"
 serial_test = "3"
+# test-util enables tokio's paused-clock (`tokio::time::pause` /
+# `start_paused = true`), used by the graceful-python-bootstrap orchestrator
+# retry test (epic #3524 slice 6, PR 3/5) so the linear backoff between
+# attempts advances instantly instead of sleeping in real time.
+tokio = { version = "1", features = ["test-util"] }
 # Why: tower::ServiceExt::oneshot is used in the unit tests for the new
 # `service::concurrency` and `service::metrics` modules (issue #41 Phase 1)
 # to exercise router behaviour without binding a TCP port.

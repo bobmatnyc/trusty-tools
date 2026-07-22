@@ -459,17 +459,108 @@ fn ensure_base_checkout_rejects_stale_non_bare_directory() {
         result.is_err(),
         "a stale non-repo directory must be rejected loudly, not silently reused: {result:?}"
     );
-    // #1937 item 1: the error must be ACTIONABLE — name the exact path and the
-    // `rm -rf` command the operator should run to allow re-provisioning.
+    // #1937 item 1: the error must be ACTIONABLE — name the exact path and a
+    // recovery command the operator can run to allow re-provisioning. #3605:
+    // that command must be a non-destructive quarantine, never a delete.
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.contains(&base_dir.display().to_string()),
         "error must name the exact stale base path, got: {msg}"
     );
+    assert_no_destructive_hint(&msg);
+}
+
+/// Assert an operator-facing recovery message offers a QUARANTINE and contains
+/// no command that recursively destroys the shared base checkout (#3605).
+///
+/// Why: on 2026-07-21 a `<project>/.base` was destroyed and ~70 worktrees were
+/// orphaned machine-wide, every one then emitting phantom git-discovery test
+/// failures. The most plausible trigger was `stale_base_dir_error`'s own
+/// suggested recovery: a literal, copy-pasteable `rm -rf <path>`. The threat
+/// model is that this message is read by an autonomous agent that executes the
+/// suggestion verbatim, so the string itself is the vulnerability and a
+/// string-level assertion is the correct regression guard.
+/// What: fails if the message names any recursive-delete form, and requires the
+/// non-destructive `mv`-aside quarantine hint plus the shared-ownership warning
+/// that was missing when the destructive hint was followed.
+/// Test: used by `ensure_base_checkout_rejects_stale_non_bare_directory`,
+/// `fake_ensure_base_checkout_rejects_stale_non_bare_directory`, and
+/// `stale_base_dir_error_suggests_quarantine_not_deletion`.
+fn assert_no_destructive_hint(msg: &str) {
+    for forbidden in ["rm -rf", "rm -fr", "rm -r ", "remove_dir_all", "rmdir"] {
+        assert!(
+            !msg.contains(forbidden),
+            "recovery message must never suggest a recursive delete of the SHARED \
+             base checkout (#3605), but it contains {forbidden:?}: {msg}"
+        );
+    }
     assert!(
-        msg.contains("rm -rf"),
-        "error must include the `rm -rf` recovery command, got: {msg}"
+        msg.contains("    mv "),
+        "recovery message must offer the non-destructive quarantine command, got: {msg}"
     );
+    assert!(
+        msg.contains("SHARED"),
+        "recovery message must warn that the base is shared across sessions, got: {msg}"
+    );
+}
+
+/// #3605 regression guard: `stale_base_dir_error`'s message must recover the
+/// operator WITHOUT naming a destructive command.
+///
+/// Why: the two backend-level tests above reach this message through a full
+/// `ensure_base_checkout` call; this one pins the message contract directly at
+/// its source so a future edit to the string is caught even if the backends'
+/// call paths change. It also pins the parts a purely negative assertion would
+/// miss: the message must still leave the operator able to recover (a safe but
+/// useless hint is not an improvement), and the quarantine destination must be
+/// a concrete, distinct sibling path — not the base path itself, which would
+/// make the suggested `mv` a no-op.
+/// What: builds the error for a non-empty, non-bare directory and asserts the
+/// message names the path, carries the quarantine + SHARED warning, offers no
+/// recursive delete, and targets a `.stale-` sibling destination that differs
+/// from the source path.
+/// Test: this function IS the test.
+#[test]
+fn stale_base_dir_error_suggests_quarantine_not_deletion() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let base_dir = root.path().join("project").join(".base");
+    std::fs::create_dir_all(&base_dir).unwrap();
+    std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let err = super::base_lock::stale_base_dir_error(&base_dir)
+        .expect("a non-empty, non-bare base dir must produce an error");
+    let msg = err.to_string();
+
+    assert!(
+        msg.contains(&base_dir.display().to_string()),
+        "error must name the exact stale base path, got: {msg}"
+    );
+    assert_no_destructive_hint(&msg);
+
+    let quarantine = super::base_lock::stale_base_quarantine_path(&base_dir);
+    assert_ne!(
+        quarantine, base_dir,
+        "quarantine destination must differ from the source, or the `mv` is a no-op"
+    );
+    assert!(
+        quarantine
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(".stale-")),
+        "quarantine destination must be a timestamped `.stale-` sibling, got: {}",
+        quarantine.display()
+    );
+    assert_eq!(
+        quarantine.parent(),
+        base_dir.parent(),
+        "quarantine must be a sibling so the `mv` is a same-filesystem rename"
+    );
+
+    // An EMPTY or absent base dir is safe to clone into and must not error.
+    let empty = root.path().join("project").join(".base-empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(super::base_lock::stale_base_dir_error(&empty).is_none());
+    assert!(super::base_lock::stale_base_dir_error(&root.path().join("nope")).is_none());
 }
 
 /// #1937 item 3: `FakeGitBackend`'s idempotency/stale-detection must match
@@ -486,8 +577,8 @@ fn ensure_base_checkout_rejects_stale_non_bare_directory() {
 /// What: pre-seeds `base_dir` with ONLY a stray `HEAD` file (no `config`
 /// `bare = true` marker — the fake's stand-in for "not a valid bare checkout")
 /// and asserts `FakeGitBackend::ensure_base_checkout` returns an actionable
-/// `Err` naming the path and the `rm -rf` recovery command, exactly like the
-/// real backend — not a silent `Ok` reuse.
+/// `Err` naming the path and the non-destructive quarantine recovery command,
+/// exactly like the real backend — not a silent `Ok` reuse.
 /// Test: this function IS the test.
 #[test]
 fn fake_ensure_base_checkout_rejects_stale_non_bare_directory() {
@@ -506,9 +597,10 @@ fn fake_ensure_base_checkout_rejects_stale_non_bare_directory() {
     );
     let msg = result.unwrap_err().to_string();
     assert!(
-        msg.contains(&base_dir.display().to_string()) && msg.contains("rm -rf"),
-        "fake error must be actionable (path + `rm -rf`), got: {msg}"
+        msg.contains(&base_dir.display().to_string()),
+        "fake error must be actionable (must name the path), got: {msg}"
     );
+    assert_no_destructive_hint(&msg);
 }
 
 /// #1937 item 3 (positive path): a FRESH `FakeGitBackend::ensure_base_checkout`

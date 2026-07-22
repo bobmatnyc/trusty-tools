@@ -595,7 +595,7 @@
   .bulk-count {
     font-size: var(--trusty-fs-sm);
     font-weight: 600;
-    color: var(--trusty-text);
+    color: var(--trusty-text-primary);
     margin-right: var(--trusty-space-1);
   }
   .bulk-confirm-text {
@@ -611,7 +611,7 @@
   }
   .btn-ghost:hover:not(:disabled) {
     background: var(--trusty-surface-hover, rgba(0, 0, 0, 0.06));
-    color: var(--trusty-text);
+    color: var(--trusty-text-primary);
   }
 
   /* Per-row checkbox column */

@@ -41,47 +41,72 @@ When invoked, this skill:
 With no argument and more than one paused session present, list them
 newest-first (session id, time elapsed, topic) and confirm which to resume.
 
-## Implementation: `tm session catchup`
+## Implementation: `mcp__trusty-mpm__session_context_catchup`
 
-Resume delegates to the real CLI command rather than hand-parsing snapshot
-files, so the merge/validation logic stays in one place:
+Resume calls the MCP tool rather than shelling out to `git log`/`git status`
+and hand-parsing snapshot files, so the merge/validation logic stays in one
+place and returns typed JSON instead of scraped text:
 
-```bash
-tm session catchup                  # current project only
-tm session catchup --all-projects   # also scan machine-wide registered projects
+```
+mcp__trusty-mpm__session_context_catchup(
+  project_dir: <absolute path to the current project root>,
+  session_id: <the current session id, when known — narrows resolved_snapshot>,
+  all_projects: false,   # true also scans machine-wide registered projects
+  full: false             # true ignores the watermark, returns full history
+)
 ```
 
-`catchup` renders a unified, newest-first work-context digest for the current
-project. After running it: reconcile against `git log --oneline -5` /
-`git status`, present the digest, confirm which session to resume from if more
-than one is listed, restore the todo state, and confirm with the user before
-continuing work.
+`project_dir` is **required** — the MCP transport forwards no cwd, so pass the
+current project's absolute path explicitly. The tool returns:
+
+```json
+{
+  "sessions": [{ "format", "paused_at", "summary", "in_progress", "next_steps",
+                 "git_context", "tmux_window", "source_file" }],
+  "recent_commits": [{ "sha", "msg", "author", "ts" }],
+  "recent_memory": [{ "title", "tags" }],
+  "resolved_snapshot": "<path or null>",
+  "watermark_advanced": false
+}
+```
+
+Present the digest from these fields directly — summary, completed/in-progress
+work, next steps, git context — confirm which session to resume from if more
+than one is listed, restore the todo state from it, and confirm with the user
+before continuing work. Cross-check `recent_commits` against your own
+knowledge of the repo state if anything looks stale.
 
 > **Watermark note:** a manual `/tm-session-resume` is a *read*, not a state
-> transition — it does **not** advance the internal watermark used by
+> transition — `watermark_advanced` in the tool's response is always `false`.
+> It does **not** advance the internal watermark used by
 > auto-inject-on-session-start. Only the automatic injection path does. This is
-> intentional.
+> intentional — calling the tool repeatedly is always safe.
+
+The CLI `tm session catchup` command still works unchanged for scripted /
+non-MCP callers — the tool is additive, not a replacement.
 
 ## Re-aligning the Tmux Window
 
-If the catchup digest surfaces a **Tmux Window** line (recorded at pause time as
-`session_name:window_index:window_id`, e.g. `main:2:@7`), realign to the
-originating window so resumed work lands where it left off. Parse the string on
-`:` and use only the `session_name` and `window_index`:
+If the resumed session's `tmux_window` field is non-null (recorded at pause
+time as `session_name:window_index:window_id`, e.g. `main:2:@7`), realign to
+the originating window so resumed work lands where it left off. This is a PM
+bash step — only the PM's own shell has tmux client access, the MCP tool
+never touches tmux. Parse the string on `:` and use only the `session_name`
+and `window_index`:
 
 ```bash
-# The digest line looks like: **Tmux Window:** main:2:@7
+# tmux_window field value: main:2:@7
 if [ -n "$TMUX" ]; then
   # inside tmux → select the recorded window (idempotent no-op if already there)
-  tmux select-window -t 'main:2'   # <session_name>:<window_index> from the digest
+  tmux select-window -t 'main:2'   # <session_name>:<window_index> from the field
 else
   # not inside tmux → just report it; do not attempt to attach
   echo "Recorded tmux window: main:2:@7 (start tmux to re-align)"
 fi
 ```
 
-This step is a **no-op** when no `Tmux Window` line is present (older snapshots
-or sessions paused outside tmux). `tmux select-window` is safe and idempotent —
+This step is a **no-op** when `tmux_window` is `null` (older snapshots or
+sessions paused outside tmux). `tmux select-window` is safe and idempotent —
 if you are already on that window it does nothing. Never force-create windows or
 attach sessions here; only align within the current tmux client.
 

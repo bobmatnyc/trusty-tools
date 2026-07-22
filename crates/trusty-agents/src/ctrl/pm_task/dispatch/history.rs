@@ -18,13 +18,17 @@ use anyhow::{Context, Result};
 use crate::events::{self, Event};
 use crate::intent::{IntentClass, classify_intent};
 use crate::llm;
+use crate::rbac::ServiceTier;
 use crate::subprocess::SubprocessAgentRunner;
+use crate::tools::pm_bridge::PmBridgeTool;
+use crate::tools::pm_bridge_backend::ProcessPmBridge;
 use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
 
 use super::super::super::claude_cli::run_pm_task_via_claude_cli;
 use super::super::super::config::{
-    SessionOverrides, apply_credential_routing, build_deployment_footer, build_user_context_prefix,
-    recall_project_memories, resolve_agent_config, resolve_overridden_credentials,
+    AgentIdentity, SessionOverrides, apply_credential_routing, build_deployment_footer,
+    build_user_context_prefix, recall_project_memories, resolve_agent_config,
+    resolve_overridden_credentials,
 };
 use super::super::super::handlers::{
     AddProjectTool, CreateDirTool, ListProjectsTool, MoveFileTool, RemoveProjectTool,
@@ -139,7 +143,13 @@ pub async fn run_pm_task_with_history(
 
     // Build augmented system prompt with optional user profile context.
     let system_prompt: String = {
-        let base = build_user_context_prefix(&pm_cfg.system_prompt.content);
+        let identity = AgentIdentity {
+            agent_name: &pm_cfg.agent.name,
+            model: &pm_cfg.agent.model,
+            runner: &format!("{:?}", pm_cfg.agent.runner),
+            provider: creds.label(),
+        };
+        let base = build_user_context_prefix(&pm_cfg.system_prompt.content, &identity);
 
         let runner_label = match pm_cfg.agent.runner {
             crate::agents::RunnerKind::Subprocess => "subprocess",
@@ -328,6 +338,14 @@ pub async fn run_pm_task_with_history(
     registry.register(Arc::new(
         DelegateToAgentTool::new(runner).with_config_dir(config_dir.clone()),
     ));
+    // #3052 PR B (lane 3): the opaque tm<->tcode bridge, distinct from lane 2
+    // (`delegate_to_agent` above). RBAC-locked to deny ReadOnly + Analytics.
+    registry.register(Arc::new(
+        PmBridgeTool::new(Arc::new(ProcessPmBridge::from_project(
+            project_path.to_path_buf(),
+        )))
+        .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics]),
+    ));
     let stop_pending: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let active_project_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
     registry.register(Arc::new(AddProjectTool));
@@ -366,8 +384,31 @@ pub async fn run_pm_task_with_history(
         crate::tools::tm_tools::register_tm_tools_for_state_dir(&mut registry, &state_dir);
     }
 
+    // system_status epic (#3052): ctrl (the default coordination persona)
+    // gets the same on-demand subsystem-health tool as the `assistant`
+    // persona (`ctrl/pm_task/dispatch/persona.rs`). Unlike the persona path,
+    // ctrl's registry here is not gated by a `[tools].allow` list, so
+    // registering it is sufficient to make it callable. `with_resolved_endpoint`
+    // (not `new`) so a `/model` override applied above is reflected instead
+    // of silently re-derived from the on-disk TOML — see
+    // `tools::system_status` module docs.
+    registry.register(Arc::new(
+        crate::tools::system_status::SystemStatusTool::with_resolved_endpoint(
+            pm_cfg.agent.name.clone(),
+            pm_cfg.agent.model.clone(),
+            pm_cfg.agent.runner,
+        ),
+    ));
+
     let adapter = llm::adapter::adapter_for_model(&pm_cfg.agent.model);
     let registry_arc = Arc::new(registry);
+    // code-critic BLOCK finding 2: this path backs Slack/Telegram/API, all of
+    // which can carry a real, less-than-`All` `ServiceTier` in
+    // `overrides.user` — without this, `dispatch_gated` (which only checks a
+    // NAME allowlist, never `restricted_tiers`) would let a ReadOnly/Analytics
+    // caller invoke `dispatch_task` regardless of its RBAC gate. See
+    // `allowed_tool_names_for`'s docs.
+    let allowed_tools = allowed_tool_names_for(&registry_arc, overrides.user.as_ref());
     let llm_t0 = std::time::Instant::now();
     tracing::info!(
         model = %pm_cfg.agent.model,
@@ -380,7 +421,7 @@ pub async fn run_pm_task_with_history(
         &*adapter,
         initial_messages,
         registry_arc,
-        None,
+        allowed_tools,
         pm_cfg.llm.temperature,
         pm_cfg.llm.max_tokens,
         4,
@@ -407,3 +448,76 @@ pub async fn run_pm_task_with_history(
     });
     Ok(content)
 }
+
+/// Compute `chat_with_tools_gated`'s `allowed_tools` argument from an
+/// optional caller `UserIdentity`.
+///
+/// Why (code-critic BLOCK, epic #3052 PR B finding 2): `chat_with_tools_gated`'s
+/// dispatch loop calls `registry.dispatch_gated`, which enforces ONLY a name
+/// allowlist (`llm/tool_loop/mod.rs`) — it never consults
+/// `ToolExecutor::restricted_tiers()` / `UserIdentity::can_access_tier`, so
+/// passing `None` unconditionally (the pre-fix behavior) let ANY caller
+/// invoke a tier-restricted tool like `dispatch_task` regardless of its RBAC
+/// gate. This path backs Slack/Telegram/API, and Slack plumbs a real,
+/// authenticated `ServiceTier` into `overrides.user`
+/// (`slack::rbac`/`slack::handlers`), so a ReadOnly/Analytics Slack user
+/// could otherwise reach `dispatch_task`. Mirrors the identical
+/// `registry.filter_tools_for_user` computation
+/// `ctrl::pm_task::dispatch::persona::run_pm_task_with_persona` already uses
+/// for the same property (see `persona.rs`'s `allowed_by_tier`).
+///
+/// Reconciliation with #3576 (`fix(trusty-agents): enforce RBAC tier and
+/// agent-declared tool scopes at dispatch`, merged to main as this fix
+/// landed): #3576 closed two DIFFERENT enforcement gaps — `PythonToolPlugin`
+/// never overriding `restricted_tiers()` (#3236), and agent-declared
+/// `[tools].scopes` never being consulted inside
+/// `persona::filter_persona_tool_names` (#3208). Neither touches
+/// `dispatch_gated`, `dispatch_for_user`, or this (`run_pm_task_with_history`)
+/// code path — #3208's fix is entirely local to `persona.rs`'s OWN filter
+/// function, which this file does not call. So this fix is NOT redundant
+/// with, nor superseded by, #3576: it remains the ONLY RBAC-tier
+/// enforcement on the `run_pm_task_with_history` (ctrl/Slack/Telegram/API)
+/// dispatch path, complementary to (not overlapping with) #3576's
+/// persona-path and `PythonToolPlugin` fixes. `dispatch_task` also needs no
+/// `ToolExecutor::scope()` override for #3208's purposes — it is a native
+/// in-process tool (like `delegate_to_agent`/`run_bash`), gated entirely by
+/// name/glob allowlist + RBAC tier, exactly the category #3576's own scope
+/// doc comment says is unaffected by scope-pattern gating.
+/// What: `None` (no `UserIdentity` — the local REPL/CLI path never sets
+/// `overrides.user`) returns `None`, meaning NO filtering: every registered
+/// tool stays callable, preserving the existing unauthenticated-CLI
+/// behavior exactly (the RBAC `ServiceTier` default is `All`, i.e.
+/// unrestricted, so this is not a silent widening). `Some(user)` returns
+/// `Some(names)` restricted to `registry.filter_tools_for_user(user)` — only
+/// the tools `user`'s tier may access. Passed straight through as
+/// `chat_with_tools_gated`'s `allowed_tools`, this makes `dispatch_gated`'s
+/// name-allowlist check ALSO enforce the RBAC tier, closing the gap without
+/// touching `dispatch_gated` itself.
+/// Test: `allowed_tool_names_for_no_user_returns_none_full_access`,
+/// `allowed_tool_names_for_read_only_excludes_dispatch_task`,
+/// `allowed_tool_names_for_analytics_excludes_dispatch_task`,
+/// `allowed_tool_names_for_all_tier_includes_dispatch_task`,
+/// `dispatch_task_not_invocable_for_read_only_user_through_dispatch_gated`
+/// (the integration-level proof: drives the REAL `ToolRegistry::dispatch_gated`
+/// enforcement path with the computed allowlist, not just the computation
+/// in isolation).
+fn allowed_tool_names_for(
+    registry: &ToolRegistry,
+    user: Option<&crate::rbac::UserIdentity>,
+) -> Option<Vec<String>> {
+    let user = user?;
+    Some(
+        registry
+            .filter_tools_for_user(user)
+            .into_iter()
+            .map(|t| t.name().to_string())
+            .collect(),
+    )
+}
+
+// Sibling `_tests.rs` file (this crate's `#[path=...]` pattern) — keeps
+// this production file under the 500-SLOC cap. See `history_tests.rs`'s
+// module docs for what code-critic finding this covers.
+#[cfg(test)]
+#[path = "history_tests.rs"]
+mod rbac_gate_tests;

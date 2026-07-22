@@ -1,6 +1,6 @@
 # 0005. Shared HarnessEvent envelope + process-global event bus in trusty-agents-common
 
-- **Status:** Accepted
+- **Status:** Superseded by [0019](0019-unified-ipc-messaging-on-event-bus.md)
 - **Date:** 2026-06-06
 - **Scope:** Workspace-wide (`trusty-agents-common` foundation; future consumers `trusty-agents`, `trusty-mpm`, `trusty-code`)
 - **Supersedes / Superseded by:** Builds on ADR-0004 (three harnesses on a shared event-driven common)

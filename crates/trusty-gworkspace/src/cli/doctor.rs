@@ -23,7 +23,9 @@ use anyhow::Result;
 use crate::api::auth::TokenStorage;
 use crate::api::auth::oauth::errors::is_invalid_grant;
 use crate::api::auth::oauth::flow::ClientCreds;
-use crate::api::auth::oauth::resolve_client_creds;
+use crate::api::auth::oauth::{
+    profile_client_source, resolve_client_creds, resolve_client_creds_for_profile,
+};
 use crate::api::constants::OAUTH_TOKEN_URL;
 
 /// Per-profile refresh-token health, as classified by the live probe.
@@ -53,16 +55,19 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(6);
 /// Run the doctor check and print a report to stdout.
 ///
 /// Why: Human-facing entry point for `trusty-gworkspace-mcp doctor`.
-/// What: Prints the static credential/storage checks, then — when client
-/// credentials resolve — live-probes each stored profile and prints its health.
-/// Always returns `Ok` (the report *is* the result); never mutates tokens.json.
+/// What: Prints the static credential/storage checks, then live-probes each
+/// stored profile using ITS OWN resolved OAuth client (issue #3518:
+/// per-profile client if configured, else the global one — see
+/// `resolve_client_creds_for_profile`) and prints its health, labeled with
+/// which client it used. Always returns `Ok` (the report *is* the result);
+/// never mutates tokens.json.
 /// Test: Delegates to `report_lines` and `health_lines`, both unit-tested.
 pub async fn run(storage: &TokenStorage) -> Result<()> {
-    let creds = resolve_client_creds().ok();
+    let global_creds_ok = resolve_client_creds().is_ok();
     let accounts = storage.list_accounts().unwrap_or_default();
     let has_default = accounts.iter().any(|(_, _, d)| *d);
 
-    for line in report_lines(creds.is_some(), accounts.len(), has_default) {
+    for line in report_lines(global_creds_ok, accounts.len(), has_default) {
         println!("{line}");
     }
 
@@ -72,36 +77,33 @@ pub async fn run(storage: &TokenStorage) -> Result<()> {
 
     println!();
     println!("Per-profile refresh-token health:");
-    match &creds {
-        Some(creds) => {
-            // Never fall back to `Client::default()` on builder failure: that
-            // client has no request timeout, so a hung endpoint would stall
-            // doctor indefinitely. If the bounded client can't be built, report
-            // every profile as Unknown rather than probe without a timeout.
-            match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
-                Ok(http) => {
-                    for (name, email, _is_default) in &accounts {
-                        let result = probe_profile(&http, storage, creds, name).await;
-                        for line in health_lines(name, email.as_deref(), &result) {
-                            println!("{line}");
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("      Could not build a bounded HTTP client: {e}");
-                    for (name, email, _is_default) in &accounts {
-                        for line in health_lines(name, email.as_deref(), &ProbeResult::Unknown) {
-                            println!("{line}");
-                        }
-                    }
+    // Never fall back to `Client::default()` on builder failure: that client
+    // has no request timeout, so a hung endpoint would stall doctor
+    // indefinitely. If the bounded client can't be built, report every
+    // profile as Unknown rather than probe without a timeout.
+    match reqwest::Client::builder().timeout(PROBE_TIMEOUT).build() {
+        Ok(http) => {
+            for (name, email, _is_default) in &accounts {
+                let client_label = profile_client_source(name).label();
+                let result = match resolve_client_creds_for_profile(name) {
+                    Ok(creds) => probe_profile(&http, storage, &creds, name).await,
+                    Err(_) => ProbeResult::Unknown,
+                };
+                for line in health_lines(name, email.as_deref(), &client_label, &result) {
+                    println!("{line}");
                 }
             }
         }
-        None => {
-            println!(
-                "      Skipped — set OAuth client credentials to enable live probing \
-                 (see the check above)."
-            );
+        Err(e) => {
+            eprintln!("      Could not build a bounded HTTP client: {e}");
+            for (name, email, _is_default) in &accounts {
+                let client_label = profile_client_source(name).label();
+                for line in
+                    health_lines(name, email.as_deref(), &client_label, &ProbeResult::Unknown)
+                {
+                    println!("{line}");
+                }
+            }
         }
     }
 
@@ -167,11 +169,15 @@ async fn probe_profile(
 pub fn report_lines(creds_ok: bool, account_count: usize, has_default: bool) -> Vec<String> {
     let mut lines = vec!["trusty-gworkspace-mcp doctor".to_string(), String::new()];
 
-    lines.push(format!("[{}] OAuth client credentials", mark(creds_ok)));
+    lines.push(format!(
+        "[{}] Global OAuth client credentials",
+        mark(creds_ok)
+    ));
     if !creds_ok {
         lines.push(
             "      Set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET, or write \
-             ~/.gworkspace-mcp/oauth_client.json"
+             ~/.gworkspace-mcp/oauth_client.json (a profile with its own per-profile client, \
+             see `setup --oauth-client`, does not need this)."
                 .to_string(),
         );
     }
@@ -203,13 +209,22 @@ pub fn report_lines(creds_ok: bool, account_count: usize, has_default: bool) -> 
 ///
 /// Why: The live-probe verdict must render identically whether it came from a
 /// real network call or a test — and a `Dead` profile must always print the
-/// exact re-auth command so the fix is copy-pasteable.
-/// What: `Live` → one OK line (email + access-token lifetime); `Dead` → a
-/// failure line plus the `trusty-gworkspace-mcp setup --profile <name>` command;
-/// `Unknown` → one graceful "could not determine" line (never fatal).
+/// exact re-auth command so the fix is copy-pasteable. Issue #3518: each line
+/// also names which OAuth client (`global` or `per-profile (<path>)`) the
+/// profile actually used, so a misconfigured per-profile client is
+/// diagnosable straight from `doctor` output.
+/// What: `Live` → one OK line (email + access-token lifetime + client);
+/// `Dead` → a failure line plus the `trusty-gworkspace-mcp setup --profile
+/// <name>` command; `Unknown` → one graceful "could not determine" line
+/// (never fatal).
 /// Test: `health_lines_ok_shows_email`, `health_lines_dead_names_setup_command`,
 /// `health_lines_unknown_is_graceful`.
-pub fn health_lines(profile: &str, email: Option<&str>, result: &ProbeResult) -> Vec<String> {
+pub fn health_lines(
+    profile: &str,
+    email: Option<&str>,
+    client_label: &str,
+    result: &ProbeResult,
+) -> Vec<String> {
     let who = email.unwrap_or("email unknown");
     match result {
         ProbeResult::Live { expires_in } => {
@@ -217,14 +232,20 @@ pub fn health_lines(profile: &str, email: Option<&str>, result: &ProbeResult) ->
                 Some(secs) => format!("access token valid ~{secs}s"),
                 None => "access token valid".to_string(),
             };
-            vec![format!("[+] {profile}: OK ({who}, {expiry})")]
+            vec![format!(
+                "[+] {profile}: OK ({who}, {expiry}, client: {client_label})"
+            )]
         }
         ProbeResult::Dead => vec![
-            format!("[!] {profile}: DEAD — refresh token for {who} is expired or revoked"),
+            format!(
+                "[!] {profile}: DEAD — refresh token for {who} is expired or revoked \
+                 (client: {client_label})"
+            ),
             format!("      re-authenticate with: trusty-gworkspace-mcp setup --profile {profile}"),
         ],
         ProbeResult::Unknown => vec![format!(
-            "[?] {profile}: UNKNOWN — could not reach Google to verify ({who}); check your connection"
+            "[?] {profile}: UNKNOWN — could not reach Google to verify ({who}, client: \
+             {client_label}); check your connection"
         )],
     }
 }
@@ -242,7 +263,7 @@ mod tests {
     fn report_lines_flags_missing_creds() {
         let lines = report_lines(false, 0, false);
         let joined = lines.join("\n");
-        assert!(joined.contains("[!] OAuth client credentials"));
+        assert!(joined.contains("[!] Global OAuth client credentials"));
         assert!(joined.contains("GOOGLE_OAUTH_CLIENT_ID"));
         assert!(joined.contains("Run `trusty-gworkspace-mcp setup`"));
         assert!(joined.contains("need attention"));
@@ -252,7 +273,7 @@ mod tests {
     fn report_lines_all_green() {
         let lines = report_lines(true, 2, true);
         let joined = lines.join("\n");
-        assert!(joined.contains("[+] OAuth client credentials"));
+        assert!(joined.contains("[+] Global OAuth client credentials"));
         assert!(joined.contains("Authorized accounts: 2"));
         assert!(joined.contains("All checks passed."));
         assert!(!joined.contains("need attention"));
@@ -273,6 +294,7 @@ mod tests {
         let lines = health_lines(
             "work",
             Some("user@example.com"),
+            "global",
             &ProbeResult::Live {
                 expires_in: Some(3599),
             },
@@ -281,6 +303,7 @@ mod tests {
         assert!(joined.contains("[+] work: OK"), "OK marker: {joined}");
         assert!(joined.contains("user@example.com"), "email shown: {joined}");
         assert!(joined.contains("3599s"), "expiry shown: {joined}");
+        assert!(joined.contains("client: global"), "client shown: {joined}");
         assert!(
             !joined.contains("setup --profile"),
             "a healthy profile must not suggest re-auth: {joined}"
@@ -289,10 +312,19 @@ mod tests {
 
     #[test]
     fn health_lines_dead_names_setup_command() {
-        let lines = health_lines("work", Some("user@example.com"), &ProbeResult::Dead);
+        let lines = health_lines(
+            "work",
+            Some("user@example.com"),
+            "per-profile (/home/u/.gworkspace-mcp/clients/work.json)",
+            &ProbeResult::Dead,
+        );
         let joined = lines.join("\n");
         assert!(joined.contains("DEAD"), "dead marker: {joined}");
         assert!(joined.contains("expired or revoked"), "cause: {joined}");
+        assert!(
+            joined.contains("client: per-profile ("),
+            "per-profile client label shown: {joined}"
+        );
         assert!(
             joined.contains("trusty-gworkspace-mcp setup --profile work"),
             "must name the exact re-auth command for the dead profile: {joined}"
@@ -301,7 +333,7 @@ mod tests {
 
     #[test]
     fn health_lines_unknown_is_graceful() {
-        let lines = health_lines("work", None, &ProbeResult::Unknown);
+        let lines = health_lines("work", None, "global", &ProbeResult::Unknown);
         let joined = lines.join("\n");
         assert!(joined.contains("UNKNOWN"), "unknown marker: {joined}");
         assert!(

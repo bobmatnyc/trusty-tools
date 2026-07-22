@@ -415,6 +415,48 @@ impl AgentConfig {
         Ok((Self::from_toml_str(&raw, &path)?, false))
     }
 
+    /// Reject a root (non-`extends`) agent that omitted `[llm]`
+    /// `temperature`/`max_tokens` (#3052 PR A follow-up: per-key `[llm]`
+    /// extends inheritance).
+    ///
+    /// Why: `temperature`/`max_tokens` gained serde defaults (the UNSET
+    /// sentinel — `LlmParams::temperature_is_unset`/`max_tokens_is_unset`) so
+    /// an `extends` CHILD can omit them and inherit the base's value via
+    /// `extends::merge_extends`. That relaxation must not silently swallow a
+    /// root agent's forgotten `[llm]` block the way a plain serde-mandatory-
+    /// field error used to catch it — a root has no base to inherit from, so
+    /// a sentinel reaching `chat_with_tools_gated` would send `NaN`/`u32::MAX`
+    /// to the LLM provider. This restores that fail-fast guarantee for roots
+    /// while leaving children free to omit the fields.
+    /// What: When `cfg.agent.extends` is `None` and either sentinel is still
+    /// present, returns a descriptive error naming the file and field(s).
+    /// Test: `llm_required_fields_missing_on_root_agent_is_rejected`,
+    /// `llm_omitted_fields_allowed_on_extends_child`.
+    fn validate_llm_required_for_root(cfg: &AgentConfig, path: &Path) -> Result<()> {
+        if cfg.agent.extends.is_some() {
+            return Ok(());
+        }
+        let missing_temperature = cfg.llm.temperature_is_unset();
+        let missing_max_tokens = cfg.llm.max_tokens_is_unset();
+        if !missing_temperature && !missing_max_tokens {
+            return Ok(());
+        }
+        let fields = match (missing_temperature, missing_max_tokens) {
+            (true, true) => "temperature, max_tokens",
+            (true, false) => "temperature",
+            (false, true) => "max_tokens",
+            (false, false) => unreachable!("checked above"),
+        };
+        anyhow::bail!(
+            "agent '{}' declares no `extends` base but omits `[llm]` {} (in {}) — a root \
+             agent must declare its own sampling parameters; only an `extends` child may \
+             omit them to inherit the base's",
+            cfg.agent.name,
+            fields,
+            path.display()
+        );
+    }
+
     /// Shared parsing + adapter-resolution path used by both `load` and
     /// `by_name_async`.
     ///
@@ -429,6 +471,7 @@ impl AgentConfig {
     pub(super) fn from_toml_str(raw: &str, path: &Path) -> Result<Self> {
         let mut cfg: AgentConfig = toml::from_str(raw)
             .with_context(|| format!("failed to parse agent TOML {}", path.display()))?;
+        Self::validate_llm_required_for_root(&cfg, path)?;
         // #367: Substitute runtime context variables in the system prompt at
         // load time so every downstream consumer (prompt_builder, claude-code
         // runner, in-process runner, inspection) sees the resolved string.
@@ -616,7 +659,7 @@ fn agents_dir() -> PathBuf {
 /// `same_name_project_local_shadows_home_tier` (+ async),
 /// `extends_shadow_fallback_searches_home_tier_when_package_resolved_there`
 /// (tests/loading.rs).
-fn agents_dir_candidates() -> Vec<PathBuf> {
+pub(crate) fn agents_dir_candidates() -> Vec<PathBuf> {
     let primary = agents_dir();
     let mut dirs = vec![primary.clone()];
     if let Some(home) = std::env::var_os("HOME") {
@@ -626,6 +669,75 @@ fn agents_dir_candidates() -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// Cheap, parse-free existence check for an agent name across candidate
+/// directories, using the SAME resolution tiers as
+/// [`AgentConfig::by_name_unresolved_src_in`] (directory package, flat
+/// `.toml`, flat `.md`) — minus the `extends`-chain resolution and the
+/// `claude_mpm_loader` legacy tier, neither of which is needed to answer
+/// "does a file for this name exist somewhere in `dirs`".
+///
+/// KNOWN LIMITATION (#3555 LOW follow-up, code-critic, tracked not fixed):
+/// unlike [`Self::by_name_unresolved_src_in`]'s final fallback tier
+/// (`crate::agents::claude_mpm_loader::find_agent_sync`, which additionally
+/// searches `~/.claude/agents` / `<cwd>/.claude/agents` for legacy
+/// claude-mpm-format agents), this function does NOT check that tier — a
+/// false NEGATIVE for a name that exists ONLY as a claude-mpm-format agent
+/// there. Every BUNDLED worker/assistant agent lives under the
+/// `.trusty-agents/agents` tiers this function does check, so this never
+/// affects the roster `delegate_to_agent` actually targets; adding the tier
+/// is deferred rather than folded in here since it would require this
+/// crate-visible predicate to also depend on `claude_mpm_loader`.
+///
+/// Why (#3555 delegate-resolve follow-up): `delegate_to_agent`'s pre-flight
+/// validation must accept exactly the names `run_subagent`'s later
+/// `AgentConfig::by_name` call will actually spawn. Before this fix,
+/// `build_assistant_tier_registry` hand-rolled a SINGLE cwd-relative
+/// directory (`<cwd>/.trusty-agents/agents`) for that check — invisible to
+/// the bundled worker roster deployed at `$HOME/.trusty-agents/agents/` by
+/// [`super::bundled::ensure_bundled_agents_deployed`] — so validation
+/// rejected every delegate call whenever the assistant was launched from a
+/// directory with no local `.trusty-agents/agents/` of its own, even though
+/// the actual spawn (which resolves via [`agents_dir_candidates`]) would
+/// have found the agent fine. This function is the single source of truth
+/// both sides now share, so validation and spawn can never diverge again.
+/// What: rejects path-traversal names via `validate_agent_name`, then walks
+/// `dirs` in order. For each `dir`, if `<dir>/<name>/` exists as a
+/// directory, this MIRRORS `load_agent_package`'s `?`-propagation in
+/// [`Self::by_name_unresolved_src_in`] (#3555 MEDIUM follow-up, code-critic):
+/// the real resolver commits to that directory as the canonical source and
+/// hard-errors — aborting the ENTIRE search, not just this `dir` — if
+/// `agent.toml` or `persona.md` inside it is missing, rather than falling
+/// through to a flat `<name>.toml` in this or a later directory. So this
+/// function returns immediately (`true` only if BOTH files are present,
+/// `false` otherwise) the moment it sees `<dir>/<name>/` as a directory,
+/// exactly like the real resolver would either resolve or hard-abort right
+/// there. Otherwise it checks `<dir>/<name>.toml` then `<dir>/<name>.md`
+/// and, on a miss, continues to the next `dir`. Returns `false` once every
+/// `dir` is exhausted with no match.
+/// Test: `agent_name_resolves_tests::finds_flat_toml_in_secondary_dir`,
+/// `agent_name_resolves_tests::finds_directory_package`,
+/// `agent_name_resolves_tests::finds_flat_md`,
+/// `agent_name_resolves_tests::false_when_absent_everywhere`,
+/// `agent_name_resolves_tests::false_for_traversal_name`,
+/// `agent_name_resolves_tests::false_on_empty_dirs`,
+/// `agent_name_resolves_tests::short_circuits_on_malformed_directory_package_matching_real_resolver`
+/// (agents/tests/loading.rs).
+pub(crate) fn agent_name_resolves(dirs: &[PathBuf], name: &str) -> bool {
+    if validate_agent_name(name).is_err() {
+        return false;
+    }
+    for dir in dirs {
+        let pkg_dir = dir.join(name);
+        if pkg_dir.is_dir() {
+            return pkg_dir.join("agent.toml").is_file() && pkg_dir.join("persona.md").is_file();
+        }
+        if dir.join(format!("{name}.toml")).is_file() || dir.join(format!("{name}.md")).is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 // Why: Helper kept available for ad-hoc tooling that needs the flat

@@ -63,6 +63,57 @@ pub enum ReplEvent {
     /// (DOC-50 §5 Slice 5) rather than only clearing local UI state, per the
     /// thin-client axiom (C-2).
     Cancel,
+    /// The engine's `handle_input` returned `Ok(false)` (DOC-50 §5 Slice 5) —
+    /// synthesized by `crate::run::run`'s dispatch step, never by a key press
+    /// directly (Ctrl-D sets `ReplApp::quit` straight from the reducer since
+    /// it needs no round-trip through the engine). Exists because the
+    /// dispatch step only holds `&mut M` synchronously inside `apply`; the
+    /// spawned `handle_input` task that later learns "the engine wants to
+    /// quit" can reach the model only by pushing an event back onto the
+    /// shared channel, same as every other engine-originated signal here.
+    Quit,
+    /// A submitted turn's `TuiEngine::handle_input` call has returned, and
+    /// `crate::run::dispatch_pending` determined no terminal signal
+    /// (`AssistantOutput { done: true, .. }` or `Quit`) was ever relayed for
+    /// it — synthesized as a safety net, never by a key press or a
+    /// `TuiEngine` implementation directly.
+    ///
+    /// Why: `ReplApp::busy` is cleared ONLY by a terminal
+    /// `AssistantOutput`/`Quit` reaching the reducer — but three real,
+    /// spec-required `CodeEngine` paths return `Ok(true)` from
+    /// `handle_input` without ever sending one (`/workstream list`/
+    /// `activate`, which only push `StatusMessage`/`WorkstreamUpdated`; a
+    /// reconnect-exhausted `pump_session_events` return; a daemon-initiated
+    /// `SessionCancelled` that only pushes a `StatusMessage`). Combined with
+    /// Slice 5's busy-gating (`ReplApp::submit_line` refuses a second turn
+    /// while `busy`), any such path left `busy` stuck `true` forever —
+    /// input permanently bricked, recoverable only by the accident of
+    /// Ctrl-C's `on_cancelled` reset. This variant is the fix: a dedicated,
+    /// minimal reset that touches ONLY `busy`/`streaming_idx`, deliberately
+    /// NOT reusing an empty `AssistantOutput { done: true, .. }` for this
+    /// (that would push a stray blank chat entry via the `None`-
+    /// `streaming_idx` branch of `apply_assistant_output` — corrupting
+    /// scrollback to fix a different bug).
+    ///
+    /// **Carries its own `generation`** (the turn number `crate::run::
+    /// dispatch_pending` assigned it) so the reducer — not the spawned
+    /// completion task — decides whether it's still relevant. A prior
+    /// revision had the spawned task load-and-compare the live generation
+    /// counter itself before deciding whether to send this event at all;
+    /// that compare-then-send was a genuine TOCTOU race under
+    /// multi-threaded tokio (a cancel + new submit could both run in the
+    /// gap between the load and the send), letting a stale terminal signal
+    /// from turn N clear `busy`/`streaming_idx` for a genuinely in-flight
+    /// turn N+2. Fixed by construction: the completion task now always
+    /// sends this event (stamped with its own generation, no load-then-
+    /// branch), and the reducer — which runs serially on the same task that
+    /// bumps the generation counter, so no cross-thread race is possible —
+    /// applies it only if `generation` still matches
+    /// `ReplApp::current_generation`.
+    /// What: engine implementations should never construct this directly;
+    /// it exists purely as `crate::run::dispatch_pending`'s per-turn
+    /// completion safety net (see that function's doc comment).
+    TurnFinished { generation: u64 },
 
     // ── Engine-origin (produced by `TuiEngine` implementations) ────────
     /// A chunk of streamed assistant output. `done` marks the final chunk of
@@ -111,7 +162,11 @@ pub enum ReplEvent {
     /// The daemon activated a different workstream (DOC-48 §5.3
     /// `WorkstreamActivationChanged`), pushed via
     /// `TuiEngine::subscribe_workstream_events`. `prior_id` is `None` on the
-    /// very first activation observed in this session.
+    /// very first activation observed in this session. `new_active_id` is
+    /// `None` when the active workstream was deactivated and none is now
+    /// active (DOC-48 §4.2/§4.3) — a real, daemon-published state, not an
+    /// absence of data; distinct from `prior_id: None`, which means "no
+    /// activation happened before this one."
     ///
     /// Field names are chosen to match the DOC-48 §5.3 SSE wire event
     /// exactly (`new_active_id`, `prior_id`) — NOT DOC-50 §5 Slice 6's prose
@@ -119,9 +174,13 @@ pub enum ReplEvent {
     /// adapters deserialize this from JSON (Slice 3/6), a Rust/wire name
     /// mismatch here would not be caught at compile time, only at runtime
     /// deserialization — so the Rust field is kept byte-identical to the
-    /// wire field on purpose.
+    /// wire field on purpose, including its optionality: the wire event
+    /// (`crate::events::Event::WorkstreamActivationChanged` in
+    /// `trusty-code`) declares `new_active_id: Option<String>` for exactly
+    /// this reason, and this variant now mirrors that shape rather than
+    /// forcing a lossy `StatusMessage` fallback for the `None` case.
     WorkstreamActivationChanged {
-        new_active_id: String,
+        new_active_id: Option<String>,
         prior_id: Option<String>,
     },
     /// The backend connection was lost (daemon restart, SSE stream closed,
@@ -257,6 +316,30 @@ mod tests {
         assert_ne!(ReplEvent::ClearScrollback, ReplEvent::Cancel);
     }
 
+    /// `Quit` (DOC-50 §5 Slice 5) is a distinct unit variant, same as
+    /// `ClearScrollback` above — `crate::run::run`'s dispatch step sends it
+    /// when `TuiEngine::handle_input` returns `Ok(false)`.
+    #[test]
+    fn quit_is_a_distinct_unit_variant() {
+        assert_eq!(ReplEvent::Quit, ReplEvent::Quit);
+        assert_ne!(ReplEvent::Quit, ReplEvent::Cancel);
+    }
+
+    /// `TurnFinished` (the `dispatch_pending` completion safety net) carries
+    /// its own `generation` and compares by value, same as any other field.
+    #[test]
+    fn turn_finished_carries_and_compares_its_generation() {
+        assert_eq!(
+            ReplEvent::TurnFinished { generation: 1 },
+            ReplEvent::TurnFinished { generation: 1 }
+        );
+        assert_ne!(
+            ReplEvent::TurnFinished { generation: 1 },
+            ReplEvent::TurnFinished { generation: 2 }
+        );
+        assert_ne!(ReplEvent::TurnFinished { generation: 1 }, ReplEvent::Quit);
+    }
+
     /// `WorkstreamActivationChanged`'s field is named `new_active_id` to
     /// match the DOC-48 §5.3 SSE wire event exactly (not DOC-50 §5 Slice 6's
     /// prose, which drifted to `new_id`) — a JSON field-name mismatch here
@@ -265,7 +348,7 @@ mod tests {
     #[test]
     fn workstream_activation_changed_uses_wire_field_name() {
         let ev = ReplEvent::WorkstreamActivationChanged {
-            new_active_id: "a1b2c3d4".to_string(),
+            new_active_id: Some("a1b2c3d4".to_string()),
             prior_id: Some("00000000".to_string()),
         };
         let ReplEvent::WorkstreamActivationChanged {
@@ -275,8 +358,30 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_eq!(new_active_id, "a1b2c3d4");
+        assert_eq!(new_active_id.as_deref(), Some("a1b2c3d4"));
         assert_eq!(prior_id.as_deref(), Some("00000000"));
+    }
+
+    /// `new_active_id: None` must be representable and distinguishable from
+    /// `prior_id: None` — the whole point of this fix (issue tracked in the
+    /// commit landing this test): the daemon legitimately publishes
+    /// "deactivated, no replacement active" (DOC-48 §4.2/§4.3), and the
+    /// shared event must carry that without falling back to free text.
+    #[test]
+    fn workstream_activation_changed_represents_deactivation_with_no_replacement() {
+        let ev = ReplEvent::WorkstreamActivationChanged {
+            new_active_id: None,
+            prior_id: Some("a1b2c3d4".to_string()),
+        };
+        let ReplEvent::WorkstreamActivationChanged {
+            new_active_id,
+            prior_id,
+        } = &ev
+        else {
+            unreachable!()
+        };
+        assert_eq!(*new_active_id, None);
+        assert_eq!(prior_id.as_deref(), Some("a1b2c3d4"));
     }
 
     /// `KeyInput` default modifiers must be "nothing held" so a bare

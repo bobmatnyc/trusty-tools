@@ -70,7 +70,6 @@
   // The EventSource API auto-reconnects on transport failure with browser-
   // native exponential backoff so we don't have to.
   let eventSource: EventSource | null = null;
-  let sseStatus: 'idle' | 'connecting' | 'open' | 'reconnecting' = 'idle';
 
   // Why: Make the active transport visible at a glance so contributors and
   // testers can tell whether they're in the Tauri desktop shell (full IPC)
@@ -367,17 +366,13 @@
       // Tauri has its own listen() bridge already; web-only path needs SSE.
       return;
     }
-    sseStatus = 'connecting';
     eventSource = connectEventSource(
       undefined,
       (ev) => {
-        sseStatus = 'open';
         bridgeEventToWebBus(ev);
       },
       () => {
-        // The browser will reconnect automatically — surface state for the
-        // status pill but don't tear down the EventSource.
-        sseStatus = 'reconnecting';
+        // The browser will reconnect automatically — nothing to tear down.
       },
     );
   }
@@ -385,7 +380,6 @@
   function stopEventStream() {
     eventSource?.close();
     eventSource = null;
-    sseStatus = 'idle';
   }
 
   // Re-run the start/stop logic whenever apiReady flips so we don't open

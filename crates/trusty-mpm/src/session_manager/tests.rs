@@ -936,6 +936,14 @@ async fn manager_send_input_rejected_for_stopped_and_decommissioned() {
     );
 }
 
+// `manager_send_input_rejected_for_provisioning_and_errored`,
+// `manager_send_input_rejected_when_pane_shows_blocking_modal`, and
+// `manager_send_input_skips_modal_probe_for_tcode` (issue #3591) live in the
+// sibling `send_input_gate_tests.rs` — this file is at the 1500-SLOC test
+// cap, so new coverage for the `send_input` readiness/modal gate goes there
+// (mirrors the `restart_tests.rs` / `decommission_worktree_tests.rs`
+// precedent for keeping this file under its limit).
+
 #[tokio::test]
 async fn manager_env_scrub_command_sent() {
     // Verify that the spawn sends `env -u ANTHROPIC_API_KEY claude`.

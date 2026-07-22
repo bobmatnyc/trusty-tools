@@ -24,6 +24,7 @@ These are distinct from [regression-testing/](../regression-testing/) (which tra
 ### Validation / Audits
 
 - [`candle-metal-validation-2026-05-22.md`](candle-metal-validation-2026-05-22.md) — Candle vs ORT-CoreML embedder validation on Apple Silicon.
+- [`python-mps-embedder-sidecar-2026-07-20.md`](python-mps-embedder-sidecar-2026-07-20.md) — architecture & validation for the opt-in Python/MPS embedding sidecar (`TRUSTY_EMBEDDER=python`): wire protocol, launcher/supervisor seam, uv/venv bootstrap, idle-shutdown lifecycle, device selection, CUDA (g4dn) build notes, and validated numbers (epic #3524).
 - [`bm25-memory-2026-05-28.md`](bm25-memory-2026-05-28.md) — BM25 index memory-footprint investigation.
 - [`fjall-evaluation-2026-06-03.md`](fjall-evaluation-2026-06-03.md) — fjall LSM-tree vs. redb CoW B-tree: deeper evaluation and benchmark spike plan (refs #692, #694).
 

@@ -7,6 +7,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **`/health` no longer hangs when trusty-search is slow, not down**
+  (closes [#3658](https://github.com/bobmatnyc/trusty-tools/issues/3658),
+  follow-on to [#722](https://github.com/bobmatnyc/trusty-tools/issues/722)):
+  the trusty-search/trusty-analyze dependency probe in the HTTP `/health`
+  handler, the `review_health` MCP tool, and the `console_metrics` MCP tool
+  had no internal timeout — a memory-pressured (slow, not down)
+  trusty-search could hang all three indefinitely, bounded only by the
+  clients' own 30 s / 5 s HTTP-transport timeouts. Each dep probe now runs
+  under a strict, independent `tokio::time::timeout` (default 2 s,
+  configurable via `TRUSTY_REVIEW_DEP_PROBE_TIMEOUT_SECS`), and both deps
+  are probed concurrently so total `/health` latency stays bounded
+  regardless of dep count. `DepInfo` gains a new tri-state `state` field
+  (`"ok"` / `"unreachable"` / `"timeout"`) so a slow-but-up dependency is no
+  longer collapsed into the same `reachable: false` signal as a hard-down
+  one; the existing `reachable` boolean is unchanged for back-compat.
+
+---
+## [0.10.0] — 2026-07-21
+
 ### Security
 
 - **Adopted the shared router-wide same-origin write guard**

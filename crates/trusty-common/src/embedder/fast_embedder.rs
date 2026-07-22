@@ -65,7 +65,8 @@ static ORT_RUNTIME: OnceLock<OrtThreadingOptions> = OnceLock::new();
 /// `with_intra_threads(available_parallelism())` (= logical CPU count) — it
 /// exposes no hook to override per-session thread counts. On the CUDA
 /// deferred-embed path that multi-threaded intra-op barrier deadlocks inside
-/// `libonnxruntime` 1.24.2 (code-intelligence #1542): the pool reports
+/// `libonnxruntime` 1.24.2 (code-intelligence #1542, fixed in this repo by
+/// PR #1668): the pool reports
 /// `workers: 2` yet 8 ORT threads spin, two busy-wait at ~70% CPU while the
 /// rest block forever in `condition_variable::wait`, yielding 0 embeddings and
 /// an empty 112-byte HNSW. ORT's *global* thread pool is the one lever that
@@ -74,7 +75,10 @@ static ORT_RUNTIME: OnceLock<OrtThreadingOptions> = OnceLock::new();
 /// so fastembed's `with_intra_threads(N)` is ignored and the global pool's
 /// thread count + spin policy govern instead.
 /// What: resolves [`OrtThreadingOptions`] from the environment (defaults:
-/// intra=1, inter=1, spinning=off), commits `ort::init().with_global_thread_pool(..)`,
+/// intra=platform/EP-conditional — `1` under the `embedder-cuda` feature
+/// (the only build that can hit the PR #1668 CUDA deadlock), else
+/// `available_parallelism()` — inter=1, spinning=off), commits
+/// `ort::init().with_global_thread_pool(..)`,
 /// and caches the result in [`ORT_RUNTIME`]. Must be called *before* any
 /// `TextEmbedding::try_new`; `ort::init().commit()` is a no-op once any
 /// session/environment already exists. Idempotent and thread-safe via
@@ -100,15 +104,15 @@ fn init_ort_runtime() -> OrtThreadingOptions {
                         inter_threads = opts.inter_threads,
                         allow_spinning = opts.allow_spinning,
                         "trusty-embedder: committed ORT global thread pool \
-                         (deadlock fix #1542 — overrides fastembed's per-session \
+                         (deadlock fix PR #1668 — overrides fastembed's per-session \
                          with_intra_threads(num_cpus) via DisablePerSessionThreads)"
                     );
                 } else {
                     tracing::warn!(
                         intra_threads = opts.intra_threads,
                         "trusty-embedder: ORT environment already committed before \
-                         init_ort_runtime() — the single-intra-op-thread deadlock fix \
-                         (#1542) did NOT take effect; ensure no ORT session is created \
+                         init_ort_runtime() — the intra-op thread pin from \
+                         PR #1668 did NOT take effect; ensure no ORT session is created \
                          before the embedder initialises"
                     );
                 }
@@ -117,7 +121,7 @@ fn init_ort_runtime() -> OrtThreadingOptions {
                 tracing::error!(
                     error = %e,
                     "trusty-embedder: failed to build ORT global thread pool options; \
-                     falling back to fastembed defaults (deadlock fix #1542 NOT applied)"
+                     falling back to fastembed defaults (deadlock fix PR #1668 NOT applied)"
                 );
             }
         }
@@ -183,6 +187,69 @@ pub(super) fn coreml_init_timeout() -> Duration {
     Duration::from_secs(secs)
 }
 
+/// Resolve which fastembed model variant is the embedder's *default*, from
+/// the process environment.
+///
+/// Why: issue #3486 / #3493 P0 — the previous unconditional default,
+/// `AllMiniLML6V2Q` (INT8, dynamically quantised), is both slower and less
+/// accurate than the non-quantized fp32 variant on the CPU EP that this
+/// model actually runs on (CoreML's `GetCapability` rejects the INT8 op set
+/// outright, so the CoreML EP contributes nothing regardless of platform —
+/// confirmed by the #3486 CoreML/fp16 experiment): ~2.1x slower
+/// (`MatMulInteger`/`DynamicQuantizeLinear` dequant-requant ops are
+/// themselves expensive on CPU) and measurably less accurate (0.9897 mean
+/// cosine similarity vs a genuine `sentence-transformers` reference, vs
+/// 0.999999+ for fp32 — see that experiment's correctness gate). `Q` is kept
+/// available as an explicit opt-in for operators who need the smaller
+/// on-disk/in-memory footprint (~23MB vs ~90MB) more than they need speed or
+/// accuracy.
+/// What: `TRUSTY_EMBEDDER_MODEL=int8` / `=quantized` / `=q` (case-
+/// insensitive, trimmed) selects the previous INT8 default
+/// (`EmbeddingModel::AllMiniLML6V2Q`); anything else, including unset,
+/// selects the new default, `EmbeddingModel::AllMiniLML6V2` (fp32) —
+/// fastembed's own natively-shipped non-quantized variant. fp16 was
+/// deliberately not chosen: the CPU EP this model runs on has no native fp16
+/// compute path, and the #3486 experiment's fp16 arm required a fragile
+/// hand-built ORT-optimizer conversion pipeline that fastembed does not ship
+/// or support loading natively.
+/// Test: `resolve_default_embedding_model_defaults_to_fp32`,
+/// `resolve_default_embedding_model_int8_opt_in`,
+/// `resolve_default_embedding_model_ignores_unknown` in `mod.rs`.
+pub(super) fn resolve_default_embedding_model() -> EmbeddingModel {
+    match std::env::var("TRUSTY_EMBEDDER_MODEL")
+        .ok()
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("int8") | Some("quantized") | Some("q") => EmbeddingModel::AllMiniLML6V2Q,
+        _ => EmbeddingModel::AllMiniLML6V2,
+    }
+}
+
+/// Human-readable name for the two `EmbeddingModel` variants this crate ever
+/// selects (issue #3530 — the `(Q)` observability bug).
+///
+/// Why: `FastEmbedder::model_name()` and `trusty-embedderd`'s startup
+/// log / `/health` JSON need to report which model variant is ACTUALLY
+/// loaded rather than a hardcoded `"AllMiniLML6V2Q"` — a name that stayed
+/// wrong after the default flipped to fp32 (issue #3486 / #3493 P0).
+/// What: `AllMiniLML6V2` → `"all-MiniLM-L6-v2"` (the fp32 default, matching
+/// the Python sidecar's identical HuggingFace model name);
+/// `AllMiniLML6V2Q` → `"all-MiniLM-L6-v2-int8"` (the explicit
+/// `TRUSTY_EMBEDDER_MODEL=int8` opt-in). Any other `fastembed::EmbeddingModel`
+/// variant (never selected by [`resolve_default_embedding_model`] or the
+/// fallback logic in [`FastEmbedder::with_cache_size`]) falls back to
+/// `"unknown"` rather than panicking.
+/// Test: `embedding_model_name_*` in `provider_tests.rs`.
+pub(super) fn embedding_model_name(model: &EmbeddingModel) -> &'static str {
+    match model {
+        EmbeddingModel::AllMiniLML6V2 => "all-MiniLM-L6-v2",
+        EmbeddingModel::AllMiniLML6V2Q => "all-MiniLM-L6-v2-int8",
+        _ => "unknown",
+    }
+}
+
 /// Outcome of a single execution-provider init attempt, used to decide
 /// whether to fall back to CPU and whether to poison [`COREML_KNOWN_BAD`].
 ///
@@ -242,6 +309,12 @@ pub struct FastEmbedder {
     cache: Arc<Mutex<LruCache<String, Vec<f32>>>>,
     dim: usize,
     provider: ExecutionProvider,
+    /// Human-readable name of the `EmbeddingModel` variant that actually
+    /// ended up loaded — resolved once at construction and never mutated
+    /// (issue #3530). May differ from the PRIMARY model requested by
+    /// [`resolve_default_embedding_model`] when the primary failed to
+    /// initialise and the two-model fallback net kicked in.
+    model_name: &'static str,
 }
 
 impl FastEmbedder {
@@ -262,21 +335,48 @@ impl FastEmbedder {
         self.provider
     }
 
-    /// Build `TextInitOptions` for the given model, attempting to register
-    /// the CoreML execution provider at runtime when on Apple Silicon.
+    /// Human-readable name of the embedding model variant actually loaded.
     ///
-    /// Why: We want zero-friction GPU/ANE acceleration on Apple Silicon
-    /// without forcing users to pass `--features coreml`. fastembed-rs accepts
-    /// a `Vec<ExecutionProviderDispatch>` via `with_execution_providers`, and
-    /// our `ort` dep (pinned to the exact `=2.0.0-rc.12` fastembed uses) has
-    /// the `coreml` feature on by default on macOS, so we can always try to
-    /// build and register CoreML at runtime. On non-Apple platforms, or if
-    /// CoreML registration fails for any reason, we transparently fall back
-    /// to the default CPU provider.
+    /// Why (issue #3530 — the `(Q)` observability bug): both
+    /// `trusty-search`'s startup log and `trusty-embedderd`'s startup log /
+    /// `/health` JSON hardcoded `"AllMiniLML6V2Q"` even after the default
+    /// flipped to the fp32 `AllMiniLML6V2` variant (issue #3486 / #3493 P0),
+    /// so operators saw a stale, actively-wrong model name. Exposing the
+    /// RESOLVED name (captured once at construction, in
+    /// [`Self::with_cache_size`]) lets every caller report the truth instead
+    /// of a compile-time guess.
+    /// What: one of `"all-MiniLM-L6-v2"` (fp32, the default) or
+    /// `"all-MiniLM-L6-v2-int8"` (the `TRUSTY_EMBEDDER_MODEL=int8` opt-in) —
+    /// see [`embedding_model_name`]. Reflects whichever model actually
+    /// initialised, including after the primary→CPU-retry→fallback-model
+    /// chain in [`Self::with_cache_size`].
+    /// Test: `fast_embedder_model_name_*` (`#[ignore]` — they download a
+    /// real ONNX model).
+    pub fn model_name(&self) -> &'static str {
+        self.model_name
+    }
+
+    /// Build `TextInitOptions` for the given model. CPU is the default
+    /// execution provider everywhere, including Apple Silicon; CoreML is an
+    /// explicit opt-in (`TRUSTY_DEVICE=gpu`).
+    ///
+    /// Why: issue #3493 P0 (part 2) — CoreML was previously the unconditional
+    /// default on Apple Silicon, but it measurably degrades embedding
+    /// accuracy (~0.99 mean cosine similarity vs a genuine
+    /// `sentence-transformers` reference, vs 1.000000 on the CPU EP — see
+    /// `default_model_matches_sentence_transformers_reference`), silently
+    /// erasing the fp32 accuracy win from the #3486 default-model fix. CoreML
+    /// acceleration is still available for operators who explicitly want it
+    /// (`TRUSTY_DEVICE=gpu`) — our `ort` dep (pinned to the exact
+    /// `=2.0.0-rc.12` fastembed uses) has the `coreml` feature on by default
+    /// on macOS, so we can always build and register it at runtime on
+    /// request. On non-Apple platforms, or if CoreML registration fails for
+    /// any reason, we transparently fall back to the default CPU provider.
     /// What: returns `(TextInitOptions, ExecutionProvider)` where the tag
     /// reflects which backend was actually wired in.
-    /// Test: on an M-series Mac the tag is `CoreML`; on Intel/Linux/Windows
-    /// (or if CoreML build fails) the tag is `Cpu`.
+    /// Test: on an M-series Mac the tag is `Cpu` unless `TRUSTY_DEVICE=gpu`
+    /// is set (then `CoreML`/`CoreMLAne`); on Intel/Linux/Windows the tag is
+    /// always `Cpu`.
     pub(super) fn init_options(model: EmbeddingModel) -> (TextInitOptions, ExecutionProvider) {
         use ort::execution_providers::ExecutionProviderDispatch;
 
@@ -344,10 +444,24 @@ impl FastEmbedder {
 
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         {
-            let force_cpu = std::env::var("TRUSTY_DEVICE")
-                .map(|v| v.eq_ignore_ascii_case("cpu"))
+            // Issue #3493 P0 (part 2): CoreML is OPT-IN, not the default, on
+            // Apple Silicon. `TRUSTY_DEVICE=gpu` is the explicit escape hatch
+            // (reusing the same value the CUDA branch above and the
+            // `require_gpu` check in `with_cache_size` already treat as "the
+            // operator explicitly wants acceleration" — see the doc comment
+            // on `TRUSTY_DEVICE=gpu` there). Anything else — unset, `cpu`, or
+            // any other value — resolves to plain CPU via the fallthrough
+            // block below, restoring the 1.000000 cosine accuracy the CPU EP
+            // reaches (vs ~0.99 under CoreML — see the correctness gate
+            // `default_model_matches_sentence_transformers_reference`).
+            // `TRUSTY_DEVICE=cpu` keeps working exactly as before: it was
+            // already a no-op once CoreML stops being the default, but the
+            // check is kept so any explicit `cpu` value is still honoured if
+            // this precedence ever changes again.
+            let enable_coreml = std::env::var("TRUSTY_DEVICE")
+                .map(|v| v.eq_ignore_ascii_case("gpu"))
                 .unwrap_or(false);
-            if !force_cpu {
+            if enable_coreml {
                 use ort::ep::coreml::{ComputeUnits, SpecializationStrategy};
 
                 let (units, units_tag) = match std::env::var("TRUSTY_COREML_COMPUTE_UNITS")
@@ -396,7 +510,10 @@ impl FastEmbedder {
                 return (opts.with_execution_providers(providers), units_tag);
             }
             tracing::info!(
-                "trusty-embedder: TRUSTY_DEVICE=cpu set — skipping CoreML EP registration (Apple Silicon)"
+                "trusty-embedder: CoreML EP not registered — CPU is the default execution \
+                 provider on Apple Silicon (issue #3493 P0: CoreML degraded embedding \
+                 accuracy to ~0.99 mean cosine vs 1.000000 on CPU). Set TRUSTY_DEVICE=gpu \
+                 to opt back into CoreML acceleration."
             );
         }
 
@@ -502,22 +619,40 @@ impl FastEmbedder {
         let capacity =
             NonZeroUsize::new(capacity.max(1)).expect("capacity.max(1) is always non-zero");
 
-        let (model, provider) =
-            tokio::task::spawn_blocking(|| -> Result<(TextEmbedding, ExecutionProvider)> {
-                // Commit the ORT global thread pool (intra=1, spinning=off by
-                // default) BEFORE fastembed creates any session, so the
-                // per-session `with_intra_threads(num_cpus)` it hardcodes is
-                // overridden via DisablePerSessionThreads. This is the
-                // deferred-embed deadlock fix (#1542).
+        let (model, provider, resolved_model) = tokio::task::spawn_blocking(
+            || -> Result<(TextEmbedding, ExecutionProvider, EmbeddingModel)> {
+                // Commit the ORT global thread pool (intra=platform/EP-
+                // conditional, spinning=off by default) BEFORE fastembed
+                // creates any session, so the per-session
+                // `with_intra_threads(num_cpus)` it hardcodes is overridden
+                // via DisablePerSessionThreads. This is the deferred-embed
+                // deadlock fix (PR #1668), scoped to keep intra=1 only under
+                // the `embedder-cuda` feature — the only build that can hit
+                // the CUDA barrier deadlock (issue #3493 P0).
                 init_ort_runtime();
 
                 let require_gpu = std::env::var("TRUSTY_DEVICE")
                     .map(|v| v.eq_ignore_ascii_case("gpu"))
                     .unwrap_or(false);
 
-                let (q_opts, q_provider) = Self::init_options(EmbeddingModel::AllMiniLML6V2Q);
-                let (m, provider) = match Self::try_new_bounded(q_opts, q_provider) {
-                    Ok(m) => (m, q_provider),
+                // Default is the non-quantized fp32 model (issue #3486 /
+                // #3493 P0 — see `resolve_default_embedding_model`'s doc for
+                // the throughput + accuracy data); INT8 remains available via
+                // `TRUSTY_EMBEDDER_MODEL=int8`. Whichever model is NOT
+                // selected as the primary becomes the last-resort fallback if
+                // the primary fails to initialise on CPU too, preserving the
+                // pre-existing two-model robustness net.
+                let primary_model = resolve_default_embedding_model();
+                let fallback_model = if primary_model == EmbeddingModel::AllMiniLML6V2Q {
+                    EmbeddingModel::AllMiniLML6V2
+                } else {
+                    EmbeddingModel::AllMiniLML6V2Q
+                };
+
+                let (q_opts, q_provider) = Self::init_options(primary_model.clone());
+                let (m, provider, resolved_model) = match Self::try_new_bounded(q_opts, q_provider)
+                {
+                    Ok(m) => (m, q_provider, primary_model.clone()),
                     Err(q_err) => {
                         if q_provider != ExecutionProvider::Cpu && !require_gpu {
                             tracing::error!(
@@ -539,20 +674,20 @@ impl FastEmbedder {
                             // any worker thread reads it.
                             unsafe { std::env::set_var("TRUSTY_DEVICE", "cpu") };
                             let (cpu_opts, cpu_provider) =
-                                Self::init_options(EmbeddingModel::AllMiniLML6V2Q);
+                                Self::init_options(primary_model.clone());
                             match TextEmbedding::try_new(cpu_opts) {
-                                Ok(m) => (m, cpu_provider),
+                                Ok(m) => (m, cpu_provider, primary_model.clone()),
                                 Err(cpu_err) => {
                                     tracing::warn!(
-                                        "AllMiniLML6V2Q init failed on CPU ({cpu_err:#}), \
-                                         falling back to AllMiniLML6V2"
+                                        "{primary_model:?} init failed on CPU ({cpu_err:#}), \
+                                         falling back to {fallback_model:?}"
                                     );
                                     let (fb_opts, fb_provider) =
-                                        Self::init_options(EmbeddingModel::AllMiniLML6V2);
-                                    let m = TextEmbedding::try_new(fb_opts).context(
-                                        "failed to initialise fastembed (tried CUDA→CPU on AllMiniLML6V2Q, then AllMiniLML6V2)",
-                                    )?;
-                                    (m, fb_provider)
+                                        Self::init_options(fallback_model.clone());
+                                    let m = TextEmbedding::try_new(fb_opts).context(format!(
+                                        "failed to initialise fastembed (tried CUDA→CPU on {primary_model:?}, then {fallback_model:?})"
+                                    ))?;
+                                    (m, fb_provider, fallback_model.clone())
                                 }
                             }
                         } else if require_gpu {
@@ -562,14 +697,13 @@ impl FastEmbedder {
                             ));
                         } else {
                             tracing::warn!(
-                                "AllMiniLML6V2Q init failed ({q_err:#}), falling back to AllMiniLML6V2"
+                                "{primary_model:?} init failed ({q_err:#}), falling back to {fallback_model:?}"
                             );
-                            let (fb_opts, fb_provider) =
-                                Self::init_options(EmbeddingModel::AllMiniLML6V2);
-                            let m = TextEmbedding::try_new(fb_opts).context(
-                                "failed to initialise fastembed (tried AllMiniLML6V2Q and AllMiniLML6V2)",
-                            )?;
-                            (m, fb_provider)
+                            let (fb_opts, fb_provider) = Self::init_options(fallback_model.clone());
+                            let m = TextEmbedding::try_new(fb_opts).context(format!(
+                                "failed to initialise fastembed (tried {primary_model:?} and {fallback_model:?})"
+                            ))?;
+                            (m, fb_provider, fallback_model.clone())
                         }
                     }
                 };
@@ -585,14 +719,17 @@ impl FastEmbedder {
                 let _ = m
                     .embed(warmup, None)
                     .context("fastembed warmup batch failed")?;
-                Ok((m, provider))
-            })
-            .await
-            .context("spawn_blocking joined with error during embedder init")??;
+                Ok((m, provider, resolved_model))
+            },
+        )
+        .await
+        .context("spawn_blocking joined with error during embedder init")??;
 
+        let model_name = embedding_model_name(&resolved_model);
         tracing::info!(
-            "trusty-embedder: FastEmbedder ready (provider={}, dim={})",
+            "trusty-embedder: FastEmbedder ready (provider={}, model={}, dim={})",
             provider,
+            model_name,
             EMBED_DIM
         );
 
@@ -601,6 +738,7 @@ impl FastEmbedder {
             cache: Arc::new(Mutex::new(LruCache::new(capacity))),
             dim: EMBED_DIM,
             provider,
+            model_name,
         })
     }
 }

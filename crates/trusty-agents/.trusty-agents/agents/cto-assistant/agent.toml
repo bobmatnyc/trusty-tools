@@ -1,6 +1,28 @@
+# CTO Assistant — personalization overlay over the base `assistant` agent
+# (PR A, epic #3052). Converted from a hand-forked full copy to `extends =
+# "assistant"` so it inherits the base's curated gworkspace tool surface,
+# black-box tool posture (no session_list/system_status/mcp_list/... leaks —
+# see `../assistant/agent.toml`), and delegation grant (`delegate_to_agent`),
+# leaving only Masa/Duetto-specific personalization here: identity, the CTO
+# ops DB + ticketing + extra git/task tools, and the Duetto org/APEX/voice
+# skills. `[tools].allow` and `system_prompt.skills` below are UNIONED with
+# the base's at load time (base-first, deduped) via
+# `crate::agents::extends::merge_extends` — do not re-list tools/skills
+# already granted by the base.
+#
+# `[llm]` below declares ONLY `temperature`/`max_tokens` (the tuned deltas)
+# — these two fields use PER-KEY extends inheritance (`merge_extends`,
+# `crates/trusty-agents/src/agents/extends/mod.rs`): a declared value
+# overrides the base's, an omitted one inherits it. Every OTHER `[llm]`
+# field (`use_anthropic_direct`, `stop_sequences`, ...) is intentionally
+# NOT re-declared here — it's inherited from the base wholesale regardless
+# (unchanged pre-existing behavior), and the base's values already match
+# what this agent previously declared for those fields, so nothing is lost.
+
 [agent]
 name = "cto-assistant"
 role = "assistant"
+extends = "assistant"
 # #3358: no `runner` — falls back to the default (Subprocess), routing off
 # the claude-code CLI onto the direct-API credential path (AnthropicDirect
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
@@ -11,37 +33,30 @@ display_name = "CTO Assistant"
 prompt_label = "cto"
 
 [llm]
+# #295: lower temperature than the base's 0.7 — factual precision for org
+# data / Duetto-specific answers over conversational warmth.
 temperature = 0.3
-# #295: Conversational assistant — short replies by default.
-# #469: Bumped from 1024 to 4096 to leave room for GFA reports and structured
-# org data tables which were getting truncated.
+# #469: Bumped from the base's 1024 to 4096 to leave room for GFA reports and
+# structured org data tables which were getting truncated.
 max_tokens = 4096
-use_anthropic_direct = false
-# Conversational mode (#feature-A): block markdown headers and divider rules
-# from appearing mid-response so replies stay in plain prose. Structured
-# outputs (tables, source-notes blocks) are still allowed when the user
-# explicitly requests them — those use distinct prefixes.
-stop_sequences = ["\n##", "\n* * *"]
-# Note: "\n---\n" intentionally excluded — qwen3 uses HR dividers naturally in
-# conversational output; including it caused mid-sentence truncation (#eval-qwen3)
 
 [tools]
-# #255: Broader allowlist than personal-assistant — adds branch listing,
-# commit search, and the native ticketing surface. Tool names below match
-# the registered names in `src/tools/{mcp_tools,git_tools,native_ticketing}.rs`
-# (note: the ticketing tools use the verb_noun shape, e.g. `create_ticket`,
-# except for `ticket_search` which is the cross-text search tool added in #246).
-# #256: `granola_*` added for meeting/transcript lookup; `metro_*` for the
-# shared metro-north skill (Masa often asks transit questions during work hours).
+# CTO-specific DELTAS only — the base `assistant` already grants git_log,
+# git_status, granola_*, web_search, delegate_to_agent, and the full
+# gworkspace Gmail/Calendar/Drive/Docs/Sheets/Slides/Tasks surface (unioned
+# in automatically). BLACK-BOX POSTURE (PR A): session_list, session_status,
+# session_send, project_list, agent_delegate (trusty-mpm proxied tools),
+# console_metrics, system_status, and mcp_list/mcp_enable/mcp_disable are
+# DELIBERATELY EXCLUDED — do not re-add them here (see
+# `../assistant/agent.toml` for the rationale).
 allow = [
-    "mcp_list", "mcp_enable", "mcp_disable",
-    "git_log", "git_status", "git_branches", "git_search_commits",
+    # #255: branch listing + commit search beyond the base's git_log/git_status.
+    "git_branches", "git_search_commits",
+    # #255/#246: native ticketing surface (verb_noun shape, except
+    # `ticket_search` which is the cross-text search tool).
     "ticket_search", "list_tickets", "get_ticket", "create_ticket",
-    "granola_*",
-    "web_search",
-    # #469: Added memory_recall (project decisions from trusty-memory) and
-    # vector_search (semantic code/doc search) — both already exist as
-    # registered tools in trusty-agents but were missing from this allow list.
+    # #469: memory_recall (project decisions from trusty-memory) and
+    # vector_search (semantic code/doc search).
     "memory_recall",
     "vector_search",
     # #472: CTO ops DB query tools — read-only SQLite over ~/Duetto/cto/data/cto.db.
@@ -51,30 +66,21 @@ allow = [
     "query_budget",
     "query_risks",
     "query_work_classification",
-    # #472: Google Tasks — already exposed by gworkspace-mcp v0.2.0; just opt-in.
-    # #485: `create_task` added for Granola meeting sync → Google Tasks creation.
+    # #472/#485: Google Tasks (distinct tool names from the base's
+    # manage_task_lists/manage_tasks) — list/complete/create.
     "list_tasks",
     "complete_task",
     "create_task",
-    # #473: Gmail triage via gworkspace-mcp — read + triage + draft replies.
-    # Excluded: send_email (requires explicit user confirmation before sending).
-    "search_gmail_messages",
-    "get_gmail_message_content",
-    "modify_gmail_messages",
+    # #473: create_draft — draft-only Gmail reply tool, not on the base
+    # (search_gmail_messages/get_gmail_message_content/modify_gmail_messages
+    # are already granted by the base's Gmail surface).
     "create_draft",
-    # trusty-mpm (#3203) — full curated set; cto-assistant already has a
-    # broader write-capable posture (create_ticket, modify_gmail_messages,
-    # create_task, ...), so session_send (drive a pane) and agent_delegate
-    # (tracking/gating only) are included alongside the read-only tools.
-    "session_list",
-    "session_status",
-    "session_send",
-    "project_list",
-    "agent_delegate",
-    "console_metrics",
 ]
 
 [system_prompt]
+# CTO-specific skill DELTAS only — `gworkspace-calendar` is already granted
+# by the base and inherited via union; listing it again here would be a
+# harmless duplicate, so it's dropped.
 # #256: Skill files live in `.trusty-agents/skills/<name>.md` and are resolved
 # by name at agent load time. The org/APEX/voice skills give the model
 # durable Duetto-specific knowledge without bloating the persona file.
@@ -84,5 +90,4 @@ skills = [
     "cto-apex-framework",
     "cto-bob-voice",
     "izzie-metro-north",
-    "gworkspace-calendar",
 ]

@@ -51,10 +51,18 @@ use super::*;
 /// which extracts `ConnectInfo<SocketAddr>` to enforce that gate (see
 /// `daemon::api::rpc::rpc_handler`'s docs) — a plain `axum::serve(listener,
 /// router)` never populates that extension and every `/rpc` call would 500.
-async fn spawn_test_daemon() -> String {
+///
+/// Returns the root [`tempfile::TempDir`] guard alongside the URL — the
+/// caller MUST hold it for the test's duration (#3450: the previous
+/// `tempfile::tempdir().unwrap().keep()` both rooted under a possibly-polluted
+/// `$TMPDIR` (see `crate::test_support`'s #3382 doc) AND permanently disabled
+/// cleanup, so every test run left a fresh, un-reapable root behind).
+async fn spawn_test_daemon() -> (tempfile::TempDir, String) {
     use crate::daemon::{api, state::DaemonState};
-    let root = tempfile::tempdir().unwrap().keep();
-    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root).await);
+    let root_guard = crate::test_support::hermetic_temp_dir();
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root_guard.path().to_owned()).await,
+    );
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -65,7 +73,7 @@ async fn spawn_test_daemon() -> String {
         )
         .into_future(),
     );
-    format!("http://{addr}")
+    (root_guard, format!("http://{addr}"))
 }
 
 /// Build a local, offline-clonable bare git repo with one commit on `main`.
@@ -77,7 +85,7 @@ async fn spawn_test_daemon() -> String {
 /// `live_provision_real_repo` fixture. Returns the `TempDir` (kept alive for
 /// the caller's duration) and the `file://` URL to the bare repo.
 fn local_bare_repo() -> (TempDir, String) {
-    let scratch = TempDir::new().expect("scratch tempdir");
+    let scratch = crate::test_support::hermetic_temp_dir();
     let bare = scratch.path().join("origin.git");
     let work = scratch.path().join("seed");
     assert!(
@@ -151,7 +159,7 @@ async fn create_session_wrong_backend_params_is_invalid_request() {
 
 #[tokio::test]
 async fn list_sessions_empty_fleet_returns_empty_vec() {
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let connector = TmConnector::with_daemon_url(url);
     let sessions = connector.list_sessions().await.expect("list_sessions");
     assert!(sessions.is_empty(), "fresh daemon must have no sessions");
@@ -160,7 +168,7 @@ async fn list_sessions_empty_fleet_returns_empty_vec() {
 /// Shared conformance assertion — see [`ConnectorTestKit::assert_status_not_found_for_unknown_id`].
 #[tokio::test]
 async fn session_status_unknown_id_is_not_found() {
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let connector = TmConnector::with_daemon_url(url);
     ConnectorTestKit::assert_status_not_found_for_unknown_id(
         &connector,
@@ -172,7 +180,7 @@ async fn session_status_unknown_id_is_not_found() {
 /// Shared conformance assertion — see [`ConnectorTestKit::assert_send_not_found_for_unknown_id`].
 #[tokio::test]
 async fn send_input_unknown_id_is_not_found() {
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let connector = TmConnector::with_daemon_url(url);
     ConnectorTestKit::assert_send_not_found_for_unknown_id(
         &connector,
@@ -183,7 +191,7 @@ async fn send_input_unknown_id_is_not_found() {
 
 #[tokio::test]
 async fn attach_unknown_id_is_not_found() {
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let connector = TmConnector::with_daemon_url(url);
     let err = connector
         .attach("00000000-0000-0000-0000-000000000000")
@@ -198,7 +206,7 @@ async fn attach_unknown_id_is_not_found() {
 /// panic or a malformed-envelope `Transport` error).
 #[tokio::test]
 async fn delegate_unknown_session_is_backend_error() {
-    let url = spawn_test_daemon().await;
+    let (_daemon_root, url) = spawn_test_daemon().await;
     let connector = TmConnector::with_daemon_url(url);
     let spec = AgentSpec {
         agent_name: "research".into(),
@@ -219,11 +227,40 @@ async fn delegate_unknown_session_is_backend_error() {
 /// [`ConnectorTestKit::assert_basic_lifecycle`]) -> attach -> delegate,
 /// against a REAL daemon spawn (real git clone via `RealGitBackend`, faked
 /// tmux via `FakeNoopTmuxDriver`).
+///
+/// `#[serial_test::serial]` (#3450): this test mutates the process-global
+/// `TRUSTY_MPM_WORKSPACE_ROOT` env var — see the override comment below.
 #[tokio::test]
+#[serial_test::serial]
 async fn create_session_full_lifecycle() {
     let (_scratch, repo_url) = local_bare_repo();
-    let url = spawn_test_daemon().await;
-    let connector = TmConnector::with_daemon_url(url);
+    let (_daemon_root, url) = spawn_test_daemon().await;
+    let connector = TmConnector::with_daemon_url(url.clone());
+
+    // ── Hermetic workspace-provisioning root (#3450) ─────────────────────────
+    // `DaemonState::with_root_isolated_managed` only isolates the session
+    // manager's OWN metadata store (`root/session-manager`). The REAL
+    // `spawn_managed` handler (`daemon/managed_routes/lifecycle.rs`)
+    // independently calls `TrustyToolsConfig::load()` and resolves the
+    // workspace-PROVISIONING root via `workspace_root(&config)`, which
+    // defaults to the PRODUCTION `~/trusty-mpm-projects` whenever
+    // `TRUSTY_MPM_WORKSPACE_ROOT` is unset — completely bypassing whatever
+    // isolated root this test's `DaemonState` was built with. Compounding
+    // this, `parse_github_path` treats ANY multi-segment URL (not just a
+    // `github.com` one) as an owner/repo pair, so the `file://<scratch
+    // tempdir>/origin.git` URL from `local_bare_repo()` launders the scratch
+    // tempdir's OWN random name into "owner" — the exact
+    // `~/trusty-mpm-projects/<tempdir-name>/origin/.base/...` shape observed
+    // live in #3450. Pointing `TRUSTY_MPM_WORKSPACE_ROOT` at the SAME
+    // hermetic `_daemon_root` this test already uses closes that gap.
+    let prev_workspace_root =
+        std::env::var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV).ok();
+    unsafe {
+        std::env::set_var(
+            crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV,
+            _daemon_root.path(),
+        );
+    }
 
     let req = CreateSessionReq {
         task: "list files".into(),
@@ -236,11 +273,110 @@ async fn create_session_full_lifecycle() {
             ephemeral: true,
         },
     };
-    let info = ConnectorTestKit::assert_basic_lifecycle(&connector, req, "echo hello").await;
+
+    // NOT `ConnectorTestKit::assert_basic_lifecycle` (issue #3603 follow-up):
+    // that helper's `send_input` step hard-asserts success, which assumes the
+    // spawned session reaches `Active`. This test drives the REAL
+    // `spawn_managed_cloned` handler (module docs above), which calls the
+    // REAL `ClaudeCodeAdapter::spawn` — unlike every other tmux operation
+    // here, that is NOT faked by `FakeNoopTmuxDriver`, and it resolves an
+    // actual `claude` binary on `PATH`/well-known dirs
+    // (`ClaudeCodeAdapter::resolve_claude`). On a developer machine with
+    // Claude Code installed this succeeds and the record reaches `Active`;
+    // on a CI runner with no `claude` binary it fails and
+    // `spawn_managed_cloned` calls `mark_errored`, leaving the record
+    // `Errored`. Before #3603's send_input readiness gate, this test's
+    // `assert_basic_lifecycle` call "passed" in BOTH cases only because
+    // `send_input` had no Provisioning/Errored guard at all — on an Errored
+    // session that meant silently typing `echo hello` + Enter into a bare
+    // shell with no runtime attached, i.e. exactly the shell-execution risk
+    // #3603 closes. That was the test asserting broken (vulnerable)
+    // behavior, not a real contract. Assert the CORRECT, environment-
+    // independent contract instead: `send_input` must succeed for `Active`,
+    // and must be refused (never silently accepted) for anything else.
+    let info = connector
+        .create_session(req)
+        .await
+        .expect("create_session must succeed for a well-formed request");
+    assert!(
+        !info.id.is_empty(),
+        "create_session must return a non-empty session id"
+    );
+
+    let listed = connector
+        .list_sessions()
+        .await
+        .expect("list_sessions must succeed");
+    assert!(
+        listed.iter().any(|s| s.id == info.id),
+        "list_sessions must include the just-created session {}",
+        info.id
+    );
+
+    let status = connector
+        .session_status(&info.id)
+        .await
+        .expect("session_status must succeed for a known id");
+    assert_eq!(
+        status.id, info.id,
+        "session_status must echo back the id it was asked about"
+    );
+
+    // `session_status`'s `state` is DISPLAY-reconciled against live tmux
+    // (#3302): with `FakeNoopTmuxDriver` the tmux session never "exists", so
+    // an `active` PERSISTED record is shown as `stopped` here regardless of
+    // what actually gates `send_input` (which reads the PERSISTED state —
+    // `SessionManager::check_send_input_ready` via `self.get(id)`, never the
+    // display-reconciled view). Fetch the raw summary directly to read
+    // `persisted_state`, the field the daemon's own docs say resume/restart
+    // (and, by the same logic, this test's expectation) must key off of,
+    // rather than predicting the gate's outcome from a value it does not
+    // actually consult.
+    let raw: ManagedSessionSummary = reqwest::Client::new()
+        .get(format!("{url}/api/v1/sessions/managed/{}", info.id))
+        .send()
+        .await
+        .expect("raw status GET must succeed")
+        .json()
+        .await
+        .expect("raw status GET must decode as ManagedSessionSummary");
+    let persisted_state = raw.persisted_state.as_deref().unwrap_or(&raw.state);
+
+    match persisted_state {
+        "active" => {
+            connector
+                .send_input(&info.id, "echo hello")
+                .await
+                .expect("send_input must succeed for an Active session");
+        }
+        other => {
+            let err = connector
+                .send_input(&info.id, "echo hello")
+                .await
+                .expect_err(&format!(
+                    "send_input must be refused for a non-Active persisted state \
+                     ({other}), never silently accepted"
+                ));
+            assert!(
+                matches!(err, ConnectorError::Backend(_)),
+                "expected a Backend refusal for persisted state {other:?}, got {err:?}"
+            );
+        }
+    }
+
+    // Restore the env var immediately after the one call that provisions a
+    // workspace — attach/delegate below never re-provision.
+    unsafe {
+        match prev_workspace_root {
+            Some(v) => std::env::set_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV, v),
+            None => std::env::remove_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV),
+        }
+    }
+
     assert_eq!(
         info.task.as_deref(),
         Some("list files"),
-        "the kit's lifecycle assertion doesn't check task content — do it here"
+        "create_session must echo back the task"
     );
 
     let attach = connector.attach(&info.id).await.expect("attach");

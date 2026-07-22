@@ -11,7 +11,8 @@
     "tauri": "tauri",
     "test": "playwright test",
     "test:ui": "playwright test --ui",
-    "test:unit": "vitest run"
+    "test:unit": "vitest run",
+    "check:tokens": "node ../../../scripts/check_token_drift.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

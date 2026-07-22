@@ -10,6 +10,121 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Workstream/agents UX corrections: hide base agents, PM-only agent choice, immutable project (refs #3465).**
+  - The Agents tab and the start-working agent selector no longer list the 5
+    `BASE-*` composition-template agents (`base-agent`, `base-engineer`,
+    `base-ops`, `base-qa`, `base-research`) — they exist only to be
+    `extends:`-ed by concrete agents and were never meant to be dispatched.
+    Fixed at the source: `GET /agents` (`crate::agents::protocol::agents_list`,
+    see the trusty-code changelog) no longer includes them.
+  - **Removed the user-facing agent selector from the start-working bar
+    (`StartWorkingForm.svelte`).** "We don't choose agents, the PM does" (Bob).
+    The `agent:` dropdown (issue #3449) — and its `agentRoster`/`selectedAgent`
+    state and mount-time `GET /agents` fetch — are gone; every `POST /tasks`
+    call now omits `agent_name` entirely, so the daemon defaults every run to
+    its PM entry agent (`task::protocol::task_run`'s own default, #3437),
+    which delegates as needed. The Agents tab itself is unaffected — it still
+    lists agents for viewing/managing, this only removes the per-submit picker.
+  - **A workstream's project is now locked once the conversation is bound to
+    it.** "Once we choose a project for a workstream, we don't change it. New
+    workstream if we want to change projects" (Bob). The start-working bar's
+    "choose project"/"clear" controls are now shown only BEFORE this
+    conversation's first successful submit; once bound (a session or
+    continuation-workstream id exists) the project is displayed read-only —
+    start a new workstream to use a different project. The daemon already
+    enforces the underlying invariant (`task::protocol::task_run` rejects a
+    `project` that mismatches an existing session's persisted binding), so
+    this is a GUI-only change: the control is removed rather than left to be
+    rejected.
+
+### Added
+
+- **Download workstream transcript as Markdown (closes #3526).** The active
+  workstream's chat pane header (`WorkstreamActivity.svelte`) gains a
+  `download transcript` button that saves the full run transcript — every
+  turn, including the tool-run lines (`` `AGENT` ran: write_files ``) that a
+  runaway-loop post-mortem needs — as a Markdown file named
+  `transcript-<workstream>-<YYYYMMDD-HHMMSS>.md`. The Markdown is rendered by
+  the DAEMON (`GET /sessions/{id}/transcript.md`, see the trusty-code
+  changelog), so the same document a developer can `curl` in local dev is
+  exactly what the button downloads — no second, drift-prone client-side
+  serializer. Motivating case: a workstream ran 48 min to
+  `deadline_exceeded` with a runaway loop and there was no way to pull the
+  transcript to inspect it.
+
+### Fixed
+
+- **App / dock icon — stale "AI COMMANDER" placeholder replaced with the real
+  Foundry robot mark.** The entire `icons/` set (`icon.png`/`icon.ico`, every
+  PNG size, the `Square*Logo.png` / `StoreLogo.png` tiles) depicted a
+  robot-in-a-terminal reading "AI COMMANDER" — a placeholder for a different
+  product, shown in the macOS dock and app switcher. It is regenerated from a
+  new 1024×1024 master (`icons/icon-master.svg`) derived from the canonical
+  Foundry robot mark (`docs/design/UI/design-system/icons/RobotIcon.svelte`,
+  the `full` hero variant): a dark oxide squircle (`#2B1C12` / deeper `#241610`
+  ground) with the rust-accented (`#b7410e`, the `--trusty-primary` token)
+  robot face — antenna, two eyes, `>_` terminal mouth, sparkle. The set was
+  regenerated with `cargo tauri icon` (rendered SVG→PNG via `rsvg-convert`),
+  which also creates a macOS `icons/icon.icns` (previously absent — the app had
+  no `.icns` bundle icon at all). `tauri.conf.json` now wires `bundle.icon`
+  explicitly to `32x32.png` / `128x128.png` / `128x128@2x.png` / `icon.icns` /
+  `icon.ico` rather than relying on Tauri's implicit lookup. The orphaned,
+  unreferenced `icons/aic-logo.svg` (the "AIC" letterform, wrong product) is
+  deleted.
+
+- **Header brand mark — placeholder diamond replaced with the canonical
+  Foundry robot mark.** `AppHeader.svelte` rendered a literal `◆` diamond
+  glyph to the left of the "Trusty Code" wordmark — a placeholder, not the
+  brand identity (reported by Bob: the header logo was wrong). It now renders
+  the canonical Foundry / Trusty Assistant robot mark, vendored as
+  `ui/src/lib/icons/RobotIcon.svelte` from the design-system source
+  (`docs/design/UI/design-system/icons/RobotIcon.svelte`, refs #3486/#3495),
+  used in its `mono` variant at 18px and colored via the existing
+  `text-trusty-primary` header token (through `currentColor`) so it themes in
+  light/dark. Scope is the mark only — the wordmark, window title, and layout
+  are unchanged.
+
+### Added
+
+- **CI token drift-check (refs #3486):** a new `scripts/check_token_drift.mjs`
+  pins this crate's `app.css` Foundry `--color-*` RGB-triple values to
+  `docs/design/UI/design-system/tokens.css` (the canonical hex source),
+  wired into CI as the `token-drift` workflow. Fails with a per-token diff if
+  the two silently diverge; run locally via `pnpm run check:tokens`. Closes
+  the gap `lib/theme.test.ts` left open — that test only checks internal
+  light/dark self-consistency, not agreement with canonical. No drift was
+  found in this crate — every value already matched canonical.
+  Guards against a zero-comparison false-green (an ENFORCED entry with an
+  emptied `mappings`/`passthrough` previously reported "matches canonical"
+  regardless of the file's real contents — caught by code-critic review) and
+  ships `scripts/check_token_drift.test.mjs`, a `node:test` regression suite
+  covering drift detection, missing-block/missing-token parse failures, and
+  the zero-comparison guard, run in CI ahead of the real check.
+
+- **Agents + Skills management tabs (issue #3449).** Two new nav tabs —
+  `AgentsTab.svelte` (replacing the prior per-session-roster stub) and the
+  new `SkillsTab.svelte` — list the daemon's full agent/skill catalog with
+  tier badges (embedded/bundled = read-only) and add/remove for the
+  user-editable disk tier, via a two-step inline confirm on remove
+  (matching `WorkstreamSwitcher.svelte`'s pattern). New `lib/agent-roster.ts`/
+  `lib/skill-roster.ts` wrap the new `GET`/`POST /agents`,
+  `DELETE /agents/{name}` REST routes (and the `skills` equivalent).
+  `StartWorkingForm.svelte`'s task form gained an optional agent selector,
+  closing the "no pre-task agent roster endpoint exists yet" gap that form
+  previously carried as a standing note — omitting a selection still defers
+  to the daemon's own default, unchanged from before.
+
+### Changed
+
+- **Branding cleanups.** `ui/index.html`'s `<title>` is corrected from the
+  lowercase crate name `trusty-code` to `Trusty Code`, matching the window
+  title and header wordmark. `tauri.conf.json` gains an explicit
+  `mainBinaryName` of `Trusty Code` so the OS process / bundle binary is no
+  longer the raw crate name `trusty-code-gui`. This crate's vendored
+  `ui/src/lib/icons/RobotIcon.svelte` has its `aria-label` changed from the
+  inherited `Trusty Assistant robot` to the app-appropriate `Trusty Code`
+  (canonical design-system source left unchanged).
+
 - **`ProjectPickerModal` marks unregistered (local-only) roster rows
   (issue #3435).** The daemon's `GET /projects` roster is now primarily
   sourced from trusty-mpm's shared project registry; a row without a

@@ -280,5 +280,3 @@ TELUI-11 (hardening + tests) lands last, over TELUI-0…10.
 - Issues: **#1272** (SM TUI epic / feature parent), **#1275** (daemon `last_summary` +
   `summarizing`, DONE), **#1399** (cost-daily endpoint, STUI-2), **#1402** (per-adapter
   termination sequence, STUI-7).
-</content>
-</invoke>

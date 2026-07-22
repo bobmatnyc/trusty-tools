@@ -5,7 +5,16 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.3.0] — 2026-07-21
+
+### Fixed
+
+- `agents::builder::merge_frontmatter` now quotes an emitted scalar frontmatter value (`name`, `role`, `description`, `model`, `resource_tier`) whenever it needs quoting to stay valid YAML — e.g. a `description` containing a colon (closes #3556). Previously every scalar was emitted as a bare plain YAML scalar regardless of content, even though `split_frontmatter` had already stripped any quotes the source template used; a description like `Rust 2024 edition specialist: memory-safe systems` composed to an UNQUOTED line a strict YAML parser (`serde_yaml`, used by `trusty-agents`' `.md` agent loader) rejects with "mapping values are not allowed in this context", while trusty-mpm's own lenient reader tolerated it — so the bug was invisible to trusty-mpm's own tooling. Composition was invariant to source-side quoting, so re-provisioning alone could never have fixed an affected agent; this is a fix to the shared composer, not merely a re-deploy. `split_frontmatter` now symmetrically decodes the same escaping on parse so a compose → deploy → re-compose cycle round-trips verbatim.
+- `needs_quoting` (the #3556 quote-on-emit check, above) also now catches a mid-string `" #"` sequence — a space followed by `#` starts a YAML comment ANYWHERE in a plain scalar, not just when `#` is the very first character (code-critic review of #3556's PR #3565, HIGH finding). A value like `Model context protocol #1 tool for delegating` previously composed to valid-but-truncated YAML — `validate_frontmatter` accepted it since truncated YAML is still syntactically valid, and the real consumer silently deserialized only `Model context protocol`, dropping everything after the `#` with no error anywhere. Same blind spot as the #3556 root cause, different trigger character. Also closes two smaller gaps found in the same review: the YAML core-schema null tokens (`null`/`Null`/`NULL`/`~`) now force quoting (they'd otherwise round-trip through `Option<String>` as `None` instead of the literal string), and an embedded newline in a scalar value now quotes AND escapes correctly (`escape_yaml_double_quoted`/`unescape_yaml_double_quoted` gained a `\n` case) rather than composing a physically multi-line frontmatter block.
+
+### Added
+
+- `agents::frontmatter::validate_frontmatter`: strict-parses a document's frontmatter block with `serde_yaml` — the same check a real consumer (e.g. `trusty-agents`' `.md` agent loader) applies, deliberately stricter than the crate's own lenient `parse_kv_line` grammar (#3556). `agents::deployer::deploy_agents_filtered` now calls it on every freshly composed agent before writing: a composition that fails strict validation is treated like a compose failure — logged loudly, recorded in `DeployResult::failed`, and skipped — so a malformed agent is caught at deploy time instead of silently landing in `.claude/agents/` and only failing at runtime.
 
 ## [0.2.3] — 2026-07-19
 

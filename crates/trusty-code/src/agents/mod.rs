@@ -30,6 +30,7 @@
 
 pub mod config;
 pub mod md_loader;
+pub mod protocol;
 
 pub use config::{
     AgentConfig, AgentInfo, LlmParams, RunnerConfig, RunnerKind, SystemPrompt, ToolsConfig,
@@ -176,7 +177,7 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
 /// Test: `load_all_agents_falls_back_to_embedded_when_disk_empty`,
 /// `assets::tests::default_agents_field_identical_to_retired_toml`,
 /// `assets::tests::default_agents_parse_and_names_match`.
-fn load_embedded_default_agents() -> Vec<AgentConfig> {
+pub(crate) fn load_embedded_default_agents() -> Vec<AgentConfig> {
     crate::assets::DEFAULT_AGENTS
         .iter()
         .filter_map(|embedded| match embedded {
@@ -296,11 +297,22 @@ pub enum ResolveAgentError {
 /// not-found case below rather than propagating. If nothing matches
 /// anywhere, returns `ResolveAgentError::NotFound` with the disk ∪ embedded
 /// name list ([`available_agent_names`]) for a caller to surface.
+/// A namespaced `<plugin>:<local-name>` (issue #3539 — Phase 1 Claude Code
+/// plugin support) routes to [`crate::plugins::agents::find_plugin_agent_config`]
+/// instead of the disk/embedded precedence below: plugin agents are an
+/// independent, additive tier, never falling back to (or being shadowed
+/// by) disk/embedded resolution of the bare local name.
 /// Test: `resolve_agent_disk_wins_over_embedded`,
 /// `resolve_agent_falls_back_to_embedded_when_disk_misses`,
 /// `resolve_agent_disk_parse_error_does_not_fall_back_to_embedded`,
-/// `resolve_agent_unknown_name_lists_available_agents`.
+/// `resolve_agent_unknown_name_lists_available_agents`,
+/// `resolve_agent_namespaced_name_resolves_plugin_agent`,
+/// `resolve_agent_namespaced_unknown_plugin_is_not_found`.
 pub fn resolve_agent(dir: &Path, name: &str) -> Result<AgentConfig, ResolveAgentError> {
+    if let Some((plugin, agent_name)) = name.split_once(':') {
+        return resolve_plugin_agent(dir, plugin, agent_name, name);
+    }
+
     let disk_path = dir.join(format!("{name}.md"));
     if disk_path.exists() {
         return md_loader::load_md_agent(&disk_path).map_err(|source| ResolveAgentError::Load {
@@ -338,6 +350,47 @@ pub fn resolve_agent(dir: &Path, name: &str) -> Result<AgentConfig, ResolveAgent
         dir: dir.to_path_buf(),
         available: available_agent_names(dir).join(", "),
     })
+}
+
+/// Resolve a namespaced `<plugin>:<agent_name>` for [`resolve_agent`]
+/// (issue #3539).
+///
+/// Why: split out so `resolve_agent`'s own precedence chain (disk ->
+/// embedded -> not-found) stays a single, unbranched read for the common
+/// unnamespaced case.
+/// What: recovers a project root from `dir` via
+/// [`crate::plugins::project_root_two_levels_up`] (works whether `dir` is
+/// project- or user-scoped — see that function's docs), then delegates to
+/// [`crate::plugins::agents::find_plugin_agent_config`]. `None` (no such
+/// plugin, or no such agent within it) maps to the same `NotFound` shape
+/// `resolve_agent`'s bare-name path uses, `full_name` preserving the
+/// caller's original namespaced spelling; `Some(Err)` (found but failed to
+/// parse) maps to `Load`.
+/// Test: `resolve_agent_namespaced_name_resolves_plugin_agent`,
+/// `resolve_agent_namespaced_unknown_plugin_is_not_found`,
+/// `resolve_agent_namespaced_unknown_agent_is_not_found`.
+fn resolve_plugin_agent(
+    dir: &Path,
+    plugin: &str,
+    agent_name: &str,
+    full_name: &str,
+) -> Result<AgentConfig, ResolveAgentError> {
+    let found = crate::plugins::project_root_two_levels_up(dir).and_then(|root| {
+        crate::plugins::agents::find_plugin_agent_config(&root, plugin, agent_name)
+    });
+
+    match found {
+        Some(Ok(cfg)) => Ok(cfg),
+        Some(Err(source)) => Err(ResolveAgentError::Load {
+            name: full_name.to_string(),
+            source,
+        }),
+        None => Err(ResolveAgentError::NotFound {
+            name: full_name.to_string(),
+            dir: dir.to_path_buf(),
+            available: available_agent_names(dir).join(", "),
+        }),
+    }
 }
 
 /// List every agent name resolvable via [`resolve_agent`] for `dir`: disk ∪
@@ -772,6 +825,78 @@ mod tests {
         assert!(
             msg.contains("engineer"),
             "expected the available-agents hint to name a real embedded agent, got: {msg}"
+        );
+    }
+
+    /// `resolve_agent` routes a namespaced `<plugin>:<name>` to
+    /// `plugins::agents::find_plugin_agent_config`, recovering the project
+    /// root from the `.claude/agents` dir it was given (#3539).
+    ///
+    /// Why: this is the acceptance criterion for the dispatch half of
+    /// #3539's namespacing decision — a namespaced name must actually
+    /// dispatch, not just appear in `agents.list`.
+    /// Test: this test.
+    #[test]
+    fn resolve_agent_namespaced_name_resolves_plugin_agent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agents_dir = tmp.path().join(".claude").join("agents");
+        let plugin_agents_dir = tmp
+            .path()
+            .join(".claude")
+            .join("plugins")
+            .join("my-plugin")
+            .join("agents");
+        std::fs::create_dir_all(&plugin_agents_dir).expect("mkdir");
+        std::fs::write(
+            plugin_agents_dir.join("reviewer.md"),
+            "---\nname: reviewer\ndescription: Plugin reviewer\n---\n\nReview things.\n",
+        )
+        .expect("write");
+
+        let cfg = resolve_agent(&agents_dir, "my-plugin:reviewer").expect("resolve plugin agent");
+        assert_eq!(cfg.agent.name, "my-plugin:reviewer");
+        assert_eq!(cfg.agent.description.as_deref(), Some("Plugin reviewer"));
+        assert_eq!(cfg.system_prompt.content, "Review things.");
+    }
+
+    /// A namespaced name whose plugin does not exist errors `NotFound`, not
+    /// a silent fall-through to disk/embedded resolution of the bare name.
+    ///
+    /// Test: this test.
+    #[test]
+    fn resolve_agent_namespaced_unknown_plugin_is_not_found() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agents_dir = tmp.path().join(".claude").join("agents");
+
+        let err = resolve_agent(&agents_dir, "no-such-plugin:reviewer")
+            .expect_err("unknown plugin must not resolve");
+        assert!(
+            matches!(err, ResolveAgentError::NotFound { .. }),
+            "expected NotFound, got: {err:?}"
+        );
+    }
+
+    /// A namespaced name for a known plugin but an unknown local agent name
+    /// errors `NotFound`.
+    ///
+    /// Test: this test.
+    #[test]
+    fn resolve_agent_namespaced_unknown_agent_is_not_found() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let agents_dir = tmp.path().join(".claude").join("agents");
+        let plugin_agents_dir = tmp
+            .path()
+            .join(".claude")
+            .join("plugins")
+            .join("my-plugin")
+            .join("agents");
+        std::fs::create_dir_all(&plugin_agents_dir).expect("mkdir");
+
+        let err = resolve_agent(&agents_dir, "my-plugin:ghost")
+            .expect_err("unknown agent within a known plugin must not resolve");
+        assert!(
+            matches!(err, ResolveAgentError::NotFound { .. }),
+            "expected NotFound, got: {err:?}"
         );
     }
 

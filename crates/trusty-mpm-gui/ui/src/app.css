@@ -2,10 +2,71 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Base, dark-first styling. The theme store toggles `.dark` on <html>;
-   light mode is expressed via `dark:` inversion in components. */
+/* Why: Foundry v2 retheme (issue #3488, docs/design/UI/design-system/tokens.css)
+ * — replaces the placeholder indigo/slate palette with the Foundry
+ * rust-on-paper (light) / Night Shift (dark) values, 1:1 with the design
+ * system's hex values converted to space-separated RGB triples (see the
+ * format note below). This mirrors `crates/trusty-code-gui/ui/src/app.css`'s
+ * structure exactly (the reference implementation for this migration) so a
+ * future `scripts/check_token_drift.mjs` enforcement flip for this crate is
+ * a same-shape MAPPING addition, not a rewrite.
+ * What: each `--color-*` value is a SPACE-SEPARATED RGB triple (`"R G B"`,
+ * not `"#rrggbb"`) — required by `tailwind.config.js`'s
+ * `rgb(var(--color-*) / <alpha-value>)` format, the only way Tailwind can
+ * still generate opacity-modified utilities (`bg-trusty-primary/15`,
+ * `hover:bg-trusty-border/60`, used throughout every component) for a
+ * CSS-variable-backed color. `:root` sets the light theme as the default
+ * (`color-scheme: light dark` tells the UA both are supported); the
+ * `[data-theme='dark']` block overrides every variable for dark.
+ *
+ * Activation: matches trusty-code-gui's mechanism — `<html data-theme="dark">`,
+ * not a bare `.dark` class or a `prefers-color-scheme` media query. Unlike
+ * trusty-code-gui (OS-only, no manual toggle), this crate keeps its existing
+ * manual `ThemeToggle` + `localStorage`-persisted preference
+ * (`src/stores/theme.ts`) — only the DOM attribute that preference drives
+ * changed, from `<html class="dark">` to `<html data-theme="dark">`, so it
+ * reads the same `[data-theme='dark']` selector this file defines.
+ */
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
+
+  --color-primary: 183 65 14; /* rust accent #B7410E */
+  --color-primary-hover: 138 47 11; /* #8A2F0B */
+  --color-surface: 245 239 231; /* warm paper #F5EFE7 */
+  --color-card: 255 253 249; /* #FFFDF9 */
+  --color-raised: 239 230 216; /* header strip / raised surface #EFE6D8 */
+  --color-border: 216 201 180; /* #D8C9B4 */
+  --color-border-strong: 196 176 150; /* #C4B096 */
+  --color-text: 43 28 18; /* #2B1C12 */
+  --color-text-secondary: 110 88 67; /* #6E5843 */
+  --color-text-muted: 138 116 96; /* #8A7460 */
+  --color-text-inverse: 255 255 255;
+  --color-status-ok: 63 111 42; /* #3F6F2A */
+  --color-status-error: 194 51 31; /* #C2331F */
+  --color-status-warn: 176 125 16; /* #B07D10 */
+  --color-status-neutral: 138 116 96; /* reuses text-muted — no new hue, per README guardrail */
+}
+
+[data-theme='dark'] {
+  /* Night Shift — same rust hue family, accent brightens one step to hold
+   * contrast on oxide paper; soft/translucent fills (the `/NN` opacity
+   * modifiers every component already uses) carry the overlay treatment
+   * automatically since they derive from these same base values. */
+  --color-primary: 217 119 66; /* #D97742 */
+  --color-primary-hover: 232 144 92; /* #E8905C */
+  --color-surface: 32 22 18; /* #201612 */
+  --color-card: 43 28 18; /* #2B1C12 */
+  --color-raised: 56 37 19; /* #382513 */
+  --color-border: 70 49 31; /* #46311F */
+  --color-border-strong: 92 65 38; /* #5C4126 */
+  --color-text: 240 231 216; /* #F0E7D8 */
+  --color-text-secondary: 203 182 156; /* #CBB69C */
+  --color-text-muted: 165 138 107; /* #A58A6B */
+  --color-text-inverse: 32 22 18; /* #201612 */
+  --color-status-ok: 143 191 106; /* #8FBF6A */
+  --color-status-error: 224 106 82; /* #E06A52 */
+  --color-status-warn: 217 168 58; /* #D9A83A */
+  --color-status-neutral: 165 138 107; /* reuses dark text-muted */
 }
 
 html,
@@ -16,10 +77,6 @@ body {
 
 body {
   @apply bg-trusty-surface text-trusty-text font-sans antialiased;
-}
-
-html:not(.dark) body {
-  @apply bg-trusty-surface-light text-trusty-text-light;
 }
 
 #app {

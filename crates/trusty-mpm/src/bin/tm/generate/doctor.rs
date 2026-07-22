@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 /// `doctor_checks_match_run_doctor_names`, which fails the test suite the
 /// moment `run_doctor`'s actual check set diverges from this list.
 /// Test: `doctor_checks_match_run_doctor_names`.
-pub(crate) const DOCTOR_CHECKS: [(&str, &str); 19] = [
+pub(crate) const DOCTOR_CHECKS: [(&str, &str); 21] = [
     (
         "instructions",
         "Framework instructions deployed and non-empty for the target project.",
@@ -54,6 +54,10 @@ pub(crate) const DOCTOR_CHECKS: [(&str, &str); 19] = [
     (
         "output_style_staleness",
         "Deployed output-style file content matches the bundled catalog, and no orphaned files linger under `output-styles/` (issue #2333).",
+    ),
+    (
+        "output_style_legacy_ids",
+        "Warns when a legacy/unresolvable `outputStyle` id lingers in a currently-shadowed settings layer (e.g. `settings.local.json`) even though the effective layer resolves fine (issue #3453).",
     ),
     (
         "deployment",
@@ -106,6 +110,10 @@ pub(crate) const DOCTOR_CHECKS: [(&str, &str); 19] = [
     (
         "tcc_taint",
         "macOS: whether managed panes spawn `claude` with TCC responsibility disclaimed so its data-access prompts aren't attributed to the shared tmux server (issue #2997).",
+    ),
+    (
+        "scaffold_tracking",
+        "Warns when a harness-scaffolding path (`.claude/agents/`, `.claude/skills/`, `.claude/output-styles/`) is BOTH tracked in git AND regenerated locally by tm — the precondition for a `git merge --ff-only` \"would be overwritten\" collision; reports the exact true-intersection paths, never auto-modifies the index (issue #3427).",
     ),
 ];
 

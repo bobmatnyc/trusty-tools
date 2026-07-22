@@ -31,7 +31,7 @@ use crate::{
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
     service::{
         AppState,
-        handlers::{DepInfo, DepStatus, compute_status},
+        handlers::{compute_status, probe_deps},
     },
 };
 
@@ -299,43 +299,31 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
 /// when the LLM endpoint is down or credentials are expired.  #722 extends the
 /// status decision to factor in required-dep reachability so callers that gate
 /// on the top-level `status` field get an accurate signal even when only the
-/// search dep is down.
-/// What: probes the search dep (non-blocking health call) and the inference
-/// endpoint (via the cached `InferenceProbe`); computes `status` via the shared
-/// `compute_status` helper so the HTTP and MCP paths are always consistent;
-/// returns a JSON health snapshot with `status` (`"ok"` or `"degraded"`),
-/// `inference`, `dry_run`, `reviewer_model`, and a `deps` object with
-/// `reachable` flags for each dep.  When inference is not `"ok"` OR a required
-/// dep is unreachable, `status` becomes `"degraded"`.
+/// search dep is down.  #3658 bounds the dep probes so a slow (not down)
+/// trusty-search cannot hang this tool call either.
+/// What: probes both deps concurrently under a strict internal deadline via
+/// the shared `probe_deps` helper (same one the HTTP `/health` handler uses —
+/// #3658), and the inference endpoint (via the cached `InferenceProbe`);
+/// computes `status` via the shared `compute_status` helper so the HTTP and
+/// MCP paths are always consistent; returns a JSON health snapshot with
+/// `status` (`"ok"` or `"degraded"`), `inference`, `dry_run`,
+/// `reviewer_model`, and a `deps` object with `reachable` and tri-state
+/// `state` (`"ok"`/`"unreachable"`/`"timeout"`) for each dep.  When inference
+/// is not `"ok"` OR a required dep is unreachable, `status` becomes
+/// `"degraded"`.
 /// Test: `review_health_inference_ok`, `review_health_inference_auth_error_degraded`,
 /// `review_health_required_dep_down_degraded`, `review_health_optional_dep_down_ok`.
 async fn call_review_health(state: &AppState) -> Value {
     let reviewer_model = state.config.role_models.reviewer.model.clone();
 
-    // Non-blocking dep probes — same logic as the HTTP /health handler.
-    let search_reachable = state.search.health().await.is_ok_and(|r| r.is_healthy());
-    let analyze_reachable = match &state.analyze {
-        Some(a) => a.health().await.is_ok(),
-        None => false,
-    };
+    // Bounded, concurrent dep probes (#3658) — shared with the HTTP handler.
+    let deps = probe_deps(state).await;
 
     // Cached inference-reachability probe (#719).
     let inference = state
         .inference_probe
         .probe(&state.llm, &reviewer_model)
         .await;
-
-    // Build the deps struct so compute_status can inspect required flags (#722).
-    let deps = DepStatus {
-        trusty_search: DepInfo {
-            required: true,
-            reachable: search_reachable,
-        },
-        trusty_analyze: DepInfo {
-            required: false,
-            reachable: analyze_reachable,
-        },
-    };
 
     // #722: status is "degraded" when inference fails OR any required dep is down.
     let status = compute_status(inference, &deps);
@@ -350,10 +338,12 @@ async fn call_review_health(state: &AppState) -> Value {
             "trusty_search": {
                 "required": deps.trusty_search.required,
                 "reachable": deps.trusty_search.reachable,
+                "state": deps.trusty_search.state,
             },
             "trusty_analyze": {
                 "required": deps.trusty_analyze.required,
                 "reachable": deps.trusty_analyze.reachable,
+                "state": deps.trusty_analyze.state,
             },
         },
     });

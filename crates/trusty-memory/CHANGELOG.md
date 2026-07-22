@@ -12,7 +12,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Add crates.io package metadata (keywords/categories/homepage/readme).
 
-## [Unreleased]
+## [0.20.0] — 2026-07-21
+
+### Changed
+
+- **UI tokens now CI-enforced against the canonical Foundry source** (refs [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): flipped from the `scripts/check_token_drift.mjs` allowlist to ENFORCED. The `token-drift` CI job now compares `ui/src/lib/styles/tokens.css`'s plain-CSS `--trusty-*: #hex` values directly to `docs/design/UI/design-system/tokens.css` on every push/PR (light `:root`, dark `[data-theme='dark']`), so a hand-edit that drifts this crate's palette from canonical fails the build.
+- **Migrated the admin UI to Foundry v2 design tokens** ([#3487](https://github.com/bobmatnyc/trusty-tools/issues/3487)):
+  `ui/src/lib/styles/tokens.css` now sources its palette, fonts, radii, and
+  shadows from the canonical `docs/design/UI/design-system/tokens.css`
+  (rust-on-paper light theme) and ships a full `[data-theme='dark']` block
+  ("Night Shift") — this UI previously had no dark theme at all. Existing
+  `--trusty-*` custom-property names are unchanged; several components that
+  referenced tokens the old palette never actually defined
+  (`--trusty-bg-subtle`, `--trusty-border-light`, `--trusty-font-mono`, a bare
+  `--trusty-text`) now resolve to real values instead of silently falling
+  through to their inline fallback. Dark-mode activation follows OS
+  `prefers-color-scheme` via a new `lib/theme-bootstrap.js`, wired from
+  `main.js` before the shell mounts.
 
 ### Security
 
@@ -27,6 +43,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`open_activity_log_with_fallback_returns_discard_when_unwritable` no longer mutates the process-global `TMPDIR` env var (issue #3434).** The test used to point `TMPDIR` at an unwritable directory for its duration to force the tempdir-fallback path — but `cargo test` runs every test in this crate's lib binary as threads of ONE process, so any concurrently-running test that called `tempfile::tempdir()` (which respects `$TMPDIR`) during that window failed with `PermissionDenied` for a reason entirely unrelated to its own code. `open_activity_log_with_fallback` now delegates to a new `open_activity_log_with_fallback_in(data_root, fallback_root)` that takes the fallback root as an explicit parameter; the test calls it directly with the unwritable dir, so no env var is touched and no other test can be corrupted by it.
 - idle-to-disk palace eviction + unpin dream scheduler + configurable max-open ([#2276](https://github.com/bobmatnyc/trusty-tools/pull/2276)) ([`0e8e504`](https://github.com/bobmatnyc/trusty-tools/commit/0e8e50440cea09a8f5eedf2c7bba9613f96cd8a8))
 
 ### Changed

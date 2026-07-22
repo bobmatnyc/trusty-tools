@@ -662,5 +662,3 @@ surfacing for the statusline.
   inference + `summarizing` signal; daemon-persisted daily cost; managed-API
   delivery; fixed `user` palace). Work-items STUI-0…STUI-10 mapped to epic #1272
   and children #1275–#1279.
-</content>
-</invoke>

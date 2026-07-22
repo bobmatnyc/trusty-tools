@@ -17,9 +17,10 @@
 use super::daemon_utils::daemon_base_url;
 use super::doctor_checks::{
     check_daemon_running, check_data_dir, check_lock_file, check_log_rotation, check_model_cache,
-    check_port_reachable, doctor_data_dir, fetch_index_names, fetch_index_statuses,
-    print_index_breakdown, probe_daemon_health, read_daemon_port, summarize_indexes, CheckResult,
-    EmptyIndex,
+    check_port_reachable, check_python_device_note, check_python_launcher, check_python_uv,
+    check_python_venv, doctor_data_dir, fetch_index_names, fetch_index_statuses,
+    print_index_breakdown, probe_daemon_health, python_embedder_enabled, read_daemon_port,
+    summarize_indexes, CheckResult, EmptyIndex,
 };
 use async_trait::async_trait;
 use std::sync::Mutex;
@@ -205,6 +206,50 @@ impl DoctorCheck for LogRotationCheck {
     }
 }
 
+/// Python/MPS embedder sidecar check (epic #3524 slice 5).
+///
+/// Why: since the sidecar becomes the Apple-Silicon default, operators need
+/// a way to diagnose venv/uv/launcher state without tailing daemon logs —
+/// mirrors the existing `ModelCacheCheck` shape (a synchronous, read-only
+/// probe with no daemon dependency) rather than inventing a new pattern.
+/// What: no-ops with a single informational `Ok` when
+/// `TRUSTY_EMBEDDER=python` is not set; otherwise runs the four pure checks
+/// (`uv`, venv/`.ready`, launcher, device note) from `doctor_checks`.
+/// Test: `check_python_venv_*` and `python_embedder_enabled_*` in
+/// `doctor_checks/tests.rs` cover the pure logic this wrapper composes;
+/// `python_embedder_check_disabled_reports_single_informational_ok` and
+/// `python_embedder_check_enabled_aggregates_all_four_checks_in_order` in
+/// this module's `tests` cover the wrapper's own no-op-vs-aggregation
+/// branching directly (review finding, PR #3560 MEDIUM fix — this doc
+/// comment previously claimed that direct coverage without it existing).
+pub(crate) struct PythonEmbedderCheck;
+
+#[async_trait]
+impl DoctorCheck for PythonEmbedderCheck {
+    fn name(&self) -> &str {
+        "python_embedder"
+    }
+
+    async fn run(&self, _state: &DoctorState) -> Vec<CheckResult> {
+        if !python_embedder_enabled() {
+            return vec![CheckResult::Ok(
+                "Python/MPS embedder: not enabled (set TRUSTY_EMBEDDER=python to opt in)".into(),
+            )];
+        }
+
+        let mut results = vec![check_python_uv()];
+        match trusty_embedderd_py::resolve_layout() {
+            Ok(layout) => results.push(check_python_venv(&layout)),
+            Err(e) => results.push(CheckResult::Error(format!(
+                "Python/MPS embedder: could not resolve venv layout: {e:#}"
+            ))),
+        }
+        results.push(check_python_launcher());
+        results.push(check_python_device_note());
+        results
+    }
+}
+
 // ── Orchestrator ──────────────────────────────────────────────────────────
 
 fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
@@ -216,6 +261,7 @@ fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(IndexesCheck),
         Box::new(PortReachableCheck),
         Box::new(LogRotationCheck),
+        Box::new(PythonEmbedderCheck),
     ]
 }
 
@@ -242,4 +288,129 @@ pub(crate) async fn run_doctor_checks() -> (Vec<CheckResult>, Vec<EmptyIndex>) {
     }
 
     (checks, state.take_empty_indexes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// Save/restore a single env var across a test body — mirrors the
+    /// identically-named guard in `doctor_checks/tests.rs` (kept as a
+    /// separate local copy since the two are in different modules and this
+    /// one is only needed by the two tests below).
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, prev }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// `PythonEmbedderCheck::run` must no-op with a single informational
+    /// `Ok` when `TRUSTY_EMBEDDER` is not `"python"` (review finding, PR
+    /// #3560 MEDIUM fix — the doc comment claimed this was "exercised by
+    /// the doctor integration tests" but no such test existed).
+    ///
+    /// Why: the four detailed sub-checks (`uv`, venv, launcher, device note)
+    /// are only meaningful once the operator has opted into the Python/MPS
+    /// sidecar; running them unconditionally would produce spurious warnings
+    /// about a backend nobody selected.
+    /// What: unsets `TRUSTY_EMBEDDER`, runs the check, asserts exactly one
+    /// `CheckResult::Ok` mentioning "not enabled".
+    /// Test: this test.
+    #[tokio::test]
+    #[serial]
+    async fn python_embedder_check_disabled_reports_single_informational_ok() {
+        let _g = EnvVarGuard::remove("TRUSTY_EMBEDDER");
+
+        let client = reqwest::Client::new();
+        let state = DoctorState::new(client);
+        let results = PythonEmbedderCheck.run(&state).await;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "disabled path must be a single no-op result, got: {results:?}"
+        );
+        match &results[0] {
+            CheckResult::Ok(msg) => {
+                assert!(msg.contains("not enabled"), "unexpected message: {msg}")
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// `PythonEmbedderCheck::run` must aggregate all four sub-checks, in
+    /// order, when `TRUSTY_EMBEDDER=python` is set (review finding, PR #3560
+    /// MEDIUM fix).
+    ///
+    /// Why: this is the wrapper's own composition logic — the four pure
+    /// helpers it calls are already covered individually in
+    /// `doctor_checks/tests.rs`, but nothing previously proved `run()` itself
+    /// calls all four, in the right order, when enabled.
+    /// What: sets `TRUSTY_EMBEDDER=python`, runs the check, asserts exactly 4
+    /// results came back. The first (`check_python_uv`) and last
+    /// (`check_python_device_note`) sub-checks are deterministic pure
+    /// functions regardless of the host's actual `uv`/venv/launcher state, so
+    /// their positions are asserted directly; the middle two vary with the
+    /// host environment (real `uv`/venv/launcher presence) and are only
+    /// checked for count.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial]
+    async fn python_embedder_check_enabled_aggregates_all_four_checks_in_order() {
+        let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "python");
+
+        let client = reqwest::Client::new();
+        let state = DoctorState::new(client);
+        let results = PythonEmbedderCheck.run(&state).await;
+
+        assert_eq!(
+            results.len(),
+            4,
+            "enabled path must aggregate exactly 4 sub-check results (uv, \
+             venv/layout, launcher, device note), got: {results:?}"
+        );
+
+        // First result is always `check_python_uv()` — deterministic given
+        // the host's actual `uv` installation state, but always present.
+        assert!(
+            matches!(&results[0], CheckResult::Ok(msg) if msg.starts_with("uv:"))
+                || matches!(&results[0], CheckResult::Error(msg) if msg.contains("uv not found")),
+            "result[0] must be the uv check, got: {:?}",
+            results[0]
+        );
+
+        // Last result is always `check_python_device_note()` — a pure,
+        // env-only formatter with no filesystem/network dependency, so its
+        // content is fully deterministic.
+        match &results[3] {
+            CheckResult::Ok(msg) => assert!(
+                msg.contains("Python/MPS device: requested="),
+                "unexpected device-note message: {msg}"
+            ),
+            other => panic!("expected Ok device note, got {other:?}"),
+        }
+    }
 }

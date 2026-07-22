@@ -482,6 +482,29 @@ fn managed_session_summary_deserializes_unresumable_flag() {
     );
 }
 
+/// #3034: `slot`/`deleted` must round-trip when present, and default to
+/// `0`/`false` (never a spurious tombstone) when an older daemon omits them.
+#[test]
+fn managed_session_summary_deserializes_slot_and_deleted() {
+    let with_fields = serde_json::json!({
+        "id": "x", "name": "n", "state": "deleted", "slot": 3, "deleted": true
+    });
+    let s: ManagedSessionSummary = serde_json::from_value(with_fields).unwrap();
+    assert_eq!(s.slot, 3);
+    assert!(s.deleted);
+
+    let omitted = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
+    let s: ManagedSessionSummary = serde_json::from_value(omitted).unwrap();
+    assert_eq!(
+        s.slot, 0,
+        "an older daemon omitting `slot` must default to 0"
+    );
+    assert!(
+        !s.deleted,
+        "an older daemon omitting `deleted` must default to false"
+    );
+}
+
 /// #2444: `stale_assets` must round-trip when present, and default `false`
 /// (never spuriously flag a session stale) when an older daemon omits it.
 #[test]

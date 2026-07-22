@@ -25,7 +25,24 @@
 //!
 //! Test: `resolve_git_identity_*`, `resolve_for_config_*`,
 //! `commit_config_args_*` in the inline `tests` module.
+//!
+//! ## Account enforcement wiring (#2081/#3312)
+//!
+//! [`resolve_for_config`] above stays deliberately pure (no I/O) — every
+//! existing test here needs that. But #2081's per-project account
+//! enforcement (verifying, and self-healing, WHICH account is active inside
+//! a resolved `config_dir`) had no production call site until #3312.
+//! [`resolve_for_config_enforced`] is the daemon's wired entry point: it
+//! resolves via [`resolve_for_config`] unchanged, then — only when the
+//! selected `GithubConfig` pairs `config_dir` with an `account` (see
+//! `core::gh_account::configured_account_pair`) — runs the verify/correct
+//! check on the Tokio blocking pool (it may shell out to `gh`) BEFORE
+//! returning, so a wrong-account `config_dir` can never reach the clone/push
+//! `RealGitBackend` performs. `spawn_managed_cloned` and the local→managed
+//! redirect path (`daemon::managed_routes::lifecycle`) both call this instead
+//! of the plain resolver.
 
+use crate::core::gh_account::{configured_account_pair, ensure_gh_account_in_dir};
 use crate::core::gh_identity::{GhIdentityError, resolve_gh_env, select_github_config};
 use crate::core::trusty_tools_config::{GithubConfig, TrustyToolsConfig};
 use crate::project::record::repo_url_matches;
@@ -155,6 +172,85 @@ pub fn resolve_for_config(
         commit_name,
         commit_email,
     )
+}
+
+/// Resolve the effective [`GithubConfig`] for `repo_url` — the SAME
+/// project-over-global precedence [`resolve_for_config`] applies internally
+/// — exposed so a caller that needs the pre-[`GhEnv`] config (the #2081/#3312
+/// account-enforcement decision) does not have to reimplement the project
+/// lookup and risk diverging from it.
+///
+/// Why: [`resolve_for_config_enforced`] needs to know WHICH `GithubConfig`
+/// would be used for `repo_url` in order to decide whether an `account` is
+/// paired with a `config_dir` (see `core::gh_account::configured_account_pair`);
+/// factoring the lookup out keeps that decision and `resolve_for_config`
+/// itself from ever disagreeing on which tier won.
+/// What: mirrors `resolve_for_config`'s `matched`/`project_github` steps,
+/// then applies [`select_github_config`].
+/// Test: `select_github_config_for_project_wins`,
+/// `select_github_config_for_falls_back_to_global`,
+/// `select_github_config_for_no_match_is_global`.
+pub fn select_github_config_for<'a>(
+    config: &'a TrustyToolsConfig,
+    repo_url: &str,
+) -> Option<&'a GithubConfig> {
+    let project_github = config
+        .projects
+        .iter()
+        .find(|p| repo_url_matches(&p.repo_url, repo_url))
+        .and_then(|p| p.github.as_ref());
+    select_github_config(project_github, config.github.as_ref())
+}
+
+/// Resolve `repo_url`'s [`GitIdentity`] AND enforce any `#2081` account
+/// pairing before returning — the daemon's wired entry point (#3312) in
+/// place of the plain [`resolve_for_config`].
+///
+/// Why: `resolve_for_config` (and the pure `resolve_git_identity`/
+/// `resolve_gh_env` chain under it) intentionally does NO I/O — every
+/// existing test in this module depends on that. But the resolved
+/// `config_dir` may itself have the WRONG account active (the exact #2081
+/// incident shape), and only a real `gh auth status` check inside that
+/// directory can catch it. The daemon's two spawn paths
+/// (`spawn_managed_cloned`, the local→managed redirect) both provision a
+/// clone via `RealGitBackend` using the identity this resolves — enforcing
+/// HERE, before either call, means a wrong-account `config_dir` can never
+/// reach a clone/push. The check runs on `tokio::task::spawn_blocking` (it
+/// may shell out to `gh`, bounded by `GH_ENFORCE_TIMEOUT`) so it never stalls
+/// the async executor, mirroring `gh_account::resolve_gh_account_env_for_registry`'s
+/// existing blocking-pool convention for `gh` subprocess calls from an async
+/// context.
+/// What: resolves via [`resolve_for_config`] first, surfacing its typed error
+/// unchanged on failure. When [`select_github_config_for`]'s result pairs
+/// `config_dir` with a non-blank `account` (`configured_account_pair`
+/// returns `Some`), verifies/self-heals the active account inside that
+/// directory via [`ensure_gh_account_in_dir`] on the blocking pool; a
+/// mismatch that cannot be corrected — or a panicked blocking task — is a
+/// hard `Err`, never a silent pass. No `account` paired with `config_dir` →
+/// no enforcement, `resolve_for_config`'s result is returned unchanged (the
+/// pre-#3312, unconfigured-project behaviour, byte-for-byte).
+/// Test: `resolve_for_config_enforced_self_heals_mismatch`,
+/// `resolve_for_config_enforced_skips_when_account_unset`, and
+/// `resolve_for_config_enforced_fails_closed_on_switch_failure` — which also
+/// carries the causality proof: it asserts `resolve_for_config` ALONE (the
+/// exact pre-#3312 production path) still resolves `Ok` on the same
+/// mismatched-account fixture that `resolve_for_config_enforced` correctly
+/// rejects.
+pub async fn resolve_for_config_enforced(
+    config: &TrustyToolsConfig,
+    repo_url: &str,
+) -> anyhow::Result<GitIdentity> {
+    let identity = resolve_for_config(config, repo_url)?;
+
+    if let Some((dir, account)) =
+        configured_account_pair(select_github_config_for(config, repo_url))
+    {
+        tokio::task::spawn_blocking(move || ensure_gh_account_in_dir(&account, &dir))
+            .await
+            .map_err(|e| anyhow::anyhow!("gh account enforcement task panicked: {e}"))??;
+    }
+
+    Ok(identity)
 }
 
 #[cfg(test)]
@@ -292,6 +388,251 @@ mod tests {
         let config = TrustyToolsConfig::default();
         let identity = resolve_for_config(&config, "https://github.com/someone/else").expect("ok");
         assert!(identity.is_empty());
+    }
+
+    // ── select_github_config_for ──────────────────────────────────────────
+
+    /// Why: `select_github_config_for` must agree with what
+    /// `resolve_for_config` actually uses — a project's own binding wins.
+    /// Test: itself.
+    #[test]
+    fn select_github_config_for_project_wins() {
+        let config = TrustyToolsConfig {
+            github: Some(gh("global")),
+            projects: vec![project_config(
+                "https://github.com/acme/widget.git",
+                Some(gh("project")),
+            )],
+            ..Default::default()
+        };
+        let selected = select_github_config_for(&config, "https://github.com/acme/widget");
+        assert_eq!(selected, Some(&gh("project")));
+    }
+
+    /// Why: no project-level binding must fall back to global, matching
+    /// `resolve_for_config`'s own fallback.
+    /// Test: itself.
+    #[test]
+    fn select_github_config_for_falls_back_to_global() {
+        let config = TrustyToolsConfig {
+            github: Some(gh("global")),
+            projects: vec![project_config("https://github.com/acme/widget", None)],
+            ..Default::default()
+        };
+        let selected = select_github_config_for(&config, "https://github.com/acme/widget");
+        assert_eq!(selected, Some(&gh("global")));
+    }
+
+    /// Why: no match at all with no global tier either must resolve to
+    /// `None` — the ambient case.
+    /// Test: itself.
+    #[test]
+    fn select_github_config_for_no_match_is_global() {
+        let config = TrustyToolsConfig::default();
+        assert_eq!(
+            select_github_config_for(&config, "https://github.com/someone/else"),
+            None
+        );
+    }
+
+    // ── resolve_for_config_enforced (#2081/#3312) ─────────────────────────
+    //
+    // A fake `gh` on `PATH` stands in for the real binary (this workspace's
+    // established fake-binary-via-PATH test convention; mirrors
+    // `core::gh_account_enforce`'s test module).
+
+    fn fake_gh_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::core::trusty_tools_config::env_test_lock()
+    }
+
+    /// Drive `fut` to completion on a fresh current-thread runtime, blocking
+    /// the CALLING thread synchronously (no `.await` in the caller's own
+    /// frame). Lets these tests hold the plain `std::sync::MutexGuard` from
+    /// [`fake_gh_lock`] for their entire body — including while
+    /// `resolve_for_config_enforced` internally awaits its `spawn_blocking`
+    /// check — without tripping `clippy::await_holding_lock` (that lint
+    /// detects a guard held across a literal `.await` inside an async
+    /// fn/block; a plain `#[test]` blockingly driving a future via
+    /// `Runtime::block_on` has no such point). Using the SAME crate-wide
+    /// `env_test_lock` (rather than a second, `tokio`-aware lock) is what
+    /// actually matters here: it is the one lock every other PATH-mutating
+    /// test in this test binary (`core::gh_account_enforce`'s tests included)
+    /// already serialises on, so this module cannot race them.
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for test")
+            .block_on(fut)
+    }
+
+    #[cfg(unix)]
+    fn write_fake_gh(bin_dir: &std::path::Path, initial: &str, switch_fails: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let switch_exit = if switch_fails { 1 } else { 0 };
+        let script = format!(
+            r#"#!/bin/sh
+STATE="$GH_CONFIG_DIR/.fake_active"
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  if [ -f "$STATE" ]; then ACTIVE=$(cat "$STATE"); else ACTIVE="{initial}"; fi
+  echo "github.com"
+  echo "  - Logged in to github.com account $ACTIVE (keyring)"
+  echo "  - Active account: true"
+  exit 0
+fi
+if [ "$1" = "auth" ] && [ "$2" = "switch" ]; then
+  if [ {switch_exit} -ne 0 ]; then exit 1; fi
+  target=""
+  prev=""
+  for a in "$@"; do
+    if [ "$prev" = "--user" ]; then target="$a"; fi
+    prev="$a"
+  done
+  echo "$target" > "$STATE"
+  exit 0
+fi
+exit 1
+"#
+        );
+        let path = bin_dir.join("gh");
+        std::fs::write(&path, script).expect("write fake gh");
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat fake gh")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod fake gh");
+    }
+
+    #[cfg(unix)]
+    fn prepend_path(dir: &std::path::Path) -> Option<String> {
+        let prior = std::env::var("PATH").ok();
+        let new_path = match &prior {
+            Some(p) => format!("{}:{p}", dir.display()),
+            None => dir.display().to_string(),
+        };
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe { std::env::set_var("PATH", new_path) };
+        prior
+    }
+
+    #[cfg(unix)]
+    fn restore_path(prior: Option<String>) {
+        // SAFETY: guarded by `fake_gh_lock` in every caller.
+        unsafe {
+            match prior {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn account_paired_config(config_dir: &std::path::Path, account: &str) -> TrustyToolsConfig {
+        TrustyToolsConfig {
+            github: Some(GithubConfig {
+                config_dir: Some(config_dir.to_path_buf()),
+                token_env: None,
+                account: Some(account.to_string()),
+                host: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Why (#3312): the exact #2081 incident shape (the resolved `config_dir`
+    /// has the WRONG account active) must be self-healed before
+    /// `resolve_for_config_enforced` returns `Ok` — proving the daemon's
+    /// spawn paths now actually enforce this rather than merely resolving an
+    /// identity blind to what's active inside it.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_for_config_enforced_self_heals_mismatch() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "wrong-account", false);
+        let prior_path = prepend_path(bin_dir.path());
+
+        let config = account_paired_config(config_dir.path(), "bobmatnyc");
+        let result = block_on(resolve_for_config_enforced(
+            &config,
+            "https://github.com/acme/widget",
+        ));
+
+        restore_path(prior_path);
+        assert!(result.is_ok(), "expected self-heal to succeed: {result:?}");
+        let state = std::fs::read_to_string(config_dir.path().join(".fake_active"))
+            .expect("state file written by the fake gh's switch");
+        assert_eq!(state.trim(), "bobmatnyc");
+    }
+
+    /// Why (#3312): when the switch itself fails, `resolve_for_config_enforced`
+    /// must hard-fail — never return a `GitIdentity` a caller could still
+    /// clone/push with. This is the causality proof required for #3312:
+    /// `resolve_for_config` ALONE (the exact pre-#3312 production path,
+    /// still used unchanged by this very function internally) resolves `Ok`
+    /// on this identical mismatched-account fixture, which is exactly the
+    /// silent-wrong-account bug the issue describes. Only the NEW enforced
+    /// wrapper catches it.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_for_config_enforced_fails_closed_on_switch_failure() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "wrong-account", true);
+        let prior_path = prepend_path(bin_dir.path());
+
+        let config = account_paired_config(config_dir.path(), "bobmatnyc");
+
+        // The causal proof: the PLAIN pre-#3312 resolver is blind to the
+        // mismatch and proceeds regardless.
+        let unenforced = resolve_for_config(&config, "https://github.com/acme/widget");
+        assert!(
+            unenforced.is_ok(),
+            "sanity: the plain resolver must still ignore active-account state: {unenforced:?}"
+        );
+
+        // The wired daemon path must NOT proceed.
+        let enforced = block_on(resolve_for_config_enforced(
+            &config,
+            "https://github.com/acme/widget",
+        ));
+
+        restore_path(prior_path);
+        let err = enforced.expect_err("mismatched account with a failed switch must be an Err");
+        assert!(err.to_string().contains("bobmatnyc"), "err: {err}");
+    }
+
+    /// Why (#3312): a project with `config_dir` but no paired `account` (the
+    /// pre-#3312, still-supported shape) must see NO enforcement — proven by
+    /// making every `gh` invocation fail and asserting resolution still
+    /// succeeds (only possible if `gh` was never invoked).
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_for_config_enforced_skips_when_account_unset() {
+        let _g = fake_gh_lock();
+        let bin_dir = tempfile::tempdir().expect("bin tempdir");
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        write_fake_gh(bin_dir.path(), "irrelevant", true);
+        let prior_path = prepend_path(bin_dir.path());
+
+        let config = TrustyToolsConfig {
+            github: Some(gh(&config_dir.path().display().to_string())),
+            ..Default::default()
+        };
+        let result = block_on(resolve_for_config_enforced(
+            &config,
+            "https://github.com/acme/widget",
+        ));
+
+        restore_path(prior_path);
+        assert!(
+            result.is_ok(),
+            "no account paired with config_dir must skip enforcement entirely: {result:?}"
+        );
     }
 
     // ── commit_config_args ────────────────────────────────────────────────

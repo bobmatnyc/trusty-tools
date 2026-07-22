@@ -164,11 +164,13 @@ pub fn resolve_client_creds() -> Result<ClientCreds> {
 /// Why: Google's console downloads credentials as
 /// `{"installed":{"client_id":...,"client_secret":...}}`; supporting that
 /// verbatim lets users drop the file in unchanged, while a flat shape is
-/// simpler to hand-write.
+/// simpler to hand-write. `pub(super)` so `oauth::client_store` (issue #3518)
+/// can validate/parse a per-profile client file with the identical accepted
+/// shapes instead of re-implementing this.
 /// What: Accepts `{"client_id","client_secret"}` or the nested `installed`
 /// (or `web`) object.
 /// Test: `parses_flat_creds`, `parses_installed_creds`.
-fn parse_client_creds_json(data: &str) -> Result<ClientCreds> {
+pub(super) fn parse_client_creds_json(data: &str) -> Result<ClientCreds> {
     let v: serde_json::Value = serde_json::from_str(data).context("invalid client creds JSON")?;
     let obj = v.get("installed").or_else(|| v.get("web")).unwrap_or(&v);
     let client_id = obj
@@ -313,7 +315,56 @@ pub async fn run_consent(
     default_mode: DefaultMode,
     open_browser: bool,
 ) -> Result<ConsentOutcome> {
-    let creds = resolve_client_creds()?;
+    run_consent_with(
+        storage,
+        profile,
+        default_mode,
+        open_browser,
+        CONSENT_TIMEOUT,
+        |auth_url| {
+            for line in consent_prompt_lines(auth_url, open_browser, CONSENT_TIMEOUT.as_secs()) {
+                eprintln!("{line}");
+            }
+        },
+    )
+    .await
+}
+
+/// Run the consent flow with an explicit timeout and a caller-supplied hook
+/// for the consent URL, instead of the CLI's hardcoded stderr print.
+///
+/// Why: `setup` prints the URL to stderr and blocks up to
+/// [`CONSENT_TIMEOUT`] (5 minutes) — fine for an interactive terminal, but
+/// the `add_account` MCP tool (issue #3503) needs the URL back in its OWN
+/// tool response (the calling agent cannot see this process's stderr) and a
+/// much shorter bound (an MCP client may itself time out a single tool call
+/// long before 5 minutes). Splitting the URL hand-off into a callback lets
+/// both entry points share every byte of the PKCE / token-exchange /
+/// persistence logic — no OAuth reimplementation.
+/// What: Identical to [`run_consent`] except `timeout` replaces
+/// `CONSENT_TIMEOUT` for the browser-redirect wait, and `on_auth_url` runs
+/// synchronously with the built URL (before the browser is opened) instead
+/// of the hardcoded print. [`run_consent`] is just this function called with
+/// the default timeout and its stderr-printing closure.
+/// Test: Live browser round-trip stays deferred for both entry points; the
+/// pure helpers (`build_auth_url`, `consent_prompt_lines`, `should_set_default`)
+/// this calls are unit-tested.
+pub async fn run_consent_with(
+    storage: &TokenStorage,
+    profile: &str,
+    default_mode: DefaultMode,
+    open_browser: bool,
+    timeout: std::time::Duration,
+    on_auth_url: impl FnOnce(&str),
+) -> Result<ConsentOutcome> {
+    // Issue #3518: resolve THIS profile's own client (persisted via
+    // `setup --oauth-client` / `add_account`'s `oauth_client_path`) if it has
+    // one, falling back to the global client otherwise. The minted refresh
+    // token is bound to whichever client authorizes it, so authorization and
+    // every later refresh (`OAuthManager::refresh`) MUST agree on the same
+    // client for a given profile — this is the single call site that decides
+    // it for authorization.
+    let creds = super::client_store::resolve_client_creds_for_profile(profile)?;
 
     let existing = storage.load()?;
     let set_default = should_set_default(default_mode, profile, &existing);
@@ -344,9 +395,7 @@ pub async fn run_consent(
         &state,
     );
 
-    for line in consent_prompt_lines(&auth_url, open_browser, CONSENT_TIMEOUT.as_secs()) {
-        eprintln!("{line}");
-    }
+    on_auth_url(&auth_url);
     if open_browser && let Err(e) = open::that(&auth_url) {
         warn!(error = %e, "failed to launch browser; user must open the URL manually");
     }
@@ -354,7 +403,7 @@ pub async fn run_consent(
     // Block for the redirect off the async runtime so we don't stall the reactor.
     let expected_state = state.clone();
     let code = tokio::task::spawn_blocking(move || {
-        callback::wait_for_code_with_timeout(&listener, &expected_state, CONSENT_TIMEOUT)
+        callback::wait_for_code_with_timeout(&listener, &expected_state, timeout)
     })
     .await
     .context("callback task panicked")??;
@@ -470,9 +519,11 @@ fn build_stored_token(
 /// Persist a freshly-minted token, optionally marking it the default profile.
 ///
 /// Why: `setup` must not clobber other profiles and must keep exactly one
-/// default when asked, matching Python multi-profile semantics.
-/// What: Loads the existing map, unsets other defaults when `set_default`,
-/// inserts the new entry, and saves.
+/// default when asked, matching Python multi-profile semantics. Routed
+/// through `TokenStorage::update` (#3502) so a concurrent write (e.g. another
+/// profile refreshing at the same moment) can't lose this one.
+/// What: Reloads the map under the shared lock, unsets other defaults when
+/// `set_default`, inserts the new entry, and saves.
 /// Test: `persist_marks_single_default` via a temp storage.
 fn persist(
     storage: &TokenStorage,
@@ -480,16 +531,16 @@ fn persist(
     mut stored: StoredToken,
     set_default: bool,
 ) -> Result<()> {
-    let mut all: HashMap<String, StoredToken> = storage.load()?;
-    if set_default {
-        for entry in all.values_mut() {
-            entry.metadata.is_default = false;
+    storage.update(|all| {
+        if set_default {
+            for entry in all.values_mut() {
+                entry.metadata.is_default = false;
+            }
+            stored.metadata.is_default = true;
         }
-        stored.metadata.is_default = true;
-    }
-    all.insert(profile.to_string(), stored);
-    storage.save(&all)?;
-    Ok(())
+        all.insert(profile.to_string(), stored);
+        Ok(())
+    })
 }
 
 /// Effective profile name: caller override, else the shared default.

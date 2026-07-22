@@ -15,6 +15,7 @@
 //! the line parsers without spawning tmux, ps, or lsof.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::core::session::{ControlModel, Session, SessionHost, SessionId, SessionStatus};
@@ -300,24 +301,90 @@ fn cwd_basename(cwd: &str) -> String {
         .to_string()
 }
 
+/// Decide whether (and how) to register one native-discovery candidate.
+///
+/// Why (issue #3596): this is the crux of the phantom-identity defect,
+/// factored out of [`discover_native_processes`] so the identity-linking and
+/// de-dup rules are unit-testable without spawning real `ps`/`lsof` processes
+/// — the same pattern [`DaemonState::reap_against`](super::state::DaemonState::reap_against)
+/// uses to keep its pure decision logic hermetically testable. A process
+/// whose resolved `cwd` matches a cwd already tracked by the `SessionManager`
+/// store (`managed_cwds`) already has a durable, correlated identity there
+/// (e.g. via `TM_MANAGED_SESSION_ID`) — registering it again here under a
+/// freshly-minted [`SessionId::new()`] would give the SAME process a second,
+/// uncorrelated identity, which is exactly the defect this closes.
+/// What: returns `None` when the candidate must NOT get a new legacy
+/// [`Session`] — either because `cwd` is already SM-managed, or because it
+/// collides with an existing legacy registration by workdir or friendly name
+/// (the pre-existing de-dup rules, unchanged); otherwise returns
+/// `Some(session)`, a freshly-built [`Session`] tagged [`SessionHost::Native`]
+/// with `project_path` populated from `cwd` (issue #3596's second symptom:
+/// before this fix `project_dir` was always `None`, so
+/// [`DaemonState::list_sessions_for_project`](super::state::DaemonState::list_sessions_for_project)'s
+/// exact-equality filter could never match ANY natively-discovered session).
+/// Test: `decide_native_registration_skips_already_managed_cwd`,
+/// `decide_native_registration_sets_project_path`,
+/// `decide_native_registration_dedupes_by_workdir_and_name`.
+fn decide_native_registration(
+    pid: u32,
+    cwd: &str,
+    managed_cwds: &HashSet<String>,
+    registered_workdirs: &HashSet<String>,
+    seen_workdirs: &mut HashSet<String>,
+    registered_names: &HashSet<String>,
+) -> Option<Session> {
+    // Already has a durable managed identity — never mint a second one.
+    if !cwd.is_empty() && managed_cwds.contains(cwd) {
+        return None;
+    }
+    // Collapse the many `claude` subprocesses of one session: a directory
+    // already claimed (this scan or a prior one) yields no new session.
+    if !cwd.is_empty()
+        && (registered_workdirs.contains(cwd) || !seen_workdirs.insert(cwd.to_string()))
+    {
+        return None;
+    }
+    let name = format!("{}-{}", cwd_basename(cwd), pid);
+    if registered_names.contains(&name) {
+        return None;
+    }
+    // Native processes are not tmux-hosted; tag the control model `Pty` (an
+    // OS-owned terminal) and the origin `Native`.
+    let mut session = Session::new(SessionId::new(), cwd.to_string(), ControlModel::Pty, None);
+    session.tmux_name = name;
+    session.status = SessionStatus::Active;
+    session.origin = SessionHost::Native;
+    session.pid = Some(pid);
+    // Populate `project_path` so cwd-scoped lookup (`list_sessions_for_project`,
+    // `GET /sessions?project=`, `tm sessions list`) can actually find this
+    // session — see this function's doc for why it was structurally `None`
+    // before.
+    if !cwd.is_empty() {
+        session.project_path = Some(PathBuf::from(cwd));
+    }
+    Some(session)
+}
+
 /// Scan the OS process table and register native Claude Code processes.
 ///
 /// Why: most Claude Code sessions run in native Terminal.app windows, not tmux;
 /// `discover_claude_sessions` alone leaves them invisible. Scanning `ps aux`
 /// brings them into `GET /sessions` like any other session.
 /// What: runs `ps aux`, collects every pid satisfying [`is_claude_process`],
-/// resolves all their working directories in one batched `lsof` call, and
-/// registers one [`Session`] per distinct working directory, tagged
-/// [`SessionHost::Native`] with `name = "<cwd-basename>-<pid>"`. Claude Code
-/// spawns several `claude` subprocesses per session, so processes are
-/// de-duplicated by working directory (the lowest pid wins). Directories already
-/// registered as a session — by pid, by name, or by an existing native
-/// session's workdir — are skipped. `ps` being unavailable yields an empty
-/// [`DiscoveryResult`].
+/// resolves all their working directories in one batched `lsof` call, and —
+/// via [`decide_native_registration`] — registers one [`Session`] per
+/// distinct working directory NOT already tracked by the `SessionManager`
+/// store, tagged [`SessionHost::Native`] with `name = "<cwd-basename>-<pid>"`
+/// and `project_path` set from its cwd. Claude Code spawns several `claude`
+/// subprocesses per session, so processes are de-duplicated by working
+/// directory (the lowest pid wins). Directories already registered as a
+/// session — by pid, by name, by an existing native session's workdir, or by
+/// an already-managed `SessionManager` record's cwd (issue #3596) — are
+/// skipped. `ps` being unavailable yields an empty [`DiscoveryResult`].
 /// Test: `is_claude_process_*`, `parse_ps_line_extracts_pid_and_command`,
-/// `parse_lsof_cwds_maps_pid_to_path`, and `cwd_basename_extracts_last_component`
-/// cover the pure pieces.
-pub fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
+/// `parse_lsof_cwds_maps_pid_to_path`, `cwd_basename_extracts_last_component`,
+/// and the `decide_native_registration_*` tests cover the pure pieces.
+pub async fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
     let output = match Command::new("ps").arg("aux").output() {
         Ok(out) if out.status.success() => out,
         Ok(_) | Err(_) => {
@@ -338,6 +405,21 @@ pub fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
         .map(|s| s.workdir.clone())
         .collect();
 
+    // Cwds already tracked by the SessionManager — a process rooted at one of
+    // these already has a durable managed identity (issue #3596); native
+    // discovery must not mint a second, uncorrelated one for it. Only
+    // non-terminal records count: a Decommissioned/Deleted record's workspace
+    // is gone, so its stale cwd must never block a genuinely new session.
+    let managed_cwds: HashSet<String> = state
+        .session_manager()
+        .await
+        .list()
+        .await
+        .into_iter()
+        .filter(|r| !r.state.is_terminal())
+        .map(|r| r.cwd.to_string_lossy().into_owned())
+        .collect();
+
     // Pass 1: collect candidate pids (sorted, so the lowest pid wins per cwd).
     let mut candidate_pids: Vec<u32> = raw
         .lines()
@@ -351,29 +433,23 @@ pub fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
     // Pass 2: resolve every candidate's working directory in one `lsof` call.
     let cwds = process_cwds(&candidate_pids);
 
-    // Pass 3: register one native session per distinct working directory.
+    // Pass 3: register one native session per distinct, not-already-managed
+    // working directory.
     let mut result = DiscoveryResult::default();
     let mut seen_workdirs: HashSet<String> = HashSet::new();
     for pid in candidate_pids {
         let cwd = cwds.get(&pid).cloned().unwrap_or_default();
-        // Collapse the many `claude` subprocesses of one session: a directory
-        // already claimed (this scan or a prior one) yields no new session.
-        if !cwd.is_empty()
-            && (registered_workdirs.contains(&cwd) || !seen_workdirs.insert(cwd.clone()))
-        {
+        let Some(session) = decide_native_registration(
+            pid,
+            &cwd,
+            &managed_cwds,
+            &registered_workdirs,
+            &mut seen_workdirs,
+            &registered_names,
+        ) else {
             continue;
-        }
-        let name = format!("{}-{}", cwd_basename(&cwd), pid);
-        if registered_names.contains(&name) {
-            continue;
-        }
-        // Native processes are not tmux-hosted; tag the control model `Pty`
-        // (an OS-owned terminal) and the origin `Native`.
-        let mut session = Session::new(SessionId::new(), cwd.clone(), ControlModel::Pty, None);
-        session.tmux_name = name.clone();
-        session.status = SessionStatus::Active;
-        session.origin = SessionHost::Native;
-        session.pid = Some(pid);
+        };
+        let name = session.tmux_name.clone();
         state.register_session(session);
         tracing::info!("auto-discovered native Claude Code process: {name} (pid {pid})");
         result.adopted += 1;
@@ -390,9 +466,9 @@ pub fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
 /// and merges their [`DiscoveryResult`]s.
 /// Test: covered indirectly — each scan has its own unit coverage, and the
 /// merge is exercised by `discover_all_merges_results`.
-pub fn discover_all(state: &DaemonState) -> DiscoveryResult {
+pub async fn discover_all(state: &DaemonState) -> DiscoveryResult {
     let mut result = discover_claude_sessions(state);
-    let native = discover_native_processes(state);
+    let native = discover_native_processes(state).await;
     result.adopted += native.adopted;
     result.sessions.extend(native.sessions);
     result
@@ -535,19 +611,159 @@ mod tests {
         assert_eq!(cwd_basename("/"), "session");
     }
 
-    #[test]
-    fn discover_native_with_no_processes_is_well_formed() {
+    #[tokio::test]
+    async fn discover_native_with_no_processes_is_well_formed() {
         // `ps` is present in CI but is unlikely to host a Claude Code process;
         // the scan must return a well-formed result and never panic.
         let state = DaemonState::new();
-        let result = discover_native_processes(&state);
+        let result = discover_native_processes(&state).await;
+        assert_eq!(result.adopted, result.sessions.len());
+    }
+
+    #[tokio::test]
+    async fn discover_all_merges_results() {
+        let state = DaemonState::new();
+        let result = discover_all(&state).await;
         assert_eq!(result.adopted, result.sessions.len());
     }
 
     #[test]
-    fn discover_all_merges_results() {
+    fn decide_native_registration_skips_already_managed_cwd() {
+        // Issue #3596 symptom 1: a process whose cwd is already tracked by the
+        // SessionManager store already has a durable, correlated identity
+        // there — it must NOT get a second, uncorrelated Session minted for
+        // it here. This is the phantom-identity defect's core fix; against
+        // the pre-fix code (no `managed_cwds` parameter existed at all) this
+        // candidate was ALWAYS registered under a fresh `SessionId::new()`.
+        let managed_cwds = HashSet::from(["/work/managed-worktree".to_string()]);
+        let registered_workdirs = HashSet::new();
+        let mut seen_workdirs = HashSet::new();
+        let registered_names = HashSet::new();
+
+        let result = decide_native_registration(
+            4242,
+            "/work/managed-worktree",
+            &managed_cwds,
+            &registered_workdirs,
+            &mut seen_workdirs,
+            &registered_names,
+        );
+
+        assert!(
+            result.is_none(),
+            "an already-managed cwd must not mint a phantom Session"
+        );
+    }
+
+    #[test]
+    fn decide_native_registration_sets_project_path() {
+        // Issue #3596 symptom 2: `project_path` must be populated from the
+        // resolved cwd so `list_sessions_for_project` can find this session.
+        // Against the pre-fix code this was always `None` (`Session::new(...,
+        // None)`), so this assertion fails against pre-fix behaviour.
+        let managed_cwds = HashSet::new();
+        let registered_workdirs = HashSet::new();
+        let mut seen_workdirs = HashSet::new();
+        let registered_names = HashSet::new();
+
+        let session = decide_native_registration(
+            4242,
+            "/work/ad-hoc-project",
+            &managed_cwds,
+            &registered_workdirs,
+            &mut seen_workdirs,
+            &registered_names,
+        )
+        .expect("a not-yet-registered, not-managed cwd must be registered");
+
+        assert_eq!(
+            session.project_path,
+            Some(PathBuf::from("/work/ad-hoc-project"))
+        );
+        assert_eq!(session.origin, SessionHost::Native);
+        assert_eq!(session.pid, Some(4242));
+    }
+
+    #[test]
+    fn decide_native_registration_dedupes_by_workdir_and_name() {
+        // The pre-existing de-dup rules (by registered workdir, and by
+        // collapsing repeat candidates at the same cwd within one scan) must
+        // still hold unchanged.
+        let managed_cwds = HashSet::new();
+        let registered_workdirs = HashSet::from(["/work/already-native".to_string()]);
+        let mut seen_workdirs = HashSet::new();
+        let registered_names = HashSet::new();
+        assert!(
+            decide_native_registration(
+                1,
+                "/work/already-native",
+                &managed_cwds,
+                &registered_workdirs,
+                &mut seen_workdirs,
+                &registered_names,
+            )
+            .is_none(),
+            "a workdir already registered as a native session must be skipped"
+        );
+
+        // A second candidate at a fresh cwd claims it; a third candidate at
+        // the SAME cwd (a sibling `claude` subprocess) is collapsed away.
+        let managed_cwds = HashSet::new();
+        let registered_workdirs = HashSet::new();
+        let mut seen_workdirs = HashSet::new();
+        let registered_names = HashSet::new();
+        assert!(
+            decide_native_registration(
+                2,
+                "/work/fresh",
+                &managed_cwds,
+                &registered_workdirs,
+                &mut seen_workdirs,
+                &registered_names,
+            )
+            .is_some()
+        );
+        assert!(
+            decide_native_registration(
+                3,
+                "/work/fresh",
+                &managed_cwds,
+                &registered_workdirs,
+                &mut seen_workdirs,
+                &registered_names,
+            )
+            .is_none(),
+            "a second candidate at an already-seen cwd must be collapsed"
+        );
+    }
+
+    #[test]
+    fn native_discovery_populates_project_path_for_cwd_scoped_lookup() {
+        // Issue #3596 symptom 2, end-to-end: register a native-origin session
+        // exactly as `discover_native_processes` now would, then confirm
+        // `list_sessions_for_project` — the same lookup `GET
+        // /sessions?project=` and `tm sessions list` use (see
+        // `bin/tm/commands/session.rs`'s `SessionAction::List`) — actually
+        // finds it. Before the fix `project_path` was always `None`, making
+        // this lookup structurally incapable of matching ANY
+        // natively-discovered session; this test fails against that pre-fix
+        // behaviour.
         let state = DaemonState::new();
-        let result = discover_all(&state);
-        assert_eq!(result.adopted, result.sessions.len());
+        let cwd = "/work/native-project";
+        let session = decide_native_registration(
+            9999,
+            cwd,
+            &HashSet::new(),
+            &HashSet::new(),
+            &mut HashSet::new(),
+            &HashSet::new(),
+        )
+        .expect("fresh cwd must register");
+        let id = session.id;
+        state.register_session(session);
+
+        let found = state.list_sessions_for_project(std::path::Path::new(cwd));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, id);
     }
 }

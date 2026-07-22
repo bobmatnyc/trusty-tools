@@ -8,6 +8,135 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Test-only ambient-daemon leaks closed for two `run_task` tests (issue
+  #2914).** `spawns_indexing_thread_for_non_git_project_path` and
+  `background_indexing_invokes_readiness_observer` call
+  `ensure_project_indexed_in_background` directly, bypassing the
+  `execute_run_task` wrapper's `isolate_ambient_daemons()` guard (#3361) — on
+  a machine with a live trusty-search daemon they registered their tempdir
+  fixture against it for real. Both now install the same isolation guard.
+  Production behaviour (task-start indexing still opts in to
+  `allow_sensitive_path: true` for its own working project, issue #2747) is
+  unchanged — see `trusty-common`'s changelog for the shared-helper fix this
+  pairs with.
+
+## [0.3.0] — 2026-07-21
+
+### Added
+
+- **Claude Code plugin support, Phase 1: local-directory agents + skills
+  (issue #3539, DOC-51).** New `crate::plugins` module auto-scans
+  `<project_root>/.claude/plugins/<plugin>/` (honoring an optional
+  `.claude-plugin/plugin.json`'s `name`/`agents`/`skills` overrides) and
+  surfaces each plugin's `agents/*.md` and `skills/<name>/SKILL.md` in
+  `agents.list`/`skills.list` under a new `plugin` tier, namespaced
+  `<plugin>:<name>` and resolvable by that name via `agents::resolve_agent`
+  and the `use_skill` skill resolver. Plugin entries are additive only — the
+  namespaced key can never collide with (and so never overrides) a project
+  or embedded/bundled name, and plugin skills are independent of the
+  bundled-vs-project whole-catalog-replacement threshold (PR #3465) for
+  `skills.list`. A plugin agent's unsupported trusty-mpm-style frontmatter
+  fields (`effort`/`maxTurns`/`memory`/`isolation`/`disallowedTools`) are
+  dropped with a warning rather than failing the load; an `extends:` chain
+  is treated as leaf-only (warned, not composed). Phase 1 is local-directory
+  agents + skills only — no marketplace/git fetch, no commands/hooks/MCP
+  (later phases, tracked against #3539). Plugin content is treated as
+  HOSTILE input throughout (code-critic PR #3547 review): a `plugin.json`
+  `agents`/`skills` override that is absolute, contains `..`, or resolves
+  outside the plugin directory is rejected and falls back to the default
+  convention; every namespaced `<plugin>:<name>` dispatch/resolution path
+  (`use_skill`, `delegate_to_agent`, `agent_config_exists`, `tcode run-task`)
+  validates both segments against the existing `[a-z0-9-]+`
+  (<= 64 chars) safe charset before ever building a filesystem path, making
+  a traversal payload syntactically impossible to construct. A namespaced
+  plugin agent is also now genuinely delegatable end-to-end — the PM's
+  `delegate_to_agent` tool, the CLI, and the pre-flight existence gate all
+  accept the `<plugin>:<name>` shape (previously only `agents::resolve_agent`
+  itself could resolve one; every caller in front of it rejected `:`
+  outright). A further hardening pass (code-critic re-review) closed a
+  leaf-file-identity gap (CWE-59): a discovered `agents/*.md` or
+  `skills/<name>/SKILL.md` — or the `skills/<name>` directory itself — that
+  is a symlink escaping the plugin's `agents_dir`/`skills_dir` is now
+  rejected via `plugins::path_is_contained` (canonicalize + containment,
+  applied at both the listing and resolve/dispatch paths for both agents
+  and skills) before its content is ever read, closing a host-file
+  disclosure vector the directory- and name-level guards above didn't
+  cover. `runner::agent_config_exists`'s pre-flight gate now also requires
+  a namespaced plugin agent to resolve CLEANLY (not merely be found) to
+  count as "exists".
+- **Markdown transcript endpoint for dev observability (issue #3526).** New
+  `GET /sessions/{id}/transcript.md` (`crate::serve::rest::sessions`) renders
+  a session's full transcript as a readable `text/markdown` document —
+  a header (session id, workstream id, project, task, mode, status, start/
+  export timestamps, turn count, cost) then one section per turn, each
+  `tool_calls` entry rendered as its own `` - `ROLE` ran: <tool> `` bullet so
+  a runaway loop stays visible line-by-line. This makes a run inspectable in
+  local dev independent of the GUI (`curl
+  http://127.0.0.1:7882/sessions/<id>/transcript.md`) and is the single
+  source of truth for the Markdown the Foundry GUI's "Download transcript"
+  button saves. Session-scoped, loopback-only (no new bind — rides the
+  existing daemon listener), `404` on an unknown id like the JSON transcript
+  route.
+- **Agent/Skill catalog management endpoints (issue #3449).** New `agents.*`/
+  `skills.*` JSON-RPC methods (`crate::agents::protocol`,
+  `crate::skills::protocol`) plus their REST twins — `GET`/`POST /agents`,
+  `DELETE /agents/{name}` and the `skills` equivalent
+  (`crate::serve::rest::agent_catalog`/`skill_catalog`) — back the Foundry
+  GUI's new Agents/Skills management tabs. `GET /agents` returns the union of
+  the embedded roster (32 agents incl. `pm`) and the resolved disk tier
+  (`project` when bound, `user` for `~/.claude/agents` when projectless),
+  disk overriding embedded by name; `POST`/`DELETE` manage the disk tier
+  only, refusing to shadow or delete an embedded name (`403`) and refusing
+  to overwrite an existing disk file (`409`). `GET /skills` returns whatever
+  will ACTUALLY resolve for the project at `task.run` time — the bundled
+  catalog when the project has no (or an empty) `.claude/skills/`, or
+  EXCLUSIVELY that directory's entries once it has at least one, mirroring
+  `discover_skill_metadata`'s whole-catalog-replacement semantics rather
+  than a per-name overlay. There is no user-level skill tier
+  (`crate::skills::protocol`'s docs explain why), so `POST`/`DELETE /skills`
+  require a bound project (`400` when projectless). All names are validated
+  against `[a-z0-9-]+` (also the path-traversal guard).
+  **Code-critic PR #3465 review fixes (same-day, before merge):** both
+  creates now use an atomic `O_CREAT|O_EXCL` create
+  (`agents::protocol::write_new_file`) instead of an exists-then-write
+  pre-check, closing a TOCTOU race where two concurrent creates of the same
+  name could silently clobber each other (HIGH 1/HIGH 2); the 409 conflict
+  is minted as `-32009 already_exists` via a new `RpcError::already_exists`
+  constructor rather than reusing the workstreams' `-32008 active_conflict`
+  literal (LOW); and `agents.list` surfaces an unparseable disk file as
+  `tier: "broken"` instead of silently showing the shadowed embedded entry
+  as healthy — `resolve_agent`'s disk-wins rule means dispatch of that name
+  will fail, and the catalog must not misreport it (MEDIUM).
+  **Code-critic PR #3465 RE-review fix:** `skills.list` was still doing a
+  per-name bundled ∪ disk overlay, unlike the corrected `agents.list` — so a
+  project with one custom skill reported all ~28 bundled skills as
+  available even though `FsSkillResolver` discards the entire bundled
+  catalog the moment disk has anything, making every bundled name
+  unresolvable at runtime. Fixed to match the resolver's actual
+  whole-catalog-replacement behavior (MEDIUM).
+
+### Fixed
+
+- **`run_task::tests` are hermetic again — no longer corrupted by an ambient local `trusty-memory`/`trusty-search` daemon (issue #3361).** `execute_run_task` background-indexes the project via `trusty-search` and seeds the PM prompt via `trusty-memory`'s catch-up digest; on a machine with either daemon actually running, both were discovered and contacted for real, and the live `trusty-search` daemon would register + reindex the test's tempdir project, writing its own colocated storage (`.trusty-search/schema_version.json`) INSIDE the sandbox. That extra file corrupted the before/after diff `no_changes_yields_no_changes_exit`, `missing_disk_pm_config_falls_back_to_embedded_pm`, and `exit_code_reflects_run_failure` assert on. `run_task::tests` now installs a one-time, process-lifetime isolation (via the existing `TRUSTY_MEMORY_URL`/`TRUSTY_DATA_DIR_OVERRIDE` production override seams) before the first call to `execute_run_task`, so no ambient daemon is ever reachable from this suite again, regardless of what happens to be running on the developer's machine.
+- **`agents.list`/`GET /agents` no longer surfaces the 5 `BASE-*` composition-template agents (issue #3465 follow-up).** `base-agent`, `base-engineer`,
+  `base-ops`, `base-qa`, `base-research` exist only to be `extends:`-ed by
+  concrete agents and were never meant to be dispatched — they were leaking
+  into the Foundry GUI's Agents tab and the start-working agent selector
+  whenever a project's disk `.claude/agents/` dir had real `BASE-*.md` files
+  on it (trusty-mpm's own bundle installs them verbatim). New
+  `agents::protocol::is_base_agent` (backed by a single centralized
+  `crate::assets::BASE_AGENT_NAMES` list, matched case-insensitively) filters
+  both the embedded and disk halves of the listing; `resolve_agent`/
+  `load_md_agent` are untouched, so a leaf agent's `extends: base-engineer`
+  chain still composes exactly as before — only the user-facing catalog an
+  operator browses hides them.
+- **`CodeEngine`'s workstream-event SSE loop no longer stalls silently or loops forever (Slice 6, closes #3418, part of epic #3411).**
+  - `pump_session_events` reset its reconnect-attempt counter on every merely-successful TRANSPORT-level reconnect, before the inner loop ever observed whether the STREAM made progress. Against a daemon that accepts the connection but closes the stream immediately with no data every time, that made the retry budget un-exhaustible: the function looped forever and `handle_input` never returned. The counter now only resets on genuine progress (an actual data payload), so `SESSION_STREAM_MAX_RECONNECTS` is a real bound again.
+  - Every exhaustion path in `pump_session_events` (a non-2xx status, a transport error, a clean-but-premature stream close, an idle timeout) now sends a `done: true, is_error: true` `AssistantOutput` before returning, instead of some paths (the clean-close case) silently returning `Ok(())` — indistinguishable from a genuinely successful turn. This is the epic #3411 deferred Slice 3 review item: a terminal SSE failure now surfaces a visible error in the TUI rather than a stalled spinner with no error text.
+  - `run_workstream_subscription` discarded `refresh_workstream_cache`'s return value, so it never actually sent `ReplEvent::WorkstreamUpdated` after an activation change — only `EngineState`'s own internal cache was refreshed, not `ReplApp::active_workstream` (which the status line renders from). It now forwards the refreshed summary as `WorkstreamUpdated`, and also pushes the status line's `Workstream` segment via `ReplEvent::StatuslineUpdate` (`EngineState::statusline_segments`), clearing it (an empty segment list) on deactivation.
+
 ### Changed
 
 - **`fs.list_projects` / `GET /projects` re-sourced from trusty-mpm's shared
@@ -45,6 +174,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   surfaces a `StatusMessage` (the shared `ReplEvent::WorkstreamActivationChanged`
   declares `new_active_id` as a non-optional `String`, so it cannot carry
   this state without a `trusty-tui` change).
+- **The `StatusMessage` fallback above is now a structured event (closes #3452, part of epic #3411).** `trusty-tui`'s `ReplEvent::WorkstreamActivationChanged.new_active_id` is now `Option<String>`, matching the wire shape exactly; `workstream_subscription.rs`'s deactivation arm now emits `ReplEvent::WorkstreamActivationChanged { new_active_id: None, prior_id: Some(..) }` instead of free text, so a UI can structurally clear its "active workstream" indicator.
 
 ### Added
 

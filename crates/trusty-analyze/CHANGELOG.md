@@ -7,7 +7,35 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [Unreleased]
+## [0.7.4] — 2026-07-21
+
+### Fixed
+
+- **Smell-count false positives made the codebase-wide quality metric untrustworthy**
+  ([#3522](https://github.com/bobmatnyc/trusty-tools/issues/3522)): the
+  whole-codebase quality report and PR-review path (`core/quality.rs`,
+  `core/review/mod.rs`) always scored chunks with the language-agnostic text
+  heuristic, which over-counts `DeepNesting` on ordinary, idiomatically
+  formatted Rust (e.g. `for (i, x) in v.iter().enumerate()`) and flags
+  `MissingDocstring` on every undocumented function regardless of visibility.
+  Both paths now dispatch through the existing language-aware
+  `compute_complexity_for` (tree-sitter-backed for Rust/TypeScript), and
+  `MissingDocstring` now only fires for public API surface (`pub` items in
+  Rust; exported functions / non-private class methods in TS/JS). Measured on
+  this repo's own `crates/` tree: smell count dropped from 21,407 to 8,906
+  across ~47.8K chunks (0.448 → 0.186 smells/chunk).
+
+### Changed
+
+- **UI tokens now CI-enforced against the canonical Foundry source** (refs [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): flipped from the `scripts/check_token_drift.mjs` allowlist to ENFORCED. The `token-drift` CI job now compares `ui/src/lib/styles/tokens.css`'s plain-CSS `--trusty-*: #hex` values directly to `docs/design/UI/design-system/tokens.css` on every push/PR (light `[data-theme="light"]`, dark `:root, [data-theme="dark"]`; the crate-local alias layer is ignored), so a hand-edit that drifts this crate's palette from canonical fails the build.
+- **UI design tokens migrated to Foundry v2** ([#3490](https://github.com/bobmatnyc/trusty-tools/issues/3490),
+  epic [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): the dashboard's
+  `tokens.css` now sources its light/dark palette from the canonical Foundry
+  v2 ("rust-on-paper") design tokens instead of Catppuccin Mocha/Latte. The
+  crate's existing component-facing alias names (`--bg`, `--border`,
+  `--text`, `--grade-*`, etc.) and light/dark activation mechanism
+  (`[data-theme]` on `<html>`) are unchanged — only the underlying color
+  values moved.
 
 ### Security
 

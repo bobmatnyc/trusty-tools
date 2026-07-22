@@ -515,40 +515,20 @@ pub(crate) fn nested_managed_match<'a>(
 /// FALSE against a live tmux 3.6b: `mark_runtime_exited_stopped`'s healing
 /// step calls `tmux set-environment -t <session>` — SESSION-scoped — and
 /// tmux applies a session's stored environment to the process env of every
-/// NEW pane/window created in that session AFTERWARD. Concretely: `tmux
-/// set-environment -t sess ID abc; tmux new-window -t sess` then reading
-/// `$ID` inside that BRAND NEW window returns `abc` — inherited, not
-/// exported by THIS pane's own spawn command. Since the healing step runs on
-/// every runtime-exit reconcile (the periodic reap tick, #2453's own
-/// reconcile-then-reactivate route, and #2455's hook), any session that has
-/// exited-and-relaunched once has this poisoned session env, and every
-/// window opened afterward inherits the id into ITS OWN process env — the
-/// exact env-based gate this predicate replaces would have passed a
-/// genuinely different, unrelated sibling pane. tmux's own `pane_id` (e.g.
-/// `"%5"`, distinct from `pane_pid`, which the OS can reuse across a pane's
-/// lifetime) is NEVER inherited across panes — see
+/// NEW pane/window created in that session AFTERWARD. tmux's own `pane_id`
+/// (e.g. `"%5"`, distinct from `pane_pid`, which the OS can reuse across a
+/// pane's lifetime) is NEVER inherited across panes — see
 /// [`SessionRecord::pane_id`](trusty_mpm::session_manager::SessionRecord::pane_id)'s
 /// doc for the full rationale and [`super::tmux_attach::current_tmux_pane_id`]
 /// for how the CURRENT pane's id is resolved.
-/// What: `true` only when BOTH `current_pane_id` and `record_pane_id` are
-/// `Some` and equal. `false` when either is `None` (a legacy record that
-/// never had a `pane_id` captured, or a tmux query failure) OR they differ —
-/// fails CLOSED in every ambiguous case, meaning the caller must fall back
-/// to refuse+switch-client rather than attempt the in-place relaunch.
-/// Test: `pane_identity_confirmed_true_when_pane_id_matches_record`,
-/// `pane_identity_confirmed_false_when_current_pane_id_absent`,
-/// `pane_identity_confirmed_false_when_record_pane_id_absent`,
-/// `pane_identity_confirmed_false_when_inherited_env_but_different_pane_id`
-/// (the exact two-idle-panes/inherited-session-env hijack scenario).
-pub(crate) fn pane_identity_confirmed(
-    current_pane_id: Option<&str>,
-    record_pane_id: Option<&str>,
-) -> bool {
-    match (current_pane_id, record_pane_id) {
-        (Some(cur), Some(rec)) => cur == rec,
-        _ => false,
-    }
-}
+/// What: moved to [`super::pane_identity::pane_identity_confirmed`] (issue
+/// #3600) — that module is now the ONE shared cross-check primitive used by
+/// this guard AND by `rename.rs`/`pm_guard_deny_by_default.rs`, so the same
+/// hijack this guard fixed here doesn't rot back into a divergent (or
+/// missing) copy elsewhere. Re-exported so existing imports of
+/// `crate::commands::guided::pane_identity_confirmed` keep resolving.
+/// Test: see `super::pane_identity`'s module doc for the full test list.
+pub(crate) use super::pane_identity::pane_identity_confirmed;
 
 /// The action the nested-session guard takes when it matched a record by tmux
 /// SESSION name but could NOT confirm pane-level identity

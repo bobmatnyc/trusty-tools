@@ -9,10 +9,16 @@
 //! relative-time strings.
 //! Test: `probe_commits_returns_empty_for_non_git_dir`,
 //! `shorten_age_*` in the inline test module below.
+//!
+//! `run_git_log` spawns via
+//! [`trusty_mpm::core::spawn_disclaim::disclaimed_stdout_piped_spawn`] rather
+//! than a raw `Command::spawn()` so its TCC responsibility is disclaimed on
+//! macOS — see that function's docs (issue #3267, #2997 part 6).
 
-use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
+
+use trusty_mpm::core::spawn_disclaim::disclaimed_stdout_piped_spawn;
 
 use super::CommitLine;
 
@@ -46,30 +52,28 @@ pub(crate) fn probe_recent_commits(workdir: &str) -> Vec<CommitLine> {
 /// thread long after the panel has been shown. The watchdog closes that gap:
 /// the process is forcibly killed ≤3 seconds after spawn regardless of
 /// whether the caller already moved on.
-/// What: spawns the child with piped stdout; the watchdog thread sleeps 3 s
-/// then sends SIGKILL via the child PID (Unix) or `child.kill()` on Windows.
-/// `wait_with_output()` collects stdout+status; a non-zero exit or parse
-/// failure returns `None`.
+/// What: spawns the child via [`disclaimed_stdout_piped_spawn`] (piped
+/// stdout, TCC responsibility disclaimed on macOS — issue #3267); the
+/// watchdog thread sleeps 3 s then sends SIGKILL via the child PID (Unix) or
+/// `taskkill` on Windows. `wait_with_output()` collects stdout+status; a
+/// non-zero exit or parse failure returns `None`.
 /// Test: indirect — covered by `probe_recent_commits` tests.
 fn run_git_log(workdir: &str) -> Option<Vec<CommitLine>> {
-    let child = std::process::Command::new("git")
-        .arg("-C")
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
         .arg(workdir)
-        .args(["log", "--oneline", "-5", "--format=%h|%cr|%s"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .args(["log", "--oneline", "-5", "--format=%h|%cr|%s"]);
+    let spawned = disclaimed_stdout_piped_spawn(cmd).ok()?;
 
     // Watchdog: kill the child after 3 s so it never lingers on a slow FS
     // even after the panel recv_timeout(150ms) already fired in the caller.
-    let pid = child.id();
+    let pid = spawned.id;
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(3));
         #[cfg(unix)]
         // SAFETY: `kill(pid, SIGKILL)` is async-signal-safe; pid is a valid
-        // u32 from Child::id(); the process may already be gone — errno ESRCH
-        // is harmless.
+        // u32 from the spawned child; the process may already be gone —
+        // errno ESRCH is harmless.
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
@@ -82,7 +86,7 @@ fn run_git_log(workdir: &str) -> Option<Vec<CommitLine>> {
         }
     });
 
-    let out = child.wait_with_output().ok()?;
+    let out = spawned.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }

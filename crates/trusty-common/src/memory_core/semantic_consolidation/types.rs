@@ -167,7 +167,7 @@ pub fn resolve_openrouter_api_key(configured: &str) -> String {
 /// environment, or if `openrouter_api_key` is non-empty; `ollama_base_url` is
 /// non-empty when the local model is enabled. Does NOT ping any endpoint.
 /// Test: `inference_available_false_without_key` (no env var → false) and
-/// `inference_available_true_with_key` (env var set → true).
+/// `inference_available_true_with_*` (env var set → true).
 pub fn inference_available(openrouter_api_key: &str, local_model_enabled: bool) -> bool {
     if !openrouter_api_key.trim().is_empty() {
         return true;

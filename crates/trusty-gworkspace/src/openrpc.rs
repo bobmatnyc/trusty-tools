@@ -60,8 +60,12 @@ mod scopes {
 pub fn scopes_for_tool(name: &str) -> &'static [&'static str] {
     use scopes::*;
     match name {
-        // Accounts — only needs profile info to enumerate local profiles.
-        "list_accounts" => &[USERINFO_PROFILE],
+        // Accounts — only needs profile info to enumerate/manage local
+        // profiles (none of these call a Google data API; `add_account`
+        // mints the credential itself rather than requiring one up front).
+        "list_accounts" | "set_default_account" | "remove_account" | "add_account" => {
+            &[USERINFO_PROFILE]
+        }
 
         // Calendar
         "manage_calendars" => &[CALENDAR],

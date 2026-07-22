@@ -1,7 +1,7 @@
 //! trusty-agents desktop chat (Tauri 2).
 //!
 //! Why: Gives users a native chat UI for talking to the CTRL controller,
-//! project-scoped PMs, and — as of #3223/#3224 (Trusty Assistant agent
+//! project-scoped PMs, and — as of #3223/#3224 (Trusty Agents agent
 //! roster, epic #3052) — named persona agents, without hand-running
 //! `trusty-agents --task '…'` at the command line. The Rust side here only
 //! does three things: (1) spawn the `trusty-agents --api` sidecar on startup

@@ -58,8 +58,15 @@ fn constructs_without_touching_credentials() {
 /// only at call time, not at construction.
 /// What: skips (does not fail) when the ambient environment happens to carry
 /// a real `OPENROUTER_API_KEY`, mirroring `trusty-code`'s identical guard.
-/// Test: itself.
+/// Test: itself. #3465-followup: reads `OPENROUTER_API_KEY` (via the shared
+/// resolver, inside `chat()`) without previously holding any lock, so a
+/// concurrent credential test elsewhere in the crate transiently setting
+/// that var could make this test observe a live key mid-flight and fail the
+/// `MissingCredential` assertion below. `#[serial]` joins the same
+/// crate-wide exclusion group already used by every other test that
+/// mutates `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN`.
 #[tokio::test]
+#[serial]
 async fn missing_openrouter_key_errors_at_chat_time() {
     if std::env::var("OPENROUTER_API_KEY").is_ok_and(|v| !v.is_empty()) {
         return; // real key present locally — don't assert MissingCredential

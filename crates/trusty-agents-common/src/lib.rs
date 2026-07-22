@@ -387,7 +387,7 @@ pub trait ToolExecutor: Send + Sync {
     ///
     /// Why: RBAC at the dispatch boundary; see `ServiceTier`.
     /// What: Default returns empty (no restriction). Concrete tools override.
-    /// Test: `trusty-agents/tools/mod::filter_tools_for_user_*`.
+    /// Test: exercised by `trusty-agents`'s `tools/mod::filter_tools_for_user_*`.
     fn restricted_tiers(&self) -> &[ServiceTier] {
         &[]
     }
@@ -397,9 +397,29 @@ pub trait ToolExecutor: Send + Sync {
     /// Why: Always-on tools run automatically before each LLM call; on-demand
     ///      tools appear in the LLM's tool list. See `ToolExecutionTier`.
     /// What: Default returns `OnDemand`.
-    /// Test: `trusty-agents/tools/always_on::build_live_context_*`.
+    /// Test: exercised by `trusty-agents`'s `tools/always_on::build_live_context_*`.
     fn execution_tier(&self) -> ToolExecutionTier {
         ToolExecutionTier::OnDemand
+    }
+
+    /// The OpenRPC scope this tool was discovered under (trusty-agents #453,
+    /// #3208), e.g. `"google.gmail.read"`.
+    ///
+    /// Why: Only tools sourced from the OpenRPC tool registry (endpoints like
+    ///      `gworkspace`, `trusty-memory`) carry a meaningful scope —
+    ///      in-process tools (git, delegate_to_agent, shell, ...) are gated
+    ///      entirely by the existing name/glob allowlist + RBAC-tier checks
+    ///      and have no scope concept. Defaulting to `None` means "not part
+    ///      of the scoped surface, not subject to scope-pattern gating"
+    ///      rather than "unscoped == open" — callers that DO consult scopes
+    ///      only apply the check when this returns `Some`.
+    /// What: Default returns `None`. `RegistryToolExecutor` overrides this
+    ///       with its `DiscoveredTool`'s `scope` field.
+    /// Test: `trusty-agents/tools/registry/adapter` round-trips the override;
+    ///       `trusty-agents/ctrl/pm_task/dispatch/persona::filter_persona_tool_names_*`
+    ///       covers the enforcement consumer.
+    fn scope(&self) -> Option<&str> {
+        None
     }
 }
 

@@ -103,49 +103,64 @@ created outside tmux simply omit it (resume treats absence as a no-op).
 
 ## Procedure
 
-```bash
-git status                       # working-tree state for the Git Context block
-git log --oneline -10            # recent commits for context
-mkdir -p .trusty-mpm/sessions    # ensure the store exists
+Reconcile the todo list against `git status` first — mark blockers explicitly —
+so the snapshot reflects the *current* state, not a stale one. Then capture
+the tmux window (this ONE step stays PM-side bash — only the PM's own shell
+has tmux client access; the MCP tool never touches tmux):
 
-# Capture the current tmux window ONLY when inside tmux; skip the section otherwise.
+```bash
+# Capture the current tmux window ONLY when inside tmux; omit the field otherwise.
 if [ -n "$TMUX" ]; then
   tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'
 fi
-
-# Resolve a stable session id for the log: prefer $TM_SESSION_ID, else the tmux
-# session:window (stable within a session), else "default".
-SID="${TM_SESSION_ID:-$([ -n "$TMUX" ] && tmux display-message -p '#{session_name}:#{window_index}' || echo default)}"
-SNAP="session-$(date +%Y%m%d-%H%M%S).md"
-TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-# write $SNAP using the format above — include a `## Tmux Window` section holding
-# the captured string ONLY if the command above printed one, then APPEND (never
-# overwrite) one pause line to the log:
-printf '{"session_id":"%s","event":"pause","snapshot":"%s","timestamp":"%s"}\n' \
-  "$SID" "$SNAP" "$TS" >> .trusty-mpm/sessions/sessions-log.jsonl
 ```
 
-**Do not** write `LATEST-SESSION.txt` — the append-only log replaces it. Use
-`>>` (append), never `>` (truncate), so a concurrent session's history is
-preserved.
+Then call the MCP tool to write the snapshot, append the pause-log entry, and
+prune worktrees, all in one step:
 
-Reconcile the todo list against `git status` first — mark blockers explicitly —
-so the snapshot reflects the *current* state, not a stale one. Then report the
-written path to the user.
+```
+mcp__trusty-mpm__session_context_pause(
+  project_dir: <absolute path to the current project root>,
+  session_id: <a stable id for this session — $TM_SESSION_ID, or the tmux
+               session:window, or any other stable value>,
+  summary: <human-readable current-state prose>,
+  completed: [<completed todos/tasks this session>, ...],   # optional
+  in_progress: [<in-progress todos with detailed state>, ...],  # optional
+  next_steps: [<pending todos and recommended next actions>, ...],  # optional
+  tmux_window: <the string captured above, when inside tmux>,   # optional
+  prune_worktrees: true   # default; set false to skip the prune step
+)
+```
+
+The tool returns `{ snapshot_path, timestamp, pruned_worktrees }`. It writes
+`.trusty-mpm/sessions/session-YYYYMMDD-HHMMSS.md` in the same section format
+`/tm-session-resume` already parses (`## Summary` / `## Completed` /
+`## In Progress` / `## Next Steps` / `## Git Context` / `## Tmux Window`,
+each omitted when empty), appends the matching `pause` line to the
+append-only `sessions-log.jsonl` (never overwrites — concurrent `tm` sessions
+in the same project keep their own history), and computes the
+`## Git Context` section (branch, last commit, uncommitted-changes summary)
+itself — no separate `git status`/`git log` shell-out needed.
+
+Report the returned `snapshot_path` to the user.
 
 ## Worktree Pruning
 
 Decommissioned managed sessions (`tm session new` / `mcp__trusty-mpm__session_new`)
-can leave orphaned per-session git worktree directories behind. As part of
-pause wrap-up, prune them:
+can leave orphaned per-session git worktree directories behind. By default,
+`session_context_pause` prunes them as part of the call above (`prune_worktrees:
+true`, the default) — the same in-process engine `tm session prune-worktrees`
+uses. Only directories with **no** corresponding active session are ever
+touched; the tool returns the list of paths removed as `pruned_worktrees`.
+
+Pass `prune_worktrees: false` to skip this step (e.g. to preview first with
+the CLI):
 
 ```bash
 tm session prune-worktrees          # dry-run by default (preview only)
 tm session prune-worktrees --force  # actually remove the orphaned dirs
 ```
 
-Only directories with **no** corresponding active session are ever touched.
 `tm doctor`'s `worktrees` probe reports the orphan count and suggests this
 command; run it whenever that probe is non-zero, and always before ending a
 long session that spawned managed sessions.

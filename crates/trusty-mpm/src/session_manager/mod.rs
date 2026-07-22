@@ -18,6 +18,7 @@ pub mod hook_sync;
 pub mod injection_status;
 pub mod manager;
 pub mod naming;
+mod numbering;
 pub mod prune;
 pub mod reactivate;
 mod reconcile;
@@ -27,6 +28,7 @@ pub mod restart_ops;
 pub(crate) mod resume_workdir;
 pub mod search_gc;
 pub mod session_guard;
+pub mod slots;
 pub mod snapshot;
 pub mod store;
 pub mod task_inject;
@@ -89,6 +91,12 @@ mod adopt_existing_tests;
 #[cfg(test)]
 mod injection_status_tests;
 
+#[cfg(test)]
+mod slots_tests;
+
+#[cfg(test)]
+mod send_input_gate_tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]
@@ -99,6 +107,7 @@ pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManag
 pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome, PrunedSession};
 pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};
 pub use session_guard::TmuxSessionGuard;
+pub use slots::{NumberedSlot, SlotRegistry};
 pub use store::{SessionStore, StoreError};
 pub use task_inject::should_inject_task;
 

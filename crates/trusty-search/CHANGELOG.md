@@ -5,7 +5,386 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.38.0] — 2026-07-21
+
+Ships the epic #3524 slice 6 default flip. Depends on trusty-embedderd-py
+0.1.1 (drift-closed in this same release) for the `/health` provider
+readback used to verify the flip below.
+
+### Changed
+
+- **Graceful-Python embedder is now the DEFAULT on Apple Silicon (epic #3524
+  slice 6, PR 5/5 — the default flip).** `trusty-search start` with
+  `TRUSTY_EMBEDDER` unset/`auto` on aarch64 macOS now serves on the ort
+  stdio sidecar immediately while bootstrapping the python/MPS sidecar in
+  the background and hot-swapping to it once proven — previously this
+  required opting in via the now-retired `TRUSTY_PY_DEFAULT` ship-gate.
+  Validated by the epic #3524 slice 2-4 spike (numerically identical
+  results, ~2.4x faster end-to-end) and soaked per PR #3610 before this
+  flip. Every other platform (Linux, Intel mac, CUDA) is completely
+  unaffected — the flip is scoped to `cfg!(all(target_arch = "aarch64",
+  target_os = "macos"))` only. `TRUSTY_EMBEDDER=stdio` remains, and is now
+  the sole, permanent per-invocation escape hatch back to the unchanged ort
+  path on Apple Silicon.
+
+### Fixed
+
+- **Daemon stack-overflow crash from deep recursion in the AST chunker/entity
+  walk (issue #3537).** `walk_for_chunks` (`core/chunker/walk.rs`) and
+  `walk_rust` (`core/entity.rs`) were native recursive descents whose stack
+  depth tracked raw tree-sitter parse-tree depth — attacker-influenced, since
+  it comes directly from file content being indexed. A deeply nested
+  global-scope construct (e.g. deeply templated C++ headers, or any deeply
+  nested expression/type outside a function body, which is already pruned)
+  could exceed the process stack and abort the whole daemon with `fatal
+  runtime error: stack overflow`, taking every other index down with it.
+  Both walks are now iterative (explicit heap-allocated work stack, matching
+  the pattern `collect_calls` already used), which removes the crash
+  regardless of nesting depth, plus a bounded max-walk-depth guard (logged,
+  not silent) so a single pathological file degrades to "partially chunked"
+  rather than either crashing or — since `classify_node`'s per-node
+  `Node::parent()` lookups are not O(1) — hanging the indexing worker on
+  superlinear traversal cost.
+
+## [0.37.2] — 2026-07-21
+
+Patch release closing unpublished source drift under the already-published
+0.37.1 (issue #3366 defect class). 0.37.1 was published to crates.io (from
+`831103dd`) containing only the `ui-dist` regeneration below; every other
+entry in this section — the #3545 CLI daemon-discovery fix and the epic
+#3524 slice 5/6 embedder work — landed on `main` in later commits that
+never bumped the version, so none of it is in the live 0.37.1 tarball. This
+release carries all of it.
+
+### Fixed
+
+- **CLI daemon discovery (`index`/`list`/`reindex`/`search`/`port`/`serve`)
+  now honors `TRUSTY_DATA_DIR` (issue #3545).** These subcommands resolved
+  the daemon's address via a generic `trusty_common` resolver keyed only to
+  the test-only `TRUSTY_DATA_DIR_OVERRIDE` env var and a file location
+  distinct from the one `start`/`run_daemon()` actually wrote
+  (`$HOME/.trusty-search/http_addr`, hardcoded regardless of
+  `TRUSTY_DATA_DIR`) — so an isolated instance's clients could silently
+  reconnect to a stale, cached production-daemon address instead of the
+  isolated instance, even with `TRUSTY_DATA_DIR` and a non-default port set.
+  This caused an accidental production-daemon index mutation during PR
+  #3529. `service::daemon::http_addr_path()` now honors `TRUSTY_DATA_DIR`
+  (mirroring `daemon_dir()`), and every CLI call site reads/writes through
+  that single resolver instead of the generic one, so `start` and every
+  client subcommand always agree on which daemon they mean.
+  - **Follow-up (code-critic review):** the first cut of this fix removed
+    the only writer of the generic `trusty_common::write_daemon_addr`
+    registry without replacing it, silently breaking two other consumers
+    that still read it exclusively — `trusty_common::monitor::search_client`
+    (`trusty-search monitor status`/`monitor indexes`/`monitor tui`, whose
+    `[r]` hotkey reindexes via that resolved address) and trusty-installer's
+    `ensure` (register-index + readiness-poll stages). `run_daemon()` now
+    also populates that registry, but **only for the default
+    (`TRUSTY_DATA_DIR`-unset) instance** — an isolated instance still never
+    writes it, preserving the original fix's isolation guarantee. The CLI's
+    reachability-probe refresh write also now goes through the same atomic
+    tmp+rename helper the daemon itself uses, instead of a bare
+    `std::fs::write` that could race a torn read.
+
+### Added
+
+- **Swap-BACK watchdog: python/MPS → ort on confirmed sidecar death (epic
+  #3524 slice 6, PR 4/5) — ships DEFAULT OFF (unchanged behind
+  `TRUSTY_PY_DEFAULT`).** PR-3 hot-swaps ort→python once the sidecar proves
+  itself, then stops watching. This PR adds the other half: once hot-swapped,
+  a new detached watchdog task (`commands/start/swap_back_watchdog.rs`)
+  watches the python sidecar's pid slot and the existing
+  `EmbedderStallTracker`, and swaps `SwitchableEmbedder` back to a fresh ort
+  backend if the python sidecar is ever confirmed dead beyond recovery —
+  search never degrades permanently, with no daemon restart required.
+  - **The swap-back predicate uses a DEFINITIVE supervisor signal, not a
+    heuristic (post-merge-review fix — code-critic BLOCK on PR #3584).** The
+    first version of this predicate fired on `active.kind == Python &&
+    pid_slot == 0 && recent_timeout_count > 0`, debounced across 2 polling
+    ticks. Code-critic caught a real false-positive window before merge: an
+    ordinary idle-shutdown ALSO zeros the pid slot, and a stale non-zero
+    `recent_timeout_count` left over from an earlier TRANSIENT failure is
+    never cleared by idle-shutdown (only a subsequent successful embed clears
+    it) — so a quiet period with zero further embed traffic after an
+    idle-shutdown could satisfy the heuristic and PERMANENTLY swap away a
+    perfectly healthy sidecar. Fixed by adding
+    `trusty-common`'s new `EmbedderSupervisor::terminated_signal()` (see that
+    crate's changelog) — an `Arc<AtomicBool>` the supervision loop sets ONLY
+    at the instant it exhausts `max_restarts` / a wedge-restart storm, never
+    on a clean exit or an intentional shutdown. `LazyEmbedderHandle::is_confirmed_terminated()`
+    exposes this (via the extended `PythonAdapterTeardown` trait), and the
+    predicate is now simply `active.kind == Python &&
+    is_confirmed_terminated()` — no debounce needed, since the flag is
+    monotonic and unambiguous the instant it's observed. The regression test
+    `swap_back_does_not_fire_on_stale_timeout_count_plus_idle_shutdown`
+    reproduces the exact scenario code-critic named and fails against the
+    pre-fix heuristic.
+  - On confirmed death: builds a fresh ort backend via the same
+    `build_ort_stdio_sidecar()` the daemon's default path uses, hot-swaps
+    `SwitchableEmbedder` to it (`ActiveBackend { kind: Ort, bootstrap:
+    FellBackToOrt }`), reinstalls the ort pid slot, and cleanly shuts down the
+    dead python handle via `LazyEmbedderHandle::shutdown()` (no orphan). Logs
+    a loud `warn`: "python/MPS sidecar unrecoverable — fell back to ort;
+    search unaffected". `/health`'s `embedder_bootstrap` already reports
+    `"fell_back_to_ort"` for this state (wired in PR-2/PR-3).
+  - **CAS upgrade (code-critic LOW follow-up from PR-3 review)**:
+    `SwitchableEmbedder::set_bootstrap_state` was a non-atomic
+    read-modify-write on `active`, safe only because PR-3's orchestrator was
+    the sole writer. PR-4 introduces a second writer (the watchdog's own
+    `swap_to`), so `set_bootstrap_state` now uses `ArcSwap::rcu` — a real
+    compare-and-swap retry loop — so a concurrent `swap_to` and
+    `set_bootstrap_state` can never lose either side's update.
+  - Bounded and quiet: polls every 15s (not a tight loop), and stops
+    permanently once it either acts (swaps back) or notices the active
+    backend already moved away from python — never watches a backend it no
+    longer owns.
+  - New file: `commands/start/swap_back_watchdog.rs`. `drive_bootstrap`
+    (`graceful_bootstrap.rs`) now returns the python adapter's teardown
+    handle on success so `run_graceful_python_bootstrap` can hand it to the
+    watchdog — a pure return-type addition; no existing call site needed to
+    change.
+
+- **Graceful Apple-Silicon default gating + background bootstrap→hot-swap
+  orchestrator (epic #3524 slice 6, PR 3/5) — ships DEFAULT OFF.** On Apple
+  Silicon, once `TRUSTY_PY_DEFAULT` is enabled, `trusty-search start` now
+  serves on the ort stdio sidecar IMMEDIATELY (identical to today's default)
+  while a new background task bootstraps the python/MPS sidecar (venv +
+  launcher discovery), proves it with one real readiness-probe embed call,
+  and hot-swaps the running `SwitchableEmbedder` (epic #3524 PR-1) over to it
+  — with zero HTTP-listener or startup delay. On any bootstrap or
+  readiness-probe failure (after `TRUSTY_PY_BOOTSTRAP_RETRIES` attempts,
+  default 2, with a linear backoff between attempts) the daemon stays
+  permanently on the still-installed ort backend for that daemon's lifetime
+  and `/health`'s `embedder_bootstrap` reports `"failed"` instead of
+  `"bootstrapping"` forever.
+  - **`TRUSTY_PY_DEFAULT`** (env, default OFF): the ship-gate for this PR.
+    Unset/falsy leaves Apple-Silicon unset/`auto` resolution completely
+    unchanged (ort) — this PR is a no-op for real users until a later slice
+    (PR-5) flips the default on after a soak period. `TRUSTY_EMBEDDER=stdio`
+    remains the permanent per-invocation opt-out even after that flip.
+  - **`TRUSTY_EMBEDDER_PYTHON_EAGER`** (env, default OFF): reaches the
+    existing eager, blocking `python` arm (identical to explicit
+    `TRUSTY_EMBEDDER=python`) via unset/`auto` instead of an explicit value;
+    not platform-gated. Takes precedence over the ship-gate flag being off,
+    but the ship-gate flag wins outright when both are set (no reason to
+    block startup when the background path is available).
+  - **`TRUSTY_PY_BOOTSTRAP_RETRIES`** (env, default `2`): number of
+    bootstrap→probe attempts the background orchestrator makes before giving
+    up and marking the bootstrap `Failed`. A malformed or `0` value falls
+    back to the default rather than disabling retries.
+  - Linux/CUDA/Intel-mac hosts are completely unaffected: the new
+    `DefaultEmbedderMode::GracefulPython` resolution is unreachable off
+    Apple Silicon regardless of env — `ensure_venv`/`uv`/torch are never
+    invoked there.
+  - This PR is swap-in only: detecting a live python sidecar dying after a
+    successful hot-swap and falling back to ort is epic #3524 slice 6 PR-4's
+    scope (seam left in `commands/start/graceful_bootstrap.rs`'s
+    `drive_bootstrap` doc comment).
+  - New files: `commands/start/graceful_bootstrap.rs` (the orchestrator).
+    Extended: `SwitchableEmbedder::set_bootstrap_state` (updates only the
+    bootstrap status, leaving the live backend untouched — used to mark
+    `Failed` without disturbing the still-serving ort backend).
+  - **Fix (code-critic HIGH, pre-merge review): no more orphaned python
+    child on a bootstrap-probe failure/timeout.** The readiness probe forces
+    a REAL `trusty-embedderd-py` child to spawn (torch+MPS, hundreds of
+    MB-GB); previously, dropping the adapter on a failed/timed-out probe left
+    that child alive until the idle watchdog reaped it up to 1800s later —
+    with retries, up to `TRUSTY_PY_BOOTSTRAP_RETRIES` such orphans
+    concurrently on the memory-constrained Apple-Silicon machines this
+    targets. Added `LazyEmbedderHandle::shutdown()`
+    (`service/embedder_supervisor/mod.rs`) — an eager, cooperative
+    counterpart to the existing idle-shutdown watchdog's own teardown
+    (`SupervisorHandle::shutdown()`, issue #2979) — and a
+    `PythonAdapterTeardown` seam so `try_bootstrap_once` calls it
+    immediately on every probe failure/timeout path, before ever dropping
+    the handle.
+
+### Changed
+
+- **`/health` reports the true active embedder backend + MPS provider (epic
+  #3524 slice 6, PR 2/5, closes #3530, #3493 P1)** — `GET /health` now sources
+  `embedder_info` (`provider`, `quantized`, new `model` and `backend` fields)
+  from the REAL installed `ActiveBackend` via
+  `SearchAppState::current_switchable_embedder()` (epic #3524 PR-1's
+  `SwitchableEmbedder`) instead of inferring: the previous `quantized:
+  dimension == 384` check was always `true` regardless of the actual model,
+  and the Python/MPS sidecar reported `provider=CoreML` even though it never
+  touches ONNX Runtime. A new top-level `embedder_bootstrap` field
+  (`"n/a"`/`"bootstrapping"`/`"ready"`/`"failed"`/`"fell_back_to_ort"`) mirrors
+  `ActiveBackend::bootstrap`. Falls back gracefully to the old
+  prediction-based path when no `SwitchableEmbedder` handle is installed yet
+  (e.g. very early boot) — never panics or 500s.
+  - Fixed an ordering gap from PR-1: `commands/start/daemon.rs`'s init task
+    now installs the `SwitchableEmbedder` handle BEFORE flipping embedder
+    readiness, so `/health` can never observe `is_embedder_ready() == true`
+    while the switchable handle is still absent.
+  - `LazySlotEmbedderAdapter::provider()` (`commands/start/embedder.rs`) now
+    distinguishes the ort stdio sidecar from the Python/MPS sidecar (both use
+    the same adapter type) and predicts through the matching resolver —
+    `trusty_common::embedder::resolve_expected_python_provider` for the
+    Python arm — instead of always using the ORT-oriented resolver.
+  - `ActiveBackend::quantized` is no longer set from `TRUSTY_EMBEDDER_MODEL`
+    for every backend: only the ort/in-process `FastEmbedder` path actually
+    honours that env var (see `backend_respects_quantized_env`); the Python
+    sidecar and a manually managed remote sidecar always report `false`
+    rather than inheriting an unrelated `int8` setting.
+  - Fixed the `(Q)` startup-log hardcode (`embedder initialized:
+    model=AllMiniLML6V2(Q) ...`) to report the real resolved model name via
+    the new `FastEmbedder::model_name()` (trusty-common).
+  - `SearchAppState::switchable_embedder` is now backed by
+    `arc_swap::ArcSwapOption` instead of `tokio::sync::RwLock` — `/health`
+    reads it wait-free (`load_full`), matching the non-blocking-`/health`
+    invariant from issue #1006.
+  - Forward-note (low priority, not implemented here): `BackendKind::Remote`
+    still collapses HTTP and UDS into one `"remote"` `/health` tag — see
+    `backend_kind_str`'s doc for the split-out path if a consumer ever needs
+    to distinguish them.
+
+- **`SwitchableEmbedder` plumbing (epic #3524 slice 6, PR 1/5)** — pure
+  refactor, no behavior change. `build_embedder()` now wraps whatever backend
+  it constructs (ort stdio sidecar, opt-in Python/MPS sidecar, in-process,
+  remote HTTP/UDS, candle) in a new `SwitchableEmbedder`
+  (`service/embedder_supervisor/switchable.rs`) that holds the live backend
+  behind `arc_swap::ArcSwap` and implements the crate-local `core::Embedder`
+  trait itself, delegating every call to whichever backend is currently
+  installed. This closes a real gap the embed-pool workers had: each worker
+  captures its own `Arc::clone` of the embedder at construction
+  (`service/embed_pool.rs`), so writing a fresh `Arc` into
+  `SearchAppState::embedder_slot` could never reach an already-running
+  worker. Every existing owner (the slot, the pool workers, warm-boot
+  restore) now transparently holds the same `SwitchableEmbedder` and will
+  observe a future hot-swap (`SwitchableEmbedder::swap_to`, wired up by a
+  later slice) with zero further call-site changes. Nothing calls `swap_to`
+  yet in this PR — every code path behaves identically to before.
+  `SearchAppState` gained a `switchable_embedder` field (populated alongside
+  `embedder_slot` by the same background init task) so a later hot-swap
+  orchestrator and `/health` work can reach it without an `Any`-downcast.
+  New workspace dependency: `arc-swap`.
+
+### Added
+
+- **Runtime fallback to the Rust ort sidecar + doctor/health readback for
+  the Python/MPS embedder (epic #3524 slice 5).** Bootstrap-time fallback
+  already existed (slices 2-4); this adds the missing runtime half: a new
+  `FallbackEmbedderAdapter` (`commands/start/embedder_fallback.rs`) wraps the
+  Python sidecar and latches (one-way, logged once at ERROR) to the Rust ort
+  path once the sidecar's own supervisor permanently gives up respawning it
+  (a real, non-blocking readback of the supervisor's own give-up decision,
+  not an independently-counted request-failure proxy) — so a wedged or
+  crash-looping Python sidecar degrades gracefully instead of failing every
+  subsequent search forever. `trusty-search doctor` gained a `python_embedder`
+  check (uv presence/version, venv + lockfile-hash-current `.ready` state,
+  launcher discoverability) with a `--fix` repair that re-runs the eager venv
+  bootstrap. `GET /health`'s `embedder_info.provider` now prefers a REAL
+  device readback from the live embedder (`Embedder::resolved_provider_label`)
+  over the build-features prediction when one is available — fixes the
+  sidecar reporting `CoreML(ANE)` while torch actually selected `mps` (issue
+  #3493 P1).
+
+## [0.37.1] — 2026-07-21
+
+### Fixed
+
+- **Regenerated the `ui-dist` bundle** (#3590, `b76e08ea`): the published
+  0.37.0 tarball shipped a stale prebuilt dashboard bundle that predated the
+  Foundry v2 dark-mode migration, so the installed dashboard was missing the
+  dark-mode feature entirely. The bundle under `ui-dist/` is rebuilt from the
+  current `ui/` source so a fresh install/upgrade gets the dark-themed
+  dashboard. No Rust source changes.
+
+## [0.37.0] — 2026-07-20
+
+Minor release: opt-in Python/MPS embedding sidecar (`TRUSTY_EMBEDDER=python`),
+a new default-off capability that embeds ~2.4x faster than the Rust ort path on
+Apple Silicon with numerically identical results, and falls back to ort on any
+failure. Unset/`auto`/`stdio` behaviour is unchanged. Epic #3524 (refs #3498,
+#3493); paired with the first release of the `trusty-embedderd-py` launcher
+crate (v0.1.0).
+
+### Added
+
+- **Opt-in Python/MPS embedding sidecar (`TRUSTY_EMBEDDER=python`)** — epic
+  #3524 slices 2-4 (refs #3498, #3493). A new `TRUSTY_EMBEDDER=python` arm in
+  `commands/start/embedder.rs` eager-bootstraps a pinned Python venv (via the
+  new `trusty-embedderd-py` launcher crate) and arms the existing
+  `LazyEmbedderHandle` against it — reusing `EmbedderSupervisor` /
+  `StdioEmbedderClient` with **ZERO changes** to the supervisor/stdio/protocol
+  wire code. On Apple Silicon the torch/MPS sentence-transformers sidecar
+  embeds ~2.4x faster than the Rust ort path with numerically identical
+  results. **DEFAULT-OFF and fully backward-compatible**: unset / `auto` /
+  `stdio` behaviour is unchanged, and on ANY bootstrap or launcher-discovery
+  failure the daemon logs a loud warning and **falls back to the Rust ort
+  embedder** so search never hard-fails. The Rust build does not require
+  torch/venv. Default-on-Apple-Silicon is a later slice.
+- **`TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS`** (epic #3524 fast-follow) — a
+  python-arm-only idle-shutdown override in `commands/start/embedder.rs`,
+  defaulting to **1800s (30 min)** instead of the shared
+  `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` 300s default. Rationale: the
+  Python/MPS sidecar's cold restart is cheap (~2.5–3s) but still worth
+  avoiding mid-session, so the longer default keeps it warm through a normal
+  ~30 min work session while still reclaiming its ~500 MB after genuine
+  extended idle (matters on the 16 GB minimum-spec tier). Resolution
+  precedence preserves operator intent: the new var (if set, including `0`)
+  always wins; else an explicitly-set shared var (any value, including `0`)
+  is honoured; else the python-specific 1800s default applies. `0` disables
+  idle-shutdown entirely (always-warm) for higher-RAM machines. **Zero impact
+  on the ort/default arm**, which still calls `SupervisorConfig::from_env()`
+  directly.
+
+### Documentation
+
+- CLAUDE.md's "Embedder Configuration" table now documents the `python`
+  `TRUSTY_EMBEDDER` value, plus a new "Python/MPS sidecar tuning" reference
+  block for `TRUSTY_UV_BIN`, `TRUSTY_EMBEDDERD_PY_BIN`,
+  `TRUSTY_PY_BOOTSTRAP_TIMEOUT_SECS`, `TRUSTY_DEVICE`, `TRUSTY_PY_EMBED_FP16`,
+  `TRUSTY_PY_EMBED_BATCH_SIZE`, and `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS`
+  (epic #3524 fast-follow).
+
+## [0.36.1] — 2026-07-20
+
+### Changed
+
+- Rebuild against `trusty-common` 0.23.6 / `trusty-embedderd` 0.3.9 to pick up the
+  two embedding-performance fixes ([#3500](https://github.com/bobmatnyc/trusty-tools/pull/3500),
+  [#3511](https://github.com/bobmatnyc/trusty-tools/pull/3511); refs #3486 / #3493):
+  platform-conditional ORT intra-op thread default and a non-quantized (fp32)
+  default embedding model. `trusty-search` bundles the `trusty-embedderd` binary,
+  so this republish is what carries the faster/more-accurate embedder into the
+  single-install `cargo install trusty-search`. `TRUSTY_ORT_INTRA_THREADS` and
+  `TRUSTY_EMBEDDER_MODEL=int8` remain available to restore prior behaviour.
+
+### Changed
+
+- **UI tokens now CI-enforced against the canonical Foundry source** (refs [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): flipped from the `scripts/check_token_drift.mjs` allowlist to ENFORCED. The `token-drift` CI job now compares `ui/src/lib/styles/tokens.css`'s plain-CSS `--trusty-*: #hex` values directly to `docs/design/UI/design-system/tokens.css` on every push/PR (light `:root`, dark `[data-theme='dark']`), so a hand-edit that drifts this crate's palette from canonical fails the build.
+- **Migrated the admin UI to Foundry v2 design tokens** ([#3487](https://github.com/bobmatnyc/trusty-tools/issues/3487)):
+  `ui/src/lib/styles/tokens.css` now sources its palette, fonts, radii, and
+  shadows from the canonical `docs/design/UI/design-system/tokens.css`
+  (rust-on-paper light theme) and ships a full `[data-theme='dark']` block
+  ("Night Shift") — this UI previously had no dark theme at all. Existing
+  `--trusty-*` custom-property names are unchanged; a few components that
+  referenced tokens the old palette never actually defined (a bare
+  `--trusty-text`, `--trusty-font-mono`) now resolve to real values instead
+  of silently falling through to their inline fallback, and `--trusty-primary`
+  / `--trusty-primary-soft` / `--trusty-surface-raised` /
+  `--trusty-surface-hover` — already referenced by `Indexes.svelte` and
+  `TagListInput.svelte` with the same problem — are now defined tokens too.
+  Dark-mode activation follows OS `prefers-color-scheme` via a new
+  `lib/theme-bootstrap.js`, wired from `main.js` before the shell mounts.
+
+## [0.36.0] — 2026-07-20
+
+### Changed
+
+- **BREAKING: unknown search-filter fields now error instead of being
+  silently ignored.** `SearchQuery` (`/indexes/:id/search`) and
+  `GlobalSearchRequest` (`/search`) both now derive `#[serde(deny_unknown_fields)]`.
+  A misspelled or unsupported filter field (e.g. `path_prefx` instead of
+  `path_prefix`) previously deserialized successfully and silently returned
+  an unscoped/unfiltered result set; it now fails deserialization with a
+  clear error. Any client sending fields the schema doesn't recognize —
+  intentionally or by typo — will start seeing request failures after this
+  upgrade. Check request payloads against the current `SearchQuery` /
+  `GlobalSearchRequest` field set before upgrading.
 
 ### Added
 

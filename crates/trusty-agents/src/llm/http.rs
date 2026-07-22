@@ -444,6 +444,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn send_raw_completion_resolves_key_from_store_when_env_absent() {
+        // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
+        crate::test_env::force_env_local_loaded();
         let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
         let prev_home = std::env::var_os("HOME");
         // SAFETY: `#[serial]` (unnamed group) serializes against every other
@@ -509,6 +511,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn send_raw_completion_missing_everywhere_errors_with_provider_name() {
+        // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
+        crate::test_env::force_env_local_loaded();
         let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
         let prev_home = std::env::var_os("HOME");
         // SAFETY: `#[serial]` (unnamed group) provides exclusion.
@@ -585,6 +589,8 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn send_raw_completion_empty_endpoint_credential_falls_back_to_store() {
+        // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
+        crate::test_env::force_env_local_loaded();
         let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
         let prev_home = std::env::var_os("HOME");
         // SAFETY: `#[serial]` (unnamed group) provides exclusion.

@@ -300,3 +300,88 @@ async fn reconcile_flags_unresolvable_adopted_session_as_unmanaged() {
         adopted.task
     );
 }
+
+/// #3396 regression: a LIVE tmux session unknown to the store by NAME must
+/// NOT be externally-adopted as a second identity when its resolved pane cwd
+/// is the SAME literal workspace an EXISTING, non-`Decommissioned` record
+/// already tracks.
+///
+/// Why: this is the duplicate-record defect's creation path — a tmux session
+/// renamed (or replaced) out from under its original managed record, then
+/// rediscovered by `reconcile_on_boot`'s external-adopt loop under its new
+/// live name, minted a completely separate `SessionRecord` for the exact same
+/// worktree because the loop only ever checked `tmux_name` membership, never
+/// the resolved workspace path against records the store already tracks —
+/// the same class of bug `decide_native_registration` (#3599) fixed for the
+/// native-process discovery path. The fix must skip adoption instead of
+/// minting a duplicate.
+/// What: seeds a `Stopped` record for `workspace` under tmux_name
+/// `tm-known-01` (NOT live), then runs reconcile with a live tmux session
+/// `tm-crossed-01` (a different name, unknown to the store) whose pane cwd
+/// resolves to the SAME `workspace` directory. Asserts: no second record was
+/// minted (`mgr.list()` still has exactly one entry), and `tm-crossed-01`
+/// never appears in `report.external_adopted`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec!["tm-crossed-01".into()],
+        pane_cwd: Some(workspace.path().to_path_buf()),
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    let existing = super::record::SessionRecord {
+        id: super::record::ManagedSessionId::new(),
+        tmux_name: "tm-known-01".into(),
+        cwd: workspace.path().to_path_buf(),
+        task: "existing task".into(),
+        state: ManagedSessionState::Stopped,
+        created_at: chrono::Utc::now(),
+        last_activity_at: None,
+        workspace_path: Some(workspace.path().to_path_buf()),
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: Default::default(),
+    };
+    let existing_id = existing.id;
+    mgr.store.write().await.upsert(existing).await.unwrap();
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert!(
+        !report
+            .external_adopted
+            .contains(&"tm-crossed-01".to_string()),
+        "a live session resolving to an already-tracked workspace must never be \
+         externally adopted; report: {report:?}"
+    );
+
+    let listed = mgr.list().await;
+    assert_eq!(
+        listed.len(),
+        1,
+        "no second record must be minted for the same workspace; records: {listed:?}"
+    );
+    assert_eq!(
+        listed[0].id, existing_id,
+        "the original record must be the only one"
+    );
+    assert!(
+        !listed.iter().any(|r| r.tmux_name == "tm-crossed-01"),
+        "no record must carry the crossed tmux_name"
+    );
+}

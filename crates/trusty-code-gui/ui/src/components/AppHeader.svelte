@@ -21,13 +21,16 @@
   // covers the switcher itself — this component has no branchy logic of its
   // own to test independently.
   import WorkstreamSwitcher from './WorkstreamSwitcher.svelte';
+  import RobotIcon from '../lib/icons/RobotIcon.svelte';
 </script>
 
 <header
   class="hdr flex h-14 shrink-0 items-center justify-between gap-4 border-b border-trusty-border bg-trusty-raised px-4"
 >
   <div class="flex items-center gap-2">
-    <span class="font-display text-sm font-bold tracking-wide text-trusty-primary">◆</span>
+    <span class="flex items-center text-trusty-primary">
+      <RobotIcon variant="mono" size={18} color="currentColor" />
+    </span>
     <span class="font-display text-sm font-bold uppercase tracking-wide text-trusty-text">
       Trusty Code
     </span>

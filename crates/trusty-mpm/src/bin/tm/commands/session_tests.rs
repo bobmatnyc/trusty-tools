@@ -68,3 +68,60 @@ fn info_managed_fallback_matches_by_id_and_name() {
         "partial id must not match"
     );
 }
+
+#[test]
+fn parse_scoped_sessions_all_keeps_tombstone_in_slot_order() {
+    // Why (#3034 fix-round LOW): the `--all` sort in
+    // `session_picker::parse_scoped_sessions` sinks ONLY "decommissioned"
+    // records to the bottom; a "deleted" slot tombstone must stay exactly
+    // where the daemon placed it (ascending slot order) rather than being
+    // grouped with decommissioned rows — Bob's directive requires a
+    // tombstone to render at its ORIGINAL numbered position, not wherever a
+    // liveness sort would relocate it. Lives here (rather than
+    // `tests_behavior_c_tests.rs`, which sits at the 1500-SLOC test cap)
+    // since it needs no fixture that file already provides.
+    use crate::commands::session_picker::parse_scoped_sessions;
+
+    let raw = serde_json::json!({
+        "sessions": [
+            { "id": "a1", "name": "sess-active", "state": "active", "slot": 1, "deleted": false },
+            { "id": "",   "name": "",             "state": "deleted", "slot": 2, "deleted": true },
+            { "id": "c3", "name": "sess-old",     "state": "decommissioned", "slot": 3, "deleted": false },
+            { "id": "d4", "name": "sess-stopped", "state": "stopped", "slot": 4, "deleted": false },
+        ]
+    })
+    .to_string();
+
+    let sessions = parse_scoped_sessions(&raw, true).expect("parse must succeed");
+
+    // All 4 rows survive `--all` (nothing dropped, unlike the default view).
+    assert_eq!(
+        sessions.len(),
+        4,
+        "--all must keep every row, tombstones included"
+    );
+
+    // The tombstone (slot 2) must appear BEFORE the decommissioned row (slot 3)
+    // — i.e. it was NOT sunk to the bottom alongside "decommissioned".
+    let tombstone_pos = sessions
+        .iter()
+        .position(|s| s.deleted)
+        .expect("tombstone must be present");
+    let decommissioned_pos = sessions
+        .iter()
+        .position(|s| s.state == "decommissioned")
+        .expect("decommissioned row must be present");
+    assert!(
+        tombstone_pos < decommissioned_pos,
+        "tombstone (slot 2) must stay ahead of the sunk decommissioned row (slot 3), \
+         got tombstone at {tombstone_pos}, decommissioned at {decommissioned_pos}"
+    );
+
+    // The decommissioned row must be sunk to the very end (pre-existing #1809
+    // behavior, unchanged): it is the last row despite starting at slot 3.
+    assert_eq!(
+        sessions.last().map(|s| s.state.as_str()),
+        Some("decommissioned"),
+        "decommissioned row must still sink to the bottom of the --all view"
+    );
+}

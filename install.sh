@@ -530,16 +530,20 @@ post_install() {
 }
 
 # Why: Leave the user with concrete next steps regardless of platform/path.
+#      `${BIN} install` (#2560) already ran its own ensure + `stack health`
+#      verify tail and exited non-zero here if the stack was not verified
+#      (see `post_install`'s exit-code propagation) — these are follow-up
+#      commands for later checks, not a substitute for that automated pass.
 # What: Print the final next-steps box.
 # Test: Run end-to-end and confirm the box is the last thing printed.
 print_next_steps() {
     say ""
     say "==================================================================="
-    say "Installation complete!"
+    say "Installation complete and verified (ensure + stack health passed)."
     say ""
     say "Next steps:"
     say "  ${BIN} status          # check all daemon statuses"
-    say "  ${BIN} stack health    # full platform health check"
+    say "  ${BIN} stack health    # re-run the platform health check anytime"
     say ""
     say "Restart Claude Code to load the new MCP servers."
     say ""

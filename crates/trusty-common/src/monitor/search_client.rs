@@ -640,6 +640,7 @@ pub fn parse_reindex_event(value: &serde_json::Value) -> ReindexEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn default_search_url_is_local() {
@@ -676,6 +677,42 @@ mod tests {
         // or the documented default — both are non-empty and HTTP-schemed.
         let url = resolve_search_url();
         assert!(url.starts_with("http://") || url.starts_with("https://"));
+    }
+
+    /// Regression for the trusty-search#3602 review finding: `resolve_search_url`
+    /// (backing `trusty-search monitor status`/`monitor indexes`/`monitor tui`)
+    /// must discover a daemon on a NON-default port once it is registered via
+    /// `write_daemon_addr("trusty-search", …)` -- the exact primitive
+    /// `trusty-search`'s `run_daemon()` now calls for its default instance.
+    /// Before that producer-side fix this resolver had no writer at all and
+    /// would silently fall back to `DEFAULT_SEARCH_URL`, sending
+    /// `monitor`/the TUI's `[r]` reindex hotkey at the WRONG (or no) daemon.
+    ///
+    /// Why safe: redirects `resolve_data_dir` via `TRUSTY_DATA_DIR_OVERRIDE`
+    /// into a tempdir, so this never reads or writes a real `$HOME`/platform
+    /// data dir.
+    /// What: write a non-default-port address, call `resolve_search_url()`,
+    /// assert it returns that exact address rather than the default.
+    /// Test: this function.
+    #[test]
+    #[serial]
+    fn resolve_search_url_discovers_non_default_registered_address() {
+        let _guard = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, tmp.path());
+        }
+        crate::write_daemon_addr("trusty-search", "127.0.0.1:59321").unwrap();
+        let url = resolve_search_url();
+        unsafe {
+            std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+        }
+        assert_eq!(
+            url, "http://127.0.0.1:59321",
+            "resolve_search_url must discover a registered non-default-port address"
+        );
     }
 
     #[test]

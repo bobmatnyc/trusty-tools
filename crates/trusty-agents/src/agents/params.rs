@@ -175,7 +175,30 @@ fn default_session_keep_recent() -> usize {
 /// LLM sampling parameters.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmParams {
+    /// Sampling temperature.
+    ///
+    /// Why: The only two `[llm]` fields with no serde default (see
+    /// `max_tokens` below) — every root (non-`extends`) agent TOML must
+    /// declare a real value, enforced by
+    /// `AgentConfig::validate_llm_required_for_root` at parse time. An
+    /// `extends` child MAY omit it to inherit the base's value instead of
+    /// declaring one itself (#3052 PR A follow-up: per-key `[llm]`
+    /// inheritance for temperature/max_tokens specifically — every other
+    /// `[llm]` field keeps the pre-existing inherited-from-base-wholesale
+    /// behavior, see `extends::merge_extends`).
+    /// What: Absent in TOML → [`UNSET_TEMPERATURE`] (`NaN`) sentinel, which
+    /// `merge_extends` detects via `.is_nan()` and replaces with the base's
+    /// resolved value; never observed by a caller past `by_name`/`by_name_async`.
+    /// Test: `agents::extends::tests::extends_llm_child_overrides_temperature_only`,
+    /// `agents::extends::tests::extends_llm_child_inherits_when_omitted`.
+    #[serde(default = "unset_temperature")]
     pub temperature: f32,
+    /// Maximum output tokens. Same UNSET-sentinel treatment as `temperature`
+    /// (see above) — absent in TOML → [`UNSET_MAX_TOKENS`] (`u32::MAX`),
+    /// which is never a realistic declared value (would exceed every
+    /// provider's context window), so it is safe as an unambiguous
+    /// "not declared" marker.
+    #[serde(default = "unset_max_tokens")]
     pub max_tokens: u32,
     /// Optional TOML-level override for the agent's model.
     ///
@@ -358,7 +381,48 @@ pub struct LlmParams {
     pub thinking_enabled: Option<bool>,
 }
 
+/// Sentinel `temperature` meaning "not explicitly declared in this TOML"
+/// (#3052 PR A follow-up: per-key `[llm]` extends inheritance).
+///
+/// Why: `extends` children need a way to omit `temperature` and inherit the
+/// base's value instead of declaring their own. `NaN` is never a valid
+/// sampling temperature, so `.is_nan()` unambiguously detects "not declared"
+/// with no collision risk against a legitimately configured value.
+/// What: `f32::NAN`. Used as the serde default for
+/// [`LlmParams::temperature`]; resolved away by `extends::merge_extends`
+/// (child override when non-NaN, else inherit the base) before any caller
+/// ever reads it, and rejected by
+/// `AgentConfig::validate_llm_required_for_root` for a root (non-`extends`)
+/// agent — this value must never reach `chat_with_tools_gated`.
+/// Test: `agents::extends::tests::extends_llm_child_inherits_when_omitted`.
+pub(crate) fn unset_temperature() -> f32 {
+    f32::NAN
+}
+
+/// Sentinel `max_tokens` meaning "not explicitly declared in this TOML".
+/// See [`unset_temperature`] for the full rationale — `u32::MAX` plays the
+/// same "not declared" role here.
+pub(crate) fn unset_max_tokens() -> u32 {
+    u32::MAX
+}
+
 impl LlmParams {
+    /// Whether `temperature` was left at the UNSET sentinel (#3052 PR A).
+    ///
+    /// Why: `extends::merge_extends` needs an unambiguous, named check
+    /// rather than callers re-deriving `.is_nan()` at each use site.
+    /// What: `self.temperature.is_nan()`.
+    /// Test: `agents::extends::tests::extends_llm_child_inherits_when_omitted`.
+    pub(crate) fn temperature_is_unset(&self) -> bool {
+        self.temperature.is_nan()
+    }
+
+    /// Whether `max_tokens` was left at the UNSET sentinel (#3052 PR A). See
+    /// [`Self::temperature_is_unset`].
+    pub(crate) fn max_tokens_is_unset(&self) -> bool {
+        self.max_tokens == unset_max_tokens()
+    }
+
     /// Whether this agent's `chat_with_tools_gated` calls should apply the
     /// #33 plain-text tool-discipline retry (#3371).
     ///

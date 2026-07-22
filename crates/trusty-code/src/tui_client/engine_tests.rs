@@ -12,8 +12,11 @@ use tokio::sync::mpsc::unbounded_channel;
 
 use super::*;
 use crate::events::{Event, SessionEventEnvelope};
-use crate::tui_client::session_events::{forward_session_event, is_retryable_status};
+use crate::tui_client::session_events::{
+    forward_session_event, is_retryable_status, terminal_stream_failure_event,
+};
 use crate::tui_client::workstream_subscription::parse_workstream_envelope;
+use trusty_tui::{StatuslineSegment, WorkstreamSummary};
 
 fn envelope(event: Event) -> SessionEventEnvelope {
     SessionEventEnvelope::new("s-1".to_string(), 1, chrono::Utc::now(), event)
@@ -193,6 +196,25 @@ fn parse_workstream_envelope_round_trips_activation_changed() {
     }
 }
 
+/// `pump_session_events` giving up after exhausting reconnects must produce
+/// a `done: true, is_error: true` `AssistantOutput` — the epic #3411
+/// deferred-verification item: a `ConnectionLost` alone never clears
+/// `ReplApp::busy`, so this is what actually rules out a silent stall (a
+/// stuck spinner with no visible error) once the last reconnect attempt
+/// fails.
+#[test]
+fn terminal_stream_failure_event_is_a_done_error_output() {
+    let event = terminal_stream_failure_event("daemon unreachable".to_string());
+    assert_eq!(
+        event,
+        ReplEvent::AssistantOutput {
+            chunk: "connection lost: daemon unreachable".to_string(),
+            done: true,
+            is_error: true,
+        }
+    );
+}
+
 #[test]
 fn is_retryable_status_covers_502_and_503_only() {
     assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
@@ -230,4 +252,42 @@ fn workstream_picker_dispatch_command_round_trips_through_workstream_subcommand(
 fn picker_unknown_name_is_none() {
     let engine = CodeEngine::with_daemon_url(reqwest::Client::new(), "http://127.0.0.1:1", None);
     assert!(engine.picker("model").is_none());
+}
+
+/// `EngineState::statusline_segments` must mirror the `active_workstream`
+/// cache exactly: no segment before any workstream is known, one
+/// `StatuslineSegment::Workstream` once it is, and — critically — an EMPTY
+/// list again (not a stale segment left behind) once deactivated. This is
+/// the seam `setup`/`run_workstream_subscription` push through
+/// `ReplEvent::StatuslineUpdate` so the status line's "WS: name (id)"
+/// segment (DOC-50 §5.3, Slice 6) tracks the daemon's actual active
+/// workstream, clearing on deactivation rather than showing stale text.
+#[test]
+fn statusline_segments_reflect_active_workstream_and_clear_on_none() {
+    let state = EngineState::new(
+        RpcHttpClient::new(reqwest::Client::new(), "http://127.0.0.1:1".to_string()),
+        None,
+    );
+    assert!(
+        state.statusline_segments().is_empty(),
+        "no active workstream observed yet -> no segments"
+    );
+
+    *state.active_workstream.lock().unwrap() = Some(WorkstreamSummary {
+        id: "ws-1".to_string(),
+        name: "Feature X".to_string(),
+    });
+    assert_eq!(
+        state.statusline_segments(),
+        vec![StatuslineSegment::Workstream {
+            id: "ws-1".to_string(),
+            name: "Feature X".to_string(),
+        }]
+    );
+
+    *state.active_workstream.lock().unwrap() = None;
+    assert!(
+        state.statusline_segments().is_empty(),
+        "deactivation must clear the segment, not leave a stale one"
+    );
 }

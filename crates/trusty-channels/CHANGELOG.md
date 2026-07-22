@@ -9,10 +9,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Ten new live Slack tools for parity with the claude.ai Slack connector (epic #3611): `slack_create_canvas`, `slack_update_canvas`, `slack_read_canvas` (closes #3612); `slack_create_conversation`, `slack_list_channel_members` (closes #3613); `slack_get_reactions` (closes #3614); `slack_read_file` (closes #3615); `slack_schedule_message` (closes #3616); `slack_search_emojis`, `slack_search_users` (closes #3617) — the adapter now exposes 19 live tools total. `slack_read_canvas`/`slack_create_canvas`/`slack_update_canvas` require newly-added `canvases:read`/`canvases:write` OAuth scopes; see the README for the full per-tool scope table
+- `slack_search_messages` gained an optional `scope` argument (`"public"` | `"public_and_private"`, default `"public_and_private"` — unchanged prior behaviour) that client-side-filters matches by channel privacy, in lieu of adding claude.ai's separate `slack_search_public`/`slack_search_public_and_private` tools (#3617)
 - Cursor pagination for `slack_read_channel` and `slack_read_thread`: both tools now accept an opaque `cursor` (echo back a prior call's `next_cursor` to fetch the next page) plus `oldest`/`latest` ts time-window bounds, and both return `next_cursor`/`has_more`. Lets a caller walk a channel's or thread's full history across repeated calls instead of being capped at one page (closes #2996)
+
+### Not implemented
+
+- `slack_send_message_draft` was investigated but not implemented: Slack has no public API to create an editable message draft (`chat.postMessage` sends immediately, `chat.scheduleMessage` schedules a send — neither creates a draft). Deliberately excluded from `TOOL_NAMES` rather than stubbed (#3616)
 
 ### Fixed
 
+- `src/bin/slack-mcp.rs`'s doc-comment falsely claimed tool calls were "not-yet-implemented" and deferred per ADR-0014; corrected to reflect that all 19 tools are live (closes #3618)
 - `slack_read_thread`'s `thread_ts` argument is now validated against Slack's `seconds.microseconds` ts shape before any network call, failing fast with an actionable message (naming the expected format) instead of forwarding a malformed value to Slack and surfacing an opaque `invalid_arguments` (#2996)
 - `slack_read_channel`/`slack_read_thread`'s `oldest`/`latest` arguments get the same pre-network ts-shape validation as `thread_ts` — a malformed value (e.g. precision lost via a string→float→string round trip) now fails fast with an actionable error instead of being forwarded to Slack
 - `conversations.history` / `conversations.replies` `limit` is now clamped to Slack's documented 999-message ceiling for that method family (previously shared the 1000 ceiling meant for `search.messages`)

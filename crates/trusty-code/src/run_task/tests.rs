@@ -21,13 +21,128 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::{
-    ExitCode, RedelegationCapSignal, RunTaskParams, execute_run_task, resolve_agent_model_slug,
+    ExitCode, RedelegationCapSignal, RunTaskParams, execute_run_task as real_execute_run_task,
+    resolve_agent_model_slug,
 };
 use crate::agent_loop::AgentLoopError;
 use crate::agents::AgentConfig;
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::runner::RegistryFactory;
 use crate::tools::{AgentOutput, EngineerCompletionSignal, RunContext};
+
+// ── Hermeticity (#3361): never let a real ambient daemon reach into these
+// tests' sandboxed temp dirs ────────────────────────────────────────────────
+
+/// One-time, process-lifetime isolation of the two ambient daemon endpoints
+/// `execute_run_task` reaches for: trusty-search (background indexing, via
+/// `ensure_project_indexed_in_background`) and trusty-memory (the PM catch-up
+/// digest, via `catchup::pm_catchup_context`).
+///
+/// Why (#3361): on a machine with a live `trusty-memory` and/or
+/// `trusty-search` daemon, `execute_run_task` discovers and contacts them for
+/// real — `trusty-memory` because `catchup::pm_catchup_context` resolves its
+/// base URL via `resolve_memory_base_url_or_unreachable()`
+/// (`TRUSTY_MEMORY_URL` env override, else the daemon's on-disk discovery
+/// file), and `trusty-search` because
+/// `ensure_project_indexed_in_background` -> `ensure_project_indexed` finds
+/// the daemon via `resolve_daemon_base_url("trusty-search")` (same on-disk
+/// discovery, gated by `TRUSTY_DATA_DIR_OVERRIDE`) and, once found, actually
+/// registers + reindexes the test's tempdir `project` against the LIVE
+/// daemon — which then writes its own colocated storage (e.g.
+/// `.trusty-search/schema_version.json`) INSIDE the sandboxed tempdir. That
+/// extra on-disk file shows up in `diff::capture_snapshot`'s before/after
+/// diff, so any test asserting an empty diff (`no_changes_yields_no_changes_exit`,
+/// `missing_disk_pm_config_falls_back_to_embedded_pm`) or a specific
+/// `RunFailure`-vs-`Partial` exit keyed on "no deliverable exists"
+/// (`exit_code_reflects_run_failure`) spuriously fails — not because of a
+/// product regression, but because the sandbox was never actually hermetic.
+///
+/// This is the SAME class of bug `catchup::pm_catchup_context_with_memory_url`
+/// (#3003) and `session::memory_sink::TurnMemorySink` already fixed for their
+/// OWN unit tests by threading the daemon URL through as a parameter instead
+/// of touching the process-global env var per test. `execute_run_task` has no
+/// such injection seam (it is the black-box entry point under test here), so
+/// the fix at THIS layer uses the two seams the production code itself
+/// already treats as authoritative overrides — `TRUSTY_MEMORY_URL` (an
+/// explicit override always wins over discovery,
+/// `resolve_memory_base_url_or_unreachable`'s own doc) and
+/// `TRUSTY_DATA_DIR_OVERRIDE` (documented in `trusty_common::data_dir` as
+/// "intended for tests only... the only reliable cross-platform way to
+/// isolate test data paths") — rather than reaching for `#[serial]` or hoping
+/// no daemon happens to be running.
+///
+/// Both are set EXACTLY ONCE, guarded by `std::sync::Once`, and are NEVER
+/// restored. This deliberately differs from a per-test set/restore guard
+/// (the pattern #3434 shows is unsafe for a process-global var under
+/// `cargo test`'s parallel threads): because every test in this module wants
+/// the identical "no ambient daemon is reachable" outcome, and the value is
+/// fixed for the remainder of the test binary's lifetime once installed,
+/// there is no window in which one thread can observe a different, another
+/// thread's transient value — the mutate-once-and-never-restore shape has no
+/// race to hide behind slower runs, unlike a mutate/restore pattern would.
+/// Test: exercised implicitly by every test that calls
+/// [`execute_run_task`] (this module's wrapper) below; the before/after
+/// behaviour is demonstrated by `exit_code_reflects_run_failure`,
+/// `no_changes_yields_no_changes_exit`, and
+/// `missing_disk_pm_config_falls_back_to_embedded_pm`, which fail under a
+/// live ambient trusty-memory/trusty-search daemon without this guard and
+/// pass with it.
+fn isolate_ambient_daemons() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        // A reserved, unassigned TCP port: connection attempts fail fast
+        // rather than hanging or timing out. Mirrors
+        // `catchup::tests::UNREACHABLE_MEMORY_URL` and
+        // `trusty_common::mcp::memory_rpc`'s own `UNREACHABLE_PLACEHOLDER`
+        // convention. An explicit `TRUSTY_MEMORY_URL` always wins over
+        // discovery (see `resolve_memory_base_url`), so this alone is
+        // sufficient to stop `catchup::pm_catchup_context` from ever
+        // resolving the host's real trusty-memory address.
+        // SAFETY: `Once` guarantees this runs exactly one time, before any
+        // reader in this process observes it (no test spawns a thread that
+        // reads it before this call happens on the same thread that reaches
+        // this line first) — see the doc comment above for why no restore
+        // (and thus no unsafe-across-threads mutation) is needed.
+        unsafe {
+            std::env::set_var(
+                trusty_common::mcp::memory_rpc::TRUSTY_MEMORY_URL_ENV,
+                "http://127.0.0.1:1",
+            );
+        }
+
+        // An empty, dedicated, never-reused directory: `resolve_data_dir`
+        // will create `<this>/trusty-search/` (and `<this>/trusty-memory/`
+        // for any code path that falls through to discovery instead of the
+        // env override above) with no `http_addr` file inside, so
+        // `resolve_daemon_base_url` always resolves to `None` — the daemon
+        // is treated as "never started" rather than guessing/reaching a
+        // real port.
+        let isolated_data_dir = std::env::temp_dir().join(format!(
+            "trusty-code-run-task-test-daemon-isolation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&isolated_data_dir);
+        unsafe {
+            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, &isolated_data_dir);
+        }
+    });
+}
+
+/// Test-only wrapper around [`real_execute_run_task`] that installs the
+/// hermetic-daemon isolation (#3361) before every call.
+///
+/// Why: centralising the call here (rather than repeating
+/// `isolate_ambient_daemons()` at the top of every test) means a new test
+/// added to this file gets the guard automatically just by calling
+/// `execute_run_task` like every existing test already does — there is
+/// nothing extra to remember.
+/// What: calls [`isolate_ambient_daemons`] then forwards to
+/// [`real_execute_run_task`] unchanged.
+/// Test: see [`isolate_ambient_daemons`].
+async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> super::RunReport {
+    isolate_ambient_daemons();
+    real_execute_run_task(params, llm).await
+}
 
 // ── Scripted offline LLM ───────────────────────────────────────────────────────
 
@@ -1667,6 +1782,15 @@ async fn run_task_registry_never_registers_recall_session() {
 /// Test: this test.
 #[test]
 fn spawns_indexing_thread_for_non_git_project_path() {
+    // Hermeticity (#3361, #2914): this test calls
+    // `ensure_project_indexed_in_background` DIRECTLY rather than through the
+    // `execute_run_task` wrapper, so it must install the same ambient-daemon
+    // isolation itself — otherwise, on a machine with a live trusty-search
+    // daemon, this genuinely registers `tmp`'s throwaway tempdir against it
+    // (with `allow_sensitive_path: true`, since this is tcode's legitimate
+    // opt-in caller), which is exactly the ephemeral-index leak issue #2914
+    // reports.
+    isolate_ambient_daemons();
     let tmp = tempfile::tempdir().expect("tempdir");
     // No `.git` anywhere under `tmp` — exactly the scratch/bake-off case the
     // old guard used to skip.
@@ -1697,6 +1821,11 @@ fn spawns_indexing_thread_for_non_git_project_path() {
 /// Test: this test.
 #[test]
 fn background_indexing_invokes_readiness_observer() {
+    // Hermeticity (#3361, #2914): see the identical guard in
+    // `spawns_indexing_thread_for_non_git_project_path` — this test also
+    // calls `ensure_project_indexed_in_background` directly, bypassing
+    // `execute_run_task`'s isolation.
+    isolate_ambient_daemons();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (tx, rx) = std::sync::mpsc::channel();
 

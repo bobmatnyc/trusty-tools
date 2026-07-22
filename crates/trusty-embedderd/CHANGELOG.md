@@ -5,6 +5,34 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [0.3.10] — 2026-07-21
+
+### Changed
+
+- **Report the real loaded model on startup logs + `/health` (issue #3530 —
+  the `(Q)` observability bug, epic #3524 slice 6, PR 2/5)** — the
+  `"loading AllMiniLML6V2Q model..."` startup log and the `/health` JSON's
+  `"model": "AllMiniLML6V2Q"` field were hardcoded and went stale the moment
+  `trusty-common`'s default flipped to the non-quantized fp32 model (#3486 /
+  #3493 P0). Both now read the RESOLVED model name via the new
+  `FastEmbedder::model_name()` (trusty-common), threaded through `AppState`
+  as a new `model_name` field so `health_handler` (now
+  `State`-extractor-based) can report it.
+
+## [0.3.9] — 2026-07-20
+
+### Changed
+
+- Rebuild against `trusty-common` 0.23.6 to pick up the two embedding-performance
+  fixes ([#3500](https://github.com/bobmatnyc/trusty-tools/pull/3500),
+  [#3511](https://github.com/bobmatnyc/trusty-tools/pull/3511); refs #3486 / #3493):
+  platform-conditional ORT intra-op thread default (no longer pinned to `1` off
+  the CUDA path) and a non-quantized (fp32) default embedding model. This crate
+  is the sidecar that actually runs inference, so the fixes are inert until the
+  installed `trusty-embedderd` binary is rebuilt — no source change here beyond
+  the dependency bump. `TRUSTY_ORT_INTRA_THREADS` and `TRUSTY_EMBEDDER_MODEL=int8`
+  remain available to restore prior behaviour.
+
 ## [0.3.8] — 2026-07-13
 
 ### Fixed

@@ -57,12 +57,14 @@ default-members = [
     "crates/trusty-console",
     "crates/trusty-cto-db",
     "crates/trusty-embedderd",
+    "crates/trusty-embedderd-py",
     "crates/trusty-git-analytics",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",
     "crates/trusty-memory",
     "crates/trusty-mpm",
     "crates/trusty-progress",
+    "crates/trusty-publish-guard",
     "crates/trusty-review",
     "crates/trusty-search",
     "crates/trusty-sld-lint",
@@ -92,32 +94,32 @@ trusty-code = { path = "crates/trusty-code" }
 # shared by trusty-code's `tcode tui` and trusty-agents' tagent REPL (DOC-50,
 # epic #3411). Not yet published (Slice 1, #3425).
 trusty-tui = { path = "crates/trusty-tui", version = "0.1.0" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.2.1" }
-trusty-common = { path = "crates/trusty-common", version = "0.23.2" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.3.0" }
+trusty-common = { path = "crates/trusty-common", version = "0.24.1" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.8" }
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.10" }
 # trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
 # trusty-memory so `cargo install trusty-memory` produces both binaries from
 # one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
 trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.1.3" }
 # tga: trusty-git-analytics — developer productivity analytics.
 # Referenced by trusty-review for contributor-profile data pipeline (#558).
-tga = { path = "crates/trusty-git-analytics", version = "2.9.0" }
+tga = { path = "crates/trusty-git-analytics", version = "2.9.4" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
-trusty-mpm = { path = "crates/trusty-mpm", version = "0.15.0" }
+trusty-mpm = { path = "crates/trusty-mpm", version = "0.20.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).
-trusty-review = { path = "crates/trusty-review", version = "0.9.0" }
+trusty-review = { path = "crates/trusty-review", version = "0.10.0" }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
 # published library crate; the path entry remains so any local lib consumers
 # resolve in-tree.
-trusty-console = { path = "crates/trusty-console", version = "0.4.0" }
+trusty-console = { path = "crates/trusty-console", version = "0.5.0" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.1.1" }
@@ -169,6 +171,11 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip"] }
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
+# IANA named-timezone support (e.g. "America/New_York") for chrono. Already
+# resolved in Cargo.lock transitively via `tera` (trusty-git-analytics); pinned
+# here as a first-class workspace dep for trusty-agents' user-timezone-aware
+# date/time rendering (#3052 follow-up).
+chrono-tz = "0.9"
 base64 = "0.22"
 # jsonwebtoken 10 splits the crypto backend behind a feature flag (no backend
 # in default features). We select `aws_lc_rs` (already built via aws-smithy) so
@@ -178,6 +185,10 @@ base64 = "0.22"
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
+# Cross-process advisory file locking for trusty-gworkspace's tokens.json
+# read-modify-write critical section (issue #3502) — small, actively
+# maintained, no unsafe beyond the platform lock syscalls it wraps.
+fd-lock = "4"
 # Gzip decompression for prebuilt-binary tarballs (trusty-installer Phase 2).
 flate2 = "1"
 # Tar archive extraction for prebuilt-binary tarballs (trusty-installer Phase 2).
@@ -219,6 +230,10 @@ indicatif = "0.17"
 # Misc utilities used across crates.
 dashmap = "6"
 walkdir = "2"
+# Lock-free `Arc` hot-swap for runtime backend switching (epic #3524 slice 6:
+# `SwitchableEmbedder` wraps the active embedder backend behind this so
+# reads never block a swap). Widely used, minimal deps.
+arc-swap = "1"
 # gitignore-aware recursive file walking (ripgrep's walker) + glob matching —
 # power the tcode engineer's native glob/grep exploration tools (#1027). Both
 # are already in the workspace lockfile (transitive via trusty-search), so

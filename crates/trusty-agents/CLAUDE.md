@@ -45,6 +45,7 @@ OpenRouter API --> LLM response --> result returned to PM --> user
 - **Tool Calling** (`src/tools/`): OpenAI function-calling format. PM uses `delegate_to_agent` tool. Sub-agents may use additional tools.
 - **Agent Config** (`.trusty-agents/agents/*.toml`): Defines agent name, role, model, LLM parameters, and system prompt.
 - **Skills** (`.trusty-agents/skills/*.md`): Markdown files injected into agent system prompts for domain knowledge.
+- **PM Bridge / `dispatch_task`** (`src/tools/pm_bridge.rs`, `src/tools/pm_bridge_backend.rs`, `src/intent/route.rs`): epic #3052 PR B, lane 3 — distinct from lane 2's in-process `delegate_to_agent`. Routes a unit of work to an opaque EXTERNAL backend (`tm` for orchestration/project/session/issue/PR/multi-agent work, `tcode` for direct coding in a repo) via a deterministic pure-function router; the tool name, schema, and returned transcript never name either backend (`tools::pm_bridge::scrub_branding` strips backend-identity tokens and session ids). RBAC-denied to `ReadOnly`/`Analytics` tiers.
 
 ### IPC Message Format
 

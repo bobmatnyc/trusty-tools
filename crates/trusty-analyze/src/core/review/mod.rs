@@ -22,7 +22,7 @@
 //! the indexed-vs-new-file merge logic.
 
 use crate::core::client::TrustySearchClient;
-use crate::core::complexity::{compute_complexity_for, detect_smells};
+use crate::core::complexity::compute_complexity_for;
 use crate::types::complexity::{CodeSmell, ComplexityGrade};
 use crate::types::CodeChunk;
 
@@ -128,7 +128,11 @@ fn review_one_file(fd: &FileDiff, index_chunks: &[&CodeChunk]) -> FileReview {
         // New file: not yet indexed by trusty-search. Local fallback.
         let content = fd.added_content();
         let metrics = compute_complexity_for(&content, lang);
-        let smells = project_smells(&detect_smells(&content), anchor);
+        // Reuse the smells already computed by `compute_complexity_for` above
+        // instead of re-running the language-agnostic text heuristic (which
+        // is documented to misfire on common idioms) — see #core/quality.rs
+        // for the same fix on the whole-codebase quality report path.
+        let smells = project_smells(&metrics.smells, anchor);
         let recommendations = recommendations_for(
             metrics.grade,
             metrics.cyclomatic,
@@ -156,7 +160,7 @@ fn review_one_file(fd: &FileDiff, index_chunks: &[&CodeChunk]) -> FileReview {
         .collect::<Vec<_>>()
         .join("\n");
     let metrics = compute_complexity_for(&joined, lang);
-    let smells = project_smells(&detect_smells(&joined), anchor);
+    let smells = project_smells(&metrics.smells, anchor);
     let modified_chunks = index_chunks
         .iter()
         .filter(|c| fd.touches_range(c.start_line, c.end_line))

@@ -339,6 +339,7 @@ pub(crate) async fn session(
         // work regardless of the `--json` flag. `--json` keeps the raw
         // daemon-JSON passthrough byte-for-byte (scripts rely on this).
         SessionAction::Ls {
+            terms,
             json,
             source_id,
             current,
@@ -349,7 +350,9 @@ pub(crate) async fn session(
             } else {
                 source_id
             };
-            crate::commands::managed::session_ls(client, url, json, sid.as_deref(), all).await?
+            let (sort, term) = crate::commands::session_picker::parse_ls_terms(&terms);
+            crate::commands::managed::session_ls(client, url, json, sid.as_deref(), all, sort, term)
+                .await?
         }
         // `activity` stays on the raw path: its CLI output carries confidence,
         // token, cache, and latency detail that `CommandResult::ManagedActivity`

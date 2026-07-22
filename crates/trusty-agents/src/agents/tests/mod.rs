@@ -7,7 +7,7 @@
 //! What: Pure `toml::from_str` round-trips asserting parsed values.
 //! Test: This module IS the test surface.
 
-mod loading;
+pub(crate) mod loading;
 mod params;
 
 use crate::agents::AgentConfig;

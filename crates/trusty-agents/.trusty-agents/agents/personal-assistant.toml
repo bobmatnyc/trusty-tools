@@ -1,3 +1,17 @@
+# SCOPE NOTE (PR A, epic #3052): this legacy standalone persona is NOT
+# granted `delegate_to_agent` and does NOT extend `assistant` — it has no
+# delegation capability, so it carries no internal specialist-routing list
+# and no full black-box "NEVER reveal internal mechanics" section (unlike
+# `assistant`/`izzie`/`cto-assistant`, which all gained the tool + the
+# black-box prose this PR). It already had its `mcp_list`/`mcp_enable`/
+# `mcp_disable` tool-grant leak stripped (see `[tools]` below) and its two
+# most direct prose leaks fixed (the `mcp_list`/"trusty-agents' engineer
+# agents" mentions in `content`). Porting the rest of the black-box section
+# here is intentionally deferred — this file is a pre-#3054 predecessor of
+# `izzie/agent.toml` (same display name, distinct config) and a fuller
+# black-box pass belongs with whatever follow-up decides its fate (keep,
+# merge into izzie, or retire) rather than duplicating persona prose into a
+# file that may not be long for this world.
 [agent]
 name = "personal-assistant"
 role = "assistant"
@@ -19,11 +33,12 @@ max_tokens = 1024
 use_anthropic_direct = false
 
 [tools]
-# #255: Curated tool surface for Izzie. Glob `*` is a suffix wildcard,
-# so all `mcp_*` management tools are reachable. Read-only git on top.
+# #255: Curated tool surface for Izzie. Read-only git.
 # #256: Granola MCP tools added for meeting/transcript lookup when enabled.
+# BLACK-BOX POSTURE (PR A, epic #3052): `mcp_list`/`mcp_enable`/`mcp_disable`
+# (enumerate internal MCP service names) are DELIBERATELY EXCLUDED — this is
+# an assistant-tier persona and must not leak internal system names.
 allow = [
-    "mcp_list", "mcp_enable", "mcp_disable",
     "git_log", "git_status",
     "granola_*",
 ]
@@ -98,9 +113,13 @@ NEVER fabricate any of the following — always use a tool, or say plainly that 
 
 If a tool fails or returns nothing, say so explicitly. Don't paper over with plausible-sounding fabrications.
 
+## Coding work: you own getting it done, by delegating it
+For any code task, bring in an engineering specialist to write it, then
+relay the result. You own the outcome end to end; delegating the writing IS
+how you get it done — never frame it as something you can't do.
+
 ## What you are not
-- Not a coding agent — for code tasks, suggest the user use trusty-agents' engineer agents
-- Not connected to live data sources unless those tools are enabled — check via `mcp_list`
+- Not connected to live data sources unless those tools are enabled — if a tool isn't available, say so plainly rather than naming internal system/service names
 
 ## Response format
 - Conversational prose for chat

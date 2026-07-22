@@ -174,6 +174,82 @@ pub async fn verify_installed_binary(binary_name: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Probe a binary at a KNOWN, CONCRETE path with `--version` as a health
+/// gate (#3554).
+///
+/// Why: [`verify_installed_binary`] resolves a bare binary NAME through a
+/// priority-ordered directory search that ends in a bare-name PATH `which`
+/// fallback — the right shape when the caller genuinely does not know where
+/// the binary landed (e.g. after a plain `cargo install`). But a caller that
+/// just placed a binary at a SPECIFIC path (the prebuilt-download placement
+/// destination, or a resolved `$CARGO_HOME/bin` join) already knows the exact
+/// file to verify; re-deriving the path by name afterward is a needless,
+/// shadowable extra hop — issue #3554: the web installer wrote 0.19.29 to
+/// `~/.local/bin/tm`, then health-gated by NAME, which found a stale
+/// 0.19.26 copy at `~/.cargo/bin/tm` first (both because
+/// `candidate_bin_dirs` checks `~/.cargo/bin` before `~/.local/bin`, and
+/// because a bare-name PATH lookup is inherently shadowable) and reported
+/// the health gate "passed" against the WRONG binary. Probing the known
+/// absolute path directly makes the health gate immune to any such
+/// shadowing — there is no name resolution step for a stale binary to win.
+///
+/// What: Returns `Err` immediately if `bin_path` does not exist (no PATH
+/// fallback — the caller already knows exactly where the binary should be).
+/// Otherwise spawns `<bin_path> --version` with the same 10-second timeout as
+/// [`verify_installed_binary`]; on a clean exit 0 returns `Ok(<trimmed stdout>)`
+/// (the raw `--version` line, so the caller can parse/compare it against an
+/// expected version). Returns `Err` on a non-zero exit, spawn failure, or
+/// timeout.
+///
+/// Test: `verify_installed_binary_at_path_reads_exact_binary_despite_path_shadow`
+/// (the #3554 regression shape), `verify_installed_binary_at_path_fails_for_missing_binary`.
+pub async fn verify_installed_binary_at_path(bin_path: &std::path::Path) -> anyhow::Result<String> {
+    if !bin_path.exists() {
+        return Err(anyhow::anyhow!(
+            "binary not found at expected install path {}",
+            bin_path.display()
+        ));
+    }
+
+    tracing::debug!(
+        bin_path = %bin_path.display(),
+        "probing installed binary with --version (concrete path, #3554)"
+    );
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new(bin_path)
+            .arg("--version")
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            let version_line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            tracing::info!(
+                bin_path = %bin_path.display(),
+                version = version_line,
+                "health gate passed"
+            );
+            Ok(version_line)
+        }
+        Ok(Ok(output)) => Err(anyhow::anyhow!(
+            "`{} --version` exited with status {} — new binary may be broken",
+            bin_path.display(),
+            output.status
+        )),
+        Ok(Err(e)) => Err(anyhow::anyhow!(
+            "failed to spawn `{} --version`: {e}",
+            bin_path.display()
+        )),
+        Err(_) => Err(anyhow::anyhow!(
+            "`{} --version` timed out after 10 s — new binary may be hung",
+            bin_path.display()
+        )),
+    }
+}
+
 /// Return `true` when the current process was started by launchd.
 ///
 /// Why: The self-restart strategy (non-zero exit → launchd KeepAlive

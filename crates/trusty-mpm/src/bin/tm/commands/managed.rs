@@ -14,6 +14,20 @@
 //! the JSON responses; plus the local `catalog` handler that drives `CatalogSync`.
 //! Test: `cli_parses_catalog_sync` exercises the parse path; the HTTP round-trip
 //! is covered by `tests/session_manager_mvp.rs`.
+//!
+//! `"deleted"` slot tombstones vs. `"decommissioned"` sessions (issue #3034):
+//! these are two deliberately different states. A `"decommissioned"` session
+//! still has a live record in the store (soft-retired) and stays hidden from
+//! the default view per #1809 — that filter is unchanged here. A `"deleted"`
+//! slot tombstone is a stable-numbering placeholder for a session whose record
+//! has left the store entirely (hard-delete, decommission-reap, or prune); per
+//! Bob's explicit directive on #3034, tombstones are INTENTIONALLY shown in the
+//! default `tm ls`/picker view at their original slot position — hiding them
+//! would defeat the stable-numbering feature's whole point (an operator must
+//! see exactly why a captured number no longer resolves, not have it silently
+//! vanish). This is NOT unbounded growth: the slot registry is in-memory only
+//! and resets to empty on every daemon restart (see `SlotRegistry`'s doc), so
+//! tombstone count is bounded by daemon process lifetime, not by history.
 
 use std::io::IsTerminal as _;
 
@@ -46,30 +60,66 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
     eprintln!("{}", deprecation_message(old, new));
 }
 
-/// Return true when a session state should be shown in the default picker/list view.
+/// Return true when a session row should be shown in the default picker/list view.
 ///
-/// Why: TERMINAL tombstones (`decommissioned` AND `deleted`, #2012) accumulate
-/// without bound (#1809) and — critically — must NEVER be offered as a resume
-/// target: a deleted row surfaced in the picker would flow through the
-/// zombie-reconcile path and RESURRECT the deleted session. Driving the
-/// decision off [`ManagedSessionState::is_terminal`] (the single source of
-/// truth on the enum) rather than a hardcoded `== "decommissioned"` string
-/// guarantees a new terminal variant can never silently slip past this filter.
-/// What: returns `false` for any terminal state; `true` for every live state
-/// (active, provisioning, stopped, errored) and for any unrecognised token
-/// (fail-open for DISPLAY only — the daemon owns real lifecycle gating).
+/// Why: reconciles two independent, otherwise-contradictory directives that
+/// both landed on `"deleted"` wire rows. Main's #3302 hardening commit
+/// (`51243ea5`, addressing a code-critic CRITICAL finding) wanted a real,
+/// still-in-store record whose lifecycle state is `Deleted` (soft-deleted via
+/// `tm sessions delete`, #2012) hidden from the default view exactly like
+/// `"decommissioned"` — surfacing it risked flowing through the zombie-reconcile
+/// path and resurrecting it. #3034/#3044 (this PR) needs the OPPOSITE for a
+/// stable-numbering SLOT TOMBSTONE: it must render at its exact slot position
+/// in the default view, or the entire point of stable numbering (an operator
+/// seeing exactly why a captured number no longer resolves) is defeated.
+///
+/// Both rows serialize `state == "deleted"` on the wire, but only the slot
+/// tombstone sets the dedicated `deleted: bool` field
+/// ([`ManagedSessionSummary::deleted`], set exclusively by
+/// `daemon::managed_routes::summary::tombstone_summary`) — a soft-deleted
+/// real record's `deleted` field stays `false` even though its `state` string
+/// is `"deleted"`. Threading that flag through as `is_slot_tombstone`
+/// disambiguates the two without touching the wire shape or either directive:
+/// the slot tombstone (`is_slot_tombstone == true`) passes through and stays
+/// visible; the soft-deleted-in-store record (`is_slot_tombstone == false`)
+/// is hidden alongside `"decommissioned"`.
+///
+/// Resurrection-safety for a VISIBLE slot tombstone is unaffected by this
+/// visibility change — it is enforced independently, by two separate guards
+/// that never consult this predicate: the picker's `decide_for_index`
+/// (`session_picker.rs`) checks `ManagedSessionSummary::deleted` FIRST, ahead
+/// of every other branch, and returns `PickerDecision::SlotDeleted` rather
+/// than ever reaching `Resume`/`ConfirmRestart`; and
+/// `guided_resume::resume_guided_session`'s terminal-state refusal
+/// (`plan_resume` → `ResumeAction::Terminal`) independently refuses to attach
+/// to or restart any `"decommissioned"`/`"deleted"` session before any daemon
+/// round-trip. Both guards key off the session's own state/flags, not off
+/// whether this predicate decided to show or hide the row.
+/// What: returns `false` for `"decommissioned"` (always hidden) and for
+/// `"deleted"` when `is_slot_tombstone` is `false` (a soft-deleted, still-in-store
+/// record); returns `true` for every other state, and for `"deleted"` when
+/// `is_slot_tombstone` is `true` (a #3034 numbered-slot tombstone).
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
-/// `is_live_session_state_excludes_deleted` in `tests_behavior_c_tests.rs`.
-pub(crate) fn is_live_session_state(state: &str) -> bool {
-    !trusty_mpm::session_manager::ManagedSessionState::from_wire(state)
-        .is_some_and(|s| s.is_terminal())
+/// `is_live_session_state_excludes_soft_deleted_record`,
+/// `is_live_session_state_keeps_slot_tombstone_visible` in
+/// `tests_behavior_c_tests.rs`.
+pub(crate) fn is_live_session_state(state: &str, is_slot_tombstone: bool) -> bool {
+    match state {
+        "decommissioned" => false,
+        "deleted" => is_slot_tombstone,
+        _ => true,
+    }
 }
 
 /// Filter a session list to only live sessions for display in the picker (#1809).
 ///
-/// Why: the picker must never show decommissioned tombstones by default; the
-/// `--all` opt-in re-enables them for `tm session ls` via this module's path.
-/// What: retains only sessions whose `state` passes `is_live_session_state`.
+/// Why: the picker must never show decommissioned tombstones (or a
+/// soft-deleted, still-in-store record) by default; the `--all` opt-in
+/// re-enables them for `tm session ls` via this module's path. A #3034
+/// numbered-slot tombstone (`ManagedSessionSummary::deleted == true`) is
+/// deliberately kept regardless — see [`is_live_session_state`]'s doc.
+/// What: retains only sessions whose `(state, deleted)` pair passes
+/// [`is_live_session_state`].
 /// Test: `picker_filter_excludes_decommissioned_keeps_active` in
 /// `tests_behavior_c_tests.rs`.
 pub(crate) fn filter_live_sessions(
@@ -77,7 +127,7 @@ pub(crate) fn filter_live_sessions(
 ) -> Vec<ManagedSessionSummary> {
     sessions
         .into_iter()
-        .filter(|s| is_live_session_state(&s.state))
+        .filter(|s| is_live_session_state(&s.state, s.deleted))
         .collect()
 }
 
@@ -93,15 +143,22 @@ pub(crate) fn filter_live_sessions(
 /// path always returns the raw daemon response unfiltered.
 /// The source_id filter is passed straight through as a query parameter rather
 /// than doing client-side filtering so callers get the daemon's authoritative view.
+/// `sort`/`term` (#3483 — the `tm ls [recent|alpha] [filter]` inline
+/// grammar) apply ONLY to the table path; `--json` stays a raw, unfiltered,
+/// unsorted passthrough, matching `--all`'s existing "no effect on --json"
+/// precedent.
 /// Test: HTTP path covered by the integration test; filter logic unit-tested by
 /// `ls_source_id_filter_selects_correct_slug`,
-/// `picker_filter_excludes_decommissioned_keeps_active`.
+/// `picker_filter_excludes_decommissioned_keeps_active`; sort/filter logic by
+/// `sort_sessions_*` / `filter_sessions_by_term_*` in `session_picker.rs`.
 pub(crate) async fn session_ls(
     client: &reqwest::Client,
     url: &str,
     json: bool,
     source_id: Option<&str>,
     all: bool,
+    sort: crate::commands::session_picker::SessionSortArg,
+    term: Option<String>,
 ) -> anyhow::Result<()> {
     // Fetch the response body ONCE via the shared fetch path. `--json` echoes
     // that raw text verbatim (byte-for-byte — preserving exact field
@@ -109,11 +166,15 @@ pub(crate) async fn session_ls(
     // rather than issuing a second GET.
     let raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id).await?;
     if json {
-        // Raw JSON passthrough is always unfiltered — scripts rely on byte-for-byte.
+        // Raw JSON passthrough is always unfiltered/unsorted — scripts rely on
+        // byte-for-byte.
         println!("{raw}");
         return Ok(());
     }
     let sessions = crate::commands::session_picker::parse_scoped_sessions(&raw, all)?;
+    let mut sessions =
+        crate::commands::session_picker::filter_sessions_by_term(sessions, term.as_deref());
+    crate::commands::session_picker::sort_sessions(&mut sessions, sort);
     render_session_table(&sessions, source_id);
     Ok(())
 }
@@ -125,20 +186,28 @@ pub(crate) async fn session_ls(
 /// table, so the row formatting lives in one place rather than being duplicated
 /// across the two entry points.
 /// What: prints a "no managed sessions[ for <slug>]" line when the list is empty;
-/// otherwise prints the header + one row per session (id, state, truncated name,
-/// task/`(interactive)` placeholder, short created-at, and any pending decision).
-/// The STATE column appends `[dead]` (#2595) when the server-computed
-/// `unresumable` flag is set — the session's workspace no longer exists
-/// anywhere on disk, so `tm session resume`/the picker's restart would only
-/// ever fail; the operator's actionable remedy is `tm session rm`. It also
-/// appends `[stale-assets]` (#2444) when the server-computed `stale_assets`
-/// flag is set — the session's deployed agents/skills have drifted from the
-/// catalog; the remedy is `tm sessions sync-assets <id>`.
+/// otherwise prints the header + one row per session, prefixed by its stable
+/// `NUM` slot (#3034) — the SAME number the interactive picker shows and
+/// resolves `d<N>` against, so a number captured from this static table stays
+/// valid for a later picker session (or vice versa). A tombstoned row (`s.deleted`)
+/// prints ONLY its slot number and `-- deleted --`, every other field blanked, so
+/// a deleted session's number is never silently reused for its former neighbors.
+/// A live row shows id, state, truncated name, task/`(interactive)` placeholder,
+/// short created-at, and any pending decision. The STATE column appends
+/// `[dead]` (#2595) when the server-computed `unresumable` flag is set — the
+/// session's workspace no longer exists anywhere on disk, so `tm session
+/// resume`/the picker's restart would only ever fail; the operator's
+/// actionable remedy is `tm session rm`. It also appends `[stale-assets]`
+/// (#2444) when the server-computed `stale_assets` flag is set — the
+/// session's deployed agents/skills have drifted from the catalog; the remedy
+/// is `tm sessions sync-assets <id>`.
 /// Test: `ls_source_id_filter_selects_correct_slug` covers the scoping seam; the
 /// table bytes are exercised by `tests/session_manager_mvp.rs`;
 /// `format_state_column_appends_dead_marker` and
 /// `format_state_column_appends_stale_assets_marker` cover the two markers via
-/// the extracted pure helper, [`format_state_column`].
+/// the extracted pure helper, [`format_state_column`];
+/// `format_tombstone_row_shows_slot_and_placeholder` covers the #3034
+/// deleted-slot row via its own extracted pure helper, [`format_tombstone_row`].
 pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id: Option<&str>) {
     if sessions.is_empty() {
         if let Some(sid) = source_id {
@@ -150,10 +219,17 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
     }
     // Table header
     println!(
-        "{:<36}  {:<14}  {:<24}  {:<30}  CREATED",
-        "ID", "STATE", "NAME", "TASK"
+        "{:<5}  {:<36}  {:<14}  {:<24}  {:<30}  CREATED",
+        "NUM", "ID", "STATE", "NAME", "TASK"
     );
     for s in sessions {
+        if s.deleted {
+            // #3034: the slot stays reserved — never silently reused by a
+            // later session — so the operator sees exactly which number is
+            // now dead rather than having it vanish from the listing.
+            println!("{}", format_tombstone_row(s.slot));
+            continue;
+        }
         // #1841 Fix 3: show a descriptive placeholder for sessions with no task.
         let task = s
             .task
@@ -184,7 +260,8 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
         let state = format_state_column(base_state, s.unresumable, s.stale_assets);
         println!(
             // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
-            "{:<36}  {:<14}  {:<24}  {:<30}  {}{}",
+            "{:<5}  {:<36}  {:<14}  {:<24}  {:<30}  {}{}",
+            s.slot,
             s.id,
             state,
             truncate(&s.name, 24),
@@ -193,6 +270,17 @@ pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id
             pending
         );
     }
+}
+
+/// Format the `-- deleted --` tombstone row for a deleted slot (issue #3034).
+///
+/// Why: extracted as a pure function — mirroring [`format_state_column`] — so
+/// the exact tombstone row text is unit-testable without capturing stdout.
+/// What: returns `"{slot:<5}  -- deleted --"`, matching the live row's `NUM`
+/// column width so the table stays aligned.
+/// Test: `format_tombstone_row_shows_slot_and_placeholder`.
+fn format_tombstone_row(slot: u32) -> String {
+    format!("{slot:<5}  -- deleted --")
 }
 
 /// Format the STATE column value for one `tm session ls` row (#2595, #2444).

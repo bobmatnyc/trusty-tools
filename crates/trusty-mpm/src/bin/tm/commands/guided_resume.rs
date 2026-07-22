@@ -1,4 +1,4 @@
-//! Guided-picker resume/restart flow (#1742, #2001).
+//! Guided-picker resume/restart flow (#1742, #2001, #3531).
 //!
 //! Why: resuming a managed session from the bare-`tm` picker must handle every
 //! runtime state without ever exposing a raw tmux failure. A live session is
@@ -8,6 +8,21 @@
 //! stops it (resetting the record to Stopped) then restarts it via the same
 //! path, so the operator does nothing (#2001). Extracted from `guided.rs` to keep
 //! both files under the 500-SLOC production cap.
+//!
+//! #3531: the zombie/restart classification below MUST run on
+//! [`trusty_mpm::client::ManagedSessionSummary::persisted_state`], never the
+//! plain `state` field. #3302 made the list/get endpoints reconcile the
+//! DISPLAYED `state` against live tmux (so a running session never reads
+//! `(stopped)`), which — as an unintended side effect — collapses an
+//! `active`-but-tmux-dead zombie down to the SAME `"stopped"` string a
+//! genuinely stopped session shows. Classifying off that display value made
+//! `is_zombie` unable to tell the two apart, so the interactive picker's
+//! "restart (stopped)" selection fell through to a plain restart that the
+//! daemon's `/resume` (which validates the REAL persisted state) rejected
+//! with a 409 ("cannot resume a session in state 'active'") — the exact
+//! reported dead-end. `persisted_state` is the raw, un-reconciled value the
+//! daemon captures before any display reconciliation can touch it, so
+//! classification here always agrees with what `/resume` will actually check.
 //!
 //! What: [`plan_resume`] is the pure branch selector over [`is_zombie`] /
 //! [`needs_restart`]; [`resume_session`] is the I/O driver that dispatches on
@@ -23,9 +38,11 @@
 //! (code-critic HIGH, #2649 review).
 //!
 //! Test: the pure seams (`needs_restart`, `is_zombie`, `plan_resume`) are
-//! exhaustively unit-tested in `tests_behavior_c_tests.rs`; the HTTP paths are
-//! exercised by the e2e suite and manual smoke tests; the `no_attach` gate is
-//! covered by `managed_tests.rs`'s
+//! exhaustively unit-tested in `tests_behavior_c_tests.rs`
+//! (`guided_resume_plan_resume_prefers_persisted_state_over_display_state`
+//! covers the #3531 fix specifically); the HTTP paths are exercised by the
+//! e2e suite and manual smoke tests; the `no_attach` gate is covered by
+//! `managed_tests.rs`'s
 //! `session_resume_headless_active_live_tmux_skips_restart_and_attach`.
 
 use anyhow::Context as _;
@@ -133,6 +150,29 @@ pub(crate) enum ResumeAction {
 /// can ever be reached for a tombstone (code-critic CRITICAL).
 /// Test: `guided_resume_plan_*`, `plan_resume_refuses_terminal_states` in
 /// `tests_behavior_c_tests.rs`.
+/// Resolve the state string [`plan_resume`] must classify from a wire
+/// [`trusty_mpm::client::ManagedSessionSummary`] (#3531).
+///
+/// Why: extracting this one-line lookup into its own pure, testable seam
+/// pins the exact bug — `resume_session` used to pass `&session.state` (the
+/// possibly display-reconciled value, #3302) straight into `plan_resume`,
+/// which silently misclassified a zombie session (`active`/`provisioning`
+/// with tmux gone) as a plain `Stopped` restart the moment the list/get
+/// endpoint had already reconciled its `state` field to `"stopped"` for
+/// display. See the module doc for the full chain.
+/// What: `session.persisted_state`, when the daemon sent it; falls back to
+/// `session.state` when talking to an older daemon that predates the field
+/// (`persisted_state` is `None`) — reproducing the pre-#3531 behavior rather
+/// than panicking or guessing.
+/// Test: `resume_classification_state_prefers_persisted_state`,
+/// `resume_classification_state_falls_back_to_display_state_when_absent` in
+/// `tests_behavior_c_tests.rs`.
+pub(crate) fn resume_classification_state(
+    session: &trusty_mpm::client::ManagedSessionSummary,
+) -> &str {
+    session.persisted_state.as_deref().unwrap_or(&session.state)
+}
+
 pub(crate) fn plan_resume(state: &str, tmux_live: bool) -> ResumeAction {
     if is_terminal_state(state) {
         ResumeAction::Terminal
@@ -230,7 +270,23 @@ pub(crate) async fn resume_session(
     no_attach: bool,
 ) -> anyhow::Result<AttachOutcome> {
     let tmux_live = tmux_has_session(&session.name);
-    let action = plan_resume(&session.state, tmux_live);
+    // #3531: classify using the AUTHORITATIVE persisted state, not the
+    // display-reconciled `state` the list/get endpoints may show. #3302 made
+    // those endpoints reconcile `state` against live tmux FOR DISPLAY ONLY —
+    // an `Active`/`Provisioning` record whose tmux pane is gone (a zombie)
+    // then reads `state = "stopped"`, identical to a session that is
+    // GENUINELY stopped. Classifying off that display value made `is_zombie`
+    // unable to tell the two apart, so the interactive picker's "restart
+    // (stopped)" selection fell into the plain `Restart` branch below instead
+    // of `ReconcileThenRestart` — and the daemon's `/resume` (which validates
+    // against the REAL persisted state) rejected it with a 409 ("cannot
+    // resume a session in state 'active'"), the exact #3531 dead-end.
+    // `persisted_state` is `None` only when talking to an older daemon that
+    // predates this field, in which case falling back to `state` reproduces
+    // the pre-#3531 (imperfect but not regressed) behavior — see
+    // `resume_classification_state`.
+    let persisted_state = resume_classification_state(session);
+    let action = plan_resume(persisted_state, tmux_live);
 
     // Terminal-state refusal (code-critic CRITICAL): a decommissioned/deleted
     // tombstone must never be attached to or restarted — doing either would
@@ -239,7 +295,7 @@ pub(crate) async fn resume_session(
         eprintln!(
             "tm: '{}' is {} — a terminal (decommissioned/deleted) session cannot be \
              resumed; spawn a fresh session instead.",
-            session.name, session.state
+            session.name, persisted_state
         );
         return Ok(AttachOutcome::Skipped);
     }
@@ -253,7 +309,7 @@ pub(crate) async fn resume_session(
     if action == ResumeAction::ReconcileThenRestart {
         eprintln!(
             "tm: '{}' is marked {} but its tmux pane is gone — reconciling and restarting…",
-            session.name, session.state
+            session.name, persisted_state
         );
         reconcile_zombie_stop(client, url, session).await?;
     }
@@ -276,12 +332,12 @@ pub(crate) async fn resume_session(
                     "tm: session '{}' is {} but its tmux pane is still alive — \
                      the daemon will KILL that pane and start a fresh runtime \
                      (in-progress pane state will be lost).",
-                    session.name, session.state
+                    session.name, persisted_state
                 );
             } else {
                 eprintln!(
                     "tm: session '{}' is {} (tmux absent); restarting via daemon…",
-                    session.name, session.state
+                    session.name, persisted_state
                 );
             }
         }

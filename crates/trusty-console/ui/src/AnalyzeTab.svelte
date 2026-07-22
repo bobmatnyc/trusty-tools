@@ -163,13 +163,13 @@
   // Theme-adaptive CSS custom property refs (resolved against the active palette
   // at render time) instead of hardcoded hex — badge/stat recolor on theme flip.
   let statusVar = $derived(
-    report?.status === 'ok'         ? 'var(--color-status-ok)'
-    : report?.status === 'degraded' ? 'var(--color-status-warn)'
-    : 'var(--color-status-error)'
+    report?.status === 'ok'         ? 'var(--trusty-success)'
+    : report?.status === 'degraded' ? 'var(--trusty-warning)'
+    : 'var(--trusty-danger)'
   );
 
   let searchReachableVar = $derived(
-    report?.metrics?.search_reachable ? 'var(--color-status-ok)' : 'var(--color-status-error)'
+    report?.metrics?.search_reachable ? 'var(--trusty-success)' : 'var(--trusty-danger)'
   );
 
   /** Group entities by kind for a compact summary bar. */
@@ -319,12 +319,12 @@
           <svg width={SVG_W} height={SVG_H} viewBox="0 0 {SVG_W} {SVG_H}" role="img" aria-label="Entity node map">
             {#each vizNodes.nodes as node (node.id)}
               <g class="viz-node" transform="translate({node.x},{node.y})">
-                <circle r="10" fill={kindColor(node.kind)} fill-opacity="0.85" stroke="var(--color-border)" stroke-width="1.5"/>
+                <circle r="10" fill={kindColor(node.kind)} fill-opacity="0.85" stroke="var(--trusty-border)" stroke-width="1.5"/>
                 <text
                   x="0" y="22"
                   text-anchor="middle"
                   font-size="9"
-                  fill="var(--color-text-secondary)"
+                  fill="var(--trusty-text-secondary)"
                   font-family="'JetBrains Mono', monospace"
                 >
                   {node.label}
@@ -411,20 +411,20 @@
 <style>
   .tab-content { padding: 0.25rem 0; }
   .placeholder, .not-available {
-    background: var(--color-surface); border-radius: 0.5rem;
-    padding: 1.25rem; color: var(--color-text-secondary); font-size: 0.9rem;
+    background: var(--trusty-card-bg); border-radius: 0.5rem;
+    padding: 1.25rem; color: var(--trusty-text-secondary); font-size: 0.9rem;
   }
-  .not-available { color: var(--color-status-warn); }
+  .not-available { color: var(--trusty-warning); }
 
   .meta-row {
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
   }
-  /* --_s supplied inline (statusVar) as a theme-adaptive --color-status-* ref. */
+  /* --_s supplied inline (statusVar) as a theme-adaptive --trusty-status-* ref. */
   .badge {
     display: inline-flex; align-items: center; gap: 0.35rem;
     font-size: 0.75rem; font-weight: 600; padding: 0.2rem 0.6rem;
     border-radius: 9999px; border: 1px solid;
-    --_s: var(--color-text-muted);
+    --_s: var(--trusty-text-muted);
     color: var(--_s);
     background: rgba(0,0,0,0.08);
     background: color-mix(in srgb, var(--_s) 13%, transparent);
@@ -432,29 +432,29 @@
     border-color: color-mix(in srgb, var(--_s) 27%, transparent);
   }
   .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--_s); }
-  .version { color: var(--color-text-secondary); font-size: 0.85rem; }
+  .version { color: var(--trusty-text-secondary); font-size: 0.85rem; }
 
   .stat-grid {
     display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 0.75rem; margin-bottom: 1.5rem;
   }
   .stat-card {
-    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem;
+    background: var(--trusty-card-bg); border: 1px solid var(--trusty-border); border-radius: 0.5rem;
     padding: 1rem; display: flex; flex-direction: column; align-items: center; gap: 0.25rem;
   }
-  .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--color-text-primary); }
-  .stat-label { font-size: 0.75rem; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--trusty-text-primary); }
+  .stat-label { font-size: 0.75rem; color: var(--trusty-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
 
   .selector-row {
     display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
   }
-  .selector-label { color: var(--color-text-secondary); font-size: 0.85rem; }
+  .selector-label { color: var(--trusty-text-secondary); font-size: 0.85rem; }
   .index-select {
-    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.375rem;
-    color: var(--color-text-primary); padding: 0.35rem 0.6rem; font-size: 0.85rem; cursor: pointer;
+    background: var(--trusty-card-bg); border: 1px solid var(--trusty-border); border-radius: 0.375rem;
+    color: var(--trusty-text-primary); padding: 0.35rem 0.6rem; font-size: 0.85rem; cursor: pointer;
     max-width: 500px; min-width: 200px;
   }
-  .index-select:focus { outline: none; border-color: var(--color-accent); }
+  .index-select:focus { outline: none; border-color: var(--trusty-accent); }
 
   .kind-bar {
     display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem;
@@ -465,7 +465,7 @@
   }
 
   .svg-wrap {
-    background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 0.5rem;
+    background: var(--trusty-card-bg); border: 1px solid var(--trusty-border); border-radius: 0.5rem;
     overflow: auto; margin-bottom: 1.25rem; padding: 0.5rem;
   }
 
@@ -473,25 +473,25 @@
   .viz-node circle { transition: r 0.15s; }
   .viz-node:hover circle { r: 14; }
 
-  .sub-title { font-size: 1rem; font-weight: 600; color: var(--color-text-secondary); margin: 0 0 0.75rem; }
+  .sub-title { font-size: 1rem; font-weight: 600; color: var(--trusty-text-secondary); margin: 0 0 0.75rem; }
   .table-wrap { overflow-x: auto; margin-bottom: 1.5rem; }
   table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
   th {
     text-align: left; padding: 0.5rem 0.75rem;
-    background: var(--color-surface); color: var(--color-text-secondary); font-weight: 600;
-    border-bottom: 1px solid var(--color-border);
+    background: var(--trusty-card-bg); color: var(--trusty-text-secondary); font-weight: 600;
+    border-bottom: 1px solid var(--trusty-border);
   }
-  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--color-surface); color: var(--color-text-primary); }
+  td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--trusty-card-bg); color: var(--trusty-text-primary); }
   tr:last-child td { border-bottom: none; }
-  tr:hover td { background: var(--color-surface); }
-  td.path { font-size: 0.78rem; color: var(--color-text-secondary); max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
-  td.lang { font-size: 0.78rem; color: var(--color-text-muted); }
+  tr:hover td { background: var(--trusty-card-bg); }
+  td.path { font-size: 0.78rem; color: var(--trusty-text-secondary); max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
+  td.lang { font-size: 0.78rem; color: var(--trusty-text-muted); }
   .kind-pill { font-size: 0.75rem; font-weight: 600; }
   code {
     font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
-    background: var(--color-surface-code); padding: 0.1rem 0.35rem; border-radius: 0.25rem;
+    background: var(--trusty-surface-raised); padding: 0.1rem 0.35rem; border-radius: 0.25rem;
   }
-  .empty-hint { color: var(--color-text-secondary); font-size: 0.85rem; }
+  .empty-hint { color: var(--trusty-text-secondary); font-size: 0.85rem; }
   .clusters-grid { margin-top: 1rem; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
 </style>

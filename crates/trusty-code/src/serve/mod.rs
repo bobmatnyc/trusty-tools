@@ -101,6 +101,13 @@ pub const DEFAULT_HTTP_PORT: u16 = 7882;
 /// `fs.list_dir` (UI Phase-1) is the one group that needs NO shared state — a
 /// directory listing is a pure function of the filesystem at call time — so it
 /// registers with neither `sessions` nor `project`.
+/// `agents.*`/`skills.*` (issue #3449) are the Foundry GUI's catalog
+/// management surface — list/create/delete over the disk tier
+/// `crate::agents::resolve_agent` and `crate::skills::discover_skill_metadata`
+/// already recognise, plus the embedded/bundled roster each falls back to.
+/// Both register with immutable state resolved once here from `binding`
+/// (`AgentsCatalogState`/`SkillsCatalogState` — no `Mutex`, every operation is
+/// a stateless filesystem call at request time).
 /// What: builds an empty `Router` + a fresh `SessionRegistry`, calls
 /// `methods::register`, `crate::session::protocol::register`,
 /// `crate::fs_browse::protocol::register`, and
@@ -142,6 +149,7 @@ pub const DEFAULT_HTTP_PORT: u16 = 7882;
 /// `build_router_wires_session_methods`, `build_router_wires_task_run`,
 /// `build_router_is_projectless_without_a_project`,
 /// `build_router_wires_fs_list_dir`, `build_router_wires_workstream_methods`,
+/// `build_router_wires_agents_and_skills_catalog_methods`,
 /// `build_router_reconciles_dangling_active_pointer_on_boot`.
 pub async fn build_router(
     binding: ProjectBinding,
@@ -181,6 +189,14 @@ async fn build_router_at(
     methods::register(&mut router);
     crate::session::protocol::register(&mut router, sessions.clone(), workstreams.clone());
     crate::fs_browse::protocol::register(&mut router);
+    crate::agents::protocol::register(
+        &mut router,
+        crate::agents::protocol::AgentsCatalogState::new(agents_dir.clone(), binding.is_bound()),
+    );
+    crate::skills::protocol::register(
+        &mut router,
+        crate::skills::protocol::SkillsCatalogState::new(binding.root()),
+    );
     crate::task::protocol::register(
         &mut router,
         sessions.clone(),
@@ -336,6 +352,36 @@ mod tests {
             resp.error
         );
         assert!(resp.result.expect("result")["entries"].is_array());
+    }
+
+    /// `build_router` must also wire `agents.list`/`skills.list` (issue
+    /// #3449), so the Foundry GUI's Agents/Skills tabs are reachable over
+    /// the same `/rpc` endpoint as everything else.
+    #[tokio::test]
+    async fn build_router_wires_agents_and_skills_catalog_methods() {
+        let project = tempfile::tempdir().expect("project tempdir");
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let (router, _sessions, _workstreams) = build_router_at(
+            ProjectBinding::resolve(Some(project.path().to_path_buf())).expect("tempdir must bind"),
+            data_dir.path(),
+        )
+        .await
+        .expect("build_router_at");
+
+        for method in ["agents.list", "skills.list"] {
+            let req = Request {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: method.to_string(),
+                params: None,
+            };
+            let resp = router.dispatch(req, &test_ctx()).await;
+            assert!(
+                resp.error.is_none(),
+                "{method} must be registered, got {:?}",
+                resp.error
+            );
+        }
     }
 
     /// `DEFAULT_HTTP_PORT` must stay the documented value (7882) so a

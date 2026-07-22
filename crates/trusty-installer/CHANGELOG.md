@@ -6,17 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [0.4.5] — 2026-07-21
+
+### Fixed
+
+- `tctl install`'s health gate and the trusty-mpm supervisor's candidate-version comparison now probe the CONCRETE just-installed binary path instead of resolving a bare binary name — previously, on a host with an earlier-PATH `~/.cargo/bin/tm` shadowing the fresh `~/.local/bin/tm` prebuilt install (the default `cargo install trusty-mpm` layout), both checks silently read the STALE binary via PATH/priority-directory lookup, so the documented `curl | sh` web-install upgrade path could report success while leaving the live `tm` and its supervisor on the old version (closes #3554). The health gate additionally cross-checks the probed version against the version the installer believes it just placed, hard-erroring on any mismatch instead of a silent pass.
+- After a successful install, `tctl install` now detects whether the just-installed binary is actually the one a plain shell invocation resolves to. A genuine PATH shadow (an earlier, different copy of the same binary name) is reported loudly — naming both paths and both versions and what to do about it — and flips the member's outcome (and the process exit code) to a failure rather than a silent success (#3554).
+- `tctl upgrade`'s two non-daemon branches now also run the PATH-shadow check above (#3554 review): they previously got only the concrete-path health-gate half of the fix, so an upgrade could report the correct new version while giving no warning that the shell still resolved a stale, PATH-shadowed copy.
+- The PATH-shadow check's probe of the shadowing binary now goes through the same 10-second-timeout-guarded primitive the health gate uses, instead of an un-timed-out subprocess call (#3554 review) — an unresponsive shadowing binary (a stuck shell shim, a renamed/broken executable) degrades to an unknown shadowing version rather than hanging the unattended `curl | sh -s -- -y` install indefinitely.
+- The macOS trusty-mpm supervisor bootstrap no longer unconditionally resolves the real UID's live `gui/<uid>` launchd domain — `plist_bootstrap::install_mpm_supervisor_for` now takes an injected `SupervisorTarget` (home dir, launchd domain, and a `LaunchctlPort`) instead of reading two independent env-var escape hatches (`TCTL_MPM_SUPERVISOR_HOME_OVERRIDE` / `TCTL_MPM_SUPERVISOR_SKIP_LAUNCHCTL`, both removed). Previously a test/E2E that overrode only the home directory still bootstrapped into the real, live supervisor domain, because the domain and the `launchctl` calls were never actually gated by the home override — the installer could not be test-isolated on a host running the live stack (closes #3551). `StubLaunchctl` provides a first-class, always-available way to exercise the full write path (plist write, downgrade guard, bootout + bootstrap) without ever spawning a real `launchctl` subprocess.
+
+## [0.4.4] — 2026-07-20
 
 ### Added
 
 - `trusty-mpm-gui` joined the `trusty-mpm` signable set in `SIGNABLE_BINARIES` (`com.trusty.trusty-mpm.gui`), so `tctl sign trusty-mpm` and the automatic `tctl install` post-install hook also sign the GUI binary (if present under the install dir) with the stable Developer ID identity — fallback coverage for a bare `cargo install --path crates/trusty-mpm-gui`, alongside the GUI's own `bundle.macOS.signingIdentity` fix (closes #2951).
 - `tctl sign --verbose` (via the existing global `-v`/`--verbose` flag): prints the raw `security find-identity` probe output and which identity was selected, to help diagnose "no identity found" failures (closes #2939).
 - `tctl install --dry-run` previews the blast radius (members, binaries, planned launchd service actions) and exits 0 without installing anything — identical behaviour in TTY, non-TTY, and `--json` contexts (closes #2112).
+- `tctl install` now ends VERIFIED: after binaries + service bootstrap land, it automatically runs the `ensure` pass (`.mcp.json` patch + trusty-search index / trusty-memory palace registration) and a per-daemon health sweep, retrying a `down` launchd daemon once via `launchctl kickstart -k` before accepting the verdict (the #2498 "bootstrap succeeded but RunAtLoad never fired" flake). Prints a final green/red `VERIFIED`/`NOT VERIFIED` summary and folds the result into the same `--json` report / exit code CI already gates on. Skip with the new `--no-verify` flag (closes #2560).
+- `tctl install --force` overrides the new trusty-mpm supervisor downgrade guard (see Fixed, below) to explicitly allow replacing a registered supervisor with an older-or-equal version.
 
 ### Changed
 
 - **BREAKING for automation:** `tctl install` now REFUSES to run (exit 3) when stdin is not a TTY and neither `--yes` nor `--dry-run` was passed, instead of silently proceeding with a real install. Previously the blast-radius confirmation prompt was skipped entirely in non-TTY contexts (piped/scripted/agent-driven invocations), so an exploratory `tctl install` could reactivate real launchd services with no confirmation (#2112). Scripts and CI that relied on the old silent-proceed path must add `--yes`.
+
+### Fixed
+
+- `tctl install`'s trusty-mpm launchd supervisor bootstrap now honours `--no-service` / `TCTL_NO_SERVICE_BOOTSTRAP` like every other daemon member — previously it ran unconditionally regardless of the flag, which could bootout + replace a live production supervisor even when the operator explicitly opted out of touching launchd. It also now REFUSES to replace an already-registered supervisor with an older-or-equal version (comparing the registered vs. candidate `tm --version`, via `--force` to override), preventing a stale release from silently downgrading a newer live daemon (closes #3527).
 
 ### Fixed
 

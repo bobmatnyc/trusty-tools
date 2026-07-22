@@ -281,7 +281,7 @@ impl PalaceHandle {
     /// daemon already holds the lock, this returns `Err` (no handle), so the
     /// daemon process fails to start rather than serving in a broken state.
     /// Test: `registry_create_and_open` (default read-only path) and
-    /// `writer_intent_open_fails_loud_on_locked_palace` in the store tests.
+    /// `writer_intent_open_fails_loud_on_locked_*` in the store tests.
     pub fn open_with_intent(palace: &Palace, intent: OpenIntent) -> Result<Arc<PalaceHandle>> {
         let data_dir = &palace.data_dir;
         std::fs::create_dir_all(data_dir)

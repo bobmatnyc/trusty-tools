@@ -28,14 +28,16 @@ use std::sync::atomic::AtomicBool;
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
-use trusty_tui::{CommandDescriptor, PickerItem, ReplEvent, WorkstreamSummary};
+use trusty_tui::{CommandDescriptor, PickerItem, ReplEvent, StatuslineSegment, WorkstreamSummary};
 
 use crate::events::SessionEventEnvelope;
 
 use super::engine::{RECONNECT_BACKOFF, SESSION_STREAM_MAX_RECONNECTS, SSE_IDLE_TIMEOUT};
 use super::error::EngineError;
 use super::rpc::RpcHttpClient;
-use super::session_events::{forward_session_event, is_retryable_status};
+use super::session_events::{
+    forward_session_event, is_retryable_status, terminal_stream_failure_event,
+};
 use super::sse::SseLines;
 
 /// See module docs.
@@ -100,6 +102,42 @@ impl EngineState {
             .unwrap_or_else(|e| e.into_inner())
             .get(name)
             .cloned()
+    }
+
+    /// Snapshot the CURRENT `active_workstream` cache as a `StatuslineUpdate`
+    /// payload (DOC-50 §5.3, Slice 6), for callers that just changed it
+    /// (`setup`, the workstream-activation SSE loop) to push alongside
+    /// `WorkstreamUpdated`.
+    ///
+    /// Why: `ReplEvent::StatuslineUpdate` REPLACES `ReplApp::statusline`
+    /// wholesale (`crate::app::reduce::apply`'s `app.statusline = segments`)
+    /// — there is no per-segment upsert seam (DOC-50 §3.2's explicit
+    /// design: the ENGINE assembles the full current set on every push, the
+    /// shared TUI stays opaque to what each segment means). This MVP's
+    /// `CodeEngine` doesn't yet populate any OTHER segment (session id,
+    /// model, project — those are a future slice's work), so today this is
+    /// simply `[Workstream]` or `[]`; whoever adds those must fold them into
+    /// this same snapshot rather than pushing a second, competing
+    /// `StatuslineUpdate` that would stomp this one.
+    /// What: an empty `Vec` — collapsing the statusline's workstream segment
+    /// away entirely, not leaving a stale one — when no workstream is
+    /// active (deactivated, or never observed one); a one-element `Vec`
+    /// otherwise. Locks the SAME `active_workstream` mutex
+    /// `refresh_workstream_cache` just wrote, so callers should invoke this
+    /// immediately after awaiting that call.
+    /// Test: `engine_tests::statusline_segments_reflect_active_workstream_and_clear_on_none`.
+    pub(super) fn statusline_segments(&self) -> Vec<StatuslineSegment> {
+        self.active_workstream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|ws| {
+                vec![StatuslineSegment::Workstream {
+                    id: ws.id.clone(),
+                    name: ws.name.clone(),
+                }]
+            })
+            .unwrap_or_default()
     }
 
     /// Re-fetch `workstream.list` and refresh both `active_workstream` and
@@ -261,6 +299,17 @@ impl EngineState {
     /// [`SESSION_STREAM_MAX_RECONNECTS`]) on a `502`/`503` status, a
     /// transport error, an idle timeout, or a clean-but-premature stream
     /// close — surfacing each as `ReplEvent::ConnectionLost` first.
+    ///
+    /// Giving up (every exhaustion path below, not just the ones that return
+    /// `Err`) ALSO sends [`terminal_stream_failure_event`] before returning —
+    /// epic #3411's deferred Slice 3 review item: a `ConnectionLost` alone
+    /// during the retries is visible, but never clears `ReplApp::busy`, and
+    /// nothing downstream of this function yet turns an `Err` return into a
+    /// rendered event (that wiring is Slice 5's `process_event`, #3417, not
+    /// yet landed). Sending the terminal event here — rather than depending
+    /// on that future caller — is what actually rules out the "TUI looks
+    /// alive with a stuck spinner and no error text" silent-stall outcome the
+    /// review flagged.
     pub(super) async fn pump_session_events(
         &self,
         session_id: &str,
@@ -281,6 +330,10 @@ impl EngineState {
                         tokio::time::sleep(RECONNECT_BACKOFF).await;
                         continue 'reconnect;
                     }
+                    let _ = tx.send(terminal_stream_failure_event(format!(
+                        "daemon returned {status} after {SESSION_STREAM_MAX_RECONNECTS} \
+                         reconnect attempts; giving up"
+                    )));
                     return Err(EngineError::Status { url, status });
                 }
                 Err(source) => {
@@ -292,14 +345,34 @@ impl EngineState {
                         tokio::time::sleep(RECONNECT_BACKOFF).await;
                         continue 'reconnect;
                     }
+                    let _ = tx.send(terminal_stream_failure_event(format!(
+                        "connection failed after {SESSION_STREAM_MAX_RECONNECTS} reconnect \
+                         attempts: {source}; giving up"
+                    )));
                     return Err(EngineError::Transport { url, source });
                 }
             };
-            attempts = 0;
+            // NOT reset to 0 here (a prior revision did — HIGH finding: that
+            // reset `attempts` on every merely-successful TRANSPORT-level
+            // reconnect, before the inner loop ever got a chance to observe
+            // whether the STREAM itself made any progress. Against a daemon
+            // that accepts the connection but closes the stream immediately
+            // with no data every time — exactly `Ok(Ok(None))` below,
+            // exhausted — that made `attempts` count up to 1 and then get
+            // wiped back to 0 on every single reconnect, so
+            // `attempts < SESSION_STREAM_MAX_RECONNECTS` was permanently
+            // true and this function looped FOREVER, never reaching any
+            // exhaustion branch (`handle_input` never returning at all —
+            // strictly worse than the "silent `Ok(())`" stall epic #3411's
+            // review flagged, an unresponsive REPL rather than a merely
+            // quiet one). `attempts` now only resets on genuine progress:
+            // actually receiving a data payload, in the `Some(payload)` arm
+            // below.
             let mut lines = SseLines::new(resp);
             loop {
                 match tokio::time::timeout(SSE_IDLE_TIMEOUT, lines.next_data()).await {
                     Ok(Ok(Some(payload))) => {
+                        attempts = 0;
                         let Ok(envelope) = serde_json::from_str::<SessionEventEnvelope>(&payload)
                         else {
                             continue;
@@ -317,7 +390,18 @@ impl EngineState {
                             tokio::time::sleep(RECONNECT_BACKOFF).await;
                             continue 'reconnect;
                         }
-                        return Ok(());
+                        // Was `return Ok(())` — indistinguishable from a
+                        // genuinely successful turn, the exact silent-stall
+                        // bug epic #3411's deferred review item warned about:
+                        // the stream closed prematurely (no SessionDone/
+                        // SessionCancelled ever observed) on EVERY reconnect
+                        // attempt, yet the caller saw no error at all.
+                        let _ = tx.send(terminal_stream_failure_event(format!(
+                            "daemon closed the event stream after \
+                             {SESSION_STREAM_MAX_RECONNECTS} reconnect attempts without a \
+                             terminal session event; giving up"
+                        )));
+                        return Err(EngineError::StreamClosed { url });
                     }
                     Ok(Err(source)) => {
                         if attempts < SESSION_STREAM_MAX_RECONNECTS {
@@ -328,6 +412,10 @@ impl EngineState {
                             tokio::time::sleep(RECONNECT_BACKOFF).await;
                             continue 'reconnect;
                         }
+                        let _ = tx.send(terminal_stream_failure_event(format!(
+                            "stream error after {SESSION_STREAM_MAX_RECONNECTS} reconnect \
+                             attempts: {source}; giving up"
+                        )));
                         return Err(EngineError::Transport { url, source });
                     }
                     Err(_elapsed) => {
@@ -341,6 +429,10 @@ impl EngineState {
                             tokio::time::sleep(RECONNECT_BACKOFF).await;
                             continue 'reconnect;
                         }
+                        let _ = tx.send(terminal_stream_failure_event(format!(
+                            "no data from daemon within the idle timeout after \
+                             {SESSION_STREAM_MAX_RECONNECTS} reconnect attempts; giving up"
+                        )));
                         return Err(EngineError::Status {
                             url,
                             status: reqwest::StatusCode::REQUEST_TIMEOUT,

@@ -23,6 +23,33 @@ pub(super) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::BAD_GATEWAY || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
 }
 
+/// Build the terminal, VISIBLE-in-the-TUI event `pump_session_events` sends
+/// when it gives up reconnecting (`SESSION_STREAM_MAX_RECONNECTS` exhausted)
+/// without ever observing a `SessionDone`/`SessionCancelled` terminal event
+/// (epic #3411's deferred Slice 3 review item, closed out by Slice 6).
+///
+/// Why: every `ReplEvent::ConnectionLost` sent DURING a retry already renders
+/// visibly (`ReplApp::apply` pushes it to the status area), but
+/// `ConnectionLost` alone never clears `ReplApp::busy`/`streaming_idx` — only
+/// `AssistantOutput{done: true}` does. Without an event like this one, the
+/// LAST reconnect attempt failing left the input composer stuck on
+/// "streaming" forever with no error rendered in the chat itself: a silent
+/// stall, exactly the failure mode the review flagged as one unit tests on
+/// either side of the engine/TUI boundary would both pass while the
+/// integrated behavior is wrong.
+/// What: an `AssistantOutput{done: true, is_error: true}` chunk carrying
+/// `reason` — reusing the SAME "terminal event" vocabulary
+/// `forward_session_event` uses for a failed `SessionDone`, so `ReplApp`
+/// needs no new rendering path to display it.
+/// Test: `engine_tests::terminal_stream_failure_event_is_a_done_error_output`.
+pub(super) fn terminal_stream_failure_event(reason: String) -> ReplEvent {
+    ReplEvent::AssistantOutput {
+        chunk: format!("connection lost: {reason}"),
+        done: true,
+        is_error: true,
+    }
+}
+
 /// Translate one [`SessionEventEnvelope`] into zero or more [`ReplEvent`]s
 /// on `tx`. Returns `true` iff this event is terminal for the current chat
 /// turn (`SessionDone`/`SessionCancelled`) — the caller stops pumping.

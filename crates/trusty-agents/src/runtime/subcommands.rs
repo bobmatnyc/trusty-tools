@@ -55,7 +55,7 @@
 
 use anyhow::{Context, Result};
 
-use super::{postmortem, registry_cmds, service_cmds, session_cmds};
+use super::{postmortem, registry_cmds, service_cmds, session_cmds, system_cmd};
 use crate::{cli, debugger, inspection};
 
 /// Dispatch subcommand prefixes that own their own clap schema and must be
@@ -102,6 +102,8 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
         "config",
         // #3062: resume a checkpointed workflow run (`resume <run-id>`).
         "resume",
+        // system_status epic (#3052): `system status [--json]`.
+        "system",
     ];
     if args.len() > 1 {
         let candidate = &args[1];
@@ -195,6 +197,14 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
     // checkpointed workflow run from its first incomplete phase.
     if args.len() > 1 && args[1] == "resume" {
         super::workflow_mode::run_resume_subcommand(&args[2..]).await?;
+        return Ok(false);
+    }
+
+    // system_status epic (#3052): `trusty-agents system status [--json]` —
+    // CLI surface for the `system_status` tool, so subsystem health is
+    // checkable without burning an LLM turn.
+    if args.len() > 1 && args[1] == "system" {
+        system_cmd::run_system_subcommand(&args[2..]).await?;
         return Ok(false);
     }
 
@@ -315,6 +325,8 @@ pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Resul
             email: Option<String>,
             #[arg(long)]
             timezone: Option<String>,
+            #[arg(long)]
+            location: Option<String>,
         },
     }
 
@@ -328,11 +340,12 @@ pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Resul
                 println!("name:     {}", p.name);
                 println!("email:    {}", p.email.as_deref().unwrap_or("(not set)"));
                 println!("timezone: {}", p.timezone.as_deref().unwrap_or("(not set)"));
+                println!("location: {}", p.location.as_deref().unwrap_or("(not set)"));
                 println!("saved at: {}", UserProfile::profile_path().display());
             }
             None => println!(
                 "No profile set. Run `tagent` interactively (first-run interview), set \
-                 TAGENT_USER_NAME/_EMAIL/_TIMEZONE in .env.local, or run \
+                 TAGENT_USER_NAME/_EMAIL/_TIMEZONE/_LOCATION in .env.local, or run \
                  `tagent config profile set --name <name>`."
             ),
         },
@@ -340,6 +353,7 @@ pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Resul
             name,
             email,
             timezone,
+            location,
         } => {
             let mut profile = UserProfile::load().unwrap_or_default();
             if let Some(name) = name {
@@ -350,6 +364,9 @@ pub(super) async fn run_config_profile_subcommand(argv_tail: &[String]) -> Resul
             }
             if timezone.is_some() {
                 profile.timezone = timezone;
+            }
+            if location.is_some() {
+                profile.location = location;
             }
             if profile.created_at.is_empty() {
                 profile.created_at = chrono::Utc::now().to_rfc3339();

@@ -435,6 +435,59 @@ exit 1
         (dir, path)
     }
 
+    /// Like `write_mock_embedderd_crash_once`, but only the FIRST invocation
+    /// crashes — every later invocation (detected via a marker file dropped
+    /// on the first run, same technique as
+    /// `fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up`
+    /// in trusty-search's `embedder_fallback.rs`) behaves like
+    /// `write_mock_embedderd`: answers its own startup probe and then idles,
+    /// looping indefinitely, instead of crashing again.
+    ///
+    /// Why (issue #3635): drives the "transient crash, then sustained
+    /// health" regression test — a single crash followed by a genuinely
+    /// healthy respawn must still let `consecutive_failures` reset once
+    /// `wedge_reset_secs` of health has elapsed, so a LATER, unrelated crash
+    /// is not wrongly treated as a continuation of the first crash-storm.
+    /// What: first invocation (marker absent) answers exactly one JSON-RPC
+    /// request then exits non-zero, dropping the marker on its way in.
+    /// Every subsequent invocation (marker present) answers requests forever
+    /// like the plain healthy mock, until the test kills it.
+    /// Test: `supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up`.
+    fn write_mock_embedderd_crash_once_then_healthy() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd-crash-once-then-healthy.sh");
+        let marker = dir.path().join("crashed-once.marker");
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+MARKER="{marker}"
+if [ -f "$MARKER" ]; then
+  # Second and every later invocation: healthy — answer requests forever.
+  while IFS= read -r line; do
+    id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+    [ -n "$id" ] || id=1
+    printf '{{"jsonrpc":"2.0","result":{{"embeddings":[[0.1]]}},"id":%s}}\n' "$id"
+  done
+  exit 0
+fi
+touch "$MARKER"
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+[ -n "$id" ] || id=1
+printf '{{"jsonrpc":"2.0","result":{{"embeddings":[[0.1]]}},"id":%s}}\n' "$id"
+exit 1
+"#,
+                marker = marker.display(),
+            ),
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
     /// Best-effort liveness check via `kill -0 <pid>` (no signal sent, just
     /// an existence probe): success means the process still exists, failure
     /// means it is gone.
@@ -751,5 +804,337 @@ exit 1
             "supervisor never respawned the killed child within 5s — a \
              closed shutdown channel must not wedge ongoing supervision"
         );
+    }
+
+    /// PR #3560 review HIGH fix: `SupervisorHandle::has_given_up()` must flip
+    /// to `true` exactly when `supervision_loop`'s own `should_give_up` check
+    /// trips — this is the REAL signal trusty-search's
+    /// `FallbackEmbedderAdapter` now observes instead of an independently
+    /// counted request-failure proxy (see `embedder_fallback.rs`'s module
+    /// doc in trusty-search for the full rationale).
+    ///
+    /// Why: without a test pinning this transition, the give-up signal could
+    /// silently stop firing (e.g. a future refactor moves the `return` above
+    /// the `send`) and nothing would catch it — `FallbackEmbedderAdapter`
+    /// would then never trip at all, which is the OPPOSITE failure mode of
+    /// the bug this fix closes (search would hard-fail forever instead of
+    /// latching to the Rust ort fallback).
+    /// What: uses `write_mock_embedderd_crash_once` — every spawned instance
+    /// answers its own startup probe, then exits non-zero — so EVERY respawn
+    /// attempt counts as a fresh crash. With `max_restarts: 1` and
+    /// `backoff_max_secs: 0` (near-instant respawns), the loop crosses
+    /// `should_give_up`'s `consecutive_failures > max_restarts` ceiling after
+    /// the second crash. Asserts the flag is still `false` immediately after
+    /// the first spawn, then polls `has_given_up()` under a bounded timeout
+    /// (never a fixed sleep-and-hope) until it flips.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_gives_up_after_max_restarts_flips_has_given_up() {
+        let (_dir, binary) = write_mock_embedderd_crash_once();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 0,
+            max_restarts: 1,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, _pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+
+        let handle = supervisor.start_supervisor_task();
+
+        assert!(
+            !handle.has_given_up(),
+            "must not be given up immediately after the first spawn — the \
+             supervisor has not even observed the first crash yet"
+        );
+
+        // Generous ceiling (45s) so a loaded CI runner cannot false-fail —
+        // the poll interval is short (10ms) so a passing run still returns
+        // in milliseconds; only a genuinely stuck supervisor eats the full
+        // budget.
+        let gave_up = tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                if handle.has_given_up() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            gave_up.is_ok(),
+            "has_given_up() never flipped to true within 45s of a \
+             persistent crash loop with max_restarts=1"
+        );
+    }
+
+    /// Issue #3635 regression test: a transient single crash, followed by
+    /// genuine sustained health, must NOT leave the supervisor in a state
+    /// that is one step from a premature give-up. This is the "opposite
+    /// failure" the #3635 fix must not introduce: giving up too eagerly on
+    /// legitimate, well-separated transient restarts.
+    ///
+    /// Why: `supervisor_gives_up_after_max_restarts_flips_has_given_up`
+    /// (above) proves the fix closes the crash-storm hole; this test proves
+    /// it does not overcorrect. A SECOND, forced live-process crash was
+    /// deliberately ruled out for this test: `RestartTrigger` classification
+    /// (`ProcessExit` vs. `Unhealthy`) is an inherent, scheduler-dependent
+    /// race between `child.wait()` and the reader task's EOF detection (see
+    /// this module's `write_mock_embedderd_crash_once` doc comment and
+    /// #3635's own root-cause analysis) — independent of this fix,
+    /// `consecutive_wedge_restarts` can ALSO increment on either crash, and
+    /// its own reset check (unmodified, still evaluated once at the top of
+    /// the loop before the blocking wait — see `wedge_counter_should_reset`'s
+    /// call site above the `select!`) cannot observe a health window that
+    /// elapses entirely within a single already-blocking iteration. Forcing
+    /// a second live crash to specifically validate `consecutive_failures`'s
+    /// reset therefore could not be built without an unrelated dependency on
+    /// that pre-existing, out-of-scope wedge-counter timing behavior — which
+    /// would make the test flaky for reasons that have nothing to do with
+    /// this fix (confirmed empirically: an earlier version of this test that
+    /// forced a second crash intermittently failed via a
+    /// "wedge-restart storm" give-up, not a crash-storm one). The threshold
+    /// arithmetic of the reset itself (`elapsed >= reset_secs`) is already
+    /// covered in isolation by `wedge_counter_should_reset_after_window_resets`
+    /// and friends above, which `consecutive_failures`'s reset reuses
+    /// verbatim (see supervisor.rs's post-trigger reset check).
+    ///
+    /// De-flaking note (CI follow-up on #3646): an earlier version of this
+    /// test observed the FIRST crash by polling `pid_slot` for a
+    /// zero-crossing under a 45s bound — that polls the exact same
+    /// scheduler-dependent `child.wait()`/reader-task-EOF race described
+    /// above and above `write_mock_embedderd_crash_once`'s doc comment, and
+    /// intermittently timed out on a slower/more-contended CI runner
+    /// (`supervisor_tests.rs:960: supervisor never observed the first
+    /// (deliberate) crash within 45s`, twice on the same PR). This version
+    /// never tries to OBSERVE that intermediate transition at all: the mock
+    /// is deterministic BY CONSTRUCTION (first invocation always crashes
+    /// after answering its own probe; every later invocation is healthy),
+    /// so instead of racing a wall-clock bound against one specific signal,
+    /// it retries a REAL `embed_batch` call in a loop until one succeeds.
+    /// Retrying absorbs ANY amount of internal crash-detection/respawn
+    /// latency: a call against the about-to-crash/already-dead first
+    /// process fails FAST by construction (`StdioEmbedderClient::embed_batch`
+    /// fails immediately if already known unhealthy, and otherwise races the
+    /// reply against the unhealthy signal — see `stdio.rs`'s
+    /// `await_reply_or_unhealthy` — so it never blocks for long), so the
+    /// loop just spins past it and succeeds as soon as the healthy
+    /// second-generation process is in place, however long the internal
+    /// detection took. The completion condition is a genuine successful
+    /// response — not a timing-dependent observation of an intermediate,
+    /// racy signal.
+    /// What: `write_mock_embedderd_crash_once_then_healthy` crashes exactly
+    /// once, then answers requests indefinitely on every later invocation.
+    /// `max_restarts: 1` means a single crash is normal and must never trip
+    /// give-up by itself, regardless of which counter happens to observe it.
+    /// `wedge_reset_secs: 1` keeps the health-window wait short. Sequence:
+    ///   1. Spawn (crashes immediately after its own startup probe). Retry
+    ///      `embed_batch` in a loop (bounded, 45s) until it succeeds —
+    ///      proving the supervisor has already processed the crash and
+    ///      respawned a genuinely live, responsive process, regardless of
+    ///      how long that took.
+    ///   2. Assert `has_given_up()` is `false` — a single tolerated crash at
+    ///      `max_restarts: 1` must never trip give-up.
+    ///   3. Sleep comfortably longer than `wedge_reset_secs` while the
+    ///      respawned process idles untouched (the sustained-health window
+    ///      the fix's reset gate is keyed on).
+    ///   4. Issue ANOTHER real `embed_batch` call through the live
+    ///      `client_slot` and assert it succeeds — proving the sidecar is
+    ///      STILL genuinely operational after the health window, not merely
+    ///      "hasn't crashed again by luck". Also confirms `pid_slot` now
+    ///      reports a genuinely new process (safe to read directly at this
+    ///      point — the respawn that produced it completed well over a
+    ///      second ago, alongside the client swap this step's successful
+    ///      call already proves happened, so there is no remaining window
+    ///      for `pid_slot`'s store — which lands after the client swap in
+    ///      the respawn code — to still be pending).
+    ///   5. Assert `has_given_up()` is still `false`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up()
+    {
+        let (_dir, binary) = write_mock_embedderd_crash_once_then_healthy();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 0,
+            max_restarts: 1,
+            wedge_reset_secs: 1,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        let handle = supervisor.start_supervisor_task();
+
+        // Step 1: retry a real embed call until the supervisor has
+        // processed the (deterministic, by construction) first crash and
+        // respawned a genuinely live process — see the de-flaking note
+        // above for why this replaces a `pid_slot`-zero-crossing poll.
+        let first_success = tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let client = client_slot.read().await.clone();
+                if client
+                    .embed_batch(vec!["post-crash liveness probe".to_string()])
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            first_success.is_ok(),
+            "supervisor never became responsive again after the first \
+             (deliberate) crash within 45s"
+        );
+
+        // Step 2.
+        assert!(
+            !handle.has_given_up(),
+            "must not be given up after tolerating exactly one crash under \
+             max_restarts=1"
+        );
+
+        // Step 3: comfortably longer than `wedge_reset_secs` (1s) so the
+        // sustained-health gate has unambiguously elapsed.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Step 4: prove the sidecar is STILL genuinely operational, not
+        // merely "hasn't crashed again by luck" — a real embed call through
+        // the live client must still succeed after the health window.
+        let client = client_slot.read().await.clone();
+        let embed_result = client
+            .embed_batch(vec!["post-health-window liveness check".to_string()])
+            .await;
+        assert!(
+            embed_result.is_ok(),
+            "sidecar must still be genuinely responsive after the \
+             sustained-health window: {embed_result:?}"
+        );
+        let healthy_pid = pid_slot.load(Ordering::Acquire);
+        assert!(
+            healthy_pid != 0 && healthy_pid != initial_pid,
+            "pid_slot must report a genuinely new, live process by now (was \
+             {initial_pid}, now {healthy_pid})"
+        );
+
+        // Step 5.
+        assert!(
+            !handle.has_given_up(),
+            "has_given_up() must still be false after a full sustained- \
+             health window with no further crash"
+        );
+
+        handle.shutdown().await;
+    }
+
+    /// The definitive death signal (epic #3524 slice 6 PR-4 follow-up,
+    /// code-critic BLOCK on PR #3584) must flip to `true` when the supervisor
+    /// actually exhausts `max_restarts` — never respawning again.
+    ///
+    /// Why: this is the regression the swap-back watchdog now depends on
+    /// instead of the ambiguous `pid==0` + stall-tracker heuristic that could
+    /// false-trigger against a healthy sidecar recovering from an ordinary
+    /// idle-shutdown (see `trusty-search`'s `swap_back_watchdog` module doc
+    /// for the full false-positive analysis this signal replaces).
+    /// What: a mock child that always crashes after answering exactly one
+    /// startup probe (`write_mock_embedderd_crash_once`), `max_restarts: 1`
+    /// so exhaustion is fast, `backoff_max_secs: 1` to keep the test itself
+    /// fast. Captures `terminated_signal()` BEFORE detaching (must happen
+    /// before `start_supervisor_task` consumes `self`), then polls it until
+    /// `true` or a generous timeout.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_terminated_signal_fires_after_exhausting_max_restarts() {
+        let (_dir, binary) = write_mock_embedderd_crash_once();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            // Zero backoff so the crash -> respawn -> exhaustion sequence
+            // completes as fast as possible; this test asserts on the
+            // give-up signal, not on backoff timing.
+            backoff_max_secs: 0,
+            max_restarts: 1,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        // Must capture this BEFORE start_supervisor_task consumes `supervisor`.
+        let terminated = supervisor.terminated_signal();
+        assert!(
+            !terminated.load(Ordering::Acquire),
+            "must start false — nothing has failed yet"
+        );
+
+        let _handle = supervisor.start_supervisor_task();
+
+        // Generous ceiling (45s) so a loaded CI runner cannot false-fail —
+        // the poll interval is short (10ms) so a passing run still returns
+        // in milliseconds; only a genuinely stuck supervisor eats the full
+        // budget.
+        let gave_up = tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                if terminated.load(Ordering::Acquire) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            gave_up.is_ok(),
+            "terminated_signal never flipped true within 45s of exhausting \
+             max_restarts=1 against an always-crashing mock child"
+        );
+        assert_eq!(
+            pid_slot.load(Ordering::Acquire),
+            0,
+            "pid_slot must also be 0 once the supervisor has given up"
+        );
+    }
+
+    /// The definitive death signal must NEVER flip true on an intentional,
+    /// cooperative `shutdown()` — only on genuine restart exhaustion.
+    ///
+    /// Why: this is the other half of the regression guard — a watchdog
+    /// gating on `terminated_signal()` must not fire just because the daemon
+    /// (or the idle-shutdown watchdog) deliberately stopped a perfectly
+    /// healthy sidecar.
+    /// What: a long-lived mock child, shut down cooperatively via
+    /// `SupervisorHandle::shutdown()`, asserts `terminated_signal()` stays
+    /// `false` throughout and after.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_terminated_signal_stays_false_on_intentional_shutdown() {
+        let (_dir, binary) = write_mock_embedderd();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        assert!(pid_slot.load(Ordering::Acquire) > 0);
+
+        let terminated = supervisor.terminated_signal();
+        let handle = supervisor.start_supervisor_task();
+
+        handle.shutdown().await;
+
+        assert!(
+            !terminated.load(Ordering::Acquire),
+            "an intentional cooperative shutdown must never set terminated_signal"
+        );
+        assert_eq!(pid_slot.load(Ordering::Acquire), 0);
     }
 }

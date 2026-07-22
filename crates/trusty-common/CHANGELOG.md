@@ -7,6 +7,248 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **Flaky env-mutation-race unit test fixed (#3608), plus an audit sweep
+  for the same bug class (#3607/#3608 cross-reference #2718):**
+  - `update::tests::verify_installed_binary_finds_binary_via_path` (#3608)
+    mutated `PATH` via `unsafe { std::env::set_var(...) }` OUTSIDE any
+    `ENV_LOCK` critical section, so both that mutation and the awaited
+    `verify_installed_binary` call ran unguarded against the other
+    `verify_installed_binary_*` tests in the same file. Now wraps the PATH
+    mutation in its own brief `ENV_LOCK` section (matching the file's
+    existing convention) AND tags all four `verify_installed_binary_*`
+    tests `#[serial(update_verify_installed_binary_env)]` so the whole
+    async body — including the `.await` a `std::sync::Mutex` guard can't
+    span without tripping `clippy::await_holding_lock` — is isolated from
+    sibling tests touching the same `HOME`/`CARGO_HOME`/`PATH` vars.
+  - Audit follow-up: `OPENROUTER_API_KEY` was mutated (or read as an
+    implicit fallback) by tests in three places using three UNCOORDINATED
+    lock groups — `inference::credentials::{resolver,dotenv}::tests` under
+    the named `#[serial(dotenv_credential_env)]` group,
+    `memory_core::semantic_consolidation::tests::resolve_openrouter_api_key_falls_back_to_env`
+    under a bare (unnamed, and therefore different) `#[serial]`, and
+    `memory_core::dream::tests`'s five `EnvVarGuard`-based tests under NO
+    lock at all. `memory_core::semantic_consolidation::tests::inference_available_false_without_key`
+    also implicitly depends on the var being absent (via
+    `inference_available`'s env fallback) with no lock whatsoever. All of
+    these now share the single `dotenv_credential_env` serial group.
+
+- **`EmbedderSupervisor`'s give-up latch never tripped under a
+  crash-loop-after-successful-probe pattern (issue #3635).**
+  `consecutive_failures` — the crash-storm counter `should_give_up()` depends
+  on — was reset to `0` unconditionally on any successful respawn probe, so a
+  subprocess that reliably answered its startup probe and then immediately
+  crashed again could never escalate past `max_restarts`: every crash was
+  wiped by the next "successful" respawn before it could count. The
+  supervision loop now applies the same sustained-health gate
+  `consecutive_wedge_restarts` already used (`wedge_counter_should_reset`,
+  #1450 HIGH follow-up) to `consecutive_failures` too — evaluated
+  immediately after each trigger resolves (not merely at the top of the loop
+  before the blocking wait, which would lag a full crash-cycle behind a
+  genuine recovery window) — so mere respawn-probe success no longer resets
+  it; only `config.wedge_reset_secs` of observed health since the last crash
+  does. A transient single crash followed by genuine sustained health still
+  resets normally.
+  - Test: `supervisor_gives_up_after_max_restarts_flips_has_given_up` (now
+    passes deterministically via the crash-storm counter itself, not by
+    accident via the sibling wedge counter),
+    `supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up`.
+
+- **De-flaked `supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up`
+  (test-only follow-up to #3635, no product-code change).** The test added
+  above observed the first (deliberate) crash by polling `pid_slot` for a
+  zero-crossing under a bounded wall-clock timeout — racing the same
+  scheduler-dependent `child.wait()`/reader-task-EOF timing #3635 itself
+  documents, and intermittently timed out on a slower/more-contended CI
+  runner. It no longer tries to observe that intermediate transition at
+  all: since the mock is deterministic by construction (first invocation
+  always crashes after its own probe; every later invocation is healthy),
+  the test now retries a real `embed_batch` call in a loop until one
+  succeeds — a genuine successful response, not a timing-dependent
+  observation of an intermediate signal, absorbing any amount of internal
+  crash-detection/respawn latency.
+
+- **`search_index::ensure_project_indexed` no longer hardcodes
+  `allow_sensitive_path: true` (issue #2914).** The parameter is now explicit
+  per caller: trusty-code's task-start caller still opts in (its `directory`
+  binding can legitimately live under an OS-temp prefix, issue #2747), but
+  trusty-mpm's session-launch caller now passes `false`, since a real session
+  workspace is never an OS-temp path — closing the ephemeral test/self-heal
+  index leak into the production trusty-search index set.
+
+- **CoreML is now opt-in, not the default, execution provider on Apple
+  Silicon (issue #3493 P0 part 2).** CoreML measurably degraded embedding
+  accuracy (~0.99 mean cosine similarity vs a genuine
+  `sentence-transformers` reference, vs 1.000000 on the CPU EP), silently
+  erasing the fp32 default-model accuracy fix from #3486. `FastEmbedder`
+  now defaults to CPU on every platform, including Apple Silicon; set
+  `TRUSTY_DEVICE=gpu` to explicitly opt back into CoreML acceleration
+  (`TRUSTY_COREML_COMPUTE_UNITS` still selects the CoreML variant once
+  opted in). `TRUSTY_DEVICE=cpu` keeps working as before. Local
+  measurement on Apple Silicon showed no consistent throughput cost from
+  the CPU default (CPU and CoreML(ANE) landed within noise of each other,
+  ~127-141 texts/sec on a 300-text batch).
+- **`default_model_matches_sentence_transformers_reference` is no longer
+  `#[ignore]`d (issue #3493 P0 part 2).** This is the correctness gate that
+  would have caught the CoreML-default accuracy regression; CI now
+  pre-seeds its fp32 `Qdrant/all-MiniLM-L6-v2-onnx` model alongside the
+  existing quantized-model pre-seed so it runs on every PR without
+  HuggingFace-download flakiness.
+
+---
+## [0.24.1] — 2026-07-21
+
+Patch release closing unpublished source drift under the already-published
+0.24.0 (issue #3366 defect class): two commits landed on `main` *after*
+0.24.0 was published to crates.io (from `831103dd`) without a version bump,
+so the live 0.24.0 tarball does not contain them. This release carries both.
+
+## [0.24.0] — 2026-07-21
+
+### Added
+
+- **`EmbedderSupervisor::terminated_signal()` (epic #3524 slice 6 PR-4
+  follow-up, code-critic BLOCK on trusty-search PR #3584).** A new
+  `Arc<AtomicBool>` accessor, captured the same way `child_pid_slot` is
+  captured from `spawn_stdio`'s return tuple — before
+  `start_supervisor_task()` consumes `self`. The supervision loop sets it to
+  `true` at the exact instant, and ONLY the instant, it decides to give up
+  permanently (`should_give_up`: exhausted `max_restarts` or a wedge-restart
+  storm) — never on a clean exit, an intentional cooperative `shutdown()`,
+  or an ordinary respawn. Gives callers (trusty-search's swap-back watchdog)
+  a DEFINITIVE "this supervised process is unrecoverably dead" signal
+  instead of inferring it from `child_pid_slot == 0`, which is also `0`
+  during an ordinary intentional shutdown and therefore ambiguous on its
+  own.
+  - Test: `supervisor_terminated_signal_fires_after_exhausting_max_restarts`
+    (a real, always-crashing mock child with `max_restarts: 1`),
+    `supervisor_terminated_signal_stays_false_on_intentional_shutdown` (a
+    real cooperative `shutdown()` must never set it).
+- **`monitor::search_client::resolve_search_url` regression coverage (issue
+  #3545 follow-up, trusty-search PR #3602 review).** No production behavior
+  change in this crate — `resolve_search_url` already discovered a daemon
+  registered via `write_daemon_addr("trusty-search", …)`. The trusty-search
+  PR #3602 review found that trusty-search's CLI daemon-discovery fix had
+  stopped calling `write_daemon_addr` at all, silently starving this
+  resolver (and its trusty-search/trusty-installer consumers) of any
+  writer. trusty-search restored a writer for the default
+  (`TRUSTY_DATA_DIR`-unset) instance; this crate adds
+  `resolve_search_url_discovers_non_default_registered_address`, a
+  regression test pinning that `resolve_search_url` correctly picks up a
+  non-default-port address written that way, so a future regression here
+  fails loudly instead of silently breaking `trusty-search monitor
+  status`/`monitor indexes`/`monitor tui`'s `[r]` reindex hotkey.
+- **`ExecutionProvider::Mps` + `resolve_expected_python_provider` (epic #3524
+  slice 6, PR 2/5, refs #3530, #3493 P1)** — a new `Mps` variant on
+  `embedder::ExecutionProvider` for the opt-in Python/MPS embedding sidecar
+  (`trusty-embedderd-py`), plus a pure `resolve_expected_python_provider()`
+  function mirroring the sidecar's own device resolver
+  (`trusty_embed_sidecar.model.resolve_device`): `TRUSTY_DEVICE=cpu` → `Cpu`;
+  else aarch64-macOS → `Mps`; else an `embedder-cuda` build → `Cuda`; else
+  `Cpu`. Lets the parent `trusty-search` process predict the sidecar's
+  provider without an RPC round-trip, the same pattern
+  `resolve_expected_provider` already uses for the ORT sidecar — fixes
+  `/health` reporting `CoreML` for a sidecar that never touches ONNX Runtime.
+- **`FastEmbedder::model_name()` (issue #3530 — the `(Q)` observability
+  bug)** — `FastEmbedder` now stores the RESOLVED `EmbeddingModel` variant at
+  construction (tracking the primary→CPU-retry→fallback-model chain in
+  `with_cache_size`) and exposes it via `model_name()` — one of
+  `"all-MiniLM-L6-v2"` (fp32 default) or `"all-MiniLM-L6-v2-int8"` (the
+  `TRUSTY_EMBEDDER_MODEL=int8` opt-in). Lets `trusty-search` and
+  `trusty-embedderd` report the true loaded model instead of the stale
+  hardcoded `"AllMiniLML6V2Q"` string that predated the fp32-default flip
+  (#3486 / #3493 P0).
+- `update::verify_installed_binary_at_path`: health-gates a binary at a KNOWN, CONCRETE path via `--version`, never resolving by name. Complements the existing name-based `verify_installed_binary` (which intentionally searches `$CARGO_HOME/bin`/`~/.cargo/bin` then `~/.local/bin` then `$PATH`) for callers that already know exactly where they just placed a binary — a name-based re-resolution afterward is shadowable by a stale earlier-priority/earlier-PATH copy of the same name (trusty-installer#3554).
+- **`EmbedderClient::last_reported_device()`** — a new default-`None` trait
+  method for a real (wire-reported) backend device readback, as opposed to
+  the build-features/env-predicted `ExecutionProvider` (epic #3524 slice 5,
+  issue #3493 P1). `StdioEmbedderClient` overrides it, capturing the optional
+  `device` field the Python/MPS sidecar now echoes in its response frames;
+  every other transport keeps the `None` default unchanged.
+- **`SupervisorHandle::has_given_up()`** — a new non-blocking readback of
+  whether `EmbedderSupervisor`'s supervision loop has permanently given up
+  respawning its sidecar (crossed `max_restarts` on either the crash-storm or
+  wedge-storm counter — see `should_give_up`), exposed via a second one-way
+  `watch` channel alongside the existing shutdown signal (PR #3560 review,
+  HIGH fix). Lets a caller (trusty-search's `FallbackEmbedderAdapter`)
+  observe the supervisor's actual give-up decision instead of reconstructing
+  an independent, faster-firing proxy at the request layer.
+
+### Fixed
+
+- **`EmbedderSupervisor` could silently stop supervising, and never give up,
+  after a wedge-triggered crash whose respawn attempt then failed** (CI
+  follow-up, PR [#3560](https://github.com/bobmatnyc/trusty-tools/pull/3560)):
+  `supervision_loop`'s top-of-loop check treated an empty `child_slot` as
+  unconditional proof of an explicit cooperative shutdown and returned
+  immediately. That is only true for the shutdown path — the `Unhealthy`
+  (wedge-kill) branch also empties `child_slot` before attempting a respawn,
+  and if that respawn itself failed, the next iteration saw the same empty
+  slot and silently exited without ever incrementing `consecutive_failures`
+  or reaching `should_give_up`/`gave_up_tx`. A daemon could end up with a
+  dead sidecar, no supervision, and no fallback signal ever firing. Added
+  `RestartTrigger::RespawnFailed` so an empty slot with no shutdown in flight
+  is now treated as one more crash-cycle instead of a silent early return.
+
+## [0.23.7] — 2026-07-21
+
+Publishes the `catchup::{pause, generate_catchup_json}` API to crates.io.
+This module was merged to main under PR [#3544](https://github.com/bobmatnyc/trusty-tools/pull/3544)
+without a corresponding version bump, so it landed in the `0.23.6` source tree
+but is absent from the `0.23.6` package already published on crates.io — the
+published `0.23.6` predates this module. That mismatch blocked publishing
+`trusty-mpm`, whose `core::catchup` re-exports these symbols. `0.23.7` exists
+solely to give the catchup API a real, publishable version.
+
+### Added
+
+- **`catchup::generate_catchup_json` + `catchup::pause` module** ([#3543](https://github.com/bobmatnyc/trusty-tools/issues/3543), [#3544](https://github.com/bobmatnyc/trusty-tools/pull/3544)): a structured (JSON) sibling to `generate_catchup_context`'s markdown digest (`CatchupJson`/`PausedSessionJson`/`RecentMemoryJson`), plus a new `pause::write_pause_snapshot` writer that emits the exact session-snapshot section shape `session_finder` already parses, and a `git::capture_git_status` helper (branch/last-commit/uncommitted-summary) for its `## Git Context` section. Backs trusty-mpm's new `session_context_catchup` / `session_context_pause` MCP tools.
+
+## [0.23.6] — 2026-07-20
+
+Release cut of the two embedding-performance fixes below
+([#3500](https://github.com/bobmatnyc/trusty-tools/pull/3500),
+[#3511](https://github.com/bobmatnyc/trusty-tools/pull/3511); refs #3486 / #3493)
+so the shared embedder-inference path (`trusty-embedderd`, `trusty-search`)
+picks them up on rebuild.
+
+### Fixed
+
+- **Performance (PR [#3500](https://github.com/bobmatnyc/trusty-tools/pull/3500)):** `FastEmbedder`'s ORT intra-op thread default is now
+  platform/execution-provider-conditional instead of an unconditional `1`.
+  The `1` pin was introduced by PR #1668 to fix a real CUDA deferred-embed
+  deadlock (AL2023 Linux + CUDA EP + dynamically-loaded ORT,
+  code-intelligence #1542) but applied to every build, including the
+  CoreML/CPU-EP path used on Apple Silicon where no such deadlock exists —
+  throttling macOS embedding throughput ~3.5× for no safety benefit (issue
+  #3493 P0). `default_ort_intra_threads()` now resolves to `1` only when the
+  `embedder-cuda` feature is compiled in (the only build that can register
+  the CUDA EP); every other build resolves to
+  `std::thread::available_parallelism()`, matching fastembed's own
+  per-session default. `TRUSTY_ORT_INTRA_THREADS` remains the operator
+  override for either default. `DEFAULT_ORT_INTRA_THREADS` (a constant) is
+  replaced by the `default_ort_intra_threads()` function — the only
+  consumer was this crate's own resolver, so no downstream crate references
+  it.
+- **Performance / accuracy (PR [#3511](https://github.com/bobmatnyc/trusty-tools/pull/3511)):** `FastEmbedder`'s default embedding model is now
+  `EmbeddingModel::AllMiniLML6V2` (fp32, fastembed's own natively-shipped
+  non-quantized variant), replacing the previous default,
+  `AllMiniLML6V2Q` (INT8, dynamically quantised). INT8 was measured to be
+  both ~2.1× slower (its dequant/requant ops are themselves expensive on the
+  CPU EP this model actually runs on — CoreML rejects the INT8 op set
+  outright) and less accurate (0.9897 mean cosine similarity vs a genuine
+  `sentence-transformers` reference, vs 1.000000 for fp32 — see issues
+  #3486 / #3493 P0). INT8 remains available via
+  `TRUSTY_EMBEDDER_MODEL=int8` (or `quantized` / `q`) for operators who need
+  the smaller ~23MB on-disk footprint (fp32 is ~87MB) more than speed or
+  accuracy; the existing two-model fallback-on-init-failure safety net is
+  preserved, just parameterised by the resolved default instead of
+  hardcoded. `EMBED_DIM`, `RequireStaticInputShapes`, and all existing batch
+  caps are unchanged.
+
+## [0.23.5] — 2026-07-20
+
 ### Added
 
 - `BM25Index::score_query_all_with_filter` — same ranking as `score_query_all`,

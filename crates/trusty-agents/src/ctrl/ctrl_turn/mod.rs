@@ -204,22 +204,20 @@ pub(crate) async fn build_ctrl_turn_system_prompt(
         ));
     }
 
-    if let Some(up) = &ctrl.user_profile {
-        let mut block = format!("\n\n## User Context\nUser name: {}", up.name);
-        if let Some(email) = up.email.as_deref() {
-            block.push_str(&format!("\nEmail: {email}"));
-        }
-        if let Some(tz) = up.timezone.as_deref() {
-            block.push_str(&format!("\nTimezone: {tz}"));
-        }
-        system_prompt.push_str(&block);
-    }
-
     {
-        let now_str = chrono::Local::now()
-            .format("%Y-%m-%d %H:%M:%S %Z")
-            .to_string();
-        system_prompt.push_str(&format!("\n\nCurrent date and time: {}", now_str));
+        let runner_debug = format!("{:?}", agent_cfg.agent.runner);
+        let provider_label =
+            crate::llm::credentials::pick_credentials(Some(agent_cfg.agent.runner))
+                .map(|c| c.label())
+                .unwrap_or("none");
+        let identity = super::config::AgentIdentity {
+            agent_name: &agent_cfg.agent.name,
+            model: &agent_cfg.agent.model,
+            runner: &runner_debug,
+            provider: provider_label,
+        };
+        system_prompt.push_str("\n\n");
+        system_prompt.push_str(&super::config::render_user_context_block(&identity));
     }
 
     if !is_ctrl_persona {

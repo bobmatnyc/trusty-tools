@@ -32,13 +32,17 @@ use super::managed::filter_live_sessions;
 /// Why: extracting the parse-and-decide logic from the I/O driver makes it
 /// unit-testable without stdin/tmux. The driver calls parse, checks the variant,
 /// and shells out only for Resume and LaunchNew.
-/// What: six variants cover every valid and invalid input the picker can
+/// What: seven variants cover every valid and invalid input the picker can
 /// receive. [`Self::ConfirmRestart`] is the #2148 safety default: a bare Enter
 /// that WOULD have silently restarted (destructively recreated the tmux pane
 /// of) a stopped/errored session instead asks for an explicit numeric choice.
 /// [`Self::Unresumable`] (#2595) is the analogous safety gate for a DEAD
 /// session — no confirmation would ever help, since the resume/restart is
 /// guaranteed to fail, so the driver never round-trips to the daemon for it.
+/// [`Self::SlotDeleted`] (#3034) is the analogous safety gate for a TOMBSTONED
+/// slot number — typing (or bare-Entering onto) a number the daemon reports as
+/// deleted must be a clear, explicit error, never a silent fallthrough to
+/// whichever session now happens to occupy a neighboring row.
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
 /// `guided_picker_bare_enter_live_session_resumes_first`,
 /// `guided_picker_bare_enter_stopped_session_requires_confirm`,
@@ -46,10 +50,12 @@ use super::managed::filter_live_sessions;
 /// `guided_picker_numeric_launch_new`, `guided_picker_out_of_range_unrecognised`,
 /// `guided_picker_non_numeric_unrecognised`,
 /// `guided_picker_bare_enter_unresumable_session_blocked`,
-/// `guided_picker_numeric_unresumable_session_blocked`.
+/// `guided_picker_numeric_unresumable_session_blocked`,
+/// `guided_picker_numeric_deleted_slot_blocked`,
+/// `guided_picker_delete_prefix_on_deleted_slot_blocked`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PickerDecision {
-    /// Resume the session at 0-based index into the sessions slice.
+    /// Resume the session at this 0-based index into the sessions slice.
     Resume(usize),
     /// Launch a brand-new session.
     LaunchNew,
@@ -75,6 +81,13 @@ pub(crate) enum PickerDecision {
     /// daemon round-trip; it prints the dead-session notice and points the
     /// operator at `d<N>` (delete) instead.
     Unresumable(usize),
+    /// Selection (bare Enter, an explicit numeric choice, or `d<N>`) targeted
+    /// the 0-based-indexed row whose slot the daemon reports as deleted —
+    /// `ManagedSessionSummary::deleted == true` (#3034). This is the tombstone
+    /// resolution safety gate: it MUST be a clear, explicit outcome, never a
+    /// fallthrough to `Unrecognised` (which would look identical to a typo)
+    /// or — worse — a silent match against a neighboring live session.
+    SlotDeleted(usize),
 }
 
 /// Scope describing which sessions the picker operates over and how to launch new.
@@ -86,7 +99,10 @@ pub(crate) enum PickerDecision {
 /// [`run_tty_picker`] agnostic to its caller.
 /// What: `source_id` filters the daemon session list (`None` = every managed
 /// session); `repo_url` is the launch-new target (`None` disables launch-new with
-/// an actionable hint instead of attaching to the wrong project).
+/// an actionable hint instead of attaching to the wrong project). `sort`/`term`
+/// (#3483) are the `tm ls` inline sort-keyword + filter grammar
+/// ([`parse_ls_terms`]) re-applied on every re-fetch inside [`run_tty_picker`]'s
+/// loop so the picker's ordering/filtering never drifts from the initial menu.
 /// Test: constructed by `guided::try_show_picker` and [`run_ls_connector`];
 /// behavior is covered by the picker's e2e path.
 pub(crate) struct PickerScope {
@@ -94,13 +110,20 @@ pub(crate) struct PickerScope {
     pub(crate) source_id: Option<String>,
     /// Git-root path used as the launch-new target, or `None` to disable it.
     pub(crate) repo_url: Option<String>,
+    /// Sort order re-applied after every re-fetch (#3483).
+    pub(crate) sort: SessionSortArg,
+    /// Case-insensitive substring filter re-applied after every re-fetch
+    /// (#3483); `None` shows every (live) session.
+    pub(crate) term: Option<String>,
 }
 
 impl PickerScope {
     /// Build a single-project scope (bare `tm` guided default).
     ///
     /// Why: the guided default always knows both the project slug and the git
-    /// root, so both fields are always populated.
+    /// root, so both fields are always populated. It predates (and is out of
+    /// scope for) the `tm ls` sort/filter grammar, so `sort`/`term` are always
+    /// the no-op defaults here.
     /// What: returns a scope filtered to `source_id` with `repo_url` as the
     /// launch target.
     /// Test: exercised by `guided::try_show_picker`.
@@ -108,6 +131,8 @@ impl PickerScope {
         Self {
             source_id: Some(source_id.to_string()),
             repo_url: Some(repo_url.to_string()),
+            sort: SessionSortArg::Recent,
+            term: None,
         }
     }
 }
@@ -138,10 +163,37 @@ pub(crate) async fn fetch_managed_raw(
 /// Why: the static table and the picker share one filtering/sorting policy so
 /// the two views never diverge (#1809/#1841).
 /// What: deserializes `ManagedListResponse`; when `all` is false, drops
-/// decommissioned tombstones via [`filter_live_sessions`]; when `all` is true,
-/// keeps every session but stable-sorts tombstones to the end.
+/// decommissioned records via [`filter_live_sessions`] (a `"deleted"` slot
+/// tombstone, #3034, is NOT a decommissioned record and always passes through
+/// this branch too — see [`super::managed::is_live_session_state`]'s doc).
+/// When `all` is true, keeps every row — live, decommissioned, AND tombstoned
+/// — but stable-sorts ONLY `"decommissioned"` records to the end.
+///
+/// `"deleted"` (#3034) tombstones are deliberately EXCLUDED from that
+/// sink-to-bottom sort key, even though a reviewer might expect both "dead"
+/// states to be grouped identically. The two are not interchangeable: a
+/// `"decommissioned"` row is a soft-retired but still-present record — sinking
+/// it to the bottom is a pre-existing (#1809) forensic declutter for the
+/// `--all` view, where recency/liveness ordering is more useful than slot
+/// order. A `"deleted"` tombstone, by contrast, IS the numbered slot itself —
+/// Bob's #3034 directive requires it to render at its ORIGINAL position in the
+/// numbered listing, not wherever a liveness sort would relocate it, so an
+/// operator scanning the table top-to-bottom sees the exact gap where a
+/// session used to be. `[`render_session_table`](super::managed::render_session_table)
+/// and the picker menu both label each row with its own `slot` field (not a
+/// recomputed position), so this is not merely cosmetic — a sink-to-bottom
+/// move for tombstones would visually separate a deleted slot from its live
+/// neighbors, breaking the "see it where it was" guarantee even though the
+/// printed number itself would still be technically correct. `fetched` already
+/// arrives in ascending-slot order from the daemon's `numbered_summaries`,
+/// and `Vec::sort_by_key` is stable, so every row that is not
+/// `"decommissioned"` (live rows AND tombstones alike) keeps that incoming
+/// slot order untouched.
 /// Test: `picker_filter_excludes_decommissioned_keeps_active`,
-/// `ls_source_id_filter_selects_correct_slug` in `tests_behavior_c_tests.rs`.
+/// `ls_source_id_filter_selects_correct_slug` in `tests_behavior_c_tests.rs`;
+/// `parse_scoped_sessions_all_keeps_tombstone_in_slot_order` in
+/// `commands/session_tests.rs` covers the sink-to-bottom exclusion this doc
+/// describes.
 pub(crate) fn parse_scoped_sessions(
     raw: &str,
     all: bool,
@@ -149,12 +201,165 @@ pub(crate) fn parse_scoped_sessions(
     let fetched = serde_json::from_str::<ManagedListResponse>(raw)?.sessions;
     let sessions = if all {
         let mut s = fetched;
+        // Sink ONLY soft-retired "decommissioned" records — never "deleted"
+        // slot tombstones, which must stay in their original slot position
+        // (see this function's doc for the full reasoning).
         s.sort_by_key(|sess| u8::from(sess.state == "decommissioned"));
         s
     } else {
         filter_live_sessions(fetched)
     };
     Ok(sessions)
+}
+
+/// Sort order for the `tm ls` / `tm sessions ls` table and picker (#3483).
+///
+/// Why: the repo owner asked for selectable recent/alpha ordering expressed as
+/// an inline positional keyword (`tm ls recent|alpha …`), NOT a `--sort` flag —
+/// see [`parse_ls_terms`] for the grammar that produces this value.
+/// What: `Recent` (the default) orders by most-recently-active first; `Alpha`
+/// orders case-insensitively by session name.
+/// Test: `sort_sessions_recent_orders_by_last_activity`,
+/// `sort_sessions_alpha_orders_by_name_case_insensitive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SessionSortArg {
+    /// Most-recently-active session first (falls back to `created_at` when
+    /// `last_activity_at` is absent; a session with neither sorts last).
+    #[default]
+    Recent,
+    /// Alphabetical by session `name`, case-insensitive.
+    Alpha,
+}
+
+/// Resolve `tm ls`'s / `tm sessions ls`'s positional `terms` into a sort mode
+/// and an optional filter substring.
+///
+/// Why (PM correction): sort/filter must be bare positional words, not
+/// `--sort`/`--filter` flags — mirroring the `tm ticket <issue> [system]`
+/// precedent (a positional keyword with a default) rather than introducing a
+/// new flag convention.
+/// What: grammar — if the FIRST word case-insensitively equals `recent` or
+/// `alpha`, it is consumed as the sort keyword and every remaining word
+/// (joined with a single space) becomes the filter (`None` if none remain).
+/// Otherwise the sort defaults to [`SessionSortArg::Recent`] and EVERY word
+/// (joined with a single space) is the filter. No words at all → `(Recent,
+/// None)`, i.e. bare `tm ls` is unchanged. This means a filter term that
+/// happens to equal a sort keyword (e.g. filtering for the literal substring
+/// "alpha") is reachable by prefixing the OTHER keyword: `tm ls recent alpha`
+/// sorts by recency and filters for "alpha".
+/// Test: `parse_ls_terms_empty_defaults_recent_no_filter`,
+/// `parse_ls_terms_recent_keyword_only`, `parse_ls_terms_alpha_keyword_only`,
+/// `parse_ls_terms_keyword_case_insensitive`,
+/// `parse_ls_terms_recent_with_filter`, `parse_ls_terms_alpha_with_filter`,
+/// `parse_ls_terms_non_keyword_first_word_is_filter`,
+/// `parse_ls_terms_multi_word_filter_without_keyword_joins_with_space`,
+/// `parse_ls_terms_keyword_then_filter_equal_to_other_keyword`.
+pub(crate) fn parse_ls_terms(terms: &[String]) -> (SessionSortArg, Option<String>) {
+    match terms.split_first() {
+        None => (SessionSortArg::Recent, None),
+        Some((first, rest)) if first.eq_ignore_ascii_case("recent") => {
+            (SessionSortArg::Recent, join_non_empty(rest))
+        }
+        Some((first, rest)) if first.eq_ignore_ascii_case("alpha") => {
+            (SessionSortArg::Alpha, join_non_empty(rest))
+        }
+        Some(_) => (SessionSortArg::Recent, join_non_empty(terms)),
+    }
+}
+
+/// Join `words` with a single space, or `None` when empty.
+fn join_non_empty(words: &[String]) -> Option<String> {
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+/// Case-insensitive substring filter over a session's visible identifying
+/// columns (#3483).
+///
+/// Why: the operator scans `id`, `name`, the project slug, `state`, and `task`
+/// on the rendered table/picker — the filter should match anything they can
+/// actually see, not an internal-only field.
+/// What: keeps a session when `term` (lowercased) is a substring of ANY of:
+/// `id`, `name`, `source_id` (project), `state`, `task`. A `None`/absent field
+/// is simply skipped. `term = None` is a no-op (returns `sessions` unchanged).
+/// Test: `filter_sessions_by_term_matches_name`,
+/// `filter_sessions_by_term_matches_task`,
+/// `filter_sessions_by_term_matches_source_id`,
+/// `filter_sessions_by_term_is_case_insensitive`,
+/// `filter_sessions_by_term_no_match_returns_empty`,
+/// `filter_sessions_by_term_none_is_noop`.
+pub(crate) fn filter_sessions_by_term(
+    sessions: Vec<ManagedSessionSummary>,
+    term: Option<&str>,
+) -> Vec<ManagedSessionSummary> {
+    let Some(term) = term else {
+        return sessions;
+    };
+    let needle = term.to_lowercase();
+    sessions
+        .into_iter()
+        .filter(|s| session_matches_term(s, &needle))
+        .collect()
+}
+
+/// Pure predicate backing [`filter_sessions_by_term`]; `needle_lower` must
+/// already be lowercased.
+fn session_matches_term(s: &ManagedSessionSummary, needle_lower: &str) -> bool {
+    [
+        Some(s.id.as_str()),
+        Some(s.name.as_str()),
+        s.source_id.as_deref(),
+        Some(s.state.as_str()),
+        s.task.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|field| field.to_lowercase().contains(needle_lower))
+}
+
+/// Sort `sessions` in place per [`SessionSortArg`] (#3483).
+///
+/// Why: shared by the static table (`tm ls` / `tm sessions ls`) and the
+/// interactive picker so both views order sessions identically.
+/// What: `Recent` sorts descending by [`recency_key`] (most recent first);
+/// `Alpha` sorts ascending, case-insensitively, by `name`. Both use the
+/// stable `sort_by`, so equal keys preserve the daemon's original relative
+/// order.
+/// Test: `sort_sessions_recent_orders_by_last_activity`,
+/// `sort_sessions_recent_falls_back_to_created_at`,
+/// `sort_sessions_alpha_orders_by_name_case_insensitive`.
+pub(crate) fn sort_sessions(sessions: &mut [ManagedSessionSummary], sort: SessionSortArg) {
+    match sort {
+        SessionSortArg::Recent => {
+            sessions.sort_by(|a, b| recency_key(b).cmp(recency_key(a)));
+        }
+        SessionSortArg::Alpha => {
+            sessions.sort_by_key(|s| s.name.to_lowercase());
+        }
+    }
+}
+
+/// Best-available recency signal for a session (#3483).
+///
+/// Why: `last_activity_at` reflects actual usage (the daemon updates it on
+/// every interaction), which is the signal an operator scanning `tm ls`
+/// actually wants — a session touched five minutes ago should outrank one
+/// merely CREATED first. `created_at` is the fallback for legacy/additive
+/// records that predate the activity timestamp; a session with neither sorts
+/// last (empty string is the lexicographic minimum).
+/// What: RFC 3339 timestamps compare correctly as plain strings because the
+/// daemon always emits them in the same normalized (UTC, fixed-precision)
+/// form.
+/// Test: covered indirectly by `sort_sessions_recent_orders_by_last_activity`
+/// and `sort_sessions_recent_falls_back_to_created_at`.
+fn recency_key(s: &ManagedSessionSummary) -> &str {
+    s.last_activity_at
+        .as_deref()
+        .or(s.created_at.as_deref())
+        .unwrap_or("")
 }
 
 /// Fetch and filter managed sessions in one call — the shared picker fetch path.
@@ -177,40 +382,89 @@ pub(crate) async fn fetch_live_sessions(
     parse_scoped_sessions(&raw, all)
 }
 
+/// Find the 0-based position in `sessions` whose stable `slot` equals `n`
+/// (issue #3034).
+///
+/// Why: since the daemon assigns slot numbers, a typed number no longer maps
+/// to `n - 1` positionally — filtering (by `--source-id`, or a tombstoned row
+/// dropped from an older daemon's response) can leave gaps, so every
+/// number→session resolution must search by the `slot` field rather than
+/// computing an index arithmetically. Centralizing the search here is what
+/// guarantees `parse_picker_choice` can never silently resolve a typed number
+/// to the WRONG session merely because a neighboring slot disappeared.
+/// What: linear search (menus are small); returns the position or `None`.
+/// Test: exercised indirectly by every `guided_picker_numeric_*` test.
+fn find_slot(sessions: &[ManagedSessionSummary], n: u32) -> Option<usize> {
+    sessions.iter().position(|s| s.slot == n)
+}
+
+/// Decide a picker choice for the (already-located) session at `idx`.
+///
+/// Why: bare Enter and an explicit numeric choice share every safety check
+/// except the restart-confirmation gate (which applies ONLY to bare Enter on
+/// index 0 — an explicit numeric choice always dispatches directly, per
+/// #2148's original design). Factoring the shared checks out here is what
+/// keeps the tombstone gate (#3034) and the dead-session gate (#2595)
+/// exhaustively applied to BOTH input styles without duplicating the checks.
+/// What: `PickerDecision::SlotDeleted(idx)` when `sessions[idx].deleted`
+/// (checked FIRST — a deleted slot can never be resumed, confirmed, or
+/// flagged merely unresumable); else `Unresumable(idx)` when
+/// `sessions[idx].unresumable`; else `ConfirmRestart(idx)` only when
+/// `bare_enter_needs_restart` is `true`; else `Resume(idx)`.
+/// Test: `guided_picker_numeric_deleted_slot_blocked`,
+/// `guided_picker_bare_enter_unresumable_session_blocked`,
+/// `guided_picker_numeric_unresumable_session_blocked`.
+fn decide_for_index(
+    sessions: &[ManagedSessionSummary],
+    idx: usize,
+    bare_enter_needs_restart: bool,
+) -> PickerDecision {
+    let s = &sessions[idx];
+    if s.deleted {
+        PickerDecision::SlotDeleted(idx)
+    } else if s.unresumable {
+        PickerDecision::Unresumable(idx)
+    } else if bare_enter_needs_restart {
+        PickerDecision::ConfirmRestart(idx)
+    } else {
+        PickerDecision::Resume(idx)
+    }
+}
+
 /// Parse one line of picker input into a [`PickerDecision`].
 ///
 /// Why: separating parse-and-decide from the I/O driver makes the dispatch
 /// logic unit-testable without needing a real stdin, tmux, or daemon. Folding
 /// `first_needs_restart` in here (rather than deciding safety in the I/O
 /// driver) keeps the destructive-default guard (#2148) exhaustively
-/// unit-testable alongside every other picker-input case. `unresumable` (#2595)
-/// is folded in the same way: a session flagged dead by the daemon must never
-/// reach `Resume`/`ConfirmRestart` from EITHER a bare Enter or an explicit
-/// numeric choice — checking it here, ahead of both branches, is the single
-/// place that guarantee can never regress.
-/// What: `session_count` is the number of existing sessions in the menu (the
-/// menu slot `session_count + 1` is always "launch new"); `first_needs_restart`
-/// is true when the session at index 0 is `stopped`/`errored` — i.e. resuming
-/// it goes through the daemon's restart path, which can recreate its tmux pane
-/// (see [`super::guided_resume::needs_restart`]); `unresumable[i]` is the
-/// server-computed dead-workspace flag for the session at 0-based index `i`
-/// (`ManagedSessionSummary::unresumable`, #2595) — a slice, not a single bool,
-/// because an EXPLICIT numeric choice can target ANY index, not just 0.
+/// unit-testable alongside every other picker-input case. `unresumable`
+/// (#2595) and `deleted` (#3034) are folded in the same way via
+/// [`decide_for_index`]: a session flagged dead, or a slot flagged deleted, by
+/// the daemon must never reach `Resume`/`ConfirmRestart` from EITHER a bare
+/// Enter or an explicit numeric choice.
+/// What: `sessions` is the FULL numbered menu — live rows AND tombstoned rows
+/// (`ManagedSessionSummary::deleted`, #3034) alike, since a typed number must
+/// be able to resolve to a tombstone and produce `SlotDeleted` rather than
+/// falling through to `Unrecognised` or (worse) silently matching a
+/// neighboring row. Numbers are read off each session's stable `slot` field
+/// (via [`find_slot`]), never a positional index, since filtering can leave
+/// gaps. `first_needs_restart` is true when the session at position 0 is
+/// `stopped`/`errored` — i.e. resuming it goes through the daemon's restart
+/// path, which can recreate its tmux pane (see
+/// [`super::guided_resume::needs_restart`]).
 ///   • `"q"` / `"Q"` → `Quit`
-///   • empty / whitespace, `session_count == 0` → `LaunchNew`
-///   • empty / whitespace, `session_count > 0`, session 0 is dead →
-///     `Unresumable(0)` (#2595 — checked BEFORE the restart-confirm gate)
-///   • empty / whitespace, `session_count > 0`, session 0 is live → `Resume(0)`
-///   • empty / whitespace, `session_count > 0`, session 0 needs a restart →
-///     `ConfirmRestart(0)` (#2148: no longer an implicit destructive default)
-///   • `N` (1..=session_count), session `N-1` is dead → `Unresumable(N-1)`
-///     (#2595 — an explicit numeric choice no longer bypasses this gate)
-///   • `N` (1..=session_count) → `Resume(N-1)` (0-based index) — an EXPLICIT
-///     numeric choice always restarts/resumes directly, confirm or not
-///   • `session_count + 1` → `LaunchNew`
-///   • `d<N>` / `d <N>` (1..=session_count) → `Delete(N-1)` (#2304); the driver
-///     still runs a confirm/force-confirm prompt before deleting — this is the
-///     REMEDY the driver points a dead-session pick at
+///   • empty / whitespace, `sessions` empty → `LaunchNew`
+///   • empty / whitespace, `sessions` non-empty → [`decide_for_index`] on
+///     position 0, gated by `first_needs_restart`
+///   • `N` matching some `sessions[i].slot` → [`decide_for_index`] on `i`
+///     (an EXPLICIT numeric choice never applies the restart-confirm gate —
+///     it always dispatches directly, confirm or not, per #2148)
+///   • `N` == `(highest displayed slot) + 1` (or `1` when `sessions` is
+///     empty) → `LaunchNew`
+///   • `d<N>` / `d <N>` matching a LIVE `sessions[i].slot` → `Delete(i)`
+///     (#2304); the driver still runs a confirm/force-confirm prompt before
+///     deleting. Matching a TOMBSTONED slot → `SlotDeleted(i)` (#3034 — no
+///     double-delete, no silent no-op).
 ///   • anything else → `Unrecognised`
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
 /// `guided_picker_bare_enter_live_session_resumes_first`,
@@ -220,52 +474,51 @@ pub(crate) async fn fetch_live_sessions(
 /// `guided_picker_out_of_range_unrecognised`,
 /// `guided_picker_non_numeric_unrecognised`,
 /// `guided_picker_bare_enter_unresumable_session_blocked`,
-/// `guided_picker_numeric_unresumable_session_blocked`.
+/// `guided_picker_numeric_unresumable_session_blocked`,
+/// `guided_picker_numeric_deleted_slot_blocked`,
+/// `guided_picker_delete_prefix_on_deleted_slot_blocked`,
+/// `guided_picker_launch_new_uses_highest_slot_with_gaps`.
 pub(crate) fn parse_picker_choice(
     line: &str,
-    session_count: usize,
+    sessions: &[ManagedSessionSummary],
     first_needs_restart: bool,
-    unresumable: &[bool],
 ) -> PickerDecision {
     let choice = line.trim();
     if choice.eq_ignore_ascii_case("q") {
         return PickerDecision::Quit;
     }
-    // #2304: `d<N>` / `d <N>` deletes the session at menu slot N. Parsed before
-    // the numeric-resume branch so the `d` prefix is unambiguous. Deleting a
-    // dead session is exactly the intended remedy, so this branch is NOT
-    // gated by `unresumable`.
+    let next_slot = sessions.last().map(|s| s.slot + 1).unwrap_or(1);
+    // #2304: `d<N>` / `d <N>` deletes the LIVE session at slot N. Parsed
+    // before the numeric-resume branch so the `d` prefix is unambiguous.
+    // Deleting a dead (unresumable, but not yet deleted) session is exactly
+    // the intended remedy, so this branch is NOT gated by `unresumable` — but
+    // a slot the daemon already reports `deleted` (#3034) cannot be deleted
+    // again, so it resolves to `SlotDeleted` instead of a silent no-op.
     if let Some(rest) = choice.strip_prefix(['d', 'D']) {
-        if let Ok(n) = rest.trim().parse::<usize>()
-            && n >= 1
-            && n <= session_count
+        return match rest
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .and_then(|n| find_slot(sessions, n))
         {
-            return PickerDecision::Delete(n - 1);
-        }
-        return PickerDecision::Unrecognised;
-    }
-    if choice.is_empty() {
-        if session_count == 0 {
-            return PickerDecision::LaunchNew;
-        }
-        if unresumable.first().copied().unwrap_or(false) {
-            return PickerDecision::Unresumable(0);
-        }
-        return if first_needs_restart {
-            PickerDecision::ConfirmRestart(0)
-        } else {
-            PickerDecision::Resume(0)
+            Some(idx) if sessions[idx].deleted => PickerDecision::SlotDeleted(idx),
+            Some(idx) => PickerDecision::Delete(idx),
+            None => PickerDecision::Unrecognised,
         };
     }
-    if let Ok(n) = choice.parse::<usize>() {
-        if n >= 1 && n <= session_count {
-            let idx = n - 1;
-            if unresumable.get(idx).copied().unwrap_or(false) {
-                return PickerDecision::Unresumable(idx);
-            }
-            return PickerDecision::Resume(idx);
+    if choice.is_empty() {
+        if sessions.is_empty() {
+            return PickerDecision::LaunchNew;
         }
-        if n == session_count + 1 {
+        return decide_for_index(sessions, 0, first_needs_restart);
+    }
+    if let Ok(n) = choice.parse::<u32>() {
+        if let Some(idx) = find_slot(sessions, n) {
+            // An EXPLICIT numeric choice always dispatches directly — the
+            // restart-confirm gate applies ONLY to bare Enter (#2148).
+            return decide_for_index(sessions, idx, false);
+        }
+        if n == next_slot {
             return PickerDecision::LaunchNew;
         }
     }
@@ -295,6 +548,9 @@ pub(crate) fn parse_picker_choice(
 ///   • `Delete(i)` (#2304) → [`super::picker_delete::confirm_and_delete`] runs a
 ///     confirm (force-confirm for a running session) then the managed→local
 ///     routed delete; redisplay the re-fetched menu afterwards;
+///   • `SlotDeleted(i)` (#3034) → print a "session N was deleted" notice and
+///     redisplay the SAME menu — no daemon round-trip, and never a
+///     fallthrough to whichever session now occupies a neighboring slot;
 ///   • `Quit` / EOF / `Unrecognised` → print notice and return `Ok`.
 ///
 /// #2678: both `Resume` and `LaunchNew` can end in a tmux hand-off — either a
@@ -320,32 +576,40 @@ pub(crate) async fn run_tty_picker(
 ) -> anyhow::Result<()> {
     loop {
         eprintln!();
-        let new_idx = sessions.len() + 1;
+        // #3034: the menu number is each session's STABLE daemon-assigned
+        // slot, never a recomputed positional index — a tombstoned row keeps
+        // its slot in the printed menu too, so an operator who typed that
+        // number from an earlier listing sees exactly why it no longer
+        // resolves to a session, rather than it silently vanishing.
+        let new_idx = sessions.last().map(|s| s.slot + 1).unwrap_or(1);
         // #2148: bare Enter must not silently restart (kill+recreate the tmux
         // pane of) a stopped/errored session — only used to pick the menu's
         // default hint and to gate `parse_picker_choice`'s bare-Enter branch.
+        // A tombstoned position 0 is never `stopped`/`errored` in this sense
+        // (`decide_for_index` checks `deleted` first, ahead of this flag).
         let first_needs_restart = sessions
             .first()
-            .map(|s| super::guided_resume::needs_restart(&s.state))
+            .map(|s| !s.deleted && super::guided_resume::needs_restart(&s.state))
             .unwrap_or(false);
-        // #2595: server-computed dead-workspace flag, one per session, in menu
-        // order — the single source `parse_picker_choice` and the menu render
-        // both read so they can never disagree about which slot is dead.
-        let unresumable: Vec<bool> = sessions.iter().map(|s| s.unresumable).collect();
         if sessions.is_empty() {
             eprintln!("tm:   [Enter] launch new session");
             eprintln!("tm:   [q]     quit");
         } else {
-            for (i, s) in sessions.iter().enumerate() {
+            for s in sessions.iter() {
+                if s.deleted {
+                    // #3034: the slot stays reserved — never silently reused
+                    // by a later session — so the operator sees exactly which
+                    // number is now dead instead of it disappearing from the
+                    // menu.
+                    eprintln!("tm:   [{}] -- deleted --", s.slot);
+                    continue;
+                }
                 if s.unresumable {
                     // #2595: workspace is gone for good — never offer resume/restart;
                     // point straight at the delete remedy instead.
                     eprintln!(
                         "tm:   [{}] {} ({}) — DEAD: workspace removed; use [d{}] to remove the record",
-                        i + 1,
-                        s.name,
-                        s.state,
-                        i + 1
+                        s.slot, s.name, s.state, s.slot
                     );
                     continue;
                 }
@@ -361,20 +625,27 @@ pub(crate) async fn run_tty_picker(
                 } else {
                     s.state.as_str()
                 };
-                eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, shown_state);
+                eprintln!("tm:   [{}] {} {} ({})", s.slot, verb, s.name, shown_state);
             }
             eprintln!("tm:   [{new_idx}] launch new session");
             eprintln!("tm:   [d<N>] delete session N (e.g. d1)");
             eprintln!("tm:   [q] quit");
-            if unresumable.first().copied().unwrap_or(false) {
+            let first = &sessions[0];
+            if first.deleted {
+                eprintln!("tm: [Enter] is a DELETED slot — type another number, or [q] to quit");
+            } else if first.unresumable {
                 eprintln!(
-                    "tm: [Enter] is DEAD (workspace removed) — type [d1] to remove it, or choose another"
+                    "tm: [Enter] is DEAD (workspace removed) — type [d{}] to remove it, or choose another",
+                    first.slot
                 );
             } else if first_needs_restart {
-                // #2148: no implicit destructive default — an explicit [1] is required.
-                eprintln!("tm: [Enter] does NOT restart — type [1] to confirm the restart");
+                // #2148: no implicit destructive default — an explicit number is required.
+                eprintln!(
+                    "tm: [Enter] does NOT restart — type [{}] to confirm the restart",
+                    first.slot
+                );
             } else {
-                eprintln!("tm: default: [1] resume most recent");
+                eprintln!("tm: default: [{}] resume most recent", first.slot);
             }
         }
         eprint!("tm: > ");
@@ -387,7 +658,7 @@ pub(crate) async fn run_tty_picker(
             break;
         } // EOF (Ctrl-D): exit cleanly.
 
-        match parse_picker_choice(&line, sessions.len(), first_needs_restart, &unresumable) {
+        match parse_picker_choice(&line, &sessions, first_needs_restart) {
             PickerDecision::Quit => {
                 eprintln!("tm: quit.");
                 break;
@@ -434,7 +705,7 @@ pub(crate) async fn run_tty_picker(
                 );
                 eprintln!(
                     "tm: type [{}] to confirm the restart, or [q] to quit.",
-                    i + 1
+                    sessions[i].slot
                 );
                 continue;
             }
@@ -450,7 +721,19 @@ pub(crate) async fn run_tty_picker(
                 );
                 eprintln!(
                     "tm: run [d{}] to remove the record, or choose another session.",
-                    i + 1
+                    sessions[i].slot
+                );
+                continue;
+            }
+            // #3034: selection resolved to a slot the daemon reports as
+            // deleted — this is the exact misdirection #3034 reports: a
+            // number captured from an earlier listing must error clearly
+            // rather than silently falling through to a neighboring session.
+            // No daemon round-trip; redisplay the SAME menu.
+            PickerDecision::SlotDeleted(i) => {
+                eprintln!(
+                    "tm: session [{}] was deleted — choose another number, or [q] to quit.",
+                    sessions[i].slot
                 );
                 continue;
             }
@@ -469,7 +752,11 @@ pub(crate) async fn run_tty_picker(
 
         // Detached or session ended — re-fetch the list before redisplaying.
         // #1809: the shared fetch path applies the same live-only tombstone filter.
+        // Issue TBD: re-apply the scope's filter/sort so the redisplayed menu
+        // never drifts from the one the operator picked against.
         sessions = fetch_live_sessions(client, url, scope.source_id.as_deref(), false).await?;
+        sessions = filter_sessions_by_term(sessions, scope.term.as_deref());
+        sort_sessions(&mut sessions, scope.sort);
     }
     Ok(())
 }
@@ -510,6 +797,7 @@ pub(crate) fn should_show_picker(
 /// project only when it is a GitHub-backed git checkout.
 /// Test: parse tests `cli_parses_ls_*` and the gate tests
 /// `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_ls_connector(
     client: &reqwest::Client,
     url: &str,
@@ -517,6 +805,8 @@ pub(crate) async fn run_ls_connector(
     source_id: Option<String>,
     current: bool,
     all: bool,
+    sort: SessionSortArg,
+    term: Option<String>,
 ) -> anyhow::Result<()> {
     // `--current` derives the source_id from the cwd git remote, exactly like
     // `tm session ls --current`. `--source-id` and `--current` are mutually
@@ -532,9 +822,12 @@ pub(crate) async fn run_ls_connector(
 
     // Cheap pre-gate: `--json`, `--all`, or any non-interactive stream never
     // fetches for the picker — delegate straight to the static renderer, which
-    // owns the raw `--json` passthrough and the `--all` tombstone sort.
+    // owns the raw `--json` passthrough and the `--all` tombstone sort. `sort`/
+    // `term` ride along (the static renderer applies them; `--json` ignores
+    // them, matching `--all`'s existing "no effect on --json" precedent).
     if json || all || !stdin_tty || !stdout_tty {
-        return super::managed::session_ls(client, url, json, sid.as_deref(), all).await;
+        return super::managed::session_ls(client, url, json, sid.as_deref(), all, sort, term)
+            .await;
     }
 
     // Interactive stream: fetch the live sessions once. On any fetch error
@@ -543,9 +836,20 @@ pub(crate) async fn run_ls_connector(
     let sessions = match fetch_live_sessions(client, url, sid.as_deref(), false).await {
         Ok(s) => s,
         Err(_) => {
-            return super::managed::session_ls(client, url, false, sid.as_deref(), false).await;
+            return super::managed::session_ls(
+                client,
+                url,
+                false,
+                sid.as_deref(),
+                false,
+                sort,
+                term,
+            )
+            .await;
         }
     };
+    let mut sessions = filter_sessions_by_term(sessions, term.as_deref());
+    sort_sessions(&mut sessions, sort);
 
     if !should_show_picker(stdin_tty, stdout_tty, json, all, sessions.len()) {
         // 0 sessions on a TTY: print the static "no managed sessions" line rather
@@ -563,6 +867,8 @@ pub(crate) async fn run_ls_connector(
     let scope = PickerScope {
         source_id: sid,
         repo_url,
+        sort,
+        term,
     };
     run_tty_picker(client, url, &scope, sessions).await
 }

@@ -14,6 +14,7 @@
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use serial_test::serial;
 use tower::ServiceExt;
 
 use crate::api::server::routes::build_router;
@@ -137,8 +138,14 @@ async fn reachable_today_matches_documented_set() {
 /// the boolean is computed correctly, not just absent because nothing
 /// resolved.
 /// What: Holds `ENV_LOCK` (the only global mutation this test performs) for
-/// its full body; restores the env var on the way out.
+/// its full body; restores the env var on the way out. Also `#[serial]`:
+/// `llm::adapter::tests`, `llm::http::tests`, and other files mutate the same
+/// credential env vars from tests that can only join the crate-wide `#[serial]`
+/// group (not `ENV_LOCK`, e.g. `#[tokio::test]`s that can't hold a
+/// `std::sync::Mutex` guard across `.await`), so this test must carry
+/// `#[serial]` too to stay mutually exclusive with them.
 #[tokio::test]
+#[serial]
 async fn credential_values_never_serialized() {
     let _env_guard = crate::test_env::ENV_LOCK
         .lock()
@@ -205,6 +212,7 @@ async fn credential_values_never_serialized() {
 /// `credential_configured` equals
 /// `id == "bedrock" || id == "local" || resolve_key(id).is_some()`.
 #[tokio::test]
+#[serial]
 async fn zero_credentials_configured_is_stable() {
     let _env_guard = crate::test_env::ENV_LOCK
         .lock()

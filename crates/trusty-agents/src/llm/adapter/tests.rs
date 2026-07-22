@@ -8,6 +8,7 @@
 
 use super::*;
 use serde_json::json;
+use serial_test::serial;
 
 #[test]
 fn adapter_for_model_routes_anthropic() {
@@ -201,8 +202,18 @@ fn supports_thinking_only_anthropic() {
     assert!(!GenericAdapter.supports_thinking());
 }
 
-// The api_endpoint tests mutate process-global env. Serialize them behind
-// a mutex so they don't race with each other or with `agents::mod::tests`.
+// The api_endpoint tests mutate process-global env. `ENDPOINT_ENV_LOCK` only
+// serializes them against each other (and the secure-store tests below,
+// which also take it) WITHIN this file — it does nothing for the many other
+// files in this crate that mutate the same OPENROUTER_API_KEY/ANTHROPIC_API_KEY/
+// CLAUDE_CODE_OAUTH_TOKEN vars (`llm::credentials::tests`, `llm::http::tests`,
+// `llm::inference_client::tests`, `ctrl::ctrl_turn::dispatch::tests`,
+// `runtime::cli_def::tests`, `llm::helpers::tests`). Those all use `#[serial]`
+// (the crate-wide unnamed group) as the actual cross-file exclusion boundary,
+// so every test below ALSO carries `#[serial]` — a prior gap here (this file's
+// `with_env`-based tests lacked `#[serial]` while sibling files' credential
+// tests had it) let them race cross-file even though `ENDPOINT_ENV_LOCK`
+// correctly serialized them against each other.
 use std::sync::Mutex;
 static ENDPOINT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -235,6 +246,7 @@ fn with_env<F: FnOnce()>(kvs: &[(&str, Option<&str>)], f: F) {
 }
 
 #[test]
+#[serial]
 fn anthropic_api_endpoint_direct_when_key_set() {
     with_env(
         &[
@@ -264,6 +276,7 @@ fn anthropic_api_endpoint_direct_when_key_set() {
 }
 
 #[test]
+#[serial]
 fn anthropic_api_endpoint_use_direct_false_goes_to_openrouter() {
     with_env(
         &[
@@ -286,6 +299,7 @@ fn anthropic_api_endpoint_use_direct_false_goes_to_openrouter() {
 }
 
 #[test]
+#[serial]
 fn anthropic_api_endpoint_falls_back_to_openrouter_without_key() {
     with_env(
         &[
@@ -307,6 +321,7 @@ fn anthropic_api_endpoint_falls_back_to_openrouter_without_key() {
 }
 
 #[test]
+#[serial]
 fn openai_api_endpoint_always_openrouter() {
     with_env(
         &[
@@ -327,6 +342,7 @@ fn openai_api_endpoint_always_openrouter() {
 }
 
 #[test]
+#[serial]
 fn generic_api_endpoint_is_openrouter() {
     with_env(
         &[
@@ -357,6 +373,7 @@ fn openai_uses_native_format_false() {
 // OAuth tokens are only valid for runner="claude-code" agents.
 
 #[test]
+#[serial]
 fn oauth_token_is_not_used_for_direct_api_routing() {
     // Even when CLAUDE_CODE_OAUTH_TOKEN is set, it must NOT route to
     // api.anthropic.com. The token is for ClaudeCodeAgentRunner only.
@@ -385,6 +402,7 @@ fn oauth_token_is_not_used_for_direct_api_routing() {
 }
 
 #[test]
+#[serial]
 fn oauth_token_present_with_api_key_uses_api_key() {
     // When both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set,
     // the OAuth token is ignored and ANTHROPIC_API_KEY is used for direct API.
@@ -412,6 +430,7 @@ fn oauth_token_present_with_api_key_uses_api_key() {
 }
 
 #[test]
+#[serial]
 fn api_key_used_when_no_oauth_token() {
     // When only ANTHROPIC_API_KEY is set (no OAuth token), the adapter
     // must use the API-key path with x-api-key header.
@@ -431,6 +450,7 @@ fn api_key_used_when_no_oauth_token() {
 }
 
 #[test]
+#[serial]
 fn falls_back_to_openrouter_when_use_direct_false() {
     // Regardless of which Anthropic credentials are present, use_direct=false
     // must route through OpenRouter.
@@ -454,6 +474,7 @@ fn falls_back_to_openrouter_when_use_direct_false() {
 }
 
 #[test]
+#[serial]
 fn empty_oauth_token_with_api_key_uses_api_key() {
     // An empty CLAUDE_CODE_OAUTH_TOKEN is irrelevant; ANTHROPIC_API_KEY is used.
     with_env(
@@ -483,9 +504,15 @@ fn empty_oauth_token_with_api_key_uses_api_key() {
 // tempdir) and assert the resolved VALUE reaches the built `ApiEndpoint`, not
 // just that construction doesn't panic. Locks both `ENDPOINT_ENV_LOCK` (this
 // file's existing env-var lock) and `crate::test_env::{ENV_LOCK,HOME_LOCK}`
-// since these tests are the first in this file to also mutate `$HOME`.
+// since these tests are the first in this file to also mutate `$HOME`. Each
+// is also `#[serial]`: `llm::http::tests` and `llm::inference_client::tests`
+// mutate the same credential env vars from `#[tokio::test]`s that rely on
+// `#[serial]` alone (they cannot hold a `std::sync::Mutex` guard across
+// `.await`), so every sync test touching these vars must also carry
+// `#[serial]` to stay mutually exclusive with them.
 
 #[test]
+#[serial]
 fn openrouter_endpoint_resolves_key_from_store_when_env_absent() {
     let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
     let _env_guard = crate::test_env::ENV_LOCK
@@ -494,6 +521,8 @@ fn openrouter_endpoint_resolves_key_from_store_when_env_absent() {
     let _home_guard = crate::test_env::HOME_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
+    crate::test_env::force_env_local_loaded();
 
     let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
     let prev_home = std::env::var_os("HOME");
@@ -535,6 +564,7 @@ fn openrouter_endpoint_resolves_key_from_store_when_env_absent() {
 }
 
 #[test]
+#[serial]
 fn openrouter_endpoint_env_beats_store() {
     let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
     let _env_guard = crate::test_env::ENV_LOCK
@@ -543,6 +573,8 @@ fn openrouter_endpoint_env_beats_store() {
     let _home_guard = crate::test_env::HOME_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
+    crate::test_env::force_env_local_loaded();
 
     let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
     let prev_home = std::env::var_os("HOME");
@@ -583,6 +615,7 @@ fn openrouter_endpoint_env_beats_store() {
 }
 
 #[test]
+#[serial]
 fn anthropic_direct_endpoint_resolves_key_from_store_when_env_absent() {
     let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
     let _env_guard = crate::test_env::ENV_LOCK
@@ -591,6 +624,8 @@ fn anthropic_direct_endpoint_resolves_key_from_store_when_env_absent() {
     let _home_guard = crate::test_env::HOME_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
+    crate::test_env::force_env_local_loaded();
 
     let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
     let prev_home = std::env::var_os("HOME");
@@ -633,6 +668,7 @@ fn anthropic_direct_endpoint_resolves_key_from_store_when_env_absent() {
 }
 
 #[test]
+#[serial]
 fn anthropic_direct_endpoint_env_beats_store() {
     let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
     let _env_guard = crate::test_env::ENV_LOCK
@@ -641,6 +677,8 @@ fn anthropic_direct_endpoint_env_beats_store() {
     let _home_guard = crate::test_env::HOME_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
+    crate::test_env::force_env_local_loaded();
 
     let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
     let prev_home = std::env::var_os("HOME");

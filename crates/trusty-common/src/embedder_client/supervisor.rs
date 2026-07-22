@@ -46,7 +46,9 @@
 //! Test: `supervisor_shutdown_kills_child`,
 //! `supervisor_shutdown_handle_is_reachable_and_stops_child`,
 //! `supervisor_intentional_shutdown_does_not_respawn`,
-//! `stdio_eof_terminates_child` in this module's `tests` submodule.
+//! `stdio_eof_terminates_child`,
+//! `supervisor_gives_up_after_max_restarts_flips_has_given_up` (PR #3560
+//! HIGH fix) in this module's `tests` submodule.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,216 +56,22 @@ use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{RwLock, watch};
 
-use super::{EmbedderClient, StdioEmbedderClient};
+use super::{EmbedderClient, StdioEmbedderClient, spawn_retry};
 
-// ── Config ──────────────────────────────────────────────────────────────────
-
-/// Configuration for `EmbedderSupervisor`.
-///
-/// Why: groups all tunable knobs so they can be read from env-vars in one
-/// place and passed through cleanly without threading individual vars.
-///
-/// What: max restart count, backoff cap, startup timeout, and an optional
-/// resolved ONNX batch size to forward to the sidecar process. All fields have
-/// sensible defaults readable via `SupervisorConfig::from_env()`.
-///
-/// Test: `from_env_uses_defaults` verifies the default values.
-#[derive(Debug, Clone)]
-pub struct SupervisorConfig {
-    /// How many consecutive crashes are tolerated before the supervisor gives
-    /// up and returns an error from `start_supervisor_task`.
-    ///
-    /// Env: `TRUSTY_EMBEDDERD_MAX_RESTARTS` (default 5).
-    pub max_restarts: u32,
-
-    /// Maximum sleep between restarts under exponential back-off (seconds).
-    ///
-    /// Env: `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS` (default 60).
-    pub backoff_max_secs: u64,
-
-    /// How long to wait for the child to respond to the first request before
-    /// treating startup as failed (seconds).
-    ///
-    /// Env: `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS` (default 5).
-    pub startup_timeout_secs: u64,
-
-    /// Resolved ONNX batch size to forward as `TRUSTY_EMBED_BATCH_SIZE` to the
-    /// sidecar child process (issue #747 Fix C).
-    ///
-    /// Why: the parent computes an auto-tuned value the sidecar never received,
-    /// so the sidecar always defaulted to 32. `None` = do not forward.
-    /// What: when `Some(n)`, `spawn_child` sets `.env("TRUSTY_EMBED_BATCH_SIZE", n)`.
-    /// Test: `sidecar_batch_size_*` tests in this module.
-    pub sidecar_batch_size: Option<usize>,
-
-    /// Seconds of sustained health (no further wedge-triggered restart)
-    /// required before the supervisor resets its wedge-restart escalation
-    /// counter back to zero (#1450 HIGH follow-up — restart-storm fix).
-    ///
-    /// Why: a workload-deterministic wedge (the sidecar reliably wedges again
-    /// shortly after every respawn, because the *workload* — not the process
-    /// — is what triggers the stall) would otherwise never escalate: the
-    /// ordinary `consecutive_failures` counter resets on every successful
-    /// respawn, since the respawn *probe* itself succeeds even though the
-    /// real workload re-wedges it moments later. `EmbedderSupervisor` tracks
-    /// wedge-triggered restarts in a separate counter that is reset ONLY
-    /// after this many seconds have elapsed since the last one — not by an
-    /// ordinary respawn-probe success — so a genuine storm eventually trips
-    /// `max_restarts` instead of cycling forever.
-    ///
-    /// Env: `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` (default 300 = 5 minutes).
-    pub wedge_reset_secs: u64,
-}
-
-impl Default for SupervisorConfig {
-    fn default() -> Self {
-        Self {
-            max_restarts: 5,
-            backoff_max_secs: 60,
-            startup_timeout_secs: 5,
-            sidecar_batch_size: None,
-            wedge_reset_secs: 300,
-        }
-    }
-}
-
-impl SupervisorConfig {
-    /// Read configuration from environment variables, falling back to defaults.
-    ///
-    /// Why: lets operators tune restart behaviour in launchd/systemd unit files
-    /// without recompiling.
-    /// What: reads `TRUSTY_EMBEDDERD_MAX_RESTARTS`,
-    /// `TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS`,
-    /// `TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS`, and
-    /// `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` from the process environment.
-    /// `sidecar_batch_size` defaults to `None`; callers set it via the struct.
-    /// Test: `from_env_uses_defaults` (no env vars set → defaults).
-    pub fn from_env() -> Self {
-        let def = Self::default();
-        Self {
-            max_restarts: parse_env("TRUSTY_EMBEDDERD_MAX_RESTARTS", def.max_restarts),
-            backoff_max_secs: parse_env(
-                "TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS",
-                def.backoff_max_secs,
-            ),
-            startup_timeout_secs: parse_env(
-                "TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS",
-                def.startup_timeout_secs,
-            ),
-            sidecar_batch_size: None,
-            wedge_reset_secs: parse_env("TRUSTY_EMBEDDERD_WEDGE_RESET_SECS", def.wedge_reset_secs),
-        }
-    }
-}
-
-/// Default CUDA sidecar batch cap (issue #763 Fix 2).
-///
-/// Why: `tune_batch_size_for_provider` sets `TRUSTY_MAX_BATCH_SIZE=512` on
-/// CUDA builds for pipeline-wave efficiency, but forwarding 512 directly to the
-/// sidecar causes two concurrent 512-chunk ORT sessions to saturate the T4
-/// BFCArena — the same OOM scenario fixed by issue #600, re-triggered by the
-/// multi-flight wave size. A conservative sidecar cap decouples the parent's
-/// wave size from the sidecar's per-call ORT batch size.
-///
-/// Overridable via `TRUSTY_CUDA_SIDECAR_BATCH_CAP` at runtime.
-pub const DEFAULT_CUDA_SIDECAR_BATCH_CAP: usize = 64;
-
-/// Read the CUDA sidecar batch cap from `TRUSTY_CUDA_SIDECAR_BATCH_CAP`; fall
-/// back to `DEFAULT_CUDA_SIDECAR_BATCH_CAP` (64).
-///
-/// Why: allows operators to tune the cap without recompiling (e.g. smaller
-/// values on VRAM-constrained GPUs, larger on multi-GPU hosts with more VRAM).
-/// What: reads the env var once, parses as `usize`, clamps to `[1, 512]`.
-/// Cache note: the `OnceLock` is process-scoped and initialised on first call.
-/// Any change to `TRUSTY_CUDA_SIDECAR_BATCH_CAP` after the first call (including
-/// changes made via `std::env::set_var` in tests) will NOT be reflected. Test
-/// code that needs a different cap value must arrange for the test to execute
-/// before any other code has called this function in the same process, or must
-/// use a fresh process (e.g. `cargo test -- --test-threads=1`).
-/// Test: `sidecar_batch_size_cuda_*` tests in this module.
-pub fn cuda_sidecar_batch_cap() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("TRUSTY_CUDA_SIDECAR_BATCH_CAP")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_CUDA_SIDECAR_BATCH_CAP)
-            .clamp(1, 512)
-    })
-}
-
-/// Resolve the ONNX batch size to forward to the sidecar (issue #747 Fix C,
-/// extended by issue #763 Fix 2).
-///
-/// Why: the parent's auto-tuned `TRUSTY_MAX_BATCH_SIZE` was never forwarded to
-/// the sidecar, which therefore always ran at the default of 32. CoreML safety
-/// cap: CoreML pre-allocates per-batch GPU/ANE buffers in the unified-memory
-/// pool; oversized batches can trigger jetsam SIGKILL, so the value is clamped
-/// to `coreml_cap` when `is_coreml` is `true`. CUDA safety cap (#763): with
-/// `INFLIGHT=2` the parent sends two concurrent 512-chunk waves; forwarding 512
-/// to the sidecar causes two ORT sessions to saturate the BFCArena on a T4,
-/// re-triggering the #600 OOM. `cuda_cap` (default 64, overridable via
-/// `TRUSTY_CUDA_SIDECAR_BATCH_CAP`) bounds the per-ORT-call batch size
-/// independently of the parent's wave size. A zero result is invalid (the sidecar
-/// would set `TRUSTY_EMBED_BATCH_SIZE=0` which ORT rejects), so the return value
-/// is always clamped to at least 1.
-/// What: `min(resolved, coreml_cap)` when `is_coreml`; `min(resolved, cuda_cap)`
-/// when `is_cuda`; `resolved` otherwise. Result further clamped to
-/// `max(result, 1)` to prevent a zero batch size.
-/// When `is_coreml && coreml_cap == 0` or `is_cuda && cuda_cap == 0` a
-/// `tracing::warn!` is emitted to stderr because those combinations indicate a
-/// likely misconfiguration — the clamp-to-1 keeps the system alive but will be
-/// very slow (one embedding per ONNX call).
-/// Test: `sidecar_batch_size_*` in this module's `tests`.
-pub fn sidecar_batch_size(
-    resolved: usize,
-    is_coreml: bool,
-    coreml_cap: usize,
-    is_cuda: bool,
-    cuda_cap: usize,
-) -> usize {
-    let raw = if is_coreml {
-        if coreml_cap == 0 {
-            tracing::warn!(
-                resolved,
-                "sidecar_batch_size: CoreML batch cap resolved to 0 — likely a \
-                 resolve_coreml_batch_size() misconfiguration. Clamping to 1, \
-                 which will be very slow (one embedding per ONNX call). \
-                 Check TRUSTY_COREML_TRIPWIRE_MB and available system RAM."
-            );
-        }
-        resolved.min(coreml_cap)
-    } else if is_cuda {
-        // CUDA cap: keep the sidecar's per-ORT-call batch independent of the
-        // parent's wave size. The parent may send 512-chunk waves; we cap the
-        // sidecar at `cuda_cap` (default 64) so two concurrent INFLIGHT=2
-        // sessions stay within the BFCArena budget.
-        if cuda_cap == 0 {
-            tracing::warn!(
-                resolved,
-                "sidecar_batch_size: CUDA batch cap resolved to 0 — likely a \
-                 misconfiguration. Clamping to 1. \
-                 Check TRUSTY_CUDA_SIDECAR_BATCH_CAP."
-            );
-        }
-        resolved.min(cuda_cap)
-    } else {
-        resolved
-    };
-    // Guard: a zero batch size is invalid — the sidecar would receive
-    // TRUSTY_EMBED_BATCH_SIZE=0 which ONNX Runtime rejects. Clamp to 1.
-    raw.max(1)
-}
-
-fn parse_env<T: std::str::FromStr + Copy>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+// Config and batch-size tuning live in `supervisor_config.rs` (issue #3524
+// slice 5 CI follow-up — split to stay under the 500-SLOC production cap).
+// Re-exported here so `embedder_client::mod`'s `pub use supervisor::{...}`
+// (and this module's own `supervisor_tests.rs`, via `use super::*;`) keep
+// working unchanged; nothing outside `embedder_client` needs to know the
+// config types moved.
+#[path = "supervisor_config.rs"]
+mod supervisor_config;
+pub use supervisor_config::{
+    DEFAULT_CUDA_SIDECAR_BATCH_CAP, SupervisorConfig, cuda_sidecar_batch_cap, sidecar_batch_size,
+};
 
 // ── Supervisor ───────────────────────────────────────────────────────────────
 
@@ -302,6 +110,14 @@ pub struct EmbedderSupervisor {
     /// `child.wait()` and re-fetches a fresh receiver from each respawned
     /// client (see `StdioEmbedderClient::unhealthy_signal`).
     unhealthy_signal: watch::Receiver<bool>,
+    /// Definitive "gave up permanently" flag (epic #3524 slice 6 PR-4
+    /// follow-up, code-critic BLOCK on PR #3584). `false` for the entire
+    /// supervised lifetime except the one instant `supervision_loop` decides
+    /// `should_give_up` and is about to `return` without respawning — never
+    /// set on a clean exit, an intentional `shutdown()`, or any ordinary
+    /// respawn. See [`Self::terminated_signal`] for why callers need this
+    /// distinct from `child_pid_slot` reading `0`.
+    terminated: Arc<std::sync::atomic::AtomicBool>,
     config: SupervisorConfig,
 }
 
@@ -351,10 +167,40 @@ impl EmbedderSupervisor {
             client_slot,
             child_pid_slot,
             unhealthy_signal,
+            terminated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config,
         };
 
         Ok((supervisor, client_slot_clone, child_pid_slot_clone))
+    }
+
+    /// Clone the definitive "gave up permanently" signal — must be called
+    /// BEFORE [`Self::start_supervisor_task`] (which consumes `self`), the
+    /// same way callers capture `child_pid_slot` from `spawn_stdio`'s return
+    /// tuple before detaching.
+    ///
+    /// Why (epic #3524 slice 6 PR-4 follow-up, code-critic BLOCK on PR
+    /// #3584): the swap-back watchdog originally inferred "the python sidecar
+    /// is unrecoverably dead" from `child_pid_slot == 0` combined with
+    /// `EmbedderStallTracker::recent_timeout_count() > 0`. That heuristic has
+    /// a real false-positive window: an ordinary idle-shutdown ALSO zeroes
+    /// the pid slot, and a stale non-zero timeout count left over from an
+    /// earlier transient failure is never cleared by the idle-shutdown path
+    /// (only a subsequent SUCCESSFUL embed clears it) — so a quiet period
+    /// with zero further embed traffic after an idle-shutdown could
+    /// satisfy the heuristic and permanently swap away a perfectly healthy
+    /// backend. This method gives callers the actual, unambiguous signal
+    /// instead: `true` if and only if the supervision loop itself decided to
+    /// give up (exhausted `max_restarts` or a wedge-restart storm) — never
+    /// true for a clean exit, an intentional `shutdown()`, or an ordinary
+    /// respawn.
+    /// What: clones and returns the `Arc<AtomicBool>` `supervision_loop` sets
+    /// to `true` at the exact instant it decides `should_give_up` and returns
+    /// without respawning.
+    /// Test: `supervisor_terminated_signal_fires_after_exhausting_max_restarts`,
+    /// `supervisor_terminated_signal_stays_false_on_intentional_shutdown`.
+    pub fn terminated_signal(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.terminated)
     }
 
     /// Detach the supervisor background task.
@@ -381,16 +227,30 @@ impl EmbedderSupervisor {
     /// `supervisor_intentional_shutdown_does_not_respawn`.
     pub fn start_supervisor_task(self) -> SupervisorHandle {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // PR #3560 HIGH fix: a second one-way `watch` flag, flipped from
+        // inside `supervision_loop` the moment its own `should_give_up`
+        // check trips. `SupervisorHandle::has_given_up()` exposes this as a
+        // non-blocking readback so callers (trusty-search's
+        // `FallbackEmbedderAdapter`) can observe the supervisor's REAL
+        // give-up ceiling instead of reconstructing an independent, faster-
+        // firing proxy at the request layer. See `SupervisorHandle::has_given_up`.
+        let (gave_up_tx, gave_up_rx) = watch::channel(false);
         let join = tokio::spawn(supervision_loop(
             self.binary_path,
             self.child,
             self.client_slot,
             self.child_pid_slot,
             self.unhealthy_signal,
+            self.terminated,
             self.config,
             shutdown_rx,
+            gave_up_tx,
         ));
-        SupervisorHandle { shutdown_tx, join }
+        SupervisorHandle {
+            shutdown_tx,
+            join,
+            gave_up_rx,
+        }
     }
 
     /// Terminate the sidecar and stop supervising.
@@ -437,6 +297,9 @@ impl EmbedderSupervisor {
 pub struct SupervisorHandle {
     shutdown_tx: watch::Sender<bool>,
     join: tokio::task::JoinHandle<()>,
+    /// One-way "the supervision loop has permanently given up respawning"
+    /// flag (PR #3560 HIGH fix). See `has_given_up`.
+    gave_up_rx: watch::Receiver<bool>,
 }
 
 impl SupervisorHandle {
@@ -465,6 +328,33 @@ impl SupervisorHandle {
             tracing::warn!("EmbedderSupervisor: supervision task join error on shutdown: {e}");
         }
     }
+
+    /// Non-blocking readback: has the supervision loop permanently given up
+    /// respawning (crossed `max_restarts` on the crash-storm or wedge-storm
+    /// counter — see `should_give_up`) and returned without a further
+    /// restart? (PR #3560 HIGH fix.)
+    ///
+    /// Why: trusty-search's `FallbackEmbedderAdapter` previously approximated
+    /// this by counting consecutive embed failures at the request layer —
+    /// which, under the epic's own multi-flight design, could cross its
+    /// threshold from several concurrent requests failing against one stale
+    /// client during a SINGLE crash episode, well before the supervisor's own
+    /// restart budget was exhausted. Exposing the supervisor's actual
+    /// give-up decision as a signal callers can observe makes that decision
+    /// exact, no matter how many requests happen to be in flight when a crash
+    /// occurs.
+    /// What: `true` once `supervision_loop`'s own `should_give_up` check
+    /// trips and it returns without scheduling another respawn; `false`
+    /// before that (including while mid-respawn or mid-backoff) and for the
+    /// entire lifetime of a healthy or still-recovering sidecar. One-way —
+    /// never resets back to `false`, matching the loop's own give-up
+    /// semantics (a fresh `SupervisorHandle` only comes from a fresh
+    /// `start_supervisor_task` call, i.e. a whole new supervision run).
+    /// Test: `supervisor_gives_up_after_max_restarts_flips_has_given_up` in
+    /// `supervisor_tests.rs`.
+    pub fn has_given_up(&self) -> bool {
+        *self.gave_up_rx.borrow()
+    }
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -473,38 +363,31 @@ impl SupervisorHandle {
 ///
 /// Why: extracted so both the initial spawn and the respawn path call the same
 /// code.
-/// What: `Command::new(binary_path).arg("--stdio")` with piped stdin/stdout
-/// and inherited stderr. When `config.sidecar_batch_size` is `Some(n)`, sets
-/// `TRUSTY_EMBED_BATCH_SIZE=n` (issue #747 Fix C).
+/// What: delegates command construction and the bounded ETXTBSY retry (#3570)
+/// to `spawn_retry::spawn_embedderd`, then runs the startup probe.
 /// Test: called by `spawn_stdio` and the supervision loop.
 async fn spawn_child(
     binary_path: &Path,
     config: &SupervisorConfig,
 ) -> Result<(Child, StdioEmbedderClient)> {
-    use std::process::Stdio;
-
-    let mut cmd = Command::new(binary_path);
-    cmd.arg("--stdio")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .kill_on_drop(true);
-
     // Forward resolved ONNX batch size (issue #747 Fix C).
     if let Some(bs) = config.sidecar_batch_size {
-        cmd.env("TRUSTY_EMBED_BATCH_SIZE", bs.to_string());
         tracing::debug!(
             bs,
             "EmbedderSupervisor: forwarding TRUSTY_EMBED_BATCH_SIZE={bs}"
         );
     }
 
-    let mut child = cmd.spawn().with_context(|| {
-        format!(
-            "spawn trusty-embedderd --stdio from {}",
-            binary_path.display()
-        )
-    })?;
+    // Command construction + the bounded ETXTBSY retry (#3570 / #1634) both
+    // live in `spawn_retry` to keep this file under the 500-SLOC prod cap.
+    let mut child = spawn_retry::spawn_embedderd(binary_path, config)
+        .await
+        .with_context(|| {
+            format!(
+                "spawn trusty-embedderd --stdio from {}",
+                binary_path.display()
+            )
+        })?;
 
     let stdin = child
         .stdin
@@ -565,6 +448,26 @@ enum RestartTrigger {
     /// `unhealthy_signal` fired (#1448/#1450) — reader died or the sidecar
     /// was judged wedged. The child may still be alive and must be killed.
     Unhealthy,
+    /// No live child was found in `child_slot` (CI follow-up, PR #3560): the
+    /// PREVIOUS iteration's respawn attempt itself failed after an
+    /// `Unhealthy`-triggered kill had already taken the old (dead) child out
+    /// of the slot — see that branch's `guard.take()`. Unlike a plain
+    /// process-exit crash, whose already-dead `Child` is left in the slot
+    /// and gets re-observed by `child.wait()` on the very next iteration
+    /// (that re-observation is what turns "the respawn itself failed" into
+    /// another counted failure), a wedge-kill leaves nothing behind to
+    /// re-observe. Before this fix, hitting an empty slot here was
+    /// unconditionally treated as "an explicit shutdown must have cleared
+    /// it" and the loop returned immediately — silently abandoning the
+    /// crash-restart path (and, critically, `should_give_up`/`gave_up_tx`)
+    /// without ever giving up. That reasoning no longer holds: neither the
+    /// cooperative shutdown path (`shutdown_rx`, handled inside the
+    /// `Some(child)` arm above) nor the self-consuming `EmbedderSupervisor::
+    /// shutdown()` (mutually exclusive with this loop even running) ever
+    /// clears `child_slot` to `None` while this loop is live — only the
+    /// `Unhealthy` branch's kill does. So an empty slot here can only mean
+    /// "the last respawn failed"; treat it as one more crash-cycle instead.
+    RespawnFailed,
 }
 
 // ── Wedge-restart-storm prevention (#1450 HIGH follow-up) ──────────────────
@@ -577,25 +480,38 @@ enum RestartTrigger {
 // tripping `max_restarts`. `consecutive_wedge_restarts` is a second counter,
 // tracked alongside `consecutive_failures` in `supervision_loop`, that is
 // reset ONLY after sustained real-world health — never by an ordinary
-// respawn-probe success. The two pure functions below implement its
-// reset/give-up decisions so that logic is unit-testable without driving the
-// full async supervision loop.
+// respawn-probe success. The pure function below implements its reset
+// decision so that logic is unit-testable without driving the full async
+// supervision loop.
+//
+// Issue #3635: `consecutive_failures` itself had exactly the same hole the
+// paragraph above describes for `consecutive_wedge_restarts` — it was reset
+// unconditionally on ANY successful respawn probe, so a process that
+// reliably answers its startup probe and then immediately crashes again (a
+// crash-loop-after-successful-probe pattern) could never escalate it past
+// `max_restarts`: every crash was wiped by the next "successful" respawn
+// before it could count. `supervision_loop` now applies the SAME
+// `wedge_counter_should_reset` gate to `consecutive_failures`, keyed off a
+// second `last_failure_at` timestamp updated on every crash cycle regardless
+// of trigger type — mere respawn-probe success no longer resets it; only
+// `config.wedge_reset_secs` of sustained health since the last crash does.
 
-/// Decide whether the wedge-restart escalation counter should reset.
+/// Decide whether a restart-escalation counter should reset.
 ///
 /// Why: extracted as a pure function (no I/O, no locking, no `Instant::now()`
-/// call) so the reset decision is directly unit-testable.
-/// What: `true` iff a prior wedge-restart happened (`elapsed_since_last_wedge`
-/// is `Some`) and at least `wedge_reset_secs` have elapsed since then. `None`
-/// (no prior wedge this supervision run) never resets — there is nothing to
-/// reset.
+/// call) so the reset decision is directly unit-testable. Shared by BOTH
+/// escalation counters in `supervision_loop` — `consecutive_wedge_restarts`
+/// (its original use, #1450 HIGH follow-up) and, since issue #3635,
+/// `consecutive_failures` — the sustained-health gate is identical for both:
+/// mere respawn-probe success is never sufficient on its own.
+/// What: `true` iff a prior restart happened (`elapsed_since_last` is `Some`)
+/// and at least `reset_secs` have elapsed since then. `None` (no prior
+/// restart of that kind this supervision run) never resets — there is
+/// nothing to reset.
 /// Test: `wedge_counter_should_reset_*` in `supervisor_tests.rs`.
-fn wedge_counter_should_reset(
-    elapsed_since_last_wedge: Option<Duration>,
-    wedge_reset_secs: u64,
-) -> bool {
-    match elapsed_since_last_wedge {
-        Some(elapsed) => elapsed >= Duration::from_secs(wedge_reset_secs),
+fn wedge_counter_should_reset(elapsed_since_last: Option<Duration>, reset_secs: u64) -> bool {
+    match elapsed_since_last {
+        Some(elapsed) => elapsed >= Duration::from_secs(reset_secs),
         None => false,
     }
 }
@@ -657,18 +573,35 @@ fn should_give_up(
 pub(crate) static SUPERVISION_LOOP_ITERATIONS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+// Each parameter is a distinct piece of shared state this internal (private,
+// not part of any public API) orchestration loop threads through — spawn
+// target, live child/client slots, the two independent signal channels
+// (unhealthy, shutdown), the one-way give-up signal (PR #3560 HIGH fix), the
+// definitive terminated signal (epic #3524 slice 6 PR-4 follow-up, code-critic
+// BLOCK on PR #3584), and config. Bundling them into a struct would not reduce
+// complexity, only relocate it.
+#[allow(clippy::too_many_arguments)]
 async fn supervision_loop(
     binary_path: PathBuf,
     child_slot: Arc<tokio::sync::Mutex<Option<Child>>>,
     client_slot: Arc<RwLock<Arc<dyn EmbedderClient>>>,
     child_pid_slot: Arc<AtomicU32>,
     mut unhealthy_signal: watch::Receiver<bool>,
+    terminated: Arc<std::sync::atomic::AtomicBool>,
     config: SupervisorConfig,
     mut shutdown_rx: watch::Receiver<bool>,
+    gave_up_tx: watch::Sender<bool>,
 ) {
     let mut consecutive_failures: u32 = 0;
     let mut consecutive_wedge_restarts: u32 = 0;
     let mut last_wedge_restart_at: Option<tokio::time::Instant> = None;
+    // Issue #3635: mirrors `last_wedge_restart_at` for the crash-storm
+    // counter. Set on every crash cycle (any `RestartTrigger`), regardless
+    // of whether the respawn that follows successfully answers its own
+    // startup probe — see the sustained-health reset check below and the
+    // respawn-success arm, which deliberately no longer resets
+    // `consecutive_failures` on its own.
+    let mut last_failure_at: Option<tokio::time::Instant> = None;
     // Set once `shutdown_rx` observes its sender closed (issue #3023 HIGH):
     // `watch::Receiver::changed()` resolves `Ready(Err(_))` on every
     // subsequent poll once the sender drops without ever calling
@@ -763,12 +696,62 @@ async fn supervision_loop(
                     }
                 }
                 None => {
-                    // Sidecar was explicitly shut down; stop supervising.
+                    // CI follow-up, PR #3560 (see `RestartTrigger::RespawnFailed`):
+                    // this is NOT necessarily an explicit shutdown — the
+                    // `Unhealthy` branch below can leave the slot empty
+                    // after a wedge-kill, and if the respawn attempt that
+                    // followed then failed, there is nothing left to
+                    // re-observe via `child.wait()` next time around (unlike
+                    // a plain process-exit crash, whose dead `Child` stays
+                    // in the slot). Treat an empty slot as another
+                    // crash-cycle rather than assuming shutdown.
                     child_pid_slot.store(0, AtomicOrdering::Release);
-                    return;
+                    RestartTrigger::RespawnFailed
                 }
             }
         };
+
+        // Issue #3635: apply the SAME sustained-health gate to the
+        // crash-storm counter that `wedge_counter_should_reset` already
+        // applies to `consecutive_wedge_restarts` — a respawn's own startup
+        // probe succeeding says nothing about whether the process
+        // immediately crashes again (see the respawn-success arm below,
+        // which deliberately no longer resets `consecutive_failures` on its
+        // own).
+        //
+        // Deliberately evaluated HERE — right after `trigger` resolves —
+        // rather than mirroring the wedge check's placement at the very top
+        // of the loop (before the blocking `select!` above). The wedge
+        // check's elapsed time is measured relative to `last_wedge_restart_at`
+        // as of the START of this iteration, i.e. BEFORE the (potentially
+        // long) wait for the next trigger — so a genuinely long healthy
+        // interval that elapses DURING that wait is invisible to a
+        // before-the-wait check; it would only be credited on the iteration
+        // AFTER this one, one full crash-cycle too late; the crash that just
+        // arrived after a real recovery window would still be counted
+        // against the stale, un-reset value. Evaluating after the wait
+        // instead measures the elapsed time up to the instant THIS trigger
+        // actually fired, so a crash arriving after a genuine
+        // `wedge_reset_secs`-long recovery is correctly treated as a fresh
+        // episode instead of escalating a stale streak.
+        // NOTE: no companion `last_failure_at = None` here (unlike the wedge
+        // check above) — the trigger just resolved above IS itself the next
+        // failure/crash cycle, so the unconditional `last_failure_at =
+        // Some(...)` a few lines below (alongside `consecutive_failures +=
+        // 1`) always overwrites it before it would ever be read again; this
+        // reset treats the current trigger as crash #1 of a fresh episode
+        // rather than an escalation of the prior one.
+        if wedge_counter_should_reset(
+            last_failure_at.map(|t| t.elapsed()),
+            config.wedge_reset_secs,
+        ) {
+            tracing::info!(
+                "EmbedderSupervisor: {}s without a further crash — resetting crash-storm \
+                 escalation counter (was {consecutive_failures})",
+                config.wedge_reset_secs,
+            );
+            consecutive_failures = 0;
+        }
 
         let is_wedge_restart = matches!(trigger, RestartTrigger::Unhealthy);
 
@@ -815,9 +798,23 @@ async fn supervision_loop(
                 drop(guard);
                 child_pid_slot.store(0, AtomicOrdering::Release);
             }
+            RestartTrigger::RespawnFailed => {
+                tracing::warn!(
+                    "EmbedderSupervisor: previous respawn attempt failed with no live \
+                     child left to observe — retrying (failure #{}/{})",
+                    consecutive_failures + 1,
+                    config.max_restarts,
+                );
+            }
         }
 
         consecutive_failures += 1;
+        // Issue #3635: stamp the crash cycle so the sustained-health reset
+        // check at the top of the loop has something to measure against —
+        // set for every trigger type that reaches this point (process-exit
+        // failure, unhealthy/wedge, or a failed respawn observed as
+        // `RespawnFailed`), mirroring `last_wedge_restart_at`.
+        last_failure_at = Some(tokio::time::Instant::now());
 
         if should_give_up(
             consecutive_failures,
@@ -836,6 +833,17 @@ async fn supervision_loop(
                     "process-exit crash storm"
                 },
             );
+            // PR #3560 HIGH fix: flip the one-way give-up signal so callers
+            // (e.g. trusty-search's `FallbackEmbedderAdapter`) can observe
+            // the REAL give-up ceiling instead of an independently-counted
+            // proxy. `send` on a channel with no live receiver is harmless.
+            let _ = gave_up_tx.send(true);
+            // The definitive "gave up permanently" signal (epic #3524 slice 6
+            // PR-4 follow-up) — set ONLY on this exact path, never on a clean
+            // exit or an intentional shutdown. See `terminated_signal`'s doc
+            // for why callers need this instead of inferring death from
+            // `child_pid_slot == 0` alone.
+            terminated.store(true, AtomicOrdering::Release);
             return;
         }
 
@@ -920,11 +928,15 @@ async fn supervision_loop(
                 // Publish the PID after the child handle is in place.
                 child_pid_slot.store(new_pid, AtomicOrdering::Release);
 
-                // Reset the ordinary failure count — the new process is up.
-                // NOTE: `consecutive_wedge_restarts` is deliberately NOT reset
-                // here (see its doc comment and `wedge_counter_should_reset`)
-                // — only sustained real-world health resets it.
-                consecutive_failures = 0;
+                // Issue #3635: `consecutive_failures` is deliberately NOT
+                // reset here. A respawn's own startup probe succeeding says
+                // nothing about whether the process crashes again
+                // immediately — that was the exact bug (a crash-loop that
+                // reliably re-answers its probe never escalated past
+                // `max_restarts`). Like `consecutive_wedge_restarts`, it is
+                // reset ONLY by the sustained-health gate at the top of the
+                // loop, once `config.wedge_reset_secs` have elapsed since the
+                // last crash (`last_failure_at` / `wedge_counter_should_reset`).
                 tracing::info!(
                     "EmbedderSupervisor: sidecar restarted successfully (pid={new_pid})"
                 );

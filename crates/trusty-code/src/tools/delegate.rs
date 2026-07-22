@@ -327,14 +327,22 @@ impl ToolExecutor for DelegateToAgentTool {
         // joined into a filesystem path. Reject any name that is not strictly
         // [a-zA-Z0-9_-] before the path join so a crafted value like
         // "../../etc/passwd" cannot escape the agents config directory.
-        if agent_name.is_empty()
-            || !agent_name
+        // A namespaced `<plugin>:<name>` plugin agent dispatch name (#3539)
+        // is checked FIRST via `plugins::is_valid_namespaced_name` — exactly
+        // two `[a-z0-9-]+`-charset segments, which is itself the traversal
+        // guard for a plugin agent's path (issue #3547 HIGH 4): previously
+        // ANY name containing `:` was rejected here, so a plugin agent could
+        // never reach the runner even though `agents::resolve_agent` already
+        // resolved it.
+        let is_valid_plain_name = !agent_name.is_empty()
+            && agent_name
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !is_valid_plain_name && !crate::plugins::is_valid_namespaced_name(agent_name) {
             return ToolResult::err(format!(
-                "Invalid agent name '{agent_name}': \
-                 agent names must be non-empty and contain only [a-zA-Z0-9_-]"
+                "Invalid agent name '{agent_name}': agent names must be non-empty and contain \
+                 only [a-zA-Z0-9_-], or be a namespaced <plugin>:<name> where both segments \
+                 are [a-z0-9-]+ (<= 64 chars)"
             ));
         }
 

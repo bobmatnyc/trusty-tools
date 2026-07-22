@@ -564,11 +564,11 @@
     font-family: inherit;
   }
   .back-link:hover {
-    background: var(--trusty-bg-subtle, #f8fafc);
+    background: var(--trusty-surface-raised, #f8fafc);
   }
   .state {
     padding: var(--trusty-space-4);
-    background: var(--trusty-bg-subtle, #f8fafc);
+    background: var(--trusty-surface-raised, #f8fafc);
     border-radius: var(--trusty-radius, 6px);
     color: var(--trusty-text-secondary, #6b7280);
   }

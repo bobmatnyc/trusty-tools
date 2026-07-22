@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use axum::{body::to_bytes, extract::State, http::StatusCode, response::IntoResponse as _};
 
-use crate::service::handlers::{AppState, DepInfo, DepStatus, compute_status, handle_health};
+use crate::service::handlers::{
+    AppState, DepInfo, DepState, DepStatus, compute_status, handle_health,
+};
 use crate::service::inference_probe::InferenceStatus;
 
 // Re-use the fakes defined in `handlers_tests.rs` which is loaded first.
@@ -30,10 +32,12 @@ fn health_status_ok_all_good() {
         trusty_search: DepInfo {
             required: true,
             reachable: true,
+            state: DepState::Ok,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: true,
+            state: DepState::Ok,
         },
     };
     assert_eq!(
@@ -56,10 +60,12 @@ fn health_status_degraded_required_dep_down() {
         trusty_search: DepInfo {
             required: true,
             reachable: false, // required dep is down
+            state: DepState::Unreachable,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: true,
+            state: DepState::Ok,
         },
     };
     assert_eq!(
@@ -81,10 +87,12 @@ fn health_status_degraded_inference_auth_error() {
         trusty_search: DepInfo {
             required: true,
             reachable: true,
+            state: DepState::Ok,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: true,
+            state: DepState::Ok,
         },
     };
     assert_eq!(
@@ -110,10 +118,12 @@ fn health_status_ok_inference_unknown() {
         trusty_search: DepInfo {
             required: true,
             reachable: true,
+            state: DepState::Ok,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: true,
+            state: DepState::Ok,
         },
     };
     assert_eq!(
@@ -135,10 +145,12 @@ fn health_status_ok_optional_dep_down() {
         trusty_search: DepInfo {
             required: true,
             reachable: true,
+            state: DepState::Ok,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: false, // optional dep down — must not degrade
+            state: DepState::Unreachable,
         },
     };
     assert_eq!(
@@ -184,11 +196,18 @@ async fn health_required_dep_down_sets_degraded() {
     );
     assert_eq!(
         body["deps"]["trusty_search"]["reachable"], false,
-        "trusty_search.reachable must be false when search is down"
+        "trusty_search.reachable must be false when search is down (#3658 back-compat)"
     );
     assert_eq!(
         body["deps"]["trusty_search"]["required"], true,
         "trusty_search.required must remain true"
+    );
+    // #3658: a hard-down dep (health() returns Err immediately, no timeout)
+    // must report state:unreachable — distinct from state:timeout, which is
+    // reserved for a dep that did not respond within the probe deadline.
+    assert_eq!(
+        body["deps"]["trusty_search"]["state"], "unreachable",
+        "hard-down dep must report state:unreachable, not state:timeout (#3658)"
     );
 }
 

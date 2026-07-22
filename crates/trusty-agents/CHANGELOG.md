@@ -7,7 +7,401 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`dispatch_task` — the opaque tm<->tcode PM bridge tool (epic #3052, PR
+  B, lane 3):** a new tool, distinct from lane 2's `delegate_to_agent`
+  in-process sub-agent delegation, that routes a unit of work to either
+  `tm` (orchestration / project / session / issue / PR / multi-agent work)
+  or `tcode` (direct coding in a repo) via a deterministic, pure-function
+  router (`intent::route::route_task`) — no LLM call, same input always
+  routes the same way. The tool's name, schema, and results are fully
+  black-boxed: neither backend's identity, nor `trusty-mpm`/`trusty-code`,
+  is ever named in the schema, and the full backend transcript is run
+  through `tools::pm_bridge::scrub_branding` (strips standalone
+  `tm`/`tcode`/`trusty-mpm`/`trusty-code` tokens and redacts
+  session-id-shaped artifacts) before returning, on both the success and
+  error paths. RBAC-locked to deny `ServiceTier::ReadOnly` AND
+  `ServiceTier::Analytics` — registered in the interactive assistant
+  registry (`ctrl::pm_task::dispatch::history`) and the PM CLI registry
+  (`runtime::pm_mode`), mirroring `delegate_to_agent`'s registration.
+  Backend dispatch: `tcode` runs as a one-shot blocking subprocess
+  (`tcode run-task pm <task> --project <dir> --json`), which itself blocks
+  until its daemon-owned session reaches a terminal state; `tm` spawns
+  `tm serve --stdio` and drives the managed-session lifecycle
+  (`session_new` / `session_activity` / `session_decommission`) with a
+  bounded poll, since tm has no synchronous "run this task headlessly"
+  RPC (`agent_delegate` is explicitly a tracking/gating companion, NOT an
+  execution path) — a documented MVP scope limit, flagged for a follow-up
+  RPC.
+
 ### Security
+
+- **Assistant no longer leaks internal orchestration or disclaims delegating
+  when dispatched via `--direct`/`--agent` (#3550 follow-up):** a live smoke
+  test (`tagent --direct assistant --task "..."`) proved the black-box/tool
+  hardening from PR A (epic #3052, below) did NOT cover this dispatch path —
+  it still leaked `trusty-mpm`, `subagent`, and `subprocess`, recited the
+  entire bundled skill catalog ("wave planning", "git worktree discipline",
+  the full engineering language/framework bench), and disclaimed delegating
+  ("not a coding agent myself", "I'd hand off... rather than writing code
+  myself"). Root cause: `--direct`/`--agent` route through `run_subagent`
+  (`src/runtime/subagent_mode.rs`), a SEPARATE dispatch path from the
+  persona-chat path (`run_pm_task_with_persona`) PR A actually hardened.
+  `run_subagent` treated every agent — including `role == "assistant"`
+  personas — as a generic coding sub-agent:
+  - `SystemPromptBuilder::walk_project_instructions` unconditionally injected
+    every ancestor `CLAUDE.md`/`AGENTS.md` verbatim, including this crate's
+    own `CLAUDE.md` (which literally documents "PM Orchestrator", "Sub-Agent
+    Process", "subprocess IPC") and the workspace root `CLAUDE.md`
+    (`trusty-mpm`, worktree/PR-workflow conventions).
+  - The binary's coding-harness protocol (`agents::harness_protocol::
+    BASE_PROTOCOL` — "## trusty-agents Harness Protocol", `out_dir`,
+    "workflow phases") was injected regardless of role, priming the model to
+    describe itself as a phase-based coding harness.
+  - `build_registry_for_agent`'s catch-all branch (`src/runtime/
+    tool_registry.rs`) unconditionally wired `list_skills`/`load_skill` to
+    the FULL tag-indexed skill registry (every language/framework/workflow
+    skill, including `workflow/wave-planning.md` and `workflow/
+    delegation.md`) with no restriction: `run_subagent_with_tools` gates
+    tool reachability on `cfg.tools.allowed` (an exact-name list), but
+    persona TOMLs declare `[tools].allow` (glob patterns) instead — a field
+    this path never read — so `allowed` stayed `None`, which
+    `chat_with_tools_gated` treats as unrestricted.
+
+  Fixed with a role-scoped gate (`ASSISTANT_TIER_ROLE = "assistant"`,
+  matches `AgentInfo.role` — covers `assistant`/`cto-assistant`/`izzie`/
+  `personal-assistant` uniformly, independent of display name) in
+  `run_subagent`: skips the CLAUDE.md walk and harness-protocol layers for
+  assistant-tier agents, routes registry construction to a new curated
+  `build_assistant_tier_registry` (delegation + read-only git/web lookups,
+  no catalog-browsing tools), and adds `scope_assistant_allowed_tools` to
+  translate `[tools].allow` glob patterns into the `[tools].allowed`
+  exact-name list the existing gate enforces. Engineer/qa/research/docs/ops/
+  plan/pm/ctrl dispatch is untouched — the gate only fires for
+  `role == "assistant"`.
+
+  `assistant/persona.md`, `izzie.toml`, and `personal-assistant.toml`'s
+  "What you are not — Not a coding agent" sections were reworded from an
+  identity-negation frame (which the model was echoing near-verbatim as
+  "I'm not a coding agent myself") to a positive delegation-ownership frame
+  ("you own getting it done, by delegating it") that explicitly forbids the
+  disclaiming phrasing.
+
+  New tests: `assistant_tier_registry_excludes_skill_catalog_tools`,
+  `assistant_tier_registry_includes_curated_tools`,
+  `role_takes_precedence_over_name_for_assistant_tier`,
+  `scope_assistant_allowed_tools_filters_by_glob`,
+  `scope_assistant_allowed_tools_noop_for_non_assistant`,
+  `scope_assistant_allowed_tools_noop_when_allowed_already_set`
+  (`src/runtime/tool_registry_tests.rs`).
+
+- **`delegate_to_agent` no longer leaks internal agent names (PR A code-critic
+  fix, epic #3052):** granting `delegate_to_agent` to assistant-tier personas
+  (see below) exposed two leaks in the shared tool implementation
+  (`src/tools/delegate.rs`), sent to the LLM on every turn / every failed
+  delegation regardless of caller:
+  - The tool's schema `description` hardcoded concrete internal agent-name
+    examples (`'engineer', 'python-engineer', 'qa-agent'`) — generalized to
+    describe the parameter generically ("the specialist to hand this task
+    to"). `pm` is unaffected: it gets its roster via its own system prompt's
+    `{{available_agents}}` template substitution
+    (`agents::registry::roster::inject_roster_into_prompt`), independent of
+    this schema.
+  - An unknown `agent_name` returned "Unknown agent 'x'. Available agents:
+    &lt;full on-disk roster&gt;." — the roster enumeration is now dropped;
+    the error just names the caller's own rejected input ("'x' is not a
+    recognized specialist. Check your own instructions...") without
+    enumerating the config directory. The now-unused `available_agents()`
+    roster-listing helper was removed.
+  - **Functional companion fix:** the black-box strip left the assistant
+    with `delegate_to_agent` but no idea which `agent_name` values are
+    legitimate. `assistant/persona.md` gains a curated "Internal specialist
+    routing" list — `engineer`, `python-engineer`, `qa-agent`,
+    `research-agent`, `docs-agent`, `local-ops-agent`, `plan-agent` (the
+    general-purpose WORKER agents; excludes meta/infra agents `ctrl`/`pm`/
+    `observe-agent`/`postmortem-agent` and model-variant engineers
+    `bedrock-engineer`/`claude-code-engineer`/`code-agent`/`gpt-engineer`/
+    `gpt5-codex-engineer`) — marked explicitly as internal-only knowledge:
+    the assistant may use these names to decide who to call, but must refer
+    to the user only by role ("an engineer", "a QA specialist"), never by
+    the internal name. The same list + the full black-box "NEVER reveal
+    internal mechanics" section were ported into the two shadow-fallback
+    files (`izzie.toml`, `cto-assistant.toml`) that previously got the tool
+    grant + mcp-strip but not the black-box prose; `personal-assistant.toml`
+    (no `delegate_to_agent` grant, doesn't `extend` `assistant`) gets a
+    scope-note comment instead, documenting the deferral rather than leaving
+    it ambiguous.
+  - **Bug found + fixed along the way:** `izzie/agent.toml`'s
+    `extends = "assistant"` key was placed BEFORE the `[agent]` table
+    header, making it a top-level TOML key. `AgentConfig` has no top-level
+    `extends` field (only `AgentInfo::extends`) and doesn't
+    `deny_unknown_fields`, so serde silently dropped it — `izzie` never
+    actually inherited anything from the base (no prose concatenation, no
+    tool/skill union) despite every comment in the file claiming otherwise;
+    it "worked" only because izzie's own redundant declarations happened to
+    duplicate the base's values. Moved `extends` inside `[agent]`, where the
+    schema expects it — caught by a new pinning test that failed exactly
+    because the base's persona body (this PR's routing list) never reached
+    izzie's resolved content.
+  - New/updated tests: `unknown_agent_is_rejected_without_naming_the_agent_or_roster`
+    (`src/tools/delegate.rs`, invokes `DelegateToAgentTool::execute()` with a
+    bad name against a config dir seeded with a realistic worker + meta/infra
+    roster, asserts none of it leaks),
+    `assistant_tier_persona_carries_curated_worker_routing_list`
+    (`src/agents/tests/loading.rs`, resolves `assistant`/`izzie`/
+    `cto-assistant` and asserts the routing list + black-box reminder are
+    present), and `izzie_overlay_package_parses_with_personal_deltas`
+    corrected to assert the NOW-CORRECT real-inheritance behavior (it
+    previously asserted the absence of inheritance, which was the bug).
+
+### Fixed
+
+- **Flaky `HOME`-race unit tests in `skills::sources::tests` fixed (#3607):**
+  `remote_git_without_subdir_uses_cache_dir_directly` and its siblings
+  `remote_git_cache_path_computed_correctly` /
+  `sources_resolved_paths_expands_tilde` each called `dirs::home_dir()`
+  twice — once implicitly inside `SkillSourceRegistry::resolved_paths()`,
+  once directly to build the expected value — without holding
+  `test_env::HOME_LOCK`, so a concurrent test's `$HOME` sandboxing could
+  change the value in between the two calls under `cargo test`'s default
+  multi-threaded runner. All three now hold `HOME_LOCK` for their full
+  body, matching the crate-wide convention documented in `test_env.rs`.
+- **`gworkspace` OpenRPC endpoint no longer silently discovers zero tools
+  (#3577):** `DirectDriver::discover()` deserialized `rpc.discover`'s raw
+  result directly into `EndpointManifest`, which expected a top-level
+  `tools` array; every real server (`trusty-memory`, `trusty-search`,
+  `trusty-gworkspace`) actually emits standard OpenRPC's `methods` array.
+  Because `EndpointManifest.tools` carried `#[serde(default)]`, the shape
+  mismatch deserialized successfully with `tools: vec![]` instead of
+  erroring — the `gworkspace` endpoint (enabled by default since #3056)
+  contributed zero tools in production with no error anywhere. New
+  `discovery::parse_manifest` recognizes the real `methods` shape (and the
+  legacy `tools` shape), converts each OpenRPC method into a
+  `DiscoveredTool` (JSON Schema `input_schema`/`output_schema`
+  reconstructed from `params[]`/`result.schema`), and resolves scope from
+  `x-scopes` (dotted string, used as-is) or `x-google-scopes` (OAuth URLs,
+  mapped to a dotted scope via the new `google_scope` module — classified
+  by what the OAuth grant permits, not by today's per-tool behavior). A
+  payload with neither `methods` nor `tools` now returns a hard error
+  naming the endpoint and the keys actually present, instead of silently
+  producing an empty tool list; a manifest that parses successfully but
+  advertises zero tools now logs a loud warning naming the endpoint.
+  `default-config.toml`'s gworkspace endpoint scopes gained
+  `google.slides.*` and `google.accounts.*`, without which the Slides and
+  local-account-management tools would parse but then be dropped by scope
+  filtering.
+- **Bundled agent templates now refresh automatically when the binary's embedded content changes, instead of freezing at whatever was deployed on first run (#3556).** `agents::bundled::deploy_bundled_agents` has always been a strict "write missing files only" deploy — `ensure_bundled_agents_deployed` (run once per process from `runtime::startup::run_startup_init`) called it unconditionally, so a machine that deployed the bundled roster once NEVER picked up a later binary's changes to those same templates. Concretely: PR-A's `delegate_to_agent` grant added to the base `assistant` agent never reached a machine that already had the old `assistant/agent.toml` on disk — the assistant silently declined to delegate, and the only fix was a human manually deleting the stale file. Root cause fixed via a version-stamped reprovision pass:
+  - A new `agents::bundled::stamp` module computes a stable SHA-256 content hash over the embedded bundle's `(path, bytes)` set and persists it as `$HOME/.trusty-agents/agents/.bundled-stamp`.
+  - `ensure_bundled_agents_deployed` now compares the current binary's stamp to the on-disk one; a missing or mismatched stamp triggers a refresh pass that rewrites exactly the bundled files whose content actually differs from the current embedded template — every other bundled file (already up to date) and every NON-bundled (user-authored) file are left completely untouched, since the refresh only ever iterates the embedded bundle's own relative paths.
+  - Before overwriting a bundled file whose on-disk content differs from the incoming template (e.g. a user hand-edited it, or it's genuinely stale), the existing content is archived to a sibling `<file>.stale.bak` first, so it's always recoverable — but ONLY when that backup doesn't already exist, so a later pass can never clobber a genuine prior backup with torn or already-refreshed content.
+  - Added an explicit manual escape hatch, `tagent agents repair`, that force-refreshes every bundled file regardless of the stamp (`tagent agents deploy` also gained the same stamp-aware refresh behavior it previously lacked).
+  - Concurrency (code-critic follow-up, HIGH): `delegate_to_agent` routinely spawns a fresh `tagent` subprocess per delegation, so multiple processes can enter the stale-stamp refresh path concurrently right after a binary upgrade. Every write in `agents::bundled` (per-file overwrite, backup, and the stamp file) now goes through `state_writer::atomic_write` (tmp-file + rename, reusing the same `fs4`-based primitive the crate already uses for state files) instead of a plain truncate-then-write, and a new `agents::bundled::lock` module takes a SINGLE pass-level advisory lock for the whole `reprovision_bundled_agents` read-backup-write loop, so two concurrent passes over the same target directory are fully serialized rather than interleaving per-file decisions.
+  - Concurrency, part 2 (code-critic follow-up, MEDIUM): the first pass acquired that lock only INSIDE the refresh loop, leaving the stamp `read`/is-stale-decide/`write` sequence in `ensure_bundled_agents_deployed_in` and `force_reprovision_bundled_agents` outside it — two concurrent callers could both read the same old stamp, both refresh, then race writing the stamp back (self-healing on the next launch, but not actually the fully-serialized invariant intended). The loop body moved into a new `reprovision_bundled_agents_locked`, which REQUIRES an already-held lock guard as a parameter; `ensure_bundled_agents_deployed_in` and `force_reprovision_bundled_agents` now acquire the lock ONCE, before `stamp::read`, and hold it across the entire read-decide-refresh-write sequence.
+  - `crates/trusty-agents/src/agents/bundled.rs` was split into `agents/bundled/{mod.rs, stamp.rs, lock.rs, tests.rs}` to keep the new logic under the crate's 500-SLOC production-file cap.
+  - Regression coverage: `deployed_assistant_config_survives_scoping_with_delegate_to_agent` (`runtime/tool_registry_tests.rs`) seeds a genuinely STALE `assistant/agent.toml` (an old allow-list without `delegate_to_agent`) plus a wrong stamp into a tempdir, drives the REAL refresh path (`ensure_bundled_agents_deployed_in`), then resolves the refreshed config via `AgentConfig::by_name` and the real assistant-tier registry, asserting `delegate_to_agent` survives `scope_assistant_allowed_tools` — this sequence fails on pre-#3556 code, closing the exact deployed-config-to-registry-scoping gap that silently lost the grant. `agents::bundled::tests` adds `stale_stamp_triggers_refresh`, `refresh_backs_up_differing_content`, `existing_stale_backup_is_never_clobbered`, `non_bundled_user_file_untouched_by_refresh`, `matching_stamp_is_a_fast_noop`, `missing_stamp_establishes_baseline_without_rewriting_matching_content`, `force_reprovision_overwrites_even_when_stamp_matches`, `concurrent_ensure_calls_over_stale_target_converge_to_one_consistent_refresh` (races 6 threads' full `ensure_bundled_agents_deployed_in` calls over one seeded-stale target, asserting exactly one performs the refresh and every other observes a fully-consistent no-op), and `ensure_deployed_blocks_on_externally_held_pass_lock` (proves `stamp::read` itself is now behind the lock, by holding it externally and asserting a concurrent call cannot proceed until release); `agents::bundled::lock::tests` adds `pass_lock_serializes_concurrent_reprovision_calls`.
+
+- **Test-isolation cluster: env-var and CWD races between concurrently-running tests (issues #3398, #3516).**
+  - `ctrl/tests/tools_tests.rs`'s `detect_self_project_finds_via_env_var` / `detect_self_project_returns_none_when_no_marker` used to mutate the process-global `TAGENT_PROJECT_DIR` env var directly, with no `#[serial]` guard — but `workflow::engine::executor::tests::checkpoint_resume` mutates the SAME var under its own `#[serial]` convention, so the unguarded pair could clobber it mid-flight and produce a `CheckpointNotFound` failure in a completely unrelated test (#3398). `ctrl::util::detect_self_project` now delegates to a new `detect_self_project_with_hint(Option<&str>)`; the tests call the hinted version directly, so no env var is touched at all.
+  - `telegram::tests::tempdir_for_test` hand-rolled tempdir "uniqueness" from `std::process::id()` (constant across every thread of one test binary) plus a nanosecond timestamp, which can collide under very high `--test-threads` if two threads sample the same clock tick — silently sharing one `telegram.pid` fixture between two of the `telegram_pid_guard_*` tests (#3516). Now uses `tempfile::tempdir()`, which guarantees a collision-free unique directory.
+  - `default_bundled_config_dir`'s legacy-migration test (`env_compat.rs`) used to `std::env::set_current_dir` into a scratch tempdir under `#[serial]` — but CWD is process-global exactly like an env var, and `api::server::tests` handler tests resolve their own CWD-relative paths (`.trusty-agents/projects`, `.trusty-agents/agents`) while holding a *different* lock (`HOME_LOCK`), so `#[serial]` alone did not protect them from this CWD swap. `default_bundled_config_dir` now delegates to a new `default_bundled_config_dir_checking(&Path)` that roots its existence checks at an explicit parameter; the test points it at a tempdir directly, so no CWD mutation occurs at all.
+  - Verified with the full `trusty-agents` lib suite run repeatedly at `--test-threads=64` and `128` (9 full runs total) with zero failures in `checkpoint_resume`, `telegram_pid_guard_*`, `get_project_config_falls_back_to_registry_when_toml_missing`, or `gather_specs_does_not_spawn_mcp_add_discover_bypass` — not proof the underlying rare flakes (#3514, #3516's second sub-issue) are fully eliminated, but no regression observed either.
+
+- **Assistant can now actually delegate to bundled worker agents (`engineer`,
+  `qa-agent`, …) regardless of the invoking CWD (#3555 follow-up):** a live
+  run (`tagent --direct assistant --task "have an engineer run cargo check
+  and report back"`) proved `delegate_to_agent` always failed with
+  `is_error=true` and no `engineer` sub-agent was ever spawned, whenever the
+  assistant was launched from a directory with no local
+  `.trusty-agents/agents/` of its own (a bare worktree root, `/tmp`, …) — the
+  model honestly reported "no engineering agent is wired up right now."
+  Root cause: `build_assistant_tier_registry`
+  (`src/runtime/tool_registry.rs`) built `delegate_to_agent`'s pre-flight
+  validation directory as a single, hand-rolled
+  `<cwd>/.trusty-agents/agents` — invisible to the bundled worker roster
+  `agents::bundled::ensure_bundled_agents_deployed` deploys to
+  `$HOME/.trusty-agents/agents/` at every startup. `AgentConfig::by_name`
+  (used by the actual spawn) already resolves through
+  `agents_dir_candidates()` — CWD/`TAGENT_CONFIG_DIR` tier, THEN the `$HOME`
+  fallback — so validation rejected names the spawn would have happily
+  found, killing the delegate call before the runner was ever invoked.
+  - `DelegateToAgentTool` (`src/tools/delegate.rs`) now validates against a
+    `Vec<PathBuf>` of candidate directories (`with_config_dirs`) instead of a
+    single `Option<PathBuf>`, checked via the new `agents::agent_name_resolves`
+    predicate (package/flat-toml/flat-md tiers — the same tiers the loader's
+    `by_name_unresolved_src_in` uses). `with_config_dir` (single dir) is kept
+    unchanged for `pm`/`ctrl`, which intentionally validate against exactly
+    one project-scoped roster.
+  - `build_assistant_tier_registry` now sources its directories from the
+    newly crate-visible `agents::agents_dir_candidates()` — the SAME
+    multi-tier list `AgentConfig::by_name` resolves against — so validation
+    and the actual spawn can never diverge again.
+  - Observability: `delegate_to_agent`'s pre-flight rejection and any
+    sub-agent run error are now logged at `debug` with the actual failure
+    reason (`src/tools/delegate.rs`); the tool-loop's per-call log
+    (`src/llm/tool_loop/mod.rs`) now includes the error content on failure
+    instead of only `is_error=true` with no payload — previously a failing
+    `delegate_to_agent` call was undebuggable at any log level.
+  - New tests: `delegate_resolves_agent_from_secondary_config_dir` and
+    `delegate_rejects_agent_absent_from_all_config_dirs`
+    (`src/tools/delegate.rs`); `agent_name_resolves_tests::*`
+    (`src/agents/tests/loading.rs`) pin the three resolution tiers plus the
+    negative/traversal cases.
+  - Live-verified end-to-end (`RUST_LOG=debug`, CWD = bare worktree root with
+    no local `.trusty-agents/agents/`): `delegate_to_agent` dispatches with
+    `is_error=false`, a real `agent=engineer` sub-agent spawns and completes,
+    and the assistant relays the engineer's actual `cargo check` findings.
+  - **`agent_name_resolves` edge-case fix (code-critic MEDIUM):** the real
+    resolver (`AgentConfig::by_name_in`, via `load_agent_package`'s `?`) hard
+    -aborts the ENTIRE search the moment `<dir>/<name>/` exists as a
+    directory without a readable `agent.toml`/`persona.md` inside it — it
+    does NOT fall through to a flat `<name>.toml` in a later directory.
+    `agent_name_resolves` previously kept scanning in that case (a
+    `.iter().any(...)` over all dirs), so validation could accept a name the
+    real spawn then hard-errors on. Rewrote it as an explicit per-`dir` loop
+    that mirrors the same short-circuit: on the first `<dir>/<name>/`
+    directory hit, it returns immediately based on whether BOTH
+    `agent.toml` and `persona.md` are present, exactly like the real
+    resolver either resolves or aborts right there. New pinning test
+    `agent_name_resolves_tests::short_circuits_on_malformed_directory_package_matching_real_resolver`
+    proves both `agent_name_resolves` and `AgentConfig::by_name_in` agree in
+    the same scenario. (Known, documented, deliberately-deferred limitation:
+    `agent_name_resolves` still doesn't check the legacy
+    `~/.claude/agents`/`<cwd>/.claude/agents` claude-mpm-format tier the real
+    resolver's final fallback searches — never affects the bundled roster
+    `delegate_to_agent` actually targets, since every bundled agent lives
+    under the `.trusty-agents/agents` tiers this function does check.)
+
+### Security
+
+- **CRITICAL — privilege escalation via unrestricted assistant-tier
+  delegation target, closed with a fail-closed role allowlist (#3555
+  follow-up, code-critic):** widening `delegate_to_agent`'s pre-flight
+  validation to the full `agents_dir_candidates()` multi-tier search (the fix
+  directly above) had an unreviewed consequence — it made the ENTIRE bundled
+  roster resolvable from an assistant-tier call regardless of cwd, including
+  `pm` (role `orchestrator`), `ctrl` (role `controller`), `observe-agent`
+  (role `observer`), and `postmortem-agent`/`analysis-agent` (role
+  `analysis`). `run_subagent`'s tool registry is built from the SPAWNED
+  child's own role, so an assistant delegating to `pm`/`ctrl` would have
+  handed the resulting subprocess an UNRESTRICTED orchestrator/controller
+  registry (shell, `write_file`, unrestricted `delegate_to_agent`) — an
+  escalation straight out of the sandboxed assistant tier, reopening the
+  internal-orchestration-leak class PR A (epic #3052) closed.
+  - `DelegateToAgentTool` (`src/tools/delegate.rs`) gained
+    `allowed_target_roles: Option<Vec<String>>` and a
+    `with_allowed_target_roles` builder. When set, `execute()` resolves the
+    TARGET's `AgentConfig` (via `config_dirs`) and requires its resolved
+    `agent.role` to be in the allowlist — checked BEFORE the runner is ever
+    invoked. Both "unknown agent name" and "role not allowed" return the
+    IDENTICAL generic error text, so neither leaks which case occurred or any
+    role taxonomy. `pm`/`ctrl` never call this builder — the full roster
+    remains a legitimate delegation target for them, completely unaffected.
+  - `build_assistant_tier_registry` (`src/runtime/tool_registry.rs`) now
+    wires a new `ASSISTANT_ALLOWED_DELEGATE_ROLES` constant: the exact `role`
+    field values of the bundled worker agents (`engineer`, `qa`,
+    `researcher`, `documentation`, `ops`, `planner`) plus `ASSISTANT_TIER_ROLE`
+    itself — so the Izzie ↔ cto-assistant peer-consult lane keeps working
+    (spawning a peer assistant is safe: it's routed through the SAME
+    restricted `build_assistant_tier_registry`, never an unrestricted one).
+    Any other role — orchestrator, controller, observer, analysis, or
+    anything undeclared — is rejected.
+  - New tests: `delegate_assistant_role_gate_rejects_orchestrator_role`,
+    `delegate_assistant_role_gate_rejects_controller_role`,
+    `delegate_assistant_role_gate_allows_worker_role`,
+    `delegate_assistant_role_gate_allows_peer_assistant_role`, and
+    `delegate_without_role_gate_allows_any_resolvable_role` (pins that
+    pm/ctrl are unaffected) — all in `src/tools/delegate.rs`. A `#[ignore]`d
+    live-wiring test, `runtime::tool_registry::registry_tests::
+    live_assistant_registry_rejects_pm_role`, exercises the REAL
+    `build_assistant_tier_registry()` against whatever roster is actually
+    deployed at `$HOME/.trusty-agents/agents/` (manual verification aid, not
+    a CI gate — CI's `$HOME` may have no deployed roster at all).
+  - Live-verified: the REAL production registry (built from the machine's
+    actual deployed `$HOME/.trusty-agents/agents/pm.toml`, role
+    `orchestrator`) rejects `delegate_to_agent(agent_name="pm")` without
+    invoking the runner, while a real `engineer` delegation still spawns and
+    completes normally.
+
+### Changed
+
+- **Assistant delegates to specialists + peers; black-boxes internal tooling
+  (PR A, epic #3052):** the base `assistant` agent (and every persona built
+  on it — `izzie`, `cto-assistant`, `personal-assistant`) can now actually
+  get hands-on engineering/QA/research work done. `assistant/agent.toml`
+  gains `delegate_to_agent` in `[tools].allow` (native, in-process
+  tagent→tagent delegation via `src/tools/delegate.rs`, already wired into
+  persona dispatch by `filter_persona_tool_names` — only the grant was
+  missing). `izzie` and `cto-assistant` both declare `extends = "assistant"`
+  and inherit the grant automatically (`[tools].allow` is unioned base-first
+  by `crate::agents::extends::merge_extends`, #3055/#3106).
+  `assistant/persona.md` softens the old "redirect coding to engineering
+  agents" framing to "bring in the right specialist and relay the outcome",
+  adds a peer consult-and-relay capability (assistant instances may consult
+  each other and summarize the input, staying in control of the
+  conversation), and adds a BLACK-BOX rule: never say "tm", "tcode",
+  "trusty-mpm", "trusty-code", "PM session", "subprocess", "sub-agent", or
+  "subagent" to the user — describe outcomes via "a specialist" / "my team",
+  never internal mechanics or system/daemon names. `cto-assistant/agent.toml`
+  is refactored from a hand-forked full copy (`role = "assistant"`, no
+  `extends`) to `extends = "assistant"`, keeping only its Duetto-specific
+  deltas (CTO ops DB tools, ticketing, extra git tools, org/APEX/voice
+  skills, and its tuned `[llm]` sampling — see below) — it now also inherits
+  the base's black-box posture and full gworkspace surface.
+
+- **Per-key `[llm]` `extends` inheritance for `temperature`/`max_tokens`:**
+  `crate::agents::extends::merge_extends` previously inherited the entire
+  `[llm]` block wholesale from the base, discarding a child's declared
+  `temperature`/`max_tokens` even when explicitly set — a live regression
+  for `cto-assistant`'s conversion above (its #469 max_tokens bump, 1024 →
+  4096, for untruncated GFA reports/org tables, and its lower temperature,
+  0.3, for factual precision, would otherwise have silently reverted to the
+  base's conversational defaults). `temperature`/`max_tokens` are now the
+  only two `[llm]` fields resolved per-key: a child that declares one
+  overrides the base's, one it omits inherits the base's. This is enabled by
+  a new UNSET-sentinel serde default (`LlmParams::temperature`/`max_tokens`
+  — `NaN` / `u32::MAX`, never a realistic real-world value) plus a new
+  `AgentConfig::validate_llm_required_for_root` parse-time guard: a root
+  (non-`extends`) agent TOML must still declare real values (restoring the
+  fail-fast guarantee the old serde-mandatory-field requirement gave), while
+  an `extends` child may now legitimately omit either or both to inherit the
+  base's. `.md`-format `extends` children (which have no frontmatter path to
+  declare `temperature`/`max_tokens` at all) now correctly inherit the
+  base's values too, instead of always resolving to the `parse_md_agent`
+  stub defaults (0.2 / 8192) regardless of the base. Every other `[llm]`
+  field (`use_anthropic_direct`, `stop_sequences`, `max_turns`, ...) keeps
+  the pre-existing inherited-from-base-wholesale behavior — this is a
+  narrow, deliberate schema addition scoped to the two fields with no serde
+  default, not a general per-key `[llm]` merge. New tests:
+  `extends_llm_child_overrides_temperature_only`,
+  `extends_llm_child_overrides_max_tokens_only`,
+  `extends_llm_child_inherits_when_omitted`
+  (`crates/trusty-agents/src/agents/extends/tests.rs`),
+  `llm_required_fields_missing_on_root_agent_is_rejected`,
+  `llm_omitted_fields_allowed_on_extends_child`, and
+  `assistant_tier_llm_sampling_params_pin_per_key_extends_inheritance`
+  (`crates/trusty-agents/src/agents/tests/loading.rs`) — the last one pins
+  `cto-assistant` resolving to `(0.3, 4096)` and `assistant`/`izzie`
+  resolving to their unchanged `(0.7, 1024)`.
+
+### Security
+
+- **Assistant-tier tool black-box strip (PR A, epic #3052):** removed
+  `session_list`, `session_status`, `session_send`, `project_list`,
+  `console_metrics` (trusty-mpm proxied tools), `system_status` (enumerates
+  daemon names including "trusty-mpm"), `mcp_list`/`mcp_enable`/`mcp_disable`
+  (enumerate MCP service names), and `agent_delegate` (trusty-mpm's, distinct
+  from the native `delegate_to_agent`) from every assistant-tier
+  `[tools].allow` list (`assistant`, `izzie` (package + flat shadow),
+  `cto-assistant` (package + flat shadow), `personal-assistant`) so a
+  conversational assistant persona can no longer name-drop internal
+  trusty-* system/daemon architecture to the user. These tools remain
+  reachable to `pm`/`ctrl`/`research`/`observe` roles via their own scoping —
+  unaffected by this change. A pinning test
+  (`assistant_tier_grants_delegation_and_blackboxes_internal_tools`,
+  `crates/trusty-agents/src/agents/tests/loading.rs`) asserts the resolved
+  `[tools].allow` for `assistant`/`izzie`/`cto-assistant` includes
+  `delegate_to_agent` and excludes every black-boxed name.
 
 - **Loopback-only doctrine (#3329):** the HTTP API server (`--api`/`--serve`)
   now binds `127.0.0.1` by default instead of `0.0.0.0`. A non-loopback bind is
@@ -26,6 +420,85 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   loopback. Replaces the crate-local CORS/compression/trace stack with the
   shared standard middleware so trusty-agents no longer drifts from the sibling
   trusty-* daemons.
+
+### Added
+
+- **Product rename: "Trusty Assistant" → "Trusty Agents":** the last
+  remaining "Trusty Assistant" product-name references in the desktop UI
+  (macOS dock label / `productName` and window `title` in
+  `ui/src-tauri/tauri.conf.json`, the page `<title>`/meta description in
+  `ui/index.html`, the Tauri capabilities description, the visible
+  "desktop app only" copy in `PersonalityPanel.svelte`, `ui/README.md`'s
+  heading, the Playwright smoke-test describe block, and descriptive code
+  comments) now consistently read "Trusty Agents", matching the header/
+  sidebar wordmark and app branding already in place.
+
+- **Canonical Foundry icon set (#3486):** `ActionIcon`, `RobotIcon`, and
+  `LogoMark` — previously only defined inline in this crate's
+  `ui/src/lib/icons/` — now have a documented canonical source at
+  `docs/design/UI/design-system/icons/` (README covers the `ActionIcon`
+  name→glyph vocabulary and the `currentColor`/theme-reactivity convention).
+  This crate's copies are unchanged behaviorally but now carry a header
+  comment pointing back at the canonical source, to be kept in sync until
+  #3492 (`@trusty/foundry` package) replaces copy-paste vendoring with a real
+  import.
+
+- **Trusty Agents brand identity (#3479):** wires the new Trusty Agents brand
+  identity suite (`docs/design/UI/icons/`) into the Assistant UI. Adds
+  `Logo.svelte` (full horizontal lockup — mark + "TRUSTY AGENTS" wordmark +
+  "UNIT-04 · MPM ORCHESTRATION" descriptor, theme-aware light/Night-Shift-
+  reversed via the app's existing `dark:` convention), used in `Header.svelte`
+  in place of the old generic robot glyph + literal text block, and
+  `Mark.svelte` (standalone UNIT mark for constrained spots), used in
+  `LogoMark.svelte`/`Sidebar.svelte`. Regenerates the Tauri app/launcher icon
+  set from `trusty-agents-app-icon.png` and installs
+  `trusty-agents-favicon.svg` as `public/favicon.svg`. `LogoMark.svelte`'s
+  wordmark now reads "Trusty Agents" (was "Trusty Assistant"), matching the
+  header lockup. The now-unused generic `RobotIcon.svelte` was removed (its
+  two call sites were both replaced). This is an **intentional divergence**
+  from the generic Foundry glyph set canonicalized in #3486/#3495 —
+  trusty-agents carries its own product identity rather than vendoring the
+  placeholder robot glyph verbatim; see
+  `docs/design/UI/design-system/icons/README.md`'s "Canonical source,
+  vendored copies" section for the documented exemption.
+
+- **CI token drift-check (refs #3486):** a new `scripts/check_token_drift.mjs`
+  pins this crate's `app.css` Foundry `--color-*` RGB-triple values to
+  `docs/design/UI/design-system/tokens.css` (the canonical hex source),
+  wired into CI as the `token-drift` workflow. Fails with a per-token diff if
+  the two silently diverge; run locally via `pnpm run check:tokens`. No
+  drift was found in this crate — every value already matched canonical.
+  Guards against a zero-comparison false-green (an ENFORCED entry with an
+  emptied `mappings`/`passthrough` previously reported "matches canonical"
+  regardless of the file's real contents — caught by code-critic review) and
+  ships `scripts/check_token_drift.test.mjs`, a `node:test` regression suite
+  covering drift detection, missing-block/missing-token parse failures, and
+  the zero-comparison guard, run in CI ahead of the real check.
+
+### Fixed
+
+- **Credential-test env isolation flake (#3464):** several `llm::credentials`,
+  `llm::helpers`, `llm::adapter`, `llm::http`, `ctrl::ctrl_turn::dispatch`, and
+  `runtime::cli_def` tests that assert "no credential resolves" or "the store
+  wins when env is absent" intermittently failed under `cargo test --workspace`
+  (and deterministically on any machine/CI runner with a real project or
+  `$HOME` `.env.local`). Root cause: `trusty_common`'s `.env.local` loader is a
+  process-global `OnceLock` that fires at most once per test binary; whichever
+  test's credential-resolution call happened to be first could have it silently
+  re-populate an env var a test had just cleared, mid-call. Fixed by forcing
+  that loader to have already run (`test_env::force_env_local_loaded`) before
+  any test clears credential env vars, and by clearing every registry-mapped
+  provider's env var (not just the three `openrouter`/`anthropic`/`claude-code`
+  names) in `other_configured_providers()`'s tests
+  (`test_env::clear_all_credential_env_vars`). Also sandboxes `$HOME` in
+  `ctrl_creds_errors_when_nothing_configured`, a pre-existing gap that made it
+  fail deterministically on any machine with a real secure-store credential.
+- **Favicon/RobotIcon drift (#3486):** `ui/public/favicon.svg` was a fourth,
+  independently hand-drawn robot face (different rect/circle coordinates, a
+  `<text>`-rendered `>_` mouth) that had drifted from `RobotIcon.svelte`'s
+  actual markup. Regenerated the favicon's geometry from `RobotIcon.svelte`'s
+  `full`-variant paths (same head rect, antenna, eye positions, and stroked
+  chevron+underscore mouth) so there is a single robot design instead of two.
 
 ### Added
 

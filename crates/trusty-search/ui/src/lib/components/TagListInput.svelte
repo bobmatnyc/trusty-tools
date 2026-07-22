@@ -96,13 +96,13 @@
     align-items: center;
     gap: 4px;
     background: var(--trusty-primary-soft, rgba(59, 130, 246, 0.12));
-    color: var(--trusty-text);
+    color: var(--trusty-text-primary);
     border-radius: var(--trusty-radius-sm);
     padding: 2px 4px 2px 8px;
     font-size: var(--trusty-fs-xs);
   }
   .tag-text {
-    font-family: var(--trusty-font-mono, monospace);
+    font-family: var(--trusty-mono, monospace);
   }
   .tag-remove {
     border: none;

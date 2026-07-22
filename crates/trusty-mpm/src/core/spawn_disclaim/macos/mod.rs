@@ -1,12 +1,14 @@
 //! macOS-only spawn primitives shared by [`super::disclaimed_output`] (the
 //! capture-to-completion shape, [`capture`]), [`super::disclaimed_status`]
 //! and [`super::disclaimed_spawn_detached`] (the inherited-stdio shapes,
-//! [`status`]), and [`super::disclaimed_piped_spawn`] (the long-lived async
-//! piped shape, [`piped`]).
+//! [`status`]), [`super::disclaimed_piped_spawn`] (the long-lived async
+//! piped shape, [`piped`]), and [`super::disclaimed_stderr_piped_spawn`]/
+//! [`super::disclaimed_stdout_piped_spawn`] (the synchronous single-stream
+//! piped shapes, [`stderr_piped`]/[`stdout_piped`] — issue #3267).
 //!
-//! Why: all three spawn shapes need the SAME low-level building blocks —
-//! resolving the private disclaim SPI, reaping a pid, and (for two of the
-//! three) a CLOEXEC pipe pair or the Darwin chdir file-action extension — so
+//! Why: all five spawn shapes need the SAME low-level building blocks —
+//! resolving the private disclaim SPI, reaping a pid, and (for most of the
+//! five) a CLOEXEC pipe pair or the Darwin chdir file-action extension — so
 //! they live here once rather than being copy-pasted into each shape's own
 //! file.
 //! What: [`resolve_disclaim_fn`] (dlsym lookup for
@@ -14,19 +16,25 @@
 //! both ends `FD_CLOEXEC`), [`OwnedFd`] (an RAII raw-fd guard), and
 //! [`wait_for`] (blocking `waitpid` on a specific pid). `environ` is declared
 //! here since [`capture`] passes it straight through to `posix_spawnp`, and
-//! `posix_spawn_file_actions_addchdir_np` since both [`status`] and [`piped`]
-//! need to reproduce a `Command::current_dir()`.
-//! Test: exercised transitively by `capture`'s, `status`'s, and `piped`'s own
-//! test modules; there is no direct unit test of these helpers in isolation
-//! (they have no externally observable behavior without a real spawn).
+//! `posix_spawn_file_actions_addchdir_np` since [`status`], [`piped`],
+//! [`stderr_piped`], and [`stdout_piped`] all need to reproduce a
+//! `Command::current_dir()`.
+//! Test: exercised transitively by `capture`'s, `status`'s, `piped`'s,
+//! `stderr_piped`'s, and `stdout_piped`'s own test modules; there is no
+//! direct unit test of these helpers in isolation (they have no externally
+//! observable behavior without a real spawn).
 
 mod capture;
 mod piped;
 mod status;
+mod stderr_piped;
+mod stdout_piped;
 
 pub(crate) use capture::spawn_capture_disclaimed;
 pub(crate) use piped::spawn_piped_disclaimed;
 pub(crate) use status::{spawn_detached_disclaimed, spawn_status_inherit_disclaimed};
+pub(crate) use stderr_piped::spawn_stderr_piped_disclaimed;
+pub(crate) use stdout_piped::spawn_stdout_piped_disclaimed;
 
 use std::io;
 use std::os::unix::process::ExitStatusExt;

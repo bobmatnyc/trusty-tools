@@ -135,6 +135,114 @@ content = "c"
     assert!(merged.agent.extends.is_none());
 }
 
+// --- #3052 PR A follow-up: per-key `[llm]` temperature/max_tokens ---------
+
+#[test]
+fn extends_llm_child_overrides_temperature_only() {
+    // Child declares ONLY `temperature`, omitting `max_tokens` entirely —
+    // must override temperature and still inherit the base's max_tokens.
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.7
+max_tokens = 1024
+[system_prompt]
+content = "b"
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+[llm]
+temperature = 0.3
+[system_prompt]
+content = "c"
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(merged.llm.temperature, 0.3);
+    assert_eq!(
+        merged.llm.max_tokens, 1024,
+        "omitted max_tokens must inherit the base's"
+    );
+}
+
+#[test]
+fn extends_llm_child_overrides_max_tokens_only() {
+    // Symmetric case: child declares ONLY `max_tokens`, omitting `temperature`.
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.7
+max_tokens = 1024
+[system_prompt]
+content = "b"
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+[llm]
+max_tokens = 4096
+[system_prompt]
+content = "c"
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(
+        merged.llm.temperature, 0.7,
+        "omitted temperature must inherit the base's"
+    );
+    assert_eq!(merged.llm.max_tokens, 4096);
+}
+
+#[test]
+fn extends_llm_child_inherits_when_omitted() {
+    // Child declares an empty `[llm]` table (both fields omitted) — must
+    // inherit BOTH temperature and max_tokens from the base unchanged. This
+    // is the #469 regression guard in unit-test form: prior to the per-key
+    // fix, this behavior was correct only by accident (wholesale-inherit);
+    // now it is the explicit "child omits => inherit" path.
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.3
+max_tokens = 4096
+[system_prompt]
+content = "b"
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+[llm]
+[system_prompt]
+content = "c"
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(merged.llm.temperature, 0.3);
+    assert_eq!(merged.llm.max_tokens, 4096);
+}
+
 #[test]
 fn extends_runner_and_persistent_session_child_override() {
     // #3106 MEDIUM: a child's non-default `runner` and opt-in

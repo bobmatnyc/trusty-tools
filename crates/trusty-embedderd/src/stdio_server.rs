@@ -18,7 +18,7 @@
 //! parent's `StdioEmbedderClient` to fail with a JSON parse error.
 //!
 //! Test: `stdio_eof_terminates_cleanly` (unit, no daemon required);
-//! `bit_identical_stdio` in `tests/bit_identical.rs` (ONNX, `#[ignore]`).
+//! `bit_identical_*` in `tests/bit_identical.rs` (ONNX, `#[ignore]`).
 
 use std::sync::Arc;
 

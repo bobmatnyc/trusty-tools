@@ -112,7 +112,7 @@ impl BindMode {
 /// What: Returns 1-2 `SocketAddr`s. In `Tailscale` mode runs
 /// `detect_tailscale_ipv4` — if that fails, logs a warning and falls back to
 /// local-only.  In `Explicit` mode parses the string directly.
-/// Test: `test_resolve_bind_addrs_*` below; `detect_tailscale_ipv4` is
+/// Test: `test_resolve_*` below; `detect_tailscale_ipv4` is
 /// injected via the `ip_detector` closure for unit-test isolation.
 pub fn resolve_bind_addrs(
     mode: &BindMode,

@@ -499,7 +499,12 @@ mod tests {
         /// the whole test body — mirrors
         /// `llm::credentials::tests::clear_all` in the sibling module that
         /// tests the same underlying `resolve_key` calls.
+        ///
+        /// #3464: forces the process-global `.env.local` `OnceLock` loader
+        /// to have already fired before removing anything — see
+        /// `crate::test_env::force_env_local_loaded`'s docs.
         fn clear_all() {
+            crate::test_env::force_env_local_loaded();
             unsafe {
                 std::env::remove_var("OPENROUTER_API_KEY");
                 std::env::remove_var("ANTHROPIC_API_KEY");

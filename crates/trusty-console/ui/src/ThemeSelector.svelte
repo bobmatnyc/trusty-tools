@@ -33,15 +33,15 @@
   .theme-selector {
     display: flex;
     gap: 0;
-    border: 1px solid var(--color-border);
+    border: 1px solid var(--trusty-border);
     border-radius: 0.4rem;
     overflow: hidden;
   }
   .theme-btn {
     background: none;
     border: none;
-    border-right: 1px solid var(--color-border);
-    color: var(--color-text-secondary);
+    border-right: 1px solid var(--trusty-border);
+    color: var(--trusty-text-secondary);
     cursor: pointer;
     font-size: 0.72rem;
     font-weight: 500;
@@ -53,11 +53,11 @@
     border-right: none;
   }
   .theme-btn:hover {
-    background: var(--color-border);
-    color: var(--color-text-primary);
+    background: var(--trusty-border);
+    color: var(--trusty-text-primary);
   }
   .theme-btn.active {
-    background: var(--color-accent);
+    background: var(--trusty-accent);
     color: #ffffff;
   }
 </style>

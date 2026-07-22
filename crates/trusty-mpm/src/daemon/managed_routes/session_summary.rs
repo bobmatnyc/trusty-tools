@@ -27,8 +27,39 @@ pub struct SessionSummary {
     pub id: String,
     /// tmux session name.
     pub name: String,
-    /// Lifecycle state.
+    /// Lifecycle state (#3302: reconciled against LIVE tmux for DISPLAY by
+    /// [`super::summary::reconcile_live_state`] when this summary came from
+    /// the list/get endpoints — an `Active`/`Stopped` record whose tmux
+    /// session is absent/present is shown as `stopped`/`active` regardless of
+    /// what is actually persisted). Use [`Self::persisted_state`], not this
+    /// field, for any RESUME/RESTART decision — see that field's doc (#3531).
     pub state: String,
+    /// The RAW, un-reconciled lifecycle state exactly as persisted in the
+    /// store — set once at [`super::summary::record_to_summary`] and never
+    /// touched by the later display-only tmux reconciliation that may
+    /// overwrite [`Self::state`] (#3531).
+    ///
+    /// Why: the daemon's own `/resume` endpoint
+    /// ([`crate::session_manager::SessionManager::resume`]) validates a
+    /// restart against the PERSISTED state only — it has no idea a caller's
+    /// copy of `state` was display-reconciled. Before this field existed, a
+    /// zombie session (record still `Active`/`Provisioning` but its tmux
+    /// pane gone) had its displayed `state` collapsed to `stopped` by
+    /// [`super::summary::reconcile_live_state`] — indistinguishable, from the
+    /// CLI's point of view, from a session that is GENUINELY `Stopped`. The
+    /// CLI's own zombie auto-reconcile (#2001,
+    /// `bin/tm/commands/guided_resume::plan_resume`) then misclassified the
+    /// zombie as a plain `Restart` instead of `ReconcileThenRestart`, and the
+    /// daemon's `/resume` rejected it with a 409 ("cannot resume a session in
+    /// state 'active'") — the exact dead-end #3531 reported. Restart/resume
+    /// decisions must key off THIS field so they always agree with what the
+    /// daemon's own state-gate will actually check.
+    /// What: identical to `state` for every summary NOT produced by
+    /// `list_managed_sessions`/`get_managed_session` (nothing reconciles it);
+    /// for those two, it is the value `state` held BEFORE reconciliation.
+    /// Test: `reconcile_live_state_leaves_persisted_state_untouched` in
+    /// `super::tests`.
+    pub persisted_state: String,
     /// Provisioned workspace path.
     pub workspace_path: Option<String>,
     /// Repository URL.
@@ -155,4 +186,33 @@ pub struct SessionSummary {
     /// end-to-end coverage in the `session_lifecycle` integration suite.
     #[serde(default)]
     pub attached: bool,
+    /// Stable, daemon-lifetime `tm ls` slot number (issue #3034).
+    ///
+    /// Why: renumbering sessions on every fetch let an operator (or PM agent)
+    /// holding a number from an earlier listing act on the WRONG session once
+    /// a delete shifted every later row down. `0` (the default) means "no
+    /// slot assigned" — only [`super::list_managed_sessions`] computes a real
+    /// slot via `SessionManager::numbered_snapshot`; every other handler that
+    /// builds a `SessionSummary` via `record_to_summary` leaves it at `0`,
+    /// since slot numbers are meaningful only on the numbered listing surface.
+    /// What: 1-based; assigned once per session id for the life of the daemon
+    /// process and never reused, even after the session is deleted.
+    /// Test: `numbered_snapshot_keeps_slot_stable_across_delete` (session
+    /// manager); `list_assigns_stable_slot_numbers_and_tombstones_deleted_one`
+    /// (handler integration test, `tests/session_manager_slots.rs`).
+    #[serde(default)]
+    pub slot: u32,
+    /// True when this row is a tombstone placeholder for a slot whose session
+    /// no longer exists in the store (issue #3034).
+    ///
+    /// Why: Bob's requirement — a deleted session's slot renders as
+    /// `-- deleted --` rather than disappearing (which would let the next
+    /// session silently inherit its number). Every other field is blank when
+    /// this is `true`.
+    /// What: `false` for every session `record_to_summary` builds directly;
+    /// only [`super::list_managed_sessions`]' tombstone rows set it `true`.
+    /// Test: `list_assigns_stable_slot_numbers_and_tombstones_deleted_one`
+    /// (handler integration test, `tests/session_manager_slots.rs`).
+    #[serde(default)]
+    pub deleted: bool,
 }

@@ -7,6 +7,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- Multi-account management is now exposed as MCP tools, not just the CLI
+  (issue #3503): `set_default_account {name}`, `remove_account {name}`, and
+  `add_account` (runs the native OAuth consent flow for a new or re-auth
+  profile — see the README's "Managing accounts" section for the blocking-call
+  design and its tradeoffs). `list_accounts` is unchanged.
+- Per-profile OAuth-client support (issue #3518, follow-up to #3502/#3503):
+  each account profile can now authorize (and forever after refresh) against
+  its OWN OAuth client — e.g. a per-domain "Internal" Google Workspace app —
+  instead of one shared global client. `setup --oauth-client <path>` and
+  `add_account`'s new `oauth_client_path` argument persist a profile's client
+  to `~/.gworkspace-mcp/clients/<profile>.json` (0600); it is reused
+  automatically on every subsequent refresh. Profiles with no per-profile
+  client keep using the global `oauth_client.json`/env vars exactly as
+  before — no migration needed. `accounts list` / `list_accounts` / `doctor`
+  now show which client each profile uses.
+
 ### Changed
 
 - **BREAKING:** the native binary is renamed from `gworkspace-mcp` to
@@ -42,3 +60,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (`BaseClient::get_access_token` calls it on every MCP tool invocation, plus
   again on 401 retry), so the warning is throttled to at most once per
   profile per process rather than repeating on every call.
+- `tokens.json` read-modify-write is now guarded against concurrent writers
+  losing each other's changes (issue #3502): two profiles refreshing at the
+  same moment — in the same or different processes — could each `load()` the
+  map before either `save()`d, silently dropping whichever write lost the
+  race. Every mutation path (`OAuthManager::refresh`, consent persistence,
+  `accounts default`/`accounts remove` and their new MCP-tool counterparts)
+  now goes through `TokenStorage::update`, which serialises callers
+  in-process and holds an advisory cross-process lock on a sidecar
+  `tokens.json.lock` file for the duration.
+- `accounts remove`/`remove_account` no longer orphans the default profile
+  (issue #3502): removing the current default now deterministically
+  reassigns it to another remaining profile (the alphabetically next one)
+  instead of leaving zero default entries, which previously broke
+  `BaseClient::resolve_stored`'s default-profile fallback for every
+  subsequent call with no explicit `account`.

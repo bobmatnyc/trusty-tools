@@ -20,40 +20,61 @@
 #   immediately-following `///`/`//!` continuation lines up to the next blank
 #   comment line, a new `Why:`/`What:` tag, or the end of the doc block).
 #   Within that text, ONLY the LEADING run of backtick-quoted spans
-#   (`` `name` ``, separated by whitespace/`,`/`;`/`&`/"and"/"plus") is
-#   scanned — extraction stops dead at the first token that isn't a
-#   backtick-span or separator (see candidate_names' doc comment for why:
-#   real annotations routinely continue past the test-name list into prose
-#   that ALSO backtick-quotes unrelated symbols). Each surviving span is
-#   then filtered:
+#   (`` `name` ``, separated by whitespace/`,`/`;`/`&`/"and"/"plus", or a
+#   `(parenthetical)` remark immediately attached to a citation, e.g. "`name`
+#   (macOS-only);") is scanned — extraction stops dead at the first token
+#   that is none of those (see candidate_names' doc comment for why: real
+#   annotations routinely continue past the test-name list into prose that
+#   ALSO backtick-quotes unrelated symbols). Each surviving span is then
+#   classified:
 #     - module-path-qualified names (`foo::bar::baz_test`) are matched on
 #       their FINAL segment (`baz_test`);
-#     - a citation is only linted when its final segment is a lowercase
-#       snake_case identifier (`^[a-z][a-z0-9_]*$`) AND contains at least one
-#       `_` — this excludes glob patterns (`cli_parses_issue_*`, rejected by
-#       the character class) and bare module/type references (`` `tests` ``,
-#       `` `ActivityInfo` `` — rejected for having no underscore or for
-#       CamelCase).
-#   Each surviving candidate is checked with `git grep` (cached per crate —
-#   see the name cache section) for a `fn <name>(` (or `fn <name><...>(` for
-#   a generic fn) OR a `mod <name>;` / `mod <name> {` definition anywhere
-#   under the citing file's own crate (the nearest ancestor directory
-#   containing a Cargo.toml; falls back to the whole tree if none is found)
-#   — citing a whole test MODULE (e.g. `` `ctrl::tests::pm_task_tests` ``) is
-#   an established convention in this codebase, just as valid as citing a
-#   single `fn`. No match = a dangling pointer, reported as
-#   `file:line: cites <name> (crate <dir>)`.
+#     - a citation whose final segment is a lowercase snake_case identifier
+#       (`^[a-z][a-z0-9_]*$`) containing at least one `_` is an EXACT
+#       candidate;
+#     - a citation whose final segment is otherwise the same shape but
+#       contains one or more `*` glob wildcards (`disclaimed_stderr_*`) is a
+#       GLOB candidate — resolved by pattern match against the crate's name
+#       cache (see name_glob_exists_in_crate) rather than dropped. A glob
+#       that matches nothing is exactly as dangling as an exact citation
+#       that matches nothing, and is reported the same way.
+#     - anything else (bare module/type references (`` `tests` ``,
+#       `` `ActivityInfo` `` — no underscore, or CamelCase)) is not a
+#       candidate at all and is silently skipped, same as before — this is
+#       the deliberate leniency for field/type mentions inside the citation
+#       list, not the bug this script was rewritten to close.
+#   An UNTERMINATED backtick or parenthetical inside the leading run (a
+#   stray `` ` `` or `(` with no matching close) is not "prose" — it is
+#   malformed annotation syntax the parser cannot interpret, and is reported
+#   as a hard parse-error violation (never allowlist-suppressible) rather
+#   than silently truncating the scan.
+#   Each surviving EXACT/GLOB candidate is checked with `git grep` (cached
+#   per crate — see the name cache section) for a `fn <name>(` (or
+#   `fn <name><...>(` for a generic fn) OR a `mod <name>;` / `mod <name> {`
+#   definition anywhere under the citing file's own crate (the nearest
+#   ancestor directory containing a Cargo.toml; falls back to the whole tree
+#   if none is found) — citing a whole test MODULE (e.g.
+#   `` `ctrl::tests::pm_task_tests` ``) is an established convention in this
+#   codebase, just as valid as citing a single `fn`. No match = a dangling
+#   pointer, reported as `file:line: cites <name> (crate <dir>)`.
 #
 # PRECISION LIMITS (documented per issue #2458, "pragmatic grep is
-#   acceptable"):
+#   acceptable"; blind spots closed by issue #3581):
 #   - citations must be backtick-quoted (this codebase's universal doc
 #     convention for code identifiers); a bare-word citation with no
 #     backticks is never linted.
-#   - only the LEADING backtick-run after "Test:" is linted; a second real
-#     test name mentioned after ordinary prose (rather than a `,`/`and`/
-#     `plus`-joined list) is a false NEGATIVE — missed, not flagged. This
-#     trades missed rot for not blocking merges on misparsed prose; the same
-#     leans-lenient tradeoff check_line_cap.sh's SLOC counter documents.
+#   - only the LEADING run is linted: a citation list, each entry optionally
+#     followed by its own `(parenthetical)` aside, joined by `,`/`;`/`&`/
+#     "and"/"plus". A second real test name mentioned after ordinary prose
+#     (rather than as part of that joined list) is a false NEGATIVE —
+#     missed, not flagged. This trades missed rot for not blocking merges on
+#     misparsed prose, the same leans-lenient tradeoff check_line_cap.sh's
+#     SLOC counter documents. Genuinely malformed syntax (unterminated
+#     backtick/paren) is NOT treated as "prose" — see above, it hard-fails.
+#   - glob citations (`foo_*`) are resolved against the crate's name cache
+#     (does at least one `fn`/`mod` match the pattern?), not silently
+#     dropped — issue #3581's primary finding was that dropping them let two
+#     dangling glob-shaped pointers pass as "0 dangling pointers".
 #   - the existence check is `fn <name>(` anywhere in the crate — it does
 #     NOT verify the function is under `#[test]` / `#[cfg(test)]`. A
 #     dangling pointer that happens to collide with a same-named production
@@ -65,6 +86,31 @@
 #     pointers are meant to name in-crate tests; cross-crate citations
 #     should name the crate in prose (outside the leading backtick run, so
 #     it is never scanned) rather than as a bare backtick span.
+#   - the `::`-qualified path PREFIX of a citation (e.g. the
+#     `piped_native_tests` in `super::super::piped_native_tests::foo`) is
+#     NEVER verified — only the final segment is checked against the
+#     crate's name set. A test that keeps its bare name but moves to a
+#     different (or renamed) module is invisible no matter how wrong the
+#     stated path is; this is exactly how PR #3562's `piped_native_tests`
+#     citation (the real module is `native_tests`) passed clean. issue
+#     #3581 tried adding a `mod <prefix>`-exists check for this (candidate
+#     path segments were extracted and independently verified) and reverted
+#     it after CI found 145 false positives: this codebase has a
+#     widespread, DELIBERATE convention of citing
+#     `` `some_domain_tests::specific_fn` `` where `some_domain_tests` is a
+#     human-readable LABEL for "the tests covering this file" — e.g.
+#     `crates/trusty-common/src/inference/credentials/dotenv.rs:44` reads
+#     "Test: `dotenv_tests` (sibling file)." while the actual declaration
+#     is a plain `mod tests;` — NOT a literal module path, plus at least
+#     one citation of an external-crate path
+#     (`` `serde_json::from_str` `` in
+#     `crates/trusty-git-analytics/src/classify/tiers/llm_tests.rs:282`)
+#     that was never a local-module claim at all. The identical `foo_tests`
+#     shape is a genuine module-path assertion in the rare case (PR #3562)
+#     and a descriptive label in the dominant one (this codebase), with no
+#     cheap lexical signal telling them apart — see issue #3595 for the
+#     full writeup and why this is likely out of reach for a pragmatic-grep
+#     gate rather than a bug to patch.
 #
 # ALLOWLIST (ratchet, can only shrink — mirrors .line-cap-allowlist.tsv):
 #   `.test-pointer-allowlist.tsv`, one `<path><TAB><name>` row per
@@ -162,46 +208,113 @@ extract_test_blocks() {
 }
 
 # ---------------------------------------------------------------------------
-# candidate_names: given a Test: blob, print one lowercase-final-segment
-# candidate per line (may print duplicates; caller de-dupes if it cares).
+# candidate_names: given a Test: blob, print one "<KIND>\t<value>" row per
+# candidate/error found (may print duplicates; caller de-dupes if it cares).
+# KIND is one of:
+#   NAME  — an exact lowercase snake_case final-segment candidate.
+#   GLOB  — a final segment shaped like NAME but containing `*` wildcard(s);
+#           resolved by pattern match, not exact match, by the caller.
+#   ERR   — the annotation could not be interpreted (unterminated backtick or
+#           parenthetical). The caller must treat this as a hard failure, not
+#           a skip — this is the failure mode issue #3581 exists to close.
 #
-# Critically, this only walks the LEADING run of backtick-quoted spans
-# immediately after "Test:" (separated by whitespace/`,`/`;`/`&`/"and"/
-# "plus"), and stops at the first token that isn't one of those. Real-world
-# annotations routinely continue past the test-name list into prose that
-# ALSO backtick-quotes unrelated symbols — field names, module names, or the
-# item's own name — e.g. "Test: Used as the `pkg_mgr` field of `PlatformInfo`
-# in `tests::hint_*`." (no real test cited at all) or "Test:
-# `commit_shas_gated_on_merged_at` exercises `merged_at` / `merge_commit_sha`."
-# (only the first span is a test name; the rest are fields being exercised).
-# Scanning every backtick in the whole blob made those false positives; the
-# leading-run restriction accepts a false NEGATIVE instead (a second real
-# test name buried after prose is missed) which is the safe direction for a
-# blocking gate, matching check_line_cap.sh's stated leniency philosophy.
+# Critically, this only walks the LEADING run of the citation list
+# immediately after "Test:": backtick-quoted spans, each optionally followed
+# by its own `(parenthetical)` aside (e.g. "`name` (macOS-only);"), joined by
+# whitespace/`,`/`;`/`&`/"and"/"plus" — and stops at the first token that
+# isn't one of those. Real-world annotations routinely continue past the
+# test-name list into prose that ALSO backtick-quotes unrelated symbols —
+# field names, module names, or the item's own name — e.g. "Test: Used as
+# the `pkg_mgr` field of `PlatformInfo` in `tests::hint_*`." (no real test
+# cited at all) or "Test: `commit_shas_gated_on_merged_at` exercises
+# `merged_at` / `merge_commit_sha`." (only the first span is a test name; the
+# rest are fields being exercised). Scanning every backtick in the whole
+# blob made those false positives; the leading-run restriction accepts a
+# false NEGATIVE instead (a second real test name buried after prose is
+# missed) which is the safe direction for a blocking gate, matching
+# check_line_cap.sh's stated leniency philosophy.
+#
+# The `(parenthetical)` allowance exists because a citation is routinely
+# annotated inline right where it appears — "`a_test` (macOS-only);
+# `b_test` (any OS)." — issue #3581's second blind spot: the old parser
+# treated the `(` as "unrecognized prose" and stopped the whole scan there,
+# silently dropping every citation after it. A parenthetical attached
+# directly to a citation is part of the citation list, not free prose; free
+# prose starting with any other token still stops the scan exactly as
+# before (see "trailing prose after real name" in the self-test fixture).
 # ---------------------------------------------------------------------------
 CANDIDATES_AWK='
 function emit(nm,    parts, k, final) {
   k = split(nm, parts, "::")
   final = parts[k]
   if (final == "") return
-  if (final !~ /^[a-z][a-z0-9_]*$/) return
-  if (final !~ /_/) return
-  print final
+  if (final ~ /^[a-z][a-z0-9_]*$/ && final ~ /_/) { print "NAME\t" final; return }
+  if (final ~ /^[a-z][a-z0-9_*]*$/ && index(final, "*") > 0 && final ~ /_/) {
+    print "GLOB\t" final
+    return
+  }
+  # Not a candidate shape at all (bare module/type ref, CamelCase, no
+  # underscore) — deliberately skipped, not an error.
 }
 {
   s = $0
   sub(/^Test:[ \t]*/, "", s)
   n = length(s)
   i = 1
+  errflag = 0
   while (i <= n) {
     c = substr(s, i, 1)
     if (c == "`") {
       j = index(substr(s, i + 1), "`")
-      if (j == 0) break
+      if (j == 0) {
+        print "ERR\tunterminated backtick citation"
+        errflag = 1
+        break
+      }
       emit(substr(s, i + 1, j - 1))
       i = i + 1 + j
     } else if (c == " " || c == "\t" || c == "," || c == ";" || c == "&") {
       i++
+    } else if (c == "(") {
+      # Balanced, backtick-aware skip: a parenthetical aside routinely
+      # embeds its own backtick-quoted code span whose content may itself
+      # contain parens, e.g. "(sanity check ... a fresh `read()`)." or
+      # "(called with `.with_count(2)`)." A naive index-of-first-")" search
+      # stops at the INNER ")" (inside the backtick span), misreads the
+      # leftover backtick as the start of a new, unterminated citation, and
+      # false-positives a parse error on perfectly well-formed prose. Track
+      # paren depth, but treat backtick spans as opaque (skip them whole —
+      # their internal parens never affect depth).
+      depth = 1
+      i++
+      while (i <= n && depth > 0) {
+        cc = substr(s, i, 1)
+        if (cc == "`") {
+          jj = index(substr(s, i + 1), "`")
+          if (jj == 0) {
+            print "ERR\tunterminated backtick inside parenthetical"
+            errflag = 1
+            i = n + 1
+            depth = 0
+            break
+          }
+          i = i + 1 + jj
+        } else if (cc == "(") {
+          depth++
+          i++
+        } else if (cc == ")") {
+          depth--
+          i++
+        } else {
+          i++
+        }
+      }
+      if (errflag) break
+      if (depth > 0) {
+        print "ERR\tunterminated parenthetical after citation"
+        errflag = 1
+        break
+      }
     } else {
       rest = substr(s, i)
       if (rest ~ /^and([ \t]|$)/)       { i += 3 }
@@ -251,6 +364,23 @@ crate_cache_file() {
 }
 
 # ---------------------------------------------------------------------------
+# ensure_crate_cache: build (if not already cached) and print the path to
+# the crate root $1's `fn`/`mod` name-cache file. Shared by
+# name_exists_in_crate (exact match) and name_glob_exists_in_crate (pattern
+# match) so the cache is only ever built once per crate per scan() run.
+# ---------------------------------------------------------------------------
+ensure_crate_cache() {
+  local crate="$1" cache
+  cache="$(crate_cache_file "$crate")"
+  if [ ! -f "$cache" ]; then
+    git grep -ohE '(fn|mod)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[(<{;]' -- "${crate}/*.rs" 2>/dev/null \
+      | sed -E -e 's/^(fn|mod)[[:space:]]+//' -e 's/[[:space:]]*[(<{;]$//' \
+      | sort -u > "$cache" || : > "$cache"
+  fi
+  printf '%s\n' "$cache"
+}
+
+# ---------------------------------------------------------------------------
 # name_exists_in_crate: 0 (true) if `fn <name>` (as a whole identifier,
 # followed by `(` or `<` for a generic fn) OR `mod <name>` (followed by `;`
 # or `{`) is defined anywhere among tracked .rs files under crate root $1.
@@ -263,13 +393,23 @@ crate_cache_file() {
 # ---------------------------------------------------------------------------
 name_exists_in_crate() {
   local crate="$1" name="$2" cache
-  cache="$(crate_cache_file "$crate")"
-  if [ ! -f "$cache" ]; then
-    git grep -ohE '(fn|mod)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*[(<{;]' -- "${crate}/*.rs" 2>/dev/null \
-      | sed -E -e 's/^(fn|mod)[[:space:]]+//' -e 's/[[:space:]]*[(<{;]$//' \
-      | sort -u > "$cache" || : > "$cache"
-  fi
+  cache="$(ensure_crate_cache "$crate")"
   grep -qxF "$name" "$cache"
+}
+
+# ---------------------------------------------------------------------------
+# name_glob_exists_in_crate: 0 (true) if at least one cached `fn`/`mod` name
+# in crate root $1 matches glob pattern $2 (`*` = any run of chars, the only
+# wildcard this codebase's citations use). issue #3581: a glob citation with
+# zero matches is exactly as dangling as an exact citation with zero
+# matches — it must be resolved, not silently dropped from the candidate
+# list the way the pre-fix parser dropped it.
+# ---------------------------------------------------------------------------
+name_glob_exists_in_crate() {
+  local crate="$1" pattern="$2" cache regex
+  cache="$(ensure_crate_cache "$crate")"
+  regex="^$(printf '%s' "$pattern" | sed 's/\*/.*/g')$"
+  grep -qE -- "$regex" "$cache"
 }
 
 # ---------------------------------------------------------------------------
@@ -294,27 +434,37 @@ is_excluded_path() {
 # ---------------------------------------------------------------------------
 # scan: run the full lint over the git repo rooted at cwd. Writes violation
 # lines ("<path>\t<line>\t<name>\t<crate>", line kept only for the FAIL
-# message's file:line pointer) to the file named by $1, and stale-allowlist-
-# entry lines ("<path>\t<name>") to $2. Both files are truncated first.
+# message's file:line pointer) to the file named by $1, stale-allowlist-entry
+# lines ("<path>\t<name>") to $2, and hard parse-error lines
+# ("<path>\t<line>\t<message>") to $3. All three files are truncated first.
 # Returns nothing (caller inspects the files).
 #
-# The allowlist is keyed on (path, cited-name) — NOT line number. A citation
-# repeated at several lines in the same file collapses to one allowlist row
-# (harmless: they're all-or-nothing the same pointer). This is deliberately
-# more coarse than line-exact matching: line numbers drift on every unrelated
-# edit above a grandfathered row (this PR itself needed two manual re-syncs
-# for that reason), which turns "someone edited an unrelated function above
-# this doc comment" into a spurious gate failure. (path, name) is stable
-# across that churn while still catching real regressions — a NEW dangling
-# citation of a name that already has an allowlisted citation elsewhere in
-# the same file is still just as legitimate to suppress (same rot, same
-# fix), and a genuinely different name at any line is a different key so is
-# never accidentally covered by an unrelated row.
+# Parse errors (unterminated backtick/parenthetical — see candidate_names)
+# are NEVER allowlist-suppressible: they represent syntax the parser could
+# not interpret at all, not a dangling-but-understood citation, so ratcheting
+# them into `.test-pointer-allowlist.tsv` would defeat issue #3581's whole
+# point (a lint that can be made to pass by feeding it more nonsense). The
+# only fix is correcting the doc comment.
+#
+# The dangling-citation allowlist is keyed on (path, cited-name) — NOT line
+# number. A citation repeated at several lines in the same file collapses to
+# one allowlist row (harmless: they're all-or-nothing the same pointer).
+# This is deliberately more coarse than line-exact matching: line numbers
+# drift on every unrelated edit above a grandfathered row (this PR itself
+# needed two manual re-syncs for that reason), which turns "someone edited
+# an unrelated function above this doc comment" into a spurious gate
+# failure. (path, name) is stable across that churn while still catching
+# real regressions — a NEW dangling citation of a name that already has an
+# allowlisted citation elsewhere in the same file is still just as
+# legitimate to suppress (same rot, same fix), and a genuinely different
+# name at any line is a different key so is never accidentally covered by an
+# unrelated row.
 # ---------------------------------------------------------------------------
 scan() {
-  local viol_out="$1" stale_out="$2"
+  local viol_out="$1" stale_out="$2" err_out="$3"
   : > "$viol_out"
   : > "$stale_out"
+  : > "$err_out"
 
   CRATE_FN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tpfncache.XXXXXX")"
 
@@ -333,13 +483,26 @@ scan() {
       [ -n "${line:-}" ] || continue
       local seen_file
       seen_file="$(mktemp "${TMPDIR:-/tmp}/tpseen.XXXXXX")"
-      candidate_names "$blob" | while IFS= read -r name; do
+      candidate_names "$blob" | while IFS=$'\t' read -r kind name; do
+        [ -n "$kind" ] || continue
+        case "$kind" in
+          ERR)
+            printf '%s\t%s\t%s\n' "$f" "$line" "$name" >> "$err_out"
+            continue
+            ;;
+        esac
         [ -n "$name" ] || continue
         # De-dupe within a single annotation (same name cited twice in one blob).
-        if grep -qxF "$name" "$seen_file" 2>/dev/null; then continue; fi
-        printf '%s\n' "$name" >> "$seen_file"
-        if ! name_exists_in_crate "$crate" "$name"; then
-          printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
+        if grep -qxF "${kind}:${name}" "$seen_file" 2>/dev/null; then continue; fi
+        printf '%s\n' "${kind}:${name}" >> "$seen_file"
+        if [ "$kind" = "GLOB" ]; then
+          if ! name_glob_exists_in_crate "$crate" "$name"; then
+            printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
+          fi
+        else
+          if ! name_exists_in_crate "$crate" "$name"; then
+            printf '%s\t%s\t%s\t%s\n' "$f" "$line" "$name" "$crate" >> "$raw"
+          fi
         fi
       done
       rm -f "$seen_file"
@@ -462,10 +625,69 @@ pub fn module_cited_by_whole_test_module() {}
 /// module was never written.
 pub fn dangling_module_citation() {}
 
+/// Test: `glob_matches_real_test_*` resolves to at least one real test below
+/// (issue #3581 fix: a glob-shaped citation is resolved by pattern match
+/// against the crate's name cache, not silently dropped as a non-candidate).
+pub fn glob_resolves_to_real_test() {}
+
+/// Test: `glob_dangling_nothing_matches_*` is claimed but nothing in this
+/// crate matches the pattern — must be flagged (issue #3581 blind spot 1:
+/// pre-fix, `final !~ /^[a-z][a-z0-9_]*$/` rejected any citation containing
+/// `*`, so a glob citation produced zero candidates and was never checked at
+/// all, dangling or not).
+pub fn glob_dangling_citation() {}
+
+/// Test: `real_test_exists` (smoke coverage); `dangling_after_paren_test`
+/// (regression coverage).
+///
+/// Isolates blind spot 2 with NO glob involved: two plain exact citations,
+/// the first (real, passing) immediately followed by a `(parenthetical)`
+/// aside, then a second (dangling) citation after `;`. Pre-fix, the `(`
+/// broke the leading-run scan right after the first citation, so the
+/// dangling second citation was never even reached — this annotation
+/// reported 0 violations despite citing a nonexistent test. Post-fix it
+/// must report exactly one violation (dangling_after_paren_test), while
+/// real_test_exists still correctly passes.
+pub fn parenthetical_then_second_citation_dangling() {}
+
+/// Test: `disclaimed_combo_spawn_*` (macOS-only);
+/// `disclaimed_combo_native_missing_test` (any OS).
+///
+/// Mirrors the real-world annotation shape from issue #3581 (PR #3562's
+/// stderr_piped.rs / stdout_piped.rs): a glob citation immediately followed
+/// by a `(parenthetical)` aside, then a second citation after `;`. Neither
+/// name matches a real test. Pre-fix, the `(` broke the leading-run scan
+/// before the second citation was ever reached, AND the glob was dropped by
+/// the character-class filter — so this annotation produced ZERO
+/// candidates and reported "0 dangling pointers" despite both citations
+/// being dangling. Post-fix it must report exactly two.
+pub fn parenthetical_then_second_citation_both_dangling() {}
+
+/// Test: `unterminated_backtick_citation is malformed doc syntax (no
+/// closing backtick) that the parser cannot interpret — issue #3581
+/// requires this to fail loudly, not silently pass as zero candidates.
+pub fn malformed_unterminated_backtick() {}
+
+/// Test: `real_test_exists` (also exercised indirectly via `helper_call()`).
+///
+/// Regression for the parenthetical-skip fix itself: the aside embeds its
+/// OWN backtick-quoted code span containing parens (`helper_call()`). A
+/// naive first-`)`-wins search stops at the INNER `)` (inside the backtick
+/// span), misreads the leftover backtick as the start of a new,
+/// unterminated citation, and would wrongly report a parse error on this
+/// perfectly well-formed annotation. Must resolve cleanly to exactly the
+/// one real citation, zero parse errors.
+pub fn nested_parens_inside_parenthetical_is_not_a_parse_error() {}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn real_test_exists() {
+        assert!(true);
+    }
+
+    #[test]
+    fn glob_matches_real_test_case_a() {
         assert!(true);
     }
 
@@ -479,22 +701,31 @@ mod tests {
 EOF
   ( cd "$tmp" && git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -q -m fixture )
 
-  local viol stale rc
+  local viol stale err rc
   viol="$(mktemp "${TMPDIR:-/tmp}/tpself.viol.XXXXXX")"
   stale="$(mktemp "${TMPDIR:-/tmp}/tpself.stale.XXXXXX")"
-  ( cd "$tmp" && scan "$viol" "$stale" )
+  err="$(mktemp "${TMPDIR:-/tmp}/tpself.err.XXXXXX")"
+  ( cd "$tmp" && scan "$viol" "$stale" "$err" )
 
-  # Expect exactly two violations: dangling_test_missing (fn citation) and
-  # nonexistent_module_tests (mod citation). Nothing else — not
-  # real_test_exists, not the glob/module-ref/prose-only annotation, not the
-  # trailing-prose patterns (field mentions, self-referential tool names, or
-  # symbols named after the real leading test name) that a naive whole-blob
-  # backtick scan would misfire on, and critically NOT module_style_tests —
-  # a real `mod module_style_tests { ... }` citation must resolve, not just
-  # `fn` citations (this is exactly the case that shipped broken: module
-  # citations only ever passed via the allowlist, never verified for real).
-  if [ "$(wc -l < "$viol" | tr -d ' ')" != "2" ]; then
-    echo "self-test FAIL: expected exactly 2 violations, got:" >&2
+  # Expect exactly six violations: dangling_test_missing (fn citation),
+  # nonexistent_module_tests (mod citation), glob_dangling_nothing_matches_*
+  # (dangling glob, issue #3581 blind spot 1, isolated from any parenthetical),
+  # dangling_after_paren_test (blind spot 2 isolated from any glob — a plain
+  # exact citation after a parenthetical aside), and the two dangling
+  # citations from the combined glob+parenthetical annotation that mirrors
+  # the real PR #3562 shape (disclaimed_combo_spawn_* and
+  # disclaimed_combo_native_missing_test). Nothing else — not
+  # real_test_exists, not glob_matches_real_test_* (glob resolves to
+  # glob_matches_real_test_case_a), not the glob/module-ref/prose-only
+  # annotation, not the trailing-prose patterns (field mentions,
+  # self-referential tool names, or symbols named after the real leading
+  # test name) that a naive whole-blob backtick scan would misfire on, and
+  # critically NOT module_style_tests — a real `mod module_style_tests { ... }`
+  # citation must resolve, not just `fn` citations (this is exactly the case
+  # that shipped broken: module citations only ever passed via the
+  # allowlist, never verified for real).
+  if [ "$(wc -l < "$viol" | tr -d ' ')" != "6" ]; then
+    echo "self-test FAIL: expected exactly 6 violations, got:" >&2
     cat "$viol" >&2
     ok=0
   elif ! grep -q "dangling_test_missing" "$viol"; then
@@ -505,12 +736,32 @@ EOF
     echo "self-test FAIL: expected violation to cite nonexistent_module_tests, got:" >&2
     cat "$viol" >&2
     ok=0
-  elif grep -qE "real_test_exists|field_name|Widget|hint_|self_referential|unrelated_field|other_symbol|module_style_tests" "$viol"; then
-    echo "self-test FAIL: a trailing-prose symbol or the valid module_style_tests citation was incorrectly flagged as dangling:" >&2
+  elif ! grep -qF "glob_dangling_nothing_matches_*" "$viol"; then
+    echo "self-test FAIL: expected a dangling GLOB violation citing glob_dangling_nothing_matches_* (blind spot 1: glob citations must be resolved, not dropped), got:" >&2
     cat "$viol" >&2
     ok=0
+  elif ! grep -q "dangling_after_paren_test" "$viol"; then
+    echo "self-test FAIL: expected a dangling NAME violation citing dangling_after_paren_test — a plain exact citation after a parenthetical aside, isolated from any glob (blind spot 2), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif ! grep -qF "disclaimed_combo_spawn_*" "$viol"; then
+    echo "self-test FAIL: expected a dangling GLOB violation citing disclaimed_combo_spawn_* from the combined glob+parenthetical annotation (blind spots 1+2 together, mirrors PR #3562), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif ! grep -q "disclaimed_combo_native_missing_test" "$viol"; then
+    echo "self-test FAIL: expected a dangling NAME violation citing disclaimed_combo_native_missing_test — the second citation after a parenthetical aside (blind spot 2: pre-fix the '(' broke the scan before this citation was ever reached), got:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif grep -qE 'real_test_exists|field_name|Widget|hint_|self_referential|unrelated_field|other_symbol|module_style_tests|glob_matches_real_test_\*' "$viol"; then
+    echo "self-test FAIL: a trailing-prose symbol, the valid module_style_tests citation, or the resolvable glob_matches_real_test_* was incorrectly flagged as dangling:" >&2
+    cat "$viol" >&2
+    ok=0
+  elif [ "$(wc -l < "$err" | tr -d ' ')" != "1" ] || ! grep -q "unterminated backtick" "$err"; then
+    echo "self-test FAIL: expected exactly 1 parse-error row citing the unterminated backtick in malformed_unterminated_backtick's annotation (issue #3581: must fail loudly, not silently pass) — and NOT the well-formed nested-parens-inside-parenthetical annotation (\`helper_call()\` inside a \`(...)\` aside), got:" >&2
+    cat "$err" >&2
+    ok=0
   fi
-  rm -f "$viol" "$stale"
+  rm -f "$viol" "$stale" "$err"
 
   # --- allowlist ratchet: both properties, keyed on (path, name) only -----
   # 1. A still-genuinely-dangling citation that IS allowlisted must be
@@ -529,10 +780,11 @@ EOF
     printf 'crates/fixture/src/lib.rs\tphantom_fixed_pointer\n'
   } > "$allowlist_path"
 
-  local viol2 stale2
+  local viol2 stale2 err2
   viol2="$(mktemp "${TMPDIR:-/tmp}/tpself.viol2.XXXXXX")"
   stale2="$(mktemp "${TMPDIR:-/tmp}/tpself.stale2.XXXXXX")"
-  ( cd "$tmp" && scan "$viol2" "$stale2" )
+  err2="$(mktemp "${TMPDIR:-/tmp}/tpself.err2.XXXXXX")"
+  ( cd "$tmp" && scan "$viol2" "$stale2" "$err2" )
 
   if grep -q "dangling_test_missing" "$viol2"; then
     echo "self-test FAIL: dangling_test_missing is allowlisted but was still reported as a violation:" >&2
@@ -563,10 +815,10 @@ EOF
       ok=0
     fi
   fi
-  rm -f "$viol2" "$stale2"
+  rm -f "$viol2" "$stale2" "$err2"
 
   if [ "$ok" -eq 1 ]; then
-    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose/glob/module-ref ignored, allowlist ratchet suppresses/prunes correctly by (path,name))."
+    echo "check_test_pointers self-test: OK (valid pointer passes, dangling pointer caught, module citations resolve, prose-only/module-ref citations ignored, glob citations resolved by pattern match, parenthetical asides no longer break multi-citation scanning, unterminated backticks fail loudly, allowlist ratchet suppresses/prunes correctly by (path,name))."
     return 0
   fi
   return 1
@@ -604,9 +856,24 @@ ALLOWLIST="$REPO_ROOT/.test-pointer-allowlist.tsv"
 
 VIOL="$(mktemp "${TMPDIR:-/tmp}/tpviol.XXXXXX")"
 STALE="$(mktemp "${TMPDIR:-/tmp}/tpstale.XXXXXX")"
-trap 'rm -f "$VIOL" "$STALE"' EXIT
+ERR="$(mktemp "${TMPDIR:-/tmp}/tperr.XXXXXX")"
+trap 'rm -f "$VIOL" "$STALE" "$ERR"' EXIT
 
-scan "$VIOL" "$STALE"
+scan "$VIOL" "$STALE" "$ERR"
+
+# Parse errors (unterminated backtick/parenthetical — see candidate_names)
+# are a hard, unconditional, non-allowlistable failure in EVERY mode,
+# including --seed and --update: issue #3581 exists because "the parser
+# couldn't interpret this so it quietly produced nothing" was allowed to
+# read as success. Fail loudly here before any mode-specific logic runs.
+if [ -s "$ERR" ]; then
+  while IFS=$'\t' read -r p l m; do
+    [ -n "$p" ] || continue
+    echo "FAIL: ${p}:${l}: Test: annotation could not be parsed — ${m}. Fix the doc comment; this is never allowlist-suppressible." >&2
+  done < "$ERR"
+  echo "test-pointers: $(wc -l < "$ERR" | tr -d ' ') unparseable Test: annotation(s) — FAILED." >&2
+  exit 1
+fi
 
 if [ "$MODE" = "seed" ]; then
   # Bulk-grandfather every CURRENT dangling pointer (mirrors

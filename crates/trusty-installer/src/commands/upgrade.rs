@@ -22,6 +22,7 @@ use trusty_progress::{Component, ComponentTracker};
 
 use super::progress_ui::{is_tty, narrator, prompt_yes_no};
 use super::runtime::with_runtime;
+use super::shadow_check;
 use super::stable_set::select_members;
 use super::update_engine::{
     decide_apply, gather_candidates, ApplyDecision, ApplyInputs, UpdateCandidate,
@@ -32,7 +33,14 @@ use crate::output::render_json;
 ///
 /// Why: Typed per-member result keeps machine output stable + testable.
 /// What: `member` crate name; `ok` success; `detail` human note / error / hint.
-/// Test: `tests::report_serialises`.
+/// `shadow_ok` / `shadow_detail` (#3554) mirror `install::InstallOutcome`'s
+/// fields of the same name: `shadow_ok` is `false` ONLY when the
+/// just-upgraded binary is provably shadowed on `$PATH` by a different,
+/// stale copy (checked for the non-daemon branches of `upgrade_one`; the
+/// daemon-restart path is deliberately out of scope — see `upgrade_one`'s
+/// doc) — never a silent success.
+/// Test: `tests::report_serialises`, `tests::applied_report_all_ok`,
+/// `tests::applied_report_all_ok_reflects_shadow_failure`.
 #[derive(Clone, Debug, Serialize)]
 pub struct UpgradeOutcome {
     /// Crate name upgraded.
@@ -41,6 +49,12 @@ pub struct UpgradeOutcome {
     pub ok: bool,
     /// Human detail: applied version, restart hint, or error.
     pub detail: String,
+    /// `false` ONLY when the just-upgraded binary is shadowed on `$PATH` by
+    /// a different, stale copy (#3554); `true` when clear, not checked
+    /// (daemon path), or not applicable (a binary-upgrade failure).
+    pub shadow_ok: bool,
+    /// Human note for the shadow-detection outcome (empty when `shadow_ok`).
+    pub shadow_detail: String,
 }
 
 /// The aggregate upgrade report.
@@ -82,11 +96,17 @@ impl UpgradeReport {
 
     /// Build an applied report from per-member outcomes.
     ///
-    /// Why: Centralises the `all_ok` derivation for the applied path.
-    /// What: Sets `status = "applied"`, `all_ok = every outcome ok`.
-    /// Test: `tests::applied_report_all_ok`.
+    /// Why: Centralises the `all_ok` derivation for the applied path — must
+    /// not report success while a genuine PATH-shadow condition (#3554)
+    /// leaves the just-upgraded binary unreachable from a plain shell
+    /// invocation, mirroring `install::InstallReport::build`'s treatment of
+    /// `shadow_ok`.
+    /// What: Sets `status = "applied"`, `all_ok = every outcome ok AND
+    /// shadow_ok`.
+    /// Test: `tests::applied_report_all_ok`,
+    /// `tests::applied_report_all_ok_reflects_shadow_failure`.
     fn applied(candidates: Vec<UpdateCandidate>, members: Vec<UpgradeOutcome>) -> Self {
-        let all_ok = members.iter().all(|m| m.ok);
+        let all_ok = members.iter().all(|m| m.ok && m.shadow_ok);
         Self {
             command: "upgrade",
             status: "applied",
@@ -283,6 +303,49 @@ fn build_apply_inputs(
     }
 }
 
+/// One candidate's health-gate result, carrying the shadow-check outcome
+/// alongside the human detail string (#3554).
+///
+/// Why: `upgrade_one` needs to convey more than "succeeded with this detail"
+/// for the non-daemon branches — a genuine PATH shadow must reach
+/// `apply_all`'s `UpgradeOutcome` without collapsing into the plain success
+/// path. A small typed return keeps that distinction explicit rather than
+/// smuggling it through the detail string.
+/// What: `detail` is the human-facing note; `shadow_ok`/`shadow_detail`
+/// mirror `UpgradeOutcome`'s fields of the same name.
+struct UpgradeDetail {
+    detail: String,
+    shadow_ok: bool,
+    shadow_detail: String,
+}
+
+impl UpgradeDetail {
+    /// A clean success with no shadow check performed or nothing found
+    /// (the daemon-restart path; see `upgrade_one`'s doc for why that path
+    /// does not run `shadow_check`).
+    fn ok(detail: String) -> Self {
+        Self {
+            detail,
+            shadow_ok: true,
+            shadow_detail: String::new(),
+        }
+    }
+
+    /// Fold a `shadow_check::detect` result into the detail: `None` (clear)
+    /// stays a plain success; `Some(report)` flips `shadow_ok` to `false`
+    /// and carries the actionable message.
+    fn from_shadow(detail: String, shadow: Option<shadow_check::ShadowReport>) -> Self {
+        match shadow {
+            Some(report) => Self {
+                detail,
+                shadow_ok: false,
+                shadow_detail: report.message(),
+            },
+            None => Self::ok(detail),
+        }
+    }
+}
+
 /// Apply every candidate upgrade, prebuilt-first with cargo fallback, restarting daemons.
 ///
 /// Why: Prebuilt binaries upgrade in seconds without requiring a Rust toolchain;
@@ -291,11 +354,13 @@ fn build_apply_inputs(
 ///
 /// What: For each candidate, attempts a prebuilt download (Phase 2 / #1760):
 /// - Non-daemons: `try_install_prebuilt` → fallback to `perform_upgrade` +
-///   `verify_installed_binary`.
+///   `verify_installed_binary_at_path`, then a PATH-shadow check (#3554).
 /// - Daemons: `try_install_prebuilt` (updates the binary on disk) → fallback to
 ///   `upgrade_and_restart` (cargo install + connection-safe restart).
 ///
-/// Renders a per-member narration line + a final component table.
+/// Renders a per-member narration line + a final component table. A genuine
+/// shadow is surfaced via `narr.error` (not `info`), same as a real failure,
+/// even though the member's binary-upgrade `ok` stays `true`.
 ///
 /// Test: Side-effecting; the prebuilt routing and report shaping are tested via
 /// `UpgradeReport` and `crate::download::tests`.
@@ -303,18 +368,26 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
     let narr = narrator(json);
     let mut tracker = ComponentTracker::new(narr.output());
     let mut outcomes = Vec::with_capacity(candidates.len());
+    // #3554: the real $PATH, resolved once, used by every non-daemon
+    // candidate's shadow-detection check below (mirrors `install::install_all`).
+    let path_env = std::env::var_os("PATH").unwrap_or_default();
 
     for c in candidates {
         let _ = narr.info(&format!("upgrading {} → {}", c.crate_name, c.latest));
 
-        let result = upgrade_one(c).await;
+        let result = upgrade_one(c, &path_env).await;
 
         match result {
-            Ok(detail) => {
+            Ok(d) => {
+                if !d.shadow_ok {
+                    let _ = narr.error(&format!("{}: {}", c.crate_name, d.shadow_detail));
+                }
                 outcomes.push(UpgradeOutcome {
                     member: c.crate_name.clone(),
                     ok: true,
-                    detail,
+                    detail: d.detail,
+                    shadow_ok: d.shadow_ok,
+                    shadow_detail: d.shadow_detail,
                 });
                 tracker.add(Component::new(c.binary.clone(), 0));
             }
@@ -324,6 +397,8 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
                     member: c.crate_name.clone(),
                     ok: false,
                     detail: e.to_string(),
+                    shadow_ok: true,
+                    shadow_detail: String::new(),
                 });
             }
         }
@@ -343,10 +418,27 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
 /// daemons, always runs the restart step (via `upgrade_and_restart` or a
 /// post-placement restart) to activate the new binary. On fallback, runs
 /// `upgrade_and_restart` (daemons) or `perform_upgrade` +
-/// `verify_installed_binary` (non-daemons). Returns a human detail string.
+/// `verify_installed_binary_at_path` (non-daemons). The two non-daemon
+/// branches ALSO run `shadow_check::detect` after the health gate passes
+/// (#3554 review — this was missing from the initial fix: the health-gate
+/// half landed for `tctl upgrade` but not the shadow-detection half, so a
+/// host with `~/.cargo/bin/tm` shadowing `~/.local/bin/tm` got the right
+/// version logged with zero warning that the shell still resolves the stale
+/// binary). `path_env` is the real `$PATH`, threaded in from `apply_all` so
+/// it is resolved once per `apply_all` call, not once per candidate.
 ///
-/// Test: Side-effecting; covered indirectly.
-async fn upgrade_one(c: &UpdateCandidate) -> anyhow::Result<String> {
+/// The daemon branches (`upgrade_and_restart`) are deliberately NOT given the
+/// same concrete-path/shadow treatment: that primitive is shared with
+/// trusty-memory/trusty-search's own self-upgrade tool in `trusty-common`,
+/// so switching it is a materially larger, riskier change than this issue's
+/// scope — tracked as deliberate follow-up, not a gap left by accident.
+///
+/// Test: Side-effecting; covered indirectly. `UpgradeDetail`'s shadow-folding
+/// is covered by `tests::applied_report_all_ok_reflects_shadow_failure`.
+async fn upgrade_one(
+    c: &UpdateCandidate,
+    path_env: &std::ffi::OsStr,
+) -> anyhow::Result<UpgradeDetail> {
     use crate::download::{self, Outcome};
 
     let install_dir = download::default_install_dir().unwrap_or_else(|| {
@@ -363,7 +455,7 @@ async fn upgrade_one(c: &UpdateCandidate) -> anyhow::Result<String> {
     let outcome = download::try_install_prebuilt(&c.crate_name, &install_dir).await;
 
     match outcome {
-        Outcome::Installed { version, .. } => {
+        Outcome::Installed { paths, version } => {
             tracing::info!(crate_name = %c.crate_name, %version, "upgraded from prebuilt");
             if c.daemon {
                 // Binary is now on disk at install_dir; trigger a daemon restart.
@@ -371,13 +463,37 @@ async fn upgrade_one(c: &UpdateCandidate) -> anyhow::Result<String> {
                 // restart protocol (SIGTERM + drain + launchd KeepAlive) is followed.
                 // The `perform_upgrade` step inside upgrade_and_restart is a no-op
                 // if the binary is already current, so this is safe.
+                //
+                // NOTE (#3554): `upgrade_and_restart` health-gates by NAME
+                // internally (shared with trusty-memory/trusty-search's own
+                // self-upgrade tool, in `trusty-common`) — the daemon-restart
+                // path is intentionally NOT switched to a concrete-path probe
+                // (or given a shadow check) here; doing so would mean
+                // changing that shared primitive's signature, a materially
+                // larger/riskier change affecting those other callers.
+                // Tracked as deliberate follow-up scope, not part of this fix
+                // (see the #3554 PR description).
                 let hint = trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
                     .await
                     .map(|h| h.unwrap_or_else(|| "restarted".to_owned()))?;
-                Ok(hint)
+                Ok(UpgradeDetail::ok(hint))
             } else {
-                trusty_common::update::verify_installed_binary(&c.binary).await?;
-                Ok(format!("upgraded to {version}"))
+                // #3554: health-gate the CONCRETE just-placed binary — the
+                // exact path `download::try_install_prebuilt` reports having
+                // written — never a name re-resolved afterward (mirrors
+                // `install::install_one`'s fix for the same bug class).
+                let bin_path = paths
+                    .iter()
+                    .find(|p| p.file_name().and_then(|f| f.to_str()) == Some(c.binary.as_str()))
+                    .cloned()
+                    .unwrap_or_else(|| install_dir.join(&c.binary));
+                trusty_common::update::verify_installed_binary_at_path(&bin_path).await?;
+                let shadow =
+                    shadow_check::detect(&c.binary, &bin_path, Some(&version), path_env).await;
+                Ok(UpgradeDetail::from_shadow(
+                    format!("upgraded to {version}"),
+                    shadow,
+                ))
             }
         }
         Outcome::Fallback { reason } => {
@@ -391,18 +507,56 @@ async fn upgrade_one(c: &UpdateCandidate) -> anyhow::Result<String> {
                 )
             })?;
             if c.daemon {
+                // See the #3554 NOTE above — daemon restart intentionally
+                // keeps the shared, name-based `upgrade_and_restart` path.
                 trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
                     .await
-                    .map(|hint| hint.unwrap_or_else(|| "restarted".to_owned()))
+                    .map(|hint| UpgradeDetail::ok(hint.unwrap_or_else(|| "restarted".to_owned())))
             } else {
                 match trusty_common::update::perform_upgrade(&c.crate_name).await {
-                    Ok(()) => trusty_common::update::verify_installed_binary(&c.binary)
-                        .await
-                        .map(|()| format!("upgraded to {}", c.latest)),
+                    Ok(()) => {
+                        // #3554: `cargo install` always lands in the cargo bin
+                        // dir — resolve that CONCRETE destination directly
+                        // rather than a name lookup.
+                        let bin_path = cargo_bin_dir_for_upgrade()
+                            .unwrap_or_else(|| install_dir.clone())
+                            .join(&c.binary);
+                        let reported =
+                            trusty_common::update::verify_installed_binary_at_path(&bin_path)
+                                .await?;
+                        let reported_version =
+                            super::update_engine::extract_version_from_line(&reported);
+                        let shadow = shadow_check::detect(
+                            &c.binary,
+                            &bin_path,
+                            reported_version.as_deref(),
+                            path_env,
+                        )
+                        .await;
+                        Ok(UpgradeDetail::from_shadow(
+                            format!("upgraded to {}", c.latest),
+                            shadow,
+                        ))
+                    }
                     Err(e) => Err(e),
                 }
             }
         }
+    }
+}
+
+/// Resolve the cargo binary install directory (#3554).
+///
+/// Why: `cargo install` honours `CARGO_HOME`; a small local helper (mirroring
+/// `install::cargo_bin_dir`) avoids cross-module coupling for this one call
+/// site while keeping the concrete-path health gate accurate under a custom
+/// `CARGO_HOME` (e.g. CI).
+/// What: `<CARGO_HOME>/bin` when set and non-empty, else `~/.cargo/bin`.
+fn cargo_bin_dir_for_upgrade() -> Option<std::path::PathBuf> {
+    let cargo_home = std::env::var("CARGO_HOME").ok();
+    match cargo_home {
+        Some(home) if !home.is_empty() => Some(std::path::PathBuf::from(home).join("bin")),
+        _ => dirs::home_dir().map(|h| h.join(".cargo").join("bin")),
     }
 }
 
@@ -425,6 +579,13 @@ fn print_human(report: &UpgradeReport) {
             for m in report.members.iter().filter(|m| !m.ok) {
                 eprintln!("  failed: {} — {}", m.member, m.detail);
             }
+            // #3554: a binary can upgrade cleanly (`ok: true`) while the
+            // operator's shell still resolves a stale, PATH-shadowed copy —
+            // surface that on the human path too, not just fold it silently
+            // into the exit code.
+            for m in report.members.iter().filter(|m| m.ok && !m.shadow_ok) {
+                eprintln!("  {} — {}", m.member, m.shadow_detail);
+            }
         }
         _ => {}
     }
@@ -442,6 +603,19 @@ mod tests {
             latest: "0.20.0".to_owned(),
             daemon: true,
             is_install: false,
+        }
+    }
+
+    /// Build an `UpgradeOutcome` with the pre-#3554 default shadow state
+    /// (clear — `shadow_ok: true`, empty detail), so tests that only care
+    /// about the binary-upgrade dimension don't have to repeat those fields.
+    fn outcome(member: &str, ok: bool, detail: &str) -> UpgradeOutcome {
+        UpgradeOutcome {
+            member: member.to_owned(),
+            ok,
+            detail: detail.to_owned(),
+            shadow_ok: true,
+            shadow_detail: String::new(),
         }
     }
 
@@ -465,21 +639,49 @@ mod tests {
     fn applied_report_all_ok() {
         let report = UpgradeReport::applied(
             vec![candidate()],
-            vec![
-                UpgradeOutcome {
-                    member: "a".to_owned(),
-                    ok: true,
-                    detail: String::new(),
-                },
-                UpgradeOutcome {
-                    member: "b".to_owned(),
-                    ok: false,
-                    detail: "boom".to_owned(),
-                },
-            ],
+            vec![outcome("a", true, ""), outcome("b", false, "boom")],
         );
         assert!(!report.all_ok);
         assert_eq!(report.status, "applied");
+    }
+
+    /// Why: #3554 review (HIGH) — a just-upgraded binary that is provably
+    /// PATH-shadowed by a stale copy is a genuine "looks upgraded, actually
+    /// not live" failure; the report must not claim `all_ok: true` in that
+    /// case, mirroring `install::tests::report_all_ok_reflects_shadow_failure`.
+    /// What: one member with `ok: true, shadow_ok: false` → `all_ok == false`
+    /// and exit code 2; a `shadow_ok: true` (clear) member → `all_ok == true`.
+    /// Test: this is the test.
+    #[test]
+    fn applied_report_all_ok_reflects_shadow_failure() {
+        let shadowed = UpgradeReport::applied(
+            vec![candidate()],
+            vec![UpgradeOutcome {
+                member: "trusty-mpm".to_owned(),
+                ok: true,
+                detail: "upgraded to 0.19.29".to_owned(),
+                shadow_ok: false,
+                shadow_detail: "PATH SHADOWED: installed trusty-mpm 0.19.29 to \
+                                /x/.local/bin/tm, but the shell resolves `tm` to \
+                                /x/.cargo/bin/tm (0.19.26)"
+                    .to_owned(),
+            }],
+        );
+        assert!(
+            !shadowed.all_ok,
+            "a genuine PATH-shadow condition must flip all_ok to false"
+        );
+        assert_eq!(shadowed.exit_code(), 2);
+
+        let clear = UpgradeReport::applied(
+            vec![candidate()],
+            vec![outcome("trusty-mpm", true, "upgraded to 0.19.29")],
+        );
+        assert!(
+            clear.all_ok,
+            "a clear (non-shadowed) upgrade must not flip all_ok"
+        );
+        assert_eq!(clear.exit_code(), 0);
     }
 
     /// Why: Exit codes are the automation contract; pin each status mapping.
@@ -499,14 +701,7 @@ mod tests {
             UpgradeReport::non_applying("declined", vec![candidate()]).exit_code(),
             4
         );
-        let applied_ok = UpgradeReport::applied(
-            vec![candidate()],
-            vec![UpgradeOutcome {
-                member: "a".to_owned(),
-                ok: true,
-                detail: String::new(),
-            }],
-        );
+        let applied_ok = UpgradeReport::applied(vec![candidate()], vec![outcome("a", true, "")]);
         assert_eq!(applied_ok.exit_code(), 0);
     }
 

@@ -1,5 +1,10 @@
 <script lang="ts">
   /**
+   * Canonical source: docs/design/UI/design-system/icons/ActionIcon.svelte
+   * (refs #3486). This is a vendored copy — fix bugs/add glyphs there first,
+   * then propagate here, until #3492 (`@trusty/foundry` package) replaces
+   * copy-paste vendoring with a real import.
+   *
    * Why: Action icons appear inline with role labels, tool calls, and event
    * markers throughout the chat surface. A single component keyed by name
    * keeps stroke width / viewBox / line caps consistent across the set and

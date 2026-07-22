@@ -29,11 +29,14 @@ pub mod native_memory;
 pub mod native_search;
 pub mod native_ticketing;
 pub mod phase_audit;
+pub mod pm_bridge;
+pub mod pm_bridge_backend;
 pub mod registry;
 pub mod run_bash;
 pub mod shell;
 pub mod shell_exec;
 pub mod skill_loader;
+pub mod system_status;
 pub mod timer;
 pub mod tm_tools;
 pub mod traits;
@@ -210,6 +213,25 @@ impl ToolRegistry {
             .values()
             .filter(|t| user.can_access_tier(t.restricted_tiers()))
             .cloned()
+            .collect()
+    }
+
+    /// Map of tool name -> declared OpenRPC scope, for tools that advertise
+    /// one (#3208).
+    ///
+    /// Why: Agent-declared `[tools].scopes` patterns (`google.gmail.*`) are
+    /// matched against a tool's *scope*, not its name — but callers building
+    /// a per-agent allowlist only have tool names to hand. This gives them
+    /// the name -> scope lookup needed to consult
+    /// `tools::registry::scope::agent_can_use` per candidate name.
+    /// What: Only tools whose `ToolExecutor::scope()` returns `Some` are
+    /// present. Native/in-process tools (the trait default `None`) are
+    /// absent, since they aren't part of the scoped surface.
+    /// Test: `tool_scopes_includes_only_scoped_tools`.
+    pub fn tool_scopes(&self) -> HashMap<String, String> {
+        self.tools
+            .iter()
+            .filter_map(|(name, t)| t.scope().map(|s| (name.clone(), s.to_string())))
             .collect()
     }
 

@@ -14,7 +14,7 @@ name = "trusty-gworkspace-mcp"
 path = "src/bin/trusty-gworkspace-mcp.rs"
 
 [dependencies]
-trusty-common = { path = "../trusty-common", version = "0.23.0", features = ["mcp"] }
+trusty-common = { path = "../trusty-common", version = "0.24.0", features = ["mcp"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -29,6 +29,7 @@ tracing = { workspace = true }
 dirs = { workspace = true }
 clap = { workspace = true }
 open = { workspace = true }
+fd-lock = { workspace = true }
 
 [dev-dependencies]
 # serial_test: env-mutating tests (HOME override for oauth_client.json
@@ -40,3 +41,8 @@ serial_test = { workspace = true }
 # [workspace.dependencies]; pinned locally, matching the existing
 # trusty-git-analytics precedent.
 tracing-test = "0.2"
+# wiremock: async HTTP mock server for the OAuthManager::refresh tests
+# (issue #3518) — asserts the exact client_id/secret sent to the token
+# endpoint without hitting Google, matching the trusty-channels /
+# trusty-git-analytics precedent.
+wiremock = { workspace = true }

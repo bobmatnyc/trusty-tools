@@ -19,7 +19,7 @@
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// A single memory palace drawer surfaced by the catch-up system.
@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 /// What: minimal drawer metadata — title (the drawer's content), tags, and
 /// creation timestamp.
 /// Test: `drawer_summary_from_raw`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DrawerSummary {
     /// Human-readable title of the drawer (the drawer's stored content).
     pub title: String,

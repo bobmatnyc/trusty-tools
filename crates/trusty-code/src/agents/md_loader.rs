@@ -171,7 +171,11 @@ pub fn project_embedded_md_with_extends(name: &str) -> anyhow::Result<AgentConfi
 /// Test: `hr1_initial_prompt_not_leaked_into_body`,
 /// `interior_horizontal_rule_survives_in_body`,
 /// `frontmatter_only_agent_has_empty_body`.
-fn extract_body(composed: &str) -> String {
+///
+/// `pub(crate)`: also reused by `plugins::agents::load_plugin_agent` (#3539)
+/// so a plugin agent's body is stripped identically to a disk agent's,
+/// without a second frontmatter-fence scanner.
+pub(crate) fn extract_body(composed: &str) -> String {
     let mut lines = composed.lines();
     match lines.next() {
         Some(first) if first.trim() == "---" => {}
@@ -223,7 +227,17 @@ fn extract_body(composed: &str) -> String {
 ///   (DOC-42/#2889), but mapping it into a dead field would fabricate a
 ///   consumer that doesn't exist. Left as a gap for a future slice that adds
 ///   an actual skills consumer to tcode.
-fn project_to_agent_config(default_name: &str, meta: AgentMetadata, body: String) -> AgentConfig {
+///
+/// `pub(crate)`: also reused by `plugins::agents::load_plugin_agent` (#3539),
+/// which calls this with the plugin's LOCAL agent name (not yet namespaced)
+/// and overrides `agent.name` with the namespaced form afterward — so the
+/// frontmatter -> `AgentConfig` mapping stays written exactly once across
+/// disk, embedded, and plugin agents.
+pub(crate) fn project_to_agent_config(
+    default_name: &str,
+    meta: AgentMetadata,
+    body: String,
+) -> AgentConfig {
     AgentConfig {
         agent: AgentInfo {
             name: meta.name.unwrap_or_else(|| default_name.to_string()),

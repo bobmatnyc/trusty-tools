@@ -2,9 +2,14 @@
 //!
 //! Why: we validate the deterministic, pure parts of the supervisor
 //! (config parsing, socket path, binary discovery, lazy-handle spawn
-//! accounting) without needing a live ONNX binary. Process-lifecycle
-//! tests (spawn/restart/shutdown) are in `tests/embedder_supervisor_e2e.rs`
-//! and marked `#[ignore]`.
+//! accounting) without needing a live ONNX binary. Real-ONNX-binary
+//! process-lifecycle tests (spawn/restart) are in
+//! `tests/embedder_supervisor_e2e.rs` and marked `#[ignore]`; the
+//! `shutdown_tests` submodule below is the exception — it exercises
+//! `LazyEmbedderHandle::shutdown()`'s real process-lifecycle teardown
+//! against a fast POSIX-shell mock stdio server instead, so it runs in every
+//! CI pass without `#[ignore]` (mirrors `trusty-common`'s own
+//! `supervisor.rs` `shutdown_tests` module).
 //! Test: `cargo test -p trusty-search -- embedder_supervisor`.
 
 use super::*;
@@ -407,6 +412,55 @@ async fn lazy_handle_no_watchdog_when_idle_secs_is_zero() {
     );
 }
 
+/// `supervisor_gave_up()` must be `false` before any spawn, and `false` (not
+/// panic) for a hand-seeded `SpawnedState` with `supervisor_handle: None`
+/// (review finding, PR #3560 HIGH fix).
+///
+/// Why: this is the non-blocking accessor `FallbackEmbedderAdapter` uses to
+/// observe the supervisor's REAL give-up ceiling instead of an independently
+/// counted request-failure proxy — it must never panic or deadlock. The
+/// "flips to `true` once the real supervisor gives up" half of the contract
+/// needs an actual crash-looping subprocess to exercise `should_give_up`
+/// honestly; that end-to-end proof lives in
+/// `embedder_fallback.rs`'s `fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up`
+/// test, which drives real concurrent `embed_via` calls against a real (mock
+/// binary) crash loop.
+/// What: assert `None` pre-spawn, then hand-seed `state` with
+/// `supervisor_handle: None` (mirrors the existing hand-seeded tests in this
+/// file) and assert it stays `false` rather than panicking on the `None`.
+/// Test: this test.
+#[tokio::test]
+async fn lazy_handle_supervisor_gave_up_reflects_handle_state() {
+    use tokio::sync::RwLock;
+
+    let handle = LazyEmbedderHandle::new(
+        PathBuf::from("/nonexistent/trusty-embedderd"),
+        SupervisorConfig::default(),
+    );
+    assert!(
+        !handle.supervisor_gave_up(),
+        "must be false before any spawn"
+    );
+
+    let client: Arc<dyn trusty_common::embedder_client::EmbedderClient> = Arc::new(StubClient);
+    let client_slot = Arc::new(RwLock::new(client));
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    *handle.state.lock().await = Some(SpawnedState {
+        client_slot,
+        supervisor_handle: None,
+        shutdown_tx,
+        pid_slot: Arc::new(AtomicU32::new(0)),
+        terminated: None,
+    });
+
+    assert!(
+        !handle.supervisor_gave_up(),
+        "must be false (not panic) when supervisor_handle is None — a real \
+         spawn via do_spawn always populates it; this only covers the \
+         hand-seeded test-state shape"
+    );
+}
+
 // ── In-flight guard + eviction decision (issue #2315) ───────────────────
 
 /// `InFlightGuard` must increment on construction and decrement on drop.
@@ -488,6 +542,67 @@ impl trusty_common::embedder_client::EmbedderClient for StubClient {
     }
 }
 
+/// Like `StubClient` but overrides `last_reported_device` — stands in for
+/// `StdioEmbedderClient` talking to the Python/MPS sidecar (epic #3524
+/// slice 5, issue #3493 P1) without needing a real subprocess.
+struct DeviceReportingStubClient;
+
+#[async_trait::async_trait]
+impl trusty_common::embedder_client::EmbedderClient for DeviceReportingStubClient {
+    async fn embed_batch(
+        &self,
+        texts: Vec<String>,
+    ) -> Result<Vec<Vec<f32>>, trusty_common::embedder_client::EmbedderError> {
+        Ok(texts.into_iter().map(|_| vec![0.0_f32; 384]).collect())
+    }
+
+    fn last_reported_device(&self) -> Option<String> {
+        Some("mps".to_string())
+    }
+}
+
+/// `LazyEmbedderHandle::last_reported_device()` must be `None` before any
+/// spawn, and must forward the live client's real readback once spawned.
+///
+/// Why: this is the non-blocking accessor `/health` uses (epic #3524 slice 5)
+/// — it must never panic or deadlock, and must correctly thread through a
+/// hand-seeded `SpawnedState` the same way the idle-shutdown tests do.
+/// What: construct a `LazyEmbedderHandle`, assert `None` pre-spawn, hand-seed
+/// `state` with a `DeviceReportingStubClient`, assert `Some("mps")`.
+/// Test: this test.
+#[tokio::test]
+async fn lazy_handle_last_reported_device_reflects_client() {
+    use tokio::sync::RwLock;
+
+    let handle = LazyEmbedderHandle::new(
+        PathBuf::from("/nonexistent/trusty-embedderd"),
+        SupervisorConfig::default(),
+    );
+    assert_eq!(
+        handle.last_reported_device(),
+        None,
+        "must be None before any spawn"
+    );
+
+    let client: Arc<dyn trusty_common::embedder_client::EmbedderClient> =
+        Arc::new(DeviceReportingStubClient);
+    let client_slot = Arc::new(RwLock::new(client));
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    *handle.state.lock().await = Some(SpawnedState {
+        client_slot,
+        supervisor_handle: None,
+        shutdown_tx,
+        pid_slot: Arc::new(AtomicU32::new(0)),
+        terminated: None,
+    });
+
+    assert_eq!(
+        handle.last_reported_device(),
+        Some("mps".to_string()),
+        "must forward the live client's real device readback"
+    );
+}
+
 /// The idle watchdog must NOT evict the sidecar while a request is in flight,
 /// and MUST reclaim it once the request completes and the idle window is past.
 ///
@@ -515,6 +630,7 @@ async fn lazy_handle_idle_shutdown_waits_for_inflight_request() {
         supervisor_handle: None,
         shutdown_tx,
         pid_slot: inner_pid_slot,
+        terminated: None,
     })));
     let app_pid_slot = Arc::new(AtomicU32::new(0));
     // Already well past the 1s idle window.
@@ -611,6 +727,7 @@ async fn embed_via_defers_watchdog_eviction_while_request_in_flight() {
             supervisor_handle: None,
             shutdown_tx,
             pid_slot: Arc::new(AtomicU32::new(0)),
+            terminated: None,
         });
     }
     // Mark last_use as already well past the 1s idle deadline so the
@@ -720,5 +837,228 @@ impl Drop for EnvGuard {
                 None => std::env::remove_var(&self.key),
             }
         }
+    }
+}
+
+// ── LazyEmbedderHandle::shutdown() (epic #3524 slice 6 PR-3 fix — ──────────
+// code-critic HIGH: orphaned python child on bootstrap-probe failure)
+//
+// These spawn a real (but tiny) child process — a POSIX shell script that
+// speaks just enough of the trusty-embedderd stdio JSON-RPC wire protocol to
+// pass `spawn_child`'s startup probe, then idles until killed — so
+// `LazyEmbedderHandle::shutdown()` exercises its real process-lifecycle
+// teardown without needing the actual ONNX binary or `#[ignore]`. Mirrors
+// trusty-common's own `supervisor.rs` `shutdown_tests` module.
+#[cfg(unix)]
+mod shutdown_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Write a minimal stdio JSON-RPC mock of `trusty-embedderd --stdio` to a
+    /// temp file; returns the path plus the guarding `TempDir`.
+    /// Why/What: see `trusty_common::embedder_client::supervisor`'s own
+    /// `write_mock_embedderd` (private to that crate — reimplemented here,
+    /// identical wire behaviour).
+    fn write_mock_embedderd() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -n "$id" ] || id=1
+  printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
+done
+"#,
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
+    /// Like `write_mock_embedderd`, but answers exactly one request and then
+    /// exits non-zero — drives the real `EmbedderSupervisor` into its
+    /// crash-restart path deterministically (epic #3524 slice 6 PR-4
+    /// follow-up, code-critic BLOCK on PR #3584).
+    /// Why/What: see `trusty_common::embedder_client::supervisor`'s own
+    /// `write_mock_embedderd_crash_once` (private to that crate —
+    /// reimplemented here, identical wire behaviour).
+    fn write_mock_embedderd_crash_once() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd-crash-once.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+[ -n "$id" ] || id=1
+printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
+exit 1
+"#,
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
+    /// Best-effort liveness check via `kill -0 <pid>` (no signal sent, just
+    /// an existence probe).
+    fn process_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// `shutdown()` must be a no-op when the handle never spawned — nothing
+    /// to tear down, so it must return immediately without touching the pid
+    /// slot or panicking on an absent `SpawnedState`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_shutdown_is_noop_when_never_spawned() {
+        let handle = LazyEmbedderHandle::new(
+            PathBuf::from("/nonexistent/trusty-embedderd"),
+            SupervisorConfig::default(),
+        );
+        handle.shutdown().await;
+        assert_eq!(handle.app_pid_slot().load(Ordering::Acquire), 0);
+    }
+
+    /// `shutdown()` must cooperatively kill a REAL (mocked) spawned child
+    /// through its `SupervisorHandle` — the exact orphan-leak fix the
+    /// graceful-python bootstrap orchestrator's probe-failure path relies on
+    /// (epic #3524 slice 6 PR-3, code-critic HIGH: "orphaned python child on
+    /// bootstrap-probe failure").
+    ///
+    /// Why: without this method, a probe failure/timeout in
+    /// `commands::start::graceful_bootstrap::try_bootstrap_once` dropped the
+    /// orchestrator's only `LazyEmbedderHandle` reference and left the
+    /// just-spawned child alive until the detached idle watchdog reaped it
+    /// (up to 1800s later for the python arm) — with retries, up to N such
+    /// orphans concurrently.
+    /// What: forces a real spawn via `embed_via` against the mock stdio
+    /// script (the same real spawn path the readiness probe drives),
+    /// captures the child PID, calls `handle.shutdown()`, and asserts the OS
+    /// process is actually gone and the PID slot is cleared.
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_shutdown_kills_spawned_child() {
+        let (_dir, binary) = write_mock_embedderd();
+        let handle = LazyEmbedderHandle::new(
+            binary,
+            SupervisorConfig {
+                startup_timeout_secs: 5,
+                idle_shutdown_secs: 0, // no watchdog racing this test
+                ..SupervisorConfig::default()
+            },
+        );
+
+        // Force a real spawn — mirrors the readiness-probe embed call the
+        // graceful-python orchestrator makes before deciding to hot-swap.
+        handle
+            .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
+            .await
+            .expect("mock embed_batch must succeed");
+
+        let pid = handle.app_pid_slot().load(Ordering::Acquire);
+        assert!(pid > 0, "pid slot must be populated after a real spawn");
+        assert!(process_alive(pid), "child must be alive right after spawn");
+
+        handle.shutdown().await;
+
+        assert!(
+            !process_alive(pid),
+            "child process {pid} must be gone after LazyEmbedderHandle::shutdown()"
+        );
+        assert_eq!(
+            handle.app_pid_slot().load(Ordering::Acquire),
+            0,
+            "pid slot must be cleared after shutdown()"
+        );
+    }
+
+    /// `is_confirmed_terminated()` must be `false` when the handle has never
+    /// spawned anything — there is no reason to believe an unspawned handle
+    /// is "unrecoverably dead" (epic #3524 slice 6 PR-4 follow-up,
+    /// code-critic BLOCK on PR #3584).
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_is_confirmed_terminated_false_when_never_spawned() {
+        let handle = LazyEmbedderHandle::new(
+            PathBuf::from("/nonexistent/trusty-embedderd"),
+            SupervisorConfig::default(),
+        );
+        assert!(!handle.is_confirmed_terminated().await);
+    }
+
+    /// `is_confirmed_terminated()` must reflect the REAL underlying
+    /// `EmbedderSupervisor::terminated_signal()` once it flips true —
+    /// proving the wiring through `do_spawn` → `SpawnedState::terminated`
+    /// actually works end-to-end, not just the pure predicate in
+    /// `swap_back_watchdog`'s own tests (which use a fake).
+    ///
+    /// Why: this is the regression the swap-back watchdog now depends on
+    /// instead of the ambiguous pid==0 + stall-tracker heuristic (see
+    /// `commands::start::swap_back_watchdog`'s module doc for the full
+    /// false-positive analysis).
+    /// What: a real, always-crashing mock child (`write_mock_embedderd_crash_once`)
+    /// with `max_restarts: 1` so exhaustion is fast. Forces the first real
+    /// spawn via `embed_via`, then polls `is_confirmed_terminated()` until it
+    /// flips `true` (the real supervisor gave up) within a generous timeout.
+    /// Test: this test.
+    #[tokio::test]
+    async fn lazy_handle_is_confirmed_terminated_reflects_supervisor_signal() {
+        let (_dir, binary) = write_mock_embedderd_crash_once();
+        let handle = LazyEmbedderHandle::new(
+            binary,
+            SupervisorConfig {
+                startup_timeout_secs: 5,
+                // Zero backoff so the crash -> respawn -> exhaustion sequence
+                // completes as fast as possible; this test asserts on the
+                // give-up signal, not on backoff timing.
+                backoff_max_secs: 0,
+                max_restarts: 1,
+                idle_shutdown_secs: 0, // no watchdog racing this test
+                ..SupervisorConfig::default()
+            },
+        );
+        assert!(
+            !handle.is_confirmed_terminated().await,
+            "must start false — nothing has failed yet"
+        );
+
+        // Force the first real spawn; the mock crashes immediately after,
+        // and every respawn attempt crashes the same way, so max_restarts=1
+        // is exhausted quickly.
+        let _ = handle
+            .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
+            .await;
+
+        // Generous ceiling (45s) so a loaded CI runner cannot false-fail —
+        // the poll interval is short (20ms) so a passing run still returns
+        // in milliseconds; only a genuinely stuck supervisor eats the full
+        // budget.
+        let gave_up = tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                if handle.is_confirmed_terminated().await {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            gave_up.is_ok(),
+            "is_confirmed_terminated() never flipped true within 45s of \
+             exhausting max_restarts=1 against an always-crashing mock child"
+        );
     }
 }

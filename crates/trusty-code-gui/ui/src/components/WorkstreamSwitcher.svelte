@@ -56,6 +56,7 @@
   // `lib/workstreams.test.ts` covers the network/pure-logic layer this
   // component calls into; `App.test.ts` pins that `AppHeader` (and by
   // extension this component) mounts inside `.hdr`.
+  import { resolveActiveWorkstreamId, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
   import { apiBase } from '../lib/api-config';
   import {
     ActiveConflictError,
@@ -129,6 +130,14 @@
       list = body;
       phase = 'ready';
       error = null;
+      // Publish the resolved active id to the shared cross-module store
+      // (code-critic PR #3460 review, HIGH 2) so `StartWorkingForm`'s chat
+      // continuation re-targets when the active workstream changes via
+      // THIS switcher — which never touches the selected-project store.
+      // MUST use the same resolution rule `WorkstreamActivity.svelte`'s
+      // poller applies (see `lib/active-workstream.svelte.ts`'s module doc
+      // for why divergent rules would flip-flop the shared value).
+      setActiveWorkstreamId(resolveActiveWorkstreamId(body));
     } catch (e) {
       if (!stale()) {
         phase = 'daemon-unreachable';

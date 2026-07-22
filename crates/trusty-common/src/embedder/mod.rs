@@ -13,8 +13,11 @@
 //! feature.
 //!
 //! Test: `cargo test -p trusty-common --features embedder,embedder-test-support`
-//! covers shape, cache hits, and the mock embedder. ONNX-backed tests are
-//! `#[ignore]` to keep CI under one cargo-feature umbrella.
+//! covers shape, cache hits, and the mock embedder. Most ONNX-backed tests
+//! are `#[ignore]` to keep CI under one cargo-feature umbrella; the
+//! numerical-accuracy gate `default_model_matches_sentence_transformers_reference`
+//! is the deliberate exception (issue #3493 P0 part 2) — CI pre-seeds its
+//! model so it runs on every PR instead of being silently skipped forever.
 
 // Issue #54: opt-in Candle BERT backend. Lives in its own submodule behind
 // the `embedder-candle` feature so the default fastembed/ORT build never
@@ -40,12 +43,19 @@ mod types;
 #[cfg(any(test, feature = "embedder-test-support"))]
 mod mock;
 
+// Issue #610 (line-cap): split out of this file's own `mod tests` (already
+// at its grandfathered SLOC budget) rather than growing it further — covers
+// `resolve_expected_python_provider`, `embedding_model_name`, and
+// `FastEmbedder::model_name` (epic #3524 slice 6 / issue #3530, #3493 P1).
+#[cfg(test)]
+mod provider_tests;
+
 pub use fast_embedder::FastEmbedder;
 pub use types::{
     CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
-    DEFAULT_ORT_INTER_THREADS, DEFAULT_ORT_INTRA_THREADS, EMBED_DIM, Embedder, ExecutionProvider,
-    OrtThreadingOptions, embed_one, resolve_cuda_options, resolve_expected_provider,
-    resolve_fastembed_cache_dir, resolve_ort_threading_options,
+    DEFAULT_ORT_INTER_THREADS, EMBED_DIM, Embedder, ExecutionProvider, OrtThreadingOptions,
+    default_ort_intra_threads, embed_one, resolve_cuda_options, resolve_expected_provider,
+    resolve_expected_python_provider, resolve_fastembed_cache_dir, resolve_ort_threading_options,
 };
 
 #[cfg(any(test, feature = "embedder-test-support"))]
@@ -248,13 +258,20 @@ mod tests {
         }
     }
 
-    /// Why: #1542 — the CUDA deferred-embed deadlock is fixed by pinning ORT's
-    /// intra-/inter-op threads to 1 and disabling intra-op spinning. With no
-    /// operator override the resolver must default to that safe single-threaded,
-    /// no-spin profile so the daemon never reproduces the 8-ORT-thread barrier
-    /// deadlock out of the box.
-    /// What: clears all three knobs and asserts the defaults.
-    /// Test: this test.
+    /// Why: PR #1668 — the CUDA deferred-embed deadlock is fixed by pinning
+    /// ORT's intra-/inter-op threads to 1 and disabling intra-op spinning
+    /// under the `embedder-cuda` feature (the only build that can register
+    /// the CUDA EP). With no operator override the resolver must default to
+    /// [`default_ort_intra_threads`]'s platform/EP-conditional value and to
+    /// `1` inter-op / no-spin, so CUDA builds never reproduce the
+    /// 8-ORT-thread barrier deadlock out of the box, while CoreML/CPU-EP
+    /// builds (e.g. macOS) are not throttled by a pin that does not apply to
+    /// them (issue #3493 P0).
+    /// What: clears all three knobs and asserts the defaults match
+    /// `default_ort_intra_threads()` / `DEFAULT_ORT_INTER_THREADS`.
+    /// Test: this test; see also `ort_intra_threads_default_pinned_under_cuda_feature`
+    /// and `ort_intra_threads_default_uses_available_parallelism` below for
+    /// the two build-variant assertions.
     #[test]
     fn ort_threading_defaults() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -264,16 +281,56 @@ mod tests {
 
         let opts = resolve_ort_threading_options();
         assert_eq!(
-            opts.intra_threads, DEFAULT_ORT_INTRA_THREADS,
-            "default intra-op threads must be 1 to avoid the #1542 barrier deadlock"
+            opts.intra_threads,
+            default_ort_intra_threads(),
+            "default intra-op threads must match the platform/EP-conditional resolver"
         );
         assert_eq!(opts.inter_threads, DEFAULT_ORT_INTER_THREADS);
         assert!(
             !opts.allow_spinning,
             "spinning must default to off — it is the busy-wait half of the deadlock"
         );
-        assert_eq!(DEFAULT_ORT_INTRA_THREADS, 1);
         assert_eq!(DEFAULT_ORT_INTER_THREADS, 1);
+    }
+
+    /// Why: PR #1668's CUDA barrier deadlock only exists when the CUDA EP can
+    /// be registered — i.e. the `embedder-cuda` feature — so that is the only
+    /// build variant where `default_ort_intra_threads()` must stay pinned to
+    /// `1` (issue #3493 P0: an earlier unconditional pin throttled macOS
+    /// CoreML/CPU-EP throughput ~3.5× with no corresponding safety benefit).
+    /// What: asserts the CUDA-feature default is exactly `1`.
+    /// Test: this test (only compiled into `--features embedder-cuda` builds).
+    #[cfg(feature = "embedder-cuda")]
+    #[test]
+    fn ort_intra_threads_default_pinned_under_cuda_feature() {
+        assert_eq!(
+            default_ort_intra_threads(),
+            1,
+            "CUDA-EP builds must keep the PR #1668 single-intra-op-thread pin"
+        );
+    }
+
+    /// Why: outside the `embedder-cuda` feature (CoreML on Apple Silicon, or
+    /// any other CPU-only build) there is no CUDA barrier to deadlock on, so
+    /// the intra-op default should recover fastembed's own
+    /// `available_parallelism()` behaviour instead of the CUDA-only `1` pin
+    /// (issue #3493 P0).
+    /// What: asserts the non-CUDA default equals
+    /// `std::thread::available_parallelism()` (falling back to `1` only if
+    /// the host cannot report a count) — on any real multi-core CI/dev
+    /// machine (including macOS) this is `> 1`.
+    /// Test: this test (only compiled into non-`embedder-cuda` builds).
+    #[cfg(not(feature = "embedder-cuda"))]
+    #[test]
+    fn ort_intra_threads_default_uses_available_parallelism() {
+        let expected = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        assert_eq!(
+            default_ort_intra_threads(),
+            expected,
+            "non-CUDA builds must use available_parallelism(), not the CUDA-only pin of 1"
+        );
     }
 
     /// Why: operators on hosts proven free of the ORT barrier bug may want to
@@ -314,7 +371,8 @@ mod tests {
 
         let opts = resolve_ort_threading_options();
         assert_eq!(
-            opts.intra_threads, DEFAULT_ORT_INTRA_THREADS,
+            opts.intra_threads,
+            default_ort_intra_threads(),
             "malformed intra-op count must fall back to the safe default"
         );
         assert_eq!(
@@ -358,6 +416,9 @@ mod tests {
         assert_eq!(resolve_expected_provider(), ExecutionProvider::Cpu);
     }
 
+    /// Why: issue #3493 P0 (part 2) — CPU is now the default execution
+    /// provider on every platform, including Apple Silicon; CoreML no longer
+    /// activates just because `TRUSTY_DEVICE` is unset.
     #[test]
     fn resolve_expected_provider_default_matches_platform() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -368,16 +429,7 @@ mod tests {
 
         #[cfg(feature = "embedder-cuda")]
         let expected = ExecutionProvider::Cuda;
-        #[cfg(all(
-            not(feature = "embedder-cuda"),
-            target_arch = "aarch64",
-            target_os = "macos"
-        ))]
-        let expected = ExecutionProvider::CoreMLAne;
-        #[cfg(all(
-            not(feature = "embedder-cuda"),
-            not(all(target_arch = "aarch64", target_os = "macos"))
-        ))]
+        #[cfg(not(feature = "embedder-cuda"))]
         let expected = ExecutionProvider::Cpu;
 
         assert_eq!(
@@ -386,12 +438,25 @@ mod tests {
         );
     }
 
+    /// Why: issue #3493 P0 (part 2) — CoreML is opt-in via `TRUSTY_DEVICE=gpu`
+    /// on Apple Silicon; unset/`cpu` must predict plain `Cpu` regardless of
+    /// `TRUSTY_COREML_COMPUTE_UNITS`, and `gpu` must predict the CoreML
+    /// variant selected by `TRUSTY_COREML_COMPUTE_UNITS`.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[cfg(not(feature = "embedder-cuda"))]
     #[test]
     fn resolve_expected_provider_coreml_units() {
         let _g = ENV_LOCK.lock().unwrap();
-        let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
+        {
+            let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
+            let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", Some("all"));
+            assert_eq!(
+                resolve_expected_provider(),
+                ExecutionProvider::Cpu,
+                "TRUSTY_DEVICE unset must predict Cpu even with compute units set"
+            );
+        }
+        let _d = EnvVarGuard::apply("TRUSTY_DEVICE", Some("gpu"));
         {
             let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", Some("all"));
             assert_eq!(resolve_expected_provider(), ExecutionProvider::CoreML);
@@ -400,6 +465,59 @@ mod tests {
             let _u = EnvVarGuard::apply("TRUSTY_COREML_COMPUTE_UNITS", None);
             assert_eq!(resolve_expected_provider(), ExecutionProvider::CoreMLAne);
         }
+    }
+
+    /// Why: issue #3486 / #3493 P0 — the default embedding model must be the
+    /// non-quantized fp32 variant (faster AND more accurate on the CPU EP
+    /// this model actually runs on), not the previous INT8 default.
+    /// What: clears `TRUSTY_EMBEDDER_MODEL` and asserts the resolver returns
+    /// `AllMiniLML6V2` (fp32).
+    /// Test: this test.
+    #[test]
+    fn resolve_default_embedding_model_defaults_to_fp32() {
+        use crate::embedder::fast_embedder::resolve_default_embedding_model;
+        let _g = ENV_LOCK.lock().unwrap();
+        let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", None);
+        assert_eq!(
+            resolve_default_embedding_model(),
+            fastembed::EmbeddingModel::AllMiniLML6V2,
+            "default must be the non-quantized fp32 model, not INT8"
+        );
+    }
+
+    /// Why: operators who need the smaller ~23MB INT8 footprint more than
+    /// speed/accuracy must still be able to opt back in without a rebuild.
+    /// What: sets `TRUSTY_EMBEDDER_MODEL` to each accepted spelling
+    /// (case-insensitive) and asserts `AllMiniLML6V2Q` is selected.
+    /// Test: this test.
+    #[test]
+    fn resolve_default_embedding_model_int8_opt_in() {
+        use crate::embedder::fast_embedder::resolve_default_embedding_model;
+        let _g = ENV_LOCK.lock().unwrap();
+        for spelling in ["int8", "INT8", "quantized", "Quantized", "q", "Q"] {
+            let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", Some(spelling));
+            assert_eq!(
+                resolve_default_embedding_model(),
+                fastembed::EmbeddingModel::AllMiniLML6V2Q,
+                "{spelling:?} must select the INT8 opt-in model"
+            );
+        }
+    }
+
+    /// Why: an unrecognised value must never panic or silently pick INT8 —
+    /// it must fall back to the safe, accurate fp32 default.
+    /// What: sets an unknown value and asserts the fp32 default wins.
+    /// Test: this test.
+    #[test]
+    fn resolve_default_embedding_model_ignores_unknown() {
+        use crate::embedder::fast_embedder::resolve_default_embedding_model;
+        let _g = ENV_LOCK.lock().unwrap();
+        let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", Some("not-a-real-model"));
+        assert_eq!(
+            resolve_default_embedding_model(),
+            fastembed::EmbeddingModel::AllMiniLML6V2,
+            "an unrecognised value must fall back to the fp32 default, not INT8"
+        );
     }
 
     #[tokio::test]
@@ -444,6 +562,76 @@ mod tests {
         assert_eq!(v1, v2);
     }
 
+    /// Fixed sample used by [`default_model_matches_sentence_transformers_reference`].
+    ///
+    /// Why: issue #3486 / #3493 P0 — the default model swap (INT8 →
+    /// `AllMiniLML6V2` fp32) must be verified against a genuine, independent
+    /// reference, not just "fastembed didn't error". These 5 texts and their
+    /// reference vectors were generated with a real
+    /// `sentence-transformers/all-MiniLM-L6-v2` CPU fp32 model (`device="cpu"`,
+    /// `normalize_embeddings=True`) — the same independent-library method the
+    /// #3486 CoreML/fp16 experiment's correctness gate used (there: 0.999999+
+    /// mean cosine for fp32/fp16 vs 0.9897 for INT8, across a 50-chunk sample).
+    const REFERENCE_TEXTS: [&str; 5] = [
+        "fn authenticate(user: &str) -> bool",
+        "pub struct Embedder { model: TextEmbedding }",
+        "the quick brown fox jumps over the lazy dog",
+        "async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>",
+        "memory palace consolidation cycle",
+    ];
+
+    include!("reference_vectors_test_data.rs");
+
+    /// Why: verifies the actual production default (`FastEmbedder::new()`,
+    /// which now resolves to `AllMiniLML6V2` fp32 per
+    /// `resolve_default_embedding_model`) produces embeddings numerically
+    /// consistent with a genuine, independent `sentence-transformers`
+    /// reference — not just "some vector came back" (issue #3486 / #3493 P0).
+    /// What: embeds [`REFERENCE_TEXTS`] with the default embedder and asserts
+    /// mean cosine similarity against `REFERENCE_VECTORS` is `>= 0.999`
+    /// (matching the experiment's fp32/fp16 threshold, well above INT8's
+    /// measured 0.9897).
+    /// Test: this test. NOT `#[ignore]`d (issue #3493 P0 part 2 — this is the
+    /// correctness gate that would have caught the CoreML-default accuracy
+    /// regression had it been wired into CI; see `ci.yml`'s `test` job for
+    /// the fastembed-model pre-seed step that makes this safe to run on every
+    /// PR without HuggingFace-download flakiness).
+    #[tokio::test]
+    async fn default_model_matches_sentence_transformers_reference() {
+        fn cosine(a: &[f32], b: &[f32]) -> f64 {
+            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
+            let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+            dot / (norm_a * norm_b)
+        }
+
+        let e = FastEmbedder::new().await.unwrap();
+        let texts: Vec<String> = REFERENCE_TEXTS.iter().map(|s| s.to_string()).collect();
+        let vectors = e.embed_batch(&texts).await.unwrap();
+        assert_eq!(vectors.len(), REFERENCE_VECTORS.len());
+
+        let sims: Vec<f64> = vectors
+            .iter()
+            .zip(REFERENCE_VECTORS.iter())
+            .map(|(v, r)| cosine(v, r))
+            .collect();
+        let mean_sim = sims.iter().sum::<f64>() / sims.len() as f64;
+        let min_sim = sims.iter().cloned().fold(f64::INFINITY, f64::min);
+        println!(
+            "default_model_matches_sentence_transformers_reference: mean_cosine={mean_sim:.6} min_cosine={min_sim:.6}"
+        );
+
+        assert!(
+            mean_sim >= 0.999,
+            "default model must match the sentence-transformers reference to \
+             >= 0.999 mean cosine similarity (got {mean_sim:.6}, min {min_sim:.6}); \
+             the previous INT8 default only reached 0.9897 (issue #3486 / #3493 P0)"
+        );
+    }
+
+    /// Why: issue #3493 P0 (part 2) — `TRUSTY_DEVICE=cpu` must keep working as
+    /// an explicit-CPU escape hatch even though CPU is now the default
+    /// anyway, in case the opt-in precedence ever changes again.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
     fn trusty_device_cpu_disables_coreml_on_apple_silicon() {
@@ -467,9 +655,15 @@ mod tests {
         }
     }
 
+    /// Why: issue #3493 P0 (part 2) — CoreML measurably degraded embedding
+    /// accuracy (~0.99 mean cosine vs 1.000000 on CPU — see
+    /// `default_model_matches_sentence_transformers_reference`), so CPU is
+    /// now the DEFAULT execution provider on Apple Silicon, not CoreML. This
+    /// replaces the old `default_apple_silicon_uses_coreml_ane` test, which
+    /// asserted the opposite (now-reverted) default.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
-    fn default_apple_silicon_uses_coreml_ane() {
+    fn default_apple_silicon_uses_cpu() {
         use crate::embedder::fast_embedder::FastEmbedder as FE;
         let _guard = ENV_LOCK.lock().unwrap();
 
@@ -483,8 +677,9 @@ mod tests {
         let (_opts, provider) = FE::init_options(fastembed::EmbeddingModel::AllMiniLML6V2Q);
         assert_eq!(
             provider,
-            ExecutionProvider::CoreMLAne,
-            "default behaviour on Apple Silicon must register CoreML(ANE) — the OOM-safe replacement for CoreML(All)"
+            ExecutionProvider::Cpu,
+            "default behaviour on Apple Silicon must be CPU — CoreML is opt-in via \
+             TRUSTY_DEVICE=gpu (issue #3493 P0 part 2)"
         );
 
         unsafe {
@@ -499,6 +694,9 @@ mod tests {
         }
     }
 
+    /// Why: issue #3493 P0 (part 2) — CoreML must still be reachable as an
+    /// explicit opt-in (`TRUSTY_DEVICE=gpu`), and `TRUSTY_COREML_COMPUTE_UNITS`
+    /// must still select the CoreML(All) tag once opted in.
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     #[test]
     fn coreml_compute_units_all_opt_in() {
@@ -508,7 +706,7 @@ mod tests {
         let prev_device = std::env::var("TRUSTY_DEVICE").ok();
         let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
         unsafe {
-            std::env::remove_var("TRUSTY_DEVICE");
+            std::env::set_var("TRUSTY_DEVICE", "gpu");
             std::env::set_var("TRUSTY_COREML_COMPUTE_UNITS", "all");
         }
 
@@ -516,7 +714,43 @@ mod tests {
         assert_eq!(
             provider,
             ExecutionProvider::CoreML,
-            "TRUSTY_COREML_COMPUTE_UNITS=all must select the CoreML(All) tag"
+            "TRUSTY_DEVICE=gpu + TRUSTY_COREML_COMPUTE_UNITS=all must select the CoreML(All) tag"
+        );
+
+        unsafe {
+            match prev_device {
+                Some(v) => std::env::set_var("TRUSTY_DEVICE", v),
+                None => std::env::remove_var("TRUSTY_DEVICE"),
+            }
+            match prev_units {
+                Some(v) => std::env::set_var("TRUSTY_COREML_COMPUTE_UNITS", v),
+                None => std::env::remove_var("TRUSTY_COREML_COMPUTE_UNITS"),
+            }
+        }
+    }
+
+    /// Why: issue #3493 P0 (part 2) — `TRUSTY_DEVICE=gpu` is the explicit
+    /// opt-in that re-enables CoreML on Apple Silicon (mirroring the same
+    /// value's meaning for the CUDA branch and the `require_gpu` hard-fail
+    /// check in `with_cache_size`).
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn trusty_device_gpu_enables_coreml_on_apple_silicon() {
+        use crate::embedder::fast_embedder::FastEmbedder as FE;
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let prev_device = std::env::var("TRUSTY_DEVICE").ok();
+        let prev_units = std::env::var("TRUSTY_COREML_COMPUTE_UNITS").ok();
+        unsafe {
+            std::env::set_var("TRUSTY_DEVICE", "gpu");
+            std::env::remove_var("TRUSTY_COREML_COMPUTE_UNITS");
+        }
+
+        let (_opts, provider) = FE::init_options(fastembed::EmbeddingModel::AllMiniLML6V2Q);
+        assert_eq!(
+            provider,
+            ExecutionProvider::CoreMLAne,
+            "TRUSTY_DEVICE=gpu must opt back into CoreML(ANE) — the OOM-safe default variant"
         );
 
         unsafe {

@@ -50,7 +50,15 @@
 //! #3126 [`disclaimed_spawn_detached`] adds the TUI health screen's `[S]` key
 //! (`tui::event_loop::health_start`, a detached `cargo run` child never
 //! waited on) — the last undisclaimed spawn site found by the #2997 part 5
-//! sweep.
+//! sweep. As of #3267 (#2997 part 6) [`disclaimed_stderr_piped_spawn`] and
+//! [`disclaimed_stdout_piped_spawn`] add the two non-`claude` spawn sites the
+//! #3261 code-critic review flagged: `provisioner::clone_progress::clone_with_progress`
+//! (a daemon-initiated `git clone`) and
+//! `formatters::info_box::probes::run_git_log` (the `tm` binary's welcome-panel
+//! `git log` probe). Split into their own `stderr_piped`/`stdout_piped`
+//! submodules (mirroring the pre-existing `macos::stderr_piped`/
+//! `macos::stdout_piped` split) to keep this file under the 500-SLOC
+//! production cap — see those modules' own docs for their Why/What/Test.
 //! Test: `disclaimed_output_captures_stdout`,
 //! `disclaimed_output_captures_stderr_and_nonzero_exit`,
 //! `disclaimed_output_saturates_stdout_and_stderr_without_deadlock`,
@@ -66,7 +74,9 @@
 //! `disclaimed_spawn_detached_returns_ok_for_true`,
 //! `disclaimed_spawn_detached_reports_spawn_error_for_missing_binary`,
 //! `disclaimed_spawn_detached_disable_env_forces_plain_path` (macOS-only,
-//! this module's `tests`).
+//! this module's `tests`); `stderr_piped`'s and `stdout_piped`'s own `tests`
+//! (macOS-only) and `native_tests` (any OS) submodules cover
+//! [`disclaimed_stderr_piped_spawn`]/[`disclaimed_stdout_piped_spawn`].
 
 /// Environment variable that, when set to any value, forces
 /// [`disclaimed_output`]/[`disclaimed_status`]/[`disclaimed_piped_spawn`]
@@ -155,10 +165,11 @@ pub fn disclaimed_status(
 /// trusty-memory` child and never waits on it, so it fit none of the other
 /// three disclaim shapes (capture-to-completion, wait-for-status, or
 /// long-lived piped) — the last undisclaimed spawn site in the TUI/
-/// session-launch call graph (issue #2997 part 5, #3126). Two undisclaimed
-/// spawn sites remain elsewhere in the crate (`provisioner::clone_progress`,
-/// `formatters::info_box::probes::run_git_log`); tracked as #2997 part 6,
-/// issue #3267.
+/// session-launch call graph (issue #2997 part 5, #3126). Two more
+/// undisclaimed spawn sites (`provisioner::clone_progress`,
+/// `formatters::info_box::probes::run_git_log`) were found by the #3261
+/// code-critic review and are fixed by [`disclaimed_stderr_piped_spawn`]/
+/// [`disclaimed_stdout_piped_spawn`] below (#2997 part 6, issue #3267).
 /// What: on macOS, builds a `Command` for `program`/`args` with stdio left at
 /// the default (inherited from the caller, matching the pre-existing
 /// `.spawn()` call this replaces) and spawns it via `posix_spawnp` with the
@@ -186,6 +197,12 @@ pub fn disclaimed_spawn_detached(program: &str, args: &[&str]) -> std::io::Resul
         .spawn()
         .map(|_| ())
 }
+
+mod stderr_piped;
+pub use stderr_piped::{StderrPipedSpawn, disclaimed_stderr_piped_spawn};
+
+mod stdout_piped;
+pub use stdout_piped::{StdoutPipedSpawn, disclaimed_stdout_piped_spawn};
 
 /// Trait-object alias for a spawned child's writable stdin, uniform across
 /// the native (`tokio::process::ChildStdin`) and macOS-disclaimed

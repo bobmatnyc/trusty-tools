@@ -148,6 +148,23 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let adapter: Arc<dyn crate::llm::adapter::ModelAdapter> =
         Arc::from(adapter_for_model(&resolved_model));
 
+    // #3052 PR A follow-up: `.md` frontmatter doesn't expose `temperature`/
+    // `max_tokens` as parseable keys (`MdAgentFrontmatter` has no such
+    // fields), so a `.md` file can never explicitly declare them. When this
+    // agent `extends` a base, use the UNSET sentinel so `merge_extends`
+    // inherits the base's real tuned values instead of clobbering them with
+    // a hardcoded stub (the pre-#3052 wholesale-inherit behavior, preserved
+    // here for `.md` children specifically). A non-`extends` `.md` agent has
+    // no base to inherit from, so it keeps the historical 0.2/8192 defaults.
+    let (llm_temperature, llm_max_tokens) = if fm.extends.is_some() {
+        (
+            crate::agents::params::unset_temperature(),
+            crate::agents::params::unset_max_tokens(),
+        )
+    } else {
+        (0.2, 8192)
+    };
+
     Ok(AgentConfig {
         agent: AgentInfo {
             name,
@@ -162,8 +179,8 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             extends: fm.extends,
         },
         llm: LlmParams {
-            temperature: 0.2,
-            max_tokens: 8192,
+            temperature: llm_temperature,
+            max_tokens: llm_max_tokens,
             model_override: None,
             enable_prompt_caching: true,
             max_turns: 20,

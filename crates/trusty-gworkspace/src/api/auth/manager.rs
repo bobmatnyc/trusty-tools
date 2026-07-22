@@ -8,19 +8,25 @@
 //! What: POSTs `grant_type=refresh_token` to Google's OAuth token endpoint,
 //! updates the on-disk record on success, and routes failures through the
 //! shared [`refresh_failure_message`] helper (actionable re-auth hint on
-//! `invalid_grant`, sanitized error otherwise).
-//! Test: Manual — requires real Google credentials. The failure-message mapping
-//! is unit-tested in `oauth::errors`
-//! (`refresh_failure_message_names_profile_and_setup_command`).
+//! `invalid_grant`, sanitized error otherwise). Issue #3518: the client used
+//! for the exchange is resolved PER-PROFILE (`oauth::client_store`) — a
+//! profile authorized against its own client is always refreshed with that
+//! same client, falling back to the global client only for profiles that
+//! have none (backward compatible with every profile authorized before this
+//! feature existed).
+//! Test: The live HTTP exchange is covered against a `wiremock` server —
+//! `refresh_uses_per_profile_client_when_present` and
+//! `refresh_falls_back_to_global_client_when_absent` assert the exact
+//! `client_id` sent on the wire. The failure-message mapping is unit-tested
+//! in `oauth::errors` (`refresh_failure_message_names_profile_and_setup_command`).
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
-use tracing::warn;
 
 use super::models::{OAuthToken, StoredToken};
 use super::oauth::errors::{redact_token_response, refresh_failure_message};
-use super::oauth::resolve_client_creds;
+use super::oauth::resolve_client_creds_for_profile;
 use super::storage::TokenStorage;
 use crate::api::constants::OAUTH_TOKEN_URL;
 
@@ -39,53 +45,37 @@ struct GoogleTokenResponse {
 
 /// OAuth refresh manager.
 ///
-/// Why: Encapsulates Google's OAuth client credentials so `BaseClient` only
-/// needs to call one method to get a fresh token.
-/// What: Resolves `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` env
-/// vars first, falling back to `~/.gworkspace-mcp/oauth_client.json` (see
-/// `from_env`), on construction. `refresh` performs the HTTP exchange.
-/// Test: Construction is covered by `from_env_falls_back_to_oauth_client_json`,
-/// `from_env_returns_none_when_both_absent`, and
-/// `from_env_prefers_env_vars_over_file`.
+/// Why: Centralises the token-endpoint HTTP exchange so `BaseClient` only
+/// needs to call one method to get a fresh token; the OAuth CLIENT itself is
+/// no longer fixed at construction time (issue #3518) — it is resolved
+/// per-profile on every call via [`resolve_client_creds_for_profile`], since
+/// different profiles may be bound to different clients.
+/// What: Holds a `reqwest::Client` and the token endpoint URL (overridable
+/// in tests via [`OAuthManager::with_token_url`] to point at a `wiremock`
+/// server instead of Google's real endpoint).
+/// Test: `refresh_uses_per_profile_client_when_present`,
+/// `refresh_falls_back_to_global_client_when_absent`.
 pub struct OAuthManager {
     http: reqwest::Client,
-    client_id: String,
-    client_secret: String,
+    token_url: String,
 }
 
 impl OAuthManager {
-    /// Construct from env vars, falling back to `oauth_client.json` on disk.
-    ///
-    /// Why: Issue #2946 — no tm-managed session sets
-    /// `GOOGLE_OAUTH_CLIENT_ID`/`SECRET`, so `from_env` previously always
-    /// returned `None` there, silently disabling self-refresh: every
-    /// tm-managed MCP server ran read-only-token mode and 401'd on Google
-    /// once the access token expired (~1h). `setup`/`doctor` already resolve
-    /// client credentials with an env-first, file-fallback strategy via
-    /// `resolve_client_creds`; reusing it here (rather than duplicating the
-    /// parse logic) gives the refresh path the same fallback for free.
-    /// What: Delegates to [`resolve_client_creds`] (env vars win when
-    /// present, else reads `~/.gworkspace-mcp/oauth_client.json`). Returns
-    /// `Ok(None)` — with a warning logged — only when neither source yields
-    /// credentials (read-only token mode: refresh disabled).
-    /// Test: `from_env_falls_back_to_oauth_client_json`,
-    /// `from_env_returns_none_when_both_absent`,
-    /// `from_env_prefers_env_vars_over_file`.
-    pub fn from_env() -> Result<Option<Self>> {
-        match resolve_client_creds() {
-            Ok(creds) => Ok(Some(Self {
-                http: reqwest::Client::new(),
-                client_id: creds.client_id,
-                client_secret: creds.client_secret,
-            })),
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "no OAuth client credentials found (env vars or oauth_client.json); \
-                     token refresh disabled — expired tokens will not self-refresh"
-                );
-                Ok(None)
-            }
+    /// Construct against Google's real token endpoint.
+    pub fn new() -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            token_url: OAUTH_TOKEN_URL.to_string(),
+        }
+    }
+
+    /// Test-only constructor pointing the refresh exchange at `token_url`
+    /// (a `wiremock` mock server) instead of Google's real endpoint.
+    #[cfg(test)]
+    pub(crate) fn with_token_url(token_url: impl Into<String>) -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            token_url: token_url.into(),
         }
     }
 
@@ -93,14 +83,21 @@ impl OAuthManager {
     ///
     /// Why: The stored token is near or past expiry; we need a fresh one
     /// before the next API call.
-    /// What: POSTs to Google's OAuth endpoint with `grant_type=refresh_token`,
-    /// parses the response, updates `expires_at` to `now + expires_in`, and
-    /// writes the updated `StoredToken` back to disk. On an HTTP failure it
-    /// returns [`refresh_failure_message`]'s actionable error (naming the exact
+    /// What: Resolves `profile`'s own OAuth client (falling back to the
+    /// global one — see [`resolve_client_creds_for_profile`]), POSTs to
+    /// Google's OAuth endpoint with `grant_type=refresh_token`, parses the
+    /// response, updates `expires_at` to `now + expires_in`, and writes the
+    /// updated `StoredToken` back to disk. On an HTTP failure it returns
+    /// [`refresh_failure_message`]'s actionable error (naming the exact
     /// re-auth command on `invalid_grant`).
-    /// Test: live path needs real Google creds; the failure-message mapping is
-    /// covered by `refresh_failure_message_names_profile_and_setup_command`.
+    /// Test: `refresh_uses_per_profile_client_when_present`,
+    /// `refresh_falls_back_to_global_client_when_absent`; the failure-message
+    /// mapping is covered by
+    /// `refresh_failure_message_names_profile_and_setup_command`.
     pub async fn refresh(&self, storage: &TokenStorage, profile: &str) -> Result<OAuthToken> {
+        let creds = resolve_client_creds_for_profile(profile)
+            .with_context(|| format!("resolve OAuth client for profile '{profile}'"))?;
+
         let mut stored: StoredToken = storage
             .get_profile(profile)?
             .ok_or_else(|| anyhow!("no stored token for profile '{profile}'"))?;
@@ -111,14 +108,14 @@ impl OAuthManager {
             .ok_or_else(|| anyhow!("no refresh_token available for profile '{profile}'"))?;
 
         let params = [
-            ("client_id", self.client_id.as_str()),
-            ("client_secret", self.client_secret.as_str()),
+            ("client_id", creds.client_id.as_str()),
+            ("client_secret", creds.client_secret.as_str()),
             ("refresh_token", refresh_token.as_str()),
             ("grant_type", "refresh_token"),
         ];
         let resp = self
             .http
-            .post(OAUTH_TOKEN_URL)
+            .post(&self.token_url)
             .form(&params)
             .send()
             .await
@@ -152,19 +149,34 @@ impl OAuthManager {
         stored.token = new_token.clone();
         stored.metadata.last_refreshed = Some(Utc::now());
 
-        let mut all = storage.load()?;
-        all.insert(profile.to_string(), stored);
-        storage.save(&all)?;
+        // Guard against a concurrent refresh of a different profile (or the
+        // same one) losing this write — see `TokenStorage::update` (#3502).
+        storage.update(|all| {
+            all.insert(profile.to_string(), stored);
+            Ok(())
+        })?;
 
         Ok(new_token)
+    }
+}
+
+impl Default for OAuthManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::auth::TokenStorage;
+    use crate::api::auth::models::TokenMetadata;
+    use crate::api::auth::oauth::client_store::profile_client_path;
+    use crate::api::auth::test_support::{EnvGuard, fresh_temp_home};
     use serial_test::serial;
     use std::path::PathBuf;
+    use wiremock::matchers::{body_string_contains, method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Env vars mutated by the fallback tests below; captured/restored as a
     /// group so a panic mid-test never leaks a fake `HOME` or client id into
@@ -175,115 +187,145 @@ mod tests {
         "GOOGLE_OAUTH_CLIENT_SECRET",
     ];
 
-    /// RAII guard that snapshots and restores a fixed set of env vars, even
-    /// on panic.
-    ///
-    /// Why: `from_env`'s fallback path reads `HOME` (via `dirs::home_dir`)
-    /// indirectly through `resolve_client_creds`; testing it in-process means
-    /// mutating real process env state, which must never leak across tests
-    /// (issue #2946 fallback tests run `#[serial]` for the same reason).
-    /// What: Captures each var's current value on construction; `Drop`
-    /// restores it (`set_var` if it was present, `remove_var` if absent).
-    /// Test: exercised by every test in this module — a leaked var would
-    /// make a later, unrelated test flaky.
-    struct EnvGuard {
-        saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    impl EnvGuard {
-        fn capture(vars: &[&'static str]) -> Self {
-            let saved = vars.iter().map(|&v| (v, std::env::var(v).ok())).collect();
-            Self { saved }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            for (k, v) in &self.saved {
-                // SAFETY: every caller of `EnvGuard` runs under `#[serial]`,
-                // so no other thread reads/writes these vars concurrently.
-                match v {
-                    Some(val) => unsafe { std::env::set_var(k, val) },
-                    None => unsafe { std::env::remove_var(k) },
-                }
-            }
-        }
-    }
-
-    /// Build a fresh temp dir with a `.gworkspace-mcp/` subdir, never
-    /// touching the real `~/.gworkspace-mcp`.
-    fn fresh_temp_home(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gw-manager-{label}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(dir.join(".gworkspace-mcp")).expect("mkdir temp home");
-        dir
-    }
-
-    #[test]
-    #[serial]
-    fn from_env_falls_back_to_oauth_client_json() {
-        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
-        // SAFETY: serialised via #[serial]; EnvGuard restores on drop.
+    fn isolated_home(label: &str) -> PathBuf {
+        let home = fresh_temp_home(label);
+        // SAFETY: caller runs under #[serial]; EnvGuard (held by the caller)
+        // restores every var on drop.
         unsafe {
             std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID");
             std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET");
-        }
-        let home = fresh_temp_home("fallback");
-        std::fs::write(
-            home.join(".gworkspace-mcp").join("oauth_client.json"),
-            r#"{"client_id":"file-id","client_secret":"file-secret"}"#,
-        )
-        .expect("write oauth_client.json");
-        // SAFETY: see above.
-        unsafe { std::env::set_var("HOME", &home) };
-
-        let mgr = OAuthManager::from_env()
-            .expect("from_env should not error")
-            .expect("oauth_client.json fallback should enable refresh");
-        assert_eq!(mgr.client_id, "file-id");
-        assert_eq!(mgr.client_secret, "file-secret");
-    }
-
-    #[test]
-    #[serial]
-    fn from_env_returns_none_when_both_absent() {
-        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
-        // SAFETY: see EnvGuard doc.
-        unsafe {
-            std::env::remove_var("GOOGLE_OAUTH_CLIENT_ID");
-            std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET");
-        }
-        let home = fresh_temp_home("absent");
-        // SAFETY: see EnvGuard doc.
-        unsafe { std::env::set_var("HOME", &home) };
-
-        let mgr = OAuthManager::from_env().expect("from_env should not error (warn, not error)");
-        assert!(
-            mgr.is_none(),
-            "refresh must stay disabled with neither env vars nor oauth_client.json present"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn from_env_prefers_env_vars_over_file() {
-        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
-        let home = fresh_temp_home("precedence");
-        std::fs::write(
-            home.join(".gworkspace-mcp").join("oauth_client.json"),
-            r#"{"client_id":"file-id","client_secret":"file-secret"}"#,
-        )
-        .expect("write oauth_client.json");
-        // SAFETY: see EnvGuard doc.
-        unsafe {
             std::env::set_var("HOME", &home);
-            std::env::set_var("GOOGLE_OAUTH_CLIENT_ID", "env-id");
-            std::env::set_var("GOOGLE_OAUTH_CLIENT_SECRET", "env-secret");
         }
+        home
+    }
 
-        let mgr = OAuthManager::from_env()
-            .expect("from_env should not error")
-            .expect("env vars should enable refresh");
-        assert_eq!(mgr.client_id, "env-id", "env vars must win over the file");
-        assert_eq!(mgr.client_secret, "env-secret");
+    fn write_client_json(path: &std::path::Path, client_id: &str, client_secret: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            path,
+            format!(r#"{{"client_id":"{client_id}","client_secret":"{client_secret}"}}"#),
+        )
+        .unwrap();
+    }
+
+    fn temp_storage_with_token(profile: &str, refresh_token: &str) -> TokenStorage {
+        let dir = std::env::temp_dir().join(format!("gw-manager-tokens-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = TokenStorage::with_path(dir.join("tokens.json"));
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            profile.to_string(),
+            StoredToken {
+                version: 1,
+                metadata: TokenMetadata {
+                    service_name: profile.to_string(),
+                    provider: "google".into(),
+                    created_at: Utc::now(),
+                    last_refreshed: None,
+                    email: Some(format!("{profile}@example.com")),
+                    is_default: true,
+                },
+                token: OAuthToken {
+                    access_token: "stale".into(),
+                    refresh_token: Some(refresh_token.to_string()),
+                    expires_at: Utc::now() - Duration::seconds(10),
+                    scopes: vec!["openid".into()],
+                    token_type: "Bearer".into(),
+                },
+            },
+        );
+        storage.save(&map).unwrap();
+        storage
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_uses_per_profile_client_when_present() {
+        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
+        let home = isolated_home("refresh-per-profile");
+        // A DIFFERENT global client is present too, to prove it is not used.
+        write_client_json(
+            &home.join(".gworkspace-mcp").join("oauth_client.json"),
+            "global-client",
+            "global-secret",
+        );
+        write_client_json(
+            &profile_client_path("work"),
+            "profile-client",
+            "profile-secret",
+        );
+        let storage = temp_storage_with_token("work", "r-work");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/token"))
+            .and(body_string_contains("client_id=profile-client"))
+            .and(body_string_contains("client_secret=profile-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new-access-token",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            })))
+            .mount(&server)
+            .await;
+
+        let mgr = OAuthManager::with_token_url(format!("{}/token", server.uri()));
+        let refreshed = mgr
+            .refresh(&storage, "work")
+            .await
+            .expect("refresh should succeed using the profile's own client");
+        assert_eq!(refreshed.access_token, "new-access-token");
+
+        let stored = storage.get_profile("work").unwrap().unwrap();
+        assert_eq!(stored.token.access_token, "new-access-token");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_falls_back_to_global_client_when_absent() {
+        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
+        let home = isolated_home("refresh-global-fallback");
+        write_client_json(
+            &home.join(".gworkspace-mcp").join("oauth_client.json"),
+            "global-client",
+            "global-secret",
+        );
+        // No per-profile client file for "legacy" — must keep using global.
+        let storage = temp_storage_with_token("legacy", "r-legacy");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/token"))
+            .and(body_string_contains("client_id=global-client"))
+            .and(body_string_contains("client_secret=global-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "legacy-new-token",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            })))
+            .mount(&server)
+            .await;
+
+        let mgr = OAuthManager::with_token_url(format!("{}/token", server.uri()));
+        let refreshed = mgr.refresh(&storage, "legacy").await.expect(
+            "a profile with no per-profile client must still refresh via the global client \
+                 (backward compatibility)",
+        );
+        assert_eq!(refreshed.access_token, "legacy-new-token");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn refresh_errors_when_no_client_resolves_for_profile() {
+        let _guard = EnvGuard::capture(MUTATED_ENV_VARS);
+        isolated_home("refresh-no-creds");
+        // Neither a per-profile client file nor a global oauth_client.json.
+        let storage = temp_storage_with_token("orphan", "r-orphan");
+
+        let mgr = OAuthManager::new();
+        let err = mgr.refresh(&storage, "orphan").await.unwrap_err();
+        assert!(err.to_string().contains("resolve OAuth client"), "{err}");
     }
 }

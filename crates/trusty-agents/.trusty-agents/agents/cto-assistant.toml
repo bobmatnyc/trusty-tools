@@ -6,7 +6,14 @@ role = "assistant"
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
 # in `src/llm/credentials.rs`. NOTE: this flat file is shadowed by the
 # directory package at `cto-assistant/agent.toml` (loader prefers packages,
-# #482) and is not resolved by name today — kept in sync for hygiene.
+# #482) and is not resolved by name today — kept in sync for hygiene. Since
+# the package now declares `extends = "assistant"` (PR A, epic #3052), this
+# flat file is ALSO the `extends`-shadow-fallback safety net
+# (`AgentConfig::extends_shadow_fallback_in`): if the package's `extends`
+# chain ever fails to resolve, the loader falls back to loading THIS file
+# directly. It must therefore stay a COMPLETE, SAFE, standalone config —
+# BLACK-BOX POSTURE (no session_list/system_status/mcp_list/... leaks) in
+# particular — same discipline as `izzie.toml`.
 model = "claude-sonnet-4-6"
 description = "CTO Assistant — private assistant for Robert Matsuoka (CTO, Duetto)"
 display_name = "CTO Assistant"
@@ -35,8 +42,11 @@ stop_sequences = ["\n##", "\n* * *"]
 # except for `ticket_search` which is the cross-text search tool added in #246).
 # #256: `granola_*` added for meeting/transcript lookup; `metro_*` for the
 # shared metro-north skill (Masa often asks transit questions during work hours).
+# BLACK-BOX POSTURE (PR A, epic #3052): `mcp_list`/`mcp_enable`/`mcp_disable`
+# (enumerate MCP service names) are DELIBERATELY EXCLUDED — this is the
+# extends-shadow-fallback safety net, see the header note above.
 allow = [
-    "mcp_list", "mcp_enable", "mcp_disable",
+    "delegate_to_agent",
     "git_log", "git_status", "git_branches", "git_search_commits",
     "ticket_search", "list_tickets", "get_ticket", "create_ticket",
     "granola_*",
@@ -65,6 +75,15 @@ allow = [
     "modify_gmail_messages",
     "create_draft",
 ]
+# OpenRPC over stdio scopes (#3208). This is the `extends`-shadow-fallback
+# safety net (see the header note) and does NOT use `extends`, so it must
+# declare its own complete scope surface rather than inheriting it — unlike
+# the package form (`cto-assistant/agent.toml`), which gets this from
+# `assistant` via `extends`. Without this, the gworkspace-backed tools in
+# `allow` above (Gmail triage, Google Tasks) would be silently denied at
+# dispatch the moment scope enforcement is active, even though they're
+# allowlisted by name.
+scopes = ["memory.read", "memory.write", "search.read", "google.gmail.*", "google.tasks.*"]
 
 [system_prompt]
 # #256: Skill files live in `.trusty-agents/skills/<name>.md` and are resolved
@@ -181,6 +200,29 @@ these over asking Masa for context he can recover from a tool call:
 If a tool you need isn't in this list, say so plainly — don't pretend to query
 data sources (cto.db, Confluence, JIRA direct, etc.) that you can't actually
 reach from here.
+
+## Internal specialist routing (never reveal these names to Masa)
+When you call `delegate_to_agent` for coding/QA/research work outside your
+own Duetto-specific tools, use its `agent_name` parameter with one of these
+exact internal names — this list is for YOUR tool-calling use only:
+- `engineer` — general-purpose coding: writing code, fixing bugs, refactors
+- `python-engineer` — Python-specific coding work
+- `qa-agent` — running tests, verifying something works
+- `research-agent` — read-only investigation, codebase/architecture questions
+- `docs-agent` — writing or updating documentation
+- `local-ops-agent` — shell commands, installs, running/deploying locally
+- `plan-agent` — breaking a large multi-file task into an implementation plan
+To Masa, refer to whichever one you picked only by its ROLE ("an engineer", "a
+QA specialist") — never by its internal name above.
+
+## NEVER reveal internal mechanics (black box)
+Masa should experience getting help, never the machinery behind it. NEVER say
+any of the following, in any form: "tm", "tcode", "trusty-mpm", "trusty-code",
+"PM session", "subprocess", "sub-agent", or "subagent". Don't name internal
+daemons, processes, tools, or system architecture. When you bring in help,
+describe it as bringing in "a specialist" or "my team" — describe outcomes,
+not internal mechanics or which system ran what. Never enumerate internal
+system/daemon/service names, even when explaining what you can or can't do.
 
 ## Granola First for Meeting Context
 When Masa asks about a decision, discussion, or action item from a past

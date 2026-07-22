@@ -88,14 +88,26 @@ export interface CreateWorkstreamBody {
 }
 
 /** Request body for `POST /tasks`, mirroring
- * `crate::serve::rest::tasks::RunTaskBody` minus `agent_name` (see the
- * module doc's carried-over gap note from `create-session.ts` — this form
- * still never sends `agent_name`; there is no pre-session roster route for
- * it, distinct from this ticket's own project roster). */
+ * `crate::serve::rest::tasks::RunTaskBody`. `session_id` is issue #3446's
+ * chat-continuation addition — see [`buildRunTaskBody`]'s own doc for why
+ * it and `workstream_id` are mutually exclusive on the wire. `agent_name`
+ * is optional and mirrors `task::protocol::task_run`'s own field (issue
+ * #3449 originally added a `GET /agents`-backed selector here so an
+ * operator could pick one per submit — a later product correction removed
+ * it: "we don't choose agents, the PM does" (Bob). No GUI caller passes
+ * this field anymore; `StartWorkingForm.svelte` always omits it, so every
+ * run defaults to the daemon's PM entry agent (`task::protocol`'s
+ * `DEFAULT_TASK_RUN_AGENT_NAME = "pm"`, #3437), which itself delegates. The
+ * field stays on the wire type (and [`buildRunTaskBody`] still accepts it)
+ * because it is a genuine, still-supported `task.run` parameter — a future
+ * non-GUI caller, or a deliberate re-introduction, should not need to
+ * re-widen this type. */
 export interface RunTaskBody {
   task_description: string;
   project?: string;
   workstream_id?: string;
+  session_id?: string;
+  agent_name?: string;
 }
 
 /** Whether the create-workstream submit control may be enabled. */
@@ -144,24 +156,54 @@ export function buildCreateWorkstreamBody(name: string): CreateWorkstreamBody {
  * Build the `POST /tasks` request body from form state.
  *
  * Why: the single place task text is trimmed and the optional project/
- * workstream bindings are attached — kept out of the component so it's
- * testable without mounting Svelte (carried over from `create-session.ts`,
- * extended with `workstream_id` for issue #3365).
- * What: `task_description` is trimmed; `project` is included only when
- * `project` is non-null (a `null` selection means projectless — the field
- * is omitted entirely rather than sent as `null`); `workstream_id` is
- * included only when passed and non-empty. `agent_name` is never sent (see
- * the module doc's gap note).
+ * workstream/session/agent bindings are attached — kept out of the
+ * component so it's testable without mounting Svelte (carried over from
+ * `create-session.ts`, extended with `workstream_id` for issue #3365,
+ * `session_id` for issue #3446's chat continuation, and `agentName` for
+ * issue #3449).
+ * What: `task_description` is trimmed; `project` is included whenever a
+ * project is selected — on BOTH the mint path and the continuation path,
+ * since `task.run` treats a per-call `project` that RESTATES a reused
+ * session's own persisted binding as valid (`task::protocol::task_run`'s
+ * docs: "project may only restate it, not change it"), so there is no need
+ * to omit it just because `sessionId` is also present.
+ * `sessionId` and `workstreamId` are MUTUALLY EXCLUSIVE on the wire — when
+ * `sessionId` is passed (a chat-continuation follow-up reusing an existing
+ * session), `workstream_id` is deliberately never sent alongside it:
+ * `task::protocol::task_run`'s docs are explicit that on the reuse path
+ * "`None` here never rejects: ambient default-targeting (§4.2) applies only
+ * at a session's FIRST binding, never re-applied on reuse" — the reused
+ * session's own persisted workstream binding is already authoritative, so
+ * restating it explicitly would be redundant at best. `workstreamId` is
+ * only ever sent on the MINT path (`sessionId` absent).
+ * `agentName` is NOT exclusive with either, unlike `sessionId`/
+ * `workstreamId` — when passed and non-empty it is included regardless of
+ * which of those two is set, because `task::protocol::task_run` applies
+ * `agent_name` per-CALL (`spawn_task_run`'s `task_params.agent_name`), not
+ * only at session mint. No current caller passes it, though — `StartWorkingForm.svelte`
+ * calls this with `agentName` omitted on every path (issue #3449 originally
+ * added a GUI selector for it; a later product correction removed that
+ * selector — "we don't choose agents, the PM does"), so every call's body
+ * omits `agent_name` and the daemon applies its own PM-entry default. The
+ * parameter stays on this function because it is a real, still-supported
+ * `task.run` field, not because any caller uses it today.
  * Test: `new-workstream.test.ts::buildRunTaskBody`.
  */
 export function buildRunTaskBody(
   task: string,
   project: ProjectSelection | null,
   workstreamId?: string | null,
+  sessionId?: string | null,
+  agentName?: string | null,
 ): RunTaskBody {
   const body: RunTaskBody = { task_description: task.trim() };
   if (project) body.project = project.path;
-  if (workstreamId) body.workstream_id = workstreamId;
+  if (sessionId) {
+    body.session_id = sessionId;
+  } else if (workstreamId) {
+    body.workstream_id = workstreamId;
+  }
+  if (agentName) body.agent_name = agentName;
   return body;
 }
 
@@ -227,4 +269,46 @@ export function isWorkstreamCreateResponse(body: unknown): body is { id: string 
 export function extractWorkstreamId(body: unknown): string | null {
   if (!isWorkstreamCreateResponse(body)) return null;
   return body.id.length > 0 ? body.id : null;
+}
+
+/**
+ * Runtime shape guard for a `POST /tasks` 202 response body.
+ *
+ * Why: issue #3446 brings this back (removed as dead code in issue #3384,
+ * when the form stopped reading a session id out of the body for its
+ * success message) — chat continuation needs the session id `task.run`
+ * minted/reused so the NEXT submit can target it. Same root pattern as
+ * `project-roster.ts::isProjectRoster` (PR #3103 precedent): a `202` status
+ * is only a promise that `task.run` accepted the request, not that whatever
+ * answered the socket returned the shape this handler dereferences
+ * (`crate::serve::rest::tasks::run_task`'s success body is `{session_id,
+ * status, mode, binding}`; this form only ever reads `session_id`).
+ * What: `body` is an object and `body.session_id` is a string (may be
+ * empty — emptiness is [`extractTaskSessionId`]'s concern, not the shape
+ * guard's).
+ * Test: `new-workstream.test.ts::isTaskRunResponse`.
+ */
+export function isTaskRunResponse(body: unknown): body is { session_id: string } {
+  if (typeof body !== 'object' || body === null) return false;
+  return typeof (body as Record<string, unknown>).session_id === 'string';
+}
+
+/**
+ * Extract the session id from a `POST /tasks` 202 body, if any.
+ *
+ * Why: issue #3446 — `StartWorkingForm.svelte` tracks this as
+ * `lastSessionId`, the id every SUBSEQUENT submit first tries to reuse as a
+ * follow-up turn (chat continuation) before ever minting a new session.
+ * Dereferencing a response field directly and using it in the template
+ * would throw when the body is missing or malformed; the `202` status is
+ * authoritative that `task.run` was accepted, so a missing/malformed id
+ * must degrade to "continuation not available this round" (the caller
+ * falls back to minting fresh), never throw.
+ * What: returns `body.session_id` when [`isTaskRunResponse`] accepts the
+ * shape AND the id is non-empty, else `null`.
+ * Test: `new-workstream.test.ts::extractTaskSessionId`.
+ */
+export function extractTaskSessionId(body: unknown): string | null {
+  if (!isTaskRunResponse(body)) return null;
+  return body.session_id.length > 0 ? body.session_id : null;
 }

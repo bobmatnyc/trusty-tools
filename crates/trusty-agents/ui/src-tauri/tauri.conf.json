@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Trusty Assistant",
+  "productName": "Trusty Agents",
   "version": "0.1.0",
   "identifier": "com.trusty.assistant",
   "build": {
@@ -15,7 +15,7 @@
     },
     "windows": [
       {
-        "title": "Trusty Assistant",
+        "title": "Trusty Agents",
         "width": 1200,
         "height": 800,
         "minWidth": 800,

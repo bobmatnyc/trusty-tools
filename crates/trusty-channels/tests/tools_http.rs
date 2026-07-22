@@ -646,6 +646,580 @@ async fn ok_false_maps_to_slack_error() {
     assert!(matches!(err, ToolCallError::Slack(_)));
 }
 
+// ── slack_get_reactions (issue #3614) ──────────────────────────────────────
+
+#[tokio::test]
+async fn get_reactions_returns_reaction_list() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "reactions.get",
+        json!({
+            "ok": true,
+            "type": "message",
+            "channel": "C1",
+            "message": {
+                "reactions": [
+                    { "name": "thumbsup", "users": ["U1", "U2"], "count": 2 },
+                    { "name": "eyes", "users": ["U3"], "count": 1 },
+                ]
+            }
+        }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_get_reactions",
+        json!({ "channel": "C1", "timestamp": "1700000000.000100" }),
+    )
+    .await
+    .expect("get reactions should succeed");
+
+    assert_eq!(out["channel"], "C1");
+    assert_eq!(out["reactions"].as_array().unwrap().len(), 2);
+    assert_eq!(out["reactions"][0]["name"], "thumbsup");
+    assert_eq!(out["reactions"][0]["count"], 2);
+}
+
+#[tokio::test]
+async fn get_reactions_missing_arg_errors_before_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/reactions.get"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(&client, "slack_get_reactions", json!({ "channel": "C1" }))
+        .await
+        .expect_err("missing timestamp should error");
+    assert!(matches!(err, ToolCallError::InvalidArgs(_)));
+}
+
+// ── slack_schedule_message (issue #3616) ───────────────────────────────────
+
+#[tokio::test]
+async fn schedule_message_returns_id() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "chat.scheduleMessage",
+        json!({
+            "ok": true,
+            "channel": "C1",
+            "scheduled_message_id": "Q1298393284",
+            "post_at": 1700000100,
+        }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_schedule_message",
+        json!({ "channel": "C1", "text": "reminder", "post_at": 1700000100 }),
+    )
+    .await
+    .expect("schedule should succeed");
+
+    assert_eq!(out["ok"], true);
+    assert_eq!(out["scheduled_message_id"], "Q1298393284");
+    assert_eq!(out["post_at"], 1700000100);
+}
+
+#[tokio::test]
+async fn schedule_message_missing_post_at_errors_before_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat.scheduleMessage"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_schedule_message",
+        json!({ "channel": "C1", "text": "reminder" }),
+    )
+    .await
+    .expect_err("missing post_at should error");
+    assert!(matches!(err, ToolCallError::InvalidArgs(_)));
+}
+
+// ── slack_create_conversation / slack_list_channel_members (issue #3613) ──
+
+#[tokio::test]
+async fn create_conversation_returns_channel() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.create"))
+        .and(body_partial_json(
+            json!({ "name": "incident-42", "is_private": true }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channel": { "id": "C99", "name": "incident-42", "is_private": true },
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_create_conversation",
+        json!({ "name": "incident-42", "is_private": true }),
+    )
+    .await
+    .expect("create conversation should succeed");
+
+    assert_eq!(out["channel"]["id"], "C99");
+    assert_eq!(out["channel"]["name"], "incident-42");
+    assert_eq!(out["channel"]["is_private"], true);
+}
+
+#[tokio::test]
+async fn create_conversation_missing_name_errors_before_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.create"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(&client, "slack_create_conversation", json!({}))
+        .await
+        .expect_err("missing name should error");
+    assert!(matches!(err, ToolCallError::InvalidArgs(_)));
+}
+
+#[tokio::test]
+async fn list_channel_members_returns_page_and_cursor() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "conversations.members",
+        json!({
+            "ok": true,
+            "members": ["U1", "U2", "U3"],
+            "response_metadata": { "next_cursor": "bmV4dA==" },
+        }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_list_channel_members",
+        json!({ "channel": "C1" }),
+    )
+    .await
+    .expect("list members should succeed");
+
+    assert_eq!(out["channel"], "C1");
+    assert_eq!(out["count"], 3);
+    assert_eq!(out["members"][0], "U1");
+    assert_eq!(out["next_cursor"], "bmV4dA==");
+}
+
+#[tokio::test]
+async fn list_channel_members_paginates_with_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/conversations.members"))
+        .and(body_partial_json(
+            json!({ "channel": "C1", "cursor": "cGFnZTI=" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "members": ["U4"],
+            "response_metadata": { "next_cursor": "" },
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_list_channel_members",
+        json!({ "channel": "C1", "cursor": "cGFnZTI=" }),
+    )
+    .await
+    .expect("paginated list members should succeed");
+
+    assert_eq!(out["count"], 1);
+    assert!(out["next_cursor"].is_null());
+    assert_eq!(out["has_more"], false);
+}
+
+// ── slack_create_canvas / slack_update_canvas / slack_read_canvas (#3612) ──
+
+#[tokio::test]
+async fn create_canvas_returns_id() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "canvases.create",
+        json!({ "ok": true, "canvas_id": "F123" }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(&client, "slack_create_canvas", json!({}))
+        .await
+        .expect("create canvas should succeed");
+
+    assert_eq!(out["canvas_id"], "F123");
+}
+
+#[tokio::test]
+async fn create_canvas_with_channel_and_markdown() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.create"))
+        .and(body_partial_json(json!({
+            "title": "Runbook",
+            "channel_id": "C1",
+            "document_content": { "type": "markdown", "markdown": "# Runbook" },
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "canvas_id": "F456",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_create_canvas",
+        json!({ "title": "Runbook", "channel_id": "C1", "markdown": "# Runbook" }),
+    )
+    .await
+    .expect("create canvas with content should succeed");
+
+    assert_eq!(out["canvas_id"], "F456");
+}
+
+#[tokio::test]
+async fn update_canvas_replaces_content() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.edit"))
+        .and(body_partial_json(json!({
+            "canvas_id": "F123",
+            "changes": [
+                { "operation": "replace", "document_content": { "type": "markdown", "markdown": "new content" } }
+            ],
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_update_canvas",
+        json!({ "canvas_id": "F123", "markdown": "new content" }),
+    )
+    .await
+    .expect("update canvas should succeed");
+
+    assert_eq!(out["canvas_id"], "F123");
+}
+
+#[tokio::test]
+async fn update_canvas_missing_markdown_errors_before_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.edit"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_update_canvas",
+        json!({ "canvas_id": "F123" }),
+    )
+    .await
+    .expect_err("missing markdown should error");
+    assert!(matches!(err, ToolCallError::InvalidArgs(_)));
+}
+
+#[tokio::test]
+async fn read_canvas_downloads_and_escapes_content() {
+    let server = MockServer::start().await;
+    let download_url = format!("{}/files/F123/download", server.uri());
+    mount_ok(
+        &server,
+        "files.info",
+        json!({
+            "ok": true,
+            "file": {
+                "id": "F123",
+                "title": "<b>Runbook</b>",
+                "url_private_download": download_url,
+            }
+        }),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/files/F123/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<h1>Runbook</h1> & steps"))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(&client, "slack_read_canvas", json!({ "canvas_id": "F123" }))
+        .await
+        .expect("read canvas should succeed");
+
+    assert_eq!(out["canvas_id"], "F123");
+    assert_eq!(out["title"], "&lt;b&gt;Runbook&lt;/b&gt;");
+    assert_eq!(out["content"], "&lt;h1&gt;Runbook&lt;/h1&gt; &amp; steps");
+}
+
+#[tokio::test]
+async fn read_canvas_without_download_url_returns_empty_content() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "files.info",
+        json!({ "ok": true, "file": { "id": "F999", "title": "Empty" } }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(&client, "slack_read_canvas", json!({ "canvas_id": "F999" }))
+        .await
+        .expect("read canvas with no download url should still succeed");
+
+    assert_eq!(out["content"], "");
+}
+
+// ── slack_read_file (issue #3615) ──────────────────────────────────────────
+
+#[tokio::test]
+async fn read_file_returns_text_content() {
+    let server = MockServer::start().await;
+    let download_url = format!("{}/files/F1/download", server.uri());
+    mount_ok(
+        &server,
+        "files.info",
+        json!({
+            "ok": true,
+            "file": {
+                "id": "F1",
+                "name": "notes.md",
+                "mimetype": "text/markdown",
+                "size": 42,
+                "permalink": "https://x.slack.com/files/F1",
+                "url_private_download": download_url,
+            }
+        }),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/files/F1/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("hello & <world>"))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(&client, "slack_read_file", json!({ "file": "F1" }))
+        .await
+        .expect("read file should succeed");
+
+    assert_eq!(out["file"]["id"], "F1");
+    assert_eq!(out["file"]["name"], "notes.md");
+    assert_eq!(out["binary"], false);
+    assert_eq!(out["content"], "hello &amp; &lt;world&gt;");
+}
+
+#[tokio::test]
+async fn read_file_reports_binary_without_embedding_bytes() {
+    let server = MockServer::start().await;
+    let download_url = format!("{}/files/F2/download", server.uri());
+    mount_ok(
+        &server,
+        "files.info",
+        json!({
+            "ok": true,
+            "file": {
+                "id": "F2",
+                "name": "image.png",
+                "mimetype": "image/png",
+                "size": 4,
+                "permalink": "https://x.slack.com/files/F2",
+                "url_private_download": download_url,
+            }
+        }),
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/files/F2/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0xff, 0xd8, 0xff, 0xe0]))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(&client, "slack_read_file", json!({ "file": "F2" }))
+        .await
+        .expect("read binary file should still succeed");
+
+    assert_eq!(out["binary"], true);
+    assert!(out["content"].is_null());
+    assert_eq!(out["file"]["name"], "image.png");
+}
+
+#[tokio::test]
+async fn read_file_missing_arg_errors_before_network() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/files.info"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(&client, "slack_read_file", json!({}))
+        .await
+        .expect_err("missing file should error");
+    assert!(matches!(err, ToolCallError::InvalidArgs(_)));
+}
+
+// ── slack_search_users / slack_search_emojis (issue #3617) ────────────────
+
+#[tokio::test]
+async fn search_users_filters_by_query() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "users.list",
+        json!({
+            "ok": true,
+            "members": [
+                { "id": "U1", "name": "alice", "profile": { "real_name": "Alice A" } },
+                { "id": "U2", "name": "bob", "profile": { "real_name": "Bob B" } },
+            ]
+        }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(&client, "slack_search_users", json!({ "query": "alice" }))
+        .await
+        .expect("search users should succeed");
+
+    assert_eq!(out["count"], 1);
+    assert_eq!(out["users"][0]["id"], "U1");
+}
+
+#[tokio::test]
+async fn search_emojis_filters_by_name() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "emoji.list",
+        json!({
+            "ok": true,
+            "emoji": {
+                "partyparrot": "https://x.slack.com/emoji/partyparrot.png",
+                "shipit": "alias:squirrel",
+            }
+        }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let out = dispatch(&client, "slack_search_emojis", json!({ "query": "party" }))
+        .await
+        .expect("search emojis should succeed");
+
+    assert_eq!(out["count"], 1);
+    assert_eq!(out["emoji"][0]["name"], "partyparrot");
+    assert_eq!(out["emoji"][0]["is_alias"], false);
+}
+
+// ── slack_search_messages scope split (issue #3617) ────────────────────────
+
+#[tokio::test]
+async fn search_messages_scope_public_excludes_private_matches() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "search.messages",
+        json!({
+            "ok": true,
+            "messages": {
+                "matches": [
+                    {
+                        "channel": { "id": "C1", "name": "general", "is_private": false },
+                        "user": "U1", "ts": "1.1", "text": "public msg", "permalink": "https://x/1"
+                    },
+                    {
+                        "channel": { "id": "C2", "name": "leadership", "is_private": true },
+                        "user": "U2", "ts": "2.2", "text": "private msg", "permalink": "https://x/2"
+                    },
+                ]
+            }
+        }),
+    )
+    .await;
+
+    let client = client_with_user_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_search_messages",
+        json!({ "query": "msg", "scope": "public" }),
+    )
+    .await
+    .expect("scoped search should succeed");
+
+    assert_eq!(out["count"], 1);
+    assert_eq!(out["matches"][0]["channel_id"], "C1");
+}
+
+#[tokio::test]
+async fn search_messages_default_scope_includes_private_matches() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "search.messages",
+        json!({
+            "ok": true,
+            "messages": {
+                "matches": [
+                    {
+                        "channel": { "id": "C2", "name": "leadership", "is_private": true },
+                        "user": "U2", "ts": "2.2", "text": "private msg", "permalink": "https://x/2"
+                    },
+                ]
+            }
+        }),
+    )
+    .await;
+
+    let client = client_with_user_for(&server);
+    let out = dispatch(&client, "slack_search_messages", json!({ "query": "msg" }))
+        .await
+        .expect("default-scope search should succeed");
+
+    // Unchanged pre-#3617 behaviour: no scope argument means no filtering.
+    assert_eq!(out["count"], 1);
+}
+
 #[tokio::test]
 async fn missing_required_arg_errors_before_network() {
     // A server that fails the test if it is ever hit — validation must happen first.

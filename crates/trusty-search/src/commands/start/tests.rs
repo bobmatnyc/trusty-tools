@@ -589,11 +589,121 @@ fn lazy_adapter_reports_resolved_provider() {
         std::path::PathBuf::from("/nonexistent/trusty-embedderd"),
         SupervisorConfig::default(),
     ));
-    let adapter = LazySlotEmbedderAdapter { handle };
+    let adapter = LazySlotEmbedderAdapter {
+        handle,
+        is_python: false,
+    };
     assert_eq!(
         adapter.provider(),
         trusty_common::embedder::resolve_expected_provider(),
         "lazy stdio adapter must report the sidecar's resolved provider, not the CPU default"
+    );
+}
+
+/// Issue #3493 P1 (epic #3524 slice 6): the SAME `LazySlotEmbedderAdapter`
+/// type also wraps the opt-in Python/MPS sidecar, which resolves its
+/// execution provider through torch, not ONNX Runtime. Before this fix
+/// `provider()` unconditionally delegated to the ORT resolver, so `/health`
+/// reported `CoreML` for a sidecar that never runs CoreML at all.
+/// What: builds the adapter with `is_python: true` and asserts its
+/// `provider()` equals `resolve_expected_python_provider()` (MPS on Apple
+/// Silicon), never the ORT-oriented `resolve_expected_provider()`'s CoreML
+/// answer.
+/// Test: this test.
+#[test]
+fn lazy_adapter_python_reports_mps_provider() {
+    use crate::core::Embedder as _;
+    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+    let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+        std::path::PathBuf::from("/nonexistent/trusty-embedderd-py"),
+        SupervisorConfig::default(),
+    ));
+    let adapter = LazySlotEmbedderAdapter {
+        handle,
+        is_python: true,
+    };
+    assert_eq!(
+        adapter.provider(),
+        trusty_common::embedder::resolve_expected_python_provider(),
+        "python-arm adapter must report the python-sidecar's resolved provider"
+    );
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    assert_eq!(
+        adapter.provider(),
+        trusty_common::embedder::ExecutionProvider::Mps,
+        "on Apple Silicon the python arm must predict MPS, not CoreML"
+    );
+}
+
+/// Why (epic #3524 slice 5, issue #3493 P1): `resolved_provider_label()` must
+/// forward to `LazyEmbedderHandle::last_reported_device()` rather than the
+/// build-features prediction. This adapter is used for BOTH the default Rust
+/// ort arm and the opt-in Python arm, so the `None`-before-spawn case (this
+/// test) matters on both paths: `/health` must fall back to `provider()`'s
+/// prediction rather than reporting a stale value.
+/// What: a fresh (never-spawned) handle's `last_reported_device()` is `None`
+/// (proven directly by `lazy_handle_last_reported_device_reflects_client` in
+/// `embedder_supervisor::tests`); this test proves the adapter forwards that
+/// `None` through unchanged rather than substituting a wrong guess.
+/// Test: this test.
+#[test]
+fn lazy_python_adapter_reports_wire_device() {
+    use crate::core::Embedder as _;
+    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+    let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+        std::path::PathBuf::from("/nonexistent/trusty-embedderd-py"),
+        SupervisorConfig::default(),
+    ));
+    let adapter = LazySlotEmbedderAdapter {
+        handle,
+        is_python: true,
+    };
+    assert_eq!(
+        adapter.resolved_provider_label(),
+        None,
+        "before any spawn, resolved_provider_label() must be None so /health \
+         falls back to provider()'s prediction rather than reporting a stale \
+         or fabricated device"
+    );
+}
+
+/// Why (review finding, PR #3560 HIGH fix): `supervisor_gave_up()` must
+/// forward to `LazyEmbedderHandle::supervisor_gave_up()` rather than falling
+/// through to the trait-default `false` unconditionally — this is what lets
+/// `FallbackEmbedderAdapter` observe the REAL supervisor give-up ceiling
+/// instead of an independently-counted request-failure proxy.
+/// What: a fresh (never-spawned) handle's `supervisor_gave_up()` is `false`
+/// (proven directly by
+/// `lazy_handle_supervisor_gave_up_reflects_handle_state` in
+/// `embedder_supervisor::tests`); this test proves the adapter forwards that
+/// through unchanged rather than silently falling back to the trait default
+/// (which would look identical here but would NOT forward a real `true`
+/// after a spawn).
+/// Test: this test.
+#[test]
+fn lazy_python_adapter_reports_supervisor_gave_up_default_false() {
+    use crate::core::Embedder as _;
+    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+    let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+        std::path::PathBuf::from("/nonexistent/trusty-embedderd-py"),
+        SupervisorConfig::default(),
+    ));
+    let adapter = LazySlotEmbedderAdapter {
+        handle: handle.clone(),
+        is_python: true,
+    };
+    assert_eq!(
+        adapter.supervisor_gave_up(),
+        handle.supervisor_gave_up(),
+        "adapter must forward LazyEmbedderHandle::supervisor_gave_up() \
+         verbatim, not the trait-default false"
+    );
+    assert!(
+        !adapter.supervisor_gave_up(),
+        "before any spawn, supervisor_gave_up() must be false"
     );
 }
 
@@ -617,5 +727,1389 @@ fn uds_adapter_reports_resolved_provider() {
         adapter.provider(),
         trusty_common::embedder::resolve_expected_provider(),
         "uds adapter must report the sidecar's resolved provider, not the CPU default"
+    );
+}
+
+// ── Python-arm idle-shutdown resolution (epic #3524 fast-follow) ───────────
+//
+// `resolve_python_idle_shutdown_secs` is pure (no env access), so these cover
+// the precedence table directly. `resolve_python_supervisor_config_*` below
+// additionally exercise the real-env wiring end to end.
+
+use super::embedder::{resolve_python_idle_shutdown_secs, resolve_python_supervisor_config};
+
+/// py-specific var, when set to a valid value, wins outright — even over an
+/// explicitly-set shared var.
+#[test]
+fn resolve_python_idle_shutdown_secs_py_var_wins_when_set() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(Some("60".to_string()), Some("300".to_string()), 300),
+        60,
+        "TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS must win over the shared var"
+    );
+}
+
+/// `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS=0` (always-warm) must be honoured,
+/// not treated as "unset".
+#[test]
+fn resolve_python_idle_shutdown_secs_py_var_zero_is_honored() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(Some("0".to_string()), None, 1800),
+        0,
+        "py-var 0 must disable idle-shutdown (always-warm), not fall through to 1800"
+    );
+}
+
+/// When the py-var is unset but the operator explicitly set the shared var,
+/// their intent must be honoured rather than silently overridden with 1800.
+#[test]
+fn resolve_python_idle_shutdown_secs_shared_explicit_is_honored_when_py_unset() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(None, Some("120".to_string()), 120),
+        120,
+        "explicit shared var must be honoured when the py-var is unset"
+    );
+}
+
+/// The shared var explicitly set to `0` must also be honoured (not silently
+/// promoted to the python default).
+#[test]
+fn resolve_python_idle_shutdown_secs_shared_explicit_zero_is_honored() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(None, Some("0".to_string()), 0),
+        0,
+        "explicit shared-var 0 must be honoured when the py-var is unset"
+    );
+}
+
+/// Neither var set: the python arm's own 1800s default applies (NOT the
+/// shared 300s default).
+#[test]
+fn resolve_python_idle_shutdown_secs_defaults_to_1800_when_neither_set() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(None, None, 300),
+        1800,
+        "python arm must default to 1800s, not the shared 300s default"
+    );
+}
+
+/// A malformed py-var value must be ignored (fall through to the
+/// shared-var-or-1800 resolution) rather than panicking or silently zeroing.
+#[test]
+fn resolve_python_idle_shutdown_secs_malformed_py_var_falls_through_to_shared() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(
+            Some("not_a_number".to_string()),
+            Some("90".to_string()),
+            90
+        ),
+        90,
+        "malformed py-var must fall through to the explicit shared value"
+    );
+}
+
+/// A malformed py-var value with no shared var set must fall all the way
+/// through to the python 1800s default.
+#[test]
+fn resolve_python_idle_shutdown_secs_malformed_py_var_and_no_shared_falls_through_to_1800() {
+    assert_eq!(
+        resolve_python_idle_shutdown_secs(Some("bogus".to_string()), None, 300),
+        1800,
+        "malformed py-var with no shared override must fall through to 1800"
+    );
+}
+
+/// End-to-end wiring: with neither env var set, `resolve_python_supervisor_config`
+/// must return `idle_shutdown_secs=1800` while leaving every other
+/// `SupervisorConfig` field at the shared `from_env()` default.
+#[test]
+#[serial]
+fn resolve_python_supervisor_config_defaults_to_1800_and_preserves_other_fields() {
+    let _g1 = EnvGuard::remove("TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS");
+    let _g2 = EnvGuard::remove("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS");
+
+    let config = resolve_python_supervisor_config();
+    assert_eq!(config.idle_shutdown_secs, 1800);
+    assert_eq!(config.startup_timeout_secs, 30);
+    assert_eq!(config.max_restarts, 5);
+}
+
+/// End-to-end wiring: `TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS=0` must produce
+/// an always-warm config through the real env-reading path, not just the pure
+/// helper.
+#[test]
+#[serial]
+fn resolve_python_supervisor_config_py_var_zero_is_always_warm() {
+    let _g1 = EnvGuard::set("TRUSTY_EMBEDDERD_PY_IDLE_SHUTDOWN_SECS", "0");
+    let _g2 = EnvGuard::remove("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS");
+
+    let config = resolve_python_supervisor_config();
+    assert_eq!(config.idle_shutdown_secs, 0);
+}
+
+// ── SwitchableEmbedder wiring metadata (epic #3524 slice 6, PR 1/5) ────────
+
+use super::embedder::quantized_from_env;
+
+/// Unset `TRUSTY_EMBEDDER_MODEL` must describe the fp32 (non-quantized)
+/// default — matches trusty-common's `resolve_default_embedding_model`
+/// default.
+#[test]
+#[serial]
+fn quantized_from_env_unset_is_false() {
+    let _g = EnvGuard::remove("TRUSTY_EMBEDDER_MODEL");
+    assert!(!quantized_from_env());
+}
+
+/// `int8` / `quantized` / `q` (case-insensitive, trimmed) must all describe
+/// the quantized backend — mirrors trusty-common's own convention exactly.
+#[test]
+#[serial]
+fn quantized_from_env_recognizes_all_aliases() {
+    for alias in ["int8", "INT8", "quantized", " Q ", "q"] {
+        let _g = EnvGuard::set("TRUSTY_EMBEDDER_MODEL", alias);
+        assert!(
+            quantized_from_env(),
+            "{alias:?} must be recognized as the quantized alias"
+        );
+    }
+}
+
+/// Any other value (including unrecognized junk) must describe fp32 — the
+/// same "anything else defaults to fp32" fallback trusty-common applies.
+#[test]
+#[serial]
+fn quantized_from_env_unrecognized_value_is_false() {
+    let _g = EnvGuard::set("TRUSTY_EMBEDDER_MODEL", "fp32");
+    assert!(!quantized_from_env());
+}
+
+/// Issue #3530 / #3493 P1: `TRUSTY_EMBEDDER_MODEL` only governs the
+/// ort/in-process `FastEmbedder` path — the Python sidecar and a manually
+/// managed remote sidecar must never inherit `quantized=true` just because
+/// that env var happens to be set for an unrelated ort run.
+#[test]
+fn backend_respects_quantized_env_only_ort_and_in_process() {
+    use super::embedder::backend_respects_quantized_env;
+    use crate::service::embedder_supervisor::BackendKind;
+
+    assert!(backend_respects_quantized_env(BackendKind::Ort));
+    assert!(backend_respects_quantized_env(BackendKind::InProcess));
+    assert!(!backend_respects_quantized_env(BackendKind::Python));
+    assert!(!backend_respects_quantized_env(BackendKind::Remote));
+    assert!(!backend_respects_quantized_env(BackendKind::Candle));
+}
+
+/// RAII guard that restores an env var to its original state on drop.
+///
+/// Why: env vars are global; leaking changes between tests causes flakiness
+/// in parallel runs. Mirrors `embedder_supervisor::tests::EnvGuard` — kept
+/// local here rather than shared, since that one is private to its module.
+struct EnvGuard {
+    key: String,
+    old: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &str, value: &str) -> Self {
+        let old = std::env::var(key).ok();
+        // SAFETY: `#[serial]` guarantees no other test mutates env concurrently.
+        unsafe { std::env::set_var(key, value) }
+        Self {
+            key: key.to_owned(),
+            old,
+        }
+    }
+
+    fn remove(key: &str) -> Self {
+        let old = std::env::var(key).ok();
+        // SAFETY: same invariant as above.
+        unsafe { std::env::remove_var(key) }
+        Self {
+            key: key.to_owned(),
+            old,
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: test teardown; no workers live past the test body.
+        unsafe {
+            match &self.old {
+                Some(v) => std::env::set_var(&self.key, v),
+                None => std::env::remove_var(&self.key),
+            }
+        }
+    }
+}
+
+// ── Graceful Apple-Silicon default resolution (epic #3524 slice 6, PR 5/5 —
+//    the default flip) ────────────────────────────────────────────────────
+
+use super::embedder::{
+    is_forced_ort_override, resolve_default_embedder_mode_for, truthy_env, DefaultEmbedderMode,
+};
+
+/// Apple Silicon with no user override must resolve to the graceful
+/// background python path — this is now the default (the whole point of
+/// this PR).
+#[test]
+fn resolve_default_embedder_mode_for_apple_silicon_no_override_is_graceful() {
+    assert_eq!(
+        resolve_default_embedder_mode_for(true, false),
+        DefaultEmbedderMode::GracefulPython
+    );
+}
+
+/// Apple Silicon + `TRUSTY_EMBEDDER_PYTHON_EAGER` must still resolve to the
+/// graceful background path, NOT the eager blocking arm — Apple Silicon wins
+/// outright, since blocking startup for the eager path is strictly worse
+/// than the non-blocking graceful path already reaching the same sidecar.
+#[test]
+fn resolve_default_embedder_mode_for_apple_silicon_eager_env_stays_graceful() {
+    assert_eq!(
+        resolve_default_embedder_mode_for(true, true),
+        DefaultEmbedderMode::GracefulPython
+    );
+}
+
+/// Non-Apple-Silicon (Linux, Intel mac, etc.) with no override must resolve
+/// to the unchanged ort path — the flip is scoped to Apple Silicon only.
+#[test]
+fn resolve_default_embedder_mode_for_non_apple_silicon_is_ort() {
+    assert_eq!(
+        resolve_default_embedder_mode_for(false, false),
+        DefaultEmbedderMode::Ort
+    );
+}
+
+/// Non-Apple-Silicon (Linux/CUDA) + `TRUSTY_EMBEDDER_PYTHON_EAGER` must
+/// resolve to the eager blocking python arm — the eager escape hatch is not
+/// platform-gated, unlike the Apple-Silicon graceful default.
+#[test]
+fn resolve_default_embedder_mode_for_non_apple_silicon_eager_env_is_eager() {
+    assert_eq!(
+        resolve_default_embedder_mode_for(false, true),
+        DefaultEmbedderMode::EagerPython
+    );
+}
+
+/// `TRUSTY_EMBEDDER=stdio` is the permanent user escape hatch back to ort,
+/// including on Apple Silicon now that the graceful-Python path is the
+/// default there — `build_embedder_raw` dispatches it before
+/// `resolve_default_embedder_mode` is ever consulted (see
+/// `is_forced_ort_override`'s doc).
+#[test]
+fn is_forced_ort_override_stdio_true() {
+    assert!(is_forced_ort_override("stdio"));
+}
+
+/// Every other raw `TRUSTY_EMBEDDER` value (including unset/`auto`, which
+/// `build_embedder_raw` matches separately) must NOT be treated as the
+/// force-ort override.
+#[test]
+fn is_forced_ort_override_other_values_false() {
+    for value in ["", "auto", "python", "in-process", "local", "candle"] {
+        assert!(
+            !is_forced_ort_override(value),
+            "{value:?} must not be treated as the force-ort override"
+        );
+    }
+}
+
+/// Real-environment sanity check (epic #3524 slice 6, PR 5/5): on an actual
+/// Apple Silicon macOS host, with `TRUSTY_EMBEDDER_PYTHON_EAGER` unset, the
+/// real `resolve_default_embedder_mode()` wrapper — not just the pure
+/// [`resolve_default_embedder_mode_for`] — must resolve to
+/// `GracefulPython`. This exercises the actual `cfg!(target_arch =
+/// "aarch64", target_os = "macos")` platform check the wrapper reads,
+/// closing the gap the pure-function tests above intentionally leave open
+/// (they take `is_apple_silicon` as a param precisely so they don't depend
+/// on the build host). Only compiled/run on aarch64 macOS; CI's Linux
+/// runners never build this test.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[test]
+#[serial]
+fn resolve_default_embedder_mode_on_real_apple_silicon_host_is_graceful() {
+    let _g = EnvGuard::remove("TRUSTY_EMBEDDER_PYTHON_EAGER");
+    assert_eq!(
+        super::embedder::resolve_default_embedder_mode(),
+        DefaultEmbedderMode::GracefulPython
+    );
+}
+
+/// `truthy_env` must recognize the common truthy spellings, case-insensitive
+/// and trimmed.
+#[test]
+#[serial]
+fn truthy_env_recognizes_common_truthy_values() {
+    for value in ["1", "true", "TRUE", " yes ", "On"] {
+        let _g = EnvGuard::set("TRUSTY_TEST_TRUTHY_3524", value);
+        assert!(
+            truthy_env("TRUSTY_TEST_TRUTHY_3524"),
+            "{value:?} must be truthy"
+        );
+    }
+}
+
+/// Unset or any non-truthy value must resolve to `false`.
+#[test]
+#[serial]
+fn truthy_env_false_for_unset_or_other() {
+    let _g = EnvGuard::remove("TRUSTY_TEST_TRUTHY_3524");
+    assert!(!truthy_env("TRUSTY_TEST_TRUTHY_3524"));
+
+    let _g2 = EnvGuard::set("TRUSTY_TEST_TRUTHY_3524", "0");
+    assert!(!truthy_env("TRUSTY_TEST_TRUTHY_3524"));
+
+    let _g3 = EnvGuard::set("TRUSTY_TEST_TRUTHY_3524", "nope");
+    assert!(!truthy_env("TRUSTY_TEST_TRUTHY_3524"));
+}
+
+// ── TRUSTY_PY_BOOTSTRAP_RETRIES resolution (epic #3524 slice 6, PR 3/5) ─────
+
+use super::graceful_bootstrap::resolve_bootstrap_retries;
+
+#[test]
+#[serial]
+fn resolve_bootstrap_retries_defaults_to_2_when_unset() {
+    let _g = EnvGuard::remove("TRUSTY_PY_BOOTSTRAP_RETRIES");
+    assert_eq!(resolve_bootstrap_retries(), 2);
+}
+
+#[test]
+#[serial]
+fn resolve_bootstrap_retries_honors_explicit_value() {
+    let _g = EnvGuard::set("TRUSTY_PY_BOOTSTRAP_RETRIES", "5");
+    assert_eq!(resolve_bootstrap_retries(), 5);
+}
+
+/// A malformed or zero value must fall back to the default rather than
+/// disabling retries entirely (zero attempts would never even try once).
+#[test]
+#[serial]
+fn resolve_bootstrap_retries_malformed_or_zero_falls_back_to_default() {
+    let _g = EnvGuard::set("TRUSTY_PY_BOOTSTRAP_RETRIES", "not_a_number");
+    assert_eq!(resolve_bootstrap_retries(), 2);
+
+    let _g2 = EnvGuard::set("TRUSTY_PY_BOOTSTRAP_RETRIES", "0");
+    assert_eq!(resolve_bootstrap_retries(), 2);
+}
+
+// ── Background bootstrap→hot-swap orchestrator (epic #3524 slice 6, PR 3/5) ─
+//
+// These drive `graceful_bootstrap::drive_bootstrap` — the actual retry/probe/
+// swap state machine — with a fully deterministic fake `PythonBootstrap` and
+// a fake in-memory `Embedder`. No real `uv`, torch, MPS, or subprocess ever
+// runs; every test completes in milliseconds.
+
+use super::graceful_bootstrap::{drive_bootstrap, PythonBootstrap};
+use crate::core::Embedder as _;
+use crate::service::embedder_supervisor::{
+    ActiveBackend as SwitchableActiveBackend, BackendKind as SwitchableBackendKind,
+    BootstrapState as SwitchableBootstrapState, SwitchableEmbedder,
+};
+use crate::service::SearchAppState;
+use std::sync::atomic::{AtomicU32 as OrchestratorAtomicU32, AtomicUsize};
+use std::sync::Arc as OrchestratorArc;
+
+/// The initial ort "backend" installed into the `SwitchableEmbedder` under
+/// test — a fake, not the real ort stdio sidecar. Its call counter proves
+/// `inner` is untouched when the orchestrator gives up and stays on ort.
+struct FakeOrtEmbedder {
+    calls: AtomicUsize,
+}
+
+impl FakeOrtEmbedder {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for FakeOrtEmbedder {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(vec![text.len() as f32; trusty_common::embedder::EMBED_DIM])
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(texts
+            .iter()
+            .map(|t| vec![t.len() as f32; trusty_common::embedder::EMBED_DIM])
+            .collect())
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+}
+
+/// Fake python adapter whose `embed_batch` (the readiness probe) always
+/// succeeds.
+struct FakePythonEmbedderOk;
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for FakePythonEmbedderOk {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![text.len() as f32; trusty_common::embedder::EMBED_DIM])
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| vec![t.len() as f32; trusty_common::embedder::EMBED_DIM])
+            .collect())
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+}
+
+/// Fake python adapter whose readiness probe always fails (simulates a
+/// spawn/import/model-load failure discovered through the real embed call).
+struct FakePythonEmbedderErr;
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for FakePythonEmbedderErr {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        anyhow::bail!("fake readiness probe failure")
+    }
+
+    async fn embed_batch(&self, _texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        anyhow::bail!("fake readiness probe failure")
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+}
+
+/// Fake python adapter whose readiness probe never resolves within any
+/// reasonable timeout (simulates a hung/stalled real embed call) — used to
+/// drive the orchestrator's probe-TIMEOUT teardown path deterministically
+/// under paused virtual time.
+struct FakePythonEmbedderHangs;
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for FakePythonEmbedderHangs {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        std::future::pending().await
+    }
+
+    async fn embed_batch(&self, _texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        std::future::pending().await
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+}
+
+/// Controllable fake [`PythonAdapterTeardown`] — records how many times
+/// `teardown()` was invoked so tests can assert it fires on the probe
+/// failure/timeout paths and NEVER on success or on a pre-adapter
+/// (venv-bootstrap) failure (epic #3524 slice 6 PR-3 fix — code-critic HIGH).
+///
+/// `terminated` (epic #3524 slice 6 PR-4 follow-up, code-critic BLOCK on PR
+/// #3584) is the fake's controllable stand-in for the real
+/// `LazyEmbedderHandle::is_confirmed_terminated()` — the DEFINITIVE
+/// supervisor-gave-up signal the swap-back watchdog gates on. Defaults to
+/// `false` (never confirmed dead); swap-back tests flip it via a shared
+/// `Arc<AtomicBool>` to simulate genuine, unrecoverable death without any
+/// real supervisor/subprocess.
+struct FakeTeardown {
+    calls: OrchestratorArc<AtomicUsize>,
+    terminated: OrchestratorArc<std::sync::atomic::AtomicBool>,
+}
+
+impl FakeTeardown {
+    /// Construct a fake that is never confirmed-terminated — the default for
+    /// every graceful_bootstrap test, none of which exercise the swap-back
+    /// watchdog's death predicate.
+    fn new(calls: OrchestratorArc<AtomicUsize>) -> Self {
+        Self {
+            calls,
+            terminated: OrchestratorArc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl super::graceful_bootstrap::PythonAdapterTeardown for FakeTeardown {
+    async fn teardown(&self) {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn is_confirmed_terminated(&self) -> bool {
+        self.terminated.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Fully deterministic fake [`PythonBootstrap`] — no real `uv`/torch/venv or
+/// subprocess ever runs.
+struct FakeBootstrap {
+    /// Number of leading `ensure_venv()` calls that fail before succeeding.
+    venv_failures_remaining: AtomicUsize,
+    /// When true, the built adapter's readiness probe always fails.
+    fail_probe: bool,
+    /// When true, the built adapter's readiness probe hangs forever (the
+    /// probe timeout fires instead of an `Err`).
+    hang_probe: bool,
+    /// Total `ensure_venv()` invocations observed — lets tests assert retry
+    /// behavior actually re-ran the bootstrap step.
+    venv_attempts: AtomicUsize,
+    /// Total `PythonAdapterTeardown::teardown()` invocations observed across
+    /// every `build_adapter` call this fake made.
+    teardown_calls: OrchestratorArc<AtomicUsize>,
+}
+
+impl FakeBootstrap {
+    fn always_succeeds() -> Self {
+        Self {
+            venv_failures_remaining: AtomicUsize::new(0),
+            fail_probe: false,
+            hang_probe: false,
+            venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn probe_always_fails() -> Self {
+        Self {
+            venv_failures_remaining: AtomicUsize::new(0),
+            fail_probe: true,
+            hang_probe: false,
+            venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn probe_always_hangs() -> Self {
+        Self {
+            venv_failures_remaining: AtomicUsize::new(0),
+            fail_probe: false,
+            hang_probe: true,
+            venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn venv_always_fails() -> Self {
+        Self {
+            venv_failures_remaining: AtomicUsize::new(u32::MAX as usize),
+            fail_probe: false,
+            hang_probe: false,
+            venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn venv_fails_once_then_succeeds() -> Self {
+        Self {
+            venv_failures_remaining: AtomicUsize::new(1),
+            fail_probe: false,
+            hang_probe: false,
+            venv_attempts: AtomicUsize::new(0),
+            teardown_calls: OrchestratorArc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn teardown_calls(&self) -> usize {
+        self.teardown_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl PythonBootstrap for FakeBootstrap {
+    fn ensure_venv(&self) -> anyhow::Result<()> {
+        self.venv_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let remaining = self
+            .venv_failures_remaining
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if remaining > 0 {
+            self.venv_failures_remaining
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            anyhow::bail!("fake venv bootstrap failure");
+        }
+        Ok(())
+    }
+
+    fn locate_launcher(&self) -> anyhow::Result<std::path::PathBuf> {
+        Ok(std::path::PathBuf::from("/fake/trusty-embedderd-py"))
+    }
+
+    fn build_adapter(
+        &self,
+        _launcher: std::path::PathBuf,
+    ) -> (
+        OrchestratorArc<dyn crate::core::Embedder>,
+        Option<OrchestratorArc<OrchestratorAtomicU32>>,
+        OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown>,
+    ) {
+        let adapter: OrchestratorArc<dyn crate::core::Embedder> = if self.fail_probe {
+            OrchestratorArc::new(FakePythonEmbedderErr)
+        } else if self.hang_probe {
+            OrchestratorArc::new(FakePythonEmbedderHangs)
+        } else {
+            OrchestratorArc::new(FakePythonEmbedderOk)
+        };
+        let teardown: OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown> =
+            OrchestratorArc::new(FakeTeardown::new(OrchestratorArc::clone(
+                &self.teardown_calls,
+            )));
+        (
+            adapter,
+            Some(OrchestratorArc::new(OrchestratorAtomicU32::new(4242))),
+            teardown,
+        )
+    }
+
+    fn probe_timeout(&self) -> std::time::Duration {
+        if self.hang_probe {
+            // Short enough that the paused-clock test resolves instantly,
+            // long enough to be unambiguous in intent.
+            std::time::Duration::from_millis(50)
+        } else {
+            std::time::Duration::from_secs(5)
+        }
+    }
+}
+
+/// The `ActiveBackend` `build_embedder`'s new graceful-python arm installs:
+/// ort, `Bootstrapping`.
+fn test_ort_bootstrapping_active() -> SwitchableActiveBackend {
+    SwitchableActiveBackend {
+        kind: SwitchableBackendKind::Ort,
+        provider: trusty_common::embedder::ExecutionProvider::Cpu,
+        model: "all-MiniLM-L6-v2".to_string(),
+        quantized: false,
+        bootstrap: SwitchableBootstrapState::Bootstrapping,
+    }
+}
+
+/// Happy path: a successful bootstrap + readiness probe must hot-swap the
+/// switchable from ort/Bootstrapping to python/Ready.
+#[tokio::test]
+async fn graceful_bootstrap_swaps_to_python_on_success() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::always_succeeds());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 2).await;
+
+    let active = switchable.active();
+    assert_eq!(active.kind, SwitchableBackendKind::Python);
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Ready);
+    assert_eq!(
+        fake.teardown_calls(),
+        0,
+        "teardown must never fire on the success path — the handle stays live"
+    );
+}
+
+/// A readiness-probe failure must leave the switchable on the still-installed
+/// ort backend, marked `Failed` — never a torn or missing backend.
+#[tokio::test]
+async fn graceful_bootstrap_stays_ort_and_failed_after_probe_failure() {
+    let ort = OrchestratorArc::new(FakeOrtEmbedder::new());
+    let ort_dyn: OrchestratorArc<dyn crate::core::Embedder> = OrchestratorArc::clone(&ort) as _;
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort_dyn,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::probe_always_fails());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 1).await;
+
+    let active = switchable.active();
+    assert_eq!(
+        active.kind,
+        SwitchableBackendKind::Ort,
+        "must stay on the still-installed ort backend"
+    );
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
+
+    // Prove the ort backend is still live and serving (not swapped away).
+    switchable
+        .embed("probe")
+        .await
+        .expect("ort backend must still serve after a failed python bootstrap");
+    assert_eq!(ort.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+/// A venv-bootstrap failure (before a python adapter is even built) must
+/// also leave the switchable on ort, marked `Failed`.
+#[tokio::test]
+async fn graceful_bootstrap_stays_ort_and_failed_after_bootstrap_failure() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::venv_always_fails());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 1).await;
+
+    let active = switchable.active();
+    assert_eq!(active.kind, SwitchableBackendKind::Ort);
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
+    assert_eq!(
+        fake.teardown_calls(),
+        0,
+        "no adapter/handle was ever built (venv bootstrap failed first) — \
+         nothing to tear down"
+    );
+}
+
+/// code-critic HIGH fix (epic #3524 slice 6 PR-3): a probe-failure path must
+/// cooperatively tear down the just-spawned handle BEFORE dropping it, so a
+/// failed bootstrap never orphans a real python/MPS child process waiting on
+/// the idle watchdog (up to 1800s later).
+///
+/// Why: this is the dedicated regression test for the exact leak code-critic
+/// flagged — earlier `graceful_bootstrap_stays_ort_and_failed_after_probe_failure`
+/// proves the SWITCHABLE state; this test proves the TEARDOWN CALL itself
+/// fires exactly once per failed attempt.
+/// What: 2 retries, both probe failures — `teardown_calls()` must equal 2
+/// (one per attempt, each attempt builds a fresh adapter/handle).
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_probe_failure_tears_down_the_handle() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::probe_always_fails());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 2).await;
+
+    assert_eq!(
+        switchable.active().bootstrap,
+        SwitchableBootstrapState::Failed
+    );
+    assert_eq!(
+        fake.teardown_calls(),
+        2,
+        "teardown must fire once per failed attempt — a probe failure must \
+         never leave a spawned handle un-shut-down"
+    );
+}
+
+/// code-critic HIGH fix, timeout variant: a probe TIMEOUT (not just an
+/// `Err`) must ALSO tear down the handle before dropping it — the probe may
+/// still be in flight against a live, just-spawned child when the timeout
+/// fires.
+/// What: a hanging fake adapter + a short fake probe timeout, under paused
+/// virtual time so the test resolves instantly; asserts the switchable stays
+/// ort/Failed and `teardown_calls() == 1`.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_probe_timeout_tears_down_the_handle() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::probe_always_hangs());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 1).await;
+
+    let active = switchable.active();
+    assert_eq!(active.kind, SwitchableBackendKind::Ort);
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
+    assert_eq!(
+        fake.teardown_calls(),
+        1,
+        "a probe TIMEOUT must also tear down the handle, not just a probe Err"
+    );
+}
+
+/// A transient failure on the first attempt must be retried, succeeding on
+/// the second — proving the retry loop actually re-invokes every bootstrap
+/// step rather than giving up after one failure. Uses paused virtual time so
+/// the linear backoff between attempts resolves instantly.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_retries_before_giving_up() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::venv_fails_once_then_succeeds());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 2).await;
+
+    let active = switchable.active();
+    assert_eq!(
+        active.kind,
+        SwitchableBackendKind::Python,
+        "the second attempt must succeed and hot-swap"
+    );
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Ready);
+    assert_eq!(
+        fake.venv_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "ensure_venv must have been retried, not just called once"
+    );
+}
+
+/// Exhausting every retry attempt must mark the switchable `Failed` while
+/// staying on ort — confirms the retry loop actually bounds itself at
+/// `retries` attempts rather than looping forever.
+#[tokio::test(start_paused = true)]
+async fn graceful_bootstrap_gives_up_after_exhausting_retries() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(),
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    let fake = OrchestratorArc::new(FakeBootstrap::venv_always_fails());
+    let ops: OrchestratorArc<dyn PythonBootstrap> = OrchestratorArc::clone(&fake) as _;
+
+    drive_bootstrap(OrchestratorArc::clone(&switchable), state, ops, 3).await;
+
+    let active = switchable.active();
+    assert_eq!(active.kind, SwitchableBackendKind::Ort);
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::Failed);
+    assert_eq!(
+        fake.venv_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "must attempt exactly `retries` times, no more, no less"
+    );
+}
+
+// ── Swap-BACK watchdog (epic #3524 slice 6, PR 4/5) ─────────────────────────
+//
+// These drive `swap_back_watchdog::drive_swap_back_watchdog` — the death
+// predicate + swap-back state machine — with a deterministic fake
+// `SwapBackOps` and a fake `PythonAdapterTeardown` (`FakeTeardown`, defined
+// above, whose `terminated` flag stands in for the real
+// `LazyEmbedderHandle::is_confirmed_terminated()` — the DEFINITIVE
+// supervisor-gave-up signal this module gates on since the code-critic BLOCK
+// on PR #3584). No real subprocess/supervisor involved in these tests — see
+// `swap_back_real_hardware_kills_sidecar_past_max_restarts` (`#[ignore]`,
+// below) for the real-process proof.
+//
+// THE critical false-positive regression test is
+// `swap_back_does_not_fire_on_stale_timeout_count_plus_idle_shutdown` — it
+// reproduces the EXACT scenario code-critic identified (a stale
+// `recent_timeout_count > 0` left over from an earlier transient failure,
+// combined with a real idle-shutdown zeroing the pid slot, with zero further
+// embed traffic) and asserts the watchdog does NOT fire, because the new
+// predicate no longer reads either of those two signals at all.
+
+use super::swap_back_watchdog::{drive_swap_back_watchdog, SwapBackOps};
+use std::time::Duration as SwapBackDuration;
+
+/// Deterministic fake ort adapter installed by [`FakeSwapBackOps::build_ort`]
+/// — never a real ONNX/sidecar.
+struct FakeOrtBackendForSwapBack;
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for FakeOrtBackendForSwapBack {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![text.len() as f32; trusty_common::embedder::EMBED_DIM])
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(texts
+            .iter()
+            .map(|t| vec![t.len() as f32; trusty_common::embedder::EMBED_DIM])
+            .collect())
+    }
+
+    fn dimension(&self) -> usize {
+        trusty_common::embedder::EMBED_DIM
+    }
+}
+
+/// Fake [`SwapBackOps`] — records how many times `build_ort` was invoked so
+/// tests can assert the watchdog acted exactly once (and never, on the
+/// false-positive paths).
+struct FakeSwapBackOps {
+    build_calls: OrchestratorArc<AtomicUsize>,
+}
+
+impl FakeSwapBackOps {
+    fn new() -> (OrchestratorArc<Self>, OrchestratorArc<AtomicUsize>) {
+        let calls = OrchestratorArc::new(AtomicUsize::new(0));
+        (
+            OrchestratorArc::new(Self {
+                build_calls: OrchestratorArc::clone(&calls),
+            }),
+            calls,
+        )
+    }
+}
+
+impl SwapBackOps for FakeSwapBackOps {
+    #[allow(clippy::type_complexity)]
+    fn build_ort(
+        &self,
+    ) -> anyhow::Result<(
+        OrchestratorArc<dyn crate::core::Embedder>,
+        Option<OrchestratorArc<OrchestratorAtomicU32>>,
+    )> {
+        self.build_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let adapter: OrchestratorArc<dyn crate::core::Embedder> =
+            OrchestratorArc::new(FakeOrtBackendForSwapBack);
+        Ok((
+            adapter,
+            Some(OrchestratorArc::new(OrchestratorAtomicU32::new(9999))),
+        ))
+    }
+}
+
+/// The `ActiveBackend` a successful PR-3 hot-swap installs: python, `Ready`.
+fn test_python_ready_active() -> SwitchableActiveBackend {
+    SwitchableActiveBackend {
+        kind: SwitchableBackendKind::Python,
+        provider: trusty_common::embedder::ExecutionProvider::Mps,
+        model: "all-MiniLM-L6-v2".to_string(),
+        quantized: false,
+        bootstrap: SwitchableBootstrapState::Ready,
+    }
+}
+
+/// THE false-positive regression test named by code-critic's BLOCK review of
+/// PR #3584: a stale `recent_timeout_count > 0` (left over from an earlier
+/// TRANSIENT embed failure that was never followed by a success) combined
+/// with a real idle-shutdown (pid slot zeroed) and ZERO further embed calls
+/// in between — the exact sequence that tripped the old
+/// pid==0-plus-stall-tracker heuristic. The watchdog must NOT fire, because
+/// `is_confirmed_terminated()` (the fake's `terminated` flag, standing in
+/// for the real supervisor signal) stays `false` throughout — an
+/// intentional idle-shutdown never sets it.
+///
+/// This test FAILS against the pre-fix heuristic (which read
+/// `state.current_embedderd_pid()` and
+/// `state.embedder_stall_tracker.recent_timeout_count()` directly) and
+/// PASSES against the definitive-signal fix, because the fix no longer reads
+/// either of those two fields at all.
+/// What: sets a stale non-zero `recent_timeout_count` and a zeroed pid slot
+/// on `state` (reproducing the exact stale-state shape the old heuristic
+/// would have observed), while `teardown.is_confirmed_terminated()` stays
+/// `false`. Drives the watchdog under a short timeout and asserts it NEVER
+/// returns (never fires) and `build_ort` is never called.
+/// Test: this test.
+#[tokio::test]
+async fn swap_back_does_not_fire_on_stale_timeout_count_plus_idle_shutdown() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(ort, test_python_ready_active()));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+
+    // Reproduce the exact stale-state shape that fooled the old heuristic:
+    // one transient timeout recorded (never followed by a success)...
+    state.embedder_stall_tracker.record_timeout();
+    // ...then a real idle-shutdown zeroes the pid slot...
+    state
+        .install_embedderd_pid_slot(OrchestratorArc::new(OrchestratorAtomicU32::new(0)))
+        .await;
+    // ...and ZERO further embed traffic follows (the scenario the old
+    // heuristic could not distinguish from genuine death).
+
+    let teardown_calls = OrchestratorArc::new(AtomicUsize::new(0));
+    let teardown: OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown> =
+        OrchestratorArc::new(FakeTeardown::new(OrchestratorArc::clone(&teardown_calls)));
+    // `terminated` defaults to false via `FakeTeardown::new` — the
+    // supervisor never actually gave up; this was an ordinary idle-shutdown.
+    let (fake_ops, build_calls) = FakeSwapBackOps::new();
+    let ops: OrchestratorArc<dyn SwapBackOps> = OrchestratorArc::clone(&fake_ops) as _;
+
+    let result = tokio::time::timeout(
+        SwapBackDuration::from_millis(80),
+        drive_swap_back_watchdog(
+            OrchestratorArc::clone(&switchable),
+            state.clone(),
+            teardown,
+            ops,
+            SwapBackDuration::from_millis(5),
+        ),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "watchdog must keep watching (never return) — a stale timeout count \
+         plus an ordinary idle-shutdown is NOT confirmed death"
+    );
+    assert_eq!(
+        switchable.active().kind,
+        SwitchableBackendKind::Python,
+        "must stay on python — this was an idle-shutdown, not a death"
+    );
+    assert_eq!(
+        build_calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "build_ort must never be called on the idle-shutdown path"
+    );
+    assert_eq!(
+        teardown_calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the still-healthy python handle must never be torn down"
+    );
+    // Sanity: confirm the stale-state shape really was present (otherwise
+    // this test would not be exercising the regression it claims to).
+    assert_eq!(state.current_embedderd_pid(), None, "pid must read 0/None");
+    assert!(
+        state.embedder_stall_tracker.recent_timeout_count() > 0,
+        "the stale timeout count must still be non-zero — proving the fix \
+         does not depend on this field ever clearing"
+    );
+}
+
+/// A healthy, actively-serving python sidecar must never trigger a
+/// swap-back.
+#[tokio::test]
+async fn swap_back_does_not_fire_while_healthy() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(ort, test_python_ready_active()));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    state
+        .install_embedderd_pid_slot(OrchestratorArc::new(OrchestratorAtomicU32::new(4242)))
+        .await;
+
+    let teardown_calls = OrchestratorArc::new(AtomicUsize::new(0));
+    let teardown: OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown> =
+        OrchestratorArc::new(FakeTeardown::new(teardown_calls));
+    let (fake_ops, build_calls) = FakeSwapBackOps::new();
+    let ops: OrchestratorArc<dyn SwapBackOps> = OrchestratorArc::clone(&fake_ops) as _;
+
+    let result = tokio::time::timeout(
+        SwapBackDuration::from_millis(80),
+        drive_swap_back_watchdog(
+            OrchestratorArc::clone(&switchable),
+            state,
+            teardown,
+            ops,
+            SwapBackDuration::from_millis(5),
+        ),
+    )
+    .await;
+
+    assert!(result.is_err(), "watchdog must keep watching while healthy");
+    assert_eq!(switchable.active().kind, SwitchableBackendKind::Python);
+    assert_eq!(
+        build_calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "build_ort must never be called while healthy"
+    );
+}
+
+/// Confirmed death — `is_confirmed_terminated()` reports `true` (the
+/// supervisor genuinely gave up) — must swap back to a fresh ort backend
+/// exactly once, tear down the dead python handle, and reinstall the ort pid
+/// slot.
+#[tokio::test]
+async fn swap_back_fires_on_confirmed_death() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(ort, test_python_ready_active()));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    state
+        .install_embedderd_pid_slot(OrchestratorArc::new(OrchestratorAtomicU32::new(0)))
+        .await;
+
+    let teardown_calls = OrchestratorArc::new(AtomicUsize::new(0));
+    let fake_teardown = FakeTeardown::new(OrchestratorArc::clone(&teardown_calls));
+    // The definitive signal: the supervisor genuinely gave up.
+    fake_teardown
+        .terminated
+        .store(true, std::sync::atomic::Ordering::Release);
+    let teardown: OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown> =
+        OrchestratorArc::new(fake_teardown);
+    let (fake_ops, build_calls) = FakeSwapBackOps::new();
+    let ops: OrchestratorArc<dyn SwapBackOps> = OrchestratorArc::clone(&fake_ops) as _;
+
+    tokio::time::timeout(
+        SwapBackDuration::from_secs(2),
+        drive_swap_back_watchdog(
+            OrchestratorArc::clone(&switchable),
+            state.clone(),
+            teardown,
+            ops,
+            SwapBackDuration::from_millis(5),
+        ),
+    )
+    .await
+    .expect("watchdog must act (return) on confirmed death, not loop forever");
+
+    let active = switchable.active();
+    assert_eq!(
+        active.kind,
+        SwitchableBackendKind::Ort,
+        "must swap back to a fresh ort backend"
+    );
+    assert_eq!(active.bootstrap, SwitchableBootstrapState::FellBackToOrt);
+    assert_eq!(
+        build_calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "must build exactly one fresh ort backend"
+    );
+    assert_eq!(
+        teardown_calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the dead python handle must be torn down exactly once — no orphan"
+    );
+    assert_eq!(
+        state.current_embedderd_pid(),
+        Some(9999),
+        "the new ort pid slot must be installed on state"
+    );
+}
+
+/// Once something else has already moved the switchable away from python
+/// (e.g. a concurrent/duplicate watchdog, or a manual intervention), this
+/// watchdog must notice on its next tick and stop watching — never act on a
+/// backend it no longer owns.
+#[tokio::test]
+async fn swap_back_stops_watching_once_backend_already_moved() {
+    let ort: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(FakeOrtEmbedder::new());
+    let switchable = OrchestratorArc::new(SwitchableEmbedder::new(
+        ort,
+        test_ort_bootstrapping_active(), // already ort, not python
+    ));
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+
+    let teardown_calls = OrchestratorArc::new(AtomicUsize::new(0));
+    let teardown: OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown> =
+        OrchestratorArc::new(FakeTeardown::new(teardown_calls));
+    let (fake_ops, build_calls) = FakeSwapBackOps::new();
+    let ops: OrchestratorArc<dyn SwapBackOps> = OrchestratorArc::clone(&fake_ops) as _;
+
+    tokio::time::timeout(
+        SwapBackDuration::from_secs(2),
+        drive_swap_back_watchdog(
+            OrchestratorArc::clone(&switchable),
+            state,
+            teardown,
+            ops,
+            SwapBackDuration::from_millis(5),
+        ),
+    )
+    .await
+    .expect("watchdog must return promptly once the active backend is not python");
+
+    assert_eq!(
+        build_calls.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "must never act on a backend it doesn't own"
+    );
+}
+
+/// Real-hardware end-to-end (epic #3524 slice 6, PR 4/5). Every other test in
+/// this module drives the watchdog with fakes/spies; this is the one place
+/// that proves the FULL real stack — a real `trusty-embedderd-py` child,
+/// killed past `max_restarts`, the REAL `EmbedderSupervisor::terminated_signal`
+/// firing, the real `drive_swap_back_watchdog`, and a real axum router's
+/// `/health` + search endpoints — actually falls back and keeps serving.
+///
+/// Why: every other test substitutes a fake `SwapBackOps` / `PythonAdapterTeardown`
+/// so the pure predicate and state-machine logic can be verified
+/// deterministically in milliseconds. None of them prove that a REAL
+/// `EmbedderSupervisor` crash-restart exhaustion actually flips
+/// `terminated_signal` end-to-end through `LazyEmbedderHandle::is_confirmed_terminated()`
+/// — this test is that proof, on real hardware.
+///
+/// Requires a real `trusty-embedderd-py` launcher discoverable on PATH (or
+/// `TRUSTY_EMBEDDERD_PY_BIN`) with its `uv`-managed venv already bootstrapped
+/// (torch + sentence-transformers) — practically, Apple Silicon with `uv`
+/// installed. Not run in CI (too slow, requires real hardware/GPU). Run
+/// manually with:
+///   `cargo test -p trusty-search --bin trusty-search -- --ignored \
+///      swap_back_real_hardware_kills_sidecar_past_max_restarts --nocapture`
+///
+/// What: builds a real `LazyEmbedderHandle` (max_restarts=1, idle-shutdown
+/// disabled so only this test's kills matter) around the python launcher,
+/// forces the first spawn with a real embed call, then repeatedly SIGKILLs
+/// whatever child pid is currently live until `handle.is_confirmed_terminated()`
+/// itself reports `true` (the real supervisor gave up — no fabricated
+/// stall-tracker state needed, unlike the pre-fix version of this test).
+/// Wraps the handle in a real `SwitchableEmbedder` (active = Python/Ready,
+/// mirroring what PR-3's hot-swap installs). Runs the real
+/// `drive_swap_back_watchdog` (short poll interval, bounded by an overall
+/// test timeout) and waits for it to act. Finally boots a real axum router
+/// (`service::server::build_router`) on an ephemeral port and asserts, via
+/// real HTTP calls: `GET /health` reports `embedder_bootstrap:
+/// "fell_back_to_ort"`, and a real search against a freshly-registered empty
+/// index still returns `200` (proving search is unaffected, not just that
+/// the switchable's in-memory state flipped).
+/// Test: this test.
+#[tokio::test]
+#[ignore = "requires a real trusty-embedderd-py launcher + bootstrapped torch/MPS venv \
+            (Apple Silicon + uv) — not run in CI"]
+async fn swap_back_real_hardware_kills_sidecar_past_max_restarts() {
+    use crate::service::embedder_supervisor::LazyEmbedderHandle;
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    trusty_embedderd_py::ensure_venv_eager()
+        .expect("py venv bootstrap failed — install `uv` and bootstrap the venv once first");
+    let launcher = trusty_embedderd_py::locate_launcher_binary()
+        .expect("trusty-embedderd-py launcher not found on PATH");
+
+    let mut config = super::embedder::resolve_python_supervisor_config();
+    config.max_restarts = 1;
+    config.backoff_max_secs = 2;
+    // Disable idle-shutdown so only THIS test's explicit kills matter — an
+    // idle-shutdown racing in would confound the confirmed-death signal.
+    config.idle_shutdown_secs = 0;
+
+    let handle = OrchestratorArc::new(LazyEmbedderHandle::new(launcher, config));
+    let pid_slot = handle.app_pid_slot();
+
+    // Force the first real spawn.
+    handle
+        .embed_via(|client| async move { client.embed_batch(vec!["warm".to_string()]).await })
+        .await
+        .expect("initial embed (forces spawn) failed — is the venv actually bootstrapped?");
+    let pid1 = pid_slot.load(Ordering::Acquire);
+    assert!(pid1 > 0, "expected a live child after the first embed");
+
+    // Repeatedly SIGKILL whatever child is currently live until the REAL
+    // supervisor signal confirms it gave up — no fabricated state.
+    let deadline = Instant::now() + SwapBackDuration::from_secs(90);
+    loop {
+        let current = pid_slot.load(Ordering::Acquire);
+        if current > 0 {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &current.to_string()])
+                .status();
+        }
+        tokio::time::sleep(SwapBackDuration::from_millis(500)).await;
+
+        if handle.is_confirmed_terminated().await {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "sidecar kept restarting (or terminated_signal never flipped) \
+             past the 90s test deadline — max_restarts=1 was not exhausted?"
+        );
+    }
+
+    // Wrap the (now-dead) handle exactly like PR-3's hot-swap does.
+    let adapter: OrchestratorArc<dyn crate::core::Embedder> =
+        OrchestratorArc::new(super::embedder::LazySlotEmbedderAdapter {
+            handle: OrchestratorArc::clone(&handle),
+            is_python: true,
+        });
+    let switchable =
+        OrchestratorArc::new(SwitchableEmbedder::new(adapter, test_python_ready_active()));
+
+    let state = SearchAppState::new(crate::core::registry::IndexRegistry::new());
+    state.install_switchable_embedder(OrchestratorArc::clone(&switchable));
+    state
+        .install_embedderd_pid_slot(OrchestratorArc::clone(&pid_slot))
+        .await;
+
+    let teardown: OrchestratorArc<dyn super::graceful_bootstrap::PythonAdapterTeardown> =
+        OrchestratorArc::clone(&handle) as _;
+    let ops = super::swap_back_watchdog::real_swap_back_ops();
+
+    tokio::time::timeout(
+        SwapBackDuration::from_secs(60),
+        drive_swap_back_watchdog(
+            OrchestratorArc::clone(&switchable),
+            state.clone(),
+            teardown,
+            ops,
+            SwapBackDuration::from_secs(1),
+        ),
+    )
+    .await
+    .expect("watchdog did not act within 60s of confirmed real death");
+
+    assert_eq!(switchable.active().kind, SwitchableBackendKind::Ort);
+    assert_eq!(
+        switchable.active().bootstrap,
+        SwitchableBootstrapState::FellBackToOrt
+    );
+
+    // Real HTTP layer: boot the actual router and assert /health + search.
+    let app = crate::service::server::build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind failed");
+    let addr = listener.local_addr().expect("local_addr failed");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let client = reqwest::Client::new();
+    let health: serde_json::Value = client
+        .get(format!("http://{addr}/health"))
+        .send()
+        .await
+        .expect("GET /health failed")
+        .json()
+        .await
+        .expect("/health did not return JSON");
+    assert_eq!(
+        health.get("embedder_bootstrap").and_then(|v| v.as_str()),
+        Some("fell_back_to_ort"),
+        "/health must report the swap-back: {health:?}"
+    );
+
+    // Register an empty index and confirm search still returns 200 —
+    // proving the fallback did not just flip in-memory state but that
+    // search actually keeps working end-to-end.
+    let create_resp = client
+        .post(format!("http://{addr}/indexes"))
+        .json(&serde_json::json!({ "id": "swap-back-e2e", "root_path": "/tmp" }))
+        .send()
+        .await
+        .expect("POST /indexes failed");
+    assert!(create_resp.status().is_success());
+
+    let search_resp = client
+        .post(format!("http://{addr}/indexes/swap-back-e2e/search"))
+        .json(&serde_json::json!({ "text": "fn main", "top_k": 5 }))
+        .send()
+        .await
+        .expect("POST /indexes/:id/search failed");
+    assert!(
+        search_resp.status().is_success(),
+        "search must still succeed after swap-back: {}",
+        search_resp.status()
     );
 }

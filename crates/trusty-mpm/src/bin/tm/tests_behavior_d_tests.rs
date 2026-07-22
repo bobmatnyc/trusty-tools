@@ -184,6 +184,7 @@ fn cli_parses_session_ls_source_id() {
                     current,
                     json,
                     all,
+                    ..
                 },
         } => {
             assert_eq!(source_id, Some("myorg/myrepo".to_string()));
@@ -206,6 +207,7 @@ fn cli_parses_session_ls_current() {
                     source_id,
                     json,
                     all,
+                    ..
                 },
         } => {
             assert!(current);
@@ -639,6 +641,7 @@ fn cli_parses_ls_connector_bare() {
     let cli = Cli::try_parse_from(["trusty-mpm", "ls"]).unwrap();
     match cli.command.unwrap() {
         Command::Ls {
+            terms,
             projects,
             json,
             source_id,
@@ -646,6 +649,10 @@ fn cli_parses_ls_connector_bare() {
             all,
             root,
         } => {
+            assert!(
+                terms.is_empty(),
+                "bare `tm ls` must have no positional terms"
+            );
             assert!(!projects, "bare `tm ls` must not set --projects");
             assert!(!json);
             assert!(source_id.is_none());
@@ -773,6 +780,397 @@ fn ls_connector_should_show_picker_flags_and_empty_static() {
         !should_show_picker(true, true, false, false, 0),
         "0 sessions -> static"
     );
+}
+
+// ── `tm ls` inline sort/filter grammar (#3483, PM correction) ───────────
+//
+// The repo owner asked for `--sort`/`--filter` to be expressed as bare
+// positional words instead of flags: `tm ls [recent|alpha] [filter-word...]`.
+// `parse_ls_terms` is the pure grammar seam; `filter_sessions_by_term` and
+// `sort_sessions` are the pure list operations it feeds.
+
+use crate::commands::session_picker::{
+    SessionSortArg, filter_sessions_by_term, parse_ls_terms, sort_sessions,
+};
+
+/// Bare `tm ls` (no positional words) → default sort, no filter.
+#[test]
+fn parse_ls_terms_empty_defaults_recent_no_filter() {
+    assert_eq!(parse_ls_terms(&[]), (SessionSortArg::Recent, None));
+}
+
+/// A lone `recent` keyword selects `Recent` with no filter.
+#[test]
+fn parse_ls_terms_recent_keyword_only() {
+    let terms = vec!["recent".to_string()];
+    assert_eq!(parse_ls_terms(&terms), (SessionSortArg::Recent, None));
+}
+
+/// A lone `alpha` keyword selects `Alpha` with no filter.
+#[test]
+fn parse_ls_terms_alpha_keyword_only() {
+    let terms = vec!["alpha".to_string()];
+    assert_eq!(parse_ls_terms(&terms), (SessionSortArg::Alpha, None));
+}
+
+/// The sort keyword is matched case-insensitively (`ALPHA`, `Recent`, …).
+#[test]
+fn parse_ls_terms_keyword_case_insensitive() {
+    let terms = vec!["ALPHA".to_string()];
+    assert_eq!(parse_ls_terms(&terms), (SessionSortArg::Alpha, None));
+    let terms = vec!["Recent".to_string()];
+    assert_eq!(parse_ls_terms(&terms), (SessionSortArg::Recent, None));
+}
+
+/// `recent <word>` consumes the keyword and treats the rest as the filter.
+#[test]
+fn parse_ls_terms_recent_with_filter() {
+    let terms = vec!["recent".to_string(), "api".to_string()];
+    assert_eq!(
+        parse_ls_terms(&terms),
+        (SessionSortArg::Recent, Some("api".to_string()))
+    );
+}
+
+/// `alpha <word>` consumes the keyword and treats the rest as the filter.
+#[test]
+fn parse_ls_terms_alpha_with_filter() {
+    let terms = vec!["alpha".to_string(), "api".to_string()];
+    assert_eq!(
+        parse_ls_terms(&terms),
+        (SessionSortArg::Alpha, Some("api".to_string()))
+    );
+}
+
+/// A first word that is NOT `recent`/`alpha` is treated as the filter, with
+/// sort defaulting to `Recent` — `tm ls foo` behaves like `tm ls recent foo`.
+#[test]
+fn parse_ls_terms_non_keyword_first_word_is_filter() {
+    let terms = vec!["foo".to_string()];
+    assert_eq!(
+        parse_ls_terms(&terms),
+        (SessionSortArg::Recent, Some("foo".to_string()))
+    );
+}
+
+/// Multiple non-keyword words all become the filter, joined by a space.
+#[test]
+fn parse_ls_terms_multi_word_filter_without_keyword_joins_with_space() {
+    let terms = vec!["foo".to_string(), "bar".to_string()];
+    assert_eq!(
+        parse_ls_terms(&terms),
+        (SessionSortArg::Recent, Some("foo bar".to_string()))
+    );
+}
+
+/// A filter term that happens to equal the OTHER sort keyword is reachable by
+/// prefixing the keyword actually wanted: `tm ls recent alpha` sorts by
+/// recency and filters for the literal substring "alpha".
+#[test]
+fn parse_ls_terms_keyword_then_filter_equal_to_other_keyword() {
+    let terms = vec!["recent".to_string(), "alpha".to_string()];
+    assert_eq!(
+        parse_ls_terms(&terms),
+        (SessionSortArg::Recent, Some("alpha".to_string()))
+    );
+    let terms = vec!["alpha".to_string(), "recent".to_string()];
+    assert_eq!(
+        parse_ls_terms(&terms),
+        (SessionSortArg::Alpha, Some("recent".to_string()))
+    );
+}
+
+/// Minimal `ManagedSessionSummary` builder for the sort/filter tests below.
+fn ls_test_session(
+    name: &str,
+    state: &str,
+    last_activity_at: Option<&str>,
+    created_at: Option<&str>,
+    source_id: Option<&str>,
+    task: Option<&str>,
+) -> trusty_mpm::client::ManagedSessionSummary {
+    trusty_mpm::client::ManagedSessionSummary {
+        id: format!("{name}-id"),
+        name: name.to_string(),
+        state: state.to_string(),
+        persisted_state: None,
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        created_at: created_at.map(str::to_owned),
+        last_activity_at: last_activity_at.map(str::to_owned),
+        pending_decision: None,
+        proposed_default: None,
+        source_id: source_id.map(str::to_owned),
+        task: task.map(str::to_owned),
+        cwd: None,
+        claude_session_id: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: None,
+        unresumable: false,
+        stale_assets: false,
+        attached: false,
+        slot: 0,
+        deleted: false,
+    }
+}
+
+/// The filter matches a substring of the `name` column, case-insensitively.
+#[test]
+fn filter_sessions_by_term_matches_name() {
+    let sessions = vec![
+        ls_test_session("api-worker", "active", None, None, None, None),
+        ls_test_session("web-frontend", "active", None, None, None, None),
+    ];
+    let out = filter_sessions_by_term(sessions, Some("API"));
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].name, "api-worker");
+}
+
+/// The filter matches a substring of the `task` column.
+#[test]
+fn filter_sessions_by_term_matches_task() {
+    let sessions = vec![
+        ls_test_session("s1", "active", None, None, None, Some("fix the login bug")),
+        ls_test_session("s2", "active", None, None, None, Some("write docs")),
+    ];
+    let out = filter_sessions_by_term(sessions, Some("login"));
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].name, "s1");
+}
+
+/// The filter matches a substring of the `source_id` (project) column.
+#[test]
+fn filter_sessions_by_term_matches_source_id() {
+    let sessions = vec![
+        ls_test_session(
+            "s1",
+            "active",
+            None,
+            None,
+            Some("bobmatnyc/trusty-tools"),
+            None,
+        ),
+        ls_test_session("s2", "active", None, None, Some("other/repo"), None),
+    ];
+    let out = filter_sessions_by_term(sessions, Some("trusty-tools"));
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].name, "s1");
+}
+
+/// Matching is case-insensitive regardless of which column matches.
+#[test]
+fn filter_sessions_by_term_is_case_insensitive() {
+    let sessions = vec![ls_test_session("MyApp", "ACTIVE", None, None, None, None)];
+    assert_eq!(
+        filter_sessions_by_term(sessions.clone(), Some("myapp")).len(),
+        1
+    );
+    assert_eq!(filter_sessions_by_term(sessions, Some("active")).len(), 1);
+}
+
+/// A filter matching nothing returns an empty result (not an error).
+#[test]
+fn filter_sessions_by_term_no_match_returns_empty() {
+    let sessions = vec![ls_test_session("s1", "active", None, None, None, None)];
+    let out = filter_sessions_by_term(sessions, Some("nonexistent-substring"));
+    assert!(out.is_empty(), "no match must yield an empty result");
+}
+
+/// `term = None` is a no-op — every session passes through unchanged.
+#[test]
+fn filter_sessions_by_term_none_is_noop() {
+    let sessions = vec![
+        ls_test_session("s1", "active", None, None, None, None),
+        ls_test_session("s2", "stopped", None, None, None, None),
+    ];
+    assert_eq!(filter_sessions_by_term(sessions, None).len(), 2);
+}
+
+/// `Recent` orders descending by `last_activity_at` (most recent first).
+#[test]
+fn sort_sessions_recent_orders_by_last_activity() {
+    let mut sessions = vec![
+        ls_test_session(
+            "older",
+            "active",
+            Some("2026-01-01T00:00:00Z"),
+            None,
+            None,
+            None,
+        ),
+        ls_test_session(
+            "newest",
+            "active",
+            Some("2026-07-01T00:00:00Z"),
+            None,
+            None,
+            None,
+        ),
+        ls_test_session(
+            "middle",
+            "active",
+            Some("2026-04-01T00:00:00Z"),
+            None,
+            None,
+            None,
+        ),
+    ];
+    sort_sessions(&mut sessions, SessionSortArg::Recent);
+    let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["newest", "middle", "older"]);
+}
+
+/// `Recent` falls back to `created_at` when `last_activity_at` is absent, and
+/// a session with neither timestamp sorts last.
+#[test]
+fn sort_sessions_recent_falls_back_to_created_at() {
+    let mut sessions = vec![
+        ls_test_session("no-timestamp", "active", None, None, None, None),
+        ls_test_session(
+            "created-only",
+            "active",
+            None,
+            Some("2026-03-01T00:00:00Z"),
+            None,
+            None,
+        ),
+        ls_test_session(
+            "has-activity",
+            "active",
+            Some("2026-06-01T00:00:00Z"),
+            Some("2026-01-01T00:00:00Z"),
+            None,
+            None,
+        ),
+    ];
+    sort_sessions(&mut sessions, SessionSortArg::Recent);
+    let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["has-activity", "created-only", "no-timestamp"]);
+}
+
+/// `Alpha` orders ascending by `name`, case-insensitively.
+#[test]
+fn sort_sessions_alpha_orders_by_name_case_insensitive() {
+    let mut sessions = vec![
+        ls_test_session("Zebra", "active", None, None, None, None),
+        ls_test_session("apple", "active", None, None, None, None),
+        ls_test_session("Mango", "active", None, None, None, None),
+    ];
+    sort_sessions(&mut sessions, SessionSortArg::Alpha);
+    let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["apple", "Mango", "Zebra"]);
+}
+
+/// Filter + sort combined: filtering first, then sorting the remaining rows.
+#[test]
+fn filter_and_sort_combined() {
+    let sessions = vec![
+        ls_test_session(
+            "api-old",
+            "active",
+            Some("2026-01-01T00:00:00Z"),
+            None,
+            None,
+            None,
+        ),
+        ls_test_session(
+            "web-new",
+            "active",
+            Some("2026-07-01T00:00:00Z"),
+            None,
+            None,
+            None,
+        ),
+        ls_test_session(
+            "api-new",
+            "active",
+            Some("2026-06-01T00:00:00Z"),
+            None,
+            None,
+            None,
+        ),
+    ];
+    let mut filtered = filter_sessions_by_term(sessions, Some("api"));
+    assert_eq!(
+        filtered.len(),
+        2,
+        "only the two 'api' sessions survive the filter"
+    );
+    sort_sessions(&mut filtered, SessionSortArg::Recent);
+    let names: Vec<&str> = filtered.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, vec!["api-new", "api-old"]);
+}
+
+/// `tm ls recent` parses with `recent` captured in `terms`.
+#[test]
+fn cli_parses_ls_terms_recent_keyword() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "recent"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls { terms, .. } => assert_eq!(terms, vec!["recent".to_string()]),
+        other => panic!("expected top-level ls recent, got {other:?}"),
+    }
+}
+
+/// `tm ls alpha foo` parses both words into `terms`, in order.
+#[test]
+fn cli_parses_ls_terms_alpha_with_filter() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "alpha", "foo"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls { terms, .. } => {
+            assert_eq!(terms, vec!["alpha".to_string(), "foo".to_string()])
+        }
+        other => panic!("expected top-level ls alpha foo, got {other:?}"),
+    }
+}
+
+/// `tm ls somefilter` (no keyword) still parses fine as a single positional
+/// term — disambiguation happens later, in `parse_ls_terms`, not at the clap
+/// layer.
+#[test]
+fn cli_parses_ls_terms_bare_filter_word() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "somefilter"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls { terms, .. } => assert_eq!(terms, vec!["somefilter".to_string()]),
+        other => panic!("expected top-level ls somefilter, got {other:?}"),
+    }
+}
+
+/// Positional `terms` compose with existing flags (e.g. `--source-id`).
+#[test]
+fn cli_parses_ls_terms_with_source_id_flag() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "ls",
+        "--source-id",
+        "owner/repo",
+        "alpha",
+        "foo",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Ls {
+            terms, source_id, ..
+        } => {
+            assert_eq!(terms, vec!["alpha".to_string(), "foo".to_string()]);
+            assert_eq!(source_id, Some("owner/repo".to_string()));
+        }
+        other => panic!("expected top-level ls with source-id + terms, got {other:?}"),
+    }
+}
+
+/// `tm sessions ls alpha foo` mirrors the same grammar on the canonical plural
+/// surface (the `SessionAction::Ls` variant shared with `tm ls`).
+#[test]
+fn cli_parses_sessions_ls_terms_alpha_with_filter() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "ls", "alpha", "foo"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Sessions {
+            action: SessionAction::Ls { terms, .. },
+        } => assert_eq!(terms, vec!["alpha".to_string(), "foo".to_string()]),
+        other => panic!("expected sessions ls alpha foo, got {other:?}"),
+    }
 }
 
 // ── #2304: picker delete — family routing + running-session force guard ─────

@@ -119,6 +119,19 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     let mut cfg = AgentConfig::by_name(name)
         .with_context(|| format!("failed to load agent config for '{name}'"))?;
 
+    // Black-box persona/assistant-tier gate (#3550 follow-up — live smoke
+    // proved the assistant still leaked `trusty-mpm`/`subagent` and
+    // disclaimed delegating when invoked via `--direct`/`--agent`, even
+    // though PR #3550 hardened the SEPARATE persona-chat dispatch path,
+    // `run_pm_task_with_persona`). `run_subagent` is a generic coding
+    // sub-agent harness; it never routed through that hardening. Every check
+    // below keyed on `is_assistant_tier` restores parity: no raw CLAUDE.md
+    // project-instruction dump, no coding-harness protocol framing, and a
+    // curated (not catalog-unrestricted) tool registry — mirroring what the
+    // persona-chat path already does. Engineer/qa/research/docs/ops/plan
+    // agents (role != "assistant") are completely unaffected.
+    let is_assistant_tier = cfg.agent.role == super::tool_registry::ASSISTANT_TIER_ROLE;
+
     // #88: Per-call `max_turns` override via `TAGENT_MAX_TURNS`. The wave
     // loop sets this to tighten the turn budget per file (e.g. 20) so a
     // single invocation can't absorb an entire wave's work. Applied after
@@ -222,20 +235,42 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     //   2. CLAUDE.md ancestor walk from CWD (project + home instructions).
     //   3. Any resolved skills declared by the agent.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let mut builder =
-        SystemPromptBuilder::new(cfg.system_prompt.content.clone()).walk_project_instructions(&cwd);
+    let mut builder = SystemPromptBuilder::new(cfg.system_prompt.content.clone());
+
+    // Assistant-tier personas are black-boxed (persona.md/#3550): the user
+    // must never see internal system/architecture names. `CLAUDE.md`/
+    // `AGENTS.md` project-instruction files are written FOR engineers and
+    // routinely document exactly the internal mechanics the persona is
+    // forbidden from naming (this repo's own `crates/trusty-agents/CLAUDE.md`
+    // literally describes "PM Orchestrator" / "Sub-Agent Process" /
+    // "subprocess IPC"). Walking and injecting them verbatim into a
+    // persona's system prompt is a direct leak path, independent of the
+    // tool-schema allow-list PR #3550 fixed. Skip the walk entirely for
+    // assistant-tier agents; every other role keeps today's behavior.
+    if !is_assistant_tier {
+        builder = builder.walk_project_instructions(&cwd);
+    }
 
     // Harness protocol layers (single source of truth for write_file /
     // finish_task / out_dir / ## Summary rules). Injected between goal block
     // and base TOML prompt. Content is compiled into the binary via
     // `agents::harness_protocol` — the protocol is binary behavior, not user
     // config, so it cannot be disabled by editing files on disk.
-    builder = builder.add_harness_layer(BASE_PROTOCOL);
-    if matches!(cfg.agent.runner, agents::RunnerKind::ClaudeCode) && !cfg.llm.use_finish_task {
-        builder = builder.add_harness_layer(CLAUDE_CODE_PROTOCOL);
-    }
-    if cfg.llm.use_finish_task {
-        builder = builder.add_harness_layer(FINISH_TASK_PROTOCOL);
+    //
+    // Assistant-tier personas never write files, never call `finish_task`,
+    // and aren't given an `out_dir` — none of this coding-harness framing
+    // applies to them, and its "## trusty-agents Harness Protocol" /
+    // "workflow phases" language actively undermines persona.md's
+    // conversational, delegate-don't-disclaim framing. Skip it for
+    // assistant-tier; unaffected for every coding sub-agent.
+    if !is_assistant_tier {
+        builder = builder.add_harness_layer(BASE_PROTOCOL);
+        if matches!(cfg.agent.runner, agents::RunnerKind::ClaudeCode) && !cfg.llm.use_finish_task {
+            builder = builder.add_harness_layer(CLAUDE_CODE_PROTOCOL);
+        }
+        if cfg.llm.use_finish_task {
+            builder = builder.add_harness_layer(FINISH_TASK_PROTOCOL);
+        }
     }
 
     if let Some(skills) = &cfg.system_prompt.skills
@@ -300,9 +335,11 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         &default_bundled_config_dir(),
     ));
 
-    // Build the per-agent tool registry based on agent name.
+    // Build the per-agent tool registry based on agent name (and role, for
+    // the assistant-tier gate — see `ASSISTANT_TIER_ROLE`).
     let mut registry = super::tool_registry::build_registry_for_agent(
         name,
+        &cfg.agent.role,
         out_dir.as_deref(),
         code_dir.as_deref(),
         skill_registry.clone(),
@@ -341,6 +378,25 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         for tool in tools::mcp_live::live_mcp_tool_executors(&cwd, &existing_names).await {
             reg.register(tool);
         }
+    }
+
+    // Assistant-tier tool scoping (#3550 follow-up): mirrors
+    // `filter_persona_tool_names` in the persona-chat dispatch path
+    // (`ctrl::pm_task::dispatch::persona`) so a persona's `[tools].allow`
+    // glob patterns are honored here too, not just in `/agent` REPL chat.
+    // See `scope_assistant_allowed_tools` for why this is necessary.
+    cfg.tools.allowed = super::tool_registry::scope_assistant_allowed_tools(
+        is_assistant_tier,
+        cfg.tools.allowed.clone(),
+        cfg.tools.allow.as_deref(),
+        registry.as_ref(),
+    );
+    if is_assistant_tier {
+        tracing::info!(
+            agent = %name,
+            tools = ?cfg.tools.allowed,
+            "assistant-tier tool registry scoped to [tools].allow"
+        );
     }
 
     let result = if let Some(reg) = registry {

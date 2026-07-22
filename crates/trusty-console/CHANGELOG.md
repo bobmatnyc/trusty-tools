@@ -6,7 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [Unreleased]
+## [0.5.0] — 2026-07-21
+
+### Changed
+
+- **UI tokens now CI-enforced against the canonical Foundry source** (refs [#3486](https://github.com/bobmatnyc/trusty-tools/issues/3486)): flipped from the `scripts/check_token_drift.mjs` allowlist to ENFORCED. The `token-drift` CI job now compares `ui/src/theme.css`'s plain-CSS `--trusty-*: #hex` values directly (case-insensitively) to `docs/design/UI/design-system/tokens.css` on every push/PR. Enforcement is over the intersection of tokens both files define, so this crate's console-only extension tokens (`--trusty-status-degraded`, `--trusty-status-absent`) are ignored; a hand-edit that drifts a shared token from canonical fails the build.
 
 ### Added
 
@@ -27,6 +31,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **UI: migrated to Foundry v2 design tokens (closes #3489, refs #3486).**
+  `ui/src/theme.css` (and every component that referenced it) dropped the
+  independent violet/purple `--color-*` palette — treated as never-migrated
+  legacy, not an intentional identity — for the canonical "rust-on-paper"
+  Foundry v2 tokens (`docs/design/UI/design-system/tokens.css`), renamed onto
+  the shared `--trusty-*` convention used by the other migrated crates. The
+  light/dark activation mechanism (`data-theme` on `<html>`, driven by
+  `theme.svelte.js`) is unchanged. Two console-specific status tokens with no
+  canonical equivalent (`--trusty-status-degraded`, `--trusty-status-absent`)
+  were added to preserve the 5-state service-health badge model.
 - **Security (internal):** the write-origin (CSRF) guard implementation moved
   to `trusty-common` (`server::origin_guard`); `routes::origin_guard` is now a
   thin re-export so there is exactly one guard implementation shared with the

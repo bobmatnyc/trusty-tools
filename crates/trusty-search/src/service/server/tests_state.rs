@@ -114,6 +114,39 @@ async fn install_embedder_clears_previous_error() {
     assert!(resp.embedder_error.is_none());
 }
 
+/// Epic #3524 slice 6 (PR 1/5): `install_switchable_embedder` must make the
+/// concrete `SwitchableEmbedder` handle visible via
+/// `current_switchable_embedder`, independent of (but installed alongside)
+/// the trait-object `embedder_slot`.
+#[tokio::test]
+async fn switchable_embedder_installed_alongside_embedder() {
+    use crate::core::embed::MockEmbedder;
+    use crate::core::registry::IndexRegistry;
+    use crate::service::embedder_supervisor::{
+        ActiveBackend, BackendKind, BootstrapState, SwitchableEmbedder,
+    };
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    // Nothing installed yet.
+    assert!(state.current_switchable_embedder().is_none());
+
+    let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
+    let active = ActiveBackend {
+        kind: BackendKind::Ort,
+        provider: trusty_common::embedder::ExecutionProvider::Cpu,
+        model: "test-model".to_string(),
+        quantized: false,
+        bootstrap: BootstrapState::NotApplicable,
+    };
+    let switchable = Arc::new(SwitchableEmbedder::new(inner, active));
+    state.install_switchable_embedder(Arc::clone(&switchable));
+
+    let installed = state
+        .current_switchable_embedder()
+        .expect("switchable embedder must be installed");
+    assert_eq!(installed.active().kind, BackendKind::Ort);
+}
+
 /// Issue #120: when the previous reindex for an index aborted at the
 /// memory limit, a follow-up `POST /indexes/:id/reindex` request must be
 /// refused with `429 Too Many Requests` for the duration of the cooldown.
@@ -350,6 +383,93 @@ async fn health_includes_embedder_info_when_ready() {
     assert!(
         resp.embedder_info.is_some(),
         "embedder_info must be present when embedder is installed and slot is uncontended"
+    );
+}
+
+/// Epic #3524 slice 5 / issue #3493 P1: `/health`'s `embedder_info.provider`
+/// must prefer a REAL readback (`Embedder::resolved_provider_label`) over
+/// the build-features/env PREDICTION (`Embedder::provider`) when one is
+/// available — this is the fix for `/health` reporting the wrong
+/// `CoreML(ANE)` guess while the Python/MPS sidecar actually selected `mps`.
+///
+/// Why: a fake `Embedder` that deliberately returns DIFFERENT values from
+/// `provider()` (predicted) and `resolved_provider_label()` (real readback)
+/// proves the handler picks the real one, not just "any string".
+/// What: install the fake, hit `/health`, assert `embedder_info.provider ==
+/// "MPS (real readback)"` — the override's value, never the CPU/CoreML
+/// prediction the trait default would produce.
+/// Test: this test.
+#[tokio::test]
+async fn health_prefers_real_provider_readback_over_prediction() {
+    use async_trait::async_trait;
+
+    struct FakeRealReadbackEmbedder;
+
+    #[async_trait]
+    impl Embedder for FakeRealReadbackEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0; 384])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0_f32; 384]).collect())
+        }
+        fn dimension(&self) -> usize {
+            384
+        }
+        fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
+            // Deliberately the WRONG-for-this-test prediction — proves the
+            // handler does not fall back to this when a real readback exists.
+            trusty_common::embedder::ExecutionProvider::CoreMLAne
+        }
+        fn resolved_provider_label(&self) -> Option<String> {
+            Some("MPS (real readback)".to_string())
+        }
+    }
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(FakeRealReadbackEmbedder);
+    state.install_embedder(embedder).await;
+    let state_arc = Arc::new(state);
+
+    let Json(resp) = health_handler(State(state_arc)).await;
+    // `EmbedderInfo`'s fields are `pub(super)` to the `health` module, not
+    // visible from this sibling test module — round-trip through JSON
+    // (the wire format external callers actually observe) instead.
+    let value = serde_json::to_value(&resp).expect("HealthResponse must serialize");
+    let provider = value["embedder_info"]["provider"]
+        .as_str()
+        .expect("embedder_info.provider must be present and a string");
+    assert_eq!(
+        provider, "MPS (real readback)",
+        "/health must report the REAL device readback, not the CoreML(ANE) \
+         prediction the trait-default provider() would produce"
+    );
+}
+
+/// Complementary case: an embedder with NO real readback (the default,
+/// e.g. the Rust ort path or any backend that never overrides
+/// `resolved_provider_label`) must still fall back to `provider()`'s
+/// prediction exactly as before this slice — no regression for the common
+/// path.
+#[tokio::test]
+async fn health_falls_back_to_predicted_provider_when_no_readback() {
+    use crate::core::embed::MockEmbedder;
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(384));
+    state.install_embedder(embedder).await;
+    let state_arc = Arc::new(state);
+
+    let Json(resp) = health_handler(State(state_arc)).await;
+    let value = serde_json::to_value(&resp).expect("HealthResponse must serialize");
+    let provider = value["embedder_info"]["provider"]
+        .as_str()
+        .expect("embedder_info.provider must be present and a string");
+    assert_eq!(
+        provider,
+        trusty_common::embedder::ExecutionProvider::Cpu.as_str(),
+        "with no real readback, /health must fall back to provider()'s \
+         prediction unchanged (MockEmbedder's default is Cpu)"
     );
 }
 

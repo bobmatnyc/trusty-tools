@@ -522,12 +522,12 @@
     align-items: center;
     gap: var(--trusty-space-2);
     padding: var(--trusty-space-3) var(--trusty-space-5);
-    background: var(--trusty-bg-subtle, #fafafa);
+    background: var(--trusty-surface-raised, #fafafa);
     font-weight: 600;
     font-size: 13px;
   }
   .group-name {
-    color: var(--trusty-text, #111827);
+    color: var(--trusty-text-primary, #111827);
   }
   .palace {
     border-bottom: 1px solid var(--trusty-border);

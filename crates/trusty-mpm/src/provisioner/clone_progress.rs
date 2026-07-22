@@ -16,11 +16,17 @@
 //! without a subprocess.
 //! Test: `parse_git_progress_extracts_known_phases`,
 //! `parse_git_progress_ignores_non_progress_lines`.
+//!
+//! `clone_with_progress` spawns via
+//! [`crate::core::spawn_disclaim::disclaimed_stderr_piped_spawn`] rather than
+//! a raw `Command::spawn()` so the clone's TCC responsibility is disclaimed
+//! on macOS — see that function's docs (issue #3267, #2997 part 6).
 
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use crate::core::provisioning_stage::{ProvisioningStage, emit_with_detail};
+use crate::core::spawn_disclaim::disclaimed_stderr_piped_spawn;
 
 /// Outcome of a streamed clone: whether it succeeded and its full stderr.
 ///
@@ -72,34 +78,31 @@ pub(crate) fn parse_git_progress(line: &str) -> Option<String> {
 /// Why: replaces the backend's blocking `.output()` so the clone's byte/object
 /// percentages reach the client live, while preserving the exact
 /// success/stderr contract callers already depend on.
-/// What: forces `stderr` to a pipe and `stdout` to null, spawns the child,
+/// What: spawns `cmd` via [`disclaimed_stderr_piped_spawn`] (stderr piped,
+/// stdout discarded, TCC responsibility disclaimed on macOS — issue #3267),
 /// reads stderr to EOF splitting on `\r`/`\n`, emits deduplicated
 /// [`parse_git_progress`] detail on the scoped `CloningRepo` stage, then waits
 /// and returns a [`CloneOutcome`]. Callers must have already added `--progress`
 /// to `cmd` (git suppresses progress on a non-TTY stderr otherwise).
-/// Test: exercised via the `#[ignore]` clone integration tests; parsing by the
-/// `tests` submodule.
-pub(crate) fn clone_with_progress(mut cmd: Command) -> std::io::Result<CloneOutcome> {
-    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
-    let mut child = cmd.spawn()?;
-    // `take()` cannot be None here: we set `Stdio::piped()` just above.
-    let mut stderr = match child.stderr.take() {
-        Some(s) => s,
-        None => {
-            let status = child.wait()?;
-            return Ok(CloneOutcome {
-                success: status.success(),
-                stderr: String::new(),
-            });
-        }
-    };
+/// Test: no dedicated unit test of `clone_with_progress` itself — its
+/// contract (stream stderr, discard stdout, preserve success/stderr) is
+/// unchanged by the #3267 disclaim-wrapper conversion, so there is no
+/// meaningful failing-first test for that change; the underlying
+/// `disclaimed_stderr_piped_spawn` wrapper is unit-tested directly (see its
+/// own doc). Exercised end-to-end via a real `git clone` through this exact
+/// function by `provisioner::workspace::tests::ensure_base_checkout_recovers_from_concurrent_race`
+/// and `ensure_base_checkout_rejects_stale_non_bare_directory`; the pure
+/// parse logic is unit-tested by `parse_git_progress`'s own `tests` module
+/// below.
+pub(crate) fn clone_with_progress(cmd: Command) -> std::io::Result<CloneOutcome> {
+    let mut spawned = disclaimed_stderr_piped_spawn(cmd)?;
 
     let mut all: Vec<u8> = Vec::new();
     let mut segment: Vec<u8> = Vec::new();
     let mut last_emit = String::new();
     let mut buf = [0u8; 4096];
     loop {
-        let n = stderr.read(&mut buf)?;
+        let n = spawned.stderr.read(&mut buf)?;
         if n == 0 {
             break;
         }
@@ -115,7 +118,7 @@ pub(crate) fn clone_with_progress(mut cmd: Command) -> std::io::Result<CloneOutc
     }
     emit_segment(&segment, &mut last_emit);
 
-    let status = child.wait()?;
+    let status = spawned.wait()?;
     Ok(CloneOutcome {
         success: status.success(),
         stderr: String::from_utf8_lossy(&all).into_owned(),

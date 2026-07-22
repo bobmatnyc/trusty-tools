@@ -56,6 +56,25 @@ pub(super) fn opt_i64(args: &Value, key: &str) -> Option<i64> {
     args.get(key).and_then(Value::as_i64)
 }
 
+/// Require an integer argument, erroring before any network call if absent.
+///
+/// Why: mirrors [`require_str`] for handlers whose Slack method rejects the
+/// call outright without it (e.g. `chat.scheduleMessage`'s `post_at`) — the
+/// same "fail fast, name the field" contract applies to non-string required
+/// arguments.
+/// What: returns the integer, or [`ToolCallError::InvalidArgs`].
+/// Test: `require_i64_errors_when_missing_or_wrong_type`.
+pub(super) fn require_i64(args: &Value, key: &str) -> Result<i64, ToolCallError> {
+    args.get(key).and_then(Value::as_i64).ok_or_else(|| {
+        ToolCallError::InvalidArgs(format!("missing required integer argument '{key}'"))
+    })
+}
+
+/// Read an optional boolean argument (absent or wrong-typed → `None`).
+pub(super) fn opt_bool(args: &Value, key: &str) -> Option<bool> {
+    args.get(key).and_then(Value::as_bool)
+}
+
 /// Require a Slack timestamp ("ts") string argument, validating its shape.
 ///
 /// Why: Slack ts values are exact-match strings of the form
@@ -212,11 +231,30 @@ mod tests {
 
     #[test]
     fn opt_helpers_read_present_and_absent() {
-        let args = json!({ "types": "public_channel", "limit": 7 });
+        let args = json!({ "types": "public_channel", "limit": 7, "is_private": true });
         assert_eq!(opt_str(&args, "types").as_deref(), Some("public_channel"));
         assert_eq!(opt_str(&args, "missing"), None);
         assert_eq!(opt_i64(&args, "limit"), Some(7));
         assert_eq!(opt_i64(&args, "missing"), None);
+        assert_eq!(opt_bool(&args, "is_private"), Some(true));
+        assert_eq!(opt_bool(&args, "missing"), None);
+    }
+
+    #[test]
+    fn require_i64_errors_when_missing_or_wrong_type() {
+        let args = json!({ "post_at": 1_700_000_000, "post_at_str": "soon" });
+        assert_eq!(
+            require_i64(&args, "post_at").expect("present int"),
+            1_700_000_000
+        );
+        assert!(matches!(
+            require_i64(&args, "post_at_str").expect_err("wrong type"),
+            ToolCallError::InvalidArgs(_)
+        ));
+        assert!(matches!(
+            require_i64(&args, "missing").expect_err("missing"),
+            ToolCallError::InvalidArgs(_)
+        ));
     }
 
     #[test]

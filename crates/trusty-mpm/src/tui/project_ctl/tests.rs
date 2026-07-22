@@ -39,6 +39,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         id: id.to_string(),
         name: format!("s-{id}"),
         state: state.to_string(),
+        persisted_state: None,
         workspace_path: None,
         repo_url: None,
         branch: Some("main".to_string()),
@@ -56,6 +57,8 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         unresumable: false,
         stale_assets: false,
         attached: false,
+        slot: 0,
+        deleted: false,
     }
 }
 

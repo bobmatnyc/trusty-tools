@@ -872,7 +872,7 @@ pub async fn set_session_pid(
     responses((status = 200, description = "tmux sessions running Claude Code, newly registered"))
 )]
 pub async fn discover_sessions(State(state): State<Arc<DaemonState>>) -> Json<DiscoverResponse> {
-    let result = super::discovery::discover_all(&state);
+    let result = super::discovery::discover_all(&state).await;
     Json(DiscoverResponse {
         discovered: result.adopted,
         sessions: result.sessions,

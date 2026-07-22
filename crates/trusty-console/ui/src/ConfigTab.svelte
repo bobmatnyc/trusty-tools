@@ -165,29 +165,29 @@
   .label {
     font-size: 0.85rem;
     font-weight: 600;
-    color: var(--color-text-primary);
+    color: var(--trusty-text-primary);
   }
   input[type='text'] {
     padding: 0.5rem 0.65rem;
-    border: 1px solid var(--color-border);
+    border: 1px solid var(--trusty-border);
     border-radius: 0.4rem;
-    background: var(--color-surface);
-    color: var(--color-text-primary);
+    background: var(--trusty-card-bg);
+    color: var(--trusty-text-primary);
     font-size: 0.85rem;
   }
   input[type='text']:focus {
     outline: none;
-    border-color: var(--color-accent);
+    border-color: var(--trusty-accent);
   }
   .hint {
     font-size: 0.75rem;
-    color: var(--color-text-secondary);
+    color: var(--trusty-text-secondary);
     line-height: 1.4;
   }
   code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.72rem;
-    background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+    background: color-mix(in srgb, var(--trusty-accent) 8%, transparent);
     padding: 0.05rem 0.3rem;
     border-radius: 0.25rem;
   }
@@ -197,7 +197,7 @@
     gap: 0.75rem;
   }
   .save-btn {
-    background: var(--color-accent);
+    background: var(--trusty-accent);
     border: none;
     border-radius: 0.4rem;
     color: white;
@@ -207,13 +207,13 @@
     padding: 0.45rem 1.1rem;
   }
   .save-btn:disabled { opacity: 0.5; cursor: default; }
-  .save-msg { font-size: 0.78rem; color: var(--color-status-ok, #16a34a); }
+  .save-msg { font-size: 0.78rem; color: var(--trusty-success, #16a34a); }
   .msg {
     padding: 1.25rem;
     border-radius: 0.5rem;
-    background: var(--color-surface);
-    color: var(--color-text-secondary);
+    background: var(--trusty-card-bg);
+    color: var(--trusty-text-secondary);
     margin-bottom: 1rem;
   }
-  .msg.err { color: var(--color-status-error); }
+  .msg.err { color: var(--trusty-danger); }
 </style>

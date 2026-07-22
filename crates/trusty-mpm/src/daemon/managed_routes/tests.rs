@@ -95,6 +95,37 @@ fn reconcile_live_state_flips_stopped_to_active_when_alive() {
     assert!(!summaries2[0].attached);
 }
 
+/// #3531 core regression guard: `reconcile_live_state` must NEVER touch
+/// `persisted_state`, even while it flips the DISPLAYED `state` — otherwise a
+/// zombie (`Active` record, tmux gone) would again read identically to a
+/// genuinely `Stopped` one, exactly the misclassification that made the CLI's
+/// resume path 409 instead of auto-reconciling.
+#[test]
+fn reconcile_live_state_leaves_persisted_state_untouched() {
+    use std::collections::HashSet;
+    let mut rec = make_record(None);
+    rec.state = ManagedSessionState::Active;
+    rec.tmux_name = "tm-zombie-01".into();
+    let records = vec![rec];
+    let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
+    assert_eq!(summaries[0].state, "active");
+    assert_eq!(summaries[0].persisted_state, "active");
+
+    // Tmux is gone — DISPLAYED state flips to "stopped", but persisted_state
+    // must keep reporting the TRUE record state ("active") so the CLI's
+    // resume-decision logic can still tell this apart from a genuinely
+    // stopped session.
+    reconcile_live_state(&mut summaries, &records, &HashSet::new(), &HashSet::new());
+    assert_eq!(
+        summaries[0].state, "stopped",
+        "display state still reconciles to stopped when tmux is gone"
+    );
+    assert_eq!(
+        summaries[0].persisted_state, "active",
+        "persisted_state must survive display reconciliation unchanged (#3531)"
+    );
+}
+
 /// `reconcile_against_tmux` FAILS CLOSED on a tmux enumeration error: an Active
 /// record must keep its `active` state, NOT be reconciled to `stopped` (which
 /// would offer a fleet-wide destructive restart on a transient tmux hiccup).
@@ -261,6 +292,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         id: "abc-123".into(),
         name: "tmpm-test".into(),
         state: "decommissioned".into(),
+        persisted_state: "decommissioned".into(),
         workspace_path: None, // cleared in tombstone
         repo_url: None,
         branch: None,
@@ -278,6 +310,8 @@ fn decommission_workspace_removed_reflects_ownership() {
         unresumable: false,
         stale_assets: false,
         attached: false,
+        slot: 0,
+        deleted: false,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -297,6 +331,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         id: "xyz-456".into(),
         name: "tmpm-adopted".into(),
         state: "decommissioned".into(),
+        persisted_state: "decommissioned".into(),
         workspace_path: None,
         repo_url: None,
         branch: None,
@@ -314,6 +349,8 @@ fn decommission_workspace_removed_reflects_ownership() {
         unresumable: false,
         stale_assets: false,
         attached: false,
+        slot: 0,
+        deleted: false,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,

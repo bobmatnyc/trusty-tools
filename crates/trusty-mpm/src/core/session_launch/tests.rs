@@ -19,13 +19,19 @@ use tempfile::tempdir;
 /// on drop it restores the snapshot (or removes the var if it was unset).
 /// Test: used by `register_project_index_returns_derived_id`; correctness is
 /// observable via that serial test passing without leaking the override env var.
-struct EnvVarGuard {
+///
+/// `pub(super)` (issue #2914 split): also used by the sibling
+/// `tests_search_index` module, which lives outside `tests`' own module
+/// boundary (a private item is visible to descendants of its defining module,
+/// not to siblings of that module) — see `session_launch/mod.rs`'s
+/// `tests_search_index` declaration.
+pub(super) struct EnvVarGuard {
     key: &'static str,
     prev: Option<String>,
 }
 
 impl EnvVarGuard {
-    fn set(key: &'static str, value: &std::path::Path) -> Self {
+    pub(super) fn set(key: &'static str, value: &std::path::Path) -> Self {
         let prev = std::env::var(key).ok();
         // SAFETY: env-mutating tests using this guard are tagged `#[serial]`, so
         // no other thread races the set/restore. Restore happens in `Drop`.
@@ -1233,6 +1239,11 @@ fn register_project_index_returns_derived_id() {
     let expected = trusty_common::derive_index_id(project.path());
     assert_eq!(id, Some(expected), "id is the git-root basename");
 }
+
+// Issue #2914 regression (`register_project_index_never_bypasses_sensitive_path_denylist`)
+// split into `tests_search_index.rs` to keep this file under the 1500-SLOC
+// test-file cap — mirrors the `tests_roster.rs` / `tests_scaffold_gitignore.rs`
+// split pattern above.
 
 // ── index_is_fresh (#1908) ────────────────────────────────────────────────────
 // The freshness predicate was PROMOTED to trusty-common alongside the rest of

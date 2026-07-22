@@ -409,13 +409,22 @@ fn merge_index_missing_file_is_noop() {
 /// Test: `load_with_index_merges_persisted_effectiveness`.
 #[test]
 fn load_with_index_merges_persisted_effectiveness() {
+    // #3465-followup: this test sandboxes `$HOME` but previously mutated it
+    // without `crate::test_env::HOME_LOCK` (the claim "tests run
+    // single-threaded by default" is false under `cargo test`'s default
+    // multi-threaded runner), so it could race any other HOME-sandboxing
+    // test in the binary. Hold the shared lock for the whole body.
+    let _home_guard = crate::test_env::HOME_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     let home = TempDir::new().unwrap();
     let config = TempDir::new().unwrap();
     let bundled_skills = config.path().join("skills");
     fs::create_dir_all(&bundled_skills).unwrap();
     write_skill(&bundled_skills, "x", "d", &["t"]);
 
-    // SAFETY: tests run single-threaded by default; env restored before return.
+    // SAFETY: HOME_LOCK held for the entire test body; env restored before return.
     let prev_home = std::env::var_os("HOME");
     let prev_local = crate::env_compat::env_var_os(
         "TAGENT_SKILLS_PROJECT_LOCAL_ONLY",

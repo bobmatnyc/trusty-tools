@@ -417,6 +417,8 @@ fn format_fleet_by_project_renders_projects() {
                     branch: None,
                     pending_decision: None,
                     proposed_default: None,
+                    slot: 0,
+                    deleted: false,
                 },
                 ManagedSessionView {
                     id: "cccc3333dddd4444".into(),
@@ -427,6 +429,8 @@ fn format_fleet_by_project_renders_projects() {
                     branch: None,
                     pending_decision: Some("apply patch?".into()),
                     proposed_default: Some("yes".into()),
+                    slot: 0,
+                    deleted: false,
                 },
             ],
         },
@@ -522,6 +526,8 @@ fn format_fleet_by_project_provisioning_glyph() {
             branch: None,
             pending_decision: None,
             proposed_default: None,
+            slot: 0,
+            deleted: false,
         }],
     }];
     let text = format_fleet_by_project(&fleet);
@@ -607,6 +613,8 @@ fn focus_keyboard_has_a_button_per_session() {
                     branch: None,
                     pending_decision: None,
                     proposed_default: None,
+                    slot: 0,
+                    deleted: false,
                 },
                 ManagedSessionView {
                     id: "id-2".into(),
@@ -617,6 +625,8 @@ fn focus_keyboard_has_a_button_per_session() {
                     branch: None,
                     pending_decision: None,
                     proposed_default: None,
+                    slot: 0,
+                    deleted: false,
                 },
             ],
         },
@@ -666,6 +676,8 @@ fn session_detail_has_focus_button() {
         branch: None,
         pending_decision: None,
         proposed_default: None,
+        slot: 0,
+        deleted: false,
     };
     let keyboard =
         TelegramFormatter::keyboard_for(&CommandResult::ManagedSession(view)).expect("keyboard");

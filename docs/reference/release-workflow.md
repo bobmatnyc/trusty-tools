@@ -50,12 +50,17 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 7. Run `scripts/check-publish-ready.sh <crate-name>` (or
    `make publish-check CRATE=<crate-name>`) — must pass before publishing. See
    [Publish-Only-From-Merged-Main Guard](#publish-only-from-merged-main-guard-issue-2227) below.
+   Also runs automatically post-merge: `make version-parity-check` (or wait
+   for `.github/workflows/version-parity.yml` on the merge commit) — see
+   [Version-Parity Guard](#version-parity-guard-issue-3366) below.
 8. Publish: `cargo publish -p <crate-name>`.
    - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): prefix with `SKIP_UI_BUILD=1`:
      ```bash
      SKIP_UI_BUILD=1 cargo publish -p <crate-name>
      ```
      The committed `ui-dist/` bundle is already in the repo; without this flag, `build.rs` will attempt to invoke `pnpm` inside cargo's verification tarball, which fails because it tries to modify files outside `OUT_DIR`.
+
+     **This is not optional for `trusty-search`/`trusty-console`** (verified via `cargo package --list`): their `Cargo.toml` `include` list ships only the pre-built `ui-dist/`/`ui/dist/` bundle, never `ui/src` — so `cargo publish`, with or without `SKIP_UI_BUILD`, can never rebuild the UI from source during packaging. Before running step 8 for any UI-embedding crate, confirm the committed bundle is actually current: `.github/workflows/release.yml`'s `ui-freshness-check` job does this automatically on every tag push by rebuilding fresh from `ui/src` and diffing against the committed bundle (issue #3568) — if it's red, regenerate (`cd crates/<crate>/ui && pnpm install --frozen-lockfile && pnpm run build`, then for `trusty-search` also copy `ui/dist/*` into `ui-dist/`, or run `make release-prep`) and commit before publishing. Do not rely on `cargo publish --dry-run` to catch this — see the `publish-dry-run` job's header comment for why it structurally cannot.
 9. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
 10. Install the binary locally with `cargo install --path crates/<dir> --locked`
    (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
@@ -95,6 +100,53 @@ convention someone can forget under pressure.
 downgrades both guard failures to a loud warning and exits 0 instead of
 failing. Use it only when you have a specific, understood reason to publish
 from an unmerged commit; the default path is always "merge to main first."
+
+**Independently enforced in CI (issue #3366)**: this same rule is now also a
+mechanical gate on the tag-triggered binary-release pipeline itself, not just
+something a human is instructed to check before `cargo publish`.
+`.github/workflows/release.yml`'s `preflight` job fetches full history and
+runs `git merge-base --is-ancestor` on the ACTUAL tagged commit (dereferenced
+via `HEAD^{commit}`, never trusting `github.sha` or a naive `github.ref ==
+'refs/heads/main'` string comparison — the latter can never match on a tag
+push and would silently disable every release) against the true
+`origin/main` tip. A tag pushed from an unmerged branch now fails this job
+loudly and the whole pipeline — build, release, homebrew-bump, and the
+publish-dry-run job below — is skipped rather than silently proceeding.
+
+## Version-Parity Guard (issue #3366)
+
+🔴 **Before bumping a crate's version, confirm it hasn't already drifted.**
+`scripts/check-version-parity.sh` (also `make version-parity-check`) compares
+every publishable crate's local `src/` tree against the crates.io tarball for
+that crate's CURRENT (pre-bump) `Cargo.toml` version. If that version is
+already live and the source no longer matches it, the crate is flagged as
+drifted — source changes landed on `main` without a version bump, so the
+version number on crates.io no longer describes what's actually in the repo.
+
+This runs automatically on every push to `main`
+(`.github/workflows/version-parity.yml`), so drift is caught right after it
+merges instead of being discovered later as a `cargo publish --dry-run`
+failure (which is exactly how issue #3366 was found: `trusty-common` and
+`trusty-agents-common` had each drifted this way, and `cargo publish -p
+trusty-mpm --dry-run` failed with "symbol not found" errors for symbols that
+only existed in the unpublished, drifted source).
+
+The check fails CLOSED: if a crate's live/local comparison can't be verified
+(registry unreachable, unexpected response), that counts as a failure, never
+a silent pass. See `crates/trusty-publish-guard` for the underlying engine.
+
+For the cross-crate publish-ORDERING hazard (a related but distinct problem —
+publishing a crate before a sibling it depends on is live), see
+`scripts/publish-dry-run-order.sh` / `make publish-dry-run-order`, documented
+in `.claude/skills/cargo-publish/SKILL.md` under "Cross-Crate Publish
+Ordering." This ALSO now runs automatically and independently of human
+memory: every `*-v*` tag push runs it via `.github/workflows/release.yml`'s
+`publish-dry-run` job, scoped to just the tagged crate and its publishable
+dependency closure (not the whole workspace, and not on every PR — see that
+job's header comment for the cost/scope tradeoff). It is deliberately NOT a
+dependency of the binary build/release jobs (a failing crates.io dry-run says
+nothing about whether the GitHub binary tarball is safe to build), but its
+own failure still turns the tag's workflow run red.
 
 ## macOS Code-Signing Critical Alert
 

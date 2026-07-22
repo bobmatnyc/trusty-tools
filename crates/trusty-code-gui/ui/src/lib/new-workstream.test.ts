@@ -11,8 +11,10 @@ import {
   buildCreateWorkstreamBody,
   buildRunTaskBody,
   canSubmitCreate,
+  extractTaskSessionId,
   extractWorkstreamId,
   inferWorkstreamName,
+  isTaskRunResponse,
   isWorkstreamCreateResponse,
   type ProjectSelection,
 } from './new-workstream';
@@ -94,9 +96,69 @@ describe('buildRunTaskBody', () => {
     expect(buildRunTaskBody('t', null, '')).toEqual({ task_description: 't' });
   });
 
-  it('never sends agent_name (no pre-session agent roster route, see module doc)', () => {
+  it('issue #3446: includes session_id when passed, for chat continuation', () => {
+    expect(buildRunTaskBody('follow-up', null, null, 'sess-abc')).toEqual({
+      task_description: 'follow-up',
+      session_id: 'sess-abc',
+    });
+  });
+
+  it('issue #3446: session_id and workstream_id are mutually exclusive — session_id wins, workstream_id is never sent alongside it', () => {
+    expect(buildRunTaskBody('follow-up', null, 'ws-123', 'sess-abc')).toEqual({
+      task_description: 'follow-up',
+      session_id: 'sess-abc',
+    });
+  });
+
+  it("issue #3446: includes project alongside session_id (restating a reused session's own binding is valid)", () => {
+    expect(buildRunTaskBody('follow-up', GIT_PROJECT, null, 'sess-abc')).toEqual({
+      task_description: 'follow-up',
+      project: '/Users/bob/code/acme-api',
+      session_id: 'sess-abc',
+    });
+  });
+
+  it('issue #3446: omits session_id when undefined, null, or empty', () => {
+    expect(buildRunTaskBody('t', null, 'ws-1', undefined)).toEqual({
+      task_description: 't',
+      workstream_id: 'ws-1',
+    });
+    expect(buildRunTaskBody('t', null, 'ws-1', null)).toEqual({
+      task_description: 't',
+      workstream_id: 'ws-1',
+    });
+    expect(buildRunTaskBody('t', null, 'ws-1', '')).toEqual({
+      task_description: 't',
+      workstream_id: 'ws-1',
+    });
+  });
+
+  it('omits agent_name when not passed (daemon default, unchanged pre-#3449 behavior)', () => {
     const body = buildRunTaskBody('t', GIT_PROJECT, 'ws-1');
     expect('agent_name' in body).toBe(false);
+  });
+
+  it('includes agent_name when explicitly selected (issue #3449), alongside workstream_id', () => {
+    expect(buildRunTaskBody('t', GIT_PROJECT, 'ws-1', null, 'rust-engineer')).toEqual({
+      task_description: 't',
+      project: '/Users/bob/code/acme-api',
+      workstream_id: 'ws-1',
+      agent_name: 'rust-engineer',
+    });
+  });
+
+  it("includes agent_name alongside session_id too (issue #3449 + #3446: a resumed session's per-run agent must not silently reset to the daemon default)", () => {
+    expect(buildRunTaskBody('follow-up', null, null, 'sess-abc', 'rust-engineer')).toEqual({
+      task_description: 'follow-up',
+      session_id: 'sess-abc',
+      agent_name: 'rust-engineer',
+    });
+  });
+
+  it('omits agent_name when undefined, null, or empty (the "daemon default" selector option)', () => {
+    expect(buildRunTaskBody('t', null, null, null, undefined)).toEqual({ task_description: 't' });
+    expect(buildRunTaskBody('t', null, null, null, null)).toEqual({ task_description: 't' });
+    expect(buildRunTaskBody('t', null, null, null, '')).toEqual({ task_description: 't' });
   });
 });
 
@@ -149,5 +211,41 @@ describe('extractWorkstreamId', () => {
     expect(extractWorkstreamId({ id: '' })).toBeNull();
     expect(extractWorkstreamId({ id: 42 })).toBeNull();
     expect(extractWorkstreamId(null)).toBeNull();
+  });
+});
+
+describe('isTaskRunResponse', () => {
+  it('accepts a well-formed POST /tasks 202 body', () => {
+    expect(
+      isTaskRunResponse({
+        session_id: 'sess-abc12345',
+        status: 'running',
+        mode: 'auto',
+        binding: { state: 'projectless', root: null },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects non-object bodies and bodies missing/mistyping session_id', () => {
+    expect(isTaskRunResponse(null)).toBe(false);
+    expect(isTaskRunResponse('sess-abc')).toBe(false);
+    expect(isTaskRunResponse({})).toBe(false);
+    expect(isTaskRunResponse({ session_id: 42 })).toBe(false);
+  });
+});
+
+describe('extractTaskSessionId', () => {
+  it('returns the id when it is a non-empty string', () => {
+    expect(extractTaskSessionId({ session_id: 'sess-abc12345', status: 'running' })).toBe(
+      'sess-abc12345',
+    );
+  });
+
+  it('returns null for missing, empty, or non-string ids and non-object bodies', () => {
+    expect(extractTaskSessionId({})).toBeNull();
+    expect(extractTaskSessionId({ session_id: '' })).toBeNull();
+    expect(extractTaskSessionId({ session_id: 42 })).toBeNull();
+    expect(extractTaskSessionId(null)).toBeNull();
+    expect(extractTaskSessionId('sess-abc')).toBeNull();
   });
 });

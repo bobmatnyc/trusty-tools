@@ -49,6 +49,56 @@ pub trait Embedder: Send + Sync {
     fn provider(&self) -> trusty_common::embedder::ExecutionProvider {
         trusty_common::embedder::ExecutionProvider::Cpu
     }
+
+    /// A human-readable label for the ACTUALLY-resolved backend, read back
+    /// from the live embedder rather than predicted from build features/env
+    /// (epic #3524 slice 5, issue #3493 P1).
+    ///
+    /// Why: `provider()` above is a *prediction* (`resolve_expected_provider()`
+    /// — a pure function of build features + env) so it can be called before
+    /// any child process has spawned. That is correct for the common Rust ort
+    /// sidecar path, but it actively lies for the Python/MPS sidecar: the
+    /// prediction logic has no notion of "torch selected MPS", so it reports
+    /// the ORT-flavoured `CoreML(ANE)` guess while the sidecar's own startup
+    /// log says `device=mps`. `/health` should prefer a real readback when one
+    /// is available.
+    /// What: default `None` (no real readback available — callers fall back to
+    /// `provider()`'s prediction). The Python-sidecar adapter overrides this to
+    /// return the actual device string reported by the sidecar over the wire
+    /// (see `StdioEmbedderClient::last_reported_device`).
+    /// Test: `resolved_provider_label_defaults_to_none_and_is_overridable` in
+    /// this module's `tests`; the Python-sidecar override is covered by
+    /// `lazy_python_adapter_reports_wire_device` in `start/tests.rs`.
+    fn resolved_provider_label(&self) -> Option<String> {
+        None
+    }
+
+    /// Non-blocking readback: has the supervisor backing this embedder
+    /// permanently given up respawning its sidecar? (Review finding, PR
+    /// #3560 HIGH fix.)
+    ///
+    /// Why: `FallbackEmbedderAdapter` (`commands/start/embedder_fallback.rs`)
+    /// needs to trip its one-way latch on the SAME condition its module doc
+    /// claims to mirror — the supervisor's own `max_restarts` give-up
+    /// ceiling (`should_give_up` in
+    /// `trusty_common::embedder_client::supervisor`) — rather than an
+    /// independently-counted, faster-firing proxy at the request layer. The
+    /// Python sidecar is multi-flight (the epic's own design): several
+    /// concurrent requests can fail against the same stale client during a
+    /// SINGLE crash episode, and a request-count threshold could previously
+    /// cross that count well before the supervisor itself had exhausted its
+    /// restart budget.
+    /// What: default `false` — no supervisor to observe (remote HTTP/UDS
+    /// adapters, in-process, the Rust ort fallback embedder itself, and test
+    /// doubles). The Python-sidecar `LazySlotEmbedderAdapter` overrides this
+    /// to forward `LazyEmbedderHandle::supervisor_gave_up()`, which in turn
+    /// forwards `SupervisorHandle::has_given_up()`.
+    /// Test: `supervisor_gave_up_defaults_to_false_and_is_overridable` in
+    /// this module's `tests`; the lazy-adapter override is covered by
+    /// `lazy_python_adapter_reports_supervisor_gave_up` in `start/tests.rs`.
+    fn supervisor_gave_up(&self) -> bool {
+        false
+    }
 }
 
 /// Adapter: every shared `trusty_common::embedder::Embedder` automatically implements
@@ -157,6 +207,76 @@ mod tests {
             Embedder::provider(&mock),
             ExecutionProvider::Cpu,
             "provider() passthrough must return Cpu for MockEmbedder"
+        );
+    }
+
+    /// `resolved_provider_label()` defaults to `None` for any embedder that
+    /// doesn't override it (issue #3493 P1 / epic #3524 slice 5) — callers
+    /// must fall back to `provider()`'s prediction rather than crash or
+    /// silently report a wrong wire-readback.
+    #[test]
+    fn resolved_provider_label_defaults_to_none_and_is_overridable() {
+        let mock = MockEmbedder::new(8);
+        assert_eq!(
+            Embedder::resolved_provider_label(&mock),
+            None,
+            "default resolved_provider_label() must be None"
+        );
+
+        struct FakeRealReadback;
+        #[async_trait]
+        impl Embedder for FakeRealReadback {
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                unimplemented!()
+            }
+            async fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+                unimplemented!()
+            }
+            fn dimension(&self) -> usize {
+                8
+            }
+            fn resolved_provider_label(&self) -> Option<String> {
+                Some("MPS".to_string())
+            }
+        }
+        assert_eq!(
+            Embedder::resolved_provider_label(&FakeRealReadback),
+            Some("MPS".to_string()),
+            "an override must be honoured"
+        );
+    }
+
+    /// `supervisor_gave_up()` defaults to `false` for any embedder that
+    /// doesn't override it (review finding, PR #3560 HIGH fix) — callers
+    /// (`FallbackEmbedderAdapter`) must never trip on an embedder with no
+    /// supervisor to observe, and an explicit override must be honoured.
+    #[test]
+    fn supervisor_gave_up_defaults_to_false_and_is_overridable() {
+        let mock = MockEmbedder::new(8);
+        assert!(
+            !Embedder::supervisor_gave_up(&mock),
+            "default supervisor_gave_up() must be false"
+        );
+
+        struct FakeGivenUp;
+        #[async_trait]
+        impl Embedder for FakeGivenUp {
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                unimplemented!()
+            }
+            async fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+                unimplemented!()
+            }
+            fn dimension(&self) -> usize {
+                8
+            }
+            fn supervisor_gave_up(&self) -> bool {
+                true
+            }
+        }
+        assert!(
+            Embedder::supervisor_gave_up(&FakeGivenUp),
+            "an override must be honoured"
         );
     }
 }
