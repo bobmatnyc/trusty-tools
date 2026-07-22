@@ -621,14 +621,9 @@ async fn spawn_managed_cloned(
             e.to_string()
         })?;
 
-    // #3649: record this session as the owner of its own provisioned
-    // worktree — a session owns its own workspace by construction, so
-    // `owner == session_id` always. Best-effort/non-fatal, mirroring
-    // `set_source_id` below: a failure here leaves the record owner-unknown
-    // (the safe legacy default), never blocking the spawn.
-    if let Err(e) = mgr.set_worktree_owner(&session_id, session_id).await {
-        warn!(id = %session_id, "spawn_managed: set_worktree_owner failed (non-fatal): {e}");
-    }
+    // #3649: best-effort; see `worktree_ownership::set_worktree_owner_best_effort`.
+    mgr.set_worktree_owner_best_effort(&session_id, session_id)
+        .await;
 
     // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
     //
@@ -925,12 +920,9 @@ async fn spawn_managed_inproject(
         warn!(id = %session_id, "spawn_managed (inproject): set_source_id failed: {e}");
     }
 
-    // #3649: record this session as the owner of its own provisioned
-    // worktree, mirroring `spawn_managed_cloned`'s identical call. Best-effort
-    // — a failure leaves the record owner-unknown (the safe legacy default).
-    if let Err(e) = mgr.set_worktree_owner(session_id, *session_id).await {
-        warn!(id = %session_id, "spawn_managed (inproject): set_worktree_owner failed (non-fatal): {e}");
-    }
+    // #3649: mirrors `spawn_managed_cloned`'s identical call.
+    mgr.set_worktree_owner_best_effort(session_id, *session_id)
+        .await;
 
     // Front gate with the original repo_url so GitHub identity is parseable.
     if let Some(record) =

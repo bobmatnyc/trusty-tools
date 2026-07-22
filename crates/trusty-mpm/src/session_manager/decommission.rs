@@ -360,11 +360,7 @@ impl SessionManager {
             && owner != caller_id
             && !self.resolve_ownerless(owner).await
         {
-            return Err(ManagedError::WorktreeOwnerMismatch {
-                caller: caller_id,
-                owner,
-                target: *id,
-            });
+            return Err(ManagedError::WorktreeOwnerMismatch(caller_id, owner, *id));
         }
 
         // #2033: derive the trusty-search index id for a disposable workspace
@@ -689,11 +685,7 @@ mod tests {
             .await
             .expect_err("session A must be refused decommissioning session B's live worktree");
         match err {
-            ManagedError::WorktreeOwnerMismatch {
-                caller,
-                owner,
-                target,
-            } => {
+            ManagedError::WorktreeOwnerMismatch(caller, owner, target) => {
                 assert_eq!(caller, session_a);
                 assert_eq!(owner, session_b);
                 assert_eq!(target, session_b);

@@ -153,6 +153,21 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Best-effort [`Self::set_worktree_owner`] for the two real provisioning
+    /// call sites (#3649): logs and swallows a failure rather than propagating,
+    /// since a failed set only leaves the record at its safe owner-unknown
+    /// default and must never block the spawn it is called from.
+    /// Test: covered transitively by `set_worktree_owner_round_trips`.
+    pub async fn set_worktree_owner_best_effort(
+        &self,
+        id: &ManagedSessionId,
+        owner: ManagedSessionId,
+    ) {
+        if let Err(e) = self.set_worktree_owner(id, owner).await {
+            tracing::warn!(id = %id, "set_worktree_owner failed (non-fatal): {e}");
+        }
+    }
+
     /// Resolve whether `owner` is PROVABLY OWNERLESS (#3649): its worktree may
     /// be safely reclaimed by someone other than itself.
     ///
