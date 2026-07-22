@@ -56,6 +56,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     back-off provides the elapsed time the following check needs), while a
     genuinely tight loop keeps escalating. See `restart_storm_should_reset`'s
     doc comment in `supervisor.rs` for the full explanation.
+- **Flaky env-mutation-race unit test fixed (#3608), plus an audit sweep
+  for the same bug class (#3607/#3608 cross-reference #2718):**
+  - `update::tests::verify_installed_binary_finds_binary_via_path` (#3608)
+    mutated `PATH` via `unsafe { std::env::set_var(...) }` OUTSIDE any
+    `ENV_LOCK` critical section, so both that mutation and the awaited
+    `verify_installed_binary` call ran unguarded against the other
+    `verify_installed_binary_*` tests in the same file. Now wraps the PATH
+    mutation in its own brief `ENV_LOCK` section (matching the file's
+    existing convention) AND tags all four `verify_installed_binary_*`
+    tests `#[serial(update_verify_installed_binary_env)]` so the whole
+    async body — including the `.await` a `std::sync::Mutex` guard can't
+    span without tripping `clippy::await_holding_lock` — is isolated from
+    sibling tests touching the same `HOME`/`CARGO_HOME`/`PATH` vars.
+  - Audit follow-up: `OPENROUTER_API_KEY` was mutated (or read as an
+    implicit fallback) by tests in three places using three UNCOORDINATED
+    lock groups — `inference::credentials::{resolver,dotenv}::tests` under
+    the named `#[serial(dotenv_credential_env)]` group,
+    `memory_core::semantic_consolidation::tests::resolve_openrouter_api_key_falls_back_to_env`
+    under a bare (unnamed, and therefore different) `#[serial]`, and
+    `memory_core::dream::tests`'s five `EnvVarGuard`-based tests under NO
+    lock at all. `memory_core::semantic_consolidation::tests::inference_available_false_without_key`
+    also implicitly depends on the var being absent (via
+    `inference_available`'s env fallback) with no lock whatsoever. All of
+    these now share the single `dotenv_credential_env` serial group.
 
 ---
 ## [0.24.1] — 2026-07-21

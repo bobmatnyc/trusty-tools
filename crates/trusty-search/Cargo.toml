@@ -1,6 +1,6 @@
 [package]
 name = "trusty-search"
-version = "0.37.2"
+version = "0.38.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -85,7 +85,7 @@ trusty-embedderd = { path = "../trusty-embedderd", version = "0.3.10", default-f
 # in NO torch/ORT — it is a lightweight uv/venv bootstrapper + launcher used
 # only when `TRUSTY_EMBEDDER=python` selects it (DEFAULT-OFF). Building it does
 # not require a venv; that is all runtime.
-trusty-embedderd-py = { path = "../trusty-embedderd-py", version = "0.1.0" }
+trusty-embedderd-py = { path = "../trusty-embedderd-py", version = "0.1.1" }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-search (single-owner-per-binary); the
 # standalone `trusty-console` crate is its sole producer.

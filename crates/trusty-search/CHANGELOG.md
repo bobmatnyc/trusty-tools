@@ -5,7 +5,11 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.38.0] — 2026-07-21
+
+Ships the epic #3524 slice 6 default flip. Depends on trusty-embedderd-py
+0.1.1 (drift-closed in this same release) for the `/health` provider
+readback used to verify the flip below.
 
 ### Changed
 
@@ -22,6 +26,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   target_os = "macos"))` only. `TRUSTY_EMBEDDER=stdio` remains, and is now
   the sole, permanent per-invocation escape hatch back to the unchanged ort
   path on Apple Silicon.
+
+### Fixed
+
+- **Daemon stack-overflow crash from deep recursion in the AST chunker/entity
+  walk (issue #3537).** `walk_for_chunks` (`core/chunker/walk.rs`) and
+  `walk_rust` (`core/entity.rs`) were native recursive descents whose stack
+  depth tracked raw tree-sitter parse-tree depth — attacker-influenced, since
+  it comes directly from file content being indexed. A deeply nested
+  global-scope construct (e.g. deeply templated C++ headers, or any deeply
+  nested expression/type outside a function body, which is already pruned)
+  could exceed the process stack and abort the whole daemon with `fatal
+  runtime error: stack overflow`, taking every other index down with it.
+  Both walks are now iterative (explicit heap-allocated work stack, matching
+  the pattern `collect_calls` already used), which removes the crash
+  regardless of nesting depth, plus a bounded max-walk-depth guard (logged,
+  not silent) so a single pathological file degrades to "partially chunked"
+  rather than either crashing or — since `classify_node`'s per-node
+  `Node::parent()` lookups are not O(1) — hanging the indexing worker on
+  superlinear traversal cost.
 
 ## [0.37.2] — 2026-07-21
 

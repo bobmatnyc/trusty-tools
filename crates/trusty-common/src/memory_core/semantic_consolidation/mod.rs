@@ -94,7 +94,19 @@ mod tests {
 
     /// Why: the gate function must return false when no key is configured so
     /// the dream cycle skips LLM calls on unconfigured deployments.
+    ///
+    /// Audit finding (same class as #3607/#3608, found while fixing those
+    /// issues): `inference_available("", false)` falls back to reading
+    /// `OPENROUTER_API_KEY` from the process environment when neither an
+    /// inline key nor a local model is configured, so this test's PASS/FAIL
+    /// depends on that var being absent for its whole body — exactly like a
+    /// writer of the var would. It raced `resolve_openrouter_api_key_falls_back_to_env`
+    /// (and, cross-file, `memory_core::dream::tests`'s `OPENROUTER_API_KEY`
+    /// mutators) because it held no lock at all. Join the same
+    /// `dotenv_credential_env` group as every other test that reads or
+    /// writes this var.
     #[test]
+    #[serial_test::serial(dotenv_credential_env)]
     fn inference_available_false_without_key() {
         assert!(!inference_available("", false));
         assert!(!inference_available("   ", false));
@@ -125,10 +137,16 @@ mod tests {
     /// process environment before picking a backend; `resolve_openrouter_api_key`
     /// must do the same so every caller (including
     /// `trusty-memory::dream_config_from_user_config`) agrees on the
-    /// resolved key. `#[serial]` + a local `EnvVarGuard` avoid racing other
-    /// tests that read/write the same real env var.
+    /// resolved key. `#[serial(dotenv_credential_env)]` + a local
+    /// `EnvVarGuard` avoid racing other tests that read/write the same real
+    /// env var — the named group joins the SAME lock used by
+    /// `inference::credentials::{resolver,dotenv}::tests` and
+    /// `memory_core::dream::tests` (audit finding, same class as
+    /// #3607/#3608: a bare unnamed `#[serial]` here does NOT coordinate with
+    /// those other files' named group, since serial_test treats each group
+    /// name as an independent lock).
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(dotenv_credential_env)]
     fn resolve_openrouter_api_key_falls_back_to_env() {
         let _guard = EnvVarGuard::set("OPENROUTER_API_KEY", "sk-from-env");
         assert_eq!(resolve_openrouter_api_key(""), "sk-from-env");
@@ -137,8 +155,9 @@ mod tests {
     // ─── RAII env-var guard for tests (mirrors
     // trusty_common::memory_core::dream::tests::EnvVarGuard) ───────────────
     //
-    // Safety: test-only; `#[serial_test::serial]` on every caller serialises
-    // access to the real process environment across test threads.
+    // Safety: test-only; `#[serial_test::serial(dotenv_credential_env)]` on
+    // every caller serialises access to the real process environment across
+    // test threads (and across the other files sharing this named group).
 
     struct EnvVarGuard {
         key: &'static str,
