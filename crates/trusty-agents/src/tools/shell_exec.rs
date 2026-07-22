@@ -5,6 +5,14 @@
 //! gives the QA agent what it needs without opening a general exec surface.
 //! #101 (MIN-5): renamed from `shell_exec` to `pytest_exec` so it no longer
 //! collides with the broader local-ops `shell_exec` tool in `tools::shell`.
+//!
+//! ⚠️ #3679: the "without opening a general exec surface" claim above does NOT
+//! hold as written, and reviewers should not rely on it. `is_allowed_pytest`
+//! matches only the command PREFIX while `execute` hands the original string
+//! to `/bin/sh -c`, so everything after the first recognized token is
+//! unvetted — `cargo test; rm -rf /` is accepted today. Treat this module as
+//! a guardrail against an honestly-mistaken agent, not as a security boundary
+//! against a prompt-injected one. #3679 tracks closing the gap.
 //! What: `ShellExecTool` accepts a command string; if it does not match the
 //! allowed pytest invocation pattern, returns an error. Otherwise runs it
 //! with `tokio::process::Command` (via `/bin/sh -c`) and returns stdout+stderr.
