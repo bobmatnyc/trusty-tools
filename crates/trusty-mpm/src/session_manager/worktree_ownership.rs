@@ -208,9 +208,9 @@ impl SessionManager {
     /// via [`read_sentinel_owner`] and returns
     /// [`SentinelOwner::Known`](SentinelOwner::Known)'s inner id; otherwise
     /// `None` (owner unknown — the gate never fires for this target).
-    /// Test: `decommission_owner_gate_refuses_foreign_caller`,
-    /// `decommission_owner_gate_falls_back_to_sentinel` in
-    /// `super::decommission_worktree_tests` / this module.
+    /// Test: `decommission_owner_gate_refuses_foreign_caller` in
+    /// `super::decommission::tests`; `known_owner_of_falls_back_to_sentinel`
+    /// in this module.
     pub(crate) fn known_owner_of(&self, record: &SessionRecord) -> Option<ManagedSessionId> {
         if let Some(owner) = record.worktree_owner {
             return Some(owner);
@@ -371,5 +371,52 @@ mod tests {
             .expect("set_worktree_owner");
         let record = mgr.get(&id).await.expect("get");
         assert_eq!(record.worktree_owner, Some(id));
+    }
+
+    // ── known_owner_of (#3649) ───────────────────────────────────────────────
+
+    /// `known_owner_of` falls back to the on-disk sentinel when the
+    /// registry field itself is `None` (e.g. `set_worktree_owner` never ran
+    /// or raced with a decommission), so the owner gate still resolves the
+    /// owner from whichever source recorded it.
+    #[tokio::test]
+    async fn known_owner_of_falls_back_to_sentinel() {
+        let (mgr, _id, _dir) = manager_with_record(ManagedSessionState::Active).await;
+        let ws = tempfile::tempdir().expect("tempdir");
+        let sentinel_owner = ManagedSessionId::new();
+        std::fs::write(
+            ws.path().join(WORKTREE_SENTINEL_FILE),
+            sentinel_payload_bytes(sentinel_owner),
+        )
+        .expect("write sentinel");
+
+        let record = SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tm-fallback-test".into(),
+            cwd: ws.path().to_path_buf(),
+            task: "task".into(),
+            state: ManagedSessionState::Active,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(ws.path().to_path_buf()),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+            deliverable_id: None,
+            pane_id: None,
+            injection_status: Default::default(),
+            worktree_owner: None, // registry field unset — must fall back
+        };
+
+        assert_eq!(mgr.known_owner_of(&record), Some(sentinel_owner));
     }
 }
