@@ -5,7 +5,15 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.1.1] — 2026-07-21
+
+Patch release closing unpublished source drift under the already-published
+0.1.0 (issue #3366 defect class): the epic #3524 slice 5 device-echo change
+below landed on `main` after 0.1.0 was published to crates.io without a
+version bump, so the live 0.1.0 tarball (this crate embeds its Python
+payload via `include_dir!` at publish time) does not contain it. Published
+now as the direct dependency of trusty-search 0.38.0's slice 6 default flip,
+whose live `/health` provider readback relies on this field.
 
 ### Added
 

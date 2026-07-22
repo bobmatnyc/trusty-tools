@@ -5,7 +5,11 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.38.0] — 2026-07-21
+
+Ships the epic #3524 slice 6 default flip. Depends on trusty-embedderd-py
+0.1.1 (drift-closed in this same release) for the `/health` provider
+readback used to verify the flip below.
 
 ### Changed
 
