@@ -34,7 +34,7 @@ use trusty_common::console_metrics::{ServiceHealth, make_report};
 
 use crate::service::{
     AppState,
-    handlers::{DepInfo, DepStatus, compute_status},
+    handlers::{compute_status, probe_deps},
 };
 
 // ─── Descriptor ──────────────────────────────────────────────────────────────
@@ -93,30 +93,16 @@ pub(crate) async fn handle_console_metrics(state: &AppState) -> Value {
     let reviewer_model = state.config.role_models.reviewer.model.clone();
     let version = env!("CARGO_PKG_VERSION");
 
-    // Non-blocking dep probes — same logic as the HTTP /health handler.
-    let search_reachable = state.search.health().await.is_ok_and(|r| r.is_healthy());
-    let analyze_reachable = match &state.analyze {
-        Some(a) => a.health().await.is_ok(),
-        None => false,
-    };
+    // Bounded, concurrent dep probes (#3658) — same helper the HTTP /health
+    // handler and review_health use, so a slow (not down) dep cannot hang
+    // this console poll either.
+    let deps = probe_deps(state).await;
 
     // Cached inference-reachability probe (same as review_health).
     let inference = state
         .inference_probe
         .probe(&state.llm, &reviewer_model)
         .await;
-
-    // Build the deps struct so compute_status can inspect required flags.
-    let deps = DepStatus {
-        trusty_search: DepInfo {
-            required: true,
-            reachable: search_reachable,
-        },
-        trusty_analyze: DepInfo {
-            required: false,
-            reachable: analyze_reachable,
-        },
-    };
 
     // status is "degraded" when inference fails OR any required dep is down.
     let health_str = compute_status(inference, &deps);
@@ -134,8 +120,10 @@ pub(crate) async fn handle_console_metrics(state: &AppState) -> Value {
         "dry_run": state.config.dry_run,
         "version": version,
         "inference": inference,
-        "search_reachable": search_reachable,
-        "analyze_reachable": analyze_reachable,
+        "search_reachable": deps.trusty_search.reachable,
+        "analyze_reachable": deps.trusty_analyze.reachable,
+        "search_state": deps.trusty_search.state,
+        "analyze_state": deps.trusty_analyze.state,
     });
 
     let report = make_report(
