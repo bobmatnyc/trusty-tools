@@ -59,19 +59,22 @@ pub struct SupervisorConfig {
     /// Test: `sidecar_batch_size_*` tests in this module.
     pub sidecar_batch_size: Option<usize>,
 
-    /// Seconds of sustained health (no further wedge-triggered restart)
-    /// required before the supervisor resets its wedge-restart escalation
-    /// counter back to zero (#1450 HIGH follow-up — restart-storm fix).
+    /// Seconds of sustained health (no further storm-triggered restart)
+    /// required before the supervisor resets its restart-storm escalation
+    /// counter back to zero (#1450 HIGH follow-up — restart-storm fix;
+    /// extended to plain process-exit crash loops by issue #3631).
     ///
     /// Why: a workload-deterministic wedge (the sidecar reliably wedges again
     /// shortly after every respawn, because the *workload* — not the process
-    /// — is what triggers the stall) would otherwise never escalate: the
-    /// ordinary `consecutive_failures` counter resets on every successful
-    /// respawn, since the respawn *probe* itself succeeds even though the
-    /// real workload re-wedges it moments later. `EmbedderSupervisor` tracks
-    /// wedge-triggered restarts in a separate counter that is reset ONLY
-    /// after this many seconds have elapsed since the last one — not by an
-    /// ordinary respawn-probe success — so a genuine storm eventually trips
+    /// — is what triggers the stall) — or, equally, a plain crash loop where
+    /// the process itself keeps dying and coming back up healthy — would
+    /// otherwise never escalate: the ordinary `consecutive_failures` counter
+    /// resets on every successful respawn, since the respawn *probe* itself
+    /// succeeds even though the sidecar dies (or re-wedges) again moments
+    /// later. `EmbedderSupervisor` tracks BOTH kinds of forced restart in a
+    /// separate, non-resetting counter that is reset ONLY after this many
+    /// seconds have elapsed since the last one — not by an ordinary
+    /// respawn-probe success — so a genuine storm eventually trips
     /// `max_restarts` instead of cycling forever.
     ///
     /// Env: `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS` (default 300 = 5 minutes).

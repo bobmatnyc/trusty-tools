@@ -5,6 +5,44 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **`EmbedderSupervisor` crash-storm give-up never reachable for a plain
+  process-exit crash loop (issue #3631).** `supervision_loop` tracked a
+  single non-resetting escalation counter
+  (`consecutive_wedge_restarts`, #1450 HIGH follow-up) for
+  `RestartTrigger::Unhealthy` only; `RestartTrigger::ProcessExit` (the
+  classification a `SIGKILL` or any real crash produces) only bumped the
+  ordinary `consecutive_failures` counter, which is unconditionally reset to
+  0 on every successful respawn. A sidecar that kept dying but whose
+  individual respawns kept succeeding — the normal shape of "kill it, it
+  comes back healthy" — could therefore oscillate `consecutive_failures`
+  0→1→0→1 forever and never satisfy `should_give_up` for any
+  `max_restarts`, so `terminated_signal()`/`is_confirmed_terminated()` never
+  fired and the python→ort swap-back watchdog (epic #3524 slice 6) never
+  engaged. Fix: renamed/generalized the counter to
+  `consecutive_restart_storm` and extended it to also cover a failing
+  `RestartTrigger::ProcessExit` (`is_restart_storm_trigger`), so a sustained
+  crash-loop escalates in bounded time (`max_restarts`, default 5) instead
+  of resetting on every successful respawn. Reset condition unchanged:
+  `wedge_reset_secs` (default 300s, env `TRUSTY_EMBEDDERD_WEDGE_RESET_SECS`)
+  of sustained health since the last forced restart — so a genuine one-off
+  crash followed by real recovery still does NOT trip give-up.
+  - Test: `supervisor_process_exit_crash_loop_reaches_give_up` (new,
+    deterministic — a mock child whose stdout pipe survives `kill -9` via an
+    orphaned backgrounded process, closing the OS-level race between
+    `child.wait()` and reader-task EOF detection that made trigger
+    classification for a real killed process non-deterministic; fails
+    against unfixed code, passes with the fix),
+    `supervisor_single_transient_crash_then_health_does_not_give_up` (new —
+    guards against over-correction: one kill + sustained health must NOT
+    give up), plus `is_restart_storm_trigger_*` and
+    `should_give_up_restart_storm_trips_ceiling_even_with_failures_reset`
+    pure-function unit tests.
+
+---
 ## [0.24.1] — 2026-07-21
 
 Patch release closing unpublished source drift under the already-published

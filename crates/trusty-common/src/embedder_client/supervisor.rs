@@ -43,12 +43,29 @@
 //! child itself, clears the PID slot, and returns *without* ever entering the
 //! crash-restart path — the intentional stop can never be misclassified.
 //!
+//! Restart-storm escalation (issue #3631): `consecutive_failures` alone is
+//! reset to 0 on every successful respawn (the startup probe succeeding),
+//! so a sidecar that keeps dying but whose individual respawns keep
+//! succeeding — the normal shape of "kill it, it comes back healthy",
+//! including a plain `SIGKILL` — could oscillate that counter 0→1→0→1
+//! forever and NEVER trip `should_give_up`/`terminated_signal`, at any
+//! `max_restarts`. `consecutive_restart_storm` (see
+//! `is_restart_storm_trigger`) is a second, non-resetting counter — the same
+//! design #1450's wedge-storm fix introduced for `RestartTrigger::Unhealthy`
+//! — now also fed by `RestartTrigger::ProcessExit`, so a sustained crash
+//! loop escalates in bounded time instead of resetting on every successful
+//! respawn. It resets only after `config.wedge_reset_secs` of sustained
+//! health, so a genuine one-off crash followed by real recovery does not
+//! trip give-up.
+//!
 //! Test: `supervisor_shutdown_kills_child`,
 //! `supervisor_shutdown_handle_is_reachable_and_stops_child`,
 //! `supervisor_intentional_shutdown_does_not_respawn`,
 //! `stdio_eof_terminates_child`,
 //! `supervisor_gives_up_after_max_restarts_flips_has_given_up` (PR #3560
-//! HIGH fix) in this module's `tests` submodule.
+//! HIGH fix), `supervisor_process_exit_crash_loop_reaches_give_up`,
+//! `supervisor_single_transient_crash_then_health_does_not_give_up` (issue
+//! #3631 fix) in this module's `tests` submodule.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -470,34 +487,81 @@ enum RestartTrigger {
     RespawnFailed,
 }
 
-// ── Wedge-restart-storm prevention (#1450 HIGH follow-up) ──────────────────
+/// Does this trigger represent "the sidecar needed a forced restart, despite
+/// the respawn that follows likely succeeding" — i.e. should it feed the
+/// non-resetting restart-storm counter (issue #3631 fix, extending the
+/// #1450 HIGH follow-up's wedge-storm design)?
+///
+/// Why: extracted as a small pure function, independent of
+/// `supervision_loop`'s async/I-O machinery, so the exact classification
+/// this fix depends on is directly, deterministically unit-testable — no
+/// real process, no OS-level race. That matters because a REAL killed
+/// process's trigger classification (`ProcessExit` vs `Unhealthy`) is
+/// itself a genuine, non-deterministic OS/tokio-scheduler race between
+/// `child.wait()` resolving and the reader task noticing stdout EOF (see
+/// `write_mock_embedderd_pipe_survives_kill`'s doc comment in
+/// `supervisor_tests.rs` for the full empirical account) — a test that only
+/// exercises this decision through a real kill could pass "by accident" via
+/// one classification even when the OTHER classification's wiring is
+/// broken, exactly the false-confidence gap issue #3631 documents.
+/// What: `true` for `RestartTrigger::Unhealthy` (unchanged from the #1450
+/// fix) AND for a `RestartTrigger::ProcessExit` whose exit was NOT clean
+/// (`!status.success()`) — issue #3631's fix: a plain crash-loop is exactly
+/// as capable of recurring despite successful respawns as a wedge storm is,
+/// so it must feed the same non-resetting counter. `false` for a clean exit
+/// (supervision stops entirely before this matters) and for
+/// `RestartTrigger::RespawnFailed`, which already escalates correctly via
+/// `consecutive_failures` alone — that counter is never reset on this path
+/// because the `Ok` respawn arm is never reached, so folding it into the
+/// storm counter too would be redundant, not incorrect.
+/// Test: `is_restart_storm_trigger_*` in `supervisor_tests.rs`.
+fn is_restart_storm_trigger(trigger: &RestartTrigger) -> bool {
+    match trigger {
+        RestartTrigger::Unhealthy => true,
+        RestartTrigger::ProcessExit(status) => !status.success(),
+        RestartTrigger::RespawnFailed => false,
+    }
+}
+
+// ── Restart-storm prevention (#1450 HIGH follow-up; extended to plain
+//    process-exit crash loops by issue #3631) ───────────────────────────────
 //
 // A workload-deterministic wedge (the sidecar reliably wedges again shortly
 // after every respawn because the WORKLOAD — not the process — triggers the
 // stall) previously never escalated: `consecutive_failures` reset to 0 on
 // every successful respawn (the respawn *probe* itself succeeds), so the
 // detect(90s)→kill→backoff→reset→re-wedge cycle repeated forever without ever
-// tripping `max_restarts`. `consecutive_wedge_restarts` is a second counter,
+// tripping `max_restarts`. `consecutive_restart_storm` is a second counter,
 // tracked alongside `consecutive_failures` in `supervision_loop`, that is
 // reset ONLY after sustained real-world health — never by an ordinary
-// respawn-probe success. The two pure functions below implement its
-// reset/give-up decisions so that logic is unit-testable without driving the
-// full async supervision loop.
+// respawn-probe success. The #1450 fix wired only `RestartTrigger::Unhealthy`
+// into this counter; issue #3631 found that a `RestartTrigger::ProcessExit`
+// crash-loop (e.g. repeated `SIGKILL`) has the exact same shape — each
+// individual respawn's startup probe can succeed while the process keeps
+// dying moments later — and was left bumping only the resettable
+// `consecutive_failures` counter, so it could oscillate 0→1→0→1 forever and
+// NEVER trip `should_give_up`, for any `max_restarts`. `is_restart_storm_trigger`
+// now classifies both trigger kinds identically. The two pure functions below
+// implement the reset/give-up decisions so that logic is unit-testable
+// without driving the full async supervision loop.
 
-/// Decide whether the wedge-restart escalation counter should reset.
+/// Decide whether the restart-storm escalation counter should reset.
 ///
 /// Why: extracted as a pure function (no I/O, no locking, no `Instant::now()`
 /// call) so the reset decision is directly unit-testable.
-/// What: `true` iff a prior wedge-restart happened (`elapsed_since_last_wedge`
+/// What: `true` iff a prior storm-restart happened (`elapsed_since_last_restart`
 /// is `Some`) and at least `wedge_reset_secs` have elapsed since then. `None`
-/// (no prior wedge this supervision run) never resets — there is nothing to
-/// reset.
-/// Test: `wedge_counter_should_reset_*` in `supervisor_tests.rs`.
-fn wedge_counter_should_reset(
-    elapsed_since_last_wedge: Option<Duration>,
+/// (no prior storm-restart this supervision run) never resets — there is
+/// nothing to reset. Governs both the wedge-storm case (#1450) and the
+/// process-exit crash-loop case (#3631) — one shared reset window, since both
+/// represent the same underlying condition: sustained real-world health since
+/// the last forced restart.
+/// Test: `restart_storm_should_reset_*` in `supervisor_tests.rs`.
+fn restart_storm_should_reset(
+    elapsed_since_last_restart: Option<Duration>,
     wedge_reset_secs: u64,
 ) -> bool {
-    match elapsed_since_last_wedge {
+    match elapsed_since_last_restart {
         Some(elapsed) => elapsed >= Duration::from_secs(wedge_reset_secs),
         None => false,
     }
@@ -505,21 +569,22 @@ fn wedge_counter_should_reset(
 
 /// Decide whether the supervisor should give up (stop respawning).
 ///
-/// Why: extracted as a pure function so the "storm" ceiling check — which now
-/// considers TWO independent counters instead of one — is directly
-/// unit-testable. Either counter alone exceeding `max_restarts` is
-/// sufficient: an ordinary crash storm (`consecutive_failures`) or a wedge
-/// storm that keeps recurring despite each individual respawn's startup
-/// probe succeeding (`consecutive_wedge_restarts`).
-/// What: `consecutive_failures > max_restarts || consecutive_wedge_restarts >
+/// Why: extracted as a pure function so the "storm" ceiling check — which
+/// considers TWO independent counters — is directly unit-testable. Either
+/// counter alone exceeding `max_restarts` is sufficient: the respawn attempt
+/// itself repeatedly failing (`consecutive_failures`, e.g. `RespawnFailed` or
+/// a spawn/probe error), or a restart storm that keeps recurring despite each
+/// individual respawn succeeding (`consecutive_restart_storm` — covers both
+/// a wedge storm and, since issue #3631, a plain process-exit crash loop).
+/// What: `consecutive_failures > max_restarts || consecutive_restart_storm >
 /// max_restarts`.
 /// Test: `should_give_up_*` in `supervisor_tests.rs`.
 fn should_give_up(
     consecutive_failures: u32,
-    consecutive_wedge_restarts: u32,
+    consecutive_restart_storm: u32,
     max_restarts: u32,
 ) -> bool {
-    consecutive_failures > max_restarts || consecutive_wedge_restarts > max_restarts
+    consecutive_failures > max_restarts || consecutive_restart_storm > max_restarts
 }
 
 /// Background supervision loop.
@@ -541,14 +606,17 @@ fn should_give_up(
 /// and cleared to 0 when supervision terminates so RSS samplers stop sampling
 /// a dead PID.
 ///
-/// Restart-storm prevention (#1450 HIGH follow-up): `consecutive_wedge_restarts`
-/// tracks wedge-triggered restarts specifically and — unlike
-/// `consecutive_failures` — is NOT reset by an ordinary respawn-probe
-/// success; it only resets once `wedge_counter_should_reset` observes
-/// `config.wedge_reset_secs` of sustained health since the last wedge. Both
-/// counters feed `should_give_up` and both drive the exponential back-off, so
-/// a workload-deterministic wedge that recurs after every respawn eventually
-/// trips `max_restarts` instead of cycling forever at a 1s backoff.
+/// Restart-storm prevention (#1450 HIGH follow-up, extended to plain
+/// process-exit crash loops by issue #3631): `consecutive_restart_storm`
+/// tracks both wedge-triggered AND crash (`ProcessExit`) restarts — see
+/// `is_restart_storm_trigger` — and, unlike `consecutive_failures`, is NOT
+/// reset by an ordinary respawn-probe success; it only resets once
+/// `restart_storm_should_reset` observes `config.wedge_reset_secs` of
+/// sustained health since the last storm restart. Both counters feed
+/// `should_give_up` and both drive the exponential back-off, so a
+/// workload-deterministic wedge OR a plain crash-loop that recurs after every
+/// respawn eventually trips `max_restarts` instead of cycling forever at a 1s
+/// backoff.
 /// Test: `supervisor_restarts_on_crash`,
 /// `supervisor_intentional_shutdown_does_not_respawn`.
 /// Test-only iteration counter (issue #3023 regression test): bumped once per
@@ -580,8 +648,11 @@ async fn supervision_loop(
     gave_up_tx: watch::Sender<bool>,
 ) {
     let mut consecutive_failures: u32 = 0;
-    let mut consecutive_wedge_restarts: u32 = 0;
-    let mut last_wedge_restart_at: Option<tokio::time::Instant> = None;
+    // Non-resetting restart-storm counter (#1450 HIGH follow-up, extended to
+    // plain process-exit crash loops by issue #3631) — see
+    // `is_restart_storm_trigger` and `restart_storm_should_reset`.
+    let mut consecutive_restart_storm: u32 = 0;
+    let mut last_restart_storm_at: Option<tokio::time::Instant> = None;
     // Set once `shutdown_rx` observes its sender closed (issue #3023 HIGH):
     // `watch::Receiver::changed()` resolves `Ready(Err(_))` on every
     // subsequent poll once the sender drops without ever calling
@@ -595,19 +666,20 @@ async fn supervision_loop(
         #[cfg(test)]
         SUPERVISION_LOOP_ITERATIONS.fetch_add(1, AtomicOrdering::Relaxed);
 
-        // Reset the wedge-restart escalation counter once sustained health
-        // has been observed since the last wedge — see `wedge_counter_should_reset`.
-        if wedge_counter_should_reset(
-            last_wedge_restart_at.map(|t| t.elapsed()),
+        // Reset the restart-storm escalation counter once sustained health
+        // has been observed since the last storm restart (wedge OR
+        // process-exit crash, issue #3631) — see `restart_storm_should_reset`.
+        if restart_storm_should_reset(
+            last_restart_storm_at.map(|t| t.elapsed()),
             config.wedge_reset_secs,
         ) {
             tracing::info!(
-                "EmbedderSupervisor: {}s without a further wedge — resetting wedge-restart \
-                 escalation counter (was {consecutive_wedge_restarts})",
+                "EmbedderSupervisor: {}s without a further forced restart — resetting \
+                 restart-storm escalation counter (was {consecutive_restart_storm})",
                 config.wedge_reset_secs,
             );
-            consecutive_wedge_restarts = 0;
-            last_wedge_restart_at = None;
+            consecutive_restart_storm = 0;
+            last_restart_storm_at = None;
         }
 
         // Race the child actually exiting against the live client reporting
@@ -691,7 +763,12 @@ async fn supervision_loop(
             }
         };
 
-        let is_wedge_restart = matches!(trigger, RestartTrigger::Unhealthy);
+        // #3631 fix: classify BEFORE the match (which may `return` on a clean
+        // exit, in which case this value is simply unused) so both the
+        // `ProcessExit` and `Unhealthy` arms below escalate the same
+        // non-resetting restart-storm counter via the shared code after the
+        // match, instead of only `Unhealthy` doing so.
+        let is_storm_trigger = is_restart_storm_trigger(&trigger);
 
         match trigger {
             RestartTrigger::ProcessExit(exit_status) => {
@@ -703,22 +780,23 @@ async fn supervision_loop(
                     return;
                 }
                 tracing::warn!(
-                    "EmbedderSupervisor: sidecar exited with {:?} (failure #{}/{})",
+                    "EmbedderSupervisor: sidecar exited with {:?} (failure #{}/{}, \
+                     restart-storm #{}/{})",
                     exit_status.code(),
                     consecutive_failures + 1,
+                    config.max_restarts,
+                    consecutive_restart_storm + 1,
                     config.max_restarts,
                 );
             }
             RestartTrigger::Unhealthy => {
-                consecutive_wedge_restarts += 1;
-                last_wedge_restart_at = Some(tokio::time::Instant::now());
                 tracing::warn!(
                     "EmbedderSupervisor: sidecar client reported unhealthy (reader task \
                      died, or accumulating call timeouts indicate a wedged process) — \
-                     forcing restart (failure #{}/{}, wedge-restart #{}/{})",
+                     forcing restart (failure #{}/{}, restart-storm #{}/{})",
                     consecutive_failures + 1,
                     config.max_restarts,
-                    consecutive_wedge_restarts,
+                    consecutive_restart_storm + 1,
                     config.max_restarts,
                 );
                 // The process may still be running (that's the whole point of
@@ -747,22 +825,33 @@ async fn supervision_loop(
         }
 
         consecutive_failures += 1;
+        // #3631 fix: a restart-storm trigger (wedge OR process-exit crash)
+        // escalates a SECOND, non-resetting counter — unlike
+        // `consecutive_failures` above, this one survives a successful
+        // respawn (see the `Ok((new_child, new_client)) =>` arm below, which
+        // deliberately does NOT reset it) and only resets after
+        // `restart_storm_should_reset` observes sustained health.
+        if is_storm_trigger {
+            consecutive_restart_storm += 1;
+            last_restart_storm_at = Some(tokio::time::Instant::now());
+        }
 
         if should_give_up(
             consecutive_failures,
-            consecutive_wedge_restarts,
+            consecutive_restart_storm,
             config.max_restarts,
         ) {
             tracing::error!(
                 "EmbedderSupervisor: exceeded max_restarts={} ({}) — giving up. \
                  Set TRUSTY_EMBEDDERD_MAX_RESTARTS to increase the limit, or \
-                 TRUSTY_EMBEDDERD_WEDGE_RESET_SECS if wedges are recurring faster \
+                 TRUSTY_EMBEDDERD_WEDGE_RESET_SECS if the storm is recurring faster \
                  than the sustained-health reset window.",
                 config.max_restarts,
-                if consecutive_wedge_restarts > config.max_restarts {
-                    "wedge-restart storm — recurring despite successful respawns"
+                if consecutive_restart_storm > config.max_restarts {
+                    "restart storm — recurring (wedge stall or crash loop) despite \
+                     successful respawns"
                 } else {
-                    "process-exit crash storm"
+                    "respawn-attempt failure storm — the respawn itself keeps failing"
                 },
             );
             // PR #3560 HIGH fix: flip the one-way give-up signal so callers
@@ -780,11 +869,12 @@ async fn supervision_loop(
         }
 
         // Exponential back-off: 1s, 2s, 4s, …, capped at backoff_max_secs.
-        // A wedge-triggered restart backs off against its own (non-resetting)
-        // counter so a recurring wedge escalates delay across cycles instead
-        // of returning to 1s every time the respawn probe itself succeeds.
-        let backoff_attempt = if is_wedge_restart {
-            consecutive_wedge_restarts
+        // A storm-triggered restart (wedge OR process-exit crash, #3631)
+        // backs off against its own (non-resetting) counter so a recurring
+        // storm escalates delay across cycles instead of returning to 1s
+        // every time the respawn probe itself succeeds.
+        let backoff_attempt = if is_storm_trigger {
+            consecutive_restart_storm
         } else {
             consecutive_failures
         };
@@ -792,8 +882,8 @@ async fn supervision_loop(
         tracing::info!(
             "EmbedderSupervisor: restarting sidecar in {delay_secs}s (attempt \
              {consecutive_failures}{})",
-            if is_wedge_restart {
-                format!(", wedge-triggered, wedge-restart #{consecutive_wedge_restarts}")
+            if is_storm_trigger {
+                format!(", storm-triggered, restart-storm #{consecutive_restart_storm}")
             } else {
                 String::new()
             },
@@ -861,9 +951,13 @@ async fn supervision_loop(
                 child_pid_slot.store(new_pid, AtomicOrdering::Release);
 
                 // Reset the ordinary failure count — the new process is up.
-                // NOTE: `consecutive_wedge_restarts` is deliberately NOT reset
-                // here (see its doc comment and `wedge_counter_should_reset`)
-                // — only sustained real-world health resets it.
+                // NOTE: `consecutive_restart_storm` is deliberately NOT reset
+                // here (see its doc comment and `restart_storm_should_reset`)
+                // — only sustained real-world health resets it. This is the
+                // exact bug issue #3631 fixed: before that fix, a plain
+                // process-exit crash-loop had NO non-resetting counter at
+                // all, so `consecutive_failures` resetting here every time
+                // meant such a crash-loop could never trip `should_give_up`.
                 consecutive_failures = 0;
                 tracing::info!(
                     "EmbedderSupervisor: sidecar restarted successfully (pid={new_pid})"

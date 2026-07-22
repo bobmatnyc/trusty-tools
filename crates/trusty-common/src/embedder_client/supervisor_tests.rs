@@ -255,51 +255,54 @@ fn locate_binary_respects_explicit_override() {
     }
 }
 
-// ── Wedge-restart-storm prevention (#1450 HIGH follow-up) ──────────────
+// ── Restart-storm prevention (#1450 HIGH follow-up; extended to plain
+//    process-exit crash loops by issue #3631) ────────────────────────────
 //
-// `wedge_counter_should_reset` and `should_give_up` are pure functions
-// (no async, no I/O) — the async supervision loop itself is exercised only
-// by the ignored real-binary e2e tests, so this logic is unit-tested
-// directly here per the review guidance ("test the counter logic as a pure
-// function if the async path is hard to drive").
+// `restart_storm_should_reset`, `should_give_up`, and `is_restart_storm_trigger`
+// are pure functions (no async, no I/O) — the async supervision loop itself
+// is exercised only by the real-process tests further down (plus the
+// ignored real-binary e2e tests), so this logic is unit-tested directly
+// here per the review guidance ("test the counter logic as a pure function
+// if the async path is hard to drive").
 
 #[test]
-fn wedge_counter_should_reset_none_never_resets() {
-    // Why: no prior wedge this run — nothing to reset.
-    // What: `elapsed_since_last_wedge = None` → always false regardless of
+fn restart_storm_should_reset_none_never_resets() {
+    // Why: no prior storm restart this run — nothing to reset.
+    // What: `elapsed_since_last_restart = None` → always false regardless of
     // the configured window.
     // Test: this test.
-    assert!(!wedge_counter_should_reset(None, 300));
-    assert!(!wedge_counter_should_reset(None, 0));
+    assert!(!restart_storm_should_reset(None, 300));
+    assert!(!restart_storm_should_reset(None, 0));
 }
 
 #[test]
-fn wedge_counter_should_reset_before_window_stays_escalated() {
-    // Why: a wedge that recurs before the sustained-health window elapses
-    // must NOT reset — that is exactly the storm case this fix targets.
+fn restart_storm_should_reset_before_window_stays_escalated() {
+    // Why: a storm restart that recurs before the sustained-health window
+    // elapses must NOT reset — that is exactly the storm case this fix
+    // targets.
     // What: elapsed < wedge_reset_secs → false.
     // Test: this test.
-    assert!(!wedge_counter_should_reset(
+    assert!(!restart_storm_should_reset(
         Some(Duration::from_secs(299)),
         300
     ));
-    assert!(!wedge_counter_should_reset(
+    assert!(!restart_storm_should_reset(
         Some(Duration::from_secs(0)),
         300
     ));
 }
 
 #[test]
-fn wedge_counter_should_reset_after_window_resets() {
+fn restart_storm_should_reset_after_window_resets() {
     // Why: sustained health for the configured window is the ONLY way the
     // counter resets (never an ordinary respawn-probe success).
     // What: elapsed >= wedge_reset_secs → true, at and beyond the boundary.
     // Test: this test.
-    assert!(wedge_counter_should_reset(
+    assert!(restart_storm_should_reset(
         Some(Duration::from_secs(300)),
         300
     ));
-    assert!(wedge_counter_should_reset(
+    assert!(restart_storm_should_reset(
         Some(Duration::from_secs(301)),
         300
     ));
@@ -325,14 +328,15 @@ fn should_give_up_crash_storm_trips_ceiling() {
 }
 
 #[test]
-fn should_give_up_wedge_storm_trips_ceiling_even_with_failures_reset() {
+fn should_give_up_restart_storm_trips_ceiling_even_with_failures_reset() {
     // Why: THIS is the restart-storm fix under test — a workload-
-    // deterministic wedge where every individual respawn probe succeeds
-    // (so `consecutive_failures` is reset to 0 each cycle by the caller)
-    // must still eventually give up once `consecutive_wedge_restarts`
-    // climbs past `max_restarts`.
+    // deterministic wedge, OR (since issue #3631) a plain process-exit
+    // crash loop, where every individual respawn probe succeeds (so
+    // `consecutive_failures` is reset to 0 each cycle by the caller) must
+    // still eventually give up once `consecutive_restart_storm` climbs past
+    // `max_restarts`.
     // What: consecutive_failures=0 (just reset by a successful respawn),
-    // consecutive_wedge_restarts=6 > max_restarts=5 → true.
+    // consecutive_restart_storm=6 > max_restarts=5 → true.
     // Test: this test.
     assert!(should_give_up(0, 6, 5));
 }
@@ -340,11 +344,68 @@ fn should_give_up_wedge_storm_trips_ceiling_even_with_failures_reset() {
 #[test]
 fn should_give_up_at_boundary_does_not_trip() {
     // Why: the ceiling is `> max_restarts`, not `>=` — exactly
-    // `max_restarts` consecutive failures/wedges is still tolerated (matches
-    // the pre-existing crash-storm semantics).
+    // `max_restarts` consecutive failures/storm-restarts is still tolerated
+    // (matches the pre-existing crash-storm semantics).
     // What: both counters exactly at max_restarts → false.
     // Test: this test.
     assert!(!should_give_up(5, 5, 5));
+}
+
+// ── `is_restart_storm_trigger` classification (issue #3631 fix) ────────
+
+#[test]
+fn is_restart_storm_trigger_unhealthy_is_storm() {
+    // Why: unchanged from the #1450 fix — an `Unhealthy` signal always
+    // represents a forced restart that must feed the non-resetting counter.
+    // What: `RestartTrigger::Unhealthy` → true.
+    // Test: this test.
+    assert!(is_restart_storm_trigger(&RestartTrigger::Unhealthy));
+}
+
+#[test]
+fn is_restart_storm_trigger_process_exit_failure_is_storm() {
+    // Why: THIS is the exact issue #3631 fix — a failing process exit (e.g.
+    // a `SIGKILL`) must now ALSO feed the non-resetting storm counter,
+    // unlike before this fix where it only bumped the resettable
+    // `consecutive_failures`.
+    // What: `RestartTrigger::ProcessExit` with a non-zero/signal exit status
+    // → true. Constructs a real `ExitStatus` via `ExitStatusExt::from_raw`
+    // (stable on Unix) rather than running a process — deterministic, no
+    // I/O, no OS-level race.
+    // Test: this test.
+    use std::os::unix::process::ExitStatusExt;
+    let killed = std::process::ExitStatus::from_raw(9);
+    assert!(!killed.success(), "raw status 9 must not report success()");
+    assert!(is_restart_storm_trigger(&RestartTrigger::ProcessExit(
+        killed
+    )));
+}
+
+#[test]
+fn is_restart_storm_trigger_process_exit_clean_is_not_storm() {
+    // Why: a clean exit stops supervision entirely before `should_give_up`
+    // is ever consulted — but the classification itself must still be
+    // correct (false), not merely unreachable, since it is unit-tested in
+    // isolation from `supervision_loop`'s control flow here.
+    // What: `RestartTrigger::ProcessExit` with a zero exit status → false.
+    // Test: this test.
+    use std::os::unix::process::ExitStatusExt;
+    let clean = std::process::ExitStatus::from_raw(0);
+    assert!(clean.success(), "raw status 0 must report success()");
+    assert!(!is_restart_storm_trigger(&RestartTrigger::ProcessExit(
+        clean
+    )));
+}
+
+#[test]
+fn is_restart_storm_trigger_respawn_failed_is_not_storm() {
+    // Why: `RespawnFailed` already escalates correctly via
+    // `consecutive_failures` alone (never reset on this path, since the `Ok`
+    // respawn arm is never reached) — folding it into the storm counter too
+    // would be redundant, not a correctness requirement.
+    // What: `RestartTrigger::RespawnFailed` → false.
+    // Test: this test.
+    assert!(!is_restart_storm_trigger(&RestartTrigger::RespawnFailed));
 }
 
 // ── Cooperative shutdown (issue #2979) ──────────────────────────────────
@@ -388,6 +449,60 @@ mod shutdown_tests {
         std::fs::write(
             &path,
             r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  [ -n "$id" ] || id=1
+  printf '{"jsonrpc":"2.0","result":{"embeddings":[[0.1]]},"id":%s}\n' "$id"
+done
+"#,
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
+    /// Like `write_mock_embedderd`, but backgrounds a detached `sleep` job
+    /// that inherits (and so keeps open) this process's stdout file
+    /// descriptor before entering its read loop.
+    ///
+    /// Why (issue #3631 deterministic reproduction): `EmbedderSupervisor`'s
+    /// `supervision_loop` races `child.wait()` against the live client's
+    /// reader task noticing stdout EOF (`unhealthy_signal`). Killing an
+    /// ordinary mock (`write_mock_embedderd`) with `kill -9` closes its
+    /// stdout immediately, so which future resolves first — SIGCHLD-driven
+    /// process reaping, or the reader task's next `read()` returning 0 bytes
+    /// — is a genuine OS/tokio-scheduler race with NO portable, deterministic
+    /// outcome (empirically this race can go either way depending on
+    /// environment — see this module's #3631 fix note). A test built on that
+    /// race cannot reliably prove the `ProcessExit`-specific escalation path
+    /// this fix adds: it would sometimes "pass" pre-fix purely by accident
+    /// (via the already-correct `Unhealthy` counter), exactly the false
+    /// confidence issue #3631 documents in
+    /// `supervisor_gives_up_after_max_restarts_flips_has_given_up`. This mock
+    /// closes that race: the backgrounded `sleep` job inherits fd 1 (stdout)
+    /// from the shell script and is NOT itself targeted by a `kill -9` of the
+    /// script's own PID (SIGKILL is delivered to exactly the PID named, not
+    /// its children), so it keeps the pipe's write end open as an orphan
+    /// after the script dies. The reader task's next read simply blocks (no
+    /// data, no EOF) instead of ever observing end-of-stream, so
+    /// `unhealthy_signal` can never fire from this kill — `child.wait()` is
+    /// the ONLY signal `supervision_loop` can observe, guaranteeing a pure,
+    /// deterministic `RestartTrigger::ProcessExit` classification every time.
+    /// What: identical wire protocol to `write_mock_embedderd` (answers
+    /// forever), preceded by `sleep 20 &` to fork the pipe-holding orphan.
+    /// The 20s bound self-terminates the orphan well after any test using
+    /// this mock has finished.
+    /// Test: `supervisor_process_exit_crash_loop_reaches_give_up`,
+    /// `supervisor_single_transient_crash_then_health_does_not_give_up`.
+    fn write_mock_embedderd_pipe_survives_kill() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd-pipe-survives-kill.sh");
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+sleep 20 &
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
   [ -n "$id" ] || id=1
@@ -918,5 +1033,154 @@ exit 1
             "an intentional cooperative shutdown must never set terminated_signal"
         );
         assert_eq!(pid_slot.load(Ordering::Acquire), 0);
+    }
+
+    /// Reproduces issue #3631: a sidecar that keeps getting killed, but whose
+    /// EVERY individual respawn's startup probe succeeds, must still
+    /// eventually reach give-up — not oscillate `consecutive_failures`
+    /// 0→1→0→1 forever.
+    ///
+    /// Why: the existing `supervisor_gives_up_after_max_restarts_flips_has_given_up`
+    /// test above uses `write_mock_embedderd_crash_once`, a mock that
+    /// self-exits right after answering its own startup probe. Issue #3631's
+    /// investigation found that self-exit reaches give-up only by
+    /// *accidentally* racing the reader task's pipe-EOF detection into an
+    /// `Unhealthy` classification (which already used the non-resetting
+    /// wedge counter) — a race that does not hold for a real external
+    /// `SIGKILL`: `child.wait()`'s SIGCHLD-driven resolution reliably beats
+    /// the reader task noticing EOF, so an externally killed process is
+    /// classified `RestartTrigger::ProcessExit` every time (verified
+    /// empirically against real hardware in the issue). Before the #3631
+    /// fix, `ProcessExit` only bumped the resettable `consecutive_failures`
+    /// counter, which reset to 0 the instant each respawn's startup probe
+    /// succeeded (supervisor.rs, the `Ok((new_child, new_client)) =>` arm) —
+    /// so THIS test (repeated external `kill -9`, never a self-exit) never
+    /// reached give-up and timed out against unfixed `origin/main` (see PR
+    /// body for the pre-fix failing run). After the fix, `ProcessExit` also
+    /// escalates the non-resetting restart-storm counter, so give-up is
+    /// reached deterministically instead of by accident.
+    /// What: spawns the idling mock (`write_mock_embedderd`, answers forever,
+    /// never self-exits), then repeatedly polls `pid_slot` for a fresh
+    /// non-zero PID and immediately `kill -9`s it — with `backoff_max_secs:
+    /// 0` (near-instant respawns) and `wedge_reset_secs: 3600` (the
+    /// sustained-health reset window can never fire mid-test) so the only
+    /// way this test can pass is via the crash-loop escalation path itself.
+    /// Asserts `has_given_up()` flips within a bounded timeout.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_process_exit_crash_loop_reaches_give_up() {
+        let (_dir, binary) = write_mock_embedderd_pipe_survives_kill();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 0,
+            max_restarts: 2,
+            wedge_reset_secs: 3600,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        let handle = supervisor.start_supervisor_task();
+
+        let gave_up = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut last_killed_pid = 0u32;
+            loop {
+                if handle.has_given_up() {
+                    return;
+                }
+                let pid = pid_slot.load(Ordering::Acquire);
+                if pid != 0 && pid != last_killed_pid {
+                    last_killed_pid = pid;
+                    std::process::Command::new("kill")
+                        .args(["-9", &pid.to_string()])
+                        .status()
+                        .expect("kill -9 mock child");
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+
+        assert!(
+            gave_up.is_ok(),
+            "has_given_up() never flipped within 30s of a repeated external \
+             SIGKILL crash loop (max_restarts=2) where each individual \
+             respawn's startup probe succeeds — this reproduces issue \
+             #3631's oscillating consecutive_failures bug if the fix \
+             regresses"
+        );
+    }
+
+    /// Guards against over-correcting #3631's fix: a single transient
+    /// `ProcessExit`, followed by sustained health for the full
+    /// `wedge_reset_secs` window, must NOT trip give-up — only a *sustained*
+    /// crash-loop should.
+    ///
+    /// Why: the fix for #3631 makes `ProcessExit` feed the same
+    /// non-resetting restart-storm counter as `Unhealthy` restarts. Without
+    /// this test, a regression that forgot the sustained-health reset
+    /// condition (e.g. making the counter never reset at all) would make
+    /// every sidecar permanently one crash away from a false give-up,
+    /// defeating the entire point of automatic respawn.
+    /// What: a short `wedge_reset_secs` (1s) so the test itself stays fast.
+    /// Kills the mock exactly once, confirms it respawns (a fresh non-zero
+    /// PID), then waits comfortably longer than `wedge_reset_secs` and
+    /// asserts `has_given_up()` is still `false` — proving the one-off kill
+    /// did not accumulate toward the ceiling.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_single_transient_crash_then_health_does_not_give_up() {
+        let (_dir, binary) = write_mock_embedderd_pipe_survives_kill();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 0,
+            max_restarts: 1,
+            wedge_reset_secs: 1,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, _client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        let handle = supervisor.start_supervisor_task();
+
+        std::process::Command::new("kill")
+            .args(["-9", &initial_pid.to_string()])
+            .status()
+            .expect("kill -9 mock child");
+
+        // Condition-based wait for the respawn to complete (fresh non-zero
+        // PID), not a fixed sleep-and-hope.
+        let respawned = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let pid = pid_slot.load(Ordering::Acquire);
+                if pid != 0 && pid != initial_pid {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            respawned.is_ok(),
+            "supervisor never respawned after the single kill within 10s"
+        );
+
+        // Sit past the sustained-health reset window (1s) comfortably —
+        // long enough that a correctly-implemented fix has reset the
+        // restart-storm counter, but short enough to keep the test fast.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        assert!(
+            !handle.has_given_up(),
+            "a single transient crash followed by sustained health past \
+             wedge_reset_secs must NOT trip give-up — only a sustained \
+             crash-loop should"
+        );
     }
 }
