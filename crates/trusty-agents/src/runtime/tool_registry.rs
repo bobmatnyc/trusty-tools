@@ -164,8 +164,8 @@ pub(super) fn wants_ticketing_tools(tools: &crate::agents::ToolsConfig) -> bool 
 /// registry into existence for agents that legitimately have none.
 /// What: true iff `[tools] ast_native` (either TOML spelling) or the
 /// process-wide `--ast-native` override (#348) is set.
-/// Test: `bundled_engineer_declares_the_ast_native_flag`,
-/// `ast_bundle_predicate_is_false_without_the_flag`.
+/// Test: `engineer_registry_includes_ast_bundle_when_declared` (asserts the
+/// bundled engineer config sets the flag), `ast_bundle_predicate_is_false_without_the_flag`.
 pub(super) fn wants_ast_bundle(tools: &crate::agents::ToolsConfig) -> bool {
     tools.effective_ast_native() || crate::ast::is_ast_native_overridden()
 }
