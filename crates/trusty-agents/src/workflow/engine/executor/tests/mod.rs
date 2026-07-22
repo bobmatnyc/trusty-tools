@@ -27,6 +27,7 @@ pub(crate) use crate::workflow::engine::helpers::reconcile_code_outputs_against;
 pub(crate) use crate::workflow::engine::step_dispatch::discover_project_dir;
 
 mod checkpoint_resume;
+mod parallel_merge;
 mod phase_order;
 mod relocate;
 mod retry;
