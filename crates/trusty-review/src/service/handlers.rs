@@ -15,6 +15,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
@@ -199,15 +200,51 @@ pub struct DepStatus {
 /// Per-dependency info node.
 ///
 /// Why: provides `required` alongside `reachable` so consumers know the
-/// severity of a `false` without reading the docs.
-/// What: `required` is hardcoded per dep; `reachable` is a non-blocking probe.
-/// Test: verified in `health_returns_ok_json`.
+/// severity of a `false` without reading the docs.  `state` (#3658) adds a
+/// tri-state view so a caller can distinguish "confirmed down" from "probe
+/// timed out" — a slow-but-up dependency is operationally different from a
+/// hard-down one, but both previously collapsed into `reachable: false`.
+/// What: `required` is hardcoded per dep; `reachable` and `state` come from a
+/// single bounded probe (see `bounded_probe`).  `reachable` is kept for
+/// backward compatibility with existing consumers (`true` iff `state == Ok`).
+/// Test: verified in `health_returns_ok_json`,
+/// `health_stalled_dep_returns_timeout_state`.
 #[derive(Debug, Serialize)]
 pub struct DepInfo {
     /// Whether this dep is required for the service to function.
     pub required: bool,
     /// Whether the dep responded to a liveness probe at last check.
+    /// `true` iff `state == DepState::Ok`.  Kept for back-compat: existing
+    /// consumers gate on this single boolean field (#3658 is additive).
     pub reachable: bool,
+    /// Tri-state probe result: `ok`, `unreachable`, or `timeout` (#3658).
+    pub state: DepState,
+}
+
+/// Tri-state outcome of a single bounded dependency probe (#3658).
+///
+/// Why: post-#722 the dep probe correctly reported reachability, but a slow
+/// (not down) dependency and a hard-down dependency both collapsed into
+/// `reachable: false`, with no bound on how long the probe could take. This
+/// type distinguishes "probe returned an error / unhealthy response"
+/// (`Unreachable`) from "probe did not complete within the internal deadline"
+/// (`Timeout`), so operators can tell "trusty-search is down" apart from
+/// "trusty-search is just slow right now".
+/// What: serialises as a lowercase string (`"ok"`, `"unreachable"`,
+/// `"timeout"`) via `#[serde(rename_all = "snake_case")]`.
+/// Test: `dep_state_serialises_lowercase`, `bounded_probe_*` in
+/// `handlers_tests.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DepState {
+    /// Probe completed within the deadline and reported a healthy dependency.
+    Ok,
+    /// Probe completed within the deadline but reported an error or an
+    /// unhealthy response (e.g. embedder not ready).
+    Unreachable,
+    /// Probe did not complete within `dep_probe_timeout()` — the dependency
+    /// is slow, not necessarily down.
+    Timeout,
 }
 
 /// Response body for GET /status.
@@ -302,6 +339,119 @@ pub fn compute_status(inference: InferenceStatus, deps: &DepStatus) -> &'static 
     }
 }
 
+// ─── Bounded dependency probing (#3658) ───────────────────────────────────────
+
+/// Return the per-dependency-probe hard timeout, consulting
+/// `TRUSTY_REVIEW_DEP_PROBE_TIMEOUT_SECS`.
+///
+/// Why: #3658 — the trusty-search/trusty-analyze reachability probes in
+/// `handle_health` previously had no internal bound.  A slow (not down)
+/// dependency could hang the whole health handler indefinitely, because the
+/// only bound was each client's own HTTP-transport timeout (30 s for search,
+/// 5 s for analyze) — far longer than any reasonable caller deadline.  This
+/// timeout is deliberately short (default 2 s) and fully decoupled from those
+/// client-level timeouts so `/health` always answers promptly regardless of
+/// dependency latency.
+/// What: reads `TRUSTY_REVIEW_DEP_PROBE_TIMEOUT_SECS` from the environment;
+/// parses as `u64` seconds; falls back to `DEFAULT_DEP_PROBE_TIMEOUT_SECS` (2)
+/// on any parse failure, unset variable, or a value of 0 (to prevent an
+/// accidentally-zero timeout from making every probe report `timeout`).
+/// Test: `dep_probe_timeout_default`, `dep_probe_timeout_env_override`,
+/// `dep_probe_timeout_env_invalid_falls_back`,
+/// `dep_probe_timeout_env_zero_falls_back` in `handlers_tests.rs`.
+pub(crate) fn dep_probe_timeout() -> Duration {
+    const DEFAULT_DEP_PROBE_TIMEOUT_SECS: u64 = 2;
+    const ENV_VAR: &str = "TRUSTY_REVIEW_DEP_PROBE_TIMEOUT_SECS";
+
+    let secs = std::env::var(ENV_VAR)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(DEFAULT_DEP_PROBE_TIMEOUT_SECS);
+
+    Duration::from_secs(secs)
+}
+
+/// Run a single dependency probe future under a strict internal deadline.
+///
+/// Why: centralises the "wrap in `tokio::time::timeout`, map the outcome to a
+/// `DepState`" logic so both `handle_health` and the MCP `review_health` tool
+/// get the same bounded-latency guarantee (#3658) instead of duplicating it.
+/// What: awaits `fut` under `tokio::time::timeout(timeout, fut)`.  A
+/// completed `Ok(v)` is passed to `is_healthy` to decide `DepState::Ok` vs
+/// `DepState::Unreachable`; a completed `Err(_)` is `DepState::Unreachable`;
+/// an elapsed deadline is `DepState::Timeout` — deliberately distinct from
+/// `Unreachable` so a slow-but-up dependency is never reported as hard-down.
+/// Test: `bounded_probe_ok_on_healthy_response`,
+/// `bounded_probe_unreachable_on_error`,
+/// `bounded_probe_unreachable_on_unhealthy_response`,
+/// `bounded_probe_timeout_on_stalled_future` in `handlers_tests.rs`.
+async fn bounded_probe<Fut, T, E>(
+    fut: Fut,
+    timeout: Duration,
+    is_healthy: impl FnOnce(T) -> bool,
+) -> DepState
+where
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(v)) => {
+            if is_healthy(v) {
+                DepState::Ok
+            } else {
+                DepState::Unreachable
+            }
+        }
+        Ok(Err(_)) => DepState::Unreachable,
+        Err(_elapsed) => DepState::Timeout,
+    }
+}
+
+/// Probe trusty-search and trusty-analyze reachability concurrently, each
+/// bounded by `dep_probe_timeout()` (#3658).
+///
+/// Why: shared by the HTTP `/health` handler and the MCP `review_health` tool
+/// so both paths get the same bounded-latency guarantee and the same
+/// tri-state dep status, instead of each duplicating an unbounded sequential
+/// probe.  Probing concurrently (via `tokio::join!`) — rather than
+/// sequentially — bounds the total dep-probe latency to `dep_probe_timeout()`
+/// regardless of how many deps are probed or how slow each one is, per the
+/// issue's requirement that overall `/health` latency stay bounded (~2 s
+/// worst case) independent of every dependency.
+/// What: runs `state.search.health()` and (if configured)
+/// `state.analyze.health()` concurrently, each wrapped in `bounded_probe`;
+/// returns the fully-populated `DepStatus`.  An unconfigured `analyze` client
+/// is reported as `DepState::Unreachable` (unchanged back-compat behaviour:
+/// `reachable: false`).
+/// Test: `health_stalled_dep_returns_timeout_state`,
+/// `health_fast_dep_healthy_path_unchanged`,
+/// `health_hard_down_dep_reachable_false` in `handlers_tests.rs`.
+pub async fn probe_deps(state: &AppState) -> DepStatus {
+    let timeout = dep_probe_timeout();
+
+    let search_probe = bounded_probe(state.search.health(), timeout, |r| r.is_healthy());
+    let analyze_probe = async {
+        match &state.analyze {
+            Some(a) => bounded_probe(a.health(), timeout, |_| true).await,
+            None => DepState::Unreachable,
+        }
+    };
+    let (search_state, analyze_state) = tokio::join!(search_probe, analyze_probe);
+
+    DepStatus {
+        trusty_search: DepInfo {
+            required: true,
+            reachable: search_state == DepState::Ok,
+            state: search_state,
+        },
+        trusty_analyze: DepInfo {
+            required: false,
+            reachable: analyze_state == DepState::Ok,
+            state: analyze_state,
+        },
+    }
+}
+
 // ─── Route handlers ───────────────────────────────────────────────────────────
 
 /// GET /health — liveness, dependency reachability, and inference probe.
@@ -309,28 +459,28 @@ pub fn compute_status(inference: InferenceStatus, deps: &DepStatus) -> &'static 
 /// Why: required by load balancers and orchestrators to determine whether this
 /// instance is ready to handle traffic.  MPM uses the `inference` field to
 /// gate whether to attempt a `review_pr` call (closes #719).
-/// What: performs non-blocking health probes against trusty-search and
-/// trusty-analyze (both via `.health()` on the trait objects); runs the cached
-/// inference-reachability probe (10 s TTL, timeout configurable via
+/// What: performs bounded, concurrent health probes against trusty-search and
+/// trusty-analyze via `probe_deps` (each capped at `dep_probe_timeout()`,
+/// default 2 s, decoupled from any client's own HTTP timeout — #3658); runs
+/// the cached inference-reachability probe (10 s TTL, timeout configurable via
 /// `TRUSTY_REVIEW_HEALTH_TIMEOUT_SECS`, default 10 s — see #739) against the
 /// configured LLM provider; returns JSON with dep status, reviewer model, and
 /// inference result.  HTTP 200 always (degraded state is noted in the body,
 /// not via 5xx, to avoid false-positive load-balancer evictions).  When
 /// inference is `"unreachable"` or `"auth_error"` OR a required dep is
-/// unreachable, `status` becomes `"degraded"`.  A probe timeout returns
-/// `"unknown"` (not `"degraded"`) so a slow Bedrock cold-start does not
-/// falsely degrade status (#739).
+/// unreachable, `status` becomes `"degraded"`.  An inference probe timeout
+/// returns `"unknown"` (not `"degraded"`) so a slow Bedrock cold-start does not
+/// falsely degrade status (#739); a dep probe timeout reports
+/// `deps.trusty_search.state: "timeout"` with `reachable: false` (#3658).
 /// Test: `health_inference_ok_when_llm_ok`,
 /// `health_inference_auth_error_sets_degraded`,
 /// `health_required_dep_down_sets_degraded`,
-/// `health_optional_dep_down_stays_ok`.
+/// `health_optional_dep_down_stays_ok`,
+/// `health_stalled_dep_returns_timeout_state`.
 pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
-    // Non-blocking dep probes — treat errors as "unreachable".
-    let search_reachable = state.search.health().await.is_ok_and(|r| r.is_healthy());
-    let analyze_reachable = match &state.analyze {
-        Some(a) => a.health().await.is_ok(),
-        None => false,
-    };
+    // Bounded, concurrent dep probes (#3658) — total latency capped at
+    // `dep_probe_timeout()` regardless of dep count or individual slowness.
+    let deps = probe_deps(&state).await;
 
     // Cached inference-reachability probe (#719).
     let reviewer_model = state.config.role_models.reviewer.model.clone();
@@ -338,17 +488,6 @@ pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
         .inference_probe
         .probe(&state.llm, &reviewer_model)
         .await;
-
-    let deps = DepStatus {
-        trusty_search: DepInfo {
-            required: true,
-            reachable: search_reachable,
-        },
-        trusty_analyze: DepInfo {
-            required: false,
-            reachable: analyze_reachable,
-        },
-    };
 
     // #722: status is "degraded" when inference fails OR any required dep is down.
     let status = compute_status(inference, &deps);
