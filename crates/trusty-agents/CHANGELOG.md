@@ -167,10 +167,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `safe.directory` "dubious ownership" refusal, a stale `GIT_DIR`) produced
   empty stdout, which the marker scan then read as a clean merge, and the
   resolver wrote a zero-byte file over both sub-agents' work. Exit status is
-  now classified explicitly via `classify_merge_status`, a git failure
+  now decided explicitly by the pure `decide_merge_bytes`, a git failure
   degrades to first-agent-wins instead of to an empty file, and byte-identical
   versions short-circuit before git is spawned at all — so merging N copies of
   the same file is a true no-op regardless of the ambient git environment.
+- **The same zero-byte truncation on the LLM resolution path — the *default*
+  production path — is fixed (#3652 follow-up, review of #3653):**
+  `llm_resolve` did `resp["choices"][0]["message"]["content"].as_str()
+  .unwrap_or("")`. `reqwest`'s `send()` does not error on 4xx/5xx (that needs
+  `error_for_status()`), and OpenRouter's error payload is well-formed JSON,
+  so an expired key (401), a rate limit (429), an out-of-credits 402, or an
+  empty `choices` array all parsed cleanly, extracted to `""`, and were
+  written over both agents' work. This branch runs whenever an OpenRouter key
+  is configured — which `executor::dispatch` resolves by default — so every
+  genuine conflict went through it, and its triggers are routine. It also had
+  zero test coverage, because the existing tests passed an empty API key
+  specifically to disable it. `llm_resolve` now calls `error_for_status()?`
+  and parses through `extract_llm_content`, which requires a non-blank
+  `content` string and returns `Err` otherwise, so the caller degrades to a
+  real version. Regression tests drive a local HTTP stub through 401/402/429/
+  500 and a 200-with-no-choices.
+- **The non-empty invariant is now enforced structurally at one seam rather
+  than trusted per branch:** `resolve_conflict` routes every branch's result
+  through the pure `enforce_non_empty`, which rejects an empty resolution for
+  non-empty input and degrades to the first agent's full version. A future
+  resolution path therefore cannot truncate a file even if it forgets the
+  rule. Genuinely empty agent output is still passed through unchanged.
+- **Degraded conflict resolution is no longer reported as a successful merge
+  (review of #3653):** `merge()` stamped `[MERGED from a+b]` and counted
+  `Conflicts resolved: N` identically whether the bytes came from a real
+  structural merge, an LLM merge, or first-agent-wins after git or the LLM
+  failed — and that report is the only channel downstream phases read
+  (`executor::dispatch` appends it to the phase's `AgentOutput`; the
+  `tracing::warn!` goes to a log nobody downstream reads). Resolution mode is
+  now recorded per file and rendered distinctly — `[MERGED from a+b]`,
+  `[LLM-MERGED from a+b]`, `[DEGRADED from a+b] … kept 'a', discarded the
+  rest (reason)` — the summary splits into `conflicts: N (merged: X,
+  degraded: Y)`, and any degradation puts a `!! DEGRADED` block at the top of
+  the report. Report line ordering is now sorted, so it is reproducible
+  across runs despite `HashMap` iteration order.
 - **Flaky `HOME`-race unit tests in `skills::sources::tests` fixed (#3607):**
   `remote_git_without_subdir_uses_cache_dir_directly` and its siblings
   `remote_git_cache_path_computed_correctly` /
