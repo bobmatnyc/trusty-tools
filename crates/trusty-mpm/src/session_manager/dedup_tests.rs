@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use chrono::{Duration, Utc};
 use tempfile::TempDir;
 
-use super::dedup::{is_resolved_existing, plan_dedup};
+use super::dedup::{is_resolved_existing, plan_dedup, plan_workspace_duplicates};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::tests::FakeTmuxDriver;
 use crate::session_manager::SessionManager;
@@ -595,5 +595,368 @@ async fn reconcile_dedup_skips_live_group() {
         mgr.get(&stale_id).await.unwrap().state,
         ManagedSessionState::Decommissioned,
         "a group with a live member must NOT be deduped"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `plan_workspace_duplicates` — exact-workspace_path collapsing (#3396).
+// ---------------------------------------------------------------------
+
+/// Mark a record built via [`rec`] as SM-owned (the workspace was
+/// provisioned by the SM itself, e.g. via clone).
+fn owned(mut r: SessionRecord) -> SessionRecord {
+    r.workspace_owned = true;
+    r
+}
+
+/// THE #3396 regression case: two non-`Decommissioned` records resolve to
+/// the LITERAL SAME existing workspace directory. One's `tmux_name` is live,
+/// the other's is not (its tmux session was renamed/replaced out from under
+/// it). `plan_dedup` alone (proven by `plan_dedup_live_group_untouched`
+/// above, whose live-group guard skips the WHOLE group when ANY member is
+/// live) would never collapse this — that is exactly why the duplicate
+/// persisted in #3396. `plan_workspace_duplicates` must recognise "same
+/// literal path" as unambiguous and decommission the dead sibling while
+/// keeping the live one.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_collapses_dead_sibling_of_live_record() {
+    let dir = TempDir::new().unwrap();
+    let live = rec(
+        "tm-tcode-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Active,
+        1,
+    );
+    let stale = rec(
+        "tm-tm-tcode-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        50, // more recently "active" per the record, but must not matter —
+            // the live tmux_name always wins over recency.
+    );
+    let live_id = live.id;
+    let stale_id = stale.id;
+    let mut live_names = HashSet::new();
+    live_names.insert("tm-tcode-01".to_string());
+
+    let losers = plan_workspace_duplicates(&[live, stale], &live_names);
+    assert_eq!(
+        losers,
+        vec![stale_id],
+        "the dead-tmux_name sibling at the same literal path must be the loser"
+    );
+    assert!(!losers.contains(&live_id), "the live record must survive");
+}
+
+/// Two records at the same literal path, NEITHER currently live: the most
+/// recently active/created one survives (mirrors `plan_dedup`'s /unknown
+/// tie-break), the other is the loser.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_picks_most_recent_when_none_live() {
+    let dir = TempDir::new().unwrap();
+    let older = rec(
+        "tm-proj-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        1,
+    );
+    let newer = rec(
+        "tm-proj-02",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        99,
+    );
+    let older_id = older.id;
+    let newer_id = newer.id;
+
+    let losers = plan_workspace_duplicates(&[older, newer], &HashSet::new());
+    assert_eq!(losers, vec![older_id], "the older record must be the loser");
+    assert!(!losers.contains(&newer_id));
+}
+
+/// Two records at the same literal path, BOTH currently live: genuinely
+/// ambiguous (two live panes in one directory) — must NOT auto-collapse,
+/// since guessing a survivor risks tearing down a real, active session.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_leaves_two_live_records_untouched() {
+    let dir = TempDir::new().unwrap();
+    let a = rec(
+        "tm-proj-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Active,
+        1,
+    );
+    let b = rec(
+        "tm-proj-02",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Active,
+        99,
+    );
+    let mut live_names = HashSet::new();
+    live_names.insert("tm-proj-01".to_string());
+    live_names.insert("tm-proj-02".to_string());
+
+    let losers = plan_workspace_duplicates(&[a, b], &live_names);
+    assert!(
+        losers.is_empty(),
+        "two simultaneously-live records at one path must be left for the operator: {losers:?}"
+    );
+}
+
+/// An SM-owned record can NEVER be a loser, even when a dead unowned
+/// duplicate shares its literal workspace path — the owned record is the
+/// permanent survivor and the dead unowned sibling is decommissioned.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_owned_record_is_permanent_survivor() {
+    let dir = TempDir::new().unwrap();
+    let canonical = owned(rec(
+        "tm-proj-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        1,
+    ));
+    let phantom = rec(
+        "tm-tm-proj-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        99, // more recent — must not matter, ownership always wins.
+    );
+    let canonical_id = canonical.id;
+    let phantom_id = phantom.id;
+
+    let losers = plan_workspace_duplicates(&[canonical, phantom], &HashSet::new());
+    assert_eq!(
+        losers,
+        vec![phantom_id],
+        "the unowned duplicate must be the loser"
+    );
+    assert!(
+        !losers.contains(&canonical_id),
+        "the SM-owned record must never be a loser"
+    );
+}
+
+/// An SM-owned record's duplicate is left alone while its `tmux_name` is
+/// live — never decommission (and thereby kill the tmux session of) a
+/// currently-active duplicate, even one that will eventually need manual
+/// cleanup.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_owned_record_never_kills_live_duplicate() {
+    let dir = TempDir::new().unwrap();
+    let canonical = owned(rec(
+        "tm-proj-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        1,
+    ));
+    let live_dupe = rec(
+        "tm-tm-proj-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Active,
+        99,
+    );
+    let mut live_names = HashSet::new();
+    live_names.insert("tm-tm-proj-01".to_string());
+
+    let losers = plan_workspace_duplicates(&[canonical, live_dupe], &live_names);
+    assert!(
+        losers.is_empty(),
+        "a live duplicate must never be decommissioned, even alongside an owned record: {losers:?}"
+    );
+}
+
+/// Two DIFFERENT SM-owned records sharing one literal path should never
+/// structurally happen; rather than guess which is "real", the whole group
+/// is left untouched.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_two_owned_records_untouched() {
+    let dir = TempDir::new().unwrap();
+    let a = owned(rec(
+        "tm-proj-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        1,
+    ));
+    let b = owned(rec(
+        "tm-proj-02",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        99,
+    ));
+    let losers = plan_workspace_duplicates(&[a, b], &HashSet::new());
+    assert!(
+        losers.is_empty(),
+        "two owned records at one path must never be auto-collapsed: {losers:?}"
+    );
+}
+
+/// Records at DISTINCT workspace paths are never grouped, even sharing one
+/// `source_id` — sanity check that grouping keys on the literal path, not
+/// something coarser.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_distinct_paths_untouched() {
+    let dir_a = TempDir::new().unwrap();
+    let dir_b = TempDir::new().unwrap();
+    let a = rec(
+        "tm-proj-01",
+        Some("proj"),
+        Some(&dir_a.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        1,
+    );
+    let b = rec(
+        "tm-proj-02",
+        Some("proj"),
+        Some(&dir_b.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        99,
+    );
+    let losers = plan_workspace_duplicates(&[a, b], &HashSet::new());
+    assert!(
+        losers.is_empty(),
+        "distinct paths must never be grouped: {losers:?}"
+    );
+}
+
+/// A single record at a path is never a duplicate.
+/// Test: this function IS the test.
+#[test]
+fn plan_workspace_duplicates_singleton_untouched() {
+    let dir = TempDir::new().unwrap();
+    let only = rec(
+        "tm-proj-01",
+        Some("proj"),
+        Some(&dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        1,
+    );
+    assert!(plan_workspace_duplicates(&[only], &HashSet::new()).is_empty());
+}
+
+// ---------------------------------------------------------------------
+// `reconcile_on_boot` — end-to-end wiring for exact-workspace duplicates.
+// ---------------------------------------------------------------------
+
+/// End-to-end #3396 regression: reconcile collapses a dead duplicate at the
+/// SAME literal workspace path as a currently-live record — the exact shape
+/// `plan_dedup`'s live-group guard leaves untouched forever (proven by
+/// `reconcile_dedup_skips_live_group` above), which is why the #3396
+/// duplicate persisted across every prior reconcile pass.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record() {
+    let dir = TempDir::new().unwrap();
+    let ws_dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    fake.seeded_names.lock().unwrap().push("tm-tcode-01".into());
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let live = rec(
+        "tm-tcode-01",
+        Some("proj"),
+        Some(&ws_dir.path().to_path_buf()),
+        ManagedSessionState::Active,
+        1,
+    );
+    let stale = rec(
+        "tm-tm-tcode-01",
+        Some("proj"),
+        Some(&ws_dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        50,
+    );
+    let live_id = live.id;
+    let stale_id = stale.id;
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(live).await.unwrap();
+        store.upsert(stale).await.unwrap();
+    }
+
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        mgr.get(&stale_id).await.unwrap().state,
+        ManagedSessionState::Decommissioned,
+        "the stale duplicate at the same literal path must be decommissioned"
+    );
+    assert_ne!(
+        mgr.get(&live_id).await.unwrap().state,
+        ManagedSessionState::Decommissioned,
+        "the live record must survive"
+    );
+    assert!(
+        ws_dir.path().exists(),
+        "the workspace directory must remain on disk (loser was never SM-owned)"
+    );
+}
+
+/// End-to-end: an SM-owned record's dead duplicate at the same literal path
+/// is decommissioned by reconcile, but the owned record and its on-disk
+/// workspace are never touched.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_dedup_collapses_dead_duplicate_of_owned_record() {
+    let dir = TempDir::new().unwrap();
+    let ws_dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let canonical = owned(rec(
+        "tm-proj-01",
+        Some("proj"),
+        Some(&ws_dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        1,
+    ));
+    let phantom = rec(
+        "tm-tm-proj-01",
+        Some("proj"),
+        Some(&ws_dir.path().to_path_buf()),
+        ManagedSessionState::Stopped,
+        99,
+    );
+    let canonical_id = canonical.id;
+    let phantom_id = phantom.id;
+    {
+        let mut store = mgr.store.write().await;
+        store.upsert(canonical).await.unwrap();
+        store.upsert(phantom).await.unwrap();
+    }
+
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(
+        mgr.get(&phantom_id).await.unwrap().state,
+        ManagedSessionState::Decommissioned,
+        "the unowned phantom duplicate must be decommissioned"
+    );
+    assert_ne!(
+        mgr.get(&canonical_id).await.unwrap().state,
+        ManagedSessionState::Decommissioned,
+        "the SM-owned record must never be decommissioned by dedup"
+    );
+    assert!(
+        ws_dir.path().exists(),
+        "the owned workspace directory must remain on disk"
     );
 }
