@@ -55,6 +55,15 @@ pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// Fallback wait used when a `429` omits a parseable `Retry-After` header.
 pub const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(1);
 
+/// Upper bound on bytes read from a Slack private-file download
+/// (`url_private_download`, used by `slack_read_file` / `slack_read_canvas`).
+/// Why: private file/canvas exports can be arbitrarily large; capping the read
+/// keeps the MCP response bounded and prevents a single tool call from pulling
+/// an unbounded amount of memory. A caller that hits the cap is told to use
+/// the file's `permalink` directly instead of round-tripping the bytes through
+/// the model.
+pub const MAX_DOWNLOAD_BYTES: usize = 2_000_000;
+
 #[cfg(test)]
 mod tests {
     use super::*;

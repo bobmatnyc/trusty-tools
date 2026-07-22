@@ -83,4 +83,14 @@ pub enum SlackError {
     /// The response body was not the expected JSON envelope.
     #[error("could not decode Slack response body: {0}")]
     Decode(String),
+
+    /// A private-file download (`url_private_download`, used by
+    /// `slack_read_file` / `slack_read_canvas`) exceeded
+    /// [`crate::slack::api::constants::MAX_DOWNLOAD_BYTES`]. Carries the
+    /// enforced limit so the caller's error message is actionable.
+    #[error("file exceeds the {limit}-byte download cap; use its permalink to fetch it directly")]
+    DownloadTooLarge {
+        /// The enforced byte cap ([`crate::slack::api::constants::MAX_DOWNLOAD_BYTES`]).
+        limit: usize,
+    },
 }

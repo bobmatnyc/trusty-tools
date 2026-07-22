@@ -4,8 +4,9 @@
 //! `tools/list`, `tools/call`, with notifications suppressed. Centralising it
 //! here means future Slack tool handlers focus on Slack Web API specifics.
 //! What: `AppState` holds an `Arc<BaseClient>`; `handle_message` is the pure
-//! JSON-RPC dispatcher; `handle_tool_call` is the tool router (all nine tools
-//! live, #2639 + #2640); `run_stdio` wires it into
+//! JSON-RPC dispatcher; `handle_tool_call` is the tool router (19 tools live:
+//! the original nine from #2639 + #2640, plus ten more added by epic #3611 for
+//! claude.ai Slack-connector parity); `run_stdio` wires it into
 //! `trusty_common::mcp::run_stdio_loop`.
 //! Test: `handle_message_initialize_returns_server_info`,
 //! `handle_message_tools_list_returns_tools`, and
@@ -70,9 +71,10 @@ impl ToolCallError {
 
 /// Dispatch a single tool call by name.
 ///
-/// Why: One routing table keeps the tool surface greppable; all nine handlers
-/// (send/read/list from #2639, search + reactions from #2640) run live Slack
-/// calls here.
+/// Why: One routing table keeps the tool surface greppable; all 19 handlers
+/// (send/read/list from #2639, search + reactions from #2640, and the
+/// canvas/conversation/file/schedule/search-extra tools from epic #3611) run
+/// live Slack calls here.
 /// What: rejects an unknown name with `UnknownTool`, then delegates every known
 /// name to [`crate::slack::handlers::dispatch`].
 /// Test: `tools_call_unknown_tool_returns_method_not_found`,
