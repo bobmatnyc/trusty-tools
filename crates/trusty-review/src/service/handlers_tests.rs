@@ -106,6 +106,39 @@ impl SearchClient for FailSearch {
     }
 }
 
+/// A search stub whose `health()` succeeds at the transport level but reports
+/// an unhealthy embedder — exercises the `Ok(Ok(v))` + `is_healthy(v) ==
+/// false` branch of `bounded_probe` end-to-end through a real `SearchClient`
+/// (#3658 coverage gap: a degraded-but-answering dep must report
+/// `state:"unreachable"`, distinct from `state:"timeout"`).
+pub(super) struct UnhealthySearch;
+
+#[async_trait]
+impl SearchClient for UnhealthySearch {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        // Transport succeeds (HTTP 200, valid JSON) but the embedder isn't
+        // ready, so `HealthResponse::is_healthy()` is `false` — e.g. a
+        // degraded/cold-starting trusty-search that answers but isn't ready.
+        Ok(SearchHealth {
+            status: "ok".to_string(),
+            embedder: EmbedderState::Bool(false),
+        })
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _index_id: &str,
+        _query: &str,
+        _top_k: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
 // ── Fake LLM that returns auth error ─────────────────────────────────────────
 
 pub(super) struct AuthErrorLlm;
@@ -409,6 +442,22 @@ async fn health_inference_auth_error_sets_degraded() {
 // dep still reports `reachable:false` (covered above via
 // `health_status_degraded_required_dep_down` / `health_required_dep_down_sets_degraded`
 // in `handlers_status_tests.rs`, extended with a `state:"unreachable"` check).
+//
+// Env-var race note (code-review, #2688 postmortem class): the
+// `#[serial_test::serial]` tests below mutate `TRUSTY_REVIEW_DEP_PROBE_TIMEOUT_SECS`
+// for the duration of the test, but the many NON-serial `handle_health` tests
+// in this file (`health_handler_returns_ok`, `health_inference_ok_when_llm_succeeds`,
+// etc.) also transitively read that var via `dep_probe_timeout()` — and
+// `serial_test::serial` only serialises against OTHER `#[serial]`-tagged tests,
+// not against every test in the binary, so a non-serial reader CAN observe a
+// transient override from one of these tests mid-run. This is benign today
+// only because `dep_probe_timeout()` itself treats every value these tests
+// ever set (`"0"`, `"not-a-number"`, `"1"`, `"5"`) as either a valid small
+// positive timeout or a safe fallback to the 2s default — never a value that
+// would hang or corrupt a concurrent reader. If a future test needs to set a
+// value that is NOT safely handled by `dep_probe_timeout()`'s own fallback
+// (there currently is no such value), it must serialise the readers too, not
+// just itself.
 
 /// `/health` returns within the bound, reporting `state:"timeout"`, when
 /// trusty-search accepts a connection but never responds (#3658).
@@ -485,6 +534,188 @@ async fn health_stalled_dep_returns_timeout_state_within_bound() {
     assert_eq!(
         body["deps"]["trusty_search"]["reachable"], false,
         "reachable must still be false for back-compat when the dep times out"
+    );
+}
+
+// ── DepState serialisation + bounded_probe unit tests (#3658) ─────────────────
+
+/// `DepState` serialises as the documented lowercase strings.
+///
+/// Why: `handlers.rs`'s doc comment on `DepState` promises `"ok"` /
+/// `"unreachable"` / `"timeout"` via `#[serde(rename_all = "snake_case")]`;
+/// this test locks that contract in so a future derive-attribute change is
+/// caught immediately rather than surfacing as a silent wire-format break.
+/// What: serialises each variant via `serde_json::to_value` and compares
+/// against the exact lowercase string.
+/// Test: this test itself.
+#[test]
+fn dep_state_serialises_lowercase() {
+    use super::DepState;
+
+    assert_eq!(
+        serde_json::to_value(DepState::Ok).unwrap(),
+        serde_json::json!("ok")
+    );
+    assert_eq!(
+        serde_json::to_value(DepState::Unreachable).unwrap(),
+        serde_json::json!("unreachable")
+    );
+    assert_eq!(
+        serde_json::to_value(DepState::Timeout).unwrap(),
+        serde_json::json!("timeout")
+    );
+}
+
+/// `bounded_probe` returns `DepState::Ok` when the future resolves `Ok(v)`
+/// within the deadline and `is_healthy(v)` is `true`.
+///
+/// Why: the straightforward happy path of `bounded_probe`'s match arms —
+/// locks in the mapping so a refactor can't silently invert it.
+/// What: awaits `bounded_probe` on an already-resolved `Ok(true)` future with
+/// a generous deadline and `is_healthy = |v| v`.
+/// Test: this test itself.
+#[tokio::test]
+async fn bounded_probe_ok_on_healthy_response() {
+    use super::{DepState, bounded_probe};
+
+    let result = bounded_probe(
+        async { Ok::<bool, ()>(true) },
+        std::time::Duration::from_millis(50),
+        |v| v,
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        DepState::Ok,
+        "Ok(Ok(v)) with is_healthy(v)==true must be DepState::Ok"
+    );
+}
+
+/// `bounded_probe` returns `DepState::Unreachable` when the future resolves
+/// `Err(_)` within the deadline.
+///
+/// Why: a transport-level or API-level error (dep answered with a failure,
+/// or couldn't be reached at all) must map to `Unreachable`, never `Timeout`
+/// — `Timeout` is reserved exclusively for "did not respond within the
+/// deadline".
+/// What: awaits `bounded_probe` on an already-resolved `Err(())` future.
+/// Test: this test itself.
+#[tokio::test]
+async fn bounded_probe_unreachable_on_error() {
+    use super::{DepState, bounded_probe};
+
+    let result = bounded_probe(
+        async { Err::<bool, ()>(()) },
+        std::time::Duration::from_millis(50),
+        |v| v,
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        DepState::Unreachable,
+        "Ok(Err(_)) must be DepState::Unreachable"
+    );
+}
+
+/// `bounded_probe` returns `DepState::Unreachable` — NOT `DepState::Ok` — when
+/// the future resolves `Ok(v)` within the deadline but `is_healthy(v)` is
+/// `false` (#3658 coverage gap).
+///
+/// Why: this is the previously-untested third branch of `bounded_probe`'s
+/// match: the dep answered (no transport error, no timeout) but reported
+/// itself unhealthy — e.g. a degraded embedder. That must NOT be silently
+/// treated as `Ok`, and must NOT be confused with `Timeout` (it definitely
+/// answered). See also `health_unhealthy_search_response_reports_state_unreachable`
+/// below for the same branch exercised through a real `SearchClient`.
+/// What: awaits `bounded_probe` on an already-resolved `Ok(false)` future with
+/// `is_healthy = |v| v` (so `is_healthy(false) == false`).
+/// Test: this test itself.
+#[tokio::test]
+async fn bounded_probe_unreachable_on_unhealthy_response() {
+    use super::{DepState, bounded_probe};
+
+    let result = bounded_probe(
+        async { Ok::<bool, ()>(false) },
+        std::time::Duration::from_millis(50),
+        |v| v,
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        DepState::Unreachable,
+        "Ok(Ok(v)) with is_healthy(v)==false must be DepState::Unreachable, not DepState::Ok"
+    );
+}
+
+/// `bounded_probe` returns `DepState::Timeout` when the future never resolves
+/// within the deadline.
+///
+/// Why: the core guarantee of #3658 at the unit level (the real-socket
+/// integration test `health_stalled_dep_returns_timeout_state_within_bound`
+/// covers the same guarantee end-to-end through a real `SearchClient`) — a
+/// future that never completes must not hang `bounded_probe` itself.
+/// What: awaits `bounded_probe` on `std::future::pending()` (a future that
+/// never resolves) with a short deadline; asserts `DepState::Timeout`.
+/// Test: this test itself.
+#[tokio::test]
+async fn bounded_probe_timeout_on_stalled_future() {
+    use super::{DepState, bounded_probe};
+
+    let result = bounded_probe(
+        std::future::pending::<Result<bool, ()>>(),
+        std::time::Duration::from_millis(20),
+        |v| v,
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        DepState::Timeout,
+        "a future that never resolves must be DepState::Timeout"
+    );
+}
+
+/// A dep that ANSWERS successfully but reports itself unhealthy (e.g. a
+/// degraded/cold-starting embedder) must be `state:"unreachable"`, not
+/// collapsed into `state:"timeout"` and not silently treated as healthy
+/// (#3658 coverage gap: the `Ok(Ok(v))` + `is_healthy(v) == false` branch of
+/// `bounded_probe`, exercised end-to-end through `handle_health` and a real
+/// `SearchClient` this time, rather than the generic unit test above).
+///
+/// Why: a hard transport error and a stalled probe are not the only ways a
+/// dep can be "not really up" — trusty-search can answer HTTP 200 while its
+/// embedder is still loading/degraded. That must still be `reachable:false`,
+/// and specifically `state:"unreachable"` (it definitely answered, just
+/// unhealthily), never `state:"timeout"` (it never answered at all).
+/// What: builds `AppState` with `UnhealthySearch` (health() returns
+/// `Ok(HealthResponse{status:"ok", embedder:false})`, so `is_healthy()` is
+/// `false`); calls `handle_health`; asserts `reachable:false` and
+/// `state:"unreachable"`.
+/// Test: this test itself.
+#[tokio::test]
+async fn health_unhealthy_search_response_reports_state_unreachable() {
+    let state = AppState::new(
+        crate::config::ReviewConfig::load(None),
+        Arc::new(FakeLlm),
+        Arc::new(UnhealthySearch),
+        None,
+    );
+    let response = handle_health(State(state)).await;
+    let resp: axum::response::Response = response.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
+
+    assert_eq!(
+        body["deps"]["trusty_search"]["reachable"], false,
+        "a dep that answers but is unhealthy must still report reachable:false"
+    );
+    assert_eq!(
+        body["deps"]["trusty_search"]["state"], "unreachable",
+        "an unhealthy-but-answering dep must be state:unreachable, not state:timeout (#3658)"
     );
 }
 

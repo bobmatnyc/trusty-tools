@@ -208,7 +208,7 @@ pub struct DepStatus {
 /// single bounded probe (see `bounded_probe`).  `reachable` is kept for
 /// backward compatibility with existing consumers (`true` iff `state == Ok`).
 /// Test: verified in `health_returns_ok_json`,
-/// `health_stalled_dep_returns_timeout_state`.
+/// `health_stalled_dep_returns_timeout_state_within_bound`.
 #[derive(Debug, Serialize)]
 pub struct DepInfo {
     /// Whether this dep is required for the service to function.
@@ -385,7 +385,10 @@ pub(crate) fn dep_probe_timeout() -> Duration {
 /// Test: `bounded_probe_ok_on_healthy_response`,
 /// `bounded_probe_unreachable_on_error`,
 /// `bounded_probe_unreachable_on_unhealthy_response`,
-/// `bounded_probe_timeout_on_stalled_future` in `handlers_tests.rs`.
+/// `bounded_probe_timeout_on_stalled_future`,
+/// `health_unhealthy_search_response_reports_state_unreachable` (the
+/// `Ok(Ok(v))` + `is_healthy(v) == false` branch exercised end-to-end through
+/// a real `SearchClient`, e.g. a degraded embedder) in `handlers_tests.rs`.
 async fn bounded_probe<Fut, T, E>(
     fut: Fut,
     timeout: Duration,
@@ -423,9 +426,10 @@ where
 /// returns the fully-populated `DepStatus`.  An unconfigured `analyze` client
 /// is reported as `DepState::Unreachable` (unchanged back-compat behaviour:
 /// `reachable: false`).
-/// Test: `health_stalled_dep_returns_timeout_state`,
-/// `health_fast_dep_healthy_path_unchanged`,
-/// `health_hard_down_dep_reachable_false` in `handlers_tests.rs`.
+/// Test: `health_stalled_dep_returns_timeout_state_within_bound`,
+/// `health_inference_ok_when_llm_succeeds` (fast/healthy path),
+/// `health_required_dep_down_sets_degraded` (hard-down path) in
+/// `handlers_tests.rs` / `handlers_status_tests.rs`.
 pub async fn probe_deps(state: &AppState) -> DepStatus {
     let timeout = dep_probe_timeout();
 
@@ -476,7 +480,7 @@ pub async fn probe_deps(state: &AppState) -> DepStatus {
 /// `health_inference_auth_error_sets_degraded`,
 /// `health_required_dep_down_sets_degraded`,
 /// `health_optional_dep_down_stays_ok`,
-/// `health_stalled_dep_returns_timeout_state`.
+/// `health_stalled_dep_returns_timeout_state_within_bound`.
 pub async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     // Bounded, concurrent dep probes (#3658) — total latency capped at
     // `dep_probe_timeout()` regardless of dep count or individual slowness.
