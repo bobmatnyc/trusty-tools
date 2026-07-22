@@ -1103,6 +1103,98 @@ fn filter_and_sort_combined() {
     assert_eq!(names, vec!["api-new", "api-old"]);
 }
 
+// ── stale-daemon slot fallback (issue #3678) ─────────────────────────────────
+//
+// A daemon that predates #3034 omits `slot`/`deleted` from its response
+// entirely; `ManagedSessionSummary`'s `#[serde(default)]` then decodes every
+// row's `slot` to the shared `0` sentinel instead of erroring. Before this
+// fix that collapsed the picker's rendered numbers to `[0]` on every row and
+// resolved every typed choice to the first session. `slots_are_stale`
+// detects the shape; `find_slot`/`shown_slot` fall back to a 1-based
+// positional number so the printed menu and accepted input agree again. End-
+// to-end coverage through `parse_picker_choice` lives in
+// `guided_picker_stale_daemon_*` in `tests_behavior_c_tests.rs`; these test
+// the three helpers directly. `ls_test_session` defaults `slot: 0`, so it
+// doubles as the stale-daemon fixture with no extra plumbing.
+
+use crate::commands::session_picker::{find_slot, shown_slot, slots_are_stale};
+
+#[test]
+fn slots_are_stale_true_when_all_zero() {
+    let sessions = vec![
+        ls_test_session("s1", "active", None, None, None, None),
+        ls_test_session("s2", "active", None, None, None, None),
+        ls_test_session("s3", "active", None, None, None, None),
+    ];
+    assert!(slots_are_stale(&sessions));
+}
+
+#[test]
+fn slots_are_stale_false_when_any_nonzero() {
+    // A single genuinely-assigned slot is conclusive proof the daemon is
+    // healthy — never treat a real (possibly sparse) menu as stale.
+    let mut sessions = vec![
+        ls_test_session("s1", "active", None, None, None, None),
+        ls_test_session("s2", "active", None, None, None, None),
+    ];
+    sessions[1].slot = 2;
+    assert!(!slots_are_stale(&sessions));
+}
+
+#[test]
+fn slots_are_stale_false_when_empty() {
+    assert!(!slots_are_stale(&[]));
+}
+
+#[test]
+fn find_slot_healthy_looks_up_by_real_slot() {
+    let mut sessions = vec![
+        ls_test_session("s1", "active", None, None, None, None),
+        ls_test_session("s2", "active", None, None, None, None),
+    ];
+    sessions[0].slot = 1;
+    sessions[1].slot = 5;
+    assert_eq!(find_slot(&sessions, 5), Some(1));
+    assert_eq!(find_slot(&sessions, 2), None);
+}
+
+#[test]
+fn find_slot_stale_fallback_resolves_positionally() {
+    // With every slot decoded to `0`, a healthy by-slot lookup would always
+    // resolve to position 0 (or never resolve past the first row) — the
+    // fallback must resolve `n` to position `n-1` instead, matching what
+    // `shown_slot` renders.
+    let sessions = vec![
+        ls_test_session("s1", "active", None, None, None, None),
+        ls_test_session("s2", "active", None, None, None, None),
+        ls_test_session("s3", "active", None, None, None, None),
+    ];
+    assert_eq!(find_slot(&sessions, 1), Some(0));
+    assert_eq!(find_slot(&sessions, 2), Some(1));
+    assert_eq!(find_slot(&sessions, 3), Some(2));
+    assert_eq!(find_slot(&sessions, 4), None);
+    assert_eq!(find_slot(&sessions, 0), None);
+}
+
+#[test]
+fn shown_slot_healthy_uses_real_slot() {
+    let mut sessions = vec![ls_test_session("s1", "active", None, None, None, None)];
+    sessions[0].slot = 7;
+    assert_eq!(shown_slot(&sessions, 0), 7);
+}
+
+#[test]
+fn shown_slot_stale_fallback_is_distinct_and_incrementing() {
+    let sessions = vec![
+        ls_test_session("s1", "active", None, None, None, None),
+        ls_test_session("s2", "active", None, None, None, None),
+        ls_test_session("s3", "active", None, None, None, None),
+    ];
+    assert_eq!(shown_slot(&sessions, 0), 1);
+    assert_eq!(shown_slot(&sessions, 1), 2);
+    assert_eq!(shown_slot(&sessions, 2), 3);
+}
+
 /// `tm ls recent` parses with `recent` captured in `terms`.
 #[test]
 fn cli_parses_ls_terms_recent_keyword() {
