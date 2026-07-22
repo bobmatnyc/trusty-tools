@@ -89,7 +89,7 @@ async fn prune_stale_active_removable_without_force_when_tmux_dead() {
         .expect("simulate tmux death");
 
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::All, false, false)
+        .prune_managed(crate::session_manager::PruneFilter::All, false, false, None)
         .await
         .expect("prune all");
     assert_eq!(

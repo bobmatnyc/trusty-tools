@@ -70,6 +70,7 @@ fn record_round_trips_injection_status() {
         deliverable_id: None,
         pane_id: None,
         injection_status: InjectionStatus::Pending,
+        worktree_owner: None,
     };
     record.injection_status = InjectionStatus::Success;
     let json = serde_json::to_string(&record).expect("serialize");

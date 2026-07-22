@@ -136,6 +136,15 @@ pub async fn session_resume(state: &Arc<DaemonState>, session_id: &str) -> Resul
 /// Why: thin wrapper over
 /// [`crate::session_manager::SessionManager::decommission`].
 /// What: parses the id, calls `decommission`, returns the tombstone record.
+///
+/// `caller` (#3649, Option B): the trait-level MCP `Backend::session_decommission`
+/// method currently carries no per-connection caller identity — the wire
+/// protocol has no notion of "which managed session is the JSON-RPC client".
+/// Until that identity is threaded through (tracked as a follow-up against
+/// #3649; a candidate source is the `TM_MANAGED_SESSION_ID` a pane-scoped
+/// session already carries), this always passes `None`, which preserves
+/// full pre-#3649 authority — i.e. an MCP-driven decommission behaves
+/// exactly as it did before this issue, never gated by the new owner check.
 /// Test: `session_decommission_unknown_id_errors` in the `tests` module.
 pub async fn session_decommission(
     state: &Arc<DaemonState>,
@@ -143,7 +152,9 @@ pub async fn session_decommission(
 ) -> Result<Value, String> {
     let id = parse_managed_id(session_id)?;
     let mgr = state.session_manager().await;
-    mgr.decommission(&id)
+    // TODO(#3649): populate `caller` from the calling session's identity once
+    // the MCP transport threads it through; `None` preserves current authority.
+    mgr.decommission(&id, None)
         .await
         .map(|(r, _workspace_removed)| record_to_json(&r))
         .map_err(managed_err)
@@ -270,6 +281,11 @@ pub async fn session_decommission_ephemeral(state: &Arc<DaemonState>) -> Result<
 /// unless `include_active`; with `dry_run` nothing is mutated.
 /// Test: `dispatch_session_prune_tool`, `dispatch_session_prune_rejects_bad_state`
 /// (mock) in `crate::mcp`.
+///
+/// `caller` (#3649, Option B): same wire-layer gap as
+/// [`session_decommission`] — the MCP transport carries no per-connection
+/// caller identity today, so this always passes `None` to `prune_managed`,
+/// preserving full pre-#3649 authority for the fleet-wide prune tool.
 pub async fn session_prune(
     state: &Arc<DaemonState>,
     filter: &str,
@@ -278,8 +294,9 @@ pub async fn session_prune(
 ) -> Result<Value, String> {
     let filter = PruneFilter::parse(filter)?;
     let mgr = state.session_manager().await;
+    // TODO(#3649): populate `caller` once the MCP transport threads it through.
     let outcome = mgr
-        .prune_managed(filter, dry_run, include_active)
+        .prune_managed(filter, dry_run, include_active, None)
         .await
         .map_err(managed_err)?;
     serde_json::to_value(&outcome).map_err(|e| format!("failed to serialize prune outcome: {e}"))

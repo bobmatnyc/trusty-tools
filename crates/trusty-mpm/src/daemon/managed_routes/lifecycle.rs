@@ -481,7 +481,7 @@ async fn reserve_inproject_worktree(
         .await
         .map_err(|e| format!("name resolution failed for session {session_id}: {e}"))?;
 
-    let worktree = super::inproject::create_session_worktree(base, &reserved_name)
+    let worktree = super::inproject::create_session_worktree(base, &reserved_name, session_id)
         .map_err(|e| format!("worktree creation failed for session {session_id}: {e}"))?;
 
     // #2196: best-effort sync of the operator's allowlisted untracked/secret
@@ -620,6 +620,10 @@ async fn spawn_managed_cloned(
             warn!(id = %session_id, "spawn_managed: session create failed: {e}");
             e.to_string()
         })?;
+
+    // #3649: best-effort; see `worktree_ownership::set_worktree_owner_best_effort`.
+    mgr.set_worktree_owner_best_effort(&session_id, session_id)
+        .await;
 
     // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
     //
@@ -915,6 +919,10 @@ async fn spawn_managed_inproject(
     if let Err(e) = mgr.set_source_id(session_id, &source_id).await {
         warn!(id = %session_id, "spawn_managed (inproject): set_source_id failed: {e}");
     }
+
+    // #3649: mirrors `spawn_managed_cloned`'s identical call.
+    mgr.set_worktree_owner_best_effort(session_id, *session_id)
+        .await;
 
     // Front gate with the original repo_url so GitHub identity is parseable.
     if let Some(record) =

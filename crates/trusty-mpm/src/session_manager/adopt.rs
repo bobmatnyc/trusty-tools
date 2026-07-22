@@ -193,6 +193,7 @@ impl SessionManager {
             deliverable_id: None,
             pane_id,
             injection_status: Default::default(),
+            worktree_owner: None,
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────
@@ -250,6 +251,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             injection_status: Default::default(),
+            worktree_owner: None,
         }
     }
 
@@ -278,6 +280,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             injection_status: Default::default(),
+            worktree_owner: None,
         }
     }
 

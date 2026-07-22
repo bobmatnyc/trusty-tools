@@ -687,7 +687,7 @@ async fn manager_decommission_removes_workspace() {
 
     // Decommission using the injectable root — no unsafe env mutation.
     let (tombstone, workspace_removed) = mgr
-        .decommission_with_root(&record.id, managed_root.path())
+        .decommission_with_root(&record.id, managed_root.path(), None)
         .await
         .expect("decommission");
 
@@ -746,6 +746,7 @@ fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> Sessio
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     }
 }
 
@@ -842,6 +843,7 @@ async fn manager_reconcile_skips_decommissioned() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1411,6 +1413,7 @@ pub(super) async fn seed_record(
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     if seeds_live_tmux {
         mgr.tmux
@@ -1544,7 +1547,12 @@ async fn prune_by_state_never_touches_active() {
     seed_record(&mgr, &dir, stopped, ManagedSessionState::Stopped, false).await;
 
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::Stopped, false, false)
+        .prune_managed(
+            crate::session_manager::PruneFilter::Stopped,
+            false,
+            false,
+            None,
+        )
         .await
         .expect("prune stopped");
     assert_eq!(outcome.count(), 1, "only the Stopped session is pruned");
@@ -1584,6 +1592,7 @@ async fn prune_decommissioned_compacts() {
             crate::session_manager::PruneFilter::Decommissioned,
             false,
             false,
+            None,
         )
         .await
         .expect("compact");
@@ -1635,7 +1644,12 @@ async fn prune_deleted_compacts() {
     seed_record(&mgr, &dir, stopped, ManagedSessionState::Stopped, false).await;
 
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::Deleted, false, false)
+        .prune_managed(
+            crate::session_manager::PruneFilter::Deleted,
+            false,
+            false,
+            None,
+        )
         .await
         .expect("compact deleted");
     assert_eq!(outcome.count(), 2, "both deleted tombstones compacted");
@@ -1680,7 +1694,7 @@ async fn prune_all_targets_non_running() {
     seed_record(&mgr, &dir, tomb, ManagedSessionState::Decommissioned, false).await;
 
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::All, false, false)
+        .prune_managed(crate::session_manager::PruneFilter::All, false, false, None)
         .await
         .expect("prune all");
     assert_eq!(
@@ -1724,7 +1738,12 @@ async fn prune_dry_run_reports_without_mutating() {
     seed_record(&mgr, &dir, stopped, ManagedSessionState::Stopped, false).await;
 
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::Stopped, true, false)
+        .prune_managed(
+            crate::session_manager::PruneFilter::Stopped,
+            true,
+            false,
+            None,
+        )
         .await
         .expect("dry run");
     assert!(outcome.dry_run, "outcome flagged dry_run");
@@ -1779,7 +1798,12 @@ async fn prune_outcome_serializes() {
     seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, true).await;
 
     let outcome = mgr
-        .prune_managed(crate::session_manager::PruneFilter::Ephemeral, true, false)
+        .prune_managed(
+            crate::session_manager::PruneFilter::Ephemeral,
+            true,
+            false,
+            None,
+        )
         .await
         .expect("dry run");
     let v = serde_json::to_value(&outcome).expect("serialize outcome");
@@ -1863,6 +1887,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             deliverable_id: None,
             pane_id: None,
             injection_status: Default::default(),
+            worktree_owner: None,
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -1951,12 +1976,13 @@ async fn manager_decommission_unowned_skips_deletion() {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 
     // Decommission must SUCCEED (return Ok) but NOT delete the directory.
     let (tombstone, workspace_removed) = mgr
-        .decommission(&id)
+        .decommission(&id, None)
         .await
         .expect("decommission of an unowned record must succeed (skip deletion, not error)");
 

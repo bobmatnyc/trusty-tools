@@ -65,6 +65,7 @@ fn make_record(source_id: Option<&str>) -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         injection_status: Default::default(),
+        worktree_owner: None,
     }
 }
 

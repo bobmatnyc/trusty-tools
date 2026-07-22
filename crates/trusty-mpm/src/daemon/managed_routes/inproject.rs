@@ -389,9 +389,19 @@ pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
 /// steered `SessionManager::resolve_session_name` away from a colliding name
 /// via [`worktree_name_collides`], so hitting this guard indicates a TOCTOU
 /// race or a caller that skipped the collision check.
+/// `owner_session_id` (#3649, Option B): the managed session this worktree is
+/// being created FOR — written into the ownership sentinel (as a JSON
+/// payload, replacing the pre-#3649 zero-byte convention) so the orphan-GC
+/// sweep and the `decommission` owner gate can later resolve who is entitled
+/// to reclaim this worktree.
 /// Test: covered by integration tests against a real temp repo;
-/// `create_session_worktree_rejects_existing_worktree_dir`.
-pub fn create_session_worktree(base_path: &Path, worktree_name: &str) -> Result<PathBuf, String> {
+/// `create_session_worktree_rejects_existing_worktree_dir`,
+/// `create_session_worktree_writes_owner_sentinel` (#3649).
+pub fn create_session_worktree(
+    base_path: &Path,
+    worktree_name: &str,
+    owner_session_id: &crate::session_manager::ManagedSessionId,
+) -> Result<PathBuf, String> {
     let worktree_path = worktree_path_for(base_path, worktree_name);
     let branch = worktree_branch_for(worktree_name);
 
@@ -432,13 +442,22 @@ pub fn create_session_worktree(base_path: &Path, worktree_name: &str) -> Result<
     // and non-fatal — see `configure_session_branch_tracking`.
     configure_session_branch_tracking(base_path, &worktree_path);
 
-    // Item 5 (#1845): write the SM ownership sentinel so remove_session_worktree
-    // can confirm this directory was TM-created and not a user-owned path that
-    // happens to sit under a `.worktrees/` parent. The sentinel is best-effort:
-    // a failure here is a non-fatal warning; the worktree was created successfully
-    // and the naming-convention fallback in decommission.rs provides backward-compat.
+    // Item 5 (#1845; JSON payload added #3649): write the SM ownership sentinel
+    // so remove_session_worktree can confirm this directory was TM-created and
+    // not a user-owned path that happens to sit under a `.worktrees/` parent,
+    // AND so the orphan-GC / `decommission` owner gate can resolve WHO owns it
+    // (#3649, Option B) — the sentinel now carries a JSON payload naming
+    // `owner_session_id`, rather than the pre-#3649 zero-byte convention. The
+    // sentinel write is best-effort: a failure here is a non-fatal warning; the
+    // worktree was created successfully and the naming-convention fallback in
+    // decommission.rs provides backward-compat, while the tolerant sentinel
+    // parser treats an unwritten sentinel identically to a legacy one
+    // (owner-unknown), never as an error.
     let sentinel = worktree_path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
-    if let Err(e) = std::fs::write(&sentinel, b"") {
+    if let Err(e) = std::fs::write(
+        &sentinel,
+        crate::session_manager::worktree_ownership::sentinel_payload_bytes(*owner_session_id),
+    ) {
         warn!(
             worktree = %worktree_path.display(),
             sentinel = crate::session_manager::decommission::WORKTREE_SENTINEL_FILE,

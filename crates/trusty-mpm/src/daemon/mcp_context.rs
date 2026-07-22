@@ -182,7 +182,8 @@ pub async fn session_context_pause(
             .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, false)
             .await
         {
-            Ok(removed) => removed
+            Ok(outcome) => outcome
+                .removed
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),

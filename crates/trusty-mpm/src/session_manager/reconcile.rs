@@ -195,6 +195,7 @@ impl SessionManager {
                     // immediately, mirroring `adopt.rs`'s explicit adoption path.
                     pane_id: self.tmux.get_pane_id(name),
                     injection_status: Default::default(),
+                    worktree_owner: None,
                 };
                 if let Some(path) = resolved_cwd {
                     newly_resolved.push((id, path));

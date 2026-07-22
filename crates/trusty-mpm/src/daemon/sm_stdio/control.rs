@@ -218,7 +218,9 @@ impl SessionControl for DaemonSessionControl {
     async fn kill(&self, session_id: &str) -> Result<serde_json::Value, SessionControlError> {
         let id = Self::parse_id(session_id)?;
         let mgr = self.state.session_manager().await;
-        mgr.decommission(&id).await.map_err(Self::map_managed_err)?;
+        mgr.decommission(&id, None)
+            .await
+            .map_err(Self::map_managed_err)?;
         Ok(serde_json::json!({ "ok": true }))
     }
 

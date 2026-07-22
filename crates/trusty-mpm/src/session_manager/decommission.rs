@@ -304,17 +304,30 @@ impl SessionManager {
     ///
     /// What: delegates to [`decommission_with_root`](Self::decommission_with_root)
     /// with the config-derived managed root so callers remain env-agnostic.
+    ///
+    /// `caller` (#3649, Option B): `None` means an operator/daemon-internal
+    /// caller (CLI, HTTP route, the age-based reaper, bulk prune) — current
+    /// authority is preserved unconditionally, matching every pre-#3649
+    /// call site. `Some(id)` means a SESSION is asking to decommission
+    /// `id`'s target on its own behalf; if the target's worktree has a KNOWN
+    /// owner that disagrees with `caller` AND that owner is not provably
+    /// ownerless, the call is refused with
+    /// [`ManagedError::WorktreeOwnerMismatch`] instead of tearing down a peer
+    /// session's worktree out from under it.
     /// Test: `manager_decommission_removes_workspace` — asserts the workspace dir
     /// is gone from disk and the record state is `Decommissioned`.
     /// `manager_decommission_unowned_skips_deletion` — asserts that decommissioning
     /// a local-path/adopt record does NOT delete the directory.
+    /// `decommission_owner_gate_refuses_foreign_caller`,
+    /// `decommission_owner_gate_allows_terminal_owner` (#3649).
     pub async fn decommission(
         &self,
         id: &ManagedSessionId,
+        caller: Option<ManagedSessionId>,
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let config = TrustyToolsConfig::load();
         let managed_root = workspace_root(&config);
-        self.decommission_with_root(id, &managed_root).await
+        self.decommission_with_root(id, &managed_root, caller).await
     }
 
     /// Internal: decommission with an explicit managed root (test seam).
@@ -335,8 +348,20 @@ impl SessionManager {
         &self,
         id: &ManagedSessionId,
         managed_root: &Path,
+        caller: Option<ManagedSessionId>,
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let mut record = self.get(id).await?;
+
+        // #3649 owner gate: only applies when a SESSION identifies itself as
+        // the caller. `None` (operator/daemon-internal) preserves full
+        // pre-#3649 authority unconditionally — see the doc above.
+        if let Some(caller_id) = caller
+            && let Some(owner) = self.known_owner_of(&record)
+            && owner != caller_id
+            && !self.resolve_ownerless(owner).await
+        {
+            return Err(ManagedError::WorktreeOwnerMismatch(caller_id, owner, *id));
+        }
 
         // #2033: derive the trusty-search index id for a disposable workspace
         // (SM-owned clone or in-project worktree — see
@@ -597,5 +622,169 @@ mod tests {
             !wt_path.exists(),
             "sentinel present: safety gate must pass and directory must be removed"
         );
+    }
+
+    // ── #3649: decommission owner gate ───────────────────────────────────────
+
+    /// Build a bare (no workspace) [`SessionRecord`] with `worktree_owner` set
+    /// to itself, mirroring what [`SessionManager::set_worktree_owner`] does
+    /// for a freshly-provisioned session.
+    fn owned_record(id: ManagedSessionId, state: ManagedSessionState) -> SessionRecord {
+        SessionRecord {
+            id,
+            tmux_name: format!("tm-owner-gate-{id}"),
+            cwd: std::path::PathBuf::from("/tmp"),
+            task: "task".into(),
+            state,
+            created_at: chrono::Utc::now(),
+            last_activity_at: None,
+            workspace_path: None,
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+            deliverable_id: None,
+            pane_id: None,
+            injection_status: Default::default(),
+            worktree_owner: Some(id),
+        }
+    }
+
+    /// Session A cannot decommission session B's worktree when B is a
+    /// live/resumable, KNOWN owner and A != B (#3649 item 3/8).
+    #[tokio::test]
+    async fn decommission_owner_gate_refuses_foreign_caller() {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let mgr = SessionManager::new(
+            dir.path(),
+            crate::session_manager::tests::FakeTmuxDriver::new(),
+        )
+        .await
+        .expect("manager");
+
+        let session_b = ManagedSessionId::new();
+        mgr.store
+            .write()
+            .await
+            .upsert(owned_record(session_b, ManagedSessionState::Active))
+            .await
+            .expect("upsert B");
+
+        let session_a = ManagedSessionId::new();
+        let managed_root = crate::test_support::hermetic_temp_dir();
+        let err = mgr
+            .decommission_with_root(&session_b, managed_root.path(), Some(session_a))
+            .await
+            .expect_err("session A must be refused decommissioning session B's live worktree");
+        match err {
+            ManagedError::WorktreeOwnerMismatch(caller, owner, target) => {
+                assert_eq!(caller, session_a);
+                assert_eq!(owner, session_b);
+                assert_eq!(target, session_b);
+            }
+            other => panic!("expected WorktreeOwnerMismatch, got {other:?}"),
+        }
+
+        // The record must be untouched — still Active, not decommissioned.
+        let record = mgr.get(&session_b).await.expect("get B");
+        assert_eq!(record.state, ManagedSessionState::Active);
+    }
+
+    /// A caller MAY decommission its OWN record (`caller == owner`) — the
+    /// gate never fires for self-decommission (#3649 item 3).
+    #[tokio::test]
+    async fn decommission_owner_gate_allows_self() {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let mgr = SessionManager::new(
+            dir.path(),
+            crate::session_manager::tests::FakeTmuxDriver::new(),
+        )
+        .await
+        .expect("manager");
+
+        let session_id = ManagedSessionId::new();
+        mgr.store
+            .write()
+            .await
+            .upsert(owned_record(session_id, ManagedSessionState::Active))
+            .await
+            .expect("upsert");
+
+        let managed_root = crate::test_support::hermetic_temp_dir();
+        let (record, _workspace_removed) = mgr
+            .decommission_with_root(&session_id, managed_root.path(), Some(session_id))
+            .await
+            .expect("self-decommission must be allowed");
+        assert_eq!(record.state, ManagedSessionState::Decommissioned);
+    }
+
+    /// A caller MAY decommission a target whose known owner is provably
+    /// ownerless (a terminal-state, e.g. already-`Decommissioned`, record) —
+    /// the gate only refuses when the owner is genuinely contesting the
+    /// reclaim (#3649 item 5).
+    #[tokio::test]
+    async fn decommission_owner_gate_allows_terminal_owner() {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let mgr = SessionManager::new(
+            dir.path(),
+            crate::session_manager::tests::FakeTmuxDriver::new(),
+        )
+        .await
+        .expect("manager");
+
+        // `target`'s OWN worktree_owner is itself, but its state is already
+        // terminal (Decommissioned) — decommissioning it again (idempotent-ish,
+        // e.g. a retry) must not be blocked by a foreign caller.
+        let target = ManagedSessionId::new();
+        mgr.store
+            .write()
+            .await
+            .upsert(owned_record(target, ManagedSessionState::Decommissioned))
+            .await
+            .expect("upsert target");
+
+        let caller = ManagedSessionId::new();
+        let managed_root = crate::test_support::hermetic_temp_dir();
+        mgr.decommission_with_root(&target, managed_root.path(), Some(caller))
+            .await
+            .expect(
+                "decommissioning an already-terminal, provably-ownerless target must be allowed",
+            );
+    }
+
+    /// `caller: None` (operator/daemon-internal) preserves full authority
+    /// regardless of ownership — the gate is bypassed entirely (#3649 item 3).
+    #[tokio::test]
+    async fn decommission_owner_gate_bypassed_for_none_caller() {
+        let dir = crate::test_support::hermetic_temp_dir();
+        let mgr = SessionManager::new(
+            dir.path(),
+            crate::session_manager::tests::FakeTmuxDriver::new(),
+        )
+        .await
+        .expect("manager");
+
+        let session_id = ManagedSessionId::new();
+        mgr.store
+            .write()
+            .await
+            .upsert(owned_record(session_id, ManagedSessionState::Active))
+            .await
+            .expect("upsert");
+
+        let managed_root = crate::test_support::hermetic_temp_dir();
+        let (record, _workspace_removed) = mgr
+            .decommission_with_root(&session_id, managed_root.path(), None)
+            .await
+            .expect("operator (caller=None) decommission must never be gated");
+        assert_eq!(record.state, ManagedSessionState::Decommissioned);
     }
 }
