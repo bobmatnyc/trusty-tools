@@ -45,7 +45,15 @@
 //!    for the same underlying #718 hazard); `tokio::time::timeout` only
 //!    bounds how long THIS caller waits for it, and on timeout the path is
 //!    marked "wedged" so every later caller fails fast instead of queuing
-//!    behind a possibly-forever-running opener.
+//!    behind a possibly-slow-to-finish opener. Critically, this latch is
+//!    **not permanent**: the detached attempt itself — not the caller that
+//!    gave up — clears the latch the instant it actually finishes, whether
+//!    it succeeds or fails, so a transient stall that eventually resolves
+//!    (as opposed to a genuinely permanent TCC denial) does not deny the
+//!    index for the rest of the process's lifetime (issue #3659 review
+//!    round 2 — an earlier version of this fix latched permanently on a
+//!    single timeout, trading the original panic for an equally severe
+//!    opposite-polarity bug).
 //!  - **Syscall-isolated, stable gate key.** The gate key is derived by
 //!    canonicalizing the file's PARENT directory (never the file itself,
 //!    which may not exist yet) inside `spawn_blocking` — never on the calling
@@ -60,7 +68,10 @@
 //! raw panic; (c) two DIFFERENT paths do not serialize against each other;
 //! (d) the gate key is stable across the file's own creation (not just at a
 //! single instant); (e) a wedged opener times out instead of hanging forever,
-//! and a subsequent caller for the same path fails fast rather than queuing.
+//! and a subsequent caller for the same path fails fast while it is still
+//! genuinely running; (f) once a slow opener actually finishes — `Ok` or
+//! `Err` — the latch clears and a NEXT caller gets a fresh, successful
+//! attempt, with no daemon restart involved (the round-2 regression case).
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -77,12 +88,19 @@ use tokio::sync::Mutex as AsyncMutex;
 /// Why: split out of a bare `Arc<AsyncMutex<()>>` (issue #3659 review finding
 /// #1) so a caller that times out waiting for a wedged opener can record that
 /// fact for every LATER caller, without needing the mutex itself to ever be
-/// released by the wedged attempt (it may never be — `spawn_blocking` work
-/// cannot be cancelled).
-/// What: `mutex` serializes attempts exactly as before; `wedged` is a
-/// one-way latch (never reset — a wedge is treated as permanent for the
-/// process lifetime, consistent with #718's accepted-leak policy) checked
-/// before a caller even attempts to queue on `mutex`.
+/// released by the wedged attempt (it may never be, on its own timeline —
+/// `spawn_blocking` work cannot be cancelled). Round 2 of review flagged that
+/// a naive one-way latch (never cleared) turns a single transient stall into
+/// a PERMANENT refusal for the rest of the process's lifetime — an
+/// opposite-polarity bug of the same severity as the original panic. So the
+/// latch here is cleared by the in-flight attempt itself the moment it
+/// actually finishes (see `open_serialized`), not by whichever caller gave up
+/// waiting for it.
+/// What: `mutex` serializes attempts exactly as before; `wedged` reflects
+/// only "an opener is CURRENTLY running past its callers' patience" — it is
+/// set by a timed-out caller and cleared by the in-flight attempt on
+/// completion (`Ok` or `Err`), checked by every new caller before it even
+/// attempts to queue on `mutex`.
 struct PathGate {
     mutex: AsyncMutex<()>,
     wedged: AtomicBool,
@@ -221,7 +239,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// Test: `tests::concurrent_opens_of_same_path_serialize_without_panicking`,
 /// `tests::panicking_open_becomes_typed_err_not_a_panic`,
 /// `tests::different_paths_do_not_serialize`,
-/// `tests::wedged_opener_times_out_and_blocks_future_callers_fast`.
+/// `tests::wedged_opener_times_out_and_blocks_future_callers_fast`,
+/// `tests::wedge_clears_once_the_slow_opener_finishes_ok`,
+/// `tests::wedge_clears_once_the_slow_opener_finishes_err`.
 pub(crate) async fn open_serialized<F, T>(path: &Path, open_fn: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
@@ -253,9 +273,29 @@ where
     // attempt keeps the mutex held for as long as it genuinely runs (however
     // long that is); `tokio::time::timeout` below only bounds how long THIS
     // caller waits for it.
+    // Issue #3659 review round 2 (CRITICAL, opposite-polarity bug): the
+    // latch must NOT be permanent. A single caller's timeout only means
+    // *that caller* gave up waiting — the detached attempt below keeps
+    // running and may go on to complete perfectly normally (a transient
+    // disk/IO stall that resolves, not necessarily a permanent TCC denial).
+    // So the detached task itself — not the timed-out caller — clears
+    // `wedged` unconditionally (Ok or Err) the moment it actually finishes.
+    // Because a NEW caller never spawns a competing attempt while `wedged`
+    // is true (it fails fast on the check above instead), there is only ever
+    // one active attempt per path at a time, so this clear can never race a
+    // DIFFERENT, still-running wedge. The attempt's own `CorpusStore` (if
+    // Ok) is simply dropped when nobody is left awaiting this task's
+    // `JoinHandle` (the timed-out caller already dropped its handle) —
+    // releasing the redb file lock automatically; a subsequent caller's
+    // fresh `open_fn` either finds the file already released, or hits the
+    // already-handled `DatabaseError::DatabaseAlreadyOpen` retry-once path
+    // in `persistence_loader::open_corpus_with_retry` in the rare case it
+    // hasn't been released quite yet — never a panic.
     let handle = tokio::spawn(async move {
         let _permit = gate_for_task.mutex.lock().await;
-        run_open(open_fn, path_for_task).await
+        let result = run_open(open_fn, path_for_task).await;
+        gate_for_task.wedged.store(false, Ordering::Release);
+        result
     });
 
     match tokio::time::timeout(timeout_dur, handle).await {
@@ -272,22 +312,24 @@ where
         }
         Err(_elapsed) => {
             // The spawned attempt is NOT aborted — it keeps holding the
-            // per-path mutex for as long as it actually runs (possibly
-            // forever, e.g. a TCC-denied volume, issue #718). Mark the path
-            // wedged now so every later caller fails fast instead of queuing
-            // behind a possibly-forever-running opener.
+            // per-path mutex for as long as it actually runs (possibly a
+            // long time, e.g. a TCC-denied volume, issue #718). Mark the
+            // path wedged now so every later caller fails fast instead of
+            // queuing behind a possibly-slow-to-finish opener. This is
+            // explicitly NOT permanent: the attempt itself clears the latch
+            // the moment it finishes (see above), whatever the outcome.
             gate.wedged.store(true, Ordering::Release);
             tracing::error!(
                 path = %path_display,
                 timeout = ?timeout_dur,
-                "corpus open wedged past the timeout — a blocking redb open never returned \
-                 (likely a TCC-denied/blocked volume, issue #718); this path is now \
-                 permanently refused for the rest of this process's lifetime (issue #3659) \
-                 — restart the daemon once the underlying volume issue is resolved"
+                "corpus open wedged past the timeout — a blocking redb open has not yet \
+                 returned (likely a TCC-denied/blocked volume, issue #718, or a slow disk); \
+                 this path is refused for new callers until the in-flight attempt finishes \
+                 (issue #3659)"
             );
             Err(anyhow!(
-                "corpus open timed out after {timeout_dur:?} for {path_display} — opener \
-                 wedged (issue #3659); restart the daemon to retry"
+                "corpus open timed out after {timeout_dur:?} for {path_display} — an opener \
+                 is still running; retry shortly (issue #3659)"
             ))
         }
     }
@@ -531,6 +573,112 @@ mod tests {
             start2.elapsed() < std::time::Duration::from_millis(500),
             "a wedged path must fail new callers FAST, not make them wait out another \
              full timeout: elapsed {:?}",
+            start2.elapsed()
+        );
+
+        unsafe { std::env::remove_var("TRUSTY_CORPUS_OPEN_TIMEOUT_SECS") };
+    }
+
+    /// Why (issue #3659 review round 2, CRITICAL): the wedge latch must NOT
+    /// be permanent. An earlier version of this fix set `wedged` on a single
+    /// caller timeout and never cleared it anywhere — a transient stall that
+    /// eventually resolves (a slow disk, not a genuinely dead TCC-denied
+    /// volume) would then permanently deny that index for the daemon's
+    /// entire remaining lifetime, an opposite-polarity bug of the same
+    /// severity as the panic this module exists to fix.
+    /// What: an opener sleeps LONGER than the caller's timeout but then
+    /// completes `Ok`. Asserts the FIRST caller gets a timely `Err` (it gave
+    /// up waiting), then — after giving the background attempt enough real
+    /// wall-clock time to actually finish — asserts a NEXT, fresh caller for
+    /// the SAME path succeeds, with NO daemon restart involved. This is the
+    /// exact scenario the round-2 review proved was broken.
+    /// Test: this IS the test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn wedge_clears_once_the_slow_opener_finishes_ok() {
+        unsafe { std::env::set_var("TRUSTY_CORPUS_OPEN_TIMEOUT_SECS", "1") };
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("slow-then-ok.redb");
+
+        let p_open = path.clone();
+        let start = std::time::Instant::now();
+        let first: Result<()> = open_serialized(&path, move || -> Result<()> {
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            // Touch the path so the eventual completion is observable, but
+            // return a plain `Ok(())` rather than a real `CorpusStore` — this
+            // test is about the LATCH lifecycle, not redb's own locking.
+            let _ = &p_open;
+            Ok(())
+        })
+        .await;
+        assert!(
+            first.is_err(),
+            "the first caller must time out (Err) rather than wait out the full sleep"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "the first caller must be released at the ~1s timeout boundary: elapsed {:?}",
+            start.elapsed()
+        );
+
+        // Give the background attempt enough real wall-clock time to finish
+        // (it sleeps 1.5s total; the first caller gave up at ~1s, so ~1s
+        // more is more than enough margin) and clear the latch itself.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let start2 = std::time::Instant::now();
+        let second: Result<()> = open_serialized(&path, || -> Result<()> { Ok(()) }).await;
+        assert!(
+            second.is_ok(),
+            "a NEXT caller must succeed once the slow opener has actually finished — \
+             the latch must not deny the path forever after one timeout: {second:?}"
+        );
+        assert!(
+            start2.elapsed() < std::time::Duration::from_millis(500),
+            "once cleared, a fresh caller must proceed immediately, not wait out another \
+             timeout: elapsed {:?}",
+            start2.elapsed()
+        );
+
+        unsafe { std::env::remove_var("TRUSTY_CORPUS_OPEN_TIMEOUT_SECS") };
+    }
+
+    /// Why (issue #3659 review round 2): the same latch-clearing behavior
+    /// must hold when the slow opener eventually finishes with an `Err`
+    /// (e.g. a genuine but transient I/O error), not just on `Ok` — a NEXT
+    /// caller must get a FRESH attempt, not a stale fail-fast-forever state.
+    /// What: an opener sleeps longer than the timeout and then returns
+    /// `Err`; asserts the first caller times out, then a next caller (with a
+    /// plain succeeding `open_fn`) succeeds once the slow one has finished.
+    /// Test: this IS the test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn wedge_clears_once_the_slow_opener_finishes_err() {
+        unsafe { std::env::set_var("TRUSTY_CORPUS_OPEN_TIMEOUT_SECS", "1") };
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("slow-then-err.redb");
+
+        let first: Result<()> = open_serialized(&path, || -> Result<()> {
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            Err(anyhow!(
+                "simulated transient I/O error that eventually surfaces"
+            ))
+        })
+        .await;
+        assert!(first.is_err(), "the first caller must time out");
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        let start2 = std::time::Instant::now();
+        let second: Result<()> = open_serialized(&path, || -> Result<()> { Ok(()) }).await;
+        assert!(
+            second.is_ok(),
+            "a NEXT caller must get a FRESH attempt once the slow opener's eventual Err \
+             clears the latch, not remain fail-fast-forever: {second:?}"
+        );
+        assert!(
+            start2.elapsed() < std::time::Duration::from_millis(500),
+            "once cleared, a fresh caller must proceed immediately: elapsed {:?}",
             start2.elapsed()
         );
 
