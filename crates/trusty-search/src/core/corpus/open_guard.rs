@@ -115,6 +115,34 @@ impl PathGate {
     }
 }
 
+/// RAII guard that clears a [`PathGate`]'s wedge latch when dropped.
+///
+/// Why (issue #3659 review round 3, advisory): the round-2 fix cleared
+/// `wedged` via an ordinary sequential statement after `run_open` returned —
+/// correct today only because `run_open` cannot itself panic (it already
+/// catches panics internally via `catch_unwind`) and a detached
+/// `tokio::spawn` task is never aborted by anything in this codebase today.
+/// Wrapping the clear in a `Drop` impl makes the invariant hold structurally
+/// instead of resting on those two currently-true-but-incidental facts: the
+/// clear now fires unconditionally no matter how the owning async block's
+/// future ends (early return, a future change that introduces a panic path,
+/// or a future tokio policy that does cancel detached tasks).
+/// What: constructed immediately after the per-path mutex lock succeeds, so
+/// it is held for the guard's entire scope; `Drop::drop` stores `false` into
+/// the held gate's `wedged` latch.
+/// Test: covered indirectly — every `open_guard::tests` case that exercises
+/// `open_serialized` end to end depends on the latch being cleared
+/// correctly; a bug in this guard would surface as those tests failing.
+struct WedgeClearOnDrop {
+    gate: Arc<PathGate>,
+}
+
+impl Drop for WedgeClearOnDrop {
+    fn drop(&mut self) {
+        self.gate.wedged.store(false, Ordering::Release);
+    }
+}
+
 /// Process-wide registry of per-canonical-path gates.
 fn open_gates() -> &'static StdMutex<HashMap<PathBuf, Arc<PathGate>>> {
     static GATES: OnceLock<StdMutex<HashMap<PathBuf, Arc<PathGate>>>> = OnceLock::new();
@@ -279,23 +307,28 @@ where
     // running and may go on to complete perfectly normally (a transient
     // disk/IO stall that resolves, not necessarily a permanent TCC denial).
     // So the detached task itself — not the timed-out caller — clears
-    // `wedged` unconditionally (Ok or Err) the moment it actually finishes.
-    // Because a NEW caller never spawns a competing attempt while `wedged`
-    // is true (it fails fast on the check above instead), there is only ever
-    // one active attempt per path at a time, so this clear can never race a
-    // DIFFERENT, still-running wedge. The attempt's own `CorpusStore` (if
-    // Ok) is simply dropped when nobody is left awaiting this task's
-    // `JoinHandle` (the timed-out caller already dropped its handle) —
-    // releasing the redb file lock automatically; a subsequent caller's
-    // fresh `open_fn` either finds the file already released, or hits the
-    // already-handled `DatabaseError::DatabaseAlreadyOpen` retry-once path
-    // in `persistence_loader::open_corpus_with_retry` in the rare case it
+    // `wedged` unconditionally (Ok or Err) the moment it actually finishes,
+    // via the `WedgeClearOnDrop` RAII guard (issue #3659 review round 3):
+    // constructing it right after the mutex lock succeeds means the clear
+    // fires on ANY path out of this async block, not just the ordinary
+    // fall-through. Because a NEW caller never spawns a competing attempt
+    // while `wedged` is true (it fails fast on the check above instead),
+    // there is only ever one active attempt per path at a time, so this
+    // clear can never race a DIFFERENT, still-running wedge. The attempt's
+    // own `CorpusStore` (if Ok) is simply dropped when nobody is left
+    // awaiting this task's `JoinHandle` (the timed-out caller already
+    // dropped its handle) — releasing the redb file lock automatically; a
+    // subsequent caller's fresh `open_fn` either finds the file already
+    // released, or hits the already-handled
+    // `DatabaseError::DatabaseAlreadyOpen` retry-once path in
+    // `persistence_loader::open_corpus_with_retry` in the rare case it
     // hasn't been released quite yet — never a panic.
     let handle = tokio::spawn(async move {
         let _permit = gate_for_task.mutex.lock().await;
-        let result = run_open(open_fn, path_for_task).await;
-        gate_for_task.wedged.store(false, Ordering::Release);
-        result
+        let _wedge_guard = WedgeClearOnDrop {
+            gate: Arc::clone(&gate_for_task),
+        };
+        run_open(open_fn, path_for_task).await
     });
 
     match tokio::time::timeout(timeout_dur, handle).await {
