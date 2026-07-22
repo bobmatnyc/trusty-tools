@@ -217,23 +217,46 @@ pub(super) async fn commit_staged_corpus_swap(
     let tmp = tmp_path.to_path_buf();
     let live = live_path.clone();
     let index_id_inner = index_id.0.clone();
-    // rename + re-open on a blocking worker (filesystem + redb sync calls).
-    let reopened = tokio::task::spawn_blocking(
-        move || -> anyhow::Result<crate::core::corpus::CorpusStore> {
+    // Rename on a blocking worker (filesystem sync call).
+    let rename_result: anyhow::Result<()> = {
+        let tmp = tmp.clone();
+        let live = live.clone();
+        let index_id_for_msg = index_id_inner.clone();
+        tokio::task::spawn_blocking(move || {
             std::fs::rename(&tmp, &live).with_context(|| {
                 format!(
-                    "atomic-swap rename {} -> {} for '{index_id_inner}'",
+                    "atomic-swap rename {} -> {} for '{index_id_for_msg}'",
                     tmp.display(),
                     live.display()
                 )
-            })?;
-            crate::core::corpus::CorpusStore::open(&live)
-                .with_context(|| format!("re-open swapped corpus for '{index_id_inner}'"))
-        },
-    )
-    .await;
+            })
+        })
+        .await
+        .unwrap_or_else(|join_err| {
+            Err(anyhow::anyhow!(
+                "atomic-swap rename task panicked for '{index_id_inner}': {join_err}"
+            ))
+        })
+    };
+    // Re-open the swapped-in live corpus, serialized + panic-safe (issue
+    // #3659) against any other concurrent opener of this SAME path (e.g. a
+    // lazy-load or another handler racing this reindex's swap) — this used
+    // to call `CorpusStore::open` directly on a blocking worker with no
+    // serialization against the persistence_loader path.
+    let reopened: anyhow::Result<crate::core::corpus::CorpusStore> = match rename_result {
+        Ok(()) => {
+            let live_for_open = live.clone();
+            let index_id_for_open = index_id.0.clone();
+            crate::core::corpus::open_serialized(&live, move || {
+                crate::core::corpus::CorpusStore::open(&live_for_open)
+                    .with_context(|| format!("re-open swapped corpus for '{index_id_for_open}'"))
+            })
+            .await
+        }
+        Err(e) => Err(e),
+    };
     match reopened {
-        Ok(Ok(store)) => {
+        Ok(store) => {
             handle
                 .indexer
                 .write()
@@ -245,13 +268,9 @@ pub(super) async fn commit_staged_corpus_swap(
                 index_id.0
             );
         }
-        Ok(Err(e)) => tracing::warn!(
+        Err(e) => tracing::warn!(
             "force reindex: atomic corpus swap failed for '{}' ({e}) — \
              previous corpus preserved; in-memory state is the rebuilt one",
-            index_id.0
-        ),
-        Err(e) => tracing::warn!(
-            "force reindex: atomic corpus swap task panicked for '{}': {e}",
             index_id.0
         ),
     }
@@ -286,31 +305,56 @@ pub(super) async fn abort_staged_corpus_swap(
     };
     let tmp = tmp_path.to_path_buf();
     let index_id_inner = index_id.0.clone();
-    let restored = tokio::task::spawn_blocking(
-        move || -> anyhow::Result<Option<crate::core::corpus::CorpusStore>> {
-            match std::fs::remove_file(&tmp) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => tracing::warn!(
-                    "force reindex: could not delete staging corpus {} for '{index_id_inner}': {e}",
-                    tmp.display()
-                ),
-            }
-            match live_path {
-                Ok(live) => Ok(Some(crate::core::corpus::CorpusStore::open(&live)?)),
-                Err(e) => {
-                    tracing::warn!(
-                        "force reindex: cannot resolve live corpus path for '{index_id_inner}' \
-                         ({e}) — index left without a durable corpus until next restart"
-                    );
-                    Ok(None)
-                }
-            }
-        },
-    )
-    .await;
+
+    // Delete the staging tmp on a blocking worker (filesystem sync call).
+    {
+        let tmp = tmp.clone();
+        let index_id_for_msg = index_id_inner.clone();
+        let removed = tokio::task::spawn_blocking(move || match std::fs::remove_file(&tmp) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        })
+        .await;
+        match removed {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(
+                "force reindex: could not delete staging corpus {} for '{index_id_for_msg}': {e}",
+                tmp_path.display()
+            ),
+            Err(join_err) => tracing::warn!(
+                "force reindex: staging-corpus delete task panicked for '{index_id_for_msg}': \
+                 {join_err}"
+            ),
+        }
+    }
+
+    // Re-open the live corpus, serialized + panic-safe (issue #3659) against
+    // any other concurrent opener of this SAME path — this used to call
+    // `CorpusStore::open` directly on a blocking worker with no
+    // serialization against the persistence_loader path.
+    let restored: anyhow::Result<Option<crate::core::corpus::CorpusStore>> = match live_path {
+        Ok(live) => {
+            let live_for_open = live.clone();
+            let index_id_for_open = index_id_inner.clone();
+            crate::core::corpus::open_serialized(&live, move || {
+                crate::core::corpus::CorpusStore::open(&live_for_open).with_context(|| {
+                    format!("re-open live corpus for '{index_id_for_open}' after abort")
+                })
+            })
+            .await
+            .map(Some)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "force reindex: cannot resolve live corpus path for '{index_id_inner}' \
+                 ({e}) — index left without a durable corpus until next restart"
+            );
+            Ok(None)
+        }
+    };
     match restored {
-        Ok(Ok(Some(store))) => {
+        Ok(Some(store)) => {
             handle
                 .indexer
                 .write()
@@ -322,13 +366,9 @@ pub(super) async fn abort_staged_corpus_swap(
                 index_id.0
             );
         }
-        Ok(Ok(None)) => {}
-        Ok(Err(e)) => tracing::warn!(
-            "force reindex: could not restore the original corpus for '{}' after abort ({e})",
-            index_id.0
-        ),
+        Ok(None) => {}
         Err(e) => tracing::warn!(
-            "force reindex: corpus-restore task panicked for '{}': {e}",
+            "force reindex: could not restore the original corpus for '{}' after abort ({e})",
             index_id.0
         ),
     }
