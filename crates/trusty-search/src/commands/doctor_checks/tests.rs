@@ -4,6 +4,7 @@
 //! 500-SLOC cap; behaviour is unchanged (see #1195).
 
 use super::*;
+use serial_test::serial;
 
 #[test]
 fn check_result_classifiers() {
@@ -187,9 +188,33 @@ fn read_daemon_port_returns_some_u16() {
     let _ = p;
 }
 
+/// #3673: `doctor_data_dir()` reads the process-global `TRUSTY_DATA_DIR` env
+/// var, which 40+ other tests across this test binary also mutate (e.g.
+/// `service/data_dir.rs`, `commands/start/tests.rs`). Without `#[serial]`
+/// this test can observe a sibling test's tempdir value mid-flight and fail
+/// an assertion that has nothing to do with this test's own behaviour.
+///
+/// Why: `#[serial]` (bare — the crate-wide default lock, matching the
+/// convention in `service/data_dir.rs`'s `data_dir_override_yields_absolute_path`
+/// and `commands/daemon_utils.rs`) serializes this test against every other
+/// `TRUSTY_DATA_DIR`-mutating test in the crate. We additionally clear
+/// `TRUSTY_DATA_DIR` ourselves (rather than merely hoping no sibling left it
+/// set) so the assertion always exercises the platform-default fallback path
+/// — the one that actually contains `"trusty-search"` — deterministically,
+/// and restore whatever was there beforehand so we don't pollute later tests.
+/// What: clear `TRUSTY_DATA_DIR` under the lock, call `doctor_data_dir()`,
+/// assert the default fallback path contains `"trusty-search"`, restore.
+/// Test: `doctor_data_dir_returns_non_empty_path`.
 #[test]
+#[serial]
 fn doctor_data_dir_returns_non_empty_path() {
+    let prev = std::env::var("TRUSTY_DATA_DIR").ok();
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
     let p = doctor_data_dir();
+    match prev {
+        Some(v) => unsafe { std::env::set_var("TRUSTY_DATA_DIR", v) },
+        None => unsafe { std::env::remove_var("TRUSTY_DATA_DIR") },
+    }
     assert!(p.to_string_lossy().contains("trusty-search"));
 }
 
@@ -271,7 +296,6 @@ fn fake_layout(base: std::path::PathBuf) -> trusty_embedderd_py::VenvLayout {
 // test`'s default parallel threads race on the same env var across the two
 // files and can flip a "disabled" assertion into an "enabled" one (or vice
 // versa) depending on scheduling (caught by CI, PR #3560).
-use serial_test::serial;
 
 #[test]
 #[serial]
