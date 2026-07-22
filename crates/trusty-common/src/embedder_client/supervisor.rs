@@ -480,25 +480,38 @@ enum RestartTrigger {
 // tripping `max_restarts`. `consecutive_wedge_restarts` is a second counter,
 // tracked alongside `consecutive_failures` in `supervision_loop`, that is
 // reset ONLY after sustained real-world health — never by an ordinary
-// respawn-probe success. The two pure functions below implement its
-// reset/give-up decisions so that logic is unit-testable without driving the
-// full async supervision loop.
+// respawn-probe success. The pure function below implements its reset
+// decision so that logic is unit-testable without driving the full async
+// supervision loop.
+//
+// Issue #3635: `consecutive_failures` itself had exactly the same hole the
+// paragraph above describes for `consecutive_wedge_restarts` — it was reset
+// unconditionally on ANY successful respawn probe, so a process that
+// reliably answers its startup probe and then immediately crashes again (a
+// crash-loop-after-successful-probe pattern) could never escalate it past
+// `max_restarts`: every crash was wiped by the next "successful" respawn
+// before it could count. `supervision_loop` now applies the SAME
+// `wedge_counter_should_reset` gate to `consecutive_failures`, keyed off a
+// second `last_failure_at` timestamp updated on every crash cycle regardless
+// of trigger type — mere respawn-probe success no longer resets it; only
+// `config.wedge_reset_secs` of sustained health since the last crash does.
 
-/// Decide whether the wedge-restart escalation counter should reset.
+/// Decide whether a restart-escalation counter should reset.
 ///
 /// Why: extracted as a pure function (no I/O, no locking, no `Instant::now()`
-/// call) so the reset decision is directly unit-testable.
-/// What: `true` iff a prior wedge-restart happened (`elapsed_since_last_wedge`
-/// is `Some`) and at least `wedge_reset_secs` have elapsed since then. `None`
-/// (no prior wedge this supervision run) never resets — there is nothing to
-/// reset.
+/// call) so the reset decision is directly unit-testable. Shared by BOTH
+/// escalation counters in `supervision_loop` — `consecutive_wedge_restarts`
+/// (its original use, #1450 HIGH follow-up) and, since issue #3635,
+/// `consecutive_failures` — the sustained-health gate is identical for both:
+/// mere respawn-probe success is never sufficient on its own.
+/// What: `true` iff a prior restart happened (`elapsed_since_last` is `Some`)
+/// and at least `reset_secs` have elapsed since then. `None` (no prior
+/// restart of that kind this supervision run) never resets — there is
+/// nothing to reset.
 /// Test: `wedge_counter_should_reset_*` in `supervisor_tests.rs`.
-fn wedge_counter_should_reset(
-    elapsed_since_last_wedge: Option<Duration>,
-    wedge_reset_secs: u64,
-) -> bool {
-    match elapsed_since_last_wedge {
-        Some(elapsed) => elapsed >= Duration::from_secs(wedge_reset_secs),
+fn wedge_counter_should_reset(elapsed_since_last: Option<Duration>, reset_secs: u64) -> bool {
+    match elapsed_since_last {
+        Some(elapsed) => elapsed >= Duration::from_secs(reset_secs),
         None => false,
     }
 }
@@ -582,6 +595,13 @@ async fn supervision_loop(
     let mut consecutive_failures: u32 = 0;
     let mut consecutive_wedge_restarts: u32 = 0;
     let mut last_wedge_restart_at: Option<tokio::time::Instant> = None;
+    // Issue #3635: mirrors `last_wedge_restart_at` for the crash-storm
+    // counter. Set on every crash cycle (any `RestartTrigger`), regardless
+    // of whether the respawn that follows successfully answers its own
+    // startup probe — see the sustained-health reset check below and the
+    // respawn-success arm, which deliberately no longer resets
+    // `consecutive_failures` on its own.
+    let mut last_failure_at: Option<tokio::time::Instant> = None;
     // Set once `shutdown_rx` observes its sender closed (issue #3023 HIGH):
     // `watch::Receiver::changed()` resolves `Ready(Err(_))` on every
     // subsequent poll once the sender drops without ever calling
@@ -691,6 +711,48 @@ async fn supervision_loop(
             }
         };
 
+        // Issue #3635: apply the SAME sustained-health gate to the
+        // crash-storm counter that `wedge_counter_should_reset` already
+        // applies to `consecutive_wedge_restarts` — a respawn's own startup
+        // probe succeeding says nothing about whether the process
+        // immediately crashes again (see the respawn-success arm below,
+        // which deliberately no longer resets `consecutive_failures` on its
+        // own).
+        //
+        // Deliberately evaluated HERE — right after `trigger` resolves —
+        // rather than mirroring the wedge check's placement at the very top
+        // of the loop (before the blocking `select!` above). The wedge
+        // check's elapsed time is measured relative to `last_wedge_restart_at`
+        // as of the START of this iteration, i.e. BEFORE the (potentially
+        // long) wait for the next trigger — so a genuinely long healthy
+        // interval that elapses DURING that wait is invisible to a
+        // before-the-wait check; it would only be credited on the iteration
+        // AFTER this one, one full crash-cycle too late; the crash that just
+        // arrived after a real recovery window would still be counted
+        // against the stale, un-reset value. Evaluating after the wait
+        // instead measures the elapsed time up to the instant THIS trigger
+        // actually fired, so a crash arriving after a genuine
+        // `wedge_reset_secs`-long recovery is correctly treated as a fresh
+        // episode instead of escalating a stale streak.
+        // NOTE: no companion `last_failure_at = None` here (unlike the wedge
+        // check above) — the trigger just resolved above IS itself the next
+        // failure/crash cycle, so the unconditional `last_failure_at =
+        // Some(...)` a few lines below (alongside `consecutive_failures +=
+        // 1`) always overwrites it before it would ever be read again; this
+        // reset treats the current trigger as crash #1 of a fresh episode
+        // rather than an escalation of the prior one.
+        if wedge_counter_should_reset(
+            last_failure_at.map(|t| t.elapsed()),
+            config.wedge_reset_secs,
+        ) {
+            tracing::info!(
+                "EmbedderSupervisor: {}s without a further crash — resetting crash-storm \
+                 escalation counter (was {consecutive_failures})",
+                config.wedge_reset_secs,
+            );
+            consecutive_failures = 0;
+        }
+
         let is_wedge_restart = matches!(trigger, RestartTrigger::Unhealthy);
 
         match trigger {
@@ -747,6 +809,12 @@ async fn supervision_loop(
         }
 
         consecutive_failures += 1;
+        // Issue #3635: stamp the crash cycle so the sustained-health reset
+        // check at the top of the loop has something to measure against —
+        // set for every trigger type that reaches this point (process-exit
+        // failure, unhealthy/wedge, or a failed respawn observed as
+        // `RespawnFailed`), mirroring `last_wedge_restart_at`.
+        last_failure_at = Some(tokio::time::Instant::now());
 
         if should_give_up(
             consecutive_failures,
@@ -860,11 +928,15 @@ async fn supervision_loop(
                 // Publish the PID after the child handle is in place.
                 child_pid_slot.store(new_pid, AtomicOrdering::Release);
 
-                // Reset the ordinary failure count — the new process is up.
-                // NOTE: `consecutive_wedge_restarts` is deliberately NOT reset
-                // here (see its doc comment and `wedge_counter_should_reset`)
-                // — only sustained real-world health resets it.
-                consecutive_failures = 0;
+                // Issue #3635: `consecutive_failures` is deliberately NOT
+                // reset here. A respawn's own startup probe succeeding says
+                // nothing about whether the process crashes again
+                // immediately — that was the exact bug (a crash-loop that
+                // reliably re-answers its probe never escalated past
+                // `max_restarts`). Like `consecutive_wedge_restarts`, it is
+                // reset ONLY by the sustained-health gate at the top of the
+                // loop, once `config.wedge_reset_secs` have elapsed since the
+                // last crash (`last_failure_at` / `wedge_counter_should_reset`).
                 tracing::info!(
                     "EmbedderSupervisor: sidecar restarted successfully (pid={new_pid})"
                 );

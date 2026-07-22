@@ -34,6 +34,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     `inference_available`'s env fallback) with no lock whatsoever. All of
     these now share the single `dotenv_credential_env` serial group.
 
+- **`EmbedderSupervisor`'s give-up latch never tripped under a
+  crash-loop-after-successful-probe pattern (issue #3635).**
+  `consecutive_failures` — the crash-storm counter `should_give_up()` depends
+  on — was reset to `0` unconditionally on any successful respawn probe, so a
+  subprocess that reliably answered its startup probe and then immediately
+  crashed again could never escalate past `max_restarts`: every crash was
+  wiped by the next "successful" respawn before it could count. The
+  supervision loop now applies the same sustained-health gate
+  `consecutive_wedge_restarts` already used (`wedge_counter_should_reset`,
+  #1450 HIGH follow-up) to `consecutive_failures` too — evaluated
+  immediately after each trigger resolves (not merely at the top of the loop
+  before the blocking wait, which would lag a full crash-cycle behind a
+  genuine recovery window) — so mere respawn-probe success no longer resets
+  it; only `config.wedge_reset_secs` of observed health since the last crash
+  does. A transient single crash followed by genuine sustained health still
+  resets normally.
+  - Test: `supervisor_gives_up_after_max_restarts_flips_has_given_up` (now
+    passes deterministically via the crash-storm counter itself, not by
+    accident via the sibling wedge counter),
+    `supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up`.
 ## [0.24.1] — 2026-07-21
 
 Patch release closing unpublished source drift under the already-published
