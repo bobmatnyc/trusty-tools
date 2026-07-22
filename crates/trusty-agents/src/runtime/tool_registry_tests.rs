@@ -146,13 +146,17 @@ fn all_known_agents_get_skill_tools() {
         "qa-agent",
         "local-ops-agent",
         "docs-agent",
-        // #3466: these four were migrated off the claude-code runner by
-        // #3458 but were missing from this list, so nothing noticed that
-        // they had silently dropped to the catch-all branch.
+        // #3466: these were migrated off the claude-code runner by #3458 but
+        // were missing from this list, so nothing noticed that they had
+        // silently dropped to the catch-all branch.
+        //
+        // `ticketing-agent` is deliberately NOT here: its `[tools] allowed`
+        // authorizes only the 12 ticketing tools + `finish_task`, so
+        // registering skill tools it may never call would just be bait for a
+        // refused call. See `ticketing_agent_registry_matches_its_allowed_list`.
         "engineer",
         "python-engineer",
         "postmortem-agent",
-        "ticketing-agent",
         // Unknown agent name: default branch also registers skill tools.
         "unknown-agent",
     ] {
@@ -638,7 +642,7 @@ fn migrated_agents_resolve_their_declared_tool_surface() {
         ),
         // #3466: `python-engineer` is DELIBERATELY tool-light. Its prompt
         // mandates returning every file as a prose `## File: <path>` +
-        // code-fence section, which `ipc::parse_file_sections` extracts to
+        // code-fence section, which `ipc::extract_files_from_content` extracts to
         // disk after the turn. Handing it write_file would invite it to call
         // a tool instead of honoring that contract, so the catch-all
         // (skills-only) registry is CORRECT here — pinned so nobody "fixes"
@@ -702,17 +706,23 @@ fn migrated_agents_resolve_their_declared_tool_surface() {
     }
 }
 
-/// #3466: `ticketing-agent` declares 12 ticketing tools in `[tools] allowed`,
-/// but they were only ever registered in `pm_mode.rs` — never in
-/// `build_registry_for_agent`. Registering them needs an async GitHub client,
-/// so it happens at the async `subagent_mode.rs` call site (same pattern the
-/// MCP-live and finish_task steps already use). What this test can pin
-/// synchronously is that the agent is no longer silently indistinguishable
-/// from an unknown-name agent: it must at minimum resolve a registry and
-/// declare the ticketing scope that gates the async registration step.
+/// #3466 second-pass review (HIGH): registration and authorization are two
+/// separate gates. `tool_loop` sends the FULL registry schemas to the model;
+/// `dispatch_gated` then refuses any call outside `[tools] allowed`. So a tool
+/// that is registered but not allowed is strictly worse than one that is
+/// absent — the model sees it, calls it, and burns a turn on
+/// "Tool 'x' is not permitted". An earlier revision of the `ticketing-agent`
+/// arm registered skill/memory/timer/read_file/list_dir/grep_files against an
+/// `allowed` list naming only the 12 ticketing tools + `finish_task`, on a
+/// strict-discipline agent with `max_turns = 20`.
+///
+/// This pins the reconciliation: the sync arm registers NOTHING, so the
+/// resolved surface is exactly the tools the TOML authorizes (ticketing tools
+/// arrive from the async `subagent_mode` step, `finish_task` from the
+/// `use_finish_task` step).
 /// Test: this function IS the test surface.
 #[test]
-fn ticketing_agent_declares_the_scope_that_gates_its_tools() {
+fn ticketing_agent_registry_matches_its_allowed_list() {
     let reg = build_registry_for_agent(
         "ticketing-agent",
         "ticketing",
@@ -722,18 +732,151 @@ fn ticketing_agent_declares_the_scope_that_gates_its_tools() {
         empty_tag_registry(),
     )
     .expect("ticketing-agent must build a registry");
-    assert!(
-        reg.contains("load_skill"),
-        "ticketing-agent: load_skill missing"
-    );
 
     let cfg = crate::agents::AgentConfig::by_name("ticketing-agent")
         .expect("bundled ticketing-agent must load");
-    let scopes = cfg.tools.scopes.clone().unwrap_or_default();
+    let allowed = cfg.tools.allowed.clone().unwrap_or_default();
     assert!(
-        scopes.iter().any(|s| s == "ticketing.*"),
-        "ticketing-agent must declare [tools] scopes = [\"ticketing.*\"] — \
-         that declaration is what gates native ticketing-tool registration \
-         on the subagent path (#3466). Got: {scopes:?}"
+        !allowed.is_empty(),
+        "sanity: ticketing-agent must declare an [tools] allowed list"
+    );
+
+    // Every tool the sync arm registers must be authorized by `allowed`.
+    for schema in reg.schemas() {
+        let tool_name = schema
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            allowed.contains(&tool_name),
+            "ticketing-agent registers `{tool_name}` but [tools] allowed does not \
+             authorize it — the model would see it, call it, and get \
+             \"Tool '{tool_name}' is not permitted\" (#3466)"
+        );
+    }
+}
+
+/// #3466: the ticketing bundle needs an async GitHub client, so registration
+/// happens at the async `subagent_mode` call site. The DECISION is the pure
+/// predicate `wants_ticketing_tools`, tested here — otherwise the async block
+/// has no reachable coverage at all.
+/// Test: this function IS the test surface.
+#[test]
+fn ticketing_scope_predicate_is_fail_closed() {
+    use crate::agents::ToolsConfig;
+
+    // Absent scopes -> false.
+    assert!(!wants_ticketing_tools(&ToolsConfig::default()));
+
+    // Empty scopes -> false.
+    let empty = ToolsConfig {
+        scopes: Some(vec![]),
+        ..Default::default()
+    };
+    assert!(!wants_ticketing_tools(&empty));
+
+    // An unrelated scope must NOT grant ticket-mutation tools.
+    let other = ToolsConfig {
+        scopes: Some(vec!["memory.read".to_string(), "search.read".to_string()]),
+        ..Default::default()
+    };
+    assert!(!wants_ticketing_tools(&other));
+
+    // A near-miss must not match — the gate is exact, not a prefix.
+    let near = ToolsConfig {
+        scopes: Some(vec!["ticketing".to_string()]),
+        ..Default::default()
+    };
+    assert!(!wants_ticketing_tools(&near));
+
+    // The exact declared scope grants it.
+    let yes = ToolsConfig {
+        scopes: Some(vec![TICKETING_SCOPE.to_string()]),
+        ..Default::default()
+    };
+    assert!(wants_ticketing_tools(&yes));
+}
+
+/// #3466: pins that the bundled `ticketing-agent` actually declares the scope
+/// its tools are gated on. Without this, narrowing the registry arm to nothing
+/// (above) would leave the agent with no tools at all and no test would notice.
+/// Test: this function IS the test surface.
+#[test]
+fn bundled_ticketing_agent_declares_the_scope_that_gates_its_tools() {
+    let cfg = crate::agents::AgentConfig::by_name("ticketing-agent")
+        .expect("bundled ticketing-agent must load");
+    assert!(
+        wants_ticketing_tools(&cfg.tools),
+        "ticketing-agent must declare [tools] scopes = [\"{TICKETING_SCOPE}\"] — \
+         that declaration is the ONLY thing that registers its 12 ticketing \
+         tools on the subagent path (#3466). Got: {:?}",
+        cfg.tools.scopes
+    );
+}
+
+/// #3466: `[tools] ast_native = true` was honored only by the in-process
+/// runner, so `engineer.toml`'s flag was a silent no-op on the subprocess path
+/// #3458 moved it to. These pin both halves of the fix: the config predicate
+/// and the registration effect.
+/// Test: this function IS the test surface.
+#[test]
+fn engineer_registry_includes_ast_bundle_when_declared() {
+    let cfg = crate::agents::AgentConfig::by_name("engineer").expect("bundled engineer must load");
+    assert!(
+        wants_ast_bundle(&cfg.tools),
+        "engineer.toml must declare [tools] ast_native = true"
+    );
+
+    let mut reg = build_registry_for_agent(
+        "engineer",
+        "engineer",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+    )
+    .expect("engineer builds a registry");
+
+    // Not present from the name-keyed arm alone...
+    assert!(
+        !reg.contains("edit_symbol"),
+        "sanity: the AST bundle is layered on by the caller, not the arm"
+    );
+
+    // ...and present once the caller applies the declared bundle.
+    register_ast_bundle(&mut reg);
+    for tool in [
+        "get_symbol",
+        "edit_symbol",
+        "insert_symbol",
+        "add_import",
+        "validate_syntax",
+        "apply_patch",
+    ] {
+        assert!(
+            reg.contains(tool),
+            "engineer: AST-native tool `{tool}` missing after register_ast_bundle"
+        );
+    }
+}
+
+/// #3466: the AST bundle must not be handed to agents that never asked for it.
+/// Test: this function IS the test surface.
+#[test]
+fn ast_bundle_predicate_is_false_without_the_flag() {
+    use crate::agents::ToolsConfig;
+    // Guarded: the process-wide `--ast-native` override (#348) would make this
+    // true for every agent, and it is global mutable state.
+    if crate::ast::is_ast_native_overridden() {
+        return;
+    }
+    assert!(!wants_ast_bundle(&ToolsConfig::default()));
+
+    let cfg = crate::agents::AgentConfig::by_name("qa-agent").expect("bundled qa-agent must load");
+    assert!(
+        !wants_ast_bundle(&cfg.tools),
+        "qa-agent does not declare ast_native and must not receive the bundle"
     );
 }

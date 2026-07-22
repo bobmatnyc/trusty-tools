@@ -364,14 +364,11 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     // silent no-op. Mirrors `in_process_runner.rs` exactly — same flag, same
     // `--ast-native` process override (#348) — so the two runner paths agree
     // on what `ast_native` means.
-    // What: appends get_symbol / edit_symbol / insert_symbol / add_import /
-    // validate_syntax / apply_patch to whatever the name-keyed registry built.
-    // Test: `engineer_registry_includes_ast_bundle_when_declared`.
-    if cfg.tools.effective_ast_native() || crate::ast::is_ast_native_overridden() {
+    // What: condition and effect are both sync helpers in `tool_registry` so
+    // each has real coverage — see their own `Test:` lines.
+    if super::tool_registry::wants_ast_bundle(&cfg.tools) {
         let reg = registry.get_or_insert_with(ToolRegistry::new);
-        for t in tools::ast_tools::ast_native_tools() {
-            reg.register(t);
-        }
+        super::tool_registry::register_ast_bundle(reg);
         tracing::debug!(agent = %name, "registered AST-native tool bundle");
     }
 
@@ -386,14 +383,9 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     // no other agent silently inherits ticket-mutation tools.
     // What: same construction as `pm_mode.rs` — GitHub identity from
     // `~/.trusty-agents/config.toml`; absent/failed config is a non-fatal warn,
-    // matching the PM's behavior.
-    // Test: `ticketing_agent_declares_the_scope_that_gates_its_tools`.
-    if cfg
-        .tools
-        .scopes
-        .as_ref()
-        .is_some_and(|s| s.iter().any(|scope| scope == "ticketing.*"))
-    {
+    // matching the PM's behavior. The gating decision is the sync predicate
+    // `wants_ticketing_tools`, which carries its own `Test:` line.
+    if super::tool_registry::wants_ticketing_tools(&cfg.tools) {
         let global = mcp::config::GlobalConfig::load().await;
         if let Some(identity) = global.github_identity(None)
             && let Some(tk_cfg) = identity.to_ticketing_config()

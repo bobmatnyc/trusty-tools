@@ -127,6 +127,64 @@ pub(super) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
     ASSISTANT_TIER_ROLE, // peer assistant personas: izzie, cto-assistant, personal-assistant, …
 ];
 
+/// OpenRPC scope an agent must declare to receive the native ticketing bundle.
+pub(super) const TICKETING_SCOPE: &str = "ticketing.*";
+
+/// Whether this agent's config asks for the native ticketing tool bundle.
+///
+/// Why (#3466): `ticketing_tools()` was only ever registered in `pm_mode.rs`,
+/// so `ticketing-agent`'s entire declared `[tools] allowed` list resolved to
+/// nothing once #3458 took it off the claude-code runner. Registration now
+/// happens at the async `subagent_mode` call site (the bundle needs an async
+/// GitHub client), but the DECISION is this pure predicate so it is testable
+/// without a network client or a tokio runtime — the async block around it
+/// otherwise has no reachable coverage.
+/// What: true iff `[tools] scopes` contains [`TICKETING_SCOPE`]. Keyed on the
+/// agent's own declared scope rather than its name, so no agent silently
+/// inherits ticket-mutation tools by being renamed. Fail-closed: a missing or
+/// empty `scopes` list yields false.
+/// Test: `ticketing_scope_predicate_is_fail_closed`,
+/// `bundled_ticketing_agent_declares_the_scope_that_gates_its_tools`.
+pub(super) fn wants_ticketing_tools(tools: &crate::agents::ToolsConfig) -> bool {
+    tools
+        .scopes
+        .as_ref()
+        .is_some_and(|s| s.iter().any(|scope| scope == TICKETING_SCOPE))
+}
+
+/// Whether this agent's config asks for the AST-native tool bundle.
+///
+/// Why (#3466): `[tools] ast_native = true` (#347) was honored only by
+/// `InProcessAgentRunner::build_safe_registry`. Every agent declaring it was
+/// on `runner = "claude-code"`, where the `claude` CLI supplied its own
+/// Edit/Write surface, so the omission was invisible — until #3458 moved
+/// those agents onto the subprocess path and the flag became a silent no-op.
+/// Split out as a pure predicate so the async call site's condition is
+/// testable without a tokio runtime, and so guarding it does not force a
+/// registry into existence for agents that legitimately have none.
+/// What: true iff `[tools] ast_native` (either TOML spelling) or the
+/// process-wide `--ast-native` override (#348) is set.
+/// Test: `bundled_engineer_declares_the_ast_native_flag`,
+/// `ast_bundle_predicate_is_false_without_the_flag`.
+pub(super) fn wants_ast_bundle(tools: &crate::agents::ToolsConfig) -> bool {
+    tools.effective_ast_native() || crate::ast::is_ast_native_overridden()
+}
+
+/// Append the AST-native tool bundle to an existing registry.
+///
+/// Why: keeps the registration effect in one place shared by the subprocess
+/// path (`subagent_mode`) and any future caller, so the two runner paths
+/// cannot drift on what "the AST bundle" means.
+/// What: registers get_symbol / edit_symbol / insert_symbol / add_import /
+/// validate_syntax / apply_patch. Caller decides whether to invoke it — see
+/// [`wants_ast_bundle`].
+/// Test: `engineer_registry_includes_ast_bundle_when_declared`.
+pub(super) fn register_ast_bundle(reg: &mut ToolRegistry) {
+    for t in crate::tools::ast_tools::ast_native_tools() {
+        reg.register(t);
+    }
+}
+
 /// Build a tool registry tailored to a specific agent.
 ///
 /// Why: Different agents need different tools (research -> web_search,
@@ -430,20 +488,27 @@ pub(super) fn build_registry_for_agent(
             // `subagent_mode.rs` — the same reason the MCP-live discovery
             // step lives there rather than being folded in here.
             //
-            // What this arm contributes is the read-only context the agent
-            // needs to write a useful ticket body, plus skills. `finish_task`
-            // is auto-registered by the caller (`use_finish_task = true`).
-            let mut reg = ToolRegistry::new();
-            register_skill_tools(&mut reg);
-            register_memory_tools(&mut reg);
-            register_timer_tools(&mut reg);
-            reg.register(Arc::new(ReadFileTool::new()));
-            reg.register(Arc::new(ListDirTool::new()));
-            reg.register(Arc::new(GrepFilesTool::new()));
-            if let Some(dir) = out_dir {
-                reg.register(Arc::new(PhaseAuditTool::new(dir.to_path_buf())));
-            }
-            Some(reg)
+            // This arm therefore registers NOTHING of its own — deliberately.
+            //
+            // #3466 second-pass review (HIGH): an earlier revision of this arm
+            // also registered skill/memory/timer/read_file/list_dir/grep_files.
+            // That is worse than registering nothing, because registration and
+            // authorization are separate gates: `tool_loop` sends the FULL
+            // registry schemas to the model, then `dispatch_gated` refuses any
+            // call outside `[tools] allowed`. This agent's `allowed` list is
+            // exactly the 12 ticketing tools + `finish_task`, so every extra
+            // tool became bait — the model sees `read_file`, calls it, and
+            // burns a turn on `Tool 'read_file' is not permitted`, on a
+            // strict-discipline agent with `max_turns = 20`.
+            //
+            // The prompt's own "## Your Tools" section names only the
+            // ticketing tools and `finish_task`; nothing in it asks the agent
+            // to read the filesystem. Widening `allowed` to match the registry
+            // would have been a speculative capability grant with no
+            // demonstrated need, so the registry is narrowed to match
+            // `allowed` instead. Result: the resolved surface is exactly the
+            // 13 tools the TOML authorizes.
+            Some(ToolRegistry::new())
         }
         "local-ops-agent" => {
             // #77: Local operations agent. Registers a permissive (allowlisted)

@@ -126,8 +126,13 @@ impl ToolExecutor for ShellExecTool {
 ///
 /// What: Case-insensitive prefix match against a list of recognized runners,
 /// applied after stripping at most one leading `cd <path> &&` and any leading
-/// `VAR=value` assignments drawn from a fixed, non-executable variable
-/// allowlist.
+/// `VAR=value` assignments whose NAME is on a fixed allowlist (see
+/// [`strip_env_assignments`] for the bound that list actually enforces — it
+/// is not a proof of inertness).
+///
+/// This normalization does not make `pytest_exec` a security boundary, and
+/// never claimed to: the match is still prefix-only, so everything after the
+/// first recognized token reaches `/bin/sh -c` unvetted (#3679).
 /// Test: `test_allowed_commands_multi_language`, `accepts_cd_prefixed_command`,
 /// `rejects_cd_prefix_hiding_a_non_runner`, `accepts_pythonpath_prefixed_pytest`,
 /// `rejects_dangerous_env_assignments`.
@@ -216,18 +221,33 @@ fn strip_leading_cd(command: &str) -> &str {
 /// prescribe `PYTHONPATH=src:. python3 -m pytest -v`, which fails the prefix
 /// match. Accepting arbitrary `VAR=value` prefixes would be a real
 /// escalation: `LD_PRELOAD=/tmp/evil.so cargo test` executes attacker code
-/// inside an "allowlisted" command. So the variable NAME is allowlisted, and
-/// only names that cannot cause code loading or interpreter redirection are
-/// on it.
+/// inside an "allowlisted" command — and `execute()` passes the ORIGINAL
+/// (unnormalized) string to `/bin/sh -c`, so any assignment we tolerate here
+/// really does take effect. So the variable NAME is allowlisted.
+///
+/// The list is kept to variables with no *flag-level* mechanism for naming a
+/// binary to execute. It is NOT a claim that every entry is inert: notably
+/// `PYTHONPATH` is prompt-mandated and cannot be dropped, yet Python's `site`
+/// module imports `sitecustomize` from `sys.path` at interpreter startup, so
+/// a writable directory on `PYTHONPATH` is code execution. The bar this list
+/// actually enforces is "no worse than the test runner already gives you",
+/// not "provably safe" — see #3679 for the broader, pre-existing gap:
+/// `is_allowed_pytest` only vets the FIRST token while `execute()` runs the
+/// original string through `/bin/sh -c`, so `cargo test; rm -rf /` is
+/// accepted today regardless of this list.
+///
+/// Deliberately excluded, each because a flag or file it names is executed:
+/// `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_*`, `PATH`, `PYTHONSTARTUP`,
+/// `PYTHONHOME`, `NODE_OPTIONS` (`--require`), `RUSTC_WRAPPER`,
+/// `RUSTFLAGS` (`-Clinker=`), `GOFLAGS` (`-toolexec=` / `-exec=`), `CARGO`.
 /// What: Repeatedly peels `NAME=VALUE ` where NAME is in the allowlist and
 /// VALUE contains no shell metacharacters. Stops at the first token that
 /// isn't such an assignment.
 /// Test: `accepts_pythonpath_prefixed_pytest`, `rejects_dangerous_env_assignments`.
 fn strip_env_assignments(command: &str) -> &str {
-    /// Inert variables only: search paths, log verbosity, CI/colour hints.
-    /// Deliberately EXCLUDED: `LD_PRELOAD`, `LD_LIBRARY_PATH`,
-    /// `DYLD_*`, `PATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `NODE_OPTIONS`,
-    /// `RUSTC_WRAPPER`, `CARGO` — each can execute attacker-chosen code.
+    /// Search paths, log verbosity, and CI/colour hints — no entry here has a
+    /// flag-level way to name a binary for the toolchain to exec. See the
+    /// function doc for why this is a bounded claim, not a safety proof.
     const ALLOWED_ENV: &[&str] = &[
         "PYTHONPATH",
         "PYTHONHASHSEED",
@@ -235,8 +255,6 @@ fn strip_env_assignments(command: &str) -> &str {
         "PYTHONUNBUFFERED",
         "RUST_LOG",
         "RUST_BACKTRACE",
-        "RUSTFLAGS",
-        "GOFLAGS",
         "NODE_ENV",
         "CI",
         "FORCE_COLOR",
@@ -431,6 +449,20 @@ mod tests {
             "NODE_OPTIONS=--require=/tmp/e.js npm test"
         ));
         assert!(!is_allowed_pytest("RUSTC_WRAPPER=/tmp/evil cargo test"));
+        // #3466 second-pass review (HIGH): `RUSTFLAGS` and `GOFLAGS` were
+        // briefly on the allowlist. Both carry flags that make the toolchain
+        // exec an attacker-named binary — `rustc -Clinker=` at link time,
+        // `go -toolexec=` / `-exec=` per tool/test invocation — which is the
+        // same escalation class as LD_PRELOAD. Neither appears in
+        // qa-agent.toml or prescriptive.json, so they were speculative
+        // additions with no demonstrated need. Removed.
+        assert!(!is_allowed_pytest(
+            "RUSTFLAGS=-Clinker=/tmp/evil cargo test"
+        ));
+        assert!(!is_allowed_pytest(
+            "GOFLAGS=-toolexec=/tmp/evil go test ./..."
+        ));
+        assert!(!is_allowed_pytest("GOFLAGS=-exec=/tmp/evil go test ./..."));
         // Allowlisted name, but a value that smuggles a command.
         assert!(!is_allowed_pytest("PYTHONPATH=$(id) python3 -m pytest"));
         assert!(!is_allowed_pytest("RUST_LOG=`id` cargo test"));

@@ -166,11 +166,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `list_skills`, `advance_workflow_phase`). `engineer` is the `code` phase of
   `prescriptive.json` (`produces_files = true`), so combined with its newly
   enabled `use_finish_task` it reported success on turn 0 having written
-  nothing. Each now has a dedicated arm registering the file tools its prompt
-  and `[tools] allowed` actually name. `python-engineer` deliberately keeps
-  the skills-only registry — its prompt mandates prose `## File: <path>`
-  sections that `ipc::parse_file_sections` extracts after the turn — and that
-  choice is now pinned by a test rather than left implicit.
+  nothing. `engineer` and `postmortem-agent` now have dedicated arms
+  registering the file tools their prompts and `[tools] allowed` actually
+  name. `python-engineer` deliberately keeps the skills-only registry — its
+  prompt mandates prose `## File: <path>` sections that
+  `ipc::extract_files_from_content` extracts after the turn — and that choice
+  is now pinned by a test rather than left implicit.
 - **`[tools] ast_native = true` is no longer a silent no-op on the subprocess
   runner (#3466):** the AST bundle (`get_symbol` / `edit_symbol` /
   `insert_symbol` / `add_import` / `validate_syntax` / `apply_patch`) was only
@@ -184,7 +185,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   only, so the agent's whole declared `[tools] allowed` list resolved to
   nothing once it left the claude-code runner. Registration is gated on the
   agent's own `[tools] scopes = ["ticketing.*"]` declaration rather than its
-  name, so no other agent inherits ticket-mutation tools.
+  name, so no other agent inherits ticket-mutation tools. Its name-keyed
+  registry arm deliberately registers nothing else: registration and
+  authorization are separate gates (the model is sent the full registry
+  schemas, then `dispatch_gated` refuses anything outside `allowed`), so a
+  registered-but-unauthorized tool is worse than an absent one — the model
+  calls it and burns a turn on "not permitted". The resolved surface is now
+  exactly the 13 tools the TOML authorizes.
 - **QA phase no longer reports a false failure on every run (#3466):**
   `is_allowed_pytest` was a strict prefix match, but both the `qa-agent`
   prompt (STEP 1) and `prescriptive.json`'s QA template mandate
@@ -193,10 +200,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `pytest_exec` refused, and the prompt maps a refusal onto `status: "fail"`.
   The command is now normalized before the check (at most one leading
   `cd <path> &&` whose target contains no shell metacharacters, plus leading
-  `VAR=value` assignments drawn from a fixed allowlist of inert variable
-  names) so the string actually vetted is still a bare test-runner
-  invocation. The allowlist itself is unchanged: `cd /tmp && rm -rf /` and
-  `LD_PRELOAD=/tmp/evil.so cargo test` remain refused.
+  `VAR=value` assignments drawn from a fixed allowlist of variable names) so
+  the string actually vetted is still a bare test-runner invocation. No new
+  entries were added to `ALLOWED_PREFIXES`, and `cd /tmp && rm -rf /` /
+  `LD_PRELOAD=/tmp/evil.so cargo test` are both refused.
+
+  This is scoped narrowly and is **not** a claim that `pytest_exec` is a
+  security boundary. It has never been one past the first token:
+  `is_allowed_pytest` vets only the command prefix while `execute()` runs the
+  original string through `/bin/sh -c`, so `cargo test; rm -rf /` has always
+  been accepted — pre-existing on `main`, tracked as #3679. Note also
+  that this change *reduces* qa-agent's reach rather than expanding it: under
+  `runner = "claude-code"` the agent had the CLI's unrestricted `Bash` tool,
+  and it now has only this allowlisted executor.
 - **`qa-agent` can perform its own STEP 0 stack detection (#3466):**
   `read_file` and `list_dir` added to both its registry arm and its `[tools]
   allowed` list. Its prompt tells it to inspect the project directory for
