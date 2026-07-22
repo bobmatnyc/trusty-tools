@@ -54,12 +54,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     passes deterministically via the crash-storm counter itself, not by
     accident via the sibling wedge counter),
     `supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up`.
+
+- **`search_index::ensure_project_indexed` no longer hardcodes
+  `allow_sensitive_path: true` (issue #2914).** The parameter is now explicit
+  per caller: trusty-code's task-start caller still opts in (its `directory`
+  binding can legitimately live under an OS-temp prefix, issue #2747), but
+  trusty-mpm's session-launch caller now passes `false`, since a real session
+  workspace is never an OS-temp path — closing the ephemeral test/self-heal
+  index leak into the production trusty-search index set.
+
 ## [0.24.1] — 2026-07-21
 
 Patch release closing unpublished source drift under the already-published
 0.24.0 (issue #3366 defect class): two commits landed on `main` *after*
 0.24.0 was published to crates.io (from `831103dd`) without a version bump,
 so the live 0.24.0 tarball does not contain them. This release carries both.
+
+## [0.24.0] — 2026-07-21
 
 ### Added
 
@@ -94,11 +105,6 @@ so the live 0.24.0 tarball does not contain them. This release carries both.
   non-default-port address written that way, so a future regression here
   fails loudly instead of silently breaking `trusty-search monitor
   status`/`monitor indexes`/`monitor tui`'s `[r]` reindex hotkey.
-
-## [0.24.0] — 2026-07-21
-
-### Added
-
 - **`ExecutionProvider::Mps` + `resolve_expected_python_provider` (epic #3524
   slice 6, PR 2/5, refs #3530, #3493 P1)** — a new `Mps` variant on
   `embedder::ExecutionProvider` for the opt-in Python/MPS embedding sidecar

@@ -45,6 +45,12 @@ mod tests_roster;
 #[cfg(test)]
 #[path = "tests_scaffold_gitignore.rs"]
 mod tests_scaffold_gitignore;
+// Split out of `tests.rs` to keep it under the 1500-SLOC test-file cap
+// (issue #2914 ephemeral-index-leak regression coverage) — mirrors the
+// `tests_roster.rs` split pattern above.
+#[cfg(test)]
+#[path = "tests_search_index.rs"]
+mod tests_search_index;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

@@ -1782,6 +1782,15 @@ async fn run_task_registry_never_registers_recall_session() {
 /// Test: this test.
 #[test]
 fn spawns_indexing_thread_for_non_git_project_path() {
+    // Hermeticity (#3361, #2914): this test calls
+    // `ensure_project_indexed_in_background` DIRECTLY rather than through the
+    // `execute_run_task` wrapper, so it must install the same ambient-daemon
+    // isolation itself — otherwise, on a machine with a live trusty-search
+    // daemon, this genuinely registers `tmp`'s throwaway tempdir against it
+    // (with `allow_sensitive_path: true`, since this is tcode's legitimate
+    // opt-in caller), which is exactly the ephemeral-index leak issue #2914
+    // reports.
+    isolate_ambient_daemons();
     let tmp = tempfile::tempdir().expect("tempdir");
     // No `.git` anywhere under `tmp` — exactly the scratch/bake-off case the
     // old guard used to skip.
@@ -1812,6 +1821,11 @@ fn spawns_indexing_thread_for_non_git_project_path() {
 /// Test: this test.
 #[test]
 fn background_indexing_invokes_readiness_observer() {
+    // Hermeticity (#3361, #2914): see the identical guard in
+    // `spawns_indexing_thread_for_non_git_project_path` — this test also
+    // calls `ensure_project_indexed_in_background` directly, bypassing
+    // `execute_run_task`'s isolation.
+    isolate_ambient_daemons();
     let tmp = tempfile::tempdir().expect("tempdir");
     let (tx, rx) = std::sync::mpsc::channel();
 

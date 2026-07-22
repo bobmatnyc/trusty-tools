@@ -119,7 +119,12 @@ pub(crate) fn ensure_project_indexed_in_background(
     std::thread::spawn(move || {
         // Warm first, then surface the readiness the warm produced so the
         // session knows whether a semantic search is trustworthy yet (#2784).
-        let _ = trusty_common::search_index::ensure_project_indexed(&project);
+        // `allow_sensitive_path: true` (issue #2914): tcode's working project
+        // is legitimately a `directory` binding that can live under an
+        // OS-temp prefix (issue #2747's bake-off scratch project case), so
+        // this caller opts in to the daemon's temp-dir denylist bypass —
+        // unlike trusty-mpm's session-launch caller, which never needs it.
+        let _ = trusty_common::search_index::ensure_project_indexed(&project, true);
         // Probe ONCE and use that single snapshot for both surfaces — probing
         // again for the observer would double the HTTP cost and could report a
         // lane that flipped between the two reads.
