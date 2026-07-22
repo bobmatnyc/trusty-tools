@@ -236,9 +236,14 @@ fn parse_cgroup_v2_self_path(text: &str) -> Option<String> {
 fn parse_cgroup_v1_self_path(text: &str) -> Option<String> {
     for line in text.lines() {
         let mut parts = line.splitn(3, ':');
-        let _hierarchy_id = parts.next()?;
-        let controllers = parts.next()?;
-        let path = parts.next()?;
+        // Per-line `continue`, not `?`-propagation: a single malformed/blank
+        // line earlier in the file (e.g. a stray empty line) must not abandon
+        // the whole scan — the valid `...:memory:...` line may still follow.
+        let (Some(_hierarchy_id), Some(controllers), Some(path)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
         if controllers.split(',').any(|c| c == "memory") {
             let path = path.trim();
             if !path.is_empty() {
@@ -374,6 +379,33 @@ mod tests {
     fn test_parse_cgroup_v1_self_path_absent_on_v2_only_host() {
         // Pure cgroup v2 host: only the "0::" line, no numbered memory line.
         assert_eq!(parse_cgroup_v1_self_path("0::/\n"), None);
+    }
+
+    /// A malformed line (no colons at all) earlier in the file must not
+    /// abandon the whole scan — the valid `...:memory:...` line further down
+    /// must still be found. Regression test for a code-critic finding: the
+    /// original implementation used `?`-propagation per field, so a line that
+    /// didn't split into 3 parts returned `None` from the entire function
+    /// instead of just skipping that one line.
+    #[test]
+    fn test_parse_cgroup_v1_self_path_skips_malformed_line_then_finds_memory() {
+        let text = "malformed-line-no-colons\n11:memory:/system.slice/x\n";
+        assert_eq!(
+            parse_cgroup_v1_self_path(text),
+            Some("/system.slice/x".to_string())
+        );
+    }
+
+    /// Same regression, with a blank line instead of a malformed one — a
+    /// stray blank line (trailing newline artifacts, etc.) must also be
+    /// skipped rather than short-circuiting the scan.
+    #[test]
+    fn test_parse_cgroup_v1_self_path_skips_blank_line_then_finds_memory() {
+        let text = "\n11:memory:/system.slice/x\n";
+        assert_eq!(
+            parse_cgroup_v1_self_path(text),
+            Some("/system.slice/x".to_string())
+        );
     }
 
     // ---- join_cgroup_mount --------------------------------------------
