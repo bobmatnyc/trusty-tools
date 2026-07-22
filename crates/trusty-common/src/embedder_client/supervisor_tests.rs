@@ -435,6 +435,59 @@ exit 1
         (dir, path)
     }
 
+    /// Like `write_mock_embedderd_crash_once`, but only the FIRST invocation
+    /// crashes — every later invocation (detected via a marker file dropped
+    /// on the first run, same technique as
+    /// `fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up`
+    /// in trusty-search's `embedder_fallback.rs`) behaves like
+    /// `write_mock_embedderd`: answers its own startup probe and then idles,
+    /// looping indefinitely, instead of crashing again.
+    ///
+    /// Why (issue #3635): drives the "transient crash, then sustained
+    /// health" regression test — a single crash followed by a genuinely
+    /// healthy respawn must still let `consecutive_failures` reset once
+    /// `wedge_reset_secs` of health has elapsed, so a LATER, unrelated crash
+    /// is not wrongly treated as a continuation of the first crash-storm.
+    /// What: first invocation (marker absent) answers exactly one JSON-RPC
+    /// request then exits non-zero, dropping the marker on its way in.
+    /// Every subsequent invocation (marker present) answers requests forever
+    /// like the plain healthy mock, until the test kills it.
+    /// Test: `supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up`.
+    fn write_mock_embedderd_crash_once_then_healthy() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("mock-embedderd-crash-once-then-healthy.sh");
+        let marker = dir.path().join("crashed-once.marker");
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+MARKER="{marker}"
+if [ -f "$MARKER" ]; then
+  # Second and every later invocation: healthy — answer requests forever.
+  while IFS= read -r line; do
+    id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+    [ -n "$id" ] || id=1
+    printf '{{"jsonrpc":"2.0","result":{{"embeddings":[[0.1]]}},"id":%s}}\n' "$id"
+  done
+  exit 0
+fi
+touch "$MARKER"
+IFS= read -r line
+id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+[ -n "$id" ] || id=1
+printf '{{"jsonrpc":"2.0","result":{{"embeddings":[[0.1]]}},"id":%s}}\n' "$id"
+exit 1
+"#,
+                marker = marker.display(),
+            ),
+        )
+        .expect("write mock script");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod +x");
+        (dir, path)
+    }
+
     /// Best-effort liveness check via `kill -0 <pid>` (no signal sent, just
     /// an existence probe): success means the process still exists, failure
     /// means it is gone.
@@ -815,6 +868,148 @@ exit 1
             "has_given_up() never flipped to true within 45s of a \
              persistent crash loop with max_restarts=1"
         );
+    }
+
+    /// Issue #3635 regression test: a transient single crash, followed by
+    /// genuine sustained health, must NOT leave the supervisor in a state
+    /// that is one step from a premature give-up. This is the "opposite
+    /// failure" the #3635 fix must not introduce: giving up too eagerly on
+    /// legitimate, well-separated transient restarts.
+    ///
+    /// Why: `supervisor_gives_up_after_max_restarts_flips_has_given_up`
+    /// (above) proves the fix closes the crash-storm hole; this test proves
+    /// it does not overcorrect. A SECOND, forced live-process crash was
+    /// deliberately ruled out for this test: `RestartTrigger` classification
+    /// (`ProcessExit` vs. `Unhealthy`) is an inherent, scheduler-dependent
+    /// race between `child.wait()` and the reader task's EOF detection (see
+    /// this module's `write_mock_embedderd_crash_once` doc comment and
+    /// #3635's own root-cause analysis) — independent of this fix,
+    /// `consecutive_wedge_restarts` can ALSO increment on either crash, and
+    /// its own reset check (unmodified, still evaluated once at the top of
+    /// the loop before the blocking wait — see `wedge_counter_should_reset`'s
+    /// call site above the `select!`) cannot observe a health window that
+    /// elapses entirely within a single already-blocking iteration. Forcing
+    /// a second live crash to specifically validate `consecutive_failures`'s
+    /// reset therefore could not be built without an unrelated dependency on
+    /// that pre-existing, out-of-scope wedge-counter timing behavior — which
+    /// would make the test flaky for reasons that have nothing to do with
+    /// this fix (confirmed empirically: an earlier version of this test that
+    /// forced a second crash intermittently failed via a
+    /// "wedge-restart storm" give-up, not a crash-storm one). The threshold
+    /// arithmetic of the reset itself (`elapsed >= reset_secs`) is already
+    /// covered in isolation by `wedge_counter_should_reset_after_window_resets`
+    /// and friends above, which `consecutive_failures`'s reset reuses
+    /// verbatim (see supervisor.rs's post-trigger reset check).
+    /// What: `write_mock_embedderd_crash_once_then_healthy` crashes exactly
+    /// once, then answers requests indefinitely on every later invocation.
+    /// `max_restarts: 1` means a single crash is normal and must never trip
+    /// give-up by itself, regardless of which counter happens to observe it.
+    /// `wedge_reset_secs: 1` keeps the health-window wait short. Sequence:
+    ///   1. Spawn (crashes immediately after its own startup probe) —
+    ///      `supervision_loop` observes the crash and respawns (the second
+    ///      invocation, which is healthy). Two-phase zero-then-nonzero
+    ///      `pid_slot` polling (rather than comparing pids by inequality)
+    ///      avoids a PID-reuse race under load.
+    ///   2. Assert `has_given_up()` is `false` — a single tolerated crash at
+    ///      `max_restarts: 1` must never trip give-up.
+    ///   3. Sleep comfortably longer than `wedge_reset_secs` while the
+    ///      respawned process idles untouched (the sustained-health window
+    ///      the fix's reset gate is keyed on).
+    ///   4. Issue a REAL `embed_batch` call through the live `client_slot`
+    ///      and assert it succeeds — proving the sidecar is genuinely
+    ///      operational after the health window, not merely "hasn't crashed
+    ///      by luck yet".
+    ///   5. Assert `has_given_up()` is still `false`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn supervisor_transient_crash_then_sustained_health_resets_counter_no_premature_give_up()
+    {
+        let (_dir, binary) = write_mock_embedderd_crash_once_then_healthy();
+        let cfg = SupervisorConfig {
+            startup_timeout_secs: 5,
+            backoff_max_secs: 0,
+            max_restarts: 1,
+            wedge_reset_secs: 1,
+            ..SupervisorConfig::default()
+        };
+        let (supervisor, client_slot, pid_slot) = EmbedderSupervisor::spawn_stdio(binary, cfg)
+            .await
+            .expect("spawn_stdio failed");
+        let initial_pid = pid_slot.load(Ordering::Acquire);
+        assert!(initial_pid > 0, "pid_slot must be populated after spawn");
+
+        let handle = supervisor.start_supervisor_task();
+
+        // Step 1: wait for the first (deliberate) crash to be observed
+        // (`pid_slot` clears to 0), then for the healthy respawn to complete
+        // (`pid_slot` goes non-zero again). 45s ceiling matches the
+        // established convention in this file (see
+        // `supervisor_gives_up_after_max_restarts_flips_has_given_up`'s doc
+        // comment) — generous headroom so a loaded/contended host cannot
+        // false-fail; the poll interval is short (5ms) so a passing run
+        // still returns in milliseconds.
+        let crash_observed = tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                if pid_slot.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            crash_observed.is_ok(),
+            "supervisor never observed the first (deliberate) crash within 45s"
+        );
+        let healthy_pid = tokio::time::timeout(Duration::from_secs(45), async {
+            loop {
+                let pid = pid_slot.load(Ordering::Acquire);
+                if pid != 0 {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("supervisor never completed the post-crash respawn within 45s");
+        assert_ne!(
+            healthy_pid, initial_pid,
+            "the post-crash respawn must be a genuinely new process, not the \
+             original (already-crashed) one"
+        );
+
+        // Step 2.
+        assert!(
+            !handle.has_given_up(),
+            "must not be given up after tolerating exactly one crash under \
+             max_restarts=1"
+        );
+
+        // Step 3: comfortably longer than `wedge_reset_secs` (1s) so the
+        // sustained-health gate has unambiguously elapsed.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Step 4: prove the sidecar is genuinely operational, not merely
+        // "hasn't crashed again by luck" — a real embed call through the
+        // live client must still succeed after the health window.
+        let client = client_slot.read().await.clone();
+        let embed_result = client
+            .embed_batch(vec!["post-health-window liveness check".to_string()])
+            .await;
+        assert!(
+            embed_result.is_ok(),
+            "sidecar must still be genuinely responsive after the \
+             sustained-health window: {embed_result:?}"
+        );
+
+        // Step 5.
+        assert!(
+            !handle.has_given_up(),
+            "has_given_up() must still be false after a full sustained- \
+             health window with no further crash"
+        );
+
+        handle.shutdown().await;
     }
 
     /// The definitive death signal (epic #3524 slice 6 PR-4 follow-up,
