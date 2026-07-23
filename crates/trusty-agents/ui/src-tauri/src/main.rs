@@ -50,7 +50,7 @@ use overlay::{
 use sidecar::{
     ensure_api_server, kill_sidecar, terminate_child, ApiServerState, SharedApi, SIDECAR_GRACE,
 };
-use task_commands::{cancel_task, check_health, list_tasks, send_message};
+use task_commands::{cancel_task, check_health, clear_recent_tasks, list_tasks, send_message};
 
 /// Show and focus the main window (tray "Show" item / tray icon click).
 fn show_main_window(app: &AppHandle) {
@@ -73,6 +73,7 @@ fn main() {
             send_message,
             cancel_task,
             list_tasks,
+            clear_recent_tasks,
             check_health,
             read_personalization_overlay,
             write_personalization_overlay,
