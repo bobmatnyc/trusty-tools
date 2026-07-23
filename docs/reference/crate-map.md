@@ -48,9 +48,9 @@ Detailed implementation information for each crate lives in its own documentatio
 - **trusty-common** — see `crates/trusty-common/README.md` and `docs/trusty-common/`
 - **trusty-embedderd** — see `crates/trusty-embedderd/README.md` and `docs/trusty-embedderd/` (fastembed sidecar daemon)
 - **trusty-bm25-daemon** — see `crates/trusty-bm25-daemon/README.md` and `docs/trusty-bm25-daemon/` (BM25 index sidecar)
-- **trusty-memory** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (licensed MIT, not Elastic-2.0; storage engine lives in `trusty-common`'s `memory-core` feature)
+- **trusty-memory** — see `crates/trusty-memory/README.md` and `docs/trusty-memory/` (storage engine lives in `trusty-common`'s `memory-core` feature)
 - **trusty-search** — see `crates/trusty-search/README.md` and **`docs/trusty-search/`** (primary worked example with regression testing, research, sessions)
-- **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/` (licensed MIT, not Elastic-2.0)
+- **trusty-analyze** — see `crates/trusty-analyze/README.md` and `docs/trusty-analyze/`
 - **trusty-mpm** — see `crates/trusty-mpm/README.md` and `docs/trusty-mpm/` (unified platform: CLI binaries `tm`/`trusty-mpm`, daemon, MCP server, TUI, Telegram)
 - **trusty-mpm-gui** — see `crates/trusty-mpm-gui/README.md` (Tauri desktop GUI, publish=false)
 - **trusty-agents** — see `crates/trusty-agents/README.md` and `docs/trusty-agents/` (agent orchestration platform, bin: `tagent`)
@@ -59,4 +59,4 @@ Detailed implementation information for each crate lives in its own documentatio
 - **trusty-git-analytics** — see `crates/trusty-git-analytics/README.md` and `docs/trusty-git-analytics/`
 - **trusty-installer** — see `crates/trusty-installer/README.md` and `docs/trusty-installer/` (install/upgrade orchestrator, bins: `trusty-installer` + `tctl` transitional alias; ADR-0013; RFC #920; renamed from `trusty-controller` in #1757)
 
-For license details, check each crate's `Cargo.toml`: most are **Elastic License 2.0**, but `trusty-memory`, `trusty-analyze`, and a few others are **MIT**.
+For license details, check each crate's `Cargo.toml`: all 27 `crates/*` glob members are **MIT**, inherited from the workspace root `[workspace.package]` section via `license.workspace = true`. The nested internal (unpublished) Tauri crate `trusty-agents-ui` (`crates/trusty-agents/ui/src-tauri`) does not declare a license field.
