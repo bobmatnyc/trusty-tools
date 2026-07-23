@@ -189,10 +189,19 @@ async fn start_session_in_place(
     // are applied before the pane exists.
     let workdir = path.to_string_lossy().to_string();
     let new_session =
-        trusty_mpm::core::tmux::create_managed_session(None, &body.name, Some(&workdir))
-            .map(|output| output.status);
+        trusty_mpm::core::tmux::create_managed_session(None, &body.name, Some(&workdir));
     match new_session {
-        Ok(status) if status.success() => {
+        Ok(outcome) if outcome.output.status.success() => {
+            if !outcome.options_verified {
+                // #3386 review: a caller-visible one-line notice — never
+                // silently proceed as if the pane's scrollback limit landed.
+                eprintln!(
+                    "warning: tmux scrollback limit could not be verified for session {} — the \
+                     pane may be capped at tmux's factory 2000-line history-limit instead of \
+                     the configured value; see issue #3386",
+                    body.name
+                );
+            }
             // #2997: disclaim the pane's `claude` off the shared tmux server
             // (same wrapper the daemon + `tm launch`/`connect` paths use).
             // No-op off macOS / under TM_DISABLE_SPAWN_DISCLAIM.

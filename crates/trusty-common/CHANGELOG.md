@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`TmuxCommand::StartServer` / `TmuxCommand::ShowGlobalOption`** (trusty-mpm
+  issue #3386): two new shared `tmux` command variants — `start-server`
+  (idempotent server-existence guarantee) and `show-options -g -v <name>`
+  (read back a global option's current value) — for consumers that need to
+  confirm the tmux server exists (and that a `set-option -g` actually landed)
+  before relying on either, since `set-option -g` itself has no
+  auto-start-server behavior in tmux.
+
 ---
 ## [0.25.0] — 2026-07-23
 

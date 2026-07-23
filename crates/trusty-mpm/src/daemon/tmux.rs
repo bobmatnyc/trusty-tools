@@ -253,13 +253,20 @@ impl TmuxDriver {
     /// creation choke point EVERY session-creating call site (daemon, CLI,
     /// TUI client, control-plane backend) now routes through, so the
     /// ordering can never be bypassed by a future call site again.
+    ///
+    /// #3386 review: [`crate::core::tmux::warn_if_options_unverified`] logs
+    /// an `error!` naming the session when the ergonomics could not be
+    /// verified — the "at minimum" operator-visible surface the review
+    /// requires (a `warn!`-only log is the exact silent-degrade #3386 was
+    /// filed against).
     pub fn create_session(&self, name: &str, workdir: Option<&str>) -> Result<()> {
-        let output =
-            crate::core::tmux::create_managed_session(Some(&self.tmux_path), name, workdir)?;
-        if output.status.success() {
+        let outcome =
+            crate::core::tmux::create_managed_session(Some(&self.tmux_path), name, workdir)
+                .inspect(|o| crate::core::tmux::warn_if_options_unverified(o, name))?;
+        if outcome.output.status.success() {
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let stderr = String::from_utf8_lossy(&outcome.output.stderr).into_owned();
             Err(Error::Protocol(redact_oauth_token(&format!(
                 "tmux new-session for {name} failed: {stderr}"
             ))))
