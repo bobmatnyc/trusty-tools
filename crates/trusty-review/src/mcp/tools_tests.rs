@@ -77,6 +77,7 @@ impl SearchClient for FakeSearchTool {
         Ok(SearchHealth {
             status: "ok".into(),
             embedder: EmbedderState::Bool(true),
+            warmboot_summary: None,
         })
     }
 

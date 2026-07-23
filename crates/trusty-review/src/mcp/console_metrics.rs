@@ -207,6 +207,7 @@ mod tests {
             Ok(SearchHealth {
                 status: "ok".into(),
                 embedder: EmbedderState::Bool(true),
+                warmboot_summary: None,
             })
         }
         async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {

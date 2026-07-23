@@ -60,6 +60,7 @@ impl SearchClient for FakeSearch {
         Ok(SearchHealth {
             status: "ok".to_string(),
             embedder: EmbedderState::Bool(true),
+            warmboot_summary: None,
         })
     }
 

@@ -67,6 +67,7 @@ impl SearchClient for FakeSearch {
         Ok(SearchHealth {
             status: "ok".to_string(),
             embedder: EmbedderState::Bool(true),
+            warmboot_summary: None,
         })
     }
 
@@ -122,6 +123,7 @@ impl SearchClient for UnhealthySearch {
         Ok(SearchHealth {
             status: "ok".to_string(),
             embedder: EmbedderState::Bool(false),
+            warmboot_summary: None,
         })
     }
 
