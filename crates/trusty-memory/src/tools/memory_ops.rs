@@ -96,14 +96,16 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     };
     let room = parse_room(args.get("room").and_then(|v| v.as_str()));
     let mut tags = parse_tags(&args);
-    // Submission-logging Part B: attach `creator:*` attribution so
-    // every MCP-origin drawer carries the writer identity (client
-    // = `trusty-memory-mcp`, source = `mcp`, version + cwd of the
-    // MCP server process). Issue #202: also project a bare-UUID
-    // session tag (when present in the caller's tags) into the
-    // reserved `creator:session=<first-8>` slot so the activity
+    // Submission-logging Part B: attach `creator:*` attribution so every
+    // MCP-origin drawer carries the writer identity (client =
+    // `trusty-memory-mcp`, source = `mcp`, version, and caller-supplied
+    // cwd/workstream when the request carried them — DOC-53 §4.3 critical
+    // fix: NEVER this shared daemon's own env/cwd, see
+    // `helpers::attach_mcp_attribution`'s doc comment). Issue #202: also
+    // project a bare-UUID session tag (when present in the caller's tags)
+    // into the reserved `creator:session=<first-8>` slot so the activity
     // panel can surface it without inspecting every tag.
-    attach_mcp_attribution(&mut tags);
+    attach_mcp_attribution(&mut tags, &args);
 
     // Issue #230: serialise the dedup-check + write sequence per-palace
     // so two concurrent identical writes can't both pass the gate. The
@@ -201,10 +203,11 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
         }
     };
     let mut tags = parse_tags(&args);
-    // Submission-logging Part B: same attribution as memory_remember.
-    // Issue #202: project a bare-UUID session tag (when present)
+    // Submission-logging Part B: same attribution as memory_remember
+    // (caller-supplied cwd/workstream, never the daemon's own — DOC-53
+    // §4.3). Issue #202: project a bare-UUID session tag (when present)
     // into the reserved `creator:session=<first-8>` slot.
-    attach_mcp_attribution(&mut tags);
+    attach_mcp_attribution(&mut tags, &args);
     // Issue #230: serialise the dedup-check + write sequence per-palace
     // so two concurrent identical writes can't both pass the gate. The
     // lock is scoped to the palace id — writes to different palaces
@@ -534,6 +537,18 @@ pub(crate) async fn handle_memory_send_message(state: &AppState, args: Value) ->
         crate::messaging::cwd_palace_slug()
             .context("memory_send_message: derive from_palace from cwd")?
     };
+    // DOC-53 §4.3 critical fix: this handler runs inside the shared daemon
+    // (same hazard as `attach_mcp_attribution` — see its doc comment), so
+    // attribution must come from caller-supplied `args`, never
+    // `CreatorInfo::new_self`'s daemon-own env/cwd.
+    let caller_cwd = args
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let caller_workstream = args
+        .get("workstream")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let drawer_id = crate::messaging::send_message_to_palace(
         &state.registry,
         &state.data_root,
@@ -541,7 +556,12 @@ pub(crate) async fn handle_memory_send_message(state: &AppState, args: Value) ->
         &to_palace,
         &purpose,
         content,
-        CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp),
+        CreatorInfo::new_for_caller(
+            MCP_CLIENT_NAME,
+            CreatorSource::Mcp,
+            caller_cwd,
+            caller_workstream,
+        ),
     )
     .await
     .context("memory_send_message")?;

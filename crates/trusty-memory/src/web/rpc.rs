@@ -11,8 +11,8 @@
 use axum::{extract::State, http::HeaderMap, Json};
 
 use crate::attribution::{
-    resolve_workstream_name, CreatorInfo, CreatorSource, HTTP_DEFAULT_CLIENT, X_TRUSTY_CLIENT_CWD,
-    X_TRUSTY_CLIENT_NAME,
+    CreatorInfo, CreatorSource, HTTP_DEFAULT_CLIENT, X_TRUSTY_CLIENT_CWD, X_TRUSTY_CLIENT_NAME,
+    X_TRUSTY_CLIENT_WORKSTREAM,
 };
 use crate::AppState;
 
@@ -48,15 +48,17 @@ pub(super) async fn rpc_handler(
 /// attribution tags so operators can trace which client wrote which
 /// drawer. Centralising the extraction here keeps the `X-Trusty-Client-*`
 /// header contract in one place.
-/// What: pulls `X-Trusty-Client-Name` (default
-/// [`HTTP_DEFAULT_CLIENT`]) and the optional `X-Trusty-Client-Cwd`
-/// header off the request, then builds a `CreatorInfo` with
-/// `source = Http` and the current daemon crate version. The workstream
-/// (DOC-53 §4.3) is resolved from the same client-reported cwd — an HTTP
-/// caller has no environment the daemon can read, so `TM_WORKSTREAM_NAME`
-/// never applies here; only the `.worktrees/<name>` cwd fallback can fire.
+/// What: pulls `X-Trusty-Client-Name` (default [`HTTP_DEFAULT_CLIENT`]), the
+/// optional `X-Trusty-Client-Cwd`, and the optional
+/// `X-Trusty-Client-Workstream` headers off the request, then delegates to
+/// [`CreatorInfo::new_for_caller`] — the same caller-supplied-only
+/// constructor the MCP path (`tools::helpers::attach_mcp_attribution`) uses,
+/// so both transports apply identical precedence (explicit workstream
+/// header wins; else derived from cwd; never this daemon's own env/cwd —
+/// DOC-53 §4.3).
 /// Test: `drawer_creator_attribution_http_default`,
-/// `drawer_creator_attribution_http_header`.
+/// `drawer_creator_attribution_http_header`,
+/// `drawer_creator_attribution_http_workstream_header`.
 pub(crate) fn creator_info_from_http(headers: &HeaderMap) -> CreatorInfo {
     let client = headers
         .get(X_TRUSTY_CLIENT_NAME)
@@ -68,16 +70,12 @@ pub(crate) fn creator_info_from_http(headers: &HeaderMap) -> CreatorInfo {
     let cwd = headers
         .get(X_TRUSTY_CLIENT_CWD)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
-    let workstream = resolve_workstream_name(cwd.as_deref());
-    CreatorInfo {
-        client,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        source: CreatorSource::Http,
-        cwd,
-        workstream,
-    }
+    let workstream = headers
+        .get(X_TRUSTY_CLIENT_WORKSTREAM)
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty());
+    CreatorInfo::new_for_caller(client, CreatorSource::Http, cwd, workstream)
 }
 
 /// Parse an optional ISO-8601 timestamp string for the activity filter.

@@ -233,6 +233,80 @@ async fn drawer_creator_attribution_http_header() {
     );
 }
 
+/// Why (DOC-53 §4.3): `X-Trusty-Client-Workstream` is the HTTP-transport
+/// counterpart of the MCP `args["workstream"]` field — an explicit header
+/// value must win over the cwd-derived heuristic and land as both
+/// `creator:workstream=` and the bare `ws:` tag.
+/// What: POSTs with both `x-trusty-client-workstream` and an unrelated
+/// `x-trusty-client-cwd` (one with no `.worktrees` segment, so the cwd
+/// heuristic alone would resolve to nothing) and asserts the explicit
+/// header's value is what lands.
+/// Test: itself.
+#[tokio::test]
+async fn drawer_creator_attribution_http_workstream_header() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let state = AppState::new(root);
+    let palace = trusty_common::memory_core::Palace {
+        id: PalaceId::new("cred-ws-header"),
+        name: "cred-ws-header".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join("cred-ws-header"),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create palace");
+
+    let app = router().with_state(state.clone());
+    let body = serde_json::json!({
+        "content": "this is enough content to pass the signal/noise filter applied by remember",
+        "tags": [],
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/palaces/cred-ws-header/drawers")
+                .header("content-type", "application/json")
+                .header("x-trusty-client-workstream", "explicit-ws")
+                .header("x-trusty-client-cwd", "/tmp/no-worktrees-here")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let app = router().with_state(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/palaces/cred-ws-header/drawers?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    let tags: Vec<&str> = v[0]["tags"]
+        .as_array()
+        .expect("tags")
+        .iter()
+        .filter_map(|t| t.as_str())
+        .collect();
+    assert!(
+        tags.contains(&"creator:workstream=explicit-ws"),
+        "expected explicit workstream header tag; got {tags:?}"
+    );
+    assert!(
+        tags.contains(&"ws:explicit-ws"),
+        "expected bare ws: tag; got {tags:?}"
+    );
+}
+
 /// Why (submission-logging Part B): drawers written through the MCP
 /// tool surface (`memory_remember`) must carry
 /// `creator:client=trusty-memory-mcp` and `creator:source=mcp` so
@@ -303,6 +377,159 @@ async fn drawer_creator_attribution_mcp_default() {
         tags.contains(&"creator:source=mcp"),
         "expected MCP source tag; got {tags:?}"
     );
+}
+
+/// Why (CRITICAL fix, DOC-53 §4.3 — code-critic BLOCK round): the bug this
+/// test exists to catch is daemon-vs-caller mis-attribution — a SHARED
+/// daemon process serving two concurrently-attached MCP sessions must
+/// stamp EACH write with the identity ITS OWN request carried, never a
+/// value cached/derived from the daemon process itself (which would be
+/// identical for every caller and silently collapse two sessions'
+/// attribution into one — the exact epic #3524 slice 5/6 duplication this
+/// whole feature exists to prevent). An in-process `dispatch_tool` call (as
+/// `drawer_creator_attribution_mcp_default` above uses) cannot exercise
+/// this: it never goes through the shared `POST /rpc` surface a real
+/// stdio-bridge-mediated caller uses, so it cannot observe cross-request
+/// isolation. This test routes two `tools/call` envelopes — the actual MCP
+/// wire shape the stdio bridge forwards, each carrying a DIFFERENT
+/// `arguments.workstream` (simulating two distinct sessions' bridge
+/// processes, each having injected its own resolved identity per
+/// DOC-53 §4.3) — through the real `/rpc` HTTP handler against the SAME
+/// `AppState`/daemon instance, and asserts the two resulting drawers carry
+/// DIFFERENT, correct `ws:`/`creator:workstream=` tags with no cross-leak.
+/// What: two POSTs to `/rpc` with `method: "tools/call"`,
+/// `params.name: "memory_remember"`, `params.arguments.workstream` set to
+/// `"ws-alpha"` and `"ws-beta"` respectively (same palace, same daemon
+/// state); lists the palace's drawers and asserts each drawer carries only
+/// its own workstream's tags — never the other's.
+/// Test: itself.
+#[tokio::test]
+async fn mcp_writes_carry_distinct_ws_tags_per_caller_over_rpc() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let state = AppState::new(root);
+    state.set_ready();
+    let palace = trusty_common::memory_core::Palace {
+        id: PalaceId::new("cred-multi-caller"),
+        name: "cred-multi-caller".to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: state.data_root.join("cred-multi-caller"),
+    };
+    state
+        .registry
+        .create_palace(&state.data_root, palace)
+        .expect("create palace");
+
+    // `force: true` bypasses the rolling near-duplicate gate (issue #220,
+    // `helpers::dedup_gate` uses jaro_winkler similarity) -- without it the
+    // two writes below (differing only in the "alpha"/"beta" marker word)
+    // would be similar enough for the SECOND to be silently skipped rather
+    // than stored, which would make this test pass for the wrong reason
+    // (one drawer landing) rather than actually exercising two isolated
+    // writes.
+    let rpc_call = |workstream: &str, marker: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_remember",
+                "arguments": {
+                    "palace": "cred-multi-caller",
+                    "text": format!(
+                        "distinct-caller regression content marker {marker} with enough tokens"
+                    ),
+                    "room": "General",
+                    "workstream": workstream,
+                    "force": true,
+                }
+            }
+        })
+    };
+
+    for (workstream, marker) in [("ws-alpha", "alpha"), ("ws-beta", "beta")] {
+        let app = router().with_state(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rpc")
+                    .header("content-type", "application/json")
+                    .body(Body::from(rpc_call(workstream, marker).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            v.get("error").is_none(),
+            "tools/call memory_remember for {workstream} must not error; got {v:?}"
+        );
+        // The MCP result is wrapped `{"content":[{"type":"text","text":"<json>"}]}`
+        // (see `transport::rpc::dispatch`'s `tools/call` branch) -- parse the
+        // inner text back to JSON and assert it actually stored (not a
+        // gate-skip envelope), so a regression in either gate config would
+        // fail loudly here rather than downstream as a missing-drawer count.
+        let inner_text = v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        let inner: Value = serde_json::from_str(inner_text).unwrap_or_default();
+        assert_eq!(
+            inner["status"], "stored",
+            "expected a stored (not skipped) envelope for {workstream}; got {inner:?}"
+        );
+    }
+
+    let app = router().with_state(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/palaces/cred-multi-caller/drawers?limit=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    let drawers = v.as_array().expect("drawers array");
+    assert_eq!(drawers.len(), 2, "expected two drawers, got {drawers:?}");
+
+    for drawer in drawers {
+        let content = drawer["content"].as_str().unwrap_or_default();
+        let tags: Vec<&str> = drawer["tags"]
+            .as_array()
+            .expect("tags array")
+            .iter()
+            .filter_map(|t| t.as_str())
+            .collect();
+        if content.contains("marker alpha") {
+            assert!(
+                tags.contains(&"ws:ws-alpha") && tags.contains(&"creator:workstream=ws-alpha"),
+                "alpha drawer must carry its own ws tags; got {tags:?}"
+            );
+            assert!(
+                !tags.contains(&"ws:ws-beta") && !tags.contains(&"creator:workstream=ws-beta"),
+                "alpha drawer must NOT leak the beta caller's ws tags (daemon-vs-caller \
+                 mis-attribution); got {tags:?}"
+            );
+        } else if content.contains("marker beta") {
+            assert!(
+                tags.contains(&"ws:ws-beta") && tags.contains(&"creator:workstream=ws-beta"),
+                "beta drawer must carry its own ws tags; got {tags:?}"
+            );
+            assert!(
+                !tags.contains(&"ws:ws-alpha") && !tags.contains(&"creator:workstream=ws-alpha"),
+                "beta drawer must NOT leak the alpha caller's ws tags (daemon-vs-caller \
+                 mis-attribution); got {tags:?}"
+            );
+        } else {
+            panic!("drawer content did not match either marker: {content:?}");
+        }
+    }
 }
 
 /// Why (submission-logging Part A, failure isolation): if the daemon

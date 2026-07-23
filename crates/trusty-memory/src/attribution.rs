@@ -140,6 +140,20 @@ pub const X_TRUSTY_CLIENT_NAME: &str = "x-trusty-client-name";
 /// Test: `drawer_creator_attribution_http_default`.
 pub const X_TRUSTY_CLIENT_CWD: &str = "x-trusty-client-cwd";
 
+/// HTTP request header carrying the writing client's explicit workstream
+/// name (DOC-53 §4.3), the HTTP-transport counterpart of the MCP
+/// `args["workstream"]` field the stdio bridge injects
+/// (`commands::serve_stdio_bridge::inject_caller_context`).
+///
+/// Why: symmetric with [`X_TRUSTY_CLIENT_CWD`] — an HTTP caller that already
+/// knows its own workstream name (rather than relying on the
+/// `.worktrees/<name>` cwd-path heuristic [`resolve_workstream_name`]
+/// applies) can self-report it directly. Absent header → `creator:workstream=`
+/// falls back to the cwd heuristic, same precedence
+/// [`CreatorInfo::new_for_caller`] applies to the MCP path.
+/// Test: `drawer_creator_attribution_http_workstream_header`.
+pub const X_TRUSTY_CLIENT_WORKSTREAM: &str = "x-trusty-client-workstream";
+
 /// Default client name used when an HTTP caller omits the
 /// `X-Trusty-Client-Name` header.
 ///
@@ -226,19 +240,79 @@ pub struct CreatorInfo {
 
 impl CreatorInfo {
     /// Build a `CreatorInfo` with the supplied client + source, defaulting
-    /// the version to this crate's `CARGO_PKG_VERSION` and the cwd to
-    /// whatever the writing process has at construction time.
+    /// the version to this crate's `CARGO_PKG_VERSION` and the cwd/workstream
+    /// to whatever *this process* has at construction time.
     ///
-    /// Why: most call sites want a one-liner; explicit overrides remain
-    /// available by mutating the returned value.
+    /// # ⚠️ Daemon-vs-caller hazard — read before calling this from a shared
+    /// # server dispatch path
+    ///
+    /// `new_self` resolves identity from the CALLING PROCESS' own
+    /// environment (`std::env::current_dir()`, `TM_WORKSTREAM_NAME`). That is
+    /// correct only when the process constructing the `CreatorInfo` genuinely
+    /// **is** the writer — a standalone CLI invocation, or a hook that runs
+    /// once per invocation in the caller's own process tree. It is **WRONG**
+    /// for any handler that runs inside `trusty-memory`'s shared HTTP/MCP
+    /// daemon (every `crate::tools::*` handler, reached via `POST /rpc` from
+    /// the stdio bridge or any other remote caller): the daemon is ONE
+    /// long-lived process serving MANY concurrently-attached sessions, so
+    /// `new_self` there would resolve the **daemon's own** cwd/env — the same
+    /// value for every caller — producing cross-session mis-attribution (the
+    /// exact bug DOC-53's caller-supplied design (`new_for_caller`) exists to
+    /// prevent). Use [`CreatorInfo::new_for_caller`] for any write reached
+    /// through the shared daemon's dispatch surface; reserve `new_self` for
+    /// code that truly executes in the writer's own process.
     /// What: `client.into()` + `env!("CARGO_PKG_VERSION").into()` +
-    /// `std::env::current_dir().ok().map(...)` + [`resolve_workstream_name`].
+    /// `std::env::current_dir().ok().map(...)` + [`resolve_own_workstream_name`].
     /// Test: `creator_info_self_populates_version_and_cwd`.
     pub fn new_self(client: impl Into<String>, source: CreatorSource) -> Self {
         let cwd = std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().into_owned());
         let workstream = resolve_own_workstream_name(cwd.as_deref());
+        Self {
+            client: client.into(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            source,
+            cwd,
+            workstream,
+        }
+    }
+
+    /// Build a `CreatorInfo` for a write reached through the shared daemon's
+    /// dispatch surface (MCP `tools/call`/direct-method, or HTTP), using ONLY
+    /// caller-supplied context — never the daemon process' own env/cwd.
+    ///
+    /// Why (critical fix, DOC-53 §4.3): the daemon serves every
+    /// concurrently-attached session from ONE process. `new_self`'s
+    /// `std::env::current_dir()`/`TM_WORKSTREAM_NAME` reads would resolve the
+    /// *daemon's* identity, identically for every caller — this is the
+    /// constructor that instead trusts only what the specific request
+    /// carried, mirroring the existing `args["cwd"]` precedent in
+    /// `tools::palace_ops::handle_palace_create` (caller value wins; no
+    /// silent daemon-identity fallback for either field).
+    /// What: `cwd` is `caller_cwd` verbatim (empty-string treated as absent,
+    /// never re-derived from the daemon's own cwd). `workstream` prefers
+    /// `caller_workstream` when it passes [`is_valid_workstream_name`] — an
+    /// explicit-but-invalid value resolves to `None`, NOT a silent fallback
+    /// to the cwd heuristic (same "explicit-but-bad is `None`" rule
+    /// [`resolve_own_workstream_name`] already applies to the env var) —
+    /// else falls back to [`resolve_workstream_name`] against `caller_cwd`.
+    /// Neither field ever touches this process' own env or cwd.
+    /// Test: `new_for_caller_prefers_explicit_workstream_over_cwd`,
+    /// `new_for_caller_falls_back_to_cwd_when_workstream_absent`,
+    /// `new_for_caller_omits_workstream_when_neither_resolvable`,
+    /// `new_for_caller_invalid_explicit_workstream_returns_none_not_cwd_fallback`.
+    pub fn new_for_caller(
+        client: impl Into<String>,
+        source: CreatorSource,
+        caller_cwd: Option<&str>,
+        caller_workstream: Option<&str>,
+    ) -> Self {
+        let cwd = caller_cwd.map(str::to_string).filter(|c| !c.is_empty());
+        let workstream = match caller_workstream.filter(|w| !w.is_empty()) {
+            Some(w) => is_valid_workstream_name(w).then(|| w.to_string()),
+            None => resolve_workstream_name(cwd.as_deref()),
+        };
         Self {
             client: client.into(),
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -287,6 +361,30 @@ impl CreatorInfo {
     pub fn merge_into(self, dst: &mut Vec<String>) {
         for tag in self.into_tags() {
             dst.push(tag);
+        }
+    }
+
+    /// Render the tags and append them to an existing tag list, skipping any
+    /// tag already present verbatim in `dst`.
+    ///
+    /// Why (MEDIUM 1, DOC-53 §3.1): a hand-written claim drawer already
+    /// carries `ws:<name>` in its caller-supplied tags by convention (the
+    /// claim-drawer shape); [`merge_into`] would then append a *second*,
+    /// identical `ws:<name>` (and, since the caller-supplied workstream and
+    /// the auto-stamped one are the same value, an identical
+    /// `creator:workstream=<name>` too if the caller happened to write that
+    /// literal tag). Use this instead of `merge_into` for any write path
+    /// where the caller's own tags may already overlap the auto-stamped
+    /// namespace — currently [`crate::tools::helpers::attach_mcp_attribution`].
+    /// What: exact-string dedup only (not case-insensitive, not prefix-aware)
+    /// — a tag is skipped iff it already appears verbatim in `dst`.
+    /// Test: `merge_into_deduped_skips_tags_already_present`,
+    /// `merge_into_deduped_appends_when_no_overlap`.
+    pub fn merge_into_deduped(self, dst: &mut Vec<String>) {
+        for tag in self.into_tags() {
+            if !dst.contains(&tag) {
+                dst.push(tag);
+            }
         }
     }
 }
@@ -345,14 +443,22 @@ pub fn resolve_workstream_name(cwd: Option<&str>) -> Option<String> {
 /// invalid* is treated as an explicit-but-bad signal and resolves to `None`
 /// rather than silently falling through to the cwd the caller never asked
 /// for.
-/// What: only called from [`CreatorInfo::new_self`] — the MCP/CLI/hook
-/// write paths, which run as this process. The HTTP write path
-/// (`web::rpc::creator_info_from_http`) calls [`resolve_workstream_name`]
-/// directly against the *caller's* reported cwd instead, since this
-/// process' own environment says nothing about a remote caller's identity.
+/// What: called from [`CreatorInfo::new_self`] (code that truly runs in its
+/// own writer process — see that method's doc for the daemon-vs-caller
+/// hazard) and from the MCP stdio bridge
+/// (`commands::serve_stdio_bridge::run_stdio_bridge`), which — unlike the
+/// shared daemon it proxies to — genuinely IS a fresh, per-session process,
+/// so resolving "this process' own identity" there is correct and is the
+/// mechanism that turns into the caller-supplied `args["workstream"]` the
+/// daemon-side [`CreatorInfo::new_for_caller`] then trusts. The HTTP write
+/// path (`web::rpc::creator_info_from_http`) and the daemon-side MCP
+/// dispatch handlers instead call [`resolve_workstream_name`] /
+/// [`CreatorInfo::new_for_caller`] directly against caller-supplied context,
+/// since the shared daemon's own environment says nothing about a specific
+/// caller's identity.
 /// Test: `resolve_workstream_name_prefers_env_var`,
 /// `resolve_workstream_name_invalid_env_var_returns_none`.
-fn resolve_own_workstream_name(cwd: Option<&str>) -> Option<String> {
+pub(crate) fn resolve_own_workstream_name(cwd: Option<&str>) -> Option<String> {
     if let Ok(name) = std::env::var(WORKSTREAM_NAME_ENV) {
         return is_valid_workstream_name(&name).then_some(name);
     }
@@ -678,6 +784,140 @@ mod tests {
             workstream: Some("11111111-1111-1111-1111-111111111111".into()),
         };
         assert_eq!(invalid.into_tags().len(), 3);
+    }
+
+    /// Why (CRITICAL fix, DOC-53 §4.3): `new_for_caller` is the ONLY
+    /// constructor the shared daemon's dispatch handlers should use — it
+    /// must never touch this process' own env/cwd, only what the caller
+    /// supplied. This is the base case: an explicit, valid workstream wins
+    /// even when a plausible cwd fallback is also present.
+    /// What: supplies both a caller cwd and a distinct caller workstream;
+    /// asserts the explicit workstream is used, not one derived from cwd.
+    /// Test: itself.
+    #[test]
+    fn new_for_caller_prefers_explicit_workstream_over_cwd() {
+        let info = CreatorInfo::new_for_caller(
+            "trusty-memory-mcp",
+            CreatorSource::Mcp,
+            Some("/x/.worktrees/cwd-derived-name"),
+            Some("explicit-ws"),
+        );
+        assert_eq!(info.workstream.as_deref(), Some("explicit-ws"));
+        assert_eq!(info.cwd.as_deref(), Some("/x/.worktrees/cwd-derived-name"));
+    }
+
+    /// Why: when the caller omits `workstream` entirely (but supplies
+    /// `cwd`), the cwd-derived heuristic is the correct fallback — same
+    /// derivation [`resolve_workstream_name`] already provides for the HTTP
+    /// path.
+    /// What: caller workstream `None`, caller cwd a `.worktrees/<name>`
+    /// path; asserts the derived name.
+    /// Test: itself.
+    #[test]
+    fn new_for_caller_falls_back_to_cwd_when_workstream_absent() {
+        let info = CreatorInfo::new_for_caller(
+            "trusty-memory-mcp",
+            CreatorSource::Mcp,
+            Some("/x/.worktrees/cwd-derived-name"),
+            None,
+        );
+        assert_eq!(info.workstream.as_deref(), Some("cwd-derived-name"));
+    }
+
+    /// Why: no caller cwd AND no caller workstream is the honest "we don't
+    /// know" case — DOC-53 §4.1's omit-cleanly rule, at the caller-supplied
+    /// constructor.
+    /// What: both `None`; asserts `workstream` is `None` (never falls back
+    /// to this process' own identity).
+    /// Test: itself.
+    #[test]
+    fn new_for_caller_omits_workstream_when_neither_resolvable() {
+        let info = CreatorInfo::new_for_caller("trusty-memory-mcp", CreatorSource::Mcp, None, None);
+        assert_eq!(info.workstream, None);
+        assert_eq!(info.cwd, None);
+    }
+
+    /// Why: an explicit-but-invalid caller workstream (unsafe chars,
+    /// UUID-shaped, empty) is an explicit-but-bad signal — DOC-53 §4.3
+    /// treats that as `None`, NOT a silent fallback to the cwd heuristic the
+    /// caller didn't ask for (mirrors [`resolve_own_workstream_name`]'s
+    /// identical rule for the env var).
+    /// What: an invalid explicit workstream alongside a valid cwd fallback;
+    /// asserts `None`, not the cwd-derived value.
+    /// Test: itself.
+    #[test]
+    fn new_for_caller_invalid_explicit_workstream_returns_none_not_cwd_fallback() {
+        let info = CreatorInfo::new_for_caller(
+            "trusty-memory-mcp",
+            CreatorSource::Mcp,
+            Some("/x/.worktrees/cwd-derived-name"),
+            Some("not a valid name!"),
+        );
+        assert_eq!(info.workstream, None);
+    }
+
+    /// Why (MEDIUM 1, DOC-53 §3.1): a hand-written claim drawer's own tags
+    /// may already carry `ws:<name>` (and, less commonly, a literal
+    /// `creator:workstream=<name>`) — `merge_into_deduped` must not append a
+    /// second copy of either.
+    /// What: seeds `dst` with `ws:feat-x` already present, merges a
+    /// `CreatorInfo` whose rendered tags include `ws:feat-x`, asserts the
+    /// tag appears exactly once while the OTHER rendered tags (which were
+    /// not already present) still land.
+    /// Test: itself.
+    #[test]
+    fn merge_into_deduped_skips_tags_already_present() {
+        let mut tags = vec!["user-tag".to_string(), "ws:feat-x".to_string()];
+        CreatorInfo {
+            client: "trusty-memory-mcp".into(),
+            version: "0.1.0".into(),
+            source: CreatorSource::Mcp,
+            cwd: None,
+            workstream: Some("feat-x".into()),
+        }
+        .merge_into_deduped(&mut tags);
+        assert_eq!(
+            tags.iter().filter(|t| *t == "ws:feat-x").count(),
+            1,
+            "ws:feat-x must not be duplicated; got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"creator:client=trusty-memory-mcp".to_string()),
+            "non-overlapping tags must still be appended; got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"creator:workstream=feat-x".to_string()),
+            "creator:workstream= must still be appended (only ws: overlapped); got {tags:?}"
+        );
+    }
+
+    /// Why: dedup must not become a no-append bug — when nothing overlaps,
+    /// every rendered tag lands exactly as `merge_into` would produce.
+    /// What: seeds `dst` with an unrelated tag only; asserts all rendered
+    /// tags are present.
+    /// Test: itself.
+    #[test]
+    fn merge_into_deduped_appends_when_no_overlap() {
+        let mut tags = vec!["unrelated".to_string()];
+        CreatorInfo {
+            client: "trusty-memory-mcp".into(),
+            version: "0.1.0".into(),
+            source: CreatorSource::Mcp,
+            cwd: None,
+            workstream: Some("feat-x".into()),
+        }
+        .merge_into_deduped(&mut tags);
+        assert_eq!(
+            tags,
+            vec![
+                "unrelated".to_string(),
+                "creator:client=trusty-memory-mcp".to_string(),
+                "creator:version=0.1.0".to_string(),
+                "creator:source=mcp".to_string(),
+                "creator:workstream=feat-x".to_string(),
+                "ws:feat-x".to_string(),
+            ]
+        );
     }
 
     /// Why: [`WORKSTREAM_NAME_ENV`] is the forward-compatible primary
