@@ -26,10 +26,14 @@
 //! or fail a session launch.
 //! Test: `owner_repo_from_ssh_origin`, `owner_repo_from_https_origin`,
 //! `owner_repo_rejects_non_github_host`, `label_color_is_stable_and_valid_hex`,
-//! `label_color_differs_across_names`, `ensure_skips_when_no_origin`,
-//! `ensure_skips_when_non_github`, `ensure_skips_when_name_blank`,
-//! `ensure_creates_label_via_runner`, `ensure_reports_runner_failure` drive the
-//! pure derivation + a scripted [`GhLabelRunner`] fake — no live `gh`/network.
+//! `label_color_differs_across_names`, `label_name_short_is_verbatim`,
+//! `label_name_stays_within_github_cap`,
+//! `label_name_long_is_truncated_with_hash_suffix`,
+//! `label_name_distinct_long_names_get_distinct_labels`,
+//! `ensure_skips_when_no_origin`, `ensure_skips_when_non_github`,
+//! `ensure_skips_when_name_blank`, `ensure_creates_label_via_runner`,
+//! `ensure_reports_runner_failure` drive the pure derivation + a scripted
+//! [`GhLabelRunner`] fake — no live `gh`/network.
 
 use std::path::Path;
 use std::time::Duration;
@@ -184,9 +188,56 @@ pub fn spawn_workstream_label_ensure(
     });
 }
 
-/// The `ws/<name>` label name for a session.
+/// GitHub's hard cap on a label name's length (the full `ws/<name>` string).
+const GITHUB_LABEL_MAX_LEN: usize = 50;
+
+/// The `ws/<name>` label name for a session, truncated (with a stable
+/// disambiguating suffix) to stay within GitHub's label-name length cap.
+///
+/// Why: GitHub caps a label name at [`GITHUB_LABEL_MAX_LEN`] characters.
+/// Auto-derived session names are always well within that, but an OPERATOR
+/// rename (`SessionManager::rename`, up to 64 chars) can produce a name
+/// whose `ws/<name>` form overflows the cap — `gh label create`/`--add-label`
+/// would then fail with a 400, exactly the failure this module exists to
+/// prevent. Simple truncation risks two DIFFERENT long names colliding on
+/// the same truncated label; an 8-hex FNV-1a suffix — hashed from the FULL
+/// untruncated name, not the truncated prefix — keeps them apart.
+/// What: `ws/<name>` verbatim when it already fits. Otherwise:
+/// `ws/<truncated-name>-<8-hex-hash>`, where `<truncated-name>` is `name`'s
+/// leading bytes (trimmed to the nearest earlier `char` boundary so a
+/// multi-byte character is never split) shortened just far enough that the
+/// full `ws/<truncated>-<hash>` string is at most [`GITHUB_LABEL_MAX_LEN`]
+/// characters, and `<hash>` is the lowercase 8-hex encoding of the top 32
+/// bits of `name`'s FNV-1a-64 hash.
+/// Test: `label_name_short_is_verbatim`,
+/// `label_name_long_is_truncated_with_hash_suffix`,
+/// `label_name_stays_within_github_cap`,
+/// `label_name_distinct_long_names_get_distinct_labels`.
 fn label_name_for(session_name: &str) -> String {
-    format!("ws/{session_name}")
+    let full = format!("ws/{session_name}");
+    if full.len() <= GITHUB_LABEL_MAX_LEN {
+        return full;
+    }
+    // 8 lowercase hex chars from the top 32 bits of the FULL name's hash —
+    // stable per name, and keeps two names sharing a truncated prefix apart.
+    let suffix = format!("{:08x}", (fnv1a_hash(session_name) >> 32) as u32);
+    // Budget: "ws/" (3) + truncated name + "-" (1) + suffix (8) <= cap.
+    let prefix_budget = GITHUB_LABEL_MAX_LEN - "ws/".len() - 1 - suffix.len();
+    let truncated = truncate_at_char_boundary(session_name, prefix_budget);
+    format!("ws/{truncated}-{suffix}")
+}
+
+/// Truncate `s` to at most `max_bytes` bytes, backing off to the nearest
+/// earlier `char` boundary so a multi-byte UTF-8 character is never split.
+fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Read `remote.origin.url` from `dir` via `git config`, best-effort.
@@ -413,6 +464,58 @@ mod tests {
         let a = label_color_for("tm-tcode-01");
         let b = label_color_for("tm-dogfood-relaunch-01");
         assert_ne!(a, b, "distinct names should (overwhelmingly likely) differ");
+    }
+
+    // ── label name length cap ───────────────────────────────────────────
+
+    #[test]
+    fn label_name_short_is_verbatim() {
+        assert_eq!(label_name_for("tm-tcode-01"), "ws/tm-tcode-01");
+    }
+
+    #[test]
+    fn label_name_stays_within_github_cap() {
+        // `SessionManager::rename` allows operator-chosen names up to 64
+        // chars — well past the 47-char budget `ws/<name>` has under the
+        // 50-char GitHub label cap.
+        let long_name = "a".repeat(64);
+        let label = label_name_for(&long_name);
+        assert!(
+            label.len() <= GITHUB_LABEL_MAX_LEN,
+            "label {label:?} ({} chars) exceeds the {GITHUB_LABEL_MAX_LEN}-char GitHub cap",
+            label.len()
+        );
+    }
+
+    #[test]
+    fn label_name_long_is_truncated_with_hash_suffix() {
+        let long_name = "a".repeat(64);
+        let label = label_name_for(&long_name);
+        assert!(label.starts_with("ws/aaaa"), "got {label:?}");
+        // "ws/" + 38-char truncated prefix + "-" + 8-hex suffix == 50.
+        assert_eq!(label.len(), GITHUB_LABEL_MAX_LEN);
+        let suffix = label.rsplit('-').next().expect("has a suffix segment");
+        assert_eq!(suffix.len(), 8, "suffix {suffix:?} must be 8 hex chars");
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn label_name_distinct_long_names_get_distinct_labels() {
+        // Share an identical 60-char prefix (well past the ~38-char
+        // truncation budget) and differ only in their last 4 chars — the
+        // hash suffix (derived from the FULL name) must still tell them
+        // apart even though their truncated prefixes are identical.
+        let base = "x".repeat(60);
+        let name_a = format!("{base}1111");
+        let name_b = format!("{base}2222");
+        let label_a = label_name_for(&name_a);
+        let label_b = label_name_for(&name_b);
+        assert_ne!(
+            label_a, label_b,
+            "two long names differing only past the truncation point must not collide"
+        );
+        assert!(label_a.len() <= GITHUB_LABEL_MAX_LEN);
+        assert!(label_b.len() <= GITHUB_LABEL_MAX_LEN);
     }
 
     // ── ensure_workstream_label skip-cleanly paths ──────────────────────
