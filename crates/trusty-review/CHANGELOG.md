@@ -5,7 +5,7 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.10.1] — 2026-07-23
 
 ### Fixed
 
@@ -36,22 +36,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to inspect `warm_boot_degraded` for those specific cases either — same
   blind spot the old `is_healthy` had, since both only ever look at the
   top-level `status` string.
-
-- **`/health` no longer hangs when trusty-search is slow, not down**
-  (closes [#3658](https://github.com/bobmatnyc/trusty-tools/issues/3658),
-  follow-on to [#722](https://github.com/bobmatnyc/trusty-tools/issues/722)):
-  the trusty-search/trusty-analyze dependency probe in the HTTP `/health`
-  handler, the `review_health` MCP tool, and the `console_metrics` MCP tool
-  had no internal timeout — a memory-pressured (slow, not down)
-  trusty-search could hang all three indefinitely, bounded only by the
-  clients' own 30 s / 5 s HTTP-transport timeouts. Each dep probe now runs
-  under a strict, independent `tokio::time::timeout` (default 2 s,
-  configurable via `TRUSTY_REVIEW_DEP_PROBE_TIMEOUT_SECS`), and both deps
-  are probed concurrently so total `/health` latency stays bounded
-  regardless of dep count. `DepInfo` gains a new tri-state `state` field
-  (`"ok"` / `"unreachable"` / `"timeout"`) so a slow-but-up dependency is no
-  longer collapsed into the same `reachable: false` signal as a hard-down
-  one; the existing `reachable` boolean is unchanged for back-compat.
 
 ---
 ## [0.10.0] — 2026-07-21
@@ -98,6 +82,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `trusty-review`'s old default (7890, e.g. `curl http://127.0.0.1:7890/health`)
   must either pass `--port 7890` explicitly to `trusty-review serve` to keep
   the old behavior, or update that tooling to the new default (7891).
+- **`/health` no longer hangs when trusty-search is slow, not down**
+  (closes [#3658](https://github.com/bobmatnyc/trusty-tools/issues/3658),
+  follow-on to [#722](https://github.com/bobmatnyc/trusty-tools/issues/722)):
+  the trusty-search/trusty-analyze dependency probe in the HTTP `/health`
+  handler, the `review_health` MCP tool, and the `console_metrics` MCP tool
+  had no internal timeout — a memory-pressured (slow, not down)
+  trusty-search could hang all three indefinitely, bounded only by the
+  clients' own 30 s / 5 s HTTP-transport timeouts. Each dep probe now runs
+  under a strict, independent `tokio::time::timeout` (default 2 s,
+  configurable via `TRUSTY_REVIEW_DEP_PROBE_TIMEOUT_SECS`), and both deps
+  are probed concurrently so total `/health` latency stays bounded
+  regardless of dep count. `DepInfo` gains a new tri-state `state` field
+  (`"ok"` / `"unreachable"` / `"timeout"`) so a slow-but-up dependency is no
+  longer collapsed into the same `reachable: false` signal as a hard-down
+  one; the existing `reachable` boolean is unchanged for back-compat.
+  (**Note:** this fix shipped in the 0.10.0 *code* — commit `8f614980`
+  merged 2026-07-22 11:18, before the 0.10.0 tag was cut at 14:36 the same
+  day — but its changelog entry was mistakenly left under `[Unreleased]`
+  instead of being moved here. Backfilled 2026-07-23 during the 0.10.1
+  release-prep pass; not re-released under 0.10.1.)
 
 ## [0.9.2] — 2026-07-17
 
