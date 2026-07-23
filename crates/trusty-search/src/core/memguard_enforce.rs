@@ -469,68 +469,120 @@ mod tests {
         assert_eq!(enforcement_measure(), default_enforcement_measure());
     }
 
-    /// Assert two live RSS samples of the SAME underlying measure (taken a
-    /// handful of instructions apart) agree within a generous RELATIVE bound
-    /// — mirrors `memguard::tests::test_rss_for_self_pid`'s design (issue
-    /// #3702: a fixed-MB or exact-equality bound between two independently
-    /// re-sampled live readings flakes under `cargo test --workspace`'s
-    /// shared-process concurrent-allocation churn — CI observed `Some(107)`
-    /// vs `Some(243)` MB for this exact test under that load, the same flake
-    /// class #3702 fixed for `current_rss_mb_for_pid` itself).
-    ///
-    /// Why this is still a meaningful assertion (not a tautology): `a` and
-    /// `b` are sampled via two DIFFERENT call paths that must resolve to the
-    /// same underlying reader (`enforcement_rss_mb_for_pid` under a forced
-    /// measure vs. that measure's reader called directly) — a dispatch bug
-    /// that routed to the WRONG reader (e.g. `total` selected but anon
-    /// returned) would show a gap far larger than concurrent-allocation
-    /// noise, since anon and total RSS commonly differ by tens to thousands
-    /// of MB on a real workload, not by the single-digit-to-double-digit MB
-    /// drift transient concurrent allocation produces.
-    fn assert_live_samples_of_same_measure_agree(a: Option<u64>, b: Option<u64>, label: &str) {
-        let (Some(a), Some(b)) = (a, b) else {
-            // Either None means the platform/measure couldn't resolve this
-            // pid this call; tolerate it rather than fail CI on an
-            // environment quirk (mirrors `test_rss_for_self_pid`'s same
-            // tolerance).
-            return;
-        };
-        let diff = (a as i64 - b as i64).unsigned_abs();
-        let baseline = a.max(b).max(1);
-        assert!(
-            diff * 100 <= baseline * 60,
-            "{label}: two independent samples of the same measure disagree by {diff}MB, more \
-             than 60% of {baseline}MB ({a}MB vs {b}MB) — suspect enforcement_rss_mb_for_pid \
-             dispatched to the WRONG underlying reader for this measure"
-        );
-    }
-
     /// `enforcement_rss_mb_for_pid` must delegate to exactly the reading
     /// [`enforcement_measure`] selects — the structural invariant that keeps
     /// `run_memory_pressure_tick`'s gate, hysteresis baseline, and
     /// `target_freed_mb` calculation all reading the SAME measure (issue
     /// #3683 slice 3's core constraint: never mix anon and total RSS in one
     /// comparison chain).
+    ///
+    /// Why this test asserts NO live-sample "agreement" (issue #3716): three
+    /// successive rounds of calibrating a "two live samples of the same
+    /// measure agree" bound on this exact test all failed under
+    /// `cargo test --workspace` CI churn: a fixed 10 MB bound (#3702's
+    /// original design, mirrored here), then a 60%-relative bound (#3712),
+    /// then that 60% bound itself was exceeded TWICE on release PR #3713 (a
+    /// diff that never touched this file) — CI observed `Some(107)` vs
+    /// `Some(243)` MB (a 127% gap) for two back-to-back live samples of the
+    /// SAME reader function. The problem was never the calibration constant;
+    /// it was structural: both samples are independent re-samplings of the
+    /// same live reader taken microseconds apart, so the "agreement" bound
+    /// measures concurrent sibling-test allocation noise in the shared
+    /// `cargo test --workspace` process, not this function's correctness. Any
+    /// bound tight enough to catch a genuine dispatch bug (which shows up as
+    /// a gap of tens-to-thousands of MB — anon and total RSS commonly differ
+    /// by that much on a real workload) is also tight enough to occasionally
+    /// catch CI churn; a fourth calibration round would just repeat the same
+    /// mistake.
+    ///
+    /// Dispatch correctness — i.e. that [`enforcement_measure`] actually
+    /// routes to the reader `EnforcementMeasure` claims — is pinned instead
+    /// by two behavioral tests that never compare two live magnitude samples
+    /// against each other, only a live sample against a fixed constructed
+    /// threshold:
+    ///   - `service::server::memory_pressure_tests::run_memory_pressure_tick_respects_total_override_env`
+    ///     (cross-platform — works on every OS, including this crate's macOS
+    ///     dev/CI targets): forces `total`, derives a high-water limit from
+    ///     ONE live `current_rss_mb()` sample, and asserts the tick's
+    ///     observable side effect (`state.last_reclaim_rss_mb`) proves the
+    ///     gate actually read total RSS.
+    ///   - `service::server::memory_pressure_tests::run_memory_pressure_tick_gate_uses_anon_not_total_rss_on_linux`
+    ///     (Linux-only): forces `anon`, derives a limit strictly between this
+    ///     process's real anon and total readings, and proves the gate read
+    ///     anon (not total) via the same side-effect observation. It is
+    ///     Linux-only by structural necessity, not an oversight — off Linux,
+    ///     [`anon_rss_mb_for_pid`] is DEFINED to equal
+    ///     [`current_rss_mb_for_pid`] (see that function's doc comment), so
+    ///     no limit can differentiate an `anon`-dispatch bug from a
+    ///     `total`-dispatch bug there; a swapped-measure regression on
+    ///     non-Linux is a no-op by construction, not an uncovered gap.
+    ///
+    /// This test instead asserts only noise-immune, single-sample
+    /// properties: both measures resolve to `Some` for the current (self)
+    /// pid, and each resolved value lands in the same broad sanity band
+    /// `core::memguard::tests::test_rss_for_self_pid` (issue #3702) uses.
+    /// The one cross-sample check kept is a genuinely different shape from
+    /// "agreement": on Linux, `RssAnon` is a KERNEL-DEFINED SUBSET of
+    /// `VmRSS` (see [`parse_rss_anon_kb`]'s doc comment), so `anon <= total`
+    /// is a one-directional structural fact, not a two-sided closeness bound
+    /// between two samples of the same reader — a generous headroom only
+    /// needs to absorb the two readings being taken microseconds apart under
+    /// concurrent test-binary churn (observed as high as ~136 MB above,
+    /// hence 512 MB here), not to calibrate away noise the way the deleted
+    /// same-measure check tried and failed to three times.
     #[test]
     #[serial_test::serial]
     fn enforcement_rss_mb_for_pid_matches_chosen_measure() {
         let pid = std::process::id();
-        {
+
+        // Mirrors `core::memguard::tests::test_rss_for_self_pid`'s (#3702)
+        // sane band — catches a 0/negative/garbage/wrong-unit regression
+        // without being sensitive to how much memory this test binary
+        // happens to use on any given CI runner.
+        const MIN_SANE_RSS_MB: u64 = 1;
+        const MAX_SANE_RSS_MB: u64 = 32 * 1024; // 32 GB - generous for a test binary
+
+        let total_mb = {
             let _guard = EnforceMeasureEnvGuard::set("total");
-            assert_live_samples_of_same_measure_agree(
-                enforcement_rss_mb_for_pid(pid),
-                current_rss_mb_for_pid(pid),
-                "total",
-            );
-        }
-        {
+            enforcement_rss_mb_for_pid(pid)
+        };
+        let anon_mb = {
             let _guard = EnforceMeasureEnvGuard::set("anon");
-            assert_live_samples_of_same_measure_agree(
-                enforcement_rss_mb_for_pid(pid),
-                anon_rss_mb_for_pid(pid),
-                "anon",
+            enforcement_rss_mb_for_pid(pid)
+        };
+
+        for (label, v) in [("total", total_mb), ("anon", anon_mb)] {
+            let Some(v) = v else {
+                // Only plausible on an environment quirk (e.g. /proc hidden
+                // by a restricted container); tolerate rather than fail CI,
+                // mirroring `test_rss_for_self_pid`'s same convention.
+                continue;
+            };
+            assert!(
+                (MIN_SANE_RSS_MB..=MAX_SANE_RSS_MB).contains(&v),
+                "enforcement_rss_mb_for_pid under measure={label} returned {v}MB, outside sane \
+                 band [{MIN_SANE_RSS_MB}, {MAX_SANE_RSS_MB}] MB"
             );
         }
+
+        // Structural (not agreement) check, Linux-only because the subset
+        // guarantee itself only holds there — see the doc comment above.
+        // `RssAnon` is a kernel-defined subset of `VmRSS`, so anon must never
+        // exceed total by more than sampling-skew headroom; a larger gap
+        // suggests the wrong reader was dispatched for one of the two forced
+        // measures.
+        #[cfg(target_os = "linux")]
+        if let (Some(total), Some(anon)) = (total_mb, anon_mb) {
+            const SAMPLING_SKEW_HEADROOM_MB: u64 = 512;
+            assert!(
+                anon <= total + SAMPLING_SKEW_HEADROOM_MB,
+                "anon RSS ({anon}MB) exceeded total RSS ({total}MB) by more than the \
+                 {SAMPLING_SKEW_HEADROOM_MB}MB sampling-skew headroom — RssAnon is a subset of \
+                 VmRSS by kernel definition, so a larger gap suggests enforcement_rss_mb_for_pid \
+                 dispatched to the wrong reader for one of the two forced measures"
+            );
+        }
+
         // pid=0 sentinel must still short-circuit to None regardless of
         // which measure is selected.
         assert_eq!(enforcement_rss_mb_for_pid(0), None);
