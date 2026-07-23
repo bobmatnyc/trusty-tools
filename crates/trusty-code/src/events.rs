@@ -420,6 +420,51 @@ pub enum Event {
         agent: String,
         text: String,
     },
+    /// A streamed chunk of one assistant turn's text (tcode streaming epic
+    /// #3696 Slice 0 — contract only, no producer/consumer wired yet).
+    ///
+    /// Why: [`Event::AgentMessage`] carries a turn's full text as a single
+    /// atomic event, which is fine for a batch-completed turn but cannot
+    /// represent a turn arriving incrementally — the UI has nothing to render
+    /// until the whole turn lands. This variant lets a producer emit the SAME
+    /// turn as a sequence of deltas correlated by `turn_id`, with two
+    /// intentionally-supported shapes: Gap A (a harness that only exposes a
+    /// turn's full text once it is done) emits ONE delta carrying the whole
+    /// turn text with `done: true`; Gap B (a harness with real token-level
+    /// streaming) emits many small deltas with `done: false` followed by one
+    /// final `done: true` marker. Consumers must handle both without special-
+    /// casing which shape a given session uses. `agent_id` mirrors
+    /// [`Event::AgentSpawned`]'s rationale — `agent` alone cannot disambiguate
+    /// two concurrently-delegated sub-agents sharing one name — and this
+    /// codebase runs sub-agents concurrently (`AgentLoop`/`InProcessAgentRunner`
+    /// delegation), so `turn_id` scoping is a correctness requirement, not a
+    /// nicety: see `turn_id`'s own note below.
+    /// What: `turn_id` is opaque and MUST be unique within a session across
+    /// ALL agents, INCLUDING two agents streaming concurrently — a UUID or a
+    /// session-global monotonic counter satisfies this; a per-agent-local
+    /// counter (e.g. each `AgentLoop` restarting its own turn counter from 0)
+    /// does NOT, and would let two concurrently-streaming agents collide on
+    /// the same `turn_id` and interleave into one bubble. Consumers SHOULD
+    /// therefore group/concatenate deltas by the tuple `(agent_id, turn_id)`,
+    /// not `turn_id` alone, as defensive practice against a producer that
+    /// gets this id-scoping requirement wrong — reconstructing one turn's
+    /// text is "concatenate `delta` in arrival order for one `(agent_id,
+    /// turn_id)` key". `done: false` means more deltas for this key are
+    /// coming; `done: true` means this turn's bubble is complete and no
+    /// further deltas for this key will arrive. `agent_id` is
+    /// `#[serde(default)]` so a transcript recorded before this field existed
+    /// still deserializes (decoding to `""`).
+    /// Test: `agent_message_delta_round_trips_through_json`,
+    /// `agent_message_delta_full_text_in_one_delta_round_trips` (Gap A shape).
+    AgentMessageDelta {
+        session_id: String,
+        agent: String,
+        #[serde(default)]
+        agent_id: String,
+        turn_id: String,
+        delta: String,
+        done: bool,
+    },
     /// (DOC-39 AC-13) see [`Event::AgentSpawned`]'s note — not yet emitted.
     AgentDone {
         session_id: String,
@@ -960,6 +1005,7 @@ impl Event {
             | Event::PmDelegating { session_id, .. }
             | Event::AgentSpawned { session_id, .. }
             | Event::AgentMessage { session_id, .. }
+            | Event::AgentMessageDelta { session_id, .. }
             | Event::AgentDone { session_id, .. }
             | Event::AgentFailed { session_id, .. }
             | Event::ToolCalled { session_id, .. }
@@ -1015,6 +1061,7 @@ impl Event {
             Event::PmDelegating { .. } => "pm_delegating",
             Event::AgentSpawned { .. } => "agent_spawned",
             Event::AgentMessage { .. } => "agent_message",
+            Event::AgentMessageDelta { .. } => "agent_message_delta",
             Event::AgentDone { .. } => "agent_done",
             Event::AgentFailed { .. } => "agent_failed",
             Event::ToolCalled { .. } => "tool_called",
