@@ -7,6 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **`core::memguard_enforce::tests::enforcement_rss_mb_for_pid_matches_chosen_measure`
+  deflaked for good (issue #3716).** Three successive rounds of calibrating a
+  "two live RSS samples of the same measure agree" tolerance on this test
+  (10 MB, then 60% relative) all failed under `cargo test --workspace` CI
+  churn — the 60% bound was itself exceeded twice on an unrelated release PR.
+  The assertion is restructured to noise-immune single-sample checks (both
+  measures resolve to `Some` and land in a sane band) plus a genuinely
+  structural, Linux-only anon-subset-of-total check with generous headroom,
+  instead of comparing two independently re-sampled live readings. Dispatch
+  correctness stays pinned by the existing behavioral tests
+  `run_memory_pressure_tick_respects_total_override_env` (cross-platform) and
+  `run_memory_pressure_tick_gate_uses_anon_not_total_rss_on_linux`
+  (Linux-only, since anon and total are defined to be equal off-Linux).
+
 ---
 ## [0.39.0] — 2026-07-23
 
