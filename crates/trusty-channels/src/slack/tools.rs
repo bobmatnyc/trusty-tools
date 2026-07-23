@@ -47,6 +47,8 @@ pub const TOOL_NAMES: &[&str] = &[
     "slack_read_file",
     "slack_search_emojis",
     "slack_search_users",
+    "slack_canvas_create",
+    "slack_canvas_lookup_sections",
 ];
 
 /// Report whether `name` is a planned Slack tool.
@@ -397,6 +399,61 @@ pub fn tool_list_response() -> Value {
                 },
             }),
             &["query"],
+        ),
+        tool(
+            "slack_canvas_create",
+            "Create a standalone canvas, optionally tabbed into a channel and/or \
+             seeded with markdown content. Thin wrapper over canvases.create — no \
+             markdown-to-canvas translation beyond Slack's own markdown ingestion. \
+             `channel_id` is optional per Slack's API, but free-tier (non-Business+) \
+             workspaces reject a non-tabbed canvas (error \
+             free_teams_cannot_create_non_tabbed_canvases), so pass `channel_id` on \
+             those teams. Requires scope canvases:write; other Slack errors surfaced \
+             as-is include canvas_creation_failed, canvas_disabled_user_team, and \
+             missing_scope.",
+            json!({
+                "title": { "type": "string", "description": "Optional canvas title." },
+                "markdown": {
+                    "type": "string",
+                    "description": "Required initial markdown content, sent to Slack as \
+                        document_content: {type: \"markdown\", markdown}.",
+                },
+                "channel_id": {
+                    "type": "string",
+                    "description": "Optional channel ID to tab the new canvas into. \
+                        Effectively required on free-tier Slack teams — see the tool \
+                        description.",
+                },
+            }),
+            &["markdown"],
+        ),
+        tool(
+            "slack_canvas_lookup_sections",
+            "Look up section ids/anchors within an existing canvas via \
+             canvases.sections.lookup, filtered by section type and/or contained \
+             text. Slack has no full-canvas-content-read API — this returns section \
+             anchors (ids), not the canvas's document content; pair the returned \
+             section_id with slack_update_canvas / a section-targeted canvases.edit \
+             call if you need to act on a specific section. Slack's criteria \
+             reliably accepts only h1/h2/h3/any_header as section_types values; \
+             other section type strings may be silently ignored by the API. \
+             Requires scope canvases:read.",
+            json!({
+                "canvas_id": { "type": "string", "description": "Canvas ID (e.g. F0123ABCD)." },
+                "section_types": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional filter on section heading type. Slack \
+                        reliably accepts only \"h1\", \"h2\", \"h3\", and \
+                        \"any_header\" here.",
+                },
+                "contains_text": {
+                    "type": "string",
+                    "description": "Optional filter: only return sections whose \
+                        content contains this text.",
+                },
+            }),
+            &["canvas_id"],
         ),
     ];
     json!({ "tools": tools })
