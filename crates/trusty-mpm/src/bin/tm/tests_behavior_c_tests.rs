@@ -28,7 +28,7 @@ static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
     CwdProject, NestedFallbackAction, classify_cwd_project, cwd_owns_git_entry, derive_project,
     fallback_protected, github_host, inplace_self_relaunch_hint, is_github_remote,
-    ls_tree_reports_tracked_dir, nested_fallback_action, nested_guard_notice, nested_managed_match,
+    ls_tree_reports_tracked_dir, nested_fallback_action, nested_guard_notice,
     non_github_refusal_message, print_non_tty_hint, print_project_context, tty_gate,
     untracked_ancestor_message,
 };
@@ -1850,132 +1850,6 @@ fn daily_banner_two_panel_version_in_title_bar_not_content() {
         );
     }
     colored::control::unset_override();
-}
-
-// ── nested_managed_match (#2157 item 4) ──────────────────────────────────────
-// The nested-session guard's pure decision: does any known managed record
-// belong to the pane bare `tm` is currently running inside? Matched either by
-// tmux session name (the primary signal — works even when the env var was
-// never exported into THIS particular pane) or by TM_MANAGED_SESSION_ID
-// (belt-and-suspenders).
-
-#[test]
-fn nested_managed_match_by_session_name() {
-    let sessions = vec![make_session("tm-proj-01", "active", None)];
-    let matched = nested_managed_match(Some("tm-proj-01"), None, &sessions);
-    assert_eq!(matched.map(|s| s.name.as_str()), Some("tm-proj-01"));
-}
-
-#[test]
-fn nested_managed_match_by_env_id() {
-    let sessions = vec![make_session("tm-proj-01", "active", None)];
-    // make_session sets id = "<name>-id".
-    let matched = nested_managed_match(None, Some("tm-proj-01-id"), &sessions);
-    assert_eq!(matched.map(|s| s.name.as_str()), Some("tm-proj-01"));
-}
-
-#[test]
-fn nested_managed_match_none_when_no_match() {
-    let sessions = vec![make_session("tm-proj-01", "active", None)];
-    // Neither the session name nor the env id matches any record — e.g. a
-    // plain terminal opened outside any managed tmux session.
-    let matched = nested_managed_match(Some("some-other-session"), Some("unrelated-id"), &sessions);
-    assert!(matched.is_none());
-}
-
-#[test]
-fn nested_managed_match_none_when_both_inputs_absent() {
-    // The "not inside tmux" case: the guard's I/O wrapper passes None for
-    // both keys, which must never spuriously match any record.
-    let sessions = vec![make_session("tm-proj-01", "active", None)];
-    let matched = nested_managed_match(None, None, &sessions);
-    assert!(matched.is_none());
-}
-
-#[test]
-fn nested_managed_match_finds_record_missing_from_source_id_filtered_list() {
-    // #2157 items 4+5 interplay: the guard fetches the UNFILTERED session
-    // list specifically so it can still find a record whose source_id write
-    // never landed (item 5's failure mode) — this record would be invisible
-    // to a `?source_id=` filtered fetch, but the guard must still catch it by
-    // tmux session name.
-    let mut orphaned = make_session("tm-orphan-02", "active", None);
-    orphaned.source_id = None;
-    let sessions = vec![orphaned];
-    let matched = nested_managed_match(Some("tm-orphan-02"), None, &sessions);
-    assert!(
-        matched.is_some(),
-        "must match by session name regardless of source_id"
-    );
-}
-
-/// Build a [`make_session`] summary with an explicit `created_at` (RFC3339),
-/// for tests that need to control recency ordering.
-fn make_session_at(
-    name: &str,
-    state: &str,
-    created_at: &str,
-) -> trusty_mpm::client::ManagedSessionSummary {
-    let mut s = make_session(name, state, None);
-    s.created_at = Some(created_at.to_string());
-    s
-}
-
-#[test]
-fn nested_managed_match_prefers_live_over_recycled_decommissioned_name() {
-    // #2790 code-critic HIGH: tmux session names are RECYCLED after
-    // decommission. A stale Decommissioned tombstone sharing a name with a
-    // genuinely LIVE session must never win the match — liveness takes STRICT
-    // precedence over recency (not just "usually more recent"). Proven here by
-    // giving the tombstone a LATER created_at than the live record — an
-    // adversarial ordering the pre-#2790 plain `.find()` would have been
-    // vulnerable to depending on iteration/list order.
-    let mut decommissioned =
-        make_session_at("tm-proj-01", "decommissioned", "2026-03-01T00:00:00Z");
-    decommissioned.id = "old-id".to_string();
-    let mut live = make_session_at("tm-proj-01", "active", "2026-01-01T00:00:00Z");
-    live.id = "new-id".to_string();
-    let sessions = vec![decommissioned, live];
-
-    let matched = nested_managed_match(Some("tm-proj-01"), None, &sessions);
-    assert_eq!(
-        matched.map(|s| s.id.as_str()),
-        Some("new-id"),
-        "a live record must win over a decommissioned one sharing the same \
-         recycled name, even when the tombstone's created_at is later"
-    );
-}
-
-#[test]
-fn nested_managed_match_falls_back_to_decommissioned_when_no_live_candidate() {
-    // The legitimate #2777 repro: the ONLY record sharing this tmux session
-    // name IS the decommissioned session itself (its name has not yet been
-    // recycled by a new session) — the guard must still match it so the
-    // in-place revive path can run.
-    let sessions = vec![make_session("tm-apex-01", "decommissioned", None)];
-    let matched = nested_managed_match(Some("tm-apex-01"), None, &sessions);
-    assert_eq!(
-        matched.map(|s| s.name.as_str()),
-        Some("tm-apex-01"),
-        "must fall back to the decommissioned record when no live candidate \
-         shares its name"
-    );
-}
-
-#[test]
-fn nested_managed_match_prefers_most_recent_live_among_multiple() {
-    // Belt-and-suspenders: when MULTIPLE non-decommissioned candidates somehow
-    // share a name (should not normally happen, but the guard must still be
-    // deterministic), the most recently created one wins — mirroring
-    // `capture_pane_by_tmux_name`'s `max_by_key(created_at)` convention.
-    let mut older = make_session_at("tm-proj-02", "active", "2026-01-01T00:00:00Z");
-    older.id = "older-id".to_string();
-    let mut newer = make_session_at("tm-proj-02", "active", "2026-02-01T00:00:00Z");
-    newer.id = "newer-id".to_string();
-    let sessions = vec![older, newer];
-
-    let matched = nested_managed_match(Some("tm-proj-02"), None, &sessions);
-    assert_eq!(matched.map(|s| s.id.as_str()), Some("newer-id"));
 }
 
 // ── pane_identity_confirmed (#2456 review finding 1, ROUND 2) ────────────────

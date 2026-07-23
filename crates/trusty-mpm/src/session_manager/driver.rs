@@ -166,6 +166,40 @@ pub trait ManagedTmuxDriver: Send + Sync {
         true
     }
 
+    /// Tri-state variant of [`Self::pane_exists`] distinguishing "confirmed
+    /// present", "confirmed absent", and "could not determine" (#3714 review
+    /// finding 2).
+    ///
+    /// Why: [`Self::pane_exists`]'s bare `bool` deliberately collapses
+    /// "confirmed absent" and "query failed" into `false` — correct,
+    /// fail-closed behavior for a MUTATION guard (e.g.
+    /// `SessionManager::rename` must never trust an unverifiable pane as
+    /// safe to physically retarget — that call site keeps using
+    /// [`Self::pane_exists`] unchanged). A DISPLAY-only reconciler
+    /// (`daemon::managed_routes::summary::reconcile_live_state`) has the
+    /// opposite risk: collapsing "could not determine" into "not live"
+    /// would flip a genuinely live record's SHOWN `state` to `"stopped"` on
+    /// a transient tmux query hiccup — reproducing the exact
+    /// `state`/`persisted_state` disagreement #3714 exists to fix, just
+    /// from a different trigger. This lets that caller fall back to a
+    /// weaker signal (name-only) on `None` instead of asserting an absence
+    /// it cannot actually prove.
+    /// What: the default derives from [`Self::pane_exists`] — `true` maps to
+    /// `Some(true)`, `false` maps to `Some(false)`; a driver that never
+    /// overrides `pane_exists` therefore never produces `None`, matching its
+    /// existing "cannot verify → assume present" semantics exactly.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides this to call
+    /// `TmuxDriver::pane_exists_checked` directly, so a genuine
+    /// `list-panes` query failure reports `None` rather than `Some(false)`.
+    /// Test: `RealTmuxDriver`'s override is covered by the same
+    /// `core::tmux::list_panes_argv` coverage `pane_exists` uses; the
+    /// display-reconciliation consumer is covered by
+    /// `reconcile_live_state_pane_query_error_does_not_flip_live_record_to_stopped`
+    /// in `daemon::managed_routes::tests`.
+    fn pane_exists_checked(&self, name: &str, pane_id: &str) -> Option<bool> {
+        Some(self.pane_exists(name, pane_id))
+    }
+
     /// Send an interrupt (Ctrl-C) to the session named `name` (#1461).
     ///
     /// Why: the [`Submit::Interrupt`](crate::core::sm::control::Submit::Interrupt)

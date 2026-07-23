@@ -344,3 +344,165 @@ async fn rename_renames_live_tmux_session() {
     );
     assert!(!fake.session_exists(&old_name), "old name must be gone");
 }
+
+/// A LEGACY record (pre-#2453, no captured `pane_id`) must keep the
+/// pre-#3714 name-only tmux-liveness check for the rename MUTATION path —
+/// there is no stronger per-pane signal available for it, so `rename` must
+/// still physically rename the live tmux session exactly as before #3714.
+///
+/// Why: proves the legacy fallback explicitly, rather than incidentally —
+/// `pane_exists_override` is forced to `Some(false)` (an incorrect gone
+/// answer, if it were ever consulted): if the mutation path mistakenly
+/// probed `pane_exists` for a record with no `pane_id`, the tmux rename
+/// would be skipped and this assertion would fail. Observing the rename
+/// call fire anyway is proof the pane check was never reached — the
+/// `pane_id: None` branch short-circuits straight to the name-only check.
+#[tokio::test]
+async fn rename_legacy_record_without_pane_id_still_renames_live_tmux_session() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    // seed_record never sets `pane_id` (always `None`) — the legacy shape.
+    seed_record(&mgr, &dir, id, ManagedSessionState::Active, false).await;
+    assert_eq!(
+        mgr.get(&id).await.expect("get").pane_id,
+        None,
+        "sanity: seeded record is legacy (no pane_id)"
+    );
+    let old_name = mgr.get(&id).await.expect("get").tmux_name;
+    // If the pane check were (wrongly) consulted for this legacy record, it
+    // would report "gone" — proving below that the rename still happened
+    // means it was never consulted.
+    *fake.pane_exists_override.lock().unwrap() = Some(false);
+
+    mgr.rename(&id, "tm-legacy-renamed").await.expect("rename");
+
+    let renames = fake.rename_calls.lock().unwrap();
+    assert!(
+        renames
+            .iter()
+            .any(|(o, n)| o == &old_name && n == "tm-legacy-renamed"),
+        "a legacy record's rename must still physically rename its live tmux \
+         session via the name-only check: {renames:?}"
+    );
+}
+
+/// #3714 remediation: renaming a record whose OWN recorded pane is confirmed
+/// GONE must NEVER physically rename a tmux session merely because a session
+/// with the same NAME is live — that live session belongs to a DIFFERENT
+/// record (the duplicate-name collision from #3692), and the rename must not
+/// hijack it. Only the DB record changes; the live tmux entity is left
+/// untouched.
+///
+/// Why: the pre-#3714 code trusted `live_names.contains(old_name)` alone —
+/// this reproduces the remediation-comment incident where `tm sessions
+/// rename` on a stale duplicate physically retitled the operator's OWN,
+/// attached, unrelated live session.
+/// What: creates an Active record with a captured `pane_id` (`%3`), then
+/// forces `pane_exists` to report `false` (simulating that this record's own
+/// pane is gone even though a tmux session still answers to `old_name` — the
+/// exact shape of "a DIFFERENT record's live session happens to share this
+/// name"). Asserts the rename still succeeds (DB-only), the driver's
+/// `rename_session` is NEVER called, and the live session (still under
+/// `old_name`) is left completely alone.
+#[tokio::test]
+async fn rename_never_renames_unrelated_live_session_sharing_a_stale_name() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+    *fake.pane_id_override.lock().unwrap() = Some("%3".to_string());
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(dir.path().to_path_buf()),
+            Some("dup-name-session".into()),
+            Some(dir.path().to_path_buf()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    assert_eq!(
+        record.pane_id.as_deref(),
+        Some("%3"),
+        "sanity: pane_id captured at create time"
+    );
+    mgr.set_workspace(
+        &record.id,
+        dir.path().to_path_buf(),
+        ManagedSessionState::Active,
+    )
+    .await
+    .expect("set Active");
+    let old_name = record.tmux_name.clone();
+
+    // Simulate the #3714 duplicate-name condition: `old_name` is still a
+    // LIVE tmux session (list_sessions reports it — `create()` registered it
+    // above), but THIS record's own recorded pane is confirmed gone, as if
+    // the live session actually belongs to an unrelated record.
+    *fake.pane_exists_override.lock().unwrap() = Some(false);
+
+    let updated = mgr
+        .rename(&record.id, "tm-renamed-safely")
+        .await
+        .expect("rename must still succeed — DB-only when the tmux identity can't be confirmed");
+    assert_eq!(updated.tmux_name, "tm-renamed-safely");
+
+    assert!(
+        fake.rename_calls.lock().unwrap().is_empty(),
+        "must never physically rename a tmux session that isn't confirmed to be this record's own"
+    );
+    assert!(
+        fake.session_exists(&old_name),
+        "the unrelated live session (still answering to old_name) must remain untouched"
+    );
+    assert!(
+        !fake.session_exists("tm-renamed-safely"),
+        "no tmux session should have been created/renamed under the new name"
+    );
+}
+
+/// Regression guard for the #3714 fix's happy path: when the record's OWN
+/// `pane_id` IS confirmed alive (the ordinary case — no duplicate-name
+/// collision), the live tmux session is still renamed exactly as before.
+#[tokio::test]
+async fn rename_renames_live_session_when_pane_confirmed_alive() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+    *fake.pane_id_override.lock().unwrap() = Some("%9".to_string());
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(dir.path().to_path_buf()),
+            Some("own-pane-session".into()),
+            Some(dir.path().to_path_buf()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_workspace(
+        &record.id,
+        dir.path().to_path_buf(),
+        ManagedSessionState::Active,
+    )
+    .await
+    .expect("set Active");
+    let old_name = record.tmux_name.clone();
+    // `pane_exists_override` stays at its default (`None` -> trait's
+    // optimistic `true`), matching a real driver confirming the pane is
+    // there.
+
+    mgr.rename(&record.id, "tm-live-renamed-2")
+        .await
+        .expect("rename");
+
+    let renames = fake.rename_calls.lock().unwrap();
+    assert!(
+        renames
+            .iter()
+            .any(|(o, n)| o == &old_name && n == "tm-live-renamed-2"),
+        "a confirmed-alive pane must still rename the live tmux session: {renames:?}"
+    );
+}

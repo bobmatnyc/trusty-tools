@@ -143,24 +143,49 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
 /// DISPLAYED state here (read-time reconciliation, mirroring how
 /// `unresumable`/`stale_assets` are computed without mutating the store).
 /// What: for each summary whose record is in the transient `Active`/`Stopped`
-/// pair, sets `state` to `"active"` when its tmux session is in `live` (else
+/// pair, sets `state` to `"active"` when its tmux is confirmed live (else
 /// `"stopped"`), and sets `attached` when its session is in `attached`.
 /// Terminal states (`Decommissioned`/`Deleted`), `Provisioning`, and `Errored`
 /// are left as persisted — a live tmux name must never resurrect a
 /// deleted/decommissioned record's label, and `errored`/`provisioning` carry
 /// information a bare liveness probe would erase.
 ///
-/// Deliberately NEVER touches `summary.persisted_state` (#3531): that field is
-/// the CLI's one reliable signal for what the daemon's own `/resume` endpoint
-/// will actually validate against — collapsing it into this same
-/// display-only reconciliation would silently reintroduce the zombie
-/// misclassification this field exists to fix (an `Active`-but-tmux-dead
-/// record would again read identically to a genuinely `Stopped` one).
+/// Pane-scoped liveness (#3714): a bare `live.contains(name)` proves only that
+/// SOME tmux session currently uses this NAME — under the #3692 duplicate-name
+/// condition, a stale record's own pane can be long gone while an UNRELATED
+/// live session (owned by a DIFFERENT record) still happens to share its
+/// name. Trusting the name alone there resurrected the stale record's
+/// DISPLAYED `state` to `"active"` while its `persisted_state` correctly kept
+/// reading `"stopped"` — the exact same-record `state`/`persisted_state`
+/// contradiction the issue reported (two consecutive `tm` runs seconds apart
+/// read as flip-flopping between "already active" and "stopped, will kill
+/// pane" for the identical command). When a record has a captured `pane_id`,
+/// liveness is decided by [`ManagedTmuxDriver::pane_exists_checked`] — the
+/// TRI-STATE variant of `pane_exists` (#3714 review finding 2): `Some(true)`
+/// (THAT SPECIFIC pane confirmed inside a session named `name`) reads
+/// `"active"`; `Some(false)` (confirmed absent) reads `"stopped"` — this is
+/// the case that closes the contradiction above; `None` (the query itself
+/// failed — e.g. a transient tmux hiccup, NOT a confirmed absence) falls
+/// back to the bare name check instead of asserting the pane is gone, so a
+/// transient failure can never flip a genuinely live record to `"stopped"`
+/// (the distinct failure mode `pane_exists`'s fail-closed `bool` — correct
+/// for the MUTATION guard in `SessionManager::rename`, which keeps using
+/// `pane_exists` unchanged — would otherwise reproduce here for DISPLAY). A
+/// legacy record with no captured `pane_id` also falls back to the
+/// name-only check; no stronger signal exists for it. Pane probes only run
+/// for records whose name IS in `live` (short-circuited by `&&`), so a
+/// fleet where most sessions are genuinely stopped pays no extra tmux
+/// round-trips.
 /// Test: `reconcile_live_state_flips_stopped_to_active_when_alive`,
 /// `reconcile_live_state_leaves_terminal_states`,
-/// `reconcile_live_state_leaves_persisted_state_untouched` in `super::tests`;
-/// end-to-end coverage in the `session_lifecycle` integration suite.
+/// `reconcile_live_state_leaves_persisted_state_untouched`,
+/// `reconcile_live_state_prefers_pane_scoped_liveness_over_name_membership`,
+/// `reconcile_live_state_legacy_record_without_pane_id_uses_name_only`,
+/// `reconcile_live_state_pane_query_error_does_not_flip_live_record_to_stopped`
+/// in `super::tests`; end-to-end coverage in the `session_lifecycle`
+/// integration suite.
 pub(super) fn reconcile_live_state(
+    tmux: &dyn ManagedTmuxDriver,
     summaries: &mut [SessionSummary],
     records: &[SessionRecord],
     live: &std::collections::HashSet<String>,
@@ -168,7 +193,18 @@ pub(super) fn reconcile_live_state(
 ) {
     for (summary, record) in summaries.iter_mut().zip(records.iter()) {
         let name = &record.tmux_name;
-        let is_live = live.contains(name);
+        let name_live = live.contains(name);
+        let is_live = match record.pane_id.as_deref() {
+            Some(pane_id) if name_live => match tmux.pane_exists_checked(name, pane_id) {
+                Some(alive) => alive,
+                // Query failed — "could not determine" is NOT "confirmed
+                // absent"; fall back to the name-only signal rather than
+                // flipping a possibly-live record to "stopped" on a
+                // transient tmux hiccup (#3714 review finding 2).
+                None => name_live,
+            },
+            _ => name_live,
+        };
         summary.attached = is_live && attached.contains(name);
         if matches!(
             record.state,
@@ -208,7 +244,7 @@ pub(super) fn reconcile_against_tmux(
             let live: std::collections::HashSet<String> = names.into_iter().collect();
             let attached: std::collections::HashSet<String> =
                 tmux.attached_session_names().into_iter().collect();
-            reconcile_live_state(summaries, records, &live, &attached);
+            reconcile_live_state(tmux, summaries, records, &live, &attached);
         }
         Err(e) => {
             tracing::warn!(
