@@ -60,10 +60,11 @@ use crate::session_manager::ManagedSessionId;
 /// every residual gap otherwise.
 /// Test: `ensure_deployment_complete_noops_for_unknown_workspace`,
 /// `ensure_deployment_complete_ok_when_already_complete`,
-/// `ensure_deployment_complete_repairs_and_succeeds`;
-/// `spawn_managed_cloned_launches_despite_incomplete_deployment` (added by
-/// #2172) asserts the call site itself no longer skips `adapter.spawn` on
-/// `Err`.
+/// `ensure_deployment_complete_does_not_abort_when_no_carrier_reachable`
+/// (`lifecycle_tests.rs`) cover this function directly; #2172's
+/// non-blocking-call-site contract (every `spawn_managed_*`/`resume_managed`
+/// site logs `Err` and still proceeds to `adapter.spawn`) is asserted at
+/// each of those call sites, not here.
 pub(super) fn ensure_deployment_complete(
     fw: &crate::core::paths::FrameworkPaths,
     workspace: &std::path::Path,
