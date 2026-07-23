@@ -419,3 +419,28 @@ async fn patch_agent_invalid_name_returns_400() {
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
+
+/// #3738: `GET /api/agents` must surface `[agent].display_name` so the GUI's
+/// per-message speaker attribution reads the persona's human-facing label
+/// ("CTO Bot") straight from the catalog — and must fall back to `name` when
+/// no `display_name` is declared, matching `AgentInfo::display_label`.
+#[test]
+fn parse_agent_toml_surfaces_display_name() {
+    let with_display = r#"
+[agent]
+name = "cto-assistant"
+role = "assistant"
+display_name = "CTO Bot"
+"#;
+    let parsed = parse_agent_toml(with_display, "cto-assistant").expect("valid TOML");
+    assert_eq!(parsed["display_name"], "CTO Bot");
+
+    // No display_name → falls back to name (never "").
+    let without_display = r#"
+[agent]
+name = "engineer"
+role = "engineer"
+"#;
+    let parsed = parse_agent_toml(without_display, "engineer").expect("valid TOML");
+    assert_eq!(parsed["display_name"], "engineer");
+}

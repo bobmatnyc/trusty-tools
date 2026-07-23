@@ -16,7 +16,9 @@ role = "assistant"
 # particular — same discipline as `izzie.toml`.
 model = "claude-sonnet-4-6"
 description = "CTO Assistant — private assistant for Robert Matsuoka (CTO, Duetto)"
-display_name = "CTO Assistant"
+# #3738: user-facing display name is "CTO Bot" (kept in sync with the package
+# form `cto-assistant/agent.toml`; this flat file is the extends-shadow fallback).
+display_name = "CTO Bot"
 prompt_label = "cto"
 
 [llm]

@@ -67,6 +67,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   execution path) — a documented MVP scope limit, flagged for a follow-up
   RPC.
 
+### Changed
+
+- **Generic "Assistant" is the default persona; Izzie / CTO Bot are selectable
+  (owner decision, #3738, epic #3052):** the base `assistant/` package is now
+  the concrete GENERIC default persona with a professional display name
+  `"Assistant"` (reversing the prior "bases are nameless" decision) — it stays
+  the un-personalized `extends` base for the named personas, which override
+  `display_name` via child-Some-wins per-key merge. `cto-assistant`'s display
+  name is renamed `"CTO Assistant"` → `"CTO Bot"` (a new `"cto bot"` `/switch`
+  alias is added; existing aliases still work). Izzie keeps display name
+  `"Izzie"` and her flavor in her own overlay. The deprecated `ctrl` coordinator
+  persona stays in place and reachable via `/switch ctrl`, but nothing defaults
+  to it (the plain-CLI startup already auto-switches to `assistant`; the
+  `/switch` help and picker now list Assistant first and mark ctrl deprecated).
+  A single canonical accessor `AgentInfo::display_label()` (`display_name` →
+  `name` fallback) now drives the speaker label, and `GET /api/agents` surfaces
+  `display_name` so the GUI's per-message speaker attribution reads
+  "Assistant" / "Izzie" / "CTO Bot" from the backend without re-deriving the
+  mapping client-side. Tool registrations (weather / Metro-North on Izzie) are
+  unchanged — no tool scopes moved.
+
 ### Fixed
 
 - **A parallel phase could not fail when its merge failed (#3671):**

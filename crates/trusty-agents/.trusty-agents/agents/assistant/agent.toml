@@ -2,11 +2,19 @@
 #
 # This is the reusable, UN-personalized productivity assistant template. It
 # carries a functional role, the curated Google Workspace tool surface, and
-# generic helpful/productivity instructions (in persona.md) — but deliberately
-# NO persona identity: no display_name, no personal name, no user-identity
-# binding, and no user-specific skills. A concrete persona (e.g. "Izzie") is
-# supplied by a USER via an `extends = "assistant"` personalization overlay
-# (Eve §2.5.1). See `../izzie/` for the reference overlay example.
+# generic helpful/productivity instructions (in persona.md) — with NO
+# user-identity binding and no user-specific skills.
+#
+# #3738 (owner decision 2026-07-23): this base is ALSO the concrete GENERIC
+# "Assistant" persona — the DEFAULT starting agent for a fresh session. It
+# therefore now carries a professional, un-personalized display identity
+# (`display_name = "Assistant"`), REVERSING the prior "bases are nameless"
+# decision (2026-07-18). It remains the `extends` base for the named personas
+# (`../izzie/`, `../cto-assistant/`); each of those overrides `display_name`
+# via child-Some-wins per-key merge (`agents::extends::merge_extends`), so the
+# generic "Assistant" identity is only ever seen when the base is used
+# directly as the default. A user's own `extends = "assistant"` overlay may
+# still supply its own name (Eve §2.5.1) — see `../izzie/` for the reference.
 #
 # NOTE: the `extends`-based overlay resolver landed in #3055/#3106
 # (`crate::agents::extends`) — a personalization overlay's `[tools].allow`
@@ -23,8 +31,11 @@ role = "assistant"
 # (BASE_AGENT_ID in ui/src/lib/roster.ts) — testing default is Opus.
 model = "claude-opus-4-6"
 description = "General-purpose productivity assistant (base template; personalize via `extends`)"
-# Intentionally NO display_name / prompt_label: the base is nameless. A persona
-# identity (name + prompt label) is contributed by the personalization overlay.
+# #3738: the generic default persona's professional display identity. Named
+# personas (izzie, cto-assistant) override these via `extends`; a user overlay
+# may override them too. Kept intentionally plain — no personal name.
+display_name = "Assistant"
+prompt_label = "assistant"
 
 [llm]
 # Conversational productivity assistant — warm, short replies by default.

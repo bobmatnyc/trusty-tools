@@ -258,9 +258,10 @@ pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<se
 /// two routes' response shapes from drifting apart.
 /// What: Parses `raw` as TOML; reads `[agent]`'s `name` (falling back to
 /// `fallback_name`, typically the file stem), `role`, `model`, `runner`,
-/// `provider_id`, and `description` (each defaulting to `""` when absent).
-/// Returns `None` when `raw` fails to parse as TOML.
-/// Test: `scan_agents_dir_parses_toml`, `patch_agent_persists_model_and_round_trips`.
+/// `provider_id`, `description`, and `display_name` (each defaulting to `""`
+/// when absent). Returns `None` when `raw` fails to parse as TOML.
+/// Test: `scan_agents_dir_parses_toml`, `patch_agent_persists_model_and_round_trips`,
+/// `parse_agent_toml_surfaces_display_name`.
 pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_json::Value> {
     let parsed: toml::Value = toml::from_str(raw).ok()?;
     let agent = parsed.get("agent");
@@ -271,6 +272,12 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
             .map(str::to_string)
     };
     let name = get_str("name").unwrap_or_else(|| fallback_name.to_string());
+    // #3738: surface `display_name` ("Assistant" / "Izzie" / "CTO Bot") so the
+    // GUI's per-message speaker attribution reads the persona's human-facing
+    // label straight from the catalog. Falls back to `name` (matching
+    // `AgentInfo::display_label`'s contract) rather than "" so a consumer can
+    // always render SOME label without re-deriving the mapping client-side.
+    let display_name = get_str("display_name").unwrap_or_else(|| name.clone());
     Some(serde_json::json!({
         "name": name,
         "role": get_str("role").unwrap_or_default(),
@@ -278,6 +285,7 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
         "runner": get_str("runner").unwrap_or_default(),
         "provider_id": get_str("provider_id").unwrap_or_default(),
         "description": get_str("description").unwrap_or_default(),
+        "display_name": display_name,
     }))
 }
 

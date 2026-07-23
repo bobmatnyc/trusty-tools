@@ -124,10 +124,13 @@ impl tui::ReplHandler for ReplBridge {
                 // tag tells the inline-choice Enter handler to directly
                 // dispatch `/switch <selected>` instead of inserting the
                 // selected text into the input buffer for a second Enter.
+                // #3738: Assistant (generic default) first; CTO Bot display
+                // name; ctrl kept last (deprecated but reachable).
                 let items: Vec<String> = vec![
-                    "ctrl".to_string(),
+                    "Assistant".to_string(),
                     "Izzie".to_string(),
-                    "CTO Assistant".to_string(),
+                    "CTO Bot".to_string(),
+                    "ctrl".to_string(),
                 ];
                 let _ = tx.send(tui::ReplEvent::SetChoices {
                     items,

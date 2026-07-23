@@ -23,7 +23,7 @@ pub(crate) fn write_help(out: &mut String) {
     /status              Controller liveness
     /session             Session ID, socket, project path
     /agent [<name>]      Switch persona, or list assistant agents
-    /switch [<name>]     Switch front-end voice (ctrl | Izzie | CTO Assistant)
+    /switch [<name>]     Switch front-end voice (Assistant | Izzie | CTO Bot | ctrl)
     /agents              List available agents
     /skills              List available skills
     /memories [query]    Search the memory store

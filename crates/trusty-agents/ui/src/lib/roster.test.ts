@@ -59,6 +59,18 @@ describe('buildRoster', () => {
     expect(roster[1].description).toBe('CTO Assistant');
   });
 
+  it('prefers a catalog entry display_name over its id for the label (#3738)', () => {
+    const catalog: CatalogAgent[] = [
+      { name: 'cto-assistant', display_name: 'CTO Bot', description: 'CTO Assistant' },
+      { name: 'engineer' },
+    ];
+    const roster = buildRoster(catalog, []);
+    const cto = roster.find((r) => r.id === 'cto-assistant');
+    expect(cto?.label).toBe('CTO Bot');
+    // No display_name → label falls back to the id.
+    expect(roster.find((r) => r.id === 'engineer')?.label).toBe('engineer');
+  });
+
   it('dedupes a catalog entry literally named "assistant" against the base entry', () => {
     const catalog: CatalogAgent[] = [{ name: 'assistant' }, { name: 'engineer' }];
     const roster = buildRoster(catalog, []);

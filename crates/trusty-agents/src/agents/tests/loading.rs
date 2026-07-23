@@ -470,11 +470,15 @@ fn bundled_agents_dir() -> PathBuf {
 }
 
 #[test]
-fn base_assistant_package_is_nameless_and_curated() {
+fn base_assistant_package_is_generic_default_and_curated() {
     // #3054: The base `assistant` agent must load from its directory-package
-    // form, carry the curated gworkspace tool surface + productivity scopes,
-    // and be NAMELESS — no persona display_name/prompt_label. Persona identity
-    // is supplied later by a user's `extends` overlay (#3055).
+    // form and carry the curated gworkspace tool surface + productivity scopes.
+    // #3738 (owner decision 2026-07-23, REVERSING the 2026-07-18 "bases are
+    // nameless" decision): the base is ALSO the concrete GENERIC "Assistant"
+    // persona — the default starting agent — so it now carries a professional,
+    // un-personalized display identity ("Assistant"). It must stay UNFLAVORED:
+    // no user binding, no user-specific (izzie-*) skills, no personal name in
+    // the persona body. A user `extends` overlay may still rename it (#3055).
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("assistant");
     // SAFETY: guarded by ENV_LOCK.
@@ -490,15 +494,18 @@ fn base_assistant_package_is_nameless_and_curated() {
 
     assert_eq!(cfg.agent.name, "assistant");
     assert_eq!(cfg.agent.role, "assistant");
-    // Nameless: the base carries NO persona identity.
+    // #3738: the generic default carries the professional "Assistant" identity.
     assert_eq!(
-        cfg.agent.display_name, None,
-        "base assistant must be nameless (no display_name)"
+        cfg.agent.display_name.as_deref(),
+        Some("Assistant"),
+        "base assistant is the generic default persona named 'Assistant'"
     );
     assert_eq!(
-        cfg.agent.prompt_label, None,
-        "base assistant must be nameless (no prompt_label)"
+        cfg.agent.display_label(),
+        "Assistant",
+        "display_label resolves to the declared display_name"
     );
+    assert_eq!(cfg.agent.prompt_label.as_deref(), Some("assistant"));
     // Curated tool surface + scopes are present on the base.
     let allow = cfg
         .tools
@@ -618,6 +625,69 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
     assert!(
         cfg.system_prompt.content.contains("Anti-Hallucination"),
         "overlay persona must carry the anti-hallucination guardrail"
+    );
+}
+
+/// #3738 (owner decision 2026-07-23): pins the canonical display names the
+/// chat surface serves — generic "Assistant" (the default), "Izzie", and
+/// "CTO Bot" — resolved through `AgentInfo::display_label` from each bundled
+/// persona's `display_name`. This is the single-source-of-truth guard that
+/// keeps the GUI's per-message speaker attribution and the REPL `/switch`
+/// label from drifting (e.g. "CTO Assistant" vs "CTO Bot").
+/// Test: This function IS the test.
+#[test]
+fn bundled_personas_expose_expected_display_names() {
+    let _guard = ENV_LOCK.blocking_lock();
+    for (agent_name, expected) in [
+        ("assistant", "Assistant"),
+        ("izzie", "Izzie"),
+        ("cto-assistant", "CTO Bot"),
+    ] {
+        clear_model_env(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+        }
+        let cfg = AgentConfig::by_name(agent_name);
+        // SAFETY: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("TAGENT_CONFIG_DIR");
+        }
+        let cfg = cfg.unwrap_or_else(|e| panic!("'{agent_name}' must resolve: {e}"));
+        assert_eq!(
+            cfg.agent.display_label(),
+            expected,
+            "'{agent_name}' must surface display name '{expected}'"
+        );
+    }
+}
+
+/// #3738: `display_label` falls back to the stable `name` id for a persona
+/// that declares no `display_name` (e.g. a worker agent), so a consumer can
+/// always render SOME label. Uses the bundled `engineer` (no display_name).
+/// Test: This function IS the test.
+#[test]
+fn display_label_falls_back_to_name_when_unset() {
+    let _guard = ENV_LOCK.blocking_lock();
+    clear_model_env("engineer");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
+    }
+    let cfg = AgentConfig::by_name("engineer");
+    // SAFETY: guarded by ENV_LOCK.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+    let cfg = cfg.expect("engineer must resolve");
+    assert!(
+        cfg.agent.display_name.is_none(),
+        "engineer is a worker agent with no display_name"
+    );
+    assert_eq!(
+        cfg.agent.display_label(),
+        "engineer",
+        "display_label falls back to name when display_name is unset"
     );
 }
 
