@@ -19,6 +19,7 @@
 // Test: `chatStream.test.ts`.
 
 import type { AppEvent } from './transport';
+import type { Message } from '../stores/app';
 
 /** Web-bus payload for an accumulated token batch. */
 export interface DeltaPayload {
@@ -96,4 +97,60 @@ export class StreamAccumulator {
   finalize(taskId: string): boolean {
     return this.buffers.delete(taskId);
   }
+}
+
+/**
+ * Why: The streaming write path spans TWO components — `ChatView` grows the
+ * bubble from `task-delta` events, while `InputArea`'s poll-loop reconcile
+ * must NOT overwrite that live text with a "Running…" progress tick. Both need
+ * the same "is task T streaming?" answer, so a single shared instance is the
+ * source of truth instead of a per-component `new StreamAccumulator()` (which
+ * left `InputArea` blind to `ChatView`'s streaming state, so its reconcile
+ * clobbered streamed text — a visible mid-stream flash). Finalized per task on
+ * completion, so nothing leaks across turns.
+ * What: The process-wide accumulator both components import.
+ * Test: `chatStream.test.ts` (`streamAccumulator singleton`).
+ */
+export const streamAccumulator = new StreamAccumulator();
+
+/**
+ * Fill a streamed token batch into the in-flight assistant bubble whose
+ * `taskId` EXACTLY equals the delta's (globally-unique) backend id, in place,
+ * returning the next message list — or the SAME array reference when nothing
+ * changes (no match, or an identical/duplicate frame) so the store, Svelte's
+ * keyed `{#each}`, and the scroll reflow do not churn a redundant re-render.
+ *
+ * Why: The chat renders `{#each $activeMessages as msg (msg.id)}`, so a stable
+ * bubble requires never changing the matched message's `id` — we rewrite only
+ * `content`/`speaker` and keep `id`, so the keyed block is patched, never
+ * re-mounted. Attribution is by exact backend id ONLY: an earlier version
+ * adopted "the newest `pending-` bubble" by list position, which — on a retask
+ * race or a background stream after a project switch — let one turn's delta
+ * land in another turn's (or project's) bubble (PR #3763 code-critic HIGH). A
+ * frame whose id matches no bubble here is intentionally dropped (returned
+ * unchanged); the poll loop reconciles the placeholder `pending-<ts>` id to the
+ * real id (`InputArea` → `replaceMessageTaskId`), after which every delta for
+ * that turn matches and fills the one bubble.
+ * What: Rewrites the exact-`taskId` bubble's `content` (and `speaker`, when the
+ * delta carries one), preserving `id`; returns `list` unchanged otherwise.
+ * Test: `chatStream.test.ts` (`fillDeltaIntoList`).
+ */
+export function fillDeltaIntoList(
+  list: Message[],
+  taskId: string,
+  content: string,
+  speaker?: string,
+): Message[] {
+  const idx = list.findIndex((m) => m.taskId === taskId);
+  if (idx === -1) return list; // unattributable frame ⇒ drop (never guess)
+
+  const target = list[idx];
+  const nextSpeaker = speaker && speaker.length > 0 ? speaker : target.speaker;
+  if (target.content === content && target.speaker === nextSpeaker) {
+    return list;
+  }
+
+  const next = list.slice();
+  next[idx] = { ...target, content, speaker: nextSpeaker };
+  return next;
 }

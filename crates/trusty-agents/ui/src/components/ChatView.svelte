@@ -8,11 +8,12 @@
     agentRoster,
     setMessageSpeakerByTask,
     updateMessageByTask,
+    streamDeltaIntoTask,
     isRunning,
   } from '../stores/app';
   import { responderDisplayName } from '../lib/roster';
   import { listenEvent, type UnlistenFn } from '../lib/transport';
-  import { StreamAccumulator, type DeltaPayload } from '../lib/chatStream';
+  import { streamAccumulator, type DeltaPayload } from '../lib/chatStream';
   import ActionIcon from '../lib/icons/ActionIcon.svelte';
   import WorkflowPhaseCard from './WorkflowPhaseCard.svelte';
   import { workflowState } from '../stores/workflow';
@@ -27,8 +28,9 @@
   // `task-delta` fragments and lets the progress handler know which tasks are
   // streaming (so "Running…" ticks don't clobber the live text). Cleared on
   // task completion so the authoritative narrative replaces — not appends to —
-  // the accumulation.
-  const streams = new StreamAccumulator();
+  // the accumulation. Shared (module singleton) so `InputArea`'s reconcile
+  // handler consults the SAME streaming state and never overwrites live text.
+  const streams = streamAccumulator;
 
   interface ProgressPayload {
     task_id: string;
@@ -80,17 +82,16 @@
         streams.finalize(p.task_id);
         return;
       }
-      if (p.text) {
-        const full = streams.append(p.task_id, p.text);
-        updateMessageByTask($activeProjectId, p.task_id, full);
-      } else {
-        // Ensure the task is marked streaming even if the first fragment was
-        // empty, so progress ticks stay suppressed until completion.
-        streams.append(p.task_id, '');
-      }
-      if (p.agent) {
-        setMessageSpeakerByTask($activeProjectId, p.task_id, p.agent);
-      }
+      // Grow the SINGLE in-flight bubble in place via one store write, keyed by
+      // the delta's unique backend id (attributed to its OWNING conversation,
+      // not the viewed one). Empty fragments still `append('')` so the task is
+      // marked streaming (gating progress ticks). Content + speaker go through a
+      // single update: no second render, no mid-stream flash/flicker. Frames
+      // that arrive before the poll loop reconciles the bubble's `pending-` id
+      // match nothing and are dropped; the accumulator keeps their text, so the
+      // first matching write shows everything so far — no lost tokens.
+      const full = streams.append(p.task_id, p.text ?? '');
+      streamDeltaIntoTask(p.task_id, full, p.agent || undefined);
     });
     unlistenProgress = await listenEvent<ProgressPayload>('task-progress', (p) => {
       // Don't let a polling "Running…" tick overwrite live streamed text.

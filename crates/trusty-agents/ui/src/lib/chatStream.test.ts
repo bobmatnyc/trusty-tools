@@ -1,6 +1,25 @@
 import { describe, it, expect } from 'vitest';
-import { bridgeDelta, StreamAccumulator } from './chatStream';
+import {
+  bridgeDelta,
+  StreamAccumulator,
+  streamAccumulator,
+  fillDeltaIntoList,
+} from './chatStream';
 import type { AppEvent } from './transport';
+import type { Message } from '../stores/app';
+
+/** Minimal assistant-bubble factory for the fill-in-place tests. */
+function asst(overrides: Partial<Message> = {}): Message {
+  return {
+    id: 'asst-1',
+    role: 'assistant',
+    content: '',
+    timestamp: 0,
+    taskId: 'pending-1',
+    speaker: 'Assistant',
+    ...overrides,
+  };
+}
 
 describe('bridgeDelta', () => {
   it('maps an agent_message_delta event to a task-delta payload', () => {
@@ -88,5 +107,64 @@ describe('StreamAccumulator', () => {
     // the bubble content (handled by the component's updateMessageByTask).
     acc.finalize('t');
     expect(acc.isStreaming('t')).toBe(false);
+  });
+
+  it('exposes a shared singleton instance for cross-component streaming state', () => {
+    // ChatView (grows the bubble) and InputArea (gates its progress reconcile)
+    // must observe the SAME streaming state, so the export is one instance.
+    expect(streamAccumulator).toBeInstanceOf(StreamAccumulator);
+    streamAccumulator.append('shared-task', 'x');
+    expect(streamAccumulator.isStreaming('shared-task')).toBe(true);
+    streamAccumulator.finalize('shared-task');
+    expect(streamAccumulator.isStreaming('shared-task')).toBe(false);
+  });
+});
+
+describe('fillDeltaIntoList', () => {
+  it('fills the bubble whose taskId matches EXACTLY, in place (id preserved)', () => {
+    const list: Message[] = [
+      { id: 'user-1', role: 'user', content: 'hi', timestamp: 0 },
+      asst({ id: 'asst-1', taskId: 'real-99', content: 'Hel' }),
+    ];
+    const next = fillDeltaIntoList(list, 'real-99', 'Hello, world', 'Izzie');
+    expect(next).not.toBe(list); // changed ⇒ new array
+    expect(next.length).toBe(2); // no new bubble created
+    const bubble = next[1];
+    expect(bubble.id).toBe('asst-1'); // SAME node id ⇒ no keyed-each re-mount
+    expect(bubble.taskId).toBe('real-99'); // id unchanged
+    expect(bubble.content).toBe('Hello, world');
+    expect(bubble.speaker).toBe('Izzie'); // speaker applied in the same write
+  });
+
+  it('returns the SAME array reference for a no-op write (no re-render churn)', () => {
+    // An identical content+speaker frame (e.g. a duplicate/empty delta) must
+    // not replace the list, or the store would fire a redundant render + a
+    // forced scroll reflow per token — a source of the visible flicker.
+    const list: Message[] = [asst({ id: 'asst-1', taskId: 'real-99', content: 'Hi', speaker: 'Izzie' })];
+    const same = fillDeltaIntoList(list, 'real-99', 'Hi', 'Izzie');
+    expect(same).toBe(list);
+  });
+
+  it('keeps the existing speaker when the delta carries none', () => {
+    const list: Message[] = [asst({ id: 'asst-1', taskId: 'real-99', speaker: 'CTO Assistant', content: 'a' })];
+    const next = fillDeltaIntoList(list, 'real-99', 'ab');
+    expect(next[0].speaker).toBe('CTO Assistant');
+    expect(next[0].content).toBe('ab');
+  });
+
+  it('NEVER adopts a pending bubble by position — an unmatched id is dropped', () => {
+    // Guards PR #3763 code-critic HIGH: the delta's real id must not be
+    // steered into "the newest pending- bubble" (that swapped answers across
+    // turns on a retask race). No exact match ⇒ list returned unchanged.
+    const list: Message[] = [
+      asst({ id: 'asst-old', taskId: 'pending-old', content: 'stale' }),
+      asst({ id: 'asst-new', taskId: 'pending-new', content: '' }),
+    ];
+    expect(fillDeltaIntoList(list, 'real-99', 'live', 'Izzie')).toBe(list);
+  });
+
+  it('is a no-op when there is no matching bubble to fill', () => {
+    const list: Message[] = [{ id: 'user-1', role: 'user', content: 'hi', timestamp: 0 }];
+    expect(fillDeltaIntoList(list, 'real-99', 'x')).toBe(list);
   });
 });
