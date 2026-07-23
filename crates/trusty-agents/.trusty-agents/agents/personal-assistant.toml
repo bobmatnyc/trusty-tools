@@ -19,8 +19,8 @@ role = "assistant"
 # the claude-code CLI onto the direct-API credential path (AnthropicDirect
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
 # in `src/llm/credentials.rs`. Model bumped Haiku -> Sonnet per the
-# personas-first testing default (Opus for the base Assistant, Sonnet for
-# every other persona).
+# personas-first testing default (Sonnet for every in-scope persona,
+# including the base Assistant itself since #3688).
 model = "claude-sonnet-4-6"
 description = "Izzie — personal assistant for Masa"
 display_name = "Izzie"

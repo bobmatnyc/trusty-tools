@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **Base `assistant` persona defaults to Sonnet instead of Opus (#3688):**
+  `claude-opus-4-6` → `claude-sonnet-4-6` on `assistant/agent.toml`, trading a
+  small quality margin for materially lower per-turn latency (a trivial turn
+  measured ~2.1s on Opus via OpenRouter). `pm` is unaffected and stays on Opus
+  per the prior owner ruling (PR #3360).
+
 ### Added
 
 - **Agent context knows "now", "here", and "who" (#3469, epic #3052):** the

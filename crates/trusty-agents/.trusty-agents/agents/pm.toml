@@ -4,7 +4,8 @@ role = "orchestrator"
 # #3358: no `runner` — falls back to the default (Subprocess), routing off
 # the claude-code CLI onto the direct-API credential path (AnthropicDirect
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
-# in `src/llm/credentials.rs`. Model is Opus, matching `assistant/agent.toml`
+# in `src/llm/credentials.rs`. Model is Opus (the base `assistant` moved to
+# Sonnet for latency in #3688; `pm` keeps Opus per the owner's ruling below)
 # — `pm` is the GUI's DEFAULT no-roster-selection chat backend
 # (`resolve_agent_config` in `src/ctrl/config.rs` prefers project
 # `pm.toml`), so a user who just opens the GUI and types must also get the
