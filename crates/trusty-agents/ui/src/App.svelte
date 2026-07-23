@@ -9,6 +9,7 @@
   import Header from './components/Header.svelte';
   import PersonalityPanel from './components/PersonalityPanel.svelte';
   import { invoke, isDesktop, connectEventSource, listenEvent, emitWebEvent, type AppEvent } from './lib/transport';
+  import { bridgeDelta } from './lib/chatStream';
   import { apiAuthRequired, getCurrentApiToken, setApiToken, addMessage } from './stores/app';
   import { setRecap, type Recap } from './stores/recap';
   // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
@@ -285,6 +286,16 @@
           message: `[${ev.agent}] ${ev.text ?? ''}`,
         });
         break;
+      case 'agent_message_delta': {
+        // Token-level streaming: forward each coalesced fragment on the
+        // dedicated `task-delta` bus so ChatView can grow the in-flight reply
+        // bubble incrementally (see `lib/chatStream.ts`). The final
+        // `task-complete` still replaces the accumulation with the
+        // authoritative narrative.
+        const delta = bridgeDelta(ev);
+        if (delta) emitWebEvent('task-delta', delta);
+        break;
+      }
       case 'agent_done':
         emitWebEvent('task-progress', {
           task_id: ev.session_id ?? '',
