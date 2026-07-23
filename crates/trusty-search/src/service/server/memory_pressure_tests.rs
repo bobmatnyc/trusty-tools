@@ -37,6 +37,7 @@ use crate::core::indexer::CodeIndexer;
 use crate::core::memguard;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock as TokioRwLock;
 
 // ---------------------------------------------------------------------------
@@ -493,5 +494,136 @@ async fn pressure_sweep_desperation_pass_clears_hot_indexes_under_extreme_pressu
     assert_eq!(
         hot_count, 0,
         "extreme pressure must clear even a recently-queried (hot) index"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `run_memory_pressure_tick` — EarlyStop hysteresis wiring (issue #3683
+// slice 2, round-3 critic review MEDIUM)
+// ---------------------------------------------------------------------------
+
+/// RAII guard saving/restoring `TRUSTY_MEMORY_HIGH_WATER_PCT` — this test is
+/// the only mutator of this env var in the crate's test suite (mirrors
+/// [`ExemptSecsEnvGuard`] above).
+struct HighWaterPctEnvGuard(Option<String>);
+
+impl HighWaterPctEnvGuard {
+    fn set(v: &str) -> Self {
+        let prior = std::env::var("TRUSTY_MEMORY_HIGH_WATER_PCT").ok();
+        // SAFETY: see struct doc comment.
+        unsafe { std::env::set_var("TRUSTY_MEMORY_HIGH_WATER_PCT", v) };
+        Self(prior)
+    }
+}
+
+impl Drop for HighWaterPctEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see struct doc comment.
+        unsafe {
+            match &self.0 {
+                Some(v) => std::env::set_var("TRUSTY_MEMORY_HIGH_WATER_PCT", v),
+                None => std::env::remove_var("TRUSTY_MEMORY_HIGH_WATER_PCT"),
+            }
+        }
+    }
+}
+
+/// Round-3 critic review MEDIUM: `hysteresis_survives_early_stop_sweep_even_when_rss_is_flat`
+/// (above) pins the PURE mapping (`hysteresis_baseline_after_sweep`) in
+/// isolation, but nothing drove `run_memory_pressure_tick` ITSELF through an
+/// `EarlyStop` path and asserted `state.last_reclaim_rss_mb` afterward. A
+/// wiring regression reverting `run_memory_pressure_tick` back to
+/// unconditionally `state.last_reclaim_rss_mb.store(after, ..)` (discarding
+/// the `SweepCompletion` match entirely) would still pass every OTHER
+/// tick-level test in this file, because those use an empty `IndexRegistry`
+/// — trivially `Exhausted` (nothing to sweep), never exercising the
+/// `EarlyStop` branch's wiring at all. This test closes that gap
+/// end-to-end, through the real tick function.
+///
+/// Setup mirrors `pressure_sweep_exempts_hot_indexes_under_mild_pressure`'s
+/// cold+hot shape, but drives [`run_memory_pressure_tick`] directly instead
+/// of calling [`run_pressure_sweep`]: `TRUSTY_MEMORY_HIGH_WATER_PCT=100` plus
+/// a soft limit derived from the test process's OWN RSS, SAMPLED RIGHT
+/// BEFORE the tick call (minimizing drift between this sample and the tick's
+/// own internal sample — all index setup/sleeping happens BEFORE sampling,
+/// not between sampling and the call), make `target_freed_mb` a small,
+/// (comfortably-bounded) positive number — satisfiable by the cold index
+/// alone (1 200 files ⇒ 2 400 entries ⇒ `estimate_freed_mb` == 4, well over
+/// the 2 MB target with margin for any residual jitter), so the hot index
+/// (300 files ⇒ 600 entries, far too small to be needed) is spared,
+/// unvisited, and the sweep must report `EarlyStop`.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_memory_pressure_tick_resets_hysteresis_baseline_on_early_stop() {
+    let _mem_guard = MemGuardEnv::capture();
+    let _pct_guard = HighWaterPctEnvGuard::set("100");
+    let _exempt_guard = ExemptSecsEnvGuard::set("1");
+    // SAFETY: mirrors `MemGuardEnv`'s own convention — keep the last-resort
+    // restart tier OFF so it never fires here (irrelevant to this test).
+    unsafe { std::env::remove_var("TRUSTY_MEMORY_RESTART_ON_LIMIT") };
+
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+
+    let dir_cold = tempfile::tempdir().unwrap();
+    let dir_hot = tempfile::tempdir().unwrap();
+
+    // 1 200 files ⇒ 2 400 entries ⇒ estimate_freed_mb(2400) == 4 (2400 * 2048
+    // == 4_915_200 bytes ⇒ floor 4 MB) — comfortably covers a target of 2 MB
+    // even with a few MB of RSS jitter either way.
+    let cold = bare_corpus_handle("cold", &dir_cold.path().join("index.redb"));
+    index_n_files(&*cold.indexer.read().await, "cold", 1_200).await;
+    state.registry.register(cold);
+
+    // Push "cold" past the 1s exemption floor before "hot" is even indexed.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let hot = bare_corpus_handle("hot", &dir_hot.path().join("index.redb"));
+    index_n_files(&*hot.indexer.read().await, "hot", 300).await;
+    state.registry.register(hot); // "hot" was just touched — idle ~0s
+
+    // Sample RSS and derive the soft limit HERE — immediately before the
+    // tick call, after all setup/sleeping above, so the gap between this
+    // sample and the tick's own internal `current_rss_mb()` call is just a
+    // handful of instructions (registry snapshot + Vec allocations), not an
+    // entire index-setup-plus-1.1s-sleep window.
+    let rss = memguard::current_rss_mb().expect("sample this test process's own RSS");
+    let limit = rss.saturating_sub(2).max(1); // target_freed_mb == 2 at pct=100
+    memguard::set_memory_limit_mb(Some(limit));
+
+    run_memory_pressure_tick(&state).await;
+
+    let cold_count = state
+        .registry
+        .get(&IndexId::new("cold".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+    let hot_count = state
+        .registry
+        .get(&IndexId::new("hot".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+    assert_eq!(
+        cold_count, 0,
+        "sanity: the cold index must have been cleared"
+    );
+    assert_eq!(
+        hot_count, 300,
+        "sanity: the hot index must have been spared (EarlyStop, not desperation)"
+    );
+
+    assert_eq!(
+        state.last_reclaim_rss_mb.load(Ordering::Relaxed),
+        0,
+        "an EarlyStop sweep must reset the hysteresis baseline to the 0 sentinel, NOT store \
+         the post-trim RSS — a wiring regression reverting to the unconditional store would \
+         wedge the next tick's re-sweep on flat RSS (issue #3683 slice 2, round-2/3 critic review)"
     );
 }
