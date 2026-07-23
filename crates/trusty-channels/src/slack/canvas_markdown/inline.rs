@@ -18,6 +18,7 @@
 use comrak::nodes::{AstNode, NodeValue};
 
 use super::blocks::RenderCtx;
+use super::{longest_backtick_run, truncate_for_warning};
 
 /// Render every child of `node` as inline content, concatenated in order.
 ///
@@ -56,11 +57,7 @@ pub(super) fn render_inline<'a>(node: &'a AstNode<'a>, ctx: &mut RenderCtx, out:
     let value = node.data.borrow().value.clone();
     match value {
         NodeValue::Text(text) => out.push_str(&escape_text(&text)),
-        NodeValue::Code(code) => {
-            out.push('`');
-            out.push_str(&code.literal);
-            out.push('`');
-        }
+        NodeValue::Code(code) => out.push_str(&code_span(&code.literal)),
         NodeValue::Emph => wrap(node, ctx, out, "_", "_"),
         NodeValue::Strong => wrap(node, ctx, out, "**", "**"),
         NodeValue::Strikethrough => wrap(node, ctx, out, "~", "~"),
@@ -115,8 +112,39 @@ fn render_image(url: &str, out: &mut String, ctx: &mut RenderCtx) {
         out.push(')');
     } else {
         ctx.warn(format!(
-            "image dropped (Slack canvas markdown has no embedded-image syntax): {url}"
+            "image dropped (Slack canvas markdown has no embedded-image syntax): {}",
+            truncate_for_warning(url)
         ));
+    }
+}
+
+/// Render an inline code span with a delimiter guaranteed longer than any
+/// backtick run already inside `literal`, applying CommonMark's single-space
+/// padding rule when needed.
+///
+/// Why: a fixed single-backtick delimiter breaks as soon as `literal`
+/// contains a backtick — the span reparses as a *shorter* code span plus
+/// stray literal backticks, silently corrupting the content (the
+/// code-critic-flagged bug this fixes). CommonMark's own rule for a code
+/// span delimiter is "one backtick longer than the longest backtick run in
+/// the content"; additionally, if the content starts or ends with a
+/// backtick (or is empty), a single space is required on that side so the
+/// delimiter isn't misread as extending into the content.
+/// What: `fence` = `"`".repeat(longest_backtick_run(literal) + 1)` (minimum
+/// one backtick when `literal` has none). Padding is added on both sides
+/// together whenever `literal` is empty or starts/ends with a backtick —
+/// matching how a CommonMark parser would need to see it to parse back to
+/// the same content.
+/// Test: `code_span_backtick_collision_round_trips_through_reparse`,
+/// `code_span_padding_round_trips_through_reparse`,
+/// `code_span_handles_empty_literal`.
+fn code_span(literal: &str) -> String {
+    let fence = "`".repeat(longest_backtick_run(literal) + 1);
+    let needs_padding = literal.is_empty() || literal.starts_with('`') || literal.ends_with('`');
+    if needs_padding {
+        format!("{fence} {literal} {fence}")
+    } else {
+        format!("{fence}{literal}{fence}")
     }
 }
 
@@ -156,6 +184,9 @@ fn escape_text(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use comrak::nodes::NodeValue;
+
+    use super::super::test_support::{find_first, reparse};
     use super::super::to_canvas_markdown;
     use super::*;
 
@@ -200,5 +231,67 @@ mod tests {
         assert!(!is_slack_mention("@"));
         assert!(!is_slack_mention("#"));
         assert!(!is_slack_mention("@not-alnum!"));
+    }
+
+    #[test]
+    fn code_span_handles_empty_literal() {
+        // Delimiter sizing degrades gracefully to a single backtick with
+        // padding when there is no content at all (never reachable from a
+        // real CommonMark ` ` span, but must not panic or under-index).
+        assert_eq!(code_span(""), "`  `");
+    }
+
+    #[test]
+    fn code_span_sizes_delimiter_by_longest_run_plus_one() {
+        assert_eq!(code_span("plain"), "`plain`");
+        assert_eq!(code_span("a`b"), "``a`b``");
+        assert_eq!(code_span("a``b"), "```a``b```");
+    }
+
+    #[test]
+    fn code_span_pads_when_content_starts_or_ends_with_backtick() {
+        assert_eq!(code_span("`x"), "`` `x ``");
+        assert_eq!(code_span("x`"), "`` x` ``");
+        assert_eq!(code_span("`x`"), "`` `x` ``");
+    }
+
+    #[test]
+    fn code_span_backtick_collision_round_trips_through_reparse() {
+        // Source: a 2-backtick-delimited span containing a single backtick
+        // — valid CommonMark, and exactly the shape a naive single-backtick
+        // re-emission would corrupt on reparse.
+        let out = to_canvas_markdown("``a`b``\n").expect("should translate");
+        assert!(out.warnings.is_empty(), "warnings: {:?}", out.warnings);
+
+        let arena = comrak::Arena::new();
+        let root = reparse(&arena, &out.markdown);
+        let code = find_first(root, |v| matches!(v, NodeValue::Code(_)))
+            .expect("reparsed output must contain a code span");
+        let NodeValue::Code(code) = &code.data.borrow().value else {
+            unreachable!()
+        };
+        assert_eq!(code.literal, "a`b", "the backtick must survive intact");
+    }
+
+    #[test]
+    fn code_span_padding_round_trips_through_reparse() {
+        // Source: content that both starts and ends with a backtick after
+        // CommonMark's own leading/trailing-space-stripping rule resolves
+        // (`` `x` `` with padding spaces around a 1-backtick-delimited
+        // inner span).
+        let out = to_canvas_markdown("`` `x` ``\n").expect("should translate");
+        assert!(out.warnings.is_empty(), "warnings: {:?}", out.warnings);
+
+        let arena = comrak::Arena::new();
+        let root = reparse(&arena, &out.markdown);
+        let code = find_first(root, |v| matches!(v, NodeValue::Code(_)))
+            .expect("reparsed output must contain a code span");
+        let NodeValue::Code(code) = &code.data.borrow().value else {
+            unreachable!()
+        };
+        assert_eq!(
+            code.literal, "`x`",
+            "leading/trailing backticks must survive"
+        );
     }
 }

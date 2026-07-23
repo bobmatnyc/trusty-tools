@@ -278,6 +278,19 @@ async fn canvas_push_editing_locked_exhausts_retries() {
         ToolCallError::Slack(SlackError::Api(slug)) => assert_eq!(slug, "canvas_editing_locked"),
         other => panic!("expected ToolCallError::Slack(SlackError::Api(_)), got {other:?}"),
     }
+
+    // Exact call-count assertion: the bounded budget is 1 initial attempt
+    // plus MAX_EDITING_LOCKED_RETRIES (3) retries = 4 total requests — not
+    // more (an unbounded retry loop) and not fewer (giving up too early).
+    let requests = server
+        .received_requests()
+        .await
+        .expect("request recording enabled by default");
+    assert_eq!(
+        requests.len(),
+        4,
+        "expected 1 initial attempt + 3 retries = 4 total canvases.edit calls"
+    );
 }
 
 #[tokio::test]

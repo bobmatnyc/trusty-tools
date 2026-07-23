@@ -33,8 +33,12 @@ use crate::slack::canvas_markdown::inline;
 /// unused-but-documented parameter for callers matching by struct shape);
 /// returns [`TranslationError::TableTooLarge`] before rendering a single
 /// character when `rows * columns > `[`MAX_TABLE_CELLS`]. Otherwise emits a
-/// standard GFM pipe table.
-/// Test: `renders_simple_table`, `table_over_cap_is_a_hard_error`.
+/// standard GFM pipe table with every cell run through [`escape_cell`] so a
+/// literal `|` or `\` inside a cell can never be misread as a column
+/// delimiter on reparse (the code-critic-flagged bug this fixes — see
+/// `pipe_and_backslash_in_cell_round_trip_through_reparse`).
+/// Test: `renders_simple_table`, `table_over_cap_is_a_hard_error`,
+/// `pipe_and_backslash_in_cell_round_trip_through_reparse`.
 pub(super) fn render_table<'a>(
     node: &'a AstNode<'a>,
     _table: &NodeTable,
@@ -44,7 +48,7 @@ pub(super) fn render_table<'a>(
         .children()
         .map(|row| {
             row.children()
-                .map(|cell| inline::render_inlines(cell, ctx).trim().to_string())
+                .map(|cell| escape_cell(inline::render_inlines(cell, ctx).trim()))
                 .collect()
         })
         .collect();
@@ -76,11 +80,37 @@ pub(super) fn render_table<'a>(
     Ok(out)
 }
 
+/// Escape a rendered cell's one remaining unprotected Markdown table
+/// delimiter: `|`.
+///
+/// Why: a bare `|` inside a cell splits it into two cells on reparse — the
+/// exact "silent truncation" [`render_table`]'s own doc promises never to
+/// do. `cell` here is the *already-rendered* markdown from
+/// [`inline::render_inlines`], which has itself already run every `Text`
+/// node through `inline::escape_text` — every real backslash character in
+/// `cell` is therefore already part of a complete, self-contained escape
+/// pair (`\\`, `` \` ``, `\*`, or `\_`; see `escape_text`'s doc). Escaping
+/// backslash *again* here would double it (`\\` → `\\\\`), corrupting the
+/// content on reparse instead of preserving it — caught by
+/// `pipe_and_backslash_in_cell_round_trip_through_reparse` when this
+/// function first escaped both characters. Inserting a fresh `\` directly
+/// before an untouched `|` is always safe regardless of what precedes it,
+/// because a preceding escape pair from `escape_text` is already complete
+/// and never bleeds into the next character.
+/// Test: `pipe_and_backslash_in_cell_round_trip_through_reparse`,
+/// `escape_cell_escapes_only_the_pipe`.
+fn escape_cell(cell: &str) -> String {
+    cell.replace('|', "\\|")
+}
+
 #[cfg(test)]
 mod tests {
+    use comrak::nodes::NodeValue;
+
+    use super::super::test_support::{find_first, reparse};
     use super::super::to_canvas_markdown;
     use super::super::TranslationError;
-    use super::MAX_TABLE_CELLS;
+    use super::{escape_cell, MAX_TABLE_CELLS};
 
     #[test]
     fn renders_simple_table() {
@@ -119,5 +149,59 @@ mod tests {
         }
         let out = to_canvas_markdown(&input).expect("exactly-at-cap table must succeed");
         assert!(out.markdown.contains("| a | b |"));
+    }
+
+    #[test]
+    fn pipe_and_backslash_in_cell_round_trip_through_reparse() {
+        // Source cell content is `a|b\c` (an escaped pipe and a literal
+        // backslash), written in GFM table source as `a\|b\\c`.
+        let input = "| col1 | col2 |\n| --- | --- |\n| a\\|b\\\\c | plain |\n";
+        let out = to_canvas_markdown(input).expect("table should translate");
+        assert!(out.warnings.is_empty(), "warnings: {:?}", out.warnings);
+
+        // Substring checks alone would pass even if the cell were split in
+        // two — the escaped delimiter must actually survive a reparse.
+        let arena = comrak::Arena::new();
+        let root = reparse(&arena, &out.markdown);
+        let table = find_first(root, |v| matches!(v, NodeValue::Table(_)))
+            .expect("reparsed output must contain a table");
+
+        let rows: Vec<_> = table.children().collect();
+        assert_eq!(rows.len(), 2, "header + one data row, not split further");
+        let data_row_cells: Vec<_> = rows[1].children().collect();
+        assert_eq!(
+            data_row_cells.len(),
+            2,
+            "the escaped pipe must not split the cell into three"
+        );
+
+        // Read the reparsed cell's decoded text directly off the AST's
+        // `Text` node(s) — NOT through `inline::render_inlines`, which
+        // would re-apply `escape_text` and mask exactly the property this
+        // test exists to check (the semantic content, post-decode).
+        let mut cell_text = String::new();
+        for child in data_row_cells[0].children() {
+            if let NodeValue::Text(t) = &child.data.borrow().value {
+                cell_text.push_str(t);
+            }
+        }
+        assert_eq!(
+            cell_text, "a|b\\c",
+            "the pipe and backslash must survive as data"
+        );
+    }
+
+    #[test]
+    fn escape_cell_escapes_only_the_pipe() {
+        // Backslash is already escaped upstream by `inline::escape_text`;
+        // `escape_cell` must not touch it a second time (see its doc).
+        assert_eq!(escape_cell("a|b"), "a\\|b");
+        assert_eq!(
+            escape_cell("a\\\\b"),
+            "a\\\\b",
+            "backslash passes through untouched"
+        );
+        assert_eq!(escape_cell("plain"), "plain");
+        assert_eq!(escape_cell("a||b"), "a\\|\\|b");
     }
 }

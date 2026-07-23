@@ -21,7 +21,9 @@ use std::collections::HashMap;
 
 use comrak::nodes::{AstNode, NodeCodeBlock, NodeValue};
 
-use super::{footnotes, inline, lists, table, TranslationError};
+use super::{
+    footnotes, inline, lists, longest_backtick_run, table, truncate_for_warning, TranslationError,
+};
 
 /// Mutable state threaded through every render call.
 ///
@@ -68,8 +70,9 @@ impl RenderCtx {
         self.footnote_numbers.insert(name.to_string(), n);
         self.footnote_order.push(name.to_string());
         self.warn(format!(
-            "footnote '{name}' flattened to an inline [{n}] marker plus a trailing \
-             Footnotes section (Slack canvas markdown has no footnote syntax)"
+            "footnote '{}' flattened to an inline [{n}] marker plus a trailing \
+             Footnotes section (Slack canvas markdown has no footnote syntax)",
+            truncate_for_warning(name)
         ));
         n
     }
@@ -191,6 +194,18 @@ fn render_blockquote<'a>(
 /// Render a fenced/indented code block, preserving its info-string language
 /// tag (Slack canvas markdown fences use the same triple-backtick syntax as
 /// CommonMark).
+///
+/// Why: a hardcoded 3-backtick fence breaks as soon as the literal content
+/// itself contains a run of 3+ consecutive backticks (e.g. a code block
+/// documenting *how to write* a fenced code block) — the closing fence would
+/// match early, truncating the block on reparse (the code-critic-flagged bug
+/// this fixes).
+/// What: the fence length is `max(3, longest_backtick_run(literal) + 1)`,
+/// applied to both the opening and closing fence so they stay symmetric —
+/// CommonMark requires the closing fence be at least as long as the opening
+/// one, and using the same computed length for both is the simplest way to
+/// guarantee that.
+/// Test: `code_block_fence_widens_past_content_backtick_run_round_trips`.
 fn render_code_block(cb: &NodeCodeBlock) -> String {
     let lang = cb.info.split_whitespace().next().unwrap_or("");
     let literal = if cb.literal.ends_with('\n') {
@@ -198,11 +213,16 @@ fn render_code_block(cb: &NodeCodeBlock) -> String {
     } else {
         format!("{}\n", cb.literal)
     };
-    format!("```{lang}\n{literal}```\n\n")
+    let fence_len = (longest_backtick_run(&literal) + 1).max(3);
+    let fence = "`".repeat(fence_len);
+    format!("{fence}{lang}\n{literal}{fence}\n\n")
 }
 
 #[cfg(test)]
 mod tests {
+    use comrak::nodes::NodeValue;
+
+    use super::super::test_support::{find_first, reparse};
     use super::super::to_canvas_markdown;
     use super::*;
 
@@ -251,5 +271,32 @@ mod tests {
         assert_eq!(ctx.footnote_number("b"), 2);
         assert_eq!(ctx.footnote_number("a"), 1);
         assert_eq!(ctx.warnings.len(), 2, "only the first reference warns");
+    }
+
+    #[test]
+    fn code_block_fence_widens_past_content_backtick_run_round_trips() {
+        // Source uses a 4-backtick fence around content that itself
+        // contains a 3-backtick run — a hardcoded 3-backtick output fence
+        // would close early on reparse, truncating the block.
+        let input = "````\nhas ``` three backticks inside\n````\n";
+        let out = to_canvas_markdown(input).expect("should translate");
+        assert!(out.warnings.is_empty(), "warnings: {:?}", out.warnings);
+        assert!(
+            out.markdown.contains("````"),
+            "fence must widen to at least 4 backticks: {}",
+            out.markdown
+        );
+
+        let arena = comrak::Arena::new();
+        let root = reparse(&arena, &out.markdown);
+        let code_block = find_first(root, |v| matches!(v, NodeValue::CodeBlock(_)))
+            .expect("reparsed output must contain a code block");
+        let NodeValue::CodeBlock(cb) = &code_block.data.borrow().value else {
+            unreachable!()
+        };
+        assert_eq!(
+            cb.literal, "has ``` three backticks inside\n",
+            "the 3-backtick run must survive as block content, not truncate it"
+        );
     }
 }

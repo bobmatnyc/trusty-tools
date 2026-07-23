@@ -104,11 +104,7 @@ pub enum TranslationError {
 /// `table_over_cap_is_a_hard_error`.
 pub fn to_canvas_markdown(input: &str) -> Result<TranslationResult, TranslationError> {
     let arena = Arena::new();
-    let mut options = Options::default();
-    options.extension.table = true;
-    options.extension.strikethrough = true;
-    options.extension.tasklist = true;
-    options.extension.footnotes = true;
+    let options = parse_options();
     let root: &AstNode = parse_document(&arena, input, &options);
 
     let mut ctx = blocks::RenderCtx::default();
@@ -117,6 +113,107 @@ pub fn to_canvas_markdown(input: &str) -> Result<TranslationResult, TranslationE
         markdown,
         warnings: ctx.warnings,
     })
+}
+
+/// The exact comrak `Options` [`to_canvas_markdown`] parses with.
+///
+/// Why: extracted so regression tests can re-parse this translator's own
+/// output with the identical extension set it was produced under — a
+/// reparse using a *different* (e.g. default, extension-less) option set
+/// would misclassify constructs (a table row reparsing as a plain paragraph
+/// without `extension.table`, say) and mask exactly the kind of
+/// delimiter-collision bug these tests exist to catch.
+/// What: enables `table`, `strikethrough`, `tasklist`, and `footnotes` — the
+/// four non-core constructs this dialect needs (see the module doc).
+fn parse_options() -> Options<'static> {
+    let mut options = Options::default();
+    options.extension.table = true;
+    options.extension.strikethrough = true;
+    options.extension.tasklist = true;
+    options.extension.footnotes = true;
+    options
+}
+
+/// Length of the longest consecutive run of backticks in `s`.
+///
+/// Why: shared by [`inline`]'s code-span delimiter sizing and [`blocks`]'s
+/// fenced-code-block delimiter sizing — both need a delimiter strictly
+/// longer than any backtick run already present in the content, or the
+/// re-emitted markdown reparses with a truncated/misplaced boundary (the
+/// code-critic-flagged bug this helper fixes).
+/// Test: `blocks::tests`, `inline::tests` exercise it indirectly through
+/// [`to_canvas_markdown`]'s reparse-round-trip regression tests.
+pub(super) fn longest_backtick_run(s: &str) -> usize {
+    let mut max_run = 0usize;
+    let mut current = 0usize;
+    for c in s.chars() {
+        if c == '`' {
+            current += 1;
+            max_run = max_run.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    max_run
+}
+
+/// Cap a piece of caller-authored text (a URL, a footnote name, …) at
+/// roughly 200 characters before interpolating it into a warning string.
+///
+/// Why: warning strings are surfaced verbatim to the MCP caller (and any
+/// downstream log); an unbounded caller-controlled substring — a
+/// pathologically long footnote name or `data:` URL — bloats the tool
+/// response without adding information beyond "this got flattened/dropped".
+/// What: returns `s` unchanged when it's at or under the cap; otherwise the
+/// first 200 characters plus a `…` marker and the true length, so the
+/// truncation itself is visible rather than silently lossy.
+/// Test: `truncates_long_text_and_notes_original_length`,
+/// `leaves_short_text_unchanged`.
+pub(super) fn truncate_for_warning(s: &str) -> String {
+    const MAX_WARNING_TEXT_CHARS: usize = 200;
+    let total = s.chars().count();
+    if total <= MAX_WARNING_TEXT_CHARS {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(MAX_WARNING_TEXT_CHARS).collect();
+    format!("{head}… ({total} chars total)")
+}
+
+/// Test-only helpers shared by every submodule's reparse-round-trip
+/// regression tests.
+///
+/// Why: a `contains()` substring check on the translated markdown cannot
+/// catch a delimiter-collision bug (an unescaped `|` splitting a table cell,
+/// an undersized code-span/fence delimiter reopening early) — the only way
+/// to prove the output is actually valid, re-parseable Slack canvas markdown
+/// is to parse it again and inspect the resulting AST shape. Centralising
+/// that here means [`table`], [`inline`], [`blocks`], and [`lists`] all
+/// reparse under the exact same extension set [`to_canvas_markdown`] itself
+/// uses (see [`parse_options`]).
+/// What: [`reparse`] parses `markdown` into a fresh arena; [`find_first`]
+/// depth-first searches the resulting tree for the first node whose
+/// `NodeValue` matches `pred`.
+#[cfg(test)]
+pub(super) mod test_support {
+    use comrak::nodes::{AstNode, NodeValue};
+    use comrak::{parse_document, Arena};
+
+    /// Parse `markdown` with [`super::parse_options`]'s exact extension set.
+    pub(super) fn reparse<'a>(arena: &'a Arena<'a>, markdown: &str) -> &'a AstNode<'a> {
+        parse_document(arena, markdown, &super::parse_options())
+    }
+
+    /// Depth-first search `node` (inclusive) for the first descendant whose
+    /// value matches `pred`.
+    pub(super) fn find_first<'a>(
+        node: &'a AstNode<'a>,
+        pred: impl Fn(&NodeValue) -> bool + Copy,
+    ) -> Option<&'a AstNode<'a>> {
+        if pred(&node.data.borrow().value) {
+            return Some(node);
+        }
+        node.children().find_map(|child| find_first(child, pred))
+    }
 }
 
 #[cfg(test)]
@@ -250,5 +347,30 @@ fn main() {}
         let out = translate("");
         assert_eq!(out.markdown.trim(), "");
         assert!(out.warnings.is_empty());
+    }
+
+    #[test]
+    fn longest_backtick_run_finds_the_longest_consecutive_run() {
+        assert_eq!(longest_backtick_run(""), 0);
+        assert_eq!(longest_backtick_run("no backticks"), 0);
+        assert_eq!(longest_backtick_run("a`b"), 1);
+        assert_eq!(longest_backtick_run("a``b`c"), 2);
+        assert_eq!(longest_backtick_run("````"), 4);
+        assert_eq!(longest_backtick_run("``a```b``"), 3);
+    }
+
+    #[test]
+    fn truncate_for_warning_leaves_short_text_unchanged() {
+        assert_eq!(truncate_for_warning("short"), "short");
+        assert_eq!(truncate_for_warning(""), "");
+    }
+
+    #[test]
+    fn truncate_for_warning_caps_long_text_and_notes_original_length() {
+        let long = "x".repeat(500);
+        let out = truncate_for_warning(&long);
+        assert!(out.starts_with(&"x".repeat(200)));
+        assert!(out.contains("500 chars total"));
+        assert!(out.len() < long.len());
     }
 }
