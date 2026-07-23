@@ -17,6 +17,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **MCP tool results no longer collapse the live conversation to the system
+  prompt:** an MCP tool result (e.g. `grep` via trusty-search) is shrunk by no
+  `compress_tool_output` filter and can be multiple megabytes; the send-time
+  context trimmer's pure oldest-first, whole-message eviction then evicted the
+  user's question AND the assistant tool-call turn AND the result itself,
+  leaving only the protected system message — so the follow-up completion
+  answered with zero context (`input_tokens` flatlined at the system-prompt
+  size and the model ignored the tool output). `ContextManager::trim_to_budget`
+  now detects a single dominant oversized message and TRUNCATES it in place
+  (preserving every turn and every assistant/tool pairing) instead of evicting
+  the surrounding conversation; whole-message oldest-first eviction remains the
+  fallback for genuinely long multi-turn histories. Truncation is logged
+  distinctly from eviction so it never masquerades as the catastrophic path.
 - **Chat stream renders inside ONE stable assistant bubble — no mid-stream
   flicker:** as `task-delta` tokens arrived the reply bubble visibly flashed
   because each delta fired two separate `messages` store writes (content, then

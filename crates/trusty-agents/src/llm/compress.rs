@@ -47,17 +47,30 @@ pub fn trim_messages_with_manager(
         Err(_) => return messages,
     };
     let original_len = json_msgs.len();
-    let (trimmed, evicted) = manager.trim_to_budget(json_msgs, model, 1);
-    if evicted == 0 {
+    let (trimmed, outcome) = manager.trim_to_budget(json_msgs, model, 1);
+    if !outcome.changed() {
         return messages;
     }
-    tracing::debug!(
-        model = %model,
-        evicted,
-        before = original_len,
-        after = trimmed.len(),
-        "context manager: trimmed messages"
-    );
+    // A truncation is NOT an eviction: log the two paths distinctly so an
+    // oversized-MCP-result truncation is diagnosable and never masquerades as
+    // the catastrophic "trimmed messages evicted" case.
+    if outcome.evicted > 0 {
+        tracing::debug!(
+            model = %model,
+            evicted = outcome.evicted,
+            before = original_len,
+            after = trimmed.len(),
+            "context manager: trimmed messages"
+        );
+    }
+    if outcome.truncated > 0 {
+        tracing::debug!(
+            model = %model,
+            truncated = outcome.truncated,
+            messages = trimmed.len(),
+            "context manager: truncated oversized message(s) to fit budget"
+        );
+    }
     let parsed: Result<Vec<ChatCompletionRequestMessage>, _> = trimmed
         .into_iter()
         .map(serde_json::from_value::<ChatCompletionRequestMessage>)
