@@ -227,6 +227,23 @@ pub fn create_managed_session(
         }
     };
 
+    // #3386: `set-option -g` has no `CMD_STARTSERVER` behavior in tmux — it
+    // fails "no server running" if issued before any server-starting
+    // command has run. Confirming the server is up FIRST (retrying a bounded
+    // number of times) closes the race where a resume/recreate right after
+    // the previous server died issued the scrollback options against a
+    // socket that did not exist yet, silently logged that as non-fatal, and
+    // let the subsequent `new-session` call (the one command that DOES
+    // auto-start a server) spawn a fresh server whose pane inherited tmux's
+    // factory `history-limit` of 2000 instead of the configured value.
+    if let Err(e) = ensure_server_up(bin) {
+        warn!(
+            "#3386: tmux server could not be confirmed up after \
+             {START_SERVER_MAX_ATTEMPTS} attempts; the scrollback/mouse options below may \
+             silently fail to apply to the pane about to be created: {e}"
+        );
+    }
+
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let opts = crate::core::trusty_tools_config::resolve_tmux_options(&config);
     let commands = managed_session_command_sequence(name, workdir, opts.history_limit, opts.mouse);
@@ -248,12 +265,98 @@ pub fn create_managed_session(
         }
     }
 
+    // #3386: verify the history-limit actually landed on the server BEFORE
+    // the pane that will inherit it is created — a mismatch here means the
+    // very next `new-session` call is about to create a pane that silently
+    // inherits tmux's factory default rather than the configured value.
+    match probe_history_limit(bin) {
+        Ok(observed) if observed == opts.history_limit => {}
+        Ok(observed) => warn!(
+            "#3386: tmux history-limit verification mismatch before pane creation — \
+             expected {expected}, server reports {observed}; the pane `new-session` is about \
+             to create may inherit tmux's factory default instead",
+            expected = opts.history_limit
+        ),
+        Err(e) => warn!(
+            "#3386: tmux history-limit verification probe failed (non-fatal, session creation \
+             continues): {e}"
+        ),
+    }
+
     run_tmux_with_bin(
         bin,
         new_session
             .first()
             .expect("managed_session_command_sequence always ends with NewSession"),
     )
+}
+
+/// Number of attempts [`ensure_server_up`] makes before giving up (#3386).
+const START_SERVER_MAX_ATTEMPTS: u8 = 3;
+
+/// Delay between [`ensure_server_up`] retry attempts (#3386).
+const START_SERVER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Confirm the tmux SERVER exists before any `set-option -g`/`new-session`
+/// call relies on it (#3386).
+///
+/// Why: see [`TmuxCommand::StartServer`]'s doc for the full root-cause
+/// explanation — `set-option -g` does NOT auto-start the server the way
+/// `new-session` does, so a caller must confirm the server is actually up
+/// first rather than assuming the first tmux command of the sequence takes
+/// care of it.
+/// What: runs `tmux start-server` (idempotent against an already-running
+/// server) up to [`START_SERVER_MAX_ATTEMPTS`] times, waiting
+/// [`START_SERVER_RETRY_DELAY`] between attempts, returning `Ok(())` on the
+/// first success. Exhausting every attempt returns an `Err` describing the
+/// last failure — this is the "error loudly rather than proceed silently"
+/// signal callers must not swallow into an unconditional success path.
+/// Test: `ensure_server_up_retries_then_succeeds`,
+/// `ensure_server_up_fails_loudly_after_exhausting_retries` (both drive a
+/// scripted fake `tmux` binary — no live tmux server required).
+fn ensure_server_up(bin: &str) -> Result<(), String> {
+    let mut last_err = String::new();
+    for attempt in 1..=START_SERVER_MAX_ATTEMPTS {
+        match run_tmux_with_bin(bin, &TmuxCommand::StartServer) {
+            Ok(output) if output.status.success() => return Ok(()),
+            Ok(output) => last_err = String::from_utf8_lossy(&output.stderr).into_owned(),
+            Err(e) => last_err = e.to_string(),
+        }
+        if attempt < START_SERVER_MAX_ATTEMPTS {
+            std::thread::sleep(START_SERVER_RETRY_DELAY);
+        }
+    }
+    Err(last_err)
+}
+
+/// Read back the tmux server's current `history-limit` global option
+/// (#3386).
+///
+/// Why: the verification counterpart to [`ensure_server_up`] and the
+/// `set-option -g` loop in [`create_managed_session`] — confirms the value
+/// actually landed on the server rather than trusting a `set-option -g`
+/// exit code alone.
+/// What: runs `tmux show-options -g -v history-limit` and parses the single
+/// line of stdout as `u32`. Any spawn failure, non-zero exit, or unparsable
+/// output is returned as `Err` describing why the probe could not confirm
+/// the value — callers decide how loudly to react.
+/// Test: `probe_history_limit_reads_back_configured_value`,
+/// `probe_history_limit_errors_on_unparsable_output`.
+fn probe_history_limit(bin: &str) -> Result<u32, String> {
+    match run_tmux_with_bin(
+        bin,
+        &TmuxCommand::ShowGlobalOption {
+            name: HISTORY_LIMIT_OPTION.to_string(),
+        },
+    ) {
+        Ok(output) if output.status.success() => {
+            let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            raw.parse::<u32>()
+                .map_err(|_| format!("unparsable show-options output: {raw:?}"))
+        }
+        Ok(output) => Err(String::from_utf8_lossy(&output.stderr).into_owned()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Type `text` into a tmux pane, then press Enter (#2398 consolidation).
@@ -379,5 +482,151 @@ mod tests {
         assert!(matches!(cmds[0], TmuxCommand::SetGlobalOption { .. }));
         assert!(matches!(cmds[1], TmuxCommand::SetGlobalOption { .. }));
         assert!(matches!(cmds[2], TmuxCommand::NewSession { .. }));
+    }
+
+    // ── #3386: server-up confirmed before any `set-option -g` ───────────
+    //
+    // All of these drive a scripted fake `tmux` binary (a `#!/bin/sh` script
+    // written to a temp dir) rather than a live tmux server, so they are
+    // deterministic and safe to run anywhere `sh` exists.
+
+    /// Write an executable shell script at `dir/name` with body `body`,
+    /// returning its path as a `String` suitable for `create_managed_session`
+    /// / `run_tmux_with_bin`'s `bin` parameter.
+    fn write_fake_tmux(dir: &std::path::Path, name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write fake tmux script");
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat fake tmux script")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod fake tmux script");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn ensure_server_up_retries_then_succeeds() {
+        // Fails the first two `start-server` invocations (simulating the
+        // #3386 window right after a dead server's socket dir is torn down),
+        // then succeeds on the third — exactly `START_SERVER_MAX_ATTEMPTS`.
+        let dir = tempfile::tempdir().unwrap();
+        let counter = dir.path().join("attempts");
+        std::fs::write(&counter, "0").unwrap();
+        let script = format!(
+            "#!/bin/sh\nn=$(cat '{counter}')\nn=$((n + 1))\necho \"$n\" > '{counter}'\nif [ \"$n\" -lt 3 ]; then\n  echo 'error connecting to socket (No such file or directory)' >&2\n  exit 1\nfi\nexit 0\n",
+            counter = counter.display()
+        );
+        let bin = write_fake_tmux(dir.path(), "fake-tmux-retry", &script);
+
+        let result = ensure_server_up(&bin);
+
+        assert!(
+            result.is_ok(),
+            "must eventually succeed within {START_SERVER_MAX_ATTEMPTS} attempts: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().trim(),
+            "3",
+            "must have retried exactly up to the succeeding attempt"
+        );
+    }
+
+    #[test]
+    fn ensure_server_up_fails_loudly_after_exhausting_retries() {
+        // Always fails — the probe must return a loud Err after exhausting
+        // every attempt rather than silently reporting success.
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/bin/sh\necho 'error connecting to socket (No such file or directory)' >&2\nexit 1\n";
+        let bin = write_fake_tmux(dir.path(), "fake-tmux-always-fails", script);
+
+        let result = ensure_server_up(&bin);
+
+        assert!(
+            result.is_err(),
+            "an always-failing server probe must error loudly, never proceed as if it succeeded"
+        );
+        assert!(
+            result.unwrap_err().contains("error connecting to socket"),
+            "the Err must carry the underlying failure reason"
+        );
+    }
+
+    #[test]
+    fn probe_history_limit_reads_back_configured_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/bin/sh\necho 100000\nexit 0\n";
+        let bin = write_fake_tmux(dir.path(), "fake-tmux-show-options", script);
+
+        assert_eq!(probe_history_limit(&bin), Ok(100_000));
+    }
+
+    #[test]
+    fn probe_history_limit_errors_on_unparsable_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/bin/sh\necho 'not-a-number'\nexit 0\n";
+        let bin = write_fake_tmux(dir.path(), "fake-tmux-bad-output", script);
+
+        let result = probe_history_limit(&bin);
+        assert!(
+            result.is_err(),
+            "unparsable show-options output must error loudly, not silently pass verification"
+        );
+    }
+
+    #[test]
+    fn probe_history_limit_errors_on_nonzero_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/bin/sh\necho 'no server running' >&2\nexit 1\n";
+        let bin = write_fake_tmux(dir.path(), "fake-tmux-show-options-fails", script);
+
+        assert!(probe_history_limit(&bin).is_err());
+    }
+
+    #[test]
+    fn create_managed_session_confirms_server_before_applying_options() {
+        // #3386 end-to-end (still no live tmux): a fake `tmux` that just
+        // records each invocation's tmux sub-command (argv[0]) to a log file
+        // and always succeeds. This exercises the EXACT choke point the
+        // resume-after-server-death path (`SessionManager::resume` →
+        // `resume_workdir::create_and_verify_pane` → `RealTmuxDriver::
+        // create_session` → `TmuxDriver::create_session`) routes through, so
+        // asserting the recorded order here proves the fix for that path too.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.log");
+        let script = format!("#!/bin/sh\necho \"$1\" >> '{}'\nexit 0\n", log.display());
+        let bin = write_fake_tmux(dir.path(), "fake-tmux-order", &script);
+
+        let _ = create_managed_session(Some(&bin), "tmpm-3386-order-test", None);
+
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = calls.lines().collect();
+
+        assert_eq!(
+            lines.first(),
+            Some(&"start-server"),
+            "the server must be confirmed up BEFORE any set-option -g (#3386): {lines:?}"
+        );
+        let new_session_pos = lines
+            .iter()
+            .position(|l| *l == "new-session")
+            .expect("new-session must still run");
+        let set_option_positions: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| **l == "set-option")
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !set_option_positions.is_empty(),
+            "the scrollback/mouse options must still be applied: {lines:?}"
+        );
+        assert!(
+            set_option_positions
+                .iter()
+                .all(|&p| p > 0 && p < new_session_pos),
+            "set-option -g must run strictly AFTER start-server and BEFORE new-session \
+             (#3386 / pre-existing #2398 ordering guarantee): {lines:?}"
+        );
     }
 }

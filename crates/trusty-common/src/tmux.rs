@@ -186,12 +186,55 @@ pub enum TmuxCommand {
     /// default tmux server (no dedicated `-S` socket), so a single `-g`
     /// (global) `set-option` benefits every session subsequently created
     /// on that server, regardless of which crate created it.
+    ///
+    /// **Caveat (#3386):** unlike `new-session`/`attach-session`,
+    /// `set-option -g` has no `CMD_STARTSERVER` behavior — it fails ("no
+    /// server running") if issued before ANY server-starting command has
+    /// run. A caller that issues this before confirming the server exists
+    /// (e.g. [`TmuxCommand::StartServer`]) can have it silently no-op right
+    /// before a `new-session` call spawns a fresh server that never saw the
+    /// option.
     /// What: renders `set-option -g <name> <value>`.
     SetGlobalOption {
         /// tmux option name (e.g. `history-limit`, `mouse`).
         name: String,
         /// Option value (e.g. `"100000"`, `"on"`).
         value: String,
+    },
+    /// `start-server` — ensure the tmux SERVER exists, creating it if
+    /// necessary, without creating any session (#3386).
+    ///
+    /// Why: [`TmuxCommand::SetGlobalOption`]'s caveat above is exactly the
+    /// #3386 root cause — a resume/recreate path that issues
+    /// `SetGlobalOption` before any session-creating command has run (e.g.
+    /// right after the previous tmux server died) hits "no server running",
+    /// the failure is logged as non-fatal, and the global option never
+    /// lands before the SUBSEQUENT `new-session` call spawns a fresh server
+    /// AND a pane in one step — that pane is then born under tmux's own
+    /// factory `history-limit` of 2000 instead of the intended value.
+    /// Issuing `start-server` explicitly, and confirming it exits
+    /// successfully, before any `set-option -g` closes that race — it is
+    /// the one tmux sub-command whose entire job is "make sure a server
+    /// exists", so a caller can rely on its own exit status rather than a
+    /// side effect of an unrelated command.
+    /// What: renders `start-server` with no further arguments. Idempotent —
+    /// tmux documents this as a no-op against an already-running server.
+    StartServer,
+    /// `show-options -g -v <name>` — read back a server-wide (global) tmux
+    /// option's CURRENT value (#3386).
+    ///
+    /// Why: `set-option -g` reporting a zero exit does not, by itself,
+    /// prove the value a subsequently-created pane will actually observe —
+    /// this is the verification counterpart to
+    /// [`TmuxCommand::SetGlobalOption`], letting a caller confirm the
+    /// option truly landed on the server before trusting it and creating a
+    /// pane that will inherit it.
+    /// What: renders `show-options -g -v <name>` (`-v` prints the bare
+    /// value only, with no leading `<name> ` prefix, on a single line of
+    /// stdout).
+    ShowGlobalOption {
+        /// tmux option name to read back (e.g. `history-limit`).
+        name: String,
     },
 }
 
@@ -362,6 +405,15 @@ pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
                 "-g".to_string(),
                 name.clone(),
                 value.clone(),
+            ]
+        }
+        TmuxCommand::StartServer => vec!["start-server".to_string()],
+        TmuxCommand::ShowGlobalOption { name } => {
+            vec![
+                "show-options".to_string(),
+                "-g".to_string(),
+                "-v".to_string(),
+                name.clone(),
             ]
         }
     }
@@ -612,6 +664,22 @@ mod tests {
             value: "100000".into(),
         });
         assert_eq!(argv, ["set-option", "-g", "history-limit", "100000"]);
+    }
+
+    #[test]
+    fn start_server_argv() {
+        // #3386: no session/target arguments — this only ensures the server
+        // process itself exists.
+        assert_eq!(tmux_argv(&TmuxCommand::StartServer), ["start-server"]);
+    }
+
+    #[test]
+    fn show_global_option_argv() {
+        // #3386: `-v` so the reply is the bare value, directly parseable.
+        let argv = tmux_argv(&TmuxCommand::ShowGlobalOption {
+            name: "history-limit".into(),
+        });
+        assert_eq!(argv, ["show-options", "-g", "-v", "history-limit"]);
     }
 
     #[test]
