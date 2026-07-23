@@ -18,6 +18,29 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::sidecar::{api_base, http_health, SharedApi};
 
+/// Task-status poll interval (ms) for the `polls`-th poll (0-indexed) — 250ms
+/// for the first `FAST_POLL_COUNT` polls, then 500ms (#3745, critic MEDIUM-3).
+///
+/// Why: a flat 1500ms poll added up to +1.5s of dead time on top of the LLM
+/// call. Fast polling for the opening window (~5s, covering most turns)
+/// surfaces a quick result almost immediately; the backoff keeps a genuinely
+/// long turn from hammering the sidecar. Pulled out of `send_message`'s loop
+/// so the 250/500/boundary contract is unit-testable without a live sidecar.
+/// What: `polls < FAST_POLL_COUNT (20)` → 250, else 500. Kept in lock-step
+/// with `pollIntervalMs` in `ui/src/lib/transport.ts` (browser fallback).
+/// Test: `poll_interval_ms_backoff_contract`.
+const FAST_POLL_COUNT: u32 = 20;
+const FAST_POLL_MS: u64 = 250;
+const SLOW_POLL_MS: u64 = 500;
+
+fn poll_interval_ms(polls: u32) -> u64 {
+    if polls < FAST_POLL_COUNT {
+        FAST_POLL_MS
+    } else {
+        SLOW_POLL_MS
+    }
+}
+
 /// `GET /api/health`.
 #[tauri::command]
 pub async fn check_health(state: State<'_, SharedApi>) -> Result<bool, String> {
@@ -187,6 +210,13 @@ pub async fn send_message(
     // Poll until terminal.
     let poll_url = format!("{}/api/task/{}", api_base(port), task_id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10 * 60);
+    // #3741 (perceived-latency fix): a flat 1500ms poll added up to +1.5s of
+    // dead time on top of the LLM call — a trivial turn measured ~2.1s at the
+    // backend but felt ~3.5s. Poll every 250ms for the first ~20 polls (the
+    // first ~5s, which covers the vast majority of turns) so a fast result is
+    // surfaced almost immediately, then back off to 500ms so a genuinely long
+    // turn doesn't hammer the sidecar for minutes.
+    let mut polls: u32 = 0;
     loop {
         if std::time::Instant::now() > deadline {
             let err = "task timed out after 10 minutes";
@@ -199,7 +229,9 @@ pub async fn send_message(
             );
             return Err(err.into());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let interval_ms = poll_interval_ms(polls);
+        polls += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
 
         let poll = client
             .get(&poll_url)
@@ -291,4 +323,30 @@ pub async fn cancel_task(state: State<'_, SharedApi>, task_id: String) -> Result
         Value::Number(status_code.as_u16().into()),
     );
     Ok(Value::Object(obj))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{poll_interval_ms, FAST_POLL_MS, SLOW_POLL_MS};
+
+    // #3745 (critic MEDIUM-3): pin the 250/500/20 backoff contract,
+    // including the 19/20 boundary, without a live sidecar.
+    #[test]
+    fn poll_interval_ms_backoff_contract() {
+        let cases = [
+            (0u32, FAST_POLL_MS),
+            (1, FAST_POLL_MS),
+            (19, FAST_POLL_MS), // last fast poll
+            (20, SLOW_POLL_MS), // first slow poll (boundary)
+            (21, SLOW_POLL_MS),
+            (1000, SLOW_POLL_MS),
+        ];
+        for (polls, expected) in cases {
+            assert_eq!(
+                poll_interval_ms(polls),
+                expected,
+                "poll #{polls} should use {expected}ms"
+            );
+        }
+    }
 }

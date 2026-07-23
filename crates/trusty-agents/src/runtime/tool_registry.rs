@@ -411,7 +411,10 @@ pub(super) fn build_registry_for_agent(
 /// (`run_subagent`) applying the persona's `[tools].allow` glob patterns —
 /// registering a tool here is not the same as granting it.
 /// What: Registers `git_log`/`git_status` (when CWD is a git repo),
-/// `web_search`, and `delegate_to_agent` (pre-flight-validated against every
+/// `web_search`, the izzie platform-hosted tools (`get_weather`,
+/// `get_train_schedule`, `get_train_alerts` via `crate::tools::izzie::izzie_tools`,
+/// mirroring the persona-chat dispatch path — #3745 item C), and
+/// `delegate_to_agent` (pre-flight-validated against every
 /// tier `agents::agents_dir_candidates()` searches — CWD/`TAGENT_CONFIG_DIR`
 /// first, then `$HOME/.trusty-agents/agents`, the SAME tiers the actual
 /// sub-agent spawn resolves against — see #3555 delegate-resolve follow-up
@@ -421,7 +424,9 @@ pub(super) fn build_registry_for_agent(
 /// omits `list_skills`, `load_skill`, and every generic coding-agent tool
 /// (`write_file`, `run_bash`, analysis tools, …).
 /// Test: `assistant_tier_registry_excludes_skill_catalog_tools`,
-/// `assistant_tier_registry_includes_curated_tools`.
+/// `assistant_tier_registry_includes_curated_tools`,
+/// `assistant_tier_registry_includes_izzie_tools`,
+/// `izzie_allow_list_surfaces_persona_tools_through_scoping`.
 pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
     let mut reg = ToolRegistry::new();
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -466,6 +471,25 @@ pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
                     .collect(),
             ),
     ));
+
+    // #3745 item C: register the izzie platform-hosted tools
+    // (`get_weather`, `get_train_schedule`, `get_train_alerts`) into the
+    // `--direct`/`--agent` assistant-tier registry, exactly as the
+    // persona-chat dispatch path already does
+    // (`ctrl::pm_task::dispatch::persona::run_pm_task_with_persona`, which
+    // calls `crate::tools::izzie::izzie_tools()`). Without this the two
+    // assistant dispatch paths DIVERGED: `izzie/agent.toml` declares
+    // `get_weather` et al. in `[tools].allow`, but the subprocess path's
+    // registry never registered those executors, so
+    // `scope_assistant_allowed_tools` intersected them away — leaving only
+    // git/web_search/delegate and forcing the model to answer "weather tool
+    // unavailable". Registering here only makes the tools REACHABLE; whether a
+    // given persona can call them is still gated by its `[tools].allow` globs
+    // via `scope_assistant_allowed_tools` (only izzie opts in), so other
+    // assistant-tier personas are unaffected.
+    for tool in crate::tools::izzie::izzie_tools() {
+        reg.register(tool);
+    }
 
     reg
 }

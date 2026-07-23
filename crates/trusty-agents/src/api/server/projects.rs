@@ -10,7 +10,7 @@
 //! Test: `list_projects_*`, `connect_project_*`, `get_project_config_*`,
 //! `list_agents_*`, `list_sessions_*` in `super::tests`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     Json,
@@ -18,7 +18,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::handlers::{agents_dir, projects_config_dir};
+use super::handlers::projects_config_dir;
 use super::state::AppState;
 use crate::registry::{ProjectEntry, ProjectRegistry, discover_active_projects};
 use crate::tm::project::TmProject;
@@ -235,18 +235,30 @@ async fn load_tm_projects_from_disk() -> Vec<TmProject> {
     }
 }
 
-/// `GET /api/agents` (#407) — list discovered agents.
+/// `GET /api/agents` (#407, #3741) — list discovered agents.
 ///
-/// Why: The web UI and `om` CLI need to display which agent personas are
-/// available without spawning a sub-agent. Reading TOML directly avoids
-/// pulling the full `AgentRegistry` machinery into the request path. Wrapped
-/// in a `{"agents": [...]}` envelope so future fields (e.g. pagination,
-/// catalog version) can be added without breaking clients.
-/// What: Scans `.trusty-agents/agents/*.toml` (relative to cwd) via
-/// `scan_agents_dir` and returns the `{"agents": [...]}` envelope.
-/// Test: `list_agents_returns_agents_envelope`.
+/// Why: The web UI's agent picker needs the SAME set of personas the runtime
+/// actually dispatches — Assistant, Izzie, CTO Bot, and the specialist roster.
+/// The pre-#3741 version scanned a SINGLE cwd-relative directory
+/// (`.trusty-agents/agents`) and only globbed FLAT `*.toml` files. That broke the
+/// packaged macOS `.app` two ways: (1) the Tauri sidecar runs with cwd `/`
+/// (sealed APFS volume) — so `.trusty-agents/agents` resolved to `/.trusty-agents/
+/// agents`, which does not exist, and the catalog came back EMPTY (the picker
+/// showed only the frontend's hard-coded base "Assistant" — Bob's exact
+/// "no Izzie / CTO Bot" report); and (2) `izzie`/`cto-assistant`/`assistant`
+/// are shipped as directory PACKAGES (`<name>/agent.toml`), which a flat glob
+/// never sees. This now enumerates the SAME candidate directories the runtime
+/// loader resolves against ([`crate::agents::agents_dir_candidates`] — the
+/// project-local tier PLUS the `$HOME/.trusty-agents/agents` bundle tier) and
+/// resolves both packages and flat files, so the catalog matches dispatch.
+/// What: Scans every [`crate::agents::agents_dir_candidates`] directory via
+/// [`scan_agent_catalog`] (package + flat resolution, deduped) and returns the
+/// `{"agents": [...]}` envelope.
+/// Test: `scan_agent_catalog_dedupes_across_dirs`,
+/// `scan_agents_dir_resolves_packages_flat_and_dedupes`.
 pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "agents": scan_agents_dir(&agents_dir()).await }))
+    let dirs = crate::agents::agents_dir_candidates();
+    Json(serde_json::json!({ "agents": scan_agent_catalog(&dirs).await }))
 }
 
 /// Parse one agent TOML file's `[agent]` table into the JSON shape shared by
@@ -297,52 +309,262 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
     }))
 }
 
-/// Scan an agents directory and return a parsed JSON array.
-///
-/// Why: Extracted from `list_agents_route` so unit tests can drive it
-/// against a `tempfile::TempDir` without juggling process cwd.
-/// What: Reads `*.toml` files, delegates each to [`parse_agent_toml`], sorts
-/// by name. Skips unreadable / unparseable files.
-/// Test: `scan_agents_dir_parses_toml` — see tests module.
-pub(super) async fn scan_agents_dir(dir: &std::path::Path) -> Vec<serde_json::Value> {
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    let entries = match tokio::fs::read_dir(dir).await {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::debug!(?e, dir = %dir.display(), "list_agents: dir read failed");
-            return out;
-        }
-    };
-    let mut entries = entries;
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
-            continue;
-        }
-        let raw = match tokio::fs::read_to_string(&path).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(?e, path = %path.display(), "list_agents: read failed");
-                continue;
-            }
-        };
-        let fallback_name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        match parse_agent_toml(&raw, fallback_name) {
-            Some(v) => out.push(v),
-            None => {
-                tracing::debug!(path = %path.display(), "list_agents: parse failed");
-            }
-        }
-    }
-    out.sort_by(|a, b| {
+/// Sort a parsed-agent array in place by the `name` field (stable catalog order).
+fn sort_agents_by_name(agents: &mut [serde_json::Value]) {
+    agents.sort_by(|a, b| {
         a.get("name")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or(""))
     });
+}
+
+// Per-directory resolution tiers, matching
+// `AgentConfig::by_name_unresolved_src_in`'s order (directory package > flat
+// `.toml` > flat `.md`). Higher rank wins for the same name within a dir.
+const RANK_MD: u8 = 0;
+const RANK_TOML: u8 = 1;
+const RANK_PACKAGE: u8 = 2;
+
+/// The dispatch `name` from a parsed catalog entry, falling back to `fallback`.
+fn catalog_entry_name(v: &serde_json::Value, fallback: &str) -> String {
+    v.get("name")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+/// Project a flat-`.md` overlay's resolved `AgentConfig` into the same catalog
+/// JSON shape [`parse_agent_toml`] emits (#3745, critic HIGH-2).
+///
+/// Why: flat `<name>.md` files are the PRIMARY documented `extends:`
+/// personalization surface (`loader.rs::by_name_unresolved_src_in` tier 3), so
+/// the picker must surface them — otherwise a user's `.md` overlay dispatches
+/// fine but is invisible in (and shadowed by) the catalog. Parsing through the
+/// SAME `parse_md_agent` the registry/loader uses keeps the surfaced
+/// name/role/model/display_name identical to what actually dispatches.
+/// What: reads `agent.{name,role,model,description,display_name,runner}` off
+/// the parsed config; `display_name` honors the never-empty contract (falls
+/// back to `name`); `provider_id` is `""` (`.md` frontmatter has no such key).
+fn md_agent_to_catalog_json(
+    cfg: &crate::agents::AgentConfig,
+    fallback_name: &str,
+) -> serde_json::Value {
+    let a = &cfg.agent;
+    let name = if a.name.trim().is_empty() {
+        fallback_name.to_string()
+    } else {
+        a.name.clone()
+    };
+    let display_name = a
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| name.clone());
+    let runner = match a.runner {
+        crate::agents::RunnerKind::ClaudeCode => "claude-code",
+        crate::agents::RunnerKind::Inline => "inline",
+        crate::agents::RunnerKind::InProcess => "in-process",
+        crate::agents::RunnerKind::Subprocess => "subprocess",
+    };
+    serde_json::json!({
+        "name": name,
+        "role": a.role.clone(),
+        "model": a.model.clone(),
+        "runner": runner,
+        "provider_id": "",
+        "description": a.description.clone(),
+        "display_name": display_name,
+    })
+}
+
+/// Insert `v` for `name` at tier `rank`, keeping the higher tier on conflict
+/// (equal rank → last write wins, matching a flat glob's duplicate handling).
+fn consider_entry(
+    by_name: &mut HashMap<String, (u8, serde_json::Value)>,
+    name: String,
+    rank: u8,
+    v: serde_json::Value,
+) {
+    match by_name.get(&name) {
+        Some((existing, _)) if *existing > rank => {}
+        _ => {
+            by_name.insert(name, (rank, v));
+        }
+    }
+}
+
+/// Scan ONE agents directory across all three resolution tiers, returning the
+/// resolved entries plus the set of names BLOCKED by an incomplete package
+/// (#3745, critic HIGH-1/HIGH-2).
+///
+/// Why: the catalog must reflect what the runtime can actually dispatch.
+/// `load_agent_package` REQUIRES both `agent.toml` AND `persona.md` and
+/// HARD-FAILS `by_name` if `persona.md` is missing (it never falls through to
+/// a flat file) — so an `agent.toml`-only package is not just non-dispatchable
+/// via the package tier, it makes that whole name unresolvable in the
+/// directory. Surfacing it (or a same-named flat file it shadows) would make a
+/// broken agent picker-selectable. This mirrors the runtime: a complete
+/// package resolves; an incomplete one BLOCKS the name; only when no package
+/// dir exists do flat `.toml` then flat `.md` apply.
+/// What: skips hidden/`*.stale.bak` entries; uses `tokio::fs::metadata`
+/// (follows symlinks, matching `Path::is_dir`) for the package-dir check; a
+/// directory with `agent.toml`+`persona.md` is a package (rank 2), one with
+/// `agent.toml` but no `persona.md` is BLOCKED; flat `<name>.toml` is rank 1
+/// and flat `<name>.md` (via [`crate::agents::registry::parse_md_agent`]) is
+/// rank 0. Higher tier wins per name; blocked names are dropped from the
+/// output. Returns `(entries, blocked_names)`.
+/// Test: `scan_agents_dir_resolves_packages_flat_and_dedupes`,
+/// `scan_agents_dir_requires_persona_md_for_package`,
+/// `scan_agents_dir_surfaces_flat_md_overlay`.
+async fn scan_agents_dir_tiered(
+    dir: &std::path::Path,
+) -> (Vec<serde_json::Value>, HashSet<String>) {
+    let mut by_name: HashMap<String, (u8, serde_json::Value)> = HashMap::new();
+    let mut blocked: HashSet<String> = HashSet::new();
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!(?e, dir = %dir.display(), "list_agents: dir read failed");
+            return (Vec::new(), blocked);
+        }
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Some(entry_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Skip hidden entries (`.bundled-stamp`, …) and archived backups
+        // (`*.stale.bak`, produced by the bundled reprovision) so they never
+        // enter the catalog or shadow a live agent of the same name.
+        if entry_name.starts_with('.')
+            || entry_name.contains(".stale.bak")
+            || entry_name.ends_with(".bak")
+        {
+            continue;
+        }
+        // `metadata` follows symlinks, matching `Path::is_dir` used by the
+        // runtime's `load_agent_package` (critic MEDIUM-4).
+        let Ok(meta) = tokio::fs::metadata(&path).await else {
+            continue;
+        };
+        if meta.is_dir() {
+            // Directory package: `<dir>/agent.toml` is the dispatch key.
+            let manifest = path.join("agent.toml");
+            if tokio::fs::metadata(&manifest).await.is_err() {
+                continue; // an ordinary subdir, not an agent package
+            }
+            // Require `persona.md` — `load_agent_package` hard-fails without it,
+            // so an `agent.toml`-only package is broken. Block the name so a
+            // same-named flat file (here or in a lower-priority dir) can't make
+            // it falsely picker-selectable.
+            if tokio::fs::metadata(&path.join("persona.md")).await.is_err() {
+                blocked.insert(entry_name.to_string());
+                continue;
+            }
+            let Ok(raw) = tokio::fs::read_to_string(&manifest).await else {
+                continue;
+            };
+            if let Some(v) = parse_agent_toml(&raw, entry_name) {
+                let name = catalog_entry_name(&v, entry_name);
+                consider_entry(&mut by_name, name, RANK_PACKAGE, v);
+            }
+        } else {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            match path.extension().and_then(|s| s.to_str()) {
+                Some("toml") => match tokio::fs::read_to_string(&path).await {
+                    Ok(raw) => {
+                        if let Some(v) = parse_agent_toml(&raw, &stem) {
+                            let name = catalog_entry_name(&v, &stem);
+                            consider_entry(&mut by_name, name, RANK_TOML, v);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!(?e, path = %path.display(), "list_agents: read failed")
+                    }
+                },
+                Some("md") => match crate::agents::registry::parse_md_agent(&path) {
+                    Ok(cfg) => {
+                        let v = md_agent_to_catalog_json(&cfg, &stem);
+                        let name = catalog_entry_name(&v, &stem);
+                        consider_entry(&mut by_name, name, RANK_MD, v);
+                    }
+                    Err(e) => {
+                        tracing::debug!(?e, path = %path.display(), "list_agents: md parse failed")
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+    // Drop any name that also had an incomplete package in this directory.
+    for b in &blocked {
+        by_name.remove(b);
+    }
+    let out = by_name.into_values().map(|(_, v)| v).collect();
+    (out, blocked)
+}
+
+/// Scan ONE agents directory (all tiers) and return a name-sorted JSON array.
+///
+/// Why: single-directory entry point for the unit tests that drive the
+/// tier/dedupe/persona-md logic directly against a `tempfile::TempDir`. Wraps
+/// [`scan_agents_dir_tiered`] and drops the blocked-name set (relevant only to
+/// the cross-directory merge in [`scan_agent_catalog`], which production uses).
+/// `#[cfg(test)]` because the production route (`list_agents_route`) goes
+/// through [`scan_agent_catalog`]; this wrapper has no non-test caller.
+/// Test: `scan_agents_dir_parses_toml`,
+/// `scan_agents_dir_resolves_packages_flat_and_dedupes`,
+/// `scan_agents_dir_requires_persona_md_for_package`,
+/// `scan_agents_dir_surfaces_flat_md_overlay`.
+#[cfg(test)]
+pub(super) async fn scan_agents_dir(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let (mut out, _blocked) = scan_agents_dir_tiered(dir).await;
+    sort_agents_by_name(&mut out);
+    out
+}
+
+/// Scan MULTIPLE candidate agent directories in priority order and return one
+/// deduplicated, name-sorted catalog (#3741, #3745).
+///
+/// Why: `list_agents_route` must present the same roster the runtime resolves,
+/// which spans [`crate::agents::agents_dir_candidates`] — the project-local
+/// tier (`TAGENT_CONFIG_DIR` / cwd `.trusty-agents/agents`) AND the
+/// `$HOME/.trusty-agents/agents` bundle tier. Scanning only the first missed
+/// every bundled persona whenever the process cwd had no project tier (the
+/// packaged `.app`, cwd `/`). The `$HOME` tier is where
+/// `ensure_bundled_agents_deployed` writes Assistant / Izzie / CTO Bot.
+/// What: Scans each directory via [`scan_agents_dir_tiered`], merging by `name`
+/// with the FIRST directory to define a name winning — matching
+/// [`crate::agents::agents_dir_candidates`]'s documented precedence. An
+/// incomplete package in a higher-priority directory BLOCKS that name from ALL
+/// directories (the runtime `by_name` hard-errors on it and never reaches the
+/// lower tier), so a broken package can never be papered over by a lower-tier
+/// flat file — mirroring dispatch exactly.
+/// Test: `scan_agent_catalog_dedupes_across_dirs`.
+pub(super) async fn scan_agent_catalog(dirs: &[std::path::PathBuf]) -> Vec<serde_json::Value> {
+    let mut by_name: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut blocked: HashSet<String> = HashSet::new();
+    for dir in dirs {
+        let (entries, dir_blocked) = scan_agents_dir_tiered(dir).await;
+        blocked.extend(dir_blocked);
+        for v in entries {
+            let name = catalog_entry_name(&v, "");
+            if name.is_empty() || blocked.contains(&name) {
+                continue;
+            }
+            by_name.entry(name).or_insert(v);
+        }
+    }
+    let mut out: Vec<serde_json::Value> = by_name.into_values().collect();
+    sort_agents_by_name(&mut out);
     out
 }
 

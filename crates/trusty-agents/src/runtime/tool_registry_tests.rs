@@ -376,6 +376,77 @@ fn assistant_tier_registry_includes_curated_tools() {
 }
 
 #[test]
+fn assistant_tier_registry_includes_izzie_tools() {
+    // #3745 item C regression guard: the `--direct`/`--agent` assistant-tier
+    // registry must register the izzie platform-hosted tools so a persona
+    // whose `[tools].allow` opts into them (izzie) can actually reach them —
+    // exactly as the persona-chat dispatch path
+    // (`run_pm_task_with_persona`) already does. Before the fix these three
+    // tools were only registered on the REPL `/agent` path, so `--direct
+    // izzie` scoped them away and the model answered "weather tool
+    // unavailable".
+    let reg = build_registry_for_agent(
+        "izzie",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+    )
+    .expect("assistant-tier agent builds a registry");
+    for expected in ["get_weather", "get_train_schedule", "get_train_alerts"] {
+        assert!(
+            reg.contains(expected),
+            "{expected} missing from assistant-tier registry (#3745 item C)"
+        );
+    }
+}
+
+#[test]
+fn izzie_allow_list_surfaces_persona_tools_through_scoping() {
+    // End-to-end of the two functions the `--direct` path chains: the
+    // assistant-tier registry (`build_assistant_tier_registry`) plus the REAL
+    // glob-scoping (`scope_assistant_allowed_tools`). With izzie's declared
+    // `[tools].allow` including `get_weather`, the scoped result must retain
+    // it — proving the fix at the exact seam that dropped it (the allow list
+    // was correct; the tool simply was not in the registry to survive the
+    // intersection).
+    let reg = build_assistant_tier_registry();
+    let allow = vec![
+        "delegate_to_agent".to_string(),
+        "web_search".to_string(),
+        "get_weather".to_string(),
+        "get_train_schedule".to_string(),
+        "get_train_alerts".to_string(),
+    ];
+    let kept =
+        scope_assistant_allowed_tools(true, None, Some(&allow), Some(&reg)).unwrap_or_default();
+    for expected in ["get_weather", "get_train_schedule", "get_train_alerts"] {
+        assert!(
+            kept.iter().any(|n| n == expected),
+            "{expected} declared in [tools].allow must survive assistant-tier scoping, got: {kept:?}"
+        );
+    }
+}
+
+#[test]
+fn non_opted_in_persona_does_not_get_izzie_tools() {
+    // Registering the izzie tools into the shared assistant-tier registry
+    // must NOT widen a persona that never declared them: `scope_assistant_
+    // allowed_tools` still gates by the persona's own `[tools].allow`. A
+    // persona allowing only `web_search` gets only `web_search`, never
+    // `get_weather`.
+    let reg = build_assistant_tier_registry();
+    let allow = vec!["web_search".to_string()];
+    let kept =
+        scope_assistant_allowed_tools(true, None, Some(&allow), Some(&reg)).unwrap_or_default();
+    assert!(
+        !kept.iter().any(|n| n == "get_weather"),
+        "a persona that did not opt into get_weather must not receive it, got: {kept:?}"
+    );
+}
+
+#[test]
 fn role_takes_precedence_over_name_for_assistant_tier() {
     // Role gating is checked BEFORE the `name`-based match — an agent named
     // like a coding sub-agent (e.g. a persona overlay someone accidentally

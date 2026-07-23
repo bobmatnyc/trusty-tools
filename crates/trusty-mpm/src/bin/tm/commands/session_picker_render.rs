@@ -23,6 +23,11 @@
 //! SGR escape when `use_color` is true, else returns it unchanged — no
 //! external color crate dependency, fully deterministic and side-effect-free.
 //!
+//! #3741: rows lead with the `[N]` index and carry no `tm:` prefix — the
+//! prefix is reserved for genuine log/prompt lines (`session_picker.rs`'s
+//! `eprintln!("tm: ...")` warnings/prompts), never for menu rows a human
+//! scans by leading index.
+//!
 //! Test: `session_picker_tests.rs` — `format_session_row_*` (verbless output,
 //! color on/off), `state_color_*` (mapping), `colorize_*` (escape/plain).
 
@@ -141,12 +146,12 @@ pub(crate) fn picker_use_color(stderr_tty: bool) -> bool {
 pub(crate) fn format_session_row(num: u32, s: &ManagedSessionSummary, use_color: bool) -> String {
     if s.deleted {
         let label = colorize("-- deleted --", StateColor::Red, use_color);
-        return format!("tm:   [{num}] {label}");
+        return format!("[{num}] {label}");
     }
     if s.unresumable {
         let state = colorize(&s.state, StateColor::Red, use_color);
         return format!(
-            "tm:   [{num}] {} ({state}) — DEAD: workspace removed; use [d{num}] to remove the record",
+            "[{num}] {} ({state}) — DEAD: workspace removed; use [d{num}] to remove the record",
             s.name
         );
     }
@@ -157,5 +162,5 @@ pub(crate) fn format_session_row(num: u32, s: &ManagedSessionSummary, use_color:
     };
     let color = state_color(&s.state, s.attached);
     let state = colorize(shown_state, color, use_color);
-    format!("tm:   [{num}] {} ({state})", s.name)
+    format!("[{num}] {} ({state})", s.name)
 }
