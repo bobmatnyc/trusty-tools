@@ -121,6 +121,14 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.pane_exists(name, pane_id)
     }
 
+    /// Overrides the trait's `pane_exists`-derived default so a genuine
+    /// `list-panes` query failure reports `None` ("could not determine")
+    /// rather than `Some(false)` ("confirmed absent") — #3714 review
+    /// finding 2, consumed by the display-only `reconcile_live_state`.
+    fn pane_exists_checked(&self, name: &str, pane_id: &str) -> Option<bool> {
+        self.driver.pane_exists_checked(name, pane_id)
+    }
+
     /// Type literal text with NO trailing Enter into a SPECIFIC pane
     /// (overrides the trait default so `inject`'s `Submit::NoSubmit`
     /// dispatch actually lands in the recorded pane; #2468).

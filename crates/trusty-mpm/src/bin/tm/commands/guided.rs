@@ -537,19 +537,26 @@ pub(crate) fn nested_managed_match<'a>(
 /// long predates the stale one in the reported issue) would win purely on
 /// recency, stranding the operator against a dead-pane refusal while sitting
 /// inside their own live session.
-/// What: applies three tiers, strongest signal first, returning as soon as
+/// What: applies FOUR tiers, strongest signal first, returning as soon as
 /// one produces a single winner: (1) the invoking process's OWN tmux pane —
 /// `pane_id` is never shared between two records, so a match here is proof,
 /// not a heuristic; (2) among the remainder, prefer candidates whose `state`
 /// reads `"active"` (server-reconciled PANE-scoped liveness, #3714 part 3 —
-/// no longer a bare name-string check) over ones that don't, falling back to
-/// EVERY candidate only when none read `"active"` (preserves the pre-#3714
-/// decommissioned-fallback behavior); (3) within the surviving tier, the
-/// most-recently-created candidate (the prior sole tie-break, now the
-/// weakest and last resort). Returns `Ok(single winner)` as soon as exactly
-/// one candidate survives a tier; `Err(tied)` — the tier's full surviving
-/// set — when candidates remain tied even after tier (3), so the caller can
-/// print every tied id rather than guess.
+/// no longer a bare name-string check) over ones that don't; (3) — ONLY when
+/// tier (2) is empty — prefer any NON-`"decommissioned"` candidate (e.g.
+/// `"stopped"`/`"errored"`) over a decommissioned tombstone, EXACTLY
+/// mirroring the pre-#3714 `state != "decommissioned"` tie-break (#3714
+/// review finding 1: an earlier revision collapsed tiers 2 and 3 into a
+/// single `state == "active"` filter, which let a genuinely `"stopped"`
+/// record LOSE to a newer decommissioned tombstone — a real behavior
+/// regression from the pre-#3714 code, not just a doc inaccuracy); falling
+/// back to EVERY candidate only when tier (3) is also empty (every
+/// candidate is decommissioned — the legitimate #2777 case); (4) within the
+/// surviving tier, the most-recently-created candidate (the prior sole
+/// tie-break, now the weakest and last resort). Returns `Ok(single winner)`
+/// as soon as exactly one candidate survives a tier; `Err(tied)` — the
+/// tier's full surviving set — when candidates remain tied even after tier
+/// (4), so the caller can print every tied id rather than guess.
 /// Test: see [`nested_managed_match`]'s test list.
 pub(crate) fn pick_least_ambiguous<'a>(
     candidates: Vec<&'a trusty_mpm::client::ManagedSessionSummary>,
@@ -569,16 +576,32 @@ pub(crate) fn pick_least_ambiguous<'a>(
     {
         return Ok(own);
     }
-    // (2) prefer verifiably-alive (server-reconciled) candidates; fall back
-    // to the full set only when none are alive (mirrors the pre-#3714
-    // non-decommissioned-fallback behavior).
+    // (2) prefer verifiably-alive (server-reconciled `state == "active"`)
+    // candidates; (3) failing that, ANY non-decommissioned candidate — this
+    // second sub-tier is what the pre-#3714 code did unconditionally, and it
+    // must still win over a decommissioned tombstone regardless of recency
+    // (review finding 1); (4-fallback) only decommissioned candidates
+    // remain (#2777).
     let alive: Vec<&trusty_mpm::client::ManagedSessionSummary> = candidates
         .iter()
         .copied()
         .filter(|r| r.state == "active")
         .collect();
-    let tier = if alive.is_empty() { candidates } else { alive };
-    // (3) most-recently-created within the surviving tier.
+    let tier = if !alive.is_empty() {
+        alive
+    } else {
+        let non_decommissioned: Vec<&trusty_mpm::client::ManagedSessionSummary> = candidates
+            .iter()
+            .copied()
+            .filter(|r| r.state != "decommissioned")
+            .collect();
+        if non_decommissioned.is_empty() {
+            candidates
+        } else {
+            non_decommissioned
+        }
+    };
+    // (4) most-recently-created within the surviving tier.
     let newest_created = tier
         .iter()
         .map(|r| r.created_at.clone().unwrap_or_default())

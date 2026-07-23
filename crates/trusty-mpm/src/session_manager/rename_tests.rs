@@ -345,6 +345,48 @@ async fn rename_renames_live_tmux_session() {
     assert!(!fake.session_exists(&old_name), "old name must be gone");
 }
 
+/// A LEGACY record (pre-#2453, no captured `pane_id`) must keep the
+/// pre-#3714 name-only tmux-liveness check for the rename MUTATION path —
+/// there is no stronger per-pane signal available for it, so `rename` must
+/// still physically rename the live tmux session exactly as before #3714.
+///
+/// Why: proves the legacy fallback explicitly, rather than incidentally —
+/// `pane_exists_override` is forced to `Some(false)` (an incorrect gone
+/// answer, if it were ever consulted): if the mutation path mistakenly
+/// probed `pane_exists` for a record with no `pane_id`, the tmux rename
+/// would be skipped and this assertion would fail. Observing the rename
+/// call fire anyway is proof the pane check was never reached — the
+/// `pane_id: None` branch short-circuits straight to the name-only check.
+#[tokio::test]
+async fn rename_legacy_record_without_pane_id_still_renames_live_tmux_session() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    // seed_record never sets `pane_id` (always `None`) — the legacy shape.
+    seed_record(&mgr, &dir, id, ManagedSessionState::Active, false).await;
+    assert_eq!(
+        mgr.get(&id).await.expect("get").pane_id,
+        None,
+        "sanity: seeded record is legacy (no pane_id)"
+    );
+    let old_name = mgr.get(&id).await.expect("get").tmux_name;
+    // If the pane check were (wrongly) consulted for this legacy record, it
+    // would report "gone" — proving below that the rename still happened
+    // means it was never consulted.
+    *fake.pane_exists_override.lock().unwrap() = Some(false);
+
+    mgr.rename(&id, "tm-legacy-renamed").await.expect("rename");
+
+    let renames = fake.rename_calls.lock().unwrap();
+    assert!(
+        renames
+            .iter()
+            .any(|(o, n)| o == &old_name && n == "tm-legacy-renamed"),
+        "a legacy record's rename must still physically rename its live tmux \
+         session via the name-only check: {renames:?}"
+    );
+}
+
 /// #3714 remediation: renaming a record whose OWN recorded pane is confirmed
 /// GONE must NEVER physically rename a tmux session merely because a session
 /// with the same NAME is live — that live session belongs to a DIFFERENT

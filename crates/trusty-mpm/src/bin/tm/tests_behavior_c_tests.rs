@@ -2009,6 +2009,33 @@ fn nested_managed_match_prefers_verifiably_alive_pane_over_dead_duplicate() {
 }
 
 #[test]
+fn nested_managed_match_prefers_non_decommissioned_over_newer_decommissioned_tombstone() {
+    // #3714 review finding 1 (HIGH): when NEITHER candidate reads "active"
+    // (so tier 2 is empty), a genuinely non-terminal record (e.g.
+    // "stopped") must still beat a DECOMMISSIONED tombstone sharing its
+    // name, regardless of which one is newer — this is the pre-#3714
+    // `state != "decommissioned"` tie-break, which an earlier revision of
+    // this fix accidentally dropped by collapsing tiers 2+3 into a single
+    // `state == "active"` filter. Adversarial ordering: the tombstone is
+    // FIVE MONTHS newer than the stopped record, proving this is a real
+    // tier, not an artifact of recency.
+    let mut stopped = make_session_at("tm-proj-03", "stopped", "2026-01-01T00:00:00Z");
+    stopped.id = "stopped-id".to_string();
+    let mut decommissioned =
+        make_session_at("tm-proj-03", "decommissioned", "2026-06-01T00:00:00Z");
+    decommissioned.id = "decommissioned-id".to_string();
+    let sessions = vec![decommissioned, stopped];
+
+    let matched = nested_managed_match(Some("tm-proj-03"), None, None, &sessions);
+    assert_eq!(
+        matched.map(|s| s.id.as_str()),
+        Some("stopped-id"),
+        "a non-decommissioned record must beat a newer decommissioned tombstone \
+         when neither candidate is verifiably active"
+    );
+}
+
+#[test]
 fn nested_managed_match_prefers_own_pane_identity_over_recency() {
     // Bullet 2 of the proposed fix: when invoked from inside an existing
     // managed session, the invoking process's OWN tmux pane identity is

@@ -723,6 +723,38 @@ impl TmuxDriver {
             Err(_) => false,
         }
     }
+
+    /// Tri-state variant of [`Self::pane_exists`] distinguishing "confirmed
+    /// present" (`Some(true)`), "confirmed absent" (`Some(false)`), and
+    /// "could not determine" (`None`) — #3714 review finding 2.
+    ///
+    /// Why: [`Self::pane_exists`]'s bare `bool` deliberately collapses
+    /// "confirmed absent" and "query failed" into the same `false` — correct
+    /// fail-closed behavior for a MUTATION guard (a rename must never trust
+    /// an unverifiable pane as safe to physically retarget). A DISPLAY-only
+    /// consumer has the opposite risk: collapsing "could not determine" into
+    /// "not live" flips a genuinely live record's SHOWN `state` to
+    /// `"stopped"` on a transient `tmux list-panes` hiccup — reproducing the
+    /// exact `state`/`persisted_state` disagreement #3714 exists to fix,
+    /// just from a different trigger (a query error rather than a
+    /// duplicate-name collision). This lets a display-only caller fall back
+    /// to a weaker signal (e.g. name-only) on `None` instead of asserting
+    /// absence it cannot actually prove.
+    /// What: identical query to `pane_exists`, but `Err` maps to `None`
+    /// instead of `false`.
+    /// Test: `daemon::managed_routes::summary`'s
+    /// `reconcile_live_state_pane_query_error_does_not_flip_live_record_to_stopped`
+    /// exercises the consumer; this method's own argv shape is covered by
+    /// the same `core::tmux::list_panes_argv` coverage `pane_exists` uses.
+    pub fn pane_exists_checked(&self, session_name: &str, pane_id: &str) -> Option<bool> {
+        match self.list_panes(session_name) {
+            Ok(rows) => Some(
+                rows.iter()
+                    .any(|row| row.split(':').next() == Some(pane_id)),
+            ),
+            Err(_) => None,
+        }
+    }
 }
 
 /// A non-destructive registration of an external tmux session.

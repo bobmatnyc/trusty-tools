@@ -39,12 +39,18 @@ impl ManagedTmuxDriver for EnumErrTmux {
     }
 }
 
-/// A tmux driver whose `pane_exists` is controllable per test — used to prove
-/// `reconcile_live_state`'s pane-scoped liveness check (#3714): a name being
-/// live is not enough, the record's OWN recorded pane must also be confirmed
-/// present.
+/// A tmux driver whose pane-liveness answer is controllable per test — used
+/// to prove `reconcile_live_state`'s pane-scoped liveness check (#3714): a
+/// name being live is not enough, the record's OWN recorded pane must also
+/// be confirmed present.
+///
+/// `pane_alive: Option<bool>` mirrors the tri-state `pane_exists_checked`
+/// contract directly (#3714 review finding 2) — `Some(true)`/`Some(false)`
+/// simulate a confirmed answer, `None` simulates a `list-panes` QUERY
+/// FAILURE (distinct from a confirmed-absent pane), so tests can assert the
+/// two are handled differently by the display-only consumer.
 struct PaneAwareTmux {
-    pane_alive: bool,
+    pane_alive: Option<bool>,
 }
 impl ManagedTmuxDriver for PaneAwareTmux {
     fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
@@ -63,6 +69,9 @@ impl ManagedTmuxDriver for PaneAwareTmux {
         Ok(Vec::new())
     }
     fn pane_exists(&self, _name: &str, _pane_id: &str) -> bool {
+        self.pane_alive.unwrap_or(true)
+    }
+    fn pane_exists_checked(&self, _name: &str, _pane_id: &str) -> Option<bool> {
         self.pane_alive
     }
 }
@@ -243,7 +252,9 @@ fn reconcile_live_state_prefers_pane_scoped_liveness_over_name_membership() {
     // resurrect to "active".
     let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
     reconcile_live_state(
-        &PaneAwareTmux { pane_alive: false },
+        &PaneAwareTmux {
+            pane_alive: Some(false),
+        },
         &mut summaries,
         &records,
         &live,
@@ -262,7 +273,9 @@ fn reconcile_live_state_prefers_pane_scoped_liveness_over_name_membership() {
     // must reconcile to "active" exactly as before #3714.
     let mut summaries2: Vec<_> = records.iter().map(record_to_summary).collect();
     reconcile_live_state(
-        &PaneAwareTmux { pane_alive: true },
+        &PaneAwareTmux {
+            pane_alive: Some(true),
+        },
         &mut summaries2,
         &records,
         &live,
@@ -292,7 +305,9 @@ fn reconcile_live_state_legacy_record_without_pane_id_uses_name_only() {
     // Even a driver that would report the pane as gone must not matter here —
     // a legacy record has no `pane_id` to probe in the first place.
     reconcile_live_state(
-        &PaneAwareTmux { pane_alive: false },
+        &PaneAwareTmux {
+            pane_alive: Some(false),
+        },
         &mut summaries,
         &records,
         &live,
@@ -301,6 +316,50 @@ fn reconcile_live_state_legacy_record_without_pane_id_uses_name_only() {
     assert_eq!(
         summaries[0].state, "active",
         "a legacy record with no pane_id falls back to the name-only check"
+    );
+}
+
+/// #3714 review finding 2 (HIGH): a `list-panes` QUERY FAILURE ("could not
+/// determine") must NOT be treated as "confirmed absent" for DISPLAY
+/// reconciliation — that would flip a genuinely live, `Active`-persisted
+/// record's shown `state` to `"stopped"` on a transient tmux hiccup,
+/// reproducing the exact `state`/`persisted_state` disagreement #3714
+/// exists to fix, just from a different trigger. Distinguishing the two
+/// (via `pane_exists_checked`'s tri-state) is what `pane_exists`'s bare
+/// `bool` — correct for the MUTATION guard in `SessionManager::rename`,
+/// unaffected by this test — cannot do.
+#[test]
+fn reconcile_live_state_pane_query_error_does_not_flip_live_record_to_stopped() {
+    use std::collections::HashSet;
+    let mut rec = make_record(None);
+    rec.state = ManagedSessionState::Active;
+    rec.tmux_name = "tm-flaky-01".into();
+    rec.pane_id = Some("%7".to_string());
+    let records = vec![rec];
+    let live: HashSet<String> = ["tm-flaky-01".to_string()].into_iter().collect();
+    let empty = HashSet::new();
+
+    let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
+    assert_eq!(summaries[0].state, "active");
+    assert_eq!(summaries[0].persisted_state, "active");
+
+    // `pane_alive: None` simulates a `list-panes` query FAILURE, not a
+    // confirmed-absent pane.
+    reconcile_live_state(
+        &PaneAwareTmux { pane_alive: None },
+        &mut summaries,
+        &records,
+        &live,
+        &empty,
+    );
+    assert_eq!(
+        summaries[0].state, "active",
+        "a transient pane-query failure must fall back to the name-only signal, \
+         never assert the pane is confirmed gone"
+    );
+    assert_eq!(
+        summaries[0].persisted_state, "active",
+        "state and persisted_state must still agree — no contradiction introduced"
     );
 }
 
