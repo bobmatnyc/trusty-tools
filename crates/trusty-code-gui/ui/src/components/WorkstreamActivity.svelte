@@ -97,15 +97,32 @@
   // an immediate `refresh()` on success rather than waiting for the next
   // poll tick — all carried over unchanged from `SessionMonitor.svelte`.
   //
+  // **Live delta streaming (tcode streaming epic #3696, Slice 3), gated
+  // behind `SSE_ENABLED` (`VITE_TCODE_SSE`, default OFF).** A FIFTH `$effect`
+  // opens a SESSION-scoped `EventSource` on `GET /sessions/{id}/events` (a
+  // different route than the workstream-level nudge stream above — this one
+  // carries full event payloads, not just an "arrived" ping) whenever the
+  // bound session's id changes, folding every `agent_message_delta` envelope
+  // through `lib/transcript.ts::applyDelta` into `streamBubbles`. The poll
+  // (`chatEntries`, still the authoritative baseline — unchanged from before)
+  // and the live stream (`liveEntries`, rendered after `chatEntries`) are
+  // reconciled by a SIXTH `$effect`: once a fresh poll transcript lands, any
+  // bubble already marked `done` is dropped (the poll now has it as real
+  // history), while an in-progress bubble survives poll ticks until it
+  // finishes. `SSE_ENABLED` OFF (the default) short-circuits both new effects
+  // to a no-op, leaving every pre-Slice-3 behavior byte-for-byte unchanged.
+  //
   // Test: `lib/session-status.test.ts::pickActiveSessionInWorkstream`
   // covers the scoping rule; `lib/pending-workstream.test.ts` covers the
   // fallback marker's own read/write contract; `lib/transcript.test.ts`
-  // covers the pure chat-entry/elapsed helpers; `WorkstreamActivity.test.ts`
-  // covers the four phases (incl. the bound-session-vs-empty-workstream
-  // sub-states and the pending-workstream fallback), the SSE-subscription
-  // reactivity fix (code-critic PR #3392 review, HIGH), the auto-scroll-
-  // with-lock behavior (issue #3446), and cancel; `App.test.ts` pins that
-  // this component mounts inside `.body`.
+  // covers the pure chat-entry/elapsed helpers AND `applyDelta`'s tuple-keyed
+  // reducer (Slice 3); `WorkstreamActivity.test.ts` covers the four phases
+  // (incl. the bound-session-vs-empty-workstream sub-states and the
+  // pending-workstream fallback), the SSE-subscription reactivity fix
+  // (code-critic PR #3392 review, HIGH), the auto-scroll-with-lock behavior
+  // (issue #3446), cancel, and (Slice 3) the gated delta-stream rendering
+  // incremental text before `done` and finalizing the bubble; `App.test.ts`
+  // pins that this component mounts inside `.body`.
   import { resolveActiveWorkstreamId, setActiveWorkstreamId } from '../lib/active-workstream.svelte';
   import { apiBase } from '../lib/api-config';
   import {
@@ -115,15 +132,26 @@
     type SessionListResponse,
   } from '../lib/session-status';
   import {
+    applyDelta,
     formatElapsed,
     selectChatEntries,
     transcriptFilename,
+    type AgentMessageDeltaEvent,
+    type StreamBubble,
     type TranscriptRecord,
   } from '../lib/transcript';
   import { fetchWorkstreams, workstreamLabel, type Workstream } from '../lib/workstreams';
+  import { untrack } from 'svelte';
 
   const POLL_MS = 5000; // matches StatusBar.svelte's poll cadence
   const TICK_MS = 1000; // local redisplay tick only — no network call
+
+  /** Feature gate for the Slice 3 session-level delta SSE stream (tcode
+   * streaming epic #3696). Default OFF — ships dark, flipped on later by
+   * setting `VITE_TCODE_SSE=true` at build/dev time — so today's poll-only
+   * behavior is fully unchanged until this is explicitly enabled. See the
+   * module doc's SSE section below for what turning it on adds. */
+  const SSE_ENABLED = import.meta.env.VITE_TCODE_SSE === 'true';
 
   /** How close to the bottom (in px) still counts as "at the bottom" for
    * auto-scroll purposes — a small fudge factor, not an exact 0, so a
@@ -144,6 +172,10 @@
   let error = $state<string | null>(null);
   let cancelPhase = $state<CancelPhase>('idle');
   let now = $state(Date.now());
+
+  // Live delta bubbles (Slice 3, gated behind `SSE_ENABLED`) — see the
+  // dedicated `$effect` below for how these are populated/reset/reconciled.
+  let streamBubbles = $state<StreamBubble[]>([]);
 
   let pollController: AbortController | null = null;
 
@@ -413,7 +445,113 @@
     };
   });
 
+  // Same fresh-object-every-poll-tick problem `activeWorkstreamId` solves for
+  // the workstream-level effect above applies here too — `session` is
+  // reassigned to a newly-parsed object on every `POLL_MS` tick even when the
+  // bound session itself hasn't changed, so this effect keys off a `$derived`
+  // PRIMITIVE rather than reading `session?.id` directly.
+  let sessionId = $derived(session?.id ?? null);
+
+  // Live delta stream (tcode streaming epic #3696, Slice 3) — gated behind
+  // `SSE_ENABLED` (default OFF, see that const's doc). When enabled, opens an
+  // `EventSource` on the SESSION-scoped `GET /sessions/{id}/events` route
+  // (distinct from the WORKSTREAM-scoped nudge route above) and folds every
+  // `agent_message_delta` envelope through `applyDelta` so in-progress turns
+  // render incrementally rather than waiting for the next `POLL_MS` transcript
+  // poll. Re-subscribes only when `sessionId` itself changes (same reasoning
+  // as the effect above), resetting `streamBubbles` to `[]` on every
+  // (re)subscribe — a bubble from a previous session must never bleed into
+  // the next one's stream. `GET /sessions/{id}/events` replays that session's
+  // full ring buffer before chaining live events (see `crate::serve::http`'s
+  // `session_events_sse` docs), so a fresh subscribe naturally rebuilds any
+  // turns that were mid-stream at connect time; every frame carries its
+  // envelope `seq`, forwarded into `AgentMessageDeltaEvent.seq` so `applyDelta`
+  // can order/dedup bubbles across a replay-then-live boundary. Only
+  // `agent_message_delta` envelopes are handled — every other `kind` is
+  // ignored here (the workstream-level effect above already treats any frame
+  // as a generic "refresh now" nudge).
+  $effect(() => {
+    const id = sessionId;
+    streamBubbles = [];
+    if (!SSE_ENABLED || !id || typeof EventSource === 'undefined') return;
+
+    let source: EventSource | null = null;
+    let cancelled = false;
+
+    void (async () => {
+      let base: string;
+      try {
+        base = await apiBase();
+      } catch {
+        return;
+      }
+      if (cancelled) return;
+      source = new EventSource(`${base}/sessions/${id}/events`);
+      source.onmessage = (e: MessageEvent) => {
+        if (cancelled) return;
+        let envelope: { seq?: unknown; event?: { type?: unknown; [key: string]: unknown } };
+        try {
+          envelope = JSON.parse(e.data);
+        } catch {
+          return;
+        }
+        const event = envelope.event;
+        if (
+          typeof envelope.seq !== 'number' ||
+          !event ||
+          event.type !== 'agent_message_delta' ||
+          typeof event.agent !== 'string' ||
+          typeof event.agent_id !== 'string' ||
+          typeof event.turn_id !== 'string' ||
+          typeof event.delta !== 'string' ||
+          typeof event.done !== 'boolean'
+        ) {
+          return;
+        }
+        const delta: AgentMessageDeltaEvent = {
+          session_id: id,
+          agent: event.agent,
+          agent_id: event.agent_id,
+          turn_id: event.turn_id,
+          delta: event.delta,
+          done: event.done,
+          seq: envelope.seq,
+        };
+        streamBubbles = applyDelta(streamBubbles, delta);
+      };
+    })();
+
+    return () => {
+      cancelled = true;
+      source?.close();
+    };
+  });
+
+  // Poll-driven reconcile (Slice 3): once a FRESH poll transcript lands, the
+  // polled `chatEntries` are the durable record from here for anything the
+  // stream had already marked `done` — drop those bubbles so a finished turn
+  // is never shown twice (once as a live bubble, again once the poll catches
+  // up). An in-progress (`!done`) bubble is deliberately left alone across
+  // poll ticks — the poll cannot yet have observed it as a finished turn.
+  // Reads `streamBubbles` via `untrack` so this effect's dependency is
+  // `transcript` alone (assigning `streamBubbles` here must not make the
+  // effect re-run itself).
+  $effect(() => {
+    void transcript;
+    const current = untrack(() => streamBubbles);
+    if (current.some((b) => b.done)) {
+      streamBubbles = current.filter((b) => !b.done);
+    }
+  });
+
   let chatEntries = $derived(transcript ? selectChatEntries(transcript.turns) : []);
+  /** Live streaming entries rendered after `chatEntries` — see the Slice 3
+   * effects above for how `streamBubbles` is populated/reconciled. Carries
+   * `streaming` so the template can apply the in-progress affordance only to
+   * a bubble still receiving deltas. */
+  let liveEntries = $derived(
+    streamBubbles.map((b) => ({ agent: b.agent, text: b.text, streaming: !b.done })),
+  );
   let canCancel = $derived(session !== null && !TERMINAL_SESSION_STATUSES.has(session.status));
 
   // Download-transcript affordance (issue #3526). Shown once a bound session
@@ -468,8 +606,11 @@
     // #3446), unless the operator has scrolled up to read backlog. Reads
     // `chatEntries` (not `transcript`) so this only fires when the parsed
     // turn list itself actually changes shape/content, not on every raw
-    // poll tick that happens to return byte-identical turns.
+    // poll tick that happens to return byte-identical turns. Also reads
+    // `liveEntries` (Slice 3) so growing streamed text keeps auto-scrolling
+    // too, not just a completed-turn poll refresh.
     void chatEntries;
+    void liveEntries;
     if (streamEl && !userScrolledUp) {
       streamEl.scrollTop = streamEl.scrollHeight;
     }
@@ -555,7 +696,7 @@
           {session.task}
         </p>
 
-        {#if chatEntries.length === 0}
+        {#if chatEntries.length === 0 && liveEntries.length === 0}
           <p class="text-xs text-trusty-text-muted">no turns recorded yet</p>
         {:else}
           {#each chatEntries as entry, i (i)}
@@ -563,6 +704,20 @@
               <span class="font-mono font-semibold uppercase tracking-wide text-trusty-text"
                 >{entry.agent}</span
               >
+              <p class="mt-0.5 whitespace-pre-wrap text-trusty-text-secondary">{entry.text}</p>
+            </div>
+          {/each}
+          {#each liveEntries as entry, i (i)}
+            <div class="text-xs">
+              <span class="inline-flex items-center gap-1.5 font-mono font-semibold uppercase tracking-wide text-trusty-text">
+                {entry.agent}
+                {#if entry.streaming}
+                  <span
+                    class="h-1.5 w-1.5 animate-pulse rounded-full bg-status-warn"
+                    title="streaming…"
+                  ></span>
+                {/if}
+              </span>
               <p class="mt-0.5 whitespace-pre-wrap text-trusty-text-secondary">{entry.text}</p>
             </div>
           {/each}
