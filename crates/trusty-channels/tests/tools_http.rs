@@ -1120,10 +1120,11 @@ async fn lookup_sections_posts_criteria_and_returns_ids() {
 
     assert_eq!(out["canvas_id"], "F123");
     assert_eq!(out["section_ids"], json!(["Sc001", "Sc002"]));
-    assert_eq!(
-        out["sections"],
-        json!([{ "id": "Sc001" }, { "id": "Sc002" }])
-    );
+    // Slack's raw `sections` envelope must never be forwarded — only the
+    // allow-listed `section_ids` field is returned (code-critic finding 1 on
+    // PR #3749: a raw passthrough could carry unescaped workspace-authored
+    // text from an undocumented future response field).
+    assert!(out.get("sections").is_none());
 }
 
 #[tokio::test]
@@ -1172,6 +1173,32 @@ async fn lookup_sections_requires_canvas_id() {
     .await
     .expect_err("missing canvas_id should error before any network call");
     assert!(matches!(err, ToolCallError::InvalidArgs(_)));
+}
+
+#[tokio::test]
+async fn lookup_sections_surfaces_slack_api_error() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "canvases.sections.lookup",
+        json!({ "ok": false, "error": "canvas_not_found" }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_canvas_lookup_sections",
+        json!({ "canvas_id": "F999" }),
+    )
+    .await
+    .expect_err("Slack ok:false must surface as an error");
+    match err {
+        ToolCallError::Slack(SlackError::Api(slug)) => {
+            assert_eq!(slug, "canvas_not_found");
+        }
+        other => panic!("expected ToolCallError::Slack(SlackError::Api(_)), got {other:?}"),
+    }
 }
 
 // ── slack_read_file (issue #3615) ──────────────────────────────────────────

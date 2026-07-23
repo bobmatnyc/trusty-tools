@@ -227,12 +227,20 @@ pub(super) async fn read_canvas(client: &BaseClient, args: Value) -> Result<Valu
 /// API) and `contains_text` (string), omitting each when absent. `criteria`
 /// itself is always sent (as `{}` when both are absent) since
 /// `canvases.sections.lookup` requires the key. Returns `{canvas_id,
-/// section_ids, sections}`: `section_ids` is the convenience list of each
-/// matched section's `id`; `sections` is the raw matched-section array
-/// Slack returned, for any other surfaced fields a caller needs.
+/// section_ids}` — `section_ids` is the list of each matched section's `id`
+/// (a platform-controlled identifier, not workspace-member-authored text).
+/// Slack's raw `sections` response array is deliberately **not** passed
+/// through: `canvases.sections.lookup` is criteria'd by `contains_text`, so an
+/// undocumented future response field could carry workspace-member-authored
+/// text straight to the model unescaped, the same injection vector
+/// `clean.rs`'s `mrkdwn_escape` passes guard against everywhere else in this
+/// crate. This tool promises only ids, so only ids are returned; a caller
+/// needing more must add a `clean_section`-style escaping helper alongside
+/// [`super::clean`] rather than forward the raw envelope.
 /// Test: `tests/tools_http.rs::lookup_sections_posts_criteria_and_returns_ids`,
 /// `::lookup_sections_omits_absent_criteria_fields`,
-/// `::lookup_sections_requires_canvas_id`.
+/// `::lookup_sections_requires_canvas_id`,
+/// `::lookup_sections_surfaces_slack_api_error`.
 pub(super) async fn lookup_sections(
     client: &BaseClient,
     args: Value,
@@ -247,19 +255,19 @@ pub(super) async fn lookup_sections(
     }
     let body = json!({ "canvas_id": canvas_id.as_str(), "criteria": criteria });
     let resp = client.call_method(CANVASES_SECTIONS_LOOKUP, &body).await?;
-    let sections = resp
+    let section_ids: Vec<String> = resp
         .get("sections")
         .and_then(Value::as_array)
-        .cloned()
+        .map(|sections| {
+            sections
+                .iter()
+                .map(|s| field_str(s, "id"))
+                .filter(|id| !id.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
-    let section_ids: Vec<String> = sections
-        .iter()
-        .map(|s| field_str(s, "id"))
-        .filter(|id| !id.is_empty())
-        .collect();
     Ok(json!({
         "canvas_id": canvas_id,
         "section_ids": section_ids,
-        "sections": sections,
     }))
 }

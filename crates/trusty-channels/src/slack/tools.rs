@@ -19,13 +19,13 @@ use serde_json::{json, Value};
 ///
 /// Why: Both `tool_list_response` (indirectly) and `is_known_tool` must agree
 /// on the exact surface; a single constant array prevents drift.
-/// What: The 19 chat-as-tools operations implemented by the native Slack MCP —
-/// the original nine (#2639/#2640) plus ten added for claude.ai Slack-connector
-/// parity (epic #3611). `slack_send_message_draft` (claude.ai's 20th tool) is
-/// deliberately NOT included: Slack has no public API to create a message
+/// What: The 21 chat-as-tools operations implemented by the native Slack MCP —
+/// the original nine (#2639/#2640), ten added for claude.ai Slack-connector
+/// parity (epic #3611), and two more from epic #3744 slice 1's
+/// `slack_canvas_*` tools. `slack_send_message_draft` (claude.ai's 20th tool)
+/// is deliberately NOT included: Slack has no public API to create a message
 /// draft (`chat.postMessage`/`chat.scheduleMessage` send or schedule; neither
-/// creates an editable draft), so there is nothing for this adapter to call —
-/// see the crate README and the PR for issue #3616.
+/// creates an editable draft) — see the crate README and PR #3616.
 /// Test: `known_tools_match_registry` cross-checks this against the built list.
 pub const TOOL_NAMES: &[&str] = &[
     "slack_send_message",
@@ -431,13 +431,11 @@ pub fn tool_list_response() -> Value {
             "slack_canvas_lookup_sections",
             "Look up section ids/anchors within an existing canvas via \
              canvases.sections.lookup, filtered by section type and/or contained \
-             text. Slack has no full-canvas-content-read API — this returns section \
-             anchors (ids), not the canvas's document content; pair the returned \
-             section_id with slack_update_canvas / a section-targeted canvases.edit \
-             call if you need to act on a specific section. Slack's criteria \
-             reliably accepts only h1/h2/h3/any_header as section_types values; \
-             other section type strings may be silently ignored by the API. \
-             Requires scope canvases:read.",
+             text. Slack has no full-canvas-content-read API — this returns only \
+             section_ids, never document content or any other raw response field; \
+             pair a returned id with slack_update_canvas / a section-targeted \
+             canvases.edit call to act on it. Slack's criteria reliably accepts \
+             only h1/h2/h3/any_header as section_types. Requires scope canvases:read.",
             json!({
                 "canvas_id": { "type": "string", "description": "Canvas ID (e.g. F0123ABCD)." },
                 "section_types": {
