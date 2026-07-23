@@ -11252,6 +11252,7 @@ name = "trusty-agents-ui"
 version = "0.16.1"
 dependencies = [
  "anyhow",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

@@ -11,7 +11,7 @@
 //! checks and API base URL).
 //! What: `ApiServerState`/`SharedApi`, `api_base`, `ensure_api_server`
 //! (Tauri command), `resolve_tagent_binary`, `sidecar_candidate_names`,
-//! `http_health`, `kill_sidecar`.
+//! `http_health`, `kill_sidecar`, `terminate_child`.
 //! Test: `cargo check` in `ui/src-tauri/`; the process-spawn/respawn logic
 //! itself isn't unit-testable without an actual `tagent` binary on disk (see
 //! the module-level doc in the original `main.rs` for prior manual test
@@ -24,11 +24,22 @@
 //! remove this whole resolution dance. Out of scope here; tracked as a
 //! follow-up, not fixed in this pass.
 
+use std::process::ExitStatus;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::State;
 use tokio::process::Child;
 use tokio::sync::Mutex;
+
+/// How long we let the sidecar shut down gracefully after SIGTERM before we
+/// escalate to SIGKILL.
+///
+/// Why: `tagent --api` handles SIGTERM and releases its port cleanly, but a
+/// hung or wedged sidecar must not stall app quit indefinitely. Two seconds is
+/// long enough for a healthy sidecar to unbind its listener and short enough
+/// that a wedged one doesn't make quit feel broken during the demo.
+pub(crate) const SIDECAR_GRACE: Duration = Duration::from_secs(2);
 
 /// Shared handle to the spawned `trusty-agents --api` sidecar.
 ///
@@ -243,16 +254,69 @@ pub(crate) async fn http_health(port: u16) -> bool {
 /// `AppHandle::exit`, which raises a fresh `ExitRequested`). `guard.take()`
 /// empties the slot on first use, so a second caller finds `None` and is a
 /// safe no-op — no double-kill, no error.
-/// What: Locks `state.child`, takes the `Child` if present, sends it a kill
-/// signal and awaits reaping.
-/// Test: Manually — quit via the tray item, confirm the sidecar process
-/// exits (`ps` shows no `trusty-agents --api`); quit via Cmd+Q, same check.
+/// What: Locks `state.child`, takes the `Child` if present, and hands it to
+/// [`terminate_child`] for graceful-then-forced reaping. Releases the lock
+/// *before* awaiting termination so a concurrent `ensure_api_server` isn't
+/// blocked for the whole grace window.
+/// Test: `terminate_child` is unit-tested against real child processes (see
+/// the `tests` module); the quit wiring itself is smoke-tested manually —
+/// quit via the tray item / Cmd+Q and confirm `ps` shows no `tagent --api`.
 pub async fn kill_sidecar(state: &SharedApi) {
-    let mut guard = state.child.lock().await;
-    if let Some(mut child) = guard.take() {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+    // Take the child out under the lock, then drop the lock before awaiting so
+    // the (up to `SIDECAR_GRACE`) termination doesn't hold off other callers.
+    let child = {
+        let mut guard = state.child.lock().await;
+        guard.take()
+    };
+    if let Some(child) = child {
+        terminate_child(child, SIDECAR_GRACE).await;
     }
+}
+
+/// Terminate a sidecar child gracefully, escalating to SIGKILL after `grace`,
+/// and reap it so no zombie or orphan survives.
+///
+/// Why: `#3372` — the app quit path sent SIGKILL without awaiting the reap (or,
+/// on the fast path, never awaited at all), so the `tagent --api` sidecar could
+/// outlive the GUI and keep holding its fixed port. Repeated demo restarts then
+/// accumulated orphans and port conflicts. We now (1) send SIGTERM so the
+/// sidecar can unbind its listener cleanly, (2) wait up to `grace` for it to
+/// exit, and (3) SIGKILL + reap if it's still alive. An already-exited child is
+/// handled without panicking (`try_wait` reaps it and returns early).
+/// What: Consumes the `Child`. Returns the observed `ExitStatus`, or `None`
+/// only if the final reap itself errors (e.g. the child was already reaped
+/// elsewhere). Pure process lifecycle — no Tauri/window state — so it is
+/// unit-testable without a display server.
+/// Test: `terminate_child_reaps_running_process`,
+/// `terminate_child_handles_already_exited`.
+pub(crate) async fn terminate_child(mut child: Child, grace: Duration) -> Option<ExitStatus> {
+    // Already dead? Reap it (non-blocking) and we're done — no signal, no panic.
+    if let Ok(Some(status)) = child.try_wait() {
+        return Some(status);
+    }
+
+    // Graceful phase (unix): SIGTERM, then wait up to `grace` for a clean exit.
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: `pid` names a child process we own and have not yet reaped;
+        // `SIGTERM` is a valid signal. `kill` has no memory-safety effects — a
+        // stale pid merely returns ESRCH, which we intentionally ignore.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+        if let Ok(Ok(status)) = tokio::time::timeout(grace, child.wait()).await {
+            return Some(status);
+        }
+        tracing::warn!(
+            pid,
+            ?grace,
+            "sidecar did not exit on SIGTERM within grace; sending SIGKILL"
+        );
+    }
+
+    // Force phase: SIGKILL and reap. Also the sole path on non-unix targets.
+    let _ = child.start_kill();
+    child.wait().await.ok()
 }
 
 #[cfg(test)]
@@ -311,6 +375,68 @@ mod tests {
         assert_eq!(
             resolved,
             std::path::PathBuf::from("/tmp/custom-tagent-build")
+        );
+    }
+
+    /// The #3372 regression guard: a running sidecar must actually be reaped by
+    /// `terminate_child`, not merely signalled-and-forgotten. We spawn a real
+    /// long-lived child (`sleep 300`), confirm it is alive, terminate it, and
+    /// assert (a) we get an `ExitStatus` back (proof the reap `wait` completed)
+    /// and (b) the OS no longer knows the pid — i.e. no orphan survives. Uses
+    /// real OS processes, so it needs no display server and runs in CI.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_reaps_running_process() {
+        let child = tokio::process::Command::new("sleep")
+            .arg("300")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id().expect("running child has a pid") as libc::pid_t;
+
+        // Sanity: the process is alive before we terminate it.
+        // SAFETY: signal 0 performs existence/permission checks only, no delivery.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "child should be alive");
+
+        let status = terminate_child(child, SIDECAR_GRACE).await;
+        assert!(
+            status.is_some(),
+            "terminate_child must reap the child and yield an ExitStatus"
+        );
+
+        // The pid must be gone (reaped): kill(pid, 0) fails with ESRCH.
+        // SAFETY: signal 0, existence check only.
+        let rc = unsafe { libc::kill(pid, 0) };
+        assert_eq!(rc, -1, "reaped child's pid must no longer exist");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "kill on the reaped pid must fail with ESRCH (no such process)"
+        );
+    }
+
+    /// An already-exited child must be handled without panicking or hanging —
+    /// `terminate_child` should reap it via the fast `try_wait` path and return
+    /// its status rather than signalling a dead pid or blocking on `wait`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_handles_already_exited() {
+        let mut child = tokio::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        // Let it run to completion, but do NOT reap it here — leave that to
+        // `terminate_child` so we exercise the already-exited branch.
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(e) => panic!("try_wait failed: {e}"),
+            }
+        }
+
+        let status = terminate_child(child, SIDECAR_GRACE).await;
+        assert!(
+            status.is_some(),
+            "an already-exited child must be reaped, not left hanging"
         );
     }
 }
