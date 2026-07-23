@@ -135,3 +135,101 @@ async fn resolve_in_session_rename_target_refuses_when_record_not_found() {
         .expect_err("an unresolvable record must refuse");
     assert!(err.contains("sess-1"));
 }
+
+// ── server-confirmed rename name (#3692 review HIGH-1) ──────────────────────
+
+#[test]
+fn rename_success_message_plain() {
+    // The daemon confirmed exactly the requested name — plain success line.
+    let msg = rename_success_message("sess-1", "tm-new", Some("tm-new"));
+    assert_eq!(msg, "renamed sess-1 -> tm-new");
+}
+
+#[test]
+fn rename_success_message_notes_suffix_on_collision() {
+    // The daemon auto-suffixed a colliding name (#3692): the message must
+    // carry the ACTUAL name and say the requested one was taken — pre-fix
+    // code printed the requested name and the operator's next
+    // attach/resume-by-name would target a session that doesn't exist.
+    let msg = rename_success_message("sess-1", "tm-new", Some("tm-new-2"));
+    assert!(
+        msg.contains("tm-new-2"),
+        "must print the applied name: {msg}"
+    );
+    assert!(
+        msg.contains("was taken") && msg.contains("auto-suffixed"),
+        "must explain the suffix: {msg}"
+    );
+}
+
+#[test]
+fn rename_success_message_falls_back_without_body() {
+    // An older daemon whose response body carries no parseable `name` —
+    // fall back to the requested name rather than printing nothing.
+    let msg = rename_success_message("sess-1", "tm-new", None);
+    assert_eq!(msg, "renamed sess-1 -> tm-new");
+}
+
+/// Spawn a one-shot mock daemon that answers the rename PATCH with `status`
+/// and `body` — lets `do_rename_request` be tested end-to-end (HTTP → parse →
+/// message) without a real daemon.
+async fn spawn_mock_rename_daemon(status: &str, body: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let resp = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        let mut buf = [0u8; 2048];
+        let _ = sock.read(&mut buf).await;
+        let _ = sock.write_all(resp.as_bytes()).await;
+        let _ = sock.shutdown().await;
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn do_rename_request_reports_server_confirmed_suffixed_name() {
+    // Causality (#3692 review HIGH-1): the daemon applied `tm-new-2` (the
+    // requested `tm-new` collided and was auto-suffixed). Pre-fix code never
+    // read the body and reported `tm-new` — the message MUST carry the
+    // daemon-confirmed name instead.
+    let url = spawn_mock_rename_daemon(
+        "200 OK",
+        r#"{"id":"sess-1","name":"tm-new-2","state":"stopped"}"#,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let msg = do_rename_request(&client, &url, "sess-1", "sess-1", "tm-new".to_string())
+        .await
+        .expect("rename succeeds");
+    assert!(
+        msg.contains("tm-new-2"),
+        "must report the daemon's applied name: {msg}"
+    );
+    assert!(
+        msg.contains("was taken"),
+        "must note the collision suffix: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn do_rename_request_reports_plain_success() {
+    // No collision: the daemon confirms exactly the requested name.
+    let url = spawn_mock_rename_daemon(
+        "200 OK",
+        r#"{"id":"sess-1","name":"tm-new","state":"stopped"}"#,
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let msg = do_rename_request(&client, &url, "sess-1", "sess-1", "tm-new".to_string())
+        .await
+        .expect("rename succeeds");
+    assert_eq!(msg, "renamed sess-1 -> tm-new");
+}

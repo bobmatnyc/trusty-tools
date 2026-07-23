@@ -104,25 +104,49 @@ impl SessionManager {
     /// adoption — it synthesises a durable `Active` record for a pane that already
     /// exists.
     ///
-    /// Design decisions (DOC-20 / DOC-14):
+    /// Design decisions (DOC-20 / DOC-14; collision handling updated #3692):
     /// - **Collision check is INVERTED vs. `create`.** `create` fails when the name
     ///   already exists; `adopt_existing` fails with
     ///   [`ManagedError::TmuxSessionMissing`] when the pane does NOT exist (you
-    ///   cannot adopt what is not there) and with [`ManagedError::AlreadyAdopted`]
-    ///   when the store already tracks the name.
-    /// - **The already-adopted check and the upsert run under ONE held write lock.**
-    ///   Reading the store to test for the name and then upserting must be atomic —
-    ///   otherwise two concurrent `adopt_existing` calls for the same `tmux_name`
-    ///   could both observe "absent" before either writes, producing duplicate
-    ///   `Active` records (TOCTOU). We therefore take the store write guard ONCE,
-    ///   scan the live records through it (`all()` reloads-on-read so a record
-    ///   another process registered is also seen), reject a tracked name, and
-    ///   upsert — all without releasing the guard. The tmux `session_exists`
-    ///   liveness check stays OUTSIDE the lock (it touches tmux, not the store, and
-    ///   a stale pane between the check and the lock is the operator's race to lose,
-    ///   not a store-consistency hazard).
+    ///   cannot adopt what is not there).
+    /// - **A name held by a NON-TERMINAL record is auto-suffixed, never rejected —
+    ///   UNLESS it is provably the SAME pane** (owner decision, issue #3692: two
+    ///   distinct managed sessions were found sharing one name). tmux enforces
+    ///   session-name uniqueness on one server, so a live tmux name a NON-terminal
+    ///   record already tracks can only mean one of two things: (a) it is the
+    ///   identical pane being adopted again (compared via `pane_id` — the stable
+    ///   tmux pane identifier, #2453), in which case [`ManagedError::AlreadyAdopted`]
+    ///   is still returned (auto-suffixing would fork ONE real pane into two
+    ///   mismatched records — the exact hazard this guard exists to prevent); or
+    ///   (b) the name was RECYCLED — the colliding record's pane has since died and
+    ///   a genuinely different pane now answers to the same name — in which case the
+    ///   new adoption is auto-suffixed (smallest free `-N` ordinal) and the LIVE tmux
+    ///   session is physically renamed to match, so the record and its pane never
+    ///   drift apart; a stale collider still CLAIMING liveness
+    ///   (`Active`/`Provisioning`) is additionally converged to `Stopped` in the
+    ///   same guard scope (its pane is provably dead — this is what
+    ///   `reconcile_on_boot` would do at the next pass, done eagerly). When
+    ///   `pane_id` is unknown on either side, (a) is assumed (the safe default). A
+    ///   TERMINAL (`Decommissioned`/`Deleted`) record's name never blocks — this
+    ///   method filters to non-terminal records only, matching `rename`'s
+    ///   long-standing rule.
+    /// - **The collision check and the no-collision upsert run under ONE held
+    ///   write lock; tmux subprocesses NEVER run under it** (#3698 round-2
+    ///   HIGH-A). Reading the store to test for the name and then upserting must
+    ///   be atomic — otherwise two concurrent `adopt_existing` calls for the same
+    ///   `tmux_name` could both observe "absent" before either writes, producing
+    ///   duplicate `Active` records (TOCTOU). But `store.write()` gates every
+    ///   session-manager mutation daemon-wide and tmux calls are blocking
+    ///   fork/exec/waits, so the `session_exists`/`get_pane_id`/`list_sessions`
+    ///   preconditions all run BEFORE the guard, and the recycled-name branch
+    ///   RELEASES the guard around its `rename_session`, then re-acquires and
+    ///   RE-VERIFIES (deduped name still free) before persisting — rolling the
+    ///   tmux rename back on any failure after it (#3698 round-2 HIGH-B), since
+    ///   a live renamed session tracked by no record is the untracked-session
+    ///   defect class #3692 exists to prevent.
     /// - **No `create_session` call.** The pane already exists; the driver is only
-    ///   consulted via `session_exists` to verify presence.
+    ///   consulted via `session_exists` to verify presence (and `rename_session` in
+    ///   the recycled-name case above).
     /// - **`cwd` is REQUIRED** (a plain `PathBuf`): the pane's provenance is unknown
     ///   to the daemon, so the operator supplies the working directory rather than
     ///   have it stubbed to `/unknown` (as auto-boot adoption does). `task` may be
@@ -133,18 +157,22 @@ impl SessionManager {
     ///   `trusty-mpm-` — for SAFE automatic adoption), this explicit path
     ///   adopts ANY name the operator names. The reconcile filter is left untouched.
     ///
-    /// What: verifies the pane exists, rejects an already-tracked name, then upserts
-    /// an `Active` [`SessionRecord`] carrying the supplied `cwd`/`task`/`runtime`/
-    /// `ephemeral` (a fresh id, no workspace/repo/branch — provenance is unknown).
-    /// `ephemeral` (#1508) tags a throwaway adoption (e.g. an e2e test pane) so the
-    /// auto-reap paths may decommission it; operator adoptions pass `false`.
-    /// Returns the new record.
+    /// What: verifies the pane exists, resolves a collision-free name (auto-suffixing
+    /// a recycled name, rejecting only a genuine duplicate of the same pane), then
+    /// upserts an `Active` [`SessionRecord`] carrying the supplied `cwd`/`task`/
+    /// `runtime`/`ephemeral` (a fresh id, no workspace/repo/branch — provenance is
+    /// unknown). `ephemeral` (#1508) tags a throwaway adoption (e.g. an e2e test
+    /// pane) so the auto-reap paths may decommission it; operator adoptions pass
+    /// `false`. Returns the new record (its `tmux_name` may differ from the
+    /// requested `tmux_name` if it was auto-suffixed).
     /// Test: `manager_adopt_existing_registers_active` (also asserts the returned
     /// record's `cwd` matches the adopted cwd),
     /// `manager_adopt_existing_missing_tmux_errors`,
     /// `manager_adopt_existing_double_adopt_errors` (the single-locked path still
-    /// rejects a second adopt of the same name),
-    /// `manager_adopt_existing_allows_non_tmpm_name` in `super::tests`.
+    /// rejects a second adopt of the identical, already-tracked pane),
+    /// `manager_adopt_existing_allows_non_tmpm_name`,
+    /// `manager_adopt_existing_reuses_name_freed_by_decommissioned_record`,
+    /// `manager_adopt_existing_suffixes_recycled_name` in `super::tests`.
     pub async fn adopt_existing(
         &self,
         tmux_name: &str,
@@ -163,14 +191,26 @@ impl SessionManager {
         // Capture the pre-existing pane's stable tmux `pane_id` (#2453 review
         // finding 1, round 2) — best-effort, `None` if the driver cannot
         // resolve one. Adoption connects to an ALREADY-LIVE pane, so this is
-        // available immediately, unlike a fresh spawn.
+        // available immediately, unlike a fresh spawn. Also doubles (#3692) as
+        // the signal that tells a same-name collision below apart from a
+        // recycled one.
         let pane_id = self.tmux_driver().get_pane_id(tmux_name);
 
-        let record = SessionRecord {
+        // Live-tmux snapshot BEFORE the guard (#3698 round-2 HIGH-A):
+        // `list_sessions` is a blocking tmux subprocess and must never run
+        // under the store write lock that gates every other mutation.
+        let live_names = self
+            .tmux
+            .list_sessions()
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+
+        // One construction site for the adopted record, so the no-collision
+        // and recycled-name arms below cannot drift apart on any field.
+        let build_record = |final_name: String| SessionRecord {
             id: ManagedSessionId::new(),
-            tmux_name: tmux_name.to_string(),
-            cwd,
-            task,
+            tmux_name: final_name,
+            cwd: cwd.clone(),
+            task: task.clone(),
             state: ManagedSessionState::Active,
             created_at: Utc::now(),
             last_activity_at: None,
@@ -191,32 +231,180 @@ impl SessionManager {
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
-            pane_id,
+            pane_id: pane_id.clone(),
             injection_status: Default::default(),
             worktree_owner: None,
         };
 
-        // ── Atomic already-adopted check + upsert under ONE held write guard ──────
-        // Acquire the store write lock ONCE and keep it for both the existence
-        // scan and the upsert, so two concurrent adopts of the same `tmux_name`
-        // cannot both pass the "absent" test and create duplicate `Active` records
-        // (the TOCTOU the previous read-then-write split exposed). `all()` requires
-        // `&mut self` and reloads-on-read, so a record another process registered
-        // is also seen through this same guard.
-        {
-            let mut store = self.store.write().await;
-            if store.all().await?.iter().any(|r| r.tmux_name == tmux_name) {
-                return Err(ManagedError::AlreadyAdopted(tmux_name.to_string()));
+        // ── Guard 1: collision check (+ the no-collision persist) — the
+        // existence scan and the upsert stay atomic under one held write
+        // guard, so two concurrent adopts of the same `tmux_name` cannot both
+        // pass the "absent" test and create duplicate `Active` records (the
+        // TOCTOU the pre-#2468 read-then-write split exposed). `all()`
+        // requires `&mut self` and reloads-on-read, so a record another
+        // process registered is also seen through this same guard. NO tmux
+        // subprocess runs while this guard is held (#3698 round-2 HIGH-A).
+        let mut store = self.store.write().await;
+        let existing = store.all().await?;
+
+        // A NON-terminal record already tracking this literal name (#3692):
+        // terminal (Decommissioned/Deleted) tombstones never block — their name
+        // is gone for good and reusable as-is.
+        let colliding = existing
+            .iter()
+            .find(|r| r.tmux_name == tmux_name && !r.state.is_terminal())
+            .cloned();
+        let record = match colliding {
+            None => {
+                let record = build_record(tmux_name.to_string());
+                store.upsert(record.clone()).await?;
+                drop(store);
+                record
             }
-            store.upsert(record.clone()).await?;
-        }
+            Some(existing_record) => {
+                let same_pane = match (existing_record.pane_id.as_deref(), pane_id.as_deref()) {
+                    (Some(a), Some(b)) => a == b,
+                    // Pane identity unknown on at least one side: assume the
+                    // same pane (safe default) — a second record for one real
+                    // pane is exactly the hazard `AlreadyAdopted` guards against.
+                    _ => true,
+                };
+                if same_pane {
+                    return Err(ManagedError::AlreadyAdopted(tmux_name.to_string()));
+                }
+                // The name was RECYCLED — tmux now answers to it with a
+                // genuinely different pane than the stale record tracks.
+                // Auto-suffix (never reject, #3692) and physically rename the
+                // live tmux session so the new record and its pane stay in
+                // lock-step. The tmux rename runs OUTSIDE the guard (#3698
+                // round-2 HIGH-A), so the guard is dropped here and
+                // RE-ACQUIRED below with a re-verify before anything persists;
+                // every failure after the tmux rename rolls it back (#3698
+                // round-2 HIGH-B) — a live renamed session tracked by NO
+                // record is the untracked-session defect class #3692 exists
+                // to prevent.
+                let taken = Self::taken_name_set(&live_names, &existing, None);
+                let deduped = Self::dedupe_name_against(tmux_name, &taken);
+                drop(store);
+
+                self.tmux.rename_session(tmux_name, &deduped)?;
+
+                // ── Guard 2: re-verify, then persist; roll the tmux rename
+                // back on ANY failure from here on.
+                let mut store = self.store.write().await;
+                let records = match store.all().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        drop(store);
+                        return Err(self.rollback_adopt_rename(
+                            &deduped,
+                            tmux_name,
+                            &format!("store reload failed: {e}"),
+                        ));
+                    }
+                };
+                // Nobody may have claimed the deduped name while the lock was
+                // released across the tmux call.
+                if records
+                    .iter()
+                    .any(|r| r.tmux_name == deduped && !r.state.is_terminal())
+                {
+                    drop(store);
+                    return Err(self.rollback_adopt_rename(
+                        &deduped,
+                        tmux_name,
+                        &format!("'{deduped}' was claimed concurrently — retry the adopt"),
+                    ));
+                }
+                // #3692 review MEDIUM: the pane-id mismatch above is proof the
+                // stale record's own pane is DEAD (tmux enforces name
+                // uniqueness — a different pane answering to its name means
+                // its pane is gone). If that record still CLAIMS to be live
+                // (Active/Provisioning), converge it to `Stopped` now, in this
+                // same guard scope, instead of leaving a live-looking record
+                // whose name points at somebody else's pane until the next
+                // reconcile pass. `Stopped` (not a terminal state) is
+                // deliberate: it matches what `reconcile_on_boot` would do on
+                // discovering the dead pane, and keeps the record resumable —
+                // its name stays reserved for it (non-terminal ⇒ taken), which
+                // is exactly why THIS adoption takes the suffix instead.
+                // (Converging first, adopting second: if the second write
+                // fails, a converged-but-unadopted Stopped record is still
+                // CORRECT — its pane really is dead — so only the tmux rename
+                // needs compensating.)
+                if let Some(stale) = records.iter().find(|r| {
+                    r.id == existing_record.id
+                        && matches!(
+                            r.state,
+                            ManagedSessionState::Active | ManagedSessionState::Provisioning
+                        )
+                }) {
+                    let mut stale = stale.clone();
+                    stale.state = ManagedSessionState::Stopped;
+                    stale.last_activity_at = Some(Utc::now());
+                    if let Err(e) = store.upsert(stale).await {
+                        drop(store);
+                        return Err(self.rollback_adopt_rename(
+                            &deduped,
+                            tmux_name,
+                            &format!("store write failed: {e}"),
+                        ));
+                    }
+                }
+                let record = build_record(deduped.clone());
+                if let Err(e) = store.upsert(record.clone()).await {
+                    drop(store);
+                    return Err(self.rollback_adopt_rename(
+                        &deduped,
+                        tmux_name,
+                        &format!("store write failed: {e}"),
+                    ));
+                }
+                drop(store);
+                record
+            }
+        };
+
         info!(
             id = %record.id,
-            name = %tmux_name,
+            name = %record.tmux_name,
             runtime = %runtime.as_str(),
             "adopted existing tmux session into the managed store"
         );
         Ok(record)
+    }
+
+    /// Roll a half-applied recycled-name tmux rename back (`deduped` →
+    /// `original`) and build the error `adopt_existing` should surface
+    /// (#3698 round-2 HIGH-B).
+    ///
+    /// Why: once the live tmux session has been renamed OUTSIDE the store
+    /// guard, any later failure — reload error, lost re-verify race, failed
+    /// upsert — would otherwise leave a live RENAMED session tracked by NO
+    /// record: exactly the untracked-session defect class #3692 exists to
+    /// prevent, and one this path alone could mint (pre-#3692 adopt never
+    /// mutated tmux). Mirrors `rename.rs`'s `rollback_rename`.
+    /// What: renames tmux back; on success returns a retryable
+    /// [`ManagedError::InvalidState`] carrying `cause`; on rollback failure
+    /// returns the explicit manual-recovery error naming the exact
+    /// `tmux rename-session` command to run.
+    /// Test: `manager_adopt_existing_rolls_back_tmux_rename_when_store_write_fails`
+    /// in `super::adopt_existing_tests`.
+    fn rollback_adopt_rename(&self, deduped: &str, original: &str, cause: &str) -> ManagedError {
+        match self.tmux.rename_session(deduped, original) {
+            Ok(()) => ManagedError::InvalidState(
+                original.to_string(),
+                format!("adopt aborted and rolled back ({cause})"),
+            ),
+            Err(rollback) => ManagedError::InvalidState(
+                original.to_string(),
+                format!(
+                    "adopt half-applied: the live tmux session was renamed to '{deduped}' but \
+                     nothing was persisted ({cause}), and the rollback failed ({rollback}) — \
+                     manually run `tmux rename-session -t {deduped} {original}`"
+                ),
+            ),
+        }
     }
 }
 

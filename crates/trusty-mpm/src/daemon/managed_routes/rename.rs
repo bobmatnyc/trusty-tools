@@ -45,10 +45,14 @@ pub struct RenameRequest {
 /// reflect it.
 /// What: parses the id, delegates to
 /// [`crate::session_manager::SessionManager::rename`], and maps its result —
-/// `Ok` → 200 with the updated session summary; `SessionNotFound` → 404;
-/// `NameCollision` → 409 with the actionable message; `InvalidState` (an
-/// invalid name, or a terminal record) → 400; any other error → 500.
-/// Test: `rename_route_renames`, `rename_route_rejects_collision`,
+/// `Ok` → 200 with the updated session summary (`name` may differ from the
+/// request body if it collided and was auto-suffixed, issue #3692 —
+/// `rename` no longer rejects a collision); `SessionNotFound` → 404;
+/// `NameCollision` → 409 with the actionable message (retained for any other
+/// caller of this shared error type; `rename` itself no longer produces it);
+/// `InvalidState` (an invalid name, or a terminal record) → 400; any other
+/// error → 500.
+/// Test: `rename_route_renames`, `rename_route_suffixes_collision`,
 /// `rename_route_rejects_invalid_name` in `tests/session_lifecycle.rs`.
 pub async fn rename_managed_session(
     State(state): State<Arc<DaemonState>>,

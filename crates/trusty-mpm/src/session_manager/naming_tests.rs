@@ -386,3 +386,90 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
         "no record must carry the crossed tmux_name"
     );
 }
+
+// ── #3692: create-path final safety net + suffixed-length cap ───────────────
+
+/// A pre-reserved name gone STALE (another session claimed it between
+/// reservation and create) is auto-suffixed by `create_with_resolved_name`'s
+/// final pre-tmux-create dedupe — never creating a second session under the
+/// taken name (#3692 review HIGH-2).
+///
+/// Why: `create_with_reserved_name` trusts a name reserved BEFORE clone/
+/// worktree provisioning ran; that window is the create path's documented
+/// TOCTOU. Pre-fix, this scenario produced two live sessions sharing one
+/// name — the literal #3692 defect, via the create path.
+/// What: registers a live tmux session + Active record under `tm-stale-01`,
+/// then calls `create_with_reserved_name` with that same (now stale) reserved
+/// name and asserts the created session/record landed on `tm-stale-02`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn create_with_reserved_name_suffixes_stale_reservation() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    // The reservation went stale: someone else now LIVES at tm-stale-01.
+    let first = mgr
+        .create(
+            "squatter".into(),
+            Some(PathBuf::from("/tmp/wt1")),
+            Some("stale".into()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("first create");
+    assert_eq!(first.tmux_name, "tm-stale-01");
+
+    let second = mgr
+        .create_with_reserved_name(
+            super::record::ManagedSessionId::new(),
+            "tm-stale-01".into(),
+            "stale reservation".into(),
+            Some(PathBuf::from("/tmp/wt2")),
+            None,
+            None,
+            None,
+            Default::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("a stale reservation must auto-suffix, never collide");
+
+    assert_eq!(
+        second.tmux_name, "tm-stale-02",
+        "the stale reserved name must be suffixed to the next free ordinal"
+    );
+    assert!(
+        fake.session_exists("tm-stale-02"),
+        "the tmux session must be created under the SUFFIXED name"
+    );
+    // The squatter is untouched.
+    assert_eq!(
+        mgr.get(&first.id).await.expect("get first").tmux_name,
+        "tm-stale-01"
+    );
+}
+
+/// `dedupe_name_against` never returns a name over the 64-char cap
+/// `validate_session_name` enforces on the bare candidate (#3692 review LOW):
+/// a suffix appended to a near-cap name must truncate-and-retry, not silently
+/// overflow.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn dedupe_name_against_caps_suffixed_length_at_64() {
+    let long = "x".repeat(64); // exactly at the validate_session_name cap
+    let taken: std::collections::HashSet<String> = [long.clone()].into();
+
+    let result = SessionManager::dedupe_name_against(&long, &taken);
+
+    assert!(
+        result.chars().count() <= 64,
+        "suffixed result must stay within the 64-char cap, got {} chars: {result}",
+        result.chars().count()
+    );
+    assert_ne!(result, long, "the taken candidate must still be suffixed");
+}

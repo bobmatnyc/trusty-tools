@@ -206,9 +206,11 @@ async fn rename_route_renames() {
     );
 }
 
-/// PATCH …/{id} rename REJECTS a name already held by another session (409).
+/// PATCH …/{id} rename to a name already held by another session AUTO-SUFFIXES
+/// instead of rejecting (issue #3692 — a rejected rename was one of the gaps
+/// that let two distinct sessions end up sharing one name).
 #[tokio::test]
-async fn rename_route_rejects_collision() {
+async fn rename_route_suffixes_collision() {
     use trusty_mpm::daemon::managed_routes::{RenameRequest, rename_managed_session};
 
     let root = TempDir::new().unwrap();
@@ -223,7 +225,7 @@ async fn rename_route_rejects_collision() {
         .expect("get b")
         .tmux_name;
 
-    let (status, _body) = decode_response(
+    let (status, body) = decode_response(
         rename_managed_session(
             axum::extract::State(state.clone()),
             axum::extract::Path(id_a.to_string()),
@@ -235,8 +237,18 @@ async fn rename_route_rejects_collision() {
     )
     .await;
 
-    assert_eq!(status, axum::http::StatusCode::CONFLICT);
-    assert_ne!(
+    assert_eq!(status, axum::http::StatusCode::OK, "body={body}");
+    // `b_name` already carries its own `tm-<leaf>-NN` serial (from
+    // `resolve_session_name`'s per-project allocation, e.g. `tm-r-02`) —
+    // dedupe increments that EXISTING trailing ordinal in place rather than
+    // appending a second `-2` suffix (avoids an ugly `tm-r-02-2`).
+    let (base, digits) = b_name
+        .rsplit_once('-')
+        .expect("b_name carries a -NN serial");
+    let next: u32 = digits.parse::<u32>().expect("serial is numeric") + 1;
+    let suffixed = format!("{base}-{next:0width$}", width = digits.len());
+    assert_eq!(body["name"], serde_json::json!(suffixed));
+    assert_eq!(
         state
             .session_manager()
             .await
@@ -244,8 +256,19 @@ async fn rename_route_rejects_collision() {
             .await
             .expect("get a")
             .tmux_name,
+        suffixed,
+        "A must carry the auto-suffixed name, never the bare colliding one"
+    );
+    assert_eq!(
+        state
+            .session_manager()
+            .await
+            .get(&id_b)
+            .await
+            .expect("get b")
+            .tmux_name,
         b_name,
-        "A must keep its own name after a refused rename"
+        "B must keep its own name untouched"
     );
 }
 
