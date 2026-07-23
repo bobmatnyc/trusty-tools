@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **Deflake `test_rss_for_self_pid` under `cargo test --workspace` (issue
+  #3702).** The test asserted two RSS samples of the same process (which
+  delegate to the exact same sampling call) agree within a fixed 10MB —
+  fine in isolation, but under the workspace test run's shared-process
+  parallel execution, concurrent sibling-test allocation churn shifted the
+  readings by up to 30MB across 3 consecutive CI runs, blocking green-only
+  merges on unrelated PRs. Replaced the fixed bound with sanity-band,
+  relative-agreement, and deliberate-allocation-growth checks that keep
+  catching a genuinely broken/stale RSS reading without depending on a
+  quiet process.
+
 ---
 ## [0.38.1] — 2026-07-22
 
