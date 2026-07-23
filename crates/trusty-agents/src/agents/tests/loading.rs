@@ -1508,8 +1508,10 @@ fn extends_shadow_fallback_searches_home_tier_when_package_resolved_there() {
 // `claude-code-engineer` — deliberately claude-code) untouched. These tests
 // pin the resulting `runner`/`model` shape on the bundled configs so a
 // future edit can't silently reintroduce `runner = "claude-code"` on this
-// agent set, and so the Opus-for-the-base-Assistant /
-// Sonnet-for-every-other-persona testing default stays correct.
+// agent set, and so the Sonnet-for-every-in-scope-persona testing default
+// (owner directive 2026-07-23, #3688: the base `assistant` persona switched
+// from Opus to Sonnet for latency — a trivial turn measured ~2.1s on Opus
+// via OpenRouter) stays correct.
 // What: `bundled_persona_agents_do_not_use_claude_code_runner` loads each
 // in-scope agent by name (resolving through `AgentConfig::by_name`, which
 // prefers a directory package over a same-named flat file — #482) and
@@ -1527,15 +1529,17 @@ fn bundled_persona_agents_do_not_use_claude_code_runner() {
     use crate::agents::RunnerKind;
 
     let _guard = ENV_LOCK.blocking_lock();
-    // (agent name, expected model) — Opus for the base Assistant AND `pm`
-    // (the GUI's DEFAULT no-roster-selection chat backend — see
-    // `resolve_agent_config` in `src/ctrl/config.rs`, which prefers project
-    // `pm.toml` over `ctrl.toml`), Sonnet for every other in-scope persona
-    // (owner directive, #3358; `pm` bumped to Opus per the owner's ruling on
-    // the code-critic WARN on PR #3360 — the default chat must also get the
-    // Opus testing default, not just an explicit `assistant` roster pick).
+    // (agent name, expected model) — Opus for `pm` (the GUI's DEFAULT
+    // no-roster-selection chat backend — see `resolve_agent_config` in
+    // `src/ctrl/config.rs`, which prefers project `pm.toml` over
+    // `ctrl.toml`; bumped to Opus per the owner's ruling on the code-critic
+    // WARN on PR #3360 — the default chat must also get the Opus testing
+    // default, not just an explicit `assistant` roster pick), Sonnet for
+    // every other in-scope persona including the base `assistant` itself
+    // (owner directive 2026-07-23, #3688: switched from Opus to Sonnet for
+    // latency — a trivial turn measured ~2.1s on Opus via OpenRouter).
     let cases = [
-        ("assistant", "claude-opus-4-6"),
+        ("assistant", "claude-sonnet-4-6"),
         ("pm", "claude-opus-4-6"),
         ("personal-assistant", "claude-sonnet-4-6"),
         ("cto-assistant", "claude-sonnet-4-6"),

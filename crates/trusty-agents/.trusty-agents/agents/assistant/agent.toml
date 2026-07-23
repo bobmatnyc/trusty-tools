@@ -28,8 +28,11 @@ role = "assistant"
 # the claude-code CLI onto the direct-API credential path (AnthropicDirect
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`
 # in `src/llm/credentials.rs`. This is the base "Assistant" agent
-# (BASE_AGENT_ID in ui/src/lib/roster.ts) — testing default is Opus.
-model = "claude-opus-4-6"
+# (BASE_AGENT_ID in ui/src/lib/roster.ts) — default is Sonnet for latency
+# (owner directive 2026-07-23: trivial turns measured ~2.1s on Opus via
+# OpenRouter; Sonnet trades a small quality margin for materially lower
+# per-turn latency on the default persona).
+model = "claude-sonnet-4-6"
 description = "General-purpose productivity assistant (base template; personalize via `extends`)"
 # #3738: the generic default persona's professional display identity. Named
 # personas (izzie, cto-assistant) override these via `extends`; a user overlay

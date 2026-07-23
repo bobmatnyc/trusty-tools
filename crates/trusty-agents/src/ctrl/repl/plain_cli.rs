@@ -19,7 +19,7 @@
 //! `/model` and `/provider` with no argument print their list as plain text
 //! instead of opening a ratatui modal — the whole point of this mode.
 //! What: `run_plain_cli` — builds a `TrustyAgentsRepl`, defaults its active
-//! conversational agent to `assistant` (Opus) by internally issuing
+//! conversational agent to `assistant` (Sonnet, #3688) by internally issuing
 //! `/switch assistant` — the same mechanism a user typing that command would
 //! trigger — so the owner's actual testing surface is answered by the
 //! assistant persona out of the box, not the `ctrl` coordinator (local
