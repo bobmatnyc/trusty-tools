@@ -388,8 +388,8 @@ impl AgentInfo {
     /// re-deriving the mapping (which is how "CTO Assistant" vs "CTO Bot" drift
     /// creeps in).
     /// What: Returns `display_name` when set, else `name`.
-    /// Test: `display_label_prefers_display_name`,
-    /// `display_label_falls_back_to_name`.
+    /// Test: `bundled_personas_expose_expected_display_names` (prefers
+    /// display_name), `display_label_falls_back_to_name_when_unset`.
     pub fn display_label(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.name)
     }
