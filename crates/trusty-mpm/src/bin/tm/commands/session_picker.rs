@@ -13,12 +13,20 @@
 //! the static `tm session ls` renderer and the picker; [`run_ls_connector`] is the
 //! `tm ls` orchestrator that decides between the interactive picker and static
 //! output based on the TTY/`--json`/`--all`/session-count gate
-//! ([`should_show_picker`]).
+//! ([`should_show_picker`]). [`next_launch_slot`] is the shared "launch new
+//! session" number computation (issue #3723) both `run_tty_picker`'s render
+//! and `parse_picker_choice` use, kept in one place so they cannot drift.
+//! Row TEXT/color rendering lives in the sibling `session_picker_render`
+//! module (verbless, color-coded — #3723); the picker's rename action lives
+//! in `session_picker_rename` (#3724) — both extracted to keep this file
+//! under the 500-SLOC production cap.
 //!
 //! Test: `parse_picker_choice` unit tests live in `tests_behavior_c_tests.rs`
 //! (re-exported through `guided`); the TTY gate is unit-tested by
-//! `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`; the I/O
-//! path is exercised by the e2e suite and manual smoke tests.
+//! `ls_connector_should_show_picker_*` in `tests_behavior_d_tests.rs`;
+//! `next_launch_slot`, `PickerDecision::Rename` parsing, and the row
+//! rendering/color logic are unit-tested in `session_picker_tests.rs`; the
+//! I/O path is exercised by the e2e suite and manual smoke tests.
 
 use anyhow::Context as _;
 use std::io::IsTerminal as _;
@@ -53,6 +61,8 @@ use super::managed::filter_live_sessions;
 /// `guided_picker_numeric_unresumable_session_blocked`,
 /// `guided_picker_numeric_deleted_slot_blocked`,
 /// `guided_picker_delete_prefix_on_deleted_slot_blocked`.
+/// [`Self::Rename`] (#3724) parsing is covered by
+/// `parse_picker_choice_rename_*` in `session_picker_tests.rs`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PickerDecision {
     /// Resume the session at this 0-based index into the sessions slice.
@@ -88,6 +98,13 @@ pub(crate) enum PickerDecision {
     /// fallthrough to `Unrecognised` (which would look identical to a typo)
     /// or — worse — a silent match against a neighboring live session.
     SlotDeleted(usize),
+    /// Rename the session at this 0-based index to the given name (issue
+    /// #3724). Entered as `r<N> <new-name>` or `r <N> <new-name>`. The driver
+    /// routes this through the EXISTING hardened
+    /// `commands::rename::do_rename_request` — the same PATCH
+    /// `tm sessions rename` issues, including its #3692
+    /// auto-suffix-on-collision behavior — never a reimplementation.
+    Rename(usize, String),
 }
 
 /// Scope describing which sessions the picker operates over and how to launch new.
@@ -454,6 +471,38 @@ pub(crate) fn shown_slot(sessions: &[ManagedSessionSummary], idx: usize) -> u32 
     }
 }
 
+/// Compute the picker's "launch new session" menu number (issue #3723,
+/// duplicate-index defect).
+///
+/// Why: both [`parse_picker_choice`] and the render loop in [`run_tty_picker`]
+/// used to compute this as `sessions.last().slot + 1` — safe ONLY while
+/// `sessions` stayed in the daemon's ascending-slot order end-to-end. #3483
+/// added `sort_sessions` (`Recent`/`Alpha`), applied to this SAME slice
+/// before it ever reaches either call site — the highest-slot session can
+/// then sit anywhere in the (re-sorted) vector, not necessarily last. Taking
+/// `.last().slot + 1` after a reorder can compute a number that COLLIDES
+/// with an existing session's own slot elsewhere in the list — the exact
+/// duplicate-`[N]` defect Bob reported (`[31] restart …` AND `[31] launch
+/// new session` printed together). Centralizing the fix here (rather than
+/// patching both call sites' arithmetic independently) also guarantees they
+/// can never drift apart again.
+/// What: `slots_are_stale` → `sessions.len() + 1` (unchanged; the positional
+/// fallback numbers 1..=len have no real slots to collide with). Otherwise
+/// the true MAXIMUM `slot` across the whole slice — order-independent — plus
+/// one; `sessions.is_empty()` → `1`.
+/// Test: `next_launch_slot_survives_recency_reorder`,
+/// `next_launch_slot_survives_alpha_reorder`,
+/// `next_launch_slot_matches_ascending_order`,
+/// `next_launch_slot_empty_sessions_is_one`,
+/// `next_launch_slot_stale_slots_uses_positional_fallback` in
+/// `session_picker_tests.rs`.
+pub(crate) fn next_launch_slot(sessions: &[ManagedSessionSummary]) -> u32 {
+    if slots_are_stale(sessions) {
+        return sessions.len() as u32 + 1;
+    }
+    sessions.iter().map(|s| s.slot).max().map_or(1, |m| m + 1)
+}
+
 /// Decide a picker choice for the (already-located) session at `idx`.
 ///
 /// Why: bare Enter and an explicit numeric choice share every safety check
@@ -521,6 +570,10 @@ fn decide_for_index(
 ///     (#2304); the driver still runs a confirm/force-confirm prompt before
 ///     deleting. Matching a TOMBSTONED slot → `SlotDeleted(i)` (#3034 — no
 ///     double-delete, no silent no-op).
+///   • `r<N> <new-name>` / `r <N> <new-name>` matching a LIVE `sessions[i].slot`,
+///     with a non-empty trimmed name → `Rename(i, new-name)` (#3724). A
+///     TOMBSTONED slot → `SlotDeleted(i)`; a missing/unparseable number or an
+///     empty/whitespace-only name → `Unrecognised`.
 ///   • anything else → `Unrecognised`
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
 /// `guided_picker_bare_enter_live_session_resumes_first`,
@@ -543,16 +596,36 @@ pub(crate) fn parse_picker_choice(
     if choice.eq_ignore_ascii_case("q") {
         return PickerDecision::Quit;
     }
-    // #3678: a stale (pre-#3034) daemon decodes every slot to `0`, so
-    // `sessions.last().slot + 1` would always be `1` regardless of how many
-    // rows are actually listed — use the same positional fallback the render
-    // side uses (see `shown_slot`) so "launch new" always follows the last
-    // displayed row.
-    let next_slot = if slots_are_stale(sessions) {
-        sessions.len() as u32 + 1
-    } else {
-        sessions.last().map(|s| s.slot + 1).unwrap_or(1)
-    };
+    // #3723: see `next_launch_slot`'s doc — this must be the MAXIMUM slot
+    // across the whole (possibly `sort_sessions`-reordered, #3483) slice,
+    // never `sessions.last().slot + 1`, or a re-sorted list can compute a
+    // "launch new" number that collides with an existing session's slot.
+    let next_slot = next_launch_slot(sessions);
+    // #3724: `r<N> <new-name>` / `r <N> <new-name>` renames the LIVE session
+    // at slot N through the existing hardened rename path
+    // (`session_picker_rename::rename_selected`). Parsed before the numeric
+    // resume branch, mirroring `d<N>`'s delete prefix, so the `r` prefix is
+    // unambiguous. A tombstoned target resolves to `SlotDeleted`, never a
+    // rename of a slot that no longer exists.
+    if let Some(rest) = choice.strip_prefix(['r', 'R']) {
+        return match rest.trim_start().split_once(char::is_whitespace) {
+            Some((num_str, name)) => {
+                let name = name.trim();
+                match (
+                    name.is_empty(),
+                    num_str
+                        .parse::<u32>()
+                        .ok()
+                        .and_then(|n| find_slot(sessions, n)),
+                ) {
+                    (false, Some(idx)) if sessions[idx].deleted => PickerDecision::SlotDeleted(idx),
+                    (false, Some(idx)) => PickerDecision::Rename(idx, name.to_string()),
+                    _ => PickerDecision::Unrecognised,
+                }
+            }
+            None => PickerDecision::Unrecognised,
+        };
+    }
     // #2304: `d<N>` / `d <N>` deletes the LIVE session at slot N. Parsed
     // before the numeric-resume branch so the `d` prefix is unambiguous.
     // Deleting a dead (unresumable, but not yet deleted) session is exactly
@@ -613,6 +686,9 @@ pub(crate) fn parse_picker_choice(
 ///   • `Delete(i)` (#2304) → [`super::picker_delete::confirm_and_delete`] runs a
 ///     confirm (force-confirm for a running session) then the managed→local
 ///     routed delete; redisplay the re-fetched menu afterwards;
+///   • `Rename(i, name)` (#3724) → [`super::session_picker_rename::rename_selected`]
+///     issues the PATCH through the existing hardened rename path and prints
+///     the outcome; redisplay the re-fetched menu afterwards;
 ///   • `SlotDeleted(i)` (#3034) → print a "session N was deleted" notice and
 ///     redisplay the SAME menu — no daemon round-trip, and never a
 ///     fallthrough to whichever session now occupies a neighboring slot;
@@ -639,6 +715,11 @@ pub(crate) async fn run_tty_picker(
     scope: &PickerScope,
     mut sessions: Vec<ManagedSessionSummary>,
 ) -> anyhow::Result<()> {
+    // #3723: resolved ONCE per invocation, not per row — see
+    // `session_picker_render::picker_use_color`'s doc for why stderr (the
+    // stream this menu is written to) rather than stdout, and why NO_COLOR
+    // is honored even though `should_show_picker` already gates on a TTY.
+    let use_color = super::session_picker_render::picker_use_color(std::io::stderr().is_terminal());
     loop {
         eprintln!();
         // #3034: the menu number is each session's STABLE daemon-assigned
@@ -656,11 +737,11 @@ pub(crate) async fn run_tty_picker(
         // numbers distinct and incrementing (positional-only, not stable
         // across a re-fetch) instead of every row printing `[0]`.
         let stale_slots = slots_are_stale(&sessions);
-        let new_idx = if stale_slots {
-            sessions.len() as u32 + 1
-        } else {
-            sessions.last().map(|s| s.slot + 1).unwrap_or(1)
-        };
+        // #3723: see `next_launch_slot`'s doc — MUST be the maximum slot
+        // across the whole (possibly reordered) slice, never
+        // `sessions.last().slot + 1`, to avoid colliding with an existing
+        // session's own slot after a `sort_sessions` reorder.
+        let new_idx = next_launch_slot(&sessions);
         // #2148: bare Enter must not silently restart (kill+recreate the tmux
         // pane of) a stopped/errored session — only used to pick the menu's
         // default hint and to gate `parse_picker_choice`'s bare-Enter branch.
@@ -681,41 +762,23 @@ pub(crate) async fn run_tty_picker(
                      listing only — run `tm restart` to restore permanent numbering."
                 );
             }
+            // #3723: verbless, color-coded rows — the restart-vs-resume verb
+            // was an implementation detail of HOW the session gets reached
+            // (decided at selection time by `guided_resume::plan_resume`),
+            // not a property of the session's current state; the state word
+            // (already server-reconciled against live tmux — #3302/#3714,
+            // never re-derived here) now carries that signal via color as
+            // well as text. See `session_picker_render::format_session_row`.
             for (i, s) in sessions.iter().enumerate() {
                 let num = shown_slot(&sessions, i);
-                if s.deleted {
-                    // #3034: the slot stays reserved — never silently reused
-                    // by a later session — so the operator sees exactly which
-                    // number is now dead instead of it disappearing from the
-                    // menu.
-                    eprintln!("tm:   [{num}] -- deleted --");
-                    continue;
-                }
-                if s.unresumable {
-                    // #2595: workspace is gone for good — never offer resume/restart;
-                    // point straight at the delete remedy instead.
-                    eprintln!(
-                        "tm:   [{num}] {} ({}) — DEAD: workspace removed; use [d{num}] to remove the record",
-                        s.name, s.state
-                    );
-                    continue;
-                }
-                // Show "restart" for sessions that are stopped/errored — they have no
-                // live tmux session and will be restarted via the daemon (#1742).
-                // The state is reconciled against live tmux by the daemon list
-                // handler, so a running/attached session reads "active"/"attached"
-                // here and is offered "resume" (connect), never a stale "restart".
-                let stopped = matches!(s.state.as_str(), "stopped" | "errored");
-                let verb = if stopped { "restart" } else { "resume" };
-                let shown_state = if s.attached {
-                    "attached"
-                } else {
-                    s.state.as_str()
-                };
-                eprintln!("tm:   [{num}] {verb} {} ({shown_state})", s.name);
+                eprintln!(
+                    "{}",
+                    super::session_picker_render::format_session_row(num, s, use_color)
+                );
             }
             eprintln!("tm:   [{new_idx}] launch new session");
             eprintln!("tm:   [d<N>] delete session N (e.g. d1)");
+            eprintln!("tm:   [r<N> <new-name>] rename session N (e.g. r1 tm-my-new-name)");
             eprintln!("tm:   [q] quit");
             let first = &sessions[0];
             let first_num = shown_slot(&sessions, 0);
@@ -829,6 +892,16 @@ pub(crate) async fn run_tty_picker(
             // reflects the removal. A cancel/refusal is a no-op re-fetch.
             PickerDecision::Delete(i) => {
                 super::picker_delete::confirm_and_delete(client, url, &sessions[i]).await?;
+            }
+            // #3724: rename the selected session through the existing
+            // hardened `commands::rename::do_rename_request` path (the same
+            // PATCH `tm sessions rename` issues); the driver prints the
+            // outcome and never propagates a rename failure as a fatal
+            // error, then falls through to the re-fetch so the menu reflects
+            // the (possibly auto-suffixed, #3692) new name.
+            PickerDecision::Rename(i, new_name) => {
+                super::session_picker_rename::rename_selected(client, url, &sessions[i], new_name)
+                    .await?;
             }
             PickerDecision::Unrecognised => {
                 eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
@@ -958,3 +1031,7 @@ pub(crate) async fn run_ls_connector(
     };
     run_tty_picker(client, url, &scope, sessions).await
 }
+
+#[cfg(test)]
+#[path = "session_picker_tests.rs"]
+mod tests;
