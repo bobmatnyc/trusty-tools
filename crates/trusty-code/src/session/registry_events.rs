@@ -530,6 +530,35 @@ impl SessionRegistry {
         Ok(())
     }
 
+    /// Record one assistant turn's text as an `AgentMessageDelta` (tcode
+    /// streaming epic #3696, Gap A, Slice 1). See
+    /// [`crate::events::Event::AgentMessageDelta`] for the `turn_id`
+    /// uniqueness requirement and the `(agent_id, turn_id)` grouping contract.
+    /// Test: `registry_tests::record_agent_message_delta_publishes_event`.
+    pub fn record_agent_message_delta(
+        &self,
+        id: &str,
+        agent: &str,
+        agent_id: &str,
+        turn_id: &str,
+        delta: &str,
+        done: bool,
+    ) -> Result<(), RpcError> {
+        self.ensure_exists(id)?;
+        self.record(
+            id,
+            Event::AgentMessageDelta {
+                session_id: id.to_string(),
+                agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
+                turn_id: turn_id.to_string(),
+                delta: delta.to_string(),
+                done,
+            },
+        );
+        Ok(())
+    }
+
     /// Return `Ok(())` if `id` exists, `Err(session_not_found)` otherwise.
     ///
     /// Why: every `record_*` plumbing method needs the same existence guard

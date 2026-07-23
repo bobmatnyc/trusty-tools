@@ -570,6 +570,30 @@ impl AgentLoop {
             accrue_usage(perf, &self.config.model, &response);
             transcript.push_response(&response);
 
+            // (tcode streaming epic #3696, Gap A, Slice 1) Publish this
+            // turn's assistant text as a single `done: true` delta. Skipped
+            // for tool-only turns (`first_text` is `None`) and for an empty
+            // string — neither carries anything a streaming UI should render
+            // as a bubble. `turn_id` is a fresh UUID v4 per turn: it MUST be
+            // unique within the session across every concurrently-running
+            // agent (see `Event::AgentMessageDelta`'s doc), which a
+            // per-agent-local counter restarting from 0 in each `AgentLoop`
+            // instance would NOT guarantee.
+            if let Some(sink) = &self.sink
+                && let Some(text) = response.first_text()
+                && !text.is_empty()
+            {
+                let turn_id = uuid::Uuid::new_v4().to_string();
+                sink.agent_message(
+                    self.agent_name(),
+                    self.agent_id_str(),
+                    &turn_id,
+                    &text,
+                    true,
+                )
+                .await;
+            }
+
             let tool_calls = response.first_tool_calls().to_vec();
 
             // Finish/tool-call precedence (D3, per docs/trusty-code/parity-spec.md §5):

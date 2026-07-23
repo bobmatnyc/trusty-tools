@@ -86,15 +86,29 @@ use support::{
 /// race as a contract. The readiness event's own content/state mapping is
 /// pinned by `session::registry::registry_tests::record_index_readiness_*`
 /// instead; see `filter_async_kinds`.
+///
+/// (tcode streaming epic #3696, Gap A, Slice 1) Two `agent_message_delta`
+/// entries were added by this slice: the delegated engineer's own final
+/// (text, no-tool-call) turn emits one right after its `bash` `tool_finished`
+/// and before that result unwinds back to the PM's `delegate_to_agent`
+/// `tool_finished`; the PM's own final (text, no-tool-call) turn — the one
+/// that ends the loop with no further tool call — emits the second, right
+/// after the PM's turn-2 `context_budget` measurement and before the terminal
+/// `session_status_changed`/`session_done`. Both are deterministic functions
+/// of the fixed `TCODE_MOCK_LLM=echo` script (each loop's assistant turns are
+/// scripted, not modeled), so they belong in the ordered baseline rather than
+/// `filter_async_kinds`.
 const BASELINE_EVENT_KINDS: &[&str] = &[
     "session_started",
     "session_status_changed",
-    "context_budget", // PM turn 1 boundary (cadence measures before the call)
-    "tool_started",   // PM: delegate_to_agent
-    "tool_started",   // engineer: bash
-    "tool_finished",  // engineer: bash
-    "tool_finished",  // PM: delegate_to_agent
-    "context_budget", // PM turn 2 boundary
+    "context_budget",      // PM turn 1 boundary (cadence measures before the call)
+    "tool_started",        // PM: delegate_to_agent
+    "tool_started",        // engineer: bash
+    "tool_finished",       // engineer: bash
+    "agent_message_delta", // engineer: final text turn (Gap A, Slice 1)
+    "tool_finished",       // PM: delegate_to_agent
+    "context_budget",      // PM turn 2 boundary
+    "agent_message_delta", // PM: final text turn (Gap A, Slice 1)
     "session_status_changed",
     "session_done",
 ];

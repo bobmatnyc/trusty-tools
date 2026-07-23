@@ -33,6 +33,22 @@ struct RecordingSink {
     /// `sequentially_spawned_same_named_loops_get_distinct_agent_ids` reads
     /// this.
     started_ids: Mutex<Vec<(String, String)>>,
+    /// (tcode streaming epic #3696, Gap A, Slice 1) every `agent_message`
+    /// call — kept separate from `calls` for the same reason `started_ids`
+    /// is: only the delta-emission tests read this.
+    messages: Mutex<Vec<RecordedMessage>>,
+}
+
+/// One recorded `ToolEventSink::agent_message` call (tcode streaming epic
+/// #3696, Gap A, Slice 1). A named struct rather than a tuple so
+/// `RecordingSink::messages` doesn't trip clippy's `type_complexity` lint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedMessage {
+    agent: String,
+    agent_id: String,
+    turn_id: String,
+    delta: String,
+    done: bool,
 }
 
 impl RecordingSink {
@@ -40,6 +56,7 @@ impl RecordingSink {
         Self {
             calls: Mutex::new(Vec::new()),
             started_ids: Mutex::new(Vec::new()),
+            messages: Mutex::new(Vec::new()),
         }
     }
 
@@ -49,6 +66,10 @@ impl RecordingSink {
 
     fn started_ids(&self) -> Vec<(String, String)> {
         self.started_ids.lock().expect("lock poisoned").clone()
+    }
+
+    fn messages(&self) -> Vec<RecordedMessage> {
+        self.messages.lock().expect("lock poisoned").clone()
     }
 }
 
@@ -119,6 +140,26 @@ impl ToolEventSink for RecordingSink {
             .lock()
             .expect("lock poisoned")
             .push(format!("telemetry:{agent}:{tool}:{call_id}:{kind}"));
+    }
+
+    async fn agent_message(
+        &self,
+        agent: &str,
+        agent_id: &str,
+        turn_id: &str,
+        delta: &str,
+        done: bool,
+    ) {
+        self.messages
+            .lock()
+            .expect("lock poisoned")
+            .push(RecordedMessage {
+                agent: agent.to_string(),
+                agent_id: agent_id.to_string(),
+                turn_id: turn_id.to_string(),
+                delta: delta.to_string(),
+                done,
+            });
     }
 }
 
@@ -267,6 +308,55 @@ async fn sink_events_are_attributed_to_the_agent() {
         sink.calls(),
         vec!["started:pm:echo:call-1", "finished:pm:echo:call-1:true"]
     );
+}
+
+/// A normal (text) assistant turn must publish exactly one `done: true`
+/// delta; a tool-only turn (the model's `content` is `null`) must publish
+/// none (tcode streaming epic #3696, Gap A, Slice 1).
+///
+/// Why: this is Gap A's whole contract — the assistant's own words become
+/// observable to a `session.attach`ed client without a UI having to
+/// reconstruct them from tool events, but ONLY for turns that actually carry
+/// text; a tool-only turn has nothing for a streaming UI to render as a
+/// bubble.
+/// What: script [tool_call_response, stop_response("final answer")]; assert
+/// the sink recorded exactly one message, attributed to the running agent,
+/// carrying the final turn's text with `done: true` and a non-empty
+/// `turn_id`.
+/// Test: this test.
+#[tokio::test]
+async fn sink_receives_agent_message_delta_for_text_turn_only() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call-1", "hi"),
+        stop_response("final answer"),
+    ]));
+    let registry = registry_with_echo(false);
+    let sink = Arc::new(RecordingSink::new());
+
+    make_loop(llm, registry, AgentLoopConfig::default())
+        .with_tool_event_sink(sink.clone())
+        .with_agent("pm")
+        .with_agent_id("pm-1")
+        .run("sys", "task")
+        .await
+        .expect("loop should complete");
+
+    let messages = sink.messages();
+    assert_eq!(
+        messages.len(),
+        1,
+        "a tool-only turn must not emit a delta; expected exactly one delta \
+         for the final text turn, got {messages:?}"
+    );
+    let recorded = &messages[0];
+    assert_eq!(recorded.agent, "pm");
+    assert_eq!(recorded.agent_id, "pm-1");
+    assert!(
+        !recorded.turn_id.is_empty(),
+        "turn_id must be minted, not empty"
+    );
+    assert_eq!(recorded.delta, "final answer");
+    assert!(recorded.done, "Gap A (Slice 1) always emits done: true");
 }
 
 /// Two loops sharing ONE sink must attribute their calls to their OWN agents

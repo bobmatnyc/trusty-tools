@@ -151,6 +151,31 @@ impl ToolEventSink for SessionToolEventSink {
             tracing::warn!(session_id = %self.session_id, "record_context_budget failed: {e}");
         }
     }
+
+    /// Forward one assistant turn's text to this session's event stream
+    /// (tcode streaming epic #3696, Gap A, Slice 1). Same log-and-swallow
+    /// contract as the hooks above: a vanished session must never fault the
+    /// loop that observed the turn.
+    /// Test: `tests::agent_message_reaches_stream_as_delta`.
+    async fn agent_message(
+        &self,
+        agent: &str,
+        agent_id: &str,
+        turn_id: &str,
+        delta: &str,
+        done: bool,
+    ) {
+        if let Err(e) = self.registry.record_agent_message_delta(
+            &self.session_id,
+            agent,
+            agent_id,
+            turn_id,
+            delta,
+            done,
+        ) {
+            tracing::warn!(session_id = %self.session_id, agent, agent_id, turn_id, "record_agent_message_delta failed: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -331,6 +356,7 @@ mod tests {
         )
         .await;
         sink.context_budget(&budget_snapshot()).await;
+        sink.agent_message("pm", "pm-1", "turn-1", "x", true).await;
     }
 
     /// A representative budget snapshot for the sink tests.
@@ -368,6 +394,29 @@ mod tests {
             ev.event,
             crate::events::Event::ContextBudget { working_context_pct, overhead_tokens, .. }
                 if working_context_pct == 75 && overhead_tokens == 50_000
+        ));
+    }
+
+    /// The `agent_message` hook must reach the session's event stream as an
+    /// `agent_message_delta` event carrying the caller's attribution and
+    /// text (tcode streaming epic #3696, Gap A, Slice 1).
+    #[tokio::test]
+    async fn agent_message_reaches_stream_as_delta() {
+        let registry = Arc::new(SessionRegistry::new());
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+        let sink = SessionToolEventSink::new(Arc::clone(&registry), session.id.clone());
+        let mut events = crate::events::subscribe();
+
+        sink.agent_message("pm", "pm-1", "turn-1", "hello there", true)
+            .await;
+
+        let ev = next_event_for(&mut events, &session.id).await;
+        assert_eq!(ev.kind, "agent_message_delta");
+        assert!(matches!(
+            ev.event,
+            crate::events::Event::AgentMessageDelta { agent, agent_id, turn_id, delta, done, .. }
+                if agent == "pm" && agent_id == "pm-1" && turn_id == "turn-1"
+                    && delta == "hello there" && done
         ));
     }
 }
