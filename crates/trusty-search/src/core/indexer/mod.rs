@@ -52,6 +52,8 @@ pub(crate) use ingest::PROGRESS_CHUNK_INTERVAL;
 #[cfg(test)]
 pub(crate) use search::KG_REFINE_THRESHOLD;
 #[cfg(test)]
+mod cost_scaled_threshold_tests;
+#[cfg(test)]
 mod rehydrate_tests;
 #[cfg(test)]
 mod tests;
@@ -256,6 +258,25 @@ pub struct CodeIndexer {
     /// in `indexer::rehydrate_tests`.
     pub(super) lane_degraded: Arc<AtomicBool>,
 
+    /// Most recently MEASURED wall-clock cost (milliseconds) of this index's
+    /// corpus rehydrate scan (issue #3683 slice 2 — cost-scaled idle-eviction
+    /// window). `0` until the first rehydrate completes in this process's
+    /// lifetime; [`Self::rehydrate_cost_estimate_ms`] in `idle_evict.rs` falls
+    /// back to an ESTIMATE from the durable corpus's on-disk chunk count
+    /// until then.
+    ///
+    /// Why: production RCA (#3683) found a flat 60s idle-eviction window
+    /// treated a 315K-chunk NFS-backed index (27-40s rehydrate) identically
+    /// to a handful-of-chunks index (sub-millisecond rehydrate), thrash-
+    /// evicting the expensive one on every idle tick. Recording the actual
+    /// measured cost lets the idle-eviction window scale to how expensive
+    /// THIS index really is to rehydrate, rather than a fixed guess.
+    /// What: set by `idle_evict::spawn_detached_rehydrate` immediately after
+    /// its `spawn_blocking` redb scan completes successfully.
+    /// Test: `rehydrate_cost_estimate_ms_prefers_measured_over_estimated` in
+    /// `indexer::cost_scaled_threshold_tests`.
+    pub(super) last_rehydrate_cost_ms: Arc<AtomicU64>,
+
     /// Issue #1158: `true` when the redb corpus file existed but could NOT be
     /// opened on this boot (e.g. incompatible page format, corruption).
     ///
@@ -375,6 +396,7 @@ impl CodeIndexer {
             rehydrate_inflight: Arc::new(std::sync::Mutex::new(None)),
             rehydrate_generation: Arc::new(Mutex::new(0)),
             lane_degraded: Arc::new(AtomicBool::new(false)),
+            last_rehydrate_cost_ms: Arc::new(AtomicU64::new(0)),
             corpus_open_failed: false,
             hnsw_load_failed: false,
             skip_kg: false,

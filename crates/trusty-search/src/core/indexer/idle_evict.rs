@@ -146,10 +146,40 @@
 //! `rehydrate_commit_survives_evict_racing_the_generation_critical_section`,
 //! `lane_degraded_flag_sets_on_exhausted_retries_and_clears_on_rehydrate` in
 //! `indexer::rehydrate_tests`.
+//!
+//! ## Cost-scaled idle-eviction window + oldest-idle-first sweep (issue #3683 slice 2)
+//!
+//! Why: slice 1 fixed what happens on a slow rehydrate (survives cancellation,
+//! degrades observably) but deliberately left the eviction POLICY untouched —
+//! the flat 60s idle window (issue #2166) and the registry's arbitrary
+//! iteration order in `service::server::tickers::spawn_idle_chunk_eviction_ticker`.
+//! That flat window is the actual root cause of the #3683 production
+//! incident's query volume: it treated a 315K-chunk NFS-backed index
+//! (27-40s rehydrate) identically to a handful-of-chunks index
+//! (sub-millisecond rehydrate), so the expensive index was evicted and forced
+//! to cold-start roughly once a minute even under light interactive traffic.
+//!
+//! What: [`CodeIndexer::rehydrate_cost_estimate_ms`] and
+//! [`CodeIndexer::cost_scaled_idle_threshold`] (below) give each index its
+//! OWN idle-eviction window, scaled by how expensive that specific index is
+//! to rehydrate — see `helpers::scaled_idle_evict_threshold` for the formula.
+//! [`spawn_detached_rehydrate`] now also records the wall-clock duration of
+//! its own redb scan into [`super::CodeIndexer::last_rehydrate_cost_ms`], so
+//! the scaling input becomes a real MEASUREMENT (not just a chunk-count
+//! estimate) after an index's first rehydrate in a process's lifetime. The
+//! sweep itself (`spawn_idle_chunk_eviction_ticker` /
+//! `service::server::tickers::run_idle_eviction_tick`) now also processes
+//! indexes OLDEST-IDLE-FIRST rather than the registry's arbitrary order —
+//! see that function's doc comment for the ordering rationale.
+//! Test: `rehydrate_cost_estimate_ms_prefers_measured_over_estimated`,
+//! `cost_scaled_idle_threshold_scales_with_rehydrate_cost` in
+//! `indexer::cost_scaled_threshold_tests`; `oldest_idle_first_orders_most_idle_index_first_ties_stable`,
+//! `run_idle_eviction_tick_evicts_cheap_index_but_spares_costly_one` in
+//! `service::server::idle_eviction_tests`.
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::Notify;
@@ -511,7 +541,7 @@ impl CodeIndexer {
     /// occasionally waiting the full budget instead of returning early.
     /// Test: `detached_rehydrate_survives_caller_cancellation`,
     /// `rehydrate_dedupes_concurrent_callers_onto_one_scan` in
-    /// `indexer::tests_idle_evict`.
+    /// `indexer::cost_scaled_threshold_tests`.
     pub(super) async fn ensure_corpus_rehydrated(&self) {
         if !self.chunks_evicted.load(Ordering::Relaxed)
             && !self.bm25_entities_evicted.load(Ordering::Relaxed)
@@ -609,6 +639,7 @@ impl CodeIndexer {
         let inflight_gate = Arc::clone(&self.rehydrate_inflight);
         let rehydrate_generation = Arc::clone(&self.rehydrate_generation);
         let lane_degraded = Arc::clone(&self.lane_degraded);
+        let last_rehydrate_cost_ms = Arc::clone(&self.last_rehydrate_cost_ms);
 
         tokio::spawn(async move {
             // Finding 1: constructed BEFORE any fallible work. Its `Drop`
@@ -622,6 +653,12 @@ impl CodeIndexer {
                 notify,
             };
 
+            // Issue #3683 slice 2: wall-clock the scan itself (not the whole
+            // detached task, which also includes lock acquisition + map
+            // publish below) so `last_rehydrate_cost_ms` reflects the actual
+            // O(corpus) cost that drives `cost_scaled_idle_threshold`, not
+            // incidental commit-phase overhead.
+            let scan_started = Instant::now();
             let loaded = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
                 #[cfg(test)]
                 {
@@ -641,6 +678,8 @@ impl CodeIndexer {
                 Ok((chunks, entities))
             })
             .await;
+            let scan_elapsed_ms =
+                scan_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
             #[cfg(test)]
             if TEST_PANIC_IN_COMMIT_PHASE.load(Ordering::Relaxed) {
@@ -651,6 +690,12 @@ impl CodeIndexer {
                 Ok(Ok((chunks, entities))) => {
                     let n_chunks = chunks.len();
                     let n_files = entities.len();
+
+                    // Issue #3683 slice 2: record the MEASURED scan cost so
+                    // the next idle-eviction tick's `cost_scaled_idle_threshold`
+                    // uses a real measurement instead of the chunk-count
+                    // estimate — see `CodeIndexer::rehydrate_cost_estimate_ms`.
+                    last_rehydrate_cost_ms.store(scan_elapsed_ms, Ordering::Relaxed);
 
                     // Phase 1: BM25, in the deterministic id-sorted order,
                     // reporting (not silently swallowing) cap drops.
@@ -843,5 +888,63 @@ impl CodeIndexer {
                 false
             }
         }
+    }
+
+    /// Estimate this index's rehydrate cost in milliseconds (issue #3683
+    /// slice 2), used to scale the idle-eviction window — see
+    /// [`Self::cost_scaled_idle_threshold`].
+    ///
+    /// Why: a flat idle-eviction window treats a 315K-chunk NFS-backed index
+    /// (27-40s to rehydrate) identically to a handful-of-chunks index
+    /// (sub-millisecond rehydrate) — see the #3683 production RCA. Scaling
+    /// the window by how expensive THIS index is to rehydrate means the
+    /// eviction sweep only thrashes indexes it can cheaply afford to
+    /// re-warm.
+    /// What: returns the most recently MEASURED rehydrate duration
+    /// ([`super::CodeIndexer::last_rehydrate_cost_ms`], set by
+    /// [`spawn_detached_rehydrate`] after a real redb scan) when nonzero.
+    /// Otherwise ESTIMATES from the durable corpus's on-disk chunk count — a
+    /// cheap O(1) redb metadata read (`CorpusStore::chunk_count`, not a
+    /// scan — the same call `files::enumerate_chunks_after` already makes
+    /// inline, without `spawn_blocking`) — via
+    /// `helpers::estimate_rehydrate_cost_ms`. Returns `0` (no scaling) for an
+    /// index with no durable corpus wired (nothing to rehydrate, nothing to
+    /// cost).
+    /// Test: `rehydrate_cost_estimate_ms_prefers_measured_over_estimated`,
+    /// `rehydrate_cost_estimate_ms_falls_back_to_corpus_chunk_count_estimate`
+    /// in `indexer::cost_scaled_threshold_tests`.
+    pub(crate) fn rehydrate_cost_estimate_ms(&self) -> u64 {
+        let measured = self.last_rehydrate_cost_ms.load(Ordering::Relaxed);
+        if measured > 0 {
+            return measured;
+        }
+        let Some(corpus) = &self.corpus else {
+            return 0;
+        };
+        let chunk_count = corpus.chunk_count().unwrap_or(0) as u64;
+        super::helpers::estimate_rehydrate_cost_ms(chunk_count)
+    }
+
+    /// This index's cost-scaled idle-eviction window (issue #3683 slice 2) —
+    /// see `helpers::scaled_idle_evict_threshold` for the formula and
+    /// [`Self::rehydrate_cost_estimate_ms`] for the cost input. Called once
+    /// per index, per tick, by
+    /// `service::server::tickers::run_idle_eviction_tick` in place of the
+    /// single flat `idle_evict_secs()` window every index used to share.
+    /// Test: `cost_scaled_idle_threshold_scales_with_rehydrate_cost` in
+    /// `indexer::cost_scaled_threshold_tests`.
+    pub(crate) fn cost_scaled_idle_threshold(&self, base_secs: u64) -> Duration {
+        super::helpers::scaled_idle_evict_threshold(base_secs, self.rehydrate_cost_estimate_ms())
+    }
+}
+
+#[cfg(test)]
+impl CodeIndexer {
+    /// Test-only: directly set the measured rehydrate-cost estimate (issue
+    /// #3683 slice 2), bypassing an actual redb scan so tests can exercise
+    /// cost-scaled idle-threshold behaviour without constructing a
+    /// realistically large (hundreds-of-thousands-of-chunks) corpus fixture.
+    pub(crate) fn set_rehydrate_cost_ms_for_test(&self, ms: u64) {
+        self.last_rehydrate_cost_ms.store(ms, Ordering::Relaxed);
     }
 }

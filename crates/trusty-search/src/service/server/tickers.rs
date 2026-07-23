@@ -100,7 +100,8 @@ pub(super) fn spawn_disk_size_ticker(state: Arc<SearchAppState>) {
 /// BM25 corpus, and per-file entity map, and demotes its HNSW vector store
 /// back to mmap-view mode, after the index has been idle past the configured
 /// window (issue #83 follow-up; BM25/entities added by issue #2162; HNSW
-/// re-view added by issue #2164).
+/// re-view added by issue #2164; cost-scaled threshold + oldest-idle-first
+/// ordering added by issue #3683 slice 2).
 ///
 /// Why (idle-memory audit): the durable redb corpus already serves the query
 /// hot path, so an index that hasn't been queried or ingested for a while is
@@ -112,19 +113,16 @@ pub(super) fn spawn_disk_size_ticker(state: Arc<SearchAppState>) {
 /// every registered index. It mirrors the `spawn_*_ticker` pattern: a
 /// detached task holding a `Weak<SearchAppState>` so it stops when the daemon
 /// drops its last `Arc`.
-/// What: every 60 s, resolves the shared idle window via
+/// What: every 60 s, resolves the shared base idle window via
 /// `crate::core::indexer::idle_evict_secs()` (env `TRUSTY_CHUNKS_IDLE_EVICT_SECS`;
-/// `0` disables both evictions and the ticker idles), then walks the registry
-/// and calls `evict_chunks_if_idle` followed by `evict_bm25_entities_if_idle`
-/// on each indexer. Both calls are themselves no-ops for active indexes,
-/// indexes without a durable corpus, and already-empty structures, so the
-/// walk is cheap. Each eviction acquires the relevant read lock only to check
-/// `corpus`/idle state and a brief write lock only when it actually clears
-/// its structure.
+/// `0` disables both evictions and the ticker idles) and delegates the sweep
+/// itself to [`run_idle_eviction_tick`] — see that function for the
+/// per-index cost-scaled threshold and oldest-idle-first ordering.
 /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`,
 /// `bm25_entities_idle_eviction_drops_and_lazily_rehydrates`, and
 /// `hnsw_idle_demotion_reviews_clean_promoted_store` cover the per-indexer
-/// logic directly; the ticker is a thin scheduling wrapper.
+/// logic directly; `idle_eviction_tests` covers [`run_idle_eviction_tick`]'s
+/// orchestration; this function is a thin scheduling wrapper.
 pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
     let weak = Arc::downgrade(&state);
     tokio::spawn(async move {
@@ -144,18 +142,8 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
                 // of this loop — but do no work this tick.
                 continue;
             }
-            let threshold = Duration::from_secs(secs);
             let rss_before = crate::core::memguard::current_rss_mb();
-            let mut total_evicted = 0usize;
-            for id in state.registry.list() {
-                let Some(handle) = state.registry.get(&id) else {
-                    continue;
-                };
-                let indexer = handle.indexer.read().await;
-                total_evicted += indexer.evict_chunks_if_idle(threshold).await;
-                total_evicted += indexer.evict_bm25_entities_if_idle(threshold).await;
-                indexer.demote_vector_store_if_idle(threshold).await;
-            }
+            let total_evicted = run_idle_eviction_tick(&state, secs).await;
             // Issue #3657: per-index eviction above genuinely empties the
             // `chunks`/`bm25`/`entities` maps (no lingering `Arc` holder — see
             // `CodeIndexer::clear_in_memory_chunks` / `clear_bm25_entities`),
@@ -193,6 +181,97 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
             }
         }
     });
+}
+
+/// Sort a snapshot of `(index id, idle duration)` pairs so the LONGEST-idle
+/// (oldest / least-recently-used) index sorts FIRST (issue #3683 slice 2 —
+/// Defect 2's "the sweep should evict the cheapest-loss index first" fix).
+///
+/// Why: extracted as a pure function so the ordering rule is unit-testable
+/// with synthetic idle durations — mirrors `should_reclaim_now`'s extraction
+/// for the identical reason (driving a REAL index's idle clock to specific
+/// values on demand in a test is impractical). The #3683 production RCA
+/// found the sweep processed every registered index in whatever order
+/// `registry.list()` happened to return — effectively arbitrary — so an
+/// index that had gone idle a second ago and one that had sat idle for hours
+/// were treated identically. The longer an index has sat idle, the less
+/// likely it is to be queried again imminently, making it the safest /
+/// cheapest-to-lose candidate; this makes that priority explicit and
+/// mechanically enforced rather than accidental.
+/// What: sorts `candidates` in place, descending by idle [`Duration`] (ties
+/// broken by original relative order — `sort_by` is a stable sort).
+/// Test: `oldest_idle_first_orders_most_idle_index_first_ties_stable` in
+/// `idle_eviction_tests`.
+pub(super) fn oldest_idle_first(candidates: &mut [(IndexId, Duration)]) {
+    candidates.sort_by_key(|(_, idle)| std::cmp::Reverse(*idle));
+}
+
+/// One idle-chunk-eviction tick: snapshot every registered index's idle
+/// duration, process them OLDEST-IDLE-FIRST, and evict each past ITS OWN
+/// cost-scaled threshold (issue #3683 slice 2). Extracted from
+/// [`spawn_idle_chunk_eviction_ticker`] so the orchestration is separable
+/// from the `tokio::spawn` scaffolding and directly testable, mirroring
+/// [`run_memory_pressure_tick`] / [`run_residency_sweep_tick`].
+///
+/// Why: the #3683 production RCA's Defect 2 found two compounding policy
+/// bugs: (1) every index shared one flat idle window regardless of how
+/// expensive it was to rehydrate, and (2) the sweep visited indexes in
+/// whatever arbitrary order the registry returned. Fix (1) is
+/// `CodeIndexer::cost_scaled_idle_threshold` — an index with a large,
+/// expensive-to-rehydrate corpus earns proportionally more idle time before
+/// eviction than a small, cheap one, using that index's OWN measured/
+/// estimated rehydrate cost (`CodeIndexer::rehydrate_cost_estimate_ms`)
+/// rather than a single number shared by every index. Fix (2) is
+/// [`oldest_idle_first`]: processing the least-recently-used (safest to
+/// lose) index first, rather than an arbitrary order, so the ordering
+/// itself is a deliberate, testable policy rather than an accident of
+/// `HashMap`/registry iteration.
+/// What: takes an already-resolved `base_secs` (the caller has already
+/// handled the `idle_evict_secs() == 0` "disabled" short-circuit, matching
+/// `run_memory_pressure_tick`'s "no soft ceiling configured" early return
+/// style) — but is still defensively a no-op when `base_secs == 0`, so a
+/// test (or a future caller) can pass it directly. Snapshots `(id,
+/// idle_duration)` for every registered index in ONE read-lock pass, sorts
+/// via [`oldest_idle_first`], then in a SECOND pass computes each index's
+/// own `cost_scaled_idle_threshold(base_secs)` and calls
+/// `evict_chunks_if_idle` / `evict_bm25_entities_if_idle` /
+/// `demote_vector_store_if_idle` with that per-index threshold. Returns the
+/// total evicted-entry count across every index this tick.
+/// Test: `oldest_idle_first_orders_most_idle_index_first_ties_stable`,
+/// `run_idle_eviction_tick_evicts_cheap_index_but_spares_costly_one`,
+/// `run_idle_eviction_tick_is_noop_when_secs_is_zero` in `idle_eviction_tests`.
+async fn run_idle_eviction_tick(state: &Arc<SearchAppState>, base_secs: u64) -> usize {
+    if base_secs == 0 {
+        return 0;
+    }
+
+    // Pass 1: snapshot idle duration for every registered index BEFORE
+    // evicting anything, so the sweep can process oldest-idle-first
+    // regardless of `registry.list()`'s arbitrary order.
+    let mut candidates: Vec<(IndexId, Duration)> = Vec::new();
+    for id in state.registry.list() {
+        let Some(handle) = state.registry.get(&id) else {
+            continue;
+        };
+        let idle = handle.indexer.read().await.idle_duration();
+        candidates.push((id, idle));
+    }
+    oldest_idle_first(&mut candidates);
+
+    // Pass 2: evict oldest-idle-first, each against ITS OWN cost-scaled
+    // threshold rather than one flat window shared by every index.
+    let mut total_evicted = 0usize;
+    for (id, _idle) in candidates {
+        let Some(handle) = state.registry.get(&id) else {
+            continue;
+        };
+        let indexer = handle.indexer.read().await;
+        let threshold = indexer.cost_scaled_idle_threshold(base_secs);
+        total_evicted += indexer.evict_chunks_if_idle(threshold).await;
+        total_evicted += indexer.evict_bm25_entities_if_idle(threshold).await;
+        indexer.demote_vector_store_if_idle(threshold).await;
+    }
+    total_evicted
 }
 
 /// Spawn a background ticker that suspends the FSEvents watcher of any index
@@ -704,3 +783,7 @@ mod residency_sweep_tests;
 #[cfg(test)]
 #[path = "memory_pressure_tests.rs"]
 mod memory_pressure_tests;
+
+#[cfg(test)]
+#[path = "idle_eviction_tests.rs"]
+mod idle_eviction_tests;

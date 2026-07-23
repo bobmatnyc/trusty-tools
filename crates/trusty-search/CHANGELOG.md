@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **Cost-scaled idle-eviction threshold + oldest-idle-first sweep ordering
+  (issue #3683 slice 2).** The idle-chunk/BM25/entity-eviction window is
+  raised from a flat 60s (issue #2166) to a 300s floor, now scaled per-index
+  by that index's own measured (or, before its first rehydrate, on-disk
+  chunk-count-estimated) rehydrate cost — an expensive-to-rehydrate index
+  (the i-0076 production incident's 315K-chunk / 27-40s-scan corpus) earns
+  proportionally more idle time before eviction than a cheap one, directly
+  addressing the #3683 RCA's thrash-eviction root cause. The sweep itself
+  now processes indexes oldest-idle-first rather than the registry's
+  arbitrary iteration order. New env override `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS`
+  (default 1000ms per extra base-window multiple; `0` disables cost-scaling).
+  `TRUSTY_CHUNKS_IDLE_EVICT_SECS` continues to set the base window.
+
 ### Fixed
 
 - **Deflake `test_rss_for_self_pid` under `cargo test --workspace` (issue
