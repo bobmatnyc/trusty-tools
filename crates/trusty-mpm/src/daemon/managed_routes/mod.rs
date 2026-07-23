@@ -28,6 +28,7 @@ use crate::session_manager::ManagedSessionId;
 
 pub mod activity;
 mod deliverable_link;
+mod deployment_check;
 mod fleet;
 pub mod front_gate;
 pub mod inproject;

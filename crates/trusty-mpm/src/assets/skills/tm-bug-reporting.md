@@ -56,11 +56,14 @@ daemon-captured error event — `list_recent_errors` will not surface them.
 For these, delegate to the **Version Control** agent to file a `gh issue
 create` against `bobmatnyc/trusty-tools` directly, using the same
 information standard below (title, labels, structured body). Apply the shipped
-issue defaults — `--assignee @me --label trusty-mpm` (create the label first if
-missing: `gh label create trusty-mpm --description "Created/managed by a
-trusty-mpm session" --color 8250df`) — **in addition to** the `bug` label and
-any context labels below. The MCP pipeline is preferred whenever a fingerprint
-exists; the manual path is the fallback, not the default.
+issue defaults — `--assignee @me --label trusty-mpm --label ws/<session-name>`
+(this session's tmux session name; create the labels first if missing:
+`gh label create trusty-mpm --description "Created/managed by a
+trusty-mpm session" --color 8250df` and `gh label create "ws/$WS_NAME"
+--description "trusty-mpm workstream $WS_NAME" --color 5319E7`) — **in
+addition to** the `bug` label and any context labels below. The MCP pipeline
+is preferred whenever a fingerprint exists; the manual path is the fallback,
+not the default.
 
 ## Bug Report Content Standard
 

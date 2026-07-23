@@ -252,10 +252,14 @@ pub fn gh_account_status_local() -> Option<GhAccountStatus> {
 /// Why: `gh` subprocesses (or even a slow network-filesystem read) must never
 /// block the statusline or doctor; a bounded thread turns "hung" into "omitted".
 /// The pattern mirrors the statusline's `git_branch` bounded-thread probe.
+/// `pub(crate)` (rather than private) so other bounded-`gh`-subprocess callers
+/// in the crate — e.g. `session_launch::workstream_label`'s launch-time label
+/// ensure — reuse this one implementation instead of re-deriving the same
+/// thread+mpsc-timeout pattern.
 /// What: spawns `f` on a new thread, waits up to `timeout` on an mpsc channel,
 /// and returns `None` on timeout (the thread is abandoned, not joined).
 /// Test: side-effect timing; covered by the callers' fail-soft behaviour.
-fn run_bounded<T, F>(timeout: Duration, f: F) -> Option<T>
+pub(crate) fn run_bounded<T, F>(timeout: Duration, f: F) -> Option<T>
 where
     T: Send + 'static,
     F: FnOnce() -> Option<T> + Send + 'static,

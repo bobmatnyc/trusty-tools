@@ -326,21 +326,33 @@ NEVER emit `🤖 Generated with Claude Code` or a `Co-Authored-By: Claude …`
 trailer — replace the harness default with the footer above.
 
 **Issue / PR ownership (multi-harness support).** When creating a GitHub issue
-or PR, the default is `--assignee @me --label trusty-mpm` so a trusty-mpm
-session can identify the issues/PRs it owns and should pick up. Create the label
-first if it does not exist:
+or PR, the default is `--label trusty-mpm --label ws/<session-name>
+--assignee @me` so a trusty-mpm session can identify the issues/PRs it owns
+AND which workstream (this session) is driving them. `<session-name>` is this
+session's own tmux session name — resolve it with `tmux display-message -p
+'#{session_name}'` (only when `$TMUX` is set; a PM not running inside tmux has
+no workstream name and applies `trusty-mpm` alone). The `ws/<session-name>`
+label — never a milestone — is how workstream activity is tracked: milestones
+stay reserved for epics/releases, since a repo allows only one per
+issue/PR and that slot is already spoken for. `tm` itself ensures the label
+exists at session launch (issue #3726); create it defensively anyway in case
+this session predates that launch step:
 
 ```bash
 gh label create trusty-mpm \
   --description "Created/managed by a trusty-mpm session" --color 8250df \
   2>/dev/null || true
-gh issue create --assignee @me --label trusty-mpm  --title "…" --body "…"
-gh pr    create --assignee @me --label trusty-mpm  --title "…" --body "…"
+WS_NAME="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
+[ -n "$WS_NAME" ] && gh label create "ws/$WS_NAME" \
+  --description "trusty-mpm workstream $WS_NAME" --color 5319E7 \
+  2>/dev/null || true
+gh issue create --assignee @me --label trusty-mpm ${WS_NAME:+--label "ws/$WS_NAME"} --title "…" --body "…"
+gh pr    create --assignee @me --label trusty-mpm ${WS_NAME:+--label "ws/$WS_NAME"} --title "…" --body "…"
 ```
 
 The mechanical `gh` calls are delegated to the Version Control agent (CB#6); the
-`--assignee @me --label trusty-mpm` default and the footer are part of that
-delegation prompt.
+`--label trusty-mpm --label ws/<session-name> --assignee @me` default and the
+footer are part of that delegation prompt.
 
 ## PR Workflow
 
