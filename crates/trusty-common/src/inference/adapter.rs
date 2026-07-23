@@ -20,6 +20,7 @@ use serde_json::Value;
 
 use crate::inference::error::InferenceError;
 use crate::inference::registry::{ProviderCapabilities, context_window};
+use crate::inference::streaming::{ChatStream, buffered_stream};
 use crate::inference::types::{ChatRequest, ChatResponse, ToolChoice, openai_tool_choice};
 
 /// The async inference surface every provider implements.
@@ -64,6 +65,30 @@ pub trait InferenceAdapter: Send + Sync {
     /// [`InferenceError::is_retryable`]/[`InferenceError::is_alarm`].
     /// Test: `ScriptedAdapter::chat` returns queued scripted responses.
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, InferenceError>;
+
+    /// Issue one chat/completions call as an incremental token stream.
+    ///
+    /// Why: consumers that render tokens as they arrive (the trusty-agents chat
+    /// UI first) need deltas incrementally, not one buffered [`ChatResponse`].
+    /// Making this a trait method with a working default means every adapter is
+    /// stream-callable immediately: OpenAI-dialect providers override it with a
+    /// real SSE transport (#3696 Gap B), while adapters without native streaming
+    /// keep the default. Returning `Result<ChatStream, _>` (rather than a stream
+    /// whose first item is the error) lets a `stream=true` handshake failure
+    /// surface synchronously so the caller can choose to retry non-streaming —
+    /// the adapter never silently degrades to buffered on its own.
+    /// What: yields ordered [`crate::inference::ChatStreamEvent`]s — text/tool
+    /// deltas followed by exactly one terminal `Done` carrying the finish reason
+    /// and usage. The default buffers via [`Self::chat`] and replays the finished
+    /// response through [`buffered_stream`]; dropping the returned stream cancels
+    /// the underlying request in a real streaming override.
+    /// Test: `crates/trusty-common/tests/inference_adapters.rs` streaming
+    /// round-trip; `super::streaming::tests::buffered_stream_replays_response`
+    /// covers the default's replay shape.
+    async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        let response = self.chat(request).await?;
+        Ok(buffered_stream(response))
+    }
 
     /// Translate a neutral [`ToolChoice`] into this provider's wire JSON.
     ///

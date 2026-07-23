@@ -39,6 +39,8 @@ pub mod providers;
 #[cfg(feature = "inference-client")]
 pub mod registry;
 #[cfg(feature = "inference-client")]
+pub mod streaming;
+#[cfg(feature = "inference-client")]
 pub mod test_support;
 #[cfg(feature = "inference-client")]
 pub mod types;
@@ -62,6 +64,11 @@ pub use providers::{OpenAiCompatAdapter, OpenAiCompatConfig, register_default_fa
 pub use registry::{
     Pricing, ProviderCapabilities, ProviderId, ToolDialect, capabilities, capabilities_for,
     context_window, pricing,
+};
+#[cfg(feature = "inference-client")]
+pub use streaming::{
+    ChatStream, ChatStreamEvent, SseDecoder, StreamCompletion, ToolCallDelta, buffered_stream,
+    decode_event_stream,
 };
 #[cfg(feature = "inference-client")]
 pub use types::{

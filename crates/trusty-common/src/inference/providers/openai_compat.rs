@@ -19,10 +19,12 @@
 
 use async_trait::async_trait;
 use reqwest::Client;
+use serde_json::Value;
 
 use crate::inference::adapter::InferenceAdapter;
 use crate::inference::error::InferenceError;
 use crate::inference::registry::ProviderCapabilities;
+use crate::inference::streaming::{ChatStream, buffered_stream, decode_event_stream};
 use crate::inference::types::{ChatRequest, ChatResponse, RequestUsageConfig, SecretString};
 
 /// Per-provider configuration for an [`OpenAiCompatAdapter`].
@@ -124,6 +126,40 @@ impl OpenAiCompatAdapter {
         }
         req
     }
+
+    /// Produce the streaming request body: the prepared request with `stream`
+    /// and `stream_options.include_usage` set.
+    ///
+    /// Why: `stream:true` switches the endpoint to SSE; `stream_options:
+    /// {include_usage:true}` is what makes OpenAI-dialect providers emit the
+    /// final usage-only frame the terminal event carries (OpenRouter's
+    /// `usage:{include:true}`, injected by [`Self::prepare_body`], adds its
+    /// authoritative cost on top). Building the body as a JSON [`Value`] — rather
+    /// than adding a `stream` field to the shared [`ChatRequest`] — keeps the
+    /// non-streaming struct (and its many struct-literal construction sites)
+    /// untouched; the flag exists only on the streaming path.
+    /// What: serialises [`Self::prepare_body`] to a JSON object and inserts
+    /// `stream:true` plus `stream_options.include_usage:true`. Serialisation of a
+    /// well-formed request cannot fail, but a failure maps to
+    /// [`InferenceError::Deserialise`] rather than panicking.
+    /// Test: `stream_body_sets_stream_and_usage_options`,
+    /// `stream_body_preserves_openrouter_usage_directive`.
+    fn stream_body(&self, request: &ChatRequest) -> Result<Value, InferenceError> {
+        let prepared = self.prepare_body(request);
+        let mut body =
+            serde_json::to_value(&prepared).map_err(|e| InferenceError::Deserialise {
+                message: e.to_string(),
+                body: String::new(),
+            })?;
+        if let Value::Object(map) = &mut body {
+            map.insert("stream".to_string(), Value::Bool(true));
+            map.insert(
+                "stream_options".to_string(),
+                serde_json::json!({ "include_usage": true }),
+            );
+        }
+        Ok(body)
+    }
 }
 
 #[async_trait]
@@ -192,6 +228,89 @@ impl InferenceAdapter for OpenAiCompatAdapter {
             message: e.to_string(),
             body: text,
         })
+    }
+
+    /// POST a streaming chat request and return a live token stream.
+    ///
+    /// Why: this is the real streaming transport every OpenAI-dialect provider
+    /// (OpenRouter foremost) lights up through — one SSE grammar, one parser. The
+    /// handshake (auth, `stream:true` body, status check) happens eagerly so a
+    /// provider that rejects `stream=true` surfaces its error as the outer
+    /// `Err(Api{..})` BEFORE any stream is returned, letting the caller retry
+    /// non-streaming rather than the adapter silently degrading.
+    /// What: serialises [`Self::stream_body`], POSTs it with the same
+    /// `Authorization`/attribution headers as [`Self::chat`], and — on a 2xx
+    /// `text/event-stream` response — returns the byte stream decoded into
+    /// [`crate::inference::ChatStreamEvent`]s via [`decode_event_stream`]. If a
+    /// (mis)behaving gateway/LB answers 2xx with a buffered, non-streaming body
+    /// (e.g. `application/json`), it degrades gracefully: the full body is parsed
+    /// as a [`ChatResponse`] and replayed via [`buffered_stream`] so the answer is
+    /// never silently dropped as "zero deltas then Done". A transport failure or
+    /// non-2xx status maps to [`InferenceError::Transport`]/[`InferenceError::Api`];
+    /// a non-stream body that will not parse maps to [`InferenceError::Deserialise`]
+    /// (retryable by the caller). Dropping the returned stream drops the reqwest
+    /// response, aborting the HTTP request. The API key is only ever placed in the
+    /// auth header and never appears in a returned error.
+    /// Test: `crates/trusty-common/tests/inference_adapters.rs` streaming
+    /// round-trip + non-stream-body degrade against the axum mock server.
+    async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
+        let body = self.stream_body(request)?;
+
+        let mut builder = self
+            .http
+            .post(&self.endpoint)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", self.api_key.expose()),
+            )
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "text/event-stream");
+        for (name, value) in &self.extra_headers {
+            builder = builder.header(name, value);
+        }
+
+        let resp = builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| InferenceError::Transport(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(InferenceError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        // A conformant provider answers a `stream:true` request with an SSE body.
+        // Some gateways/LBs strip streaming and return a buffered JSON body at 2xx;
+        // feeding THAT to the SSE decoder yields zero deltas + a clean Done, which
+        // would silently drop the entire answer. Guard on the content type.
+        let is_sse = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase().contains("text/event-stream"))
+            .unwrap_or(false);
+        if is_sse {
+            return Ok(decode_event_stream(resp.bytes_stream()));
+        }
+
+        // Non-streaming body: degrade gracefully by parsing the buffered response
+        // and replaying it as a one-shot stream (rather than dropping it).
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| InferenceError::Transport(e.to_string()))?;
+        let response = serde_json::from_str::<ChatResponse>(&text).map_err(|e| {
+            InferenceError::Deserialise {
+                message: e.to_string(),
+                body: text,
+            }
+        })?;
+        Ok(buffered_stream(response))
     }
 }
 
@@ -276,5 +395,39 @@ mod tests {
             a.prepare_body(&req).usage,
             Some(RequestUsageConfig { include: false })
         );
+    }
+
+    /// Why: the streaming body must set `stream:true` and request usage in the
+    /// final frame via `stream_options.include_usage` — without these the
+    /// endpoint buffers and no terminal usage arrives.
+    /// Test: itself.
+    #[test]
+    fn stream_body_sets_stream_and_usage_options() {
+        let a = OpenAiCompatAdapter::new(config_for(ProviderId::OpenAI, "https://example.test/v1"))
+            .expect("build");
+        let req = ChatRequest::new("m", vec![ChatMessage::user("hi")]);
+        let body = a.stream_body(&req).expect("body");
+        assert_eq!(body["stream"], serde_json::json!(true));
+        assert_eq!(
+            body["stream_options"]["include_usage"],
+            serde_json::json!(true)
+        );
+        assert_eq!(body["model"], "m");
+    }
+
+    /// Why: OpenRouter's detailed-usage directive (injected by `prepare_body`)
+    /// must survive into the streaming body so cost/cache accounting is returned.
+    /// Test: itself.
+    #[test]
+    fn stream_body_preserves_openrouter_usage_directive() {
+        let a = OpenAiCompatAdapter::new(config_for(
+            ProviderId::OpenRouter,
+            "https://openrouter.ai/api/v1",
+        ))
+        .expect("build");
+        let req = ChatRequest::new("openai/gpt-4o-mini", vec![ChatMessage::user("hi")]);
+        let body = a.stream_body(&req).expect("body");
+        assert_eq!(body["usage"], serde_json::json!({ "include": true }));
+        assert_eq!(body["stream"], serde_json::json!(true));
     }
 }
