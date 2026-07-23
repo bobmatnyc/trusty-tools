@@ -54,6 +54,12 @@
 //! send or schedule; neither creates an editable draft) — `slack_send_message_draft`
 //! is therefore NOT implemented; see the crate README and the PR description
 //! for the investigation.
+//! CommonMark → canvas push (epic #3744 slice 2): `slack_canvas_push` runs
+//! caller-supplied CommonMark through [`crate::slack::canvas_markdown`]'s
+//! pure translator, then pushes the result onto an existing canvas —
+//! `append` via a single `insert_at_end` edit, `replace_all` via a sequential
+//! lookup-then-delete-then-insert sequence (not atomic; see
+//! `handlers::canvas`'s module doc for the empty-canvas / no-headers cases).
 //! Test: pure argument-parsing and response-cleaning helpers are unit-tested
 //! inline in each submodule; the full request path (200 / `ok:false` / auth /
 //! user-token-missing / pagination) is covered against a `wiremock` Slack in
@@ -169,6 +175,7 @@ pub async fn dispatch(
         "slack_update_canvas" => canvas::update_canvas(client, args).await,
         "slack_read_canvas" => canvas::read_canvas(client, args).await,
         "slack_canvas_lookup_sections" => canvas::lookup_sections(client, args).await,
+        "slack_canvas_push" => canvas::canvas_push(client, args).await,
         "slack_read_file" => files::read_file(client, args).await,
         "slack_search_emojis" => search::search_emojis(client, args).await,
         "slack_search_users" => search::search_users(client, args).await,

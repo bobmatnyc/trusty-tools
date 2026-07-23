@@ -1201,6 +1201,10 @@ async fn lookup_sections_surfaces_slack_api_error() {
     }
 }
 
+// slack_canvas_push (issue #3744 slice 2) tests moved to
+// tests/canvas_push_http.rs — keeping them here pushed this file past the
+// workspace's 1500-SLOC test-file cap (see that file's module doc).
+
 // ── slack_read_file (issue #3615) ──────────────────────────────────────────
 
 #[tokio::test]

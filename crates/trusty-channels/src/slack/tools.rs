@@ -12,20 +12,31 @@
 //! from "unknown tool".
 //! Test: Unit tests below assert the tool count, required-field shape, name
 //! uniqueness, and `is_known_tool` agreement with the registry.
+//! File split (issue #3744 slice 2): the six `slack_*canvas*` tool schemas
+//! live in [`super::tool_schemas_canvas`] rather than inline here — with
+//! `slack_canvas_push`'s schema added, this file's `vec![...]` literal alone
+//! pushed the file past the workspace's 500-SLOC production-file cap. Moving
+//! one coherent tool family out (mirroring `handlers::canvas`'s own split
+//! from the rest of `handlers`) keeps both files under the cap without
+//! changing `tool_list_response()`'s observable output.
 
 use serde_json::{json, Value};
+
+use super::tool_schemas_canvas;
 
 /// The authoritative list of live Slack tool names.
 ///
 /// Why: Both `tool_list_response` (indirectly) and `is_known_tool` must agree
 /// on the exact surface; a single constant array prevents drift.
-/// What: The 21 chat-as-tools operations implemented by the native Slack MCP —
+/// What: The 22 chat-as-tools operations implemented by the native Slack MCP —
 /// the original nine (#2639/#2640), ten added for claude.ai Slack-connector
-/// parity (epic #3611), and two more from epic #3744 slice 1's
-/// `slack_canvas_*` tools. `slack_send_message_draft` (claude.ai's 20th tool)
-/// is deliberately NOT included: Slack has no public API to create a message
-/// draft (`chat.postMessage`/`chat.scheduleMessage` send or schedule; neither
-/// creates an editable draft) — see the crate README and PR #3616.
+/// parity (epic #3611), two more from epic #3744 slice 1's `slack_canvas_*`
+/// tools, and `slack_canvas_push` from epic #3744 slice 2 (CommonMark →
+/// canvas-markdown translation + push). `slack_send_message_draft` (claude.ai's
+/// 20th tool) is deliberately NOT included: Slack has no public API to create
+/// a message draft (`chat.postMessage`/`chat.scheduleMessage` send or
+/// schedule; neither creates an editable draft) — see the crate README and PR
+/// #3616.
 /// Test: `known_tools_match_registry` cross-checks this against the built list.
 pub const TOOL_NAMES: &[&str] = &[
     "slack_send_message",
@@ -49,6 +60,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "slack_search_users",
     "slack_canvas_create",
     "slack_canvas_lookup_sections",
+    "slack_canvas_push",
 ];
 
 /// Report whether `name` is a planned Slack tool.
@@ -68,7 +80,7 @@ pub fn is_known_tool(name: &str) -> bool {
 /// What: Wraps `properties` and `required` into an object-typed input schema
 /// alongside the name and description.
 /// Test: Covered via `tool_list_response()` in `tests`.
-fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
+pub(super) fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({
         "name": name,
         "description": description,
@@ -94,7 +106,7 @@ fn channel_prop() -> Value {
 /// What: Returns the nine planned Slack tools with minimal-but-valid schemas.
 /// Test: `tool_list_has_expected_count` asserts exactly nine tools.
 pub fn tool_list_response() -> Value {
-    let tools = vec![
+    let mut tools = vec![
         tool(
             "slack_send_message",
             "Post a message to a Slack channel (or reply in a thread).",
@@ -326,49 +338,6 @@ pub fn tool_list_response() -> Value {
             &["channel"],
         ),
         tool(
-            "slack_create_canvas",
-            "Create a standalone canvas, optionally tabbed into a channel and/or \
-             seeded with markdown content. Requires scope canvases:write.",
-            json!({
-                "title": { "type": "string", "description": "Optional canvas title." },
-                "markdown": {
-                    "type": "string",
-                    "description": "Optional initial markdown content.",
-                },
-                "channel_id": {
-                    "type": "string",
-                    "description": "Optional channel ID to tab the new canvas into.",
-                },
-            }),
-            &[],
-        ),
-        tool(
-            "slack_update_canvas",
-            "Replace a canvas's entire document content. Requires scope canvases:write.",
-            json!({
-                "canvas_id": { "type": "string", "description": "Canvas ID (e.g. F0123ABCD)." },
-                "markdown": {
-                    "type": "string",
-                    "description": "New markdown content, replacing the canvas in full.",
-                },
-                "operation_id": {
-                    "type": "string",
-                    "description": "Optional idempotency key for the edit.",
-                },
-            }),
-            &["canvas_id", "markdown"],
-        ),
-        tool(
-            "slack_read_canvas",
-            "Read a canvas's content. Slack has no documented full-content-read API, so \
-             this downloads the canvas's private file export (HTML, not the original \
-             markdown). Requires scopes canvases:read and files:read.",
-            json!({
-                "canvas_id": { "type": "string", "description": "Canvas ID (e.g. F0123ABCD)." },
-            }),
-            &["canvas_id"],
-        ),
-        tool(
             "slack_read_file",
             "Read a Slack file's metadata and, for text files, its content. Binary \
              files are reported as such (with a permalink) rather than embedded. \
@@ -400,61 +369,38 @@ pub fn tool_list_response() -> Value {
             }),
             &["query"],
         ),
-        tool(
-            "slack_canvas_create",
-            "Create a standalone canvas, optionally tabbed into a channel and/or \
-             seeded with markdown content. Thin wrapper over canvases.create — no \
-             markdown-to-canvas translation beyond Slack's own markdown ingestion. \
-             `channel_id` is optional per Slack's API, but free-tier (non-Business+) \
-             workspaces reject a non-tabbed canvas (error \
-             free_teams_cannot_create_non_tabbed_canvases), so pass `channel_id` on \
-             those teams. Requires scope canvases:write; other Slack errors surfaced \
-             as-is include canvas_creation_failed, canvas_disabled_user_team, and \
-             missing_scope.",
-            json!({
-                "title": { "type": "string", "description": "Optional canvas title." },
-                "markdown": {
-                    "type": "string",
-                    "description": "Required initial markdown content, sent to Slack as \
-                        document_content: {type: \"markdown\", markdown}.",
-                },
-                "channel_id": {
-                    "type": "string",
-                    "description": "Optional channel ID to tab the new canvas into. \
-                        Effectively required on free-tier Slack teams — see the tool \
-                        description.",
-                },
-            }),
-            &["markdown"],
-        ),
-        tool(
-            "slack_canvas_lookup_sections",
-            "Look up section ids/anchors within an existing canvas via \
-             canvases.sections.lookup, filtered by section type and/or contained \
-             text. Slack has no full-canvas-content-read API — this returns only \
-             section_ids, never document content or any other raw response field; \
-             pair a returned id with slack_update_canvas / a section-targeted \
-             canvases.edit call to act on it. Slack's criteria reliably accepts \
-             only h1/h2/h3/any_header as section_types. Requires scope canvases:read.",
-            json!({
-                "canvas_id": { "type": "string", "description": "Canvas ID (e.g. F0123ABCD)." },
-                "section_types": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Optional filter on section heading type. Slack \
-                        reliably accepts only \"h1\", \"h2\", \"h3\", and \
-                        \"any_header\" here.",
-                },
-                "contains_text": {
-                    "type": "string",
-                    "description": "Optional filter: only return sections whose \
-                        content contains this text.",
-                },
-            }),
-            &["canvas_id"],
-        ),
     ];
+    tools.extend(tool_schemas_canvas::canvas_tools());
     json!({ "tools": tools })
+}
+
+#[cfg(test)]
+mod canvas_split_tests {
+    use super::tool_list_response;
+
+    #[test]
+    fn canvas_tools_are_present_after_the_file_split() {
+        // The six canvas tool schemas were moved into
+        // `tool_schemas_canvas.rs` (issue #3744 slice 2) but must still
+        // appear in the combined `tools/list` response.
+        let v = tool_list_response();
+        let names: Vec<&str> = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for expected in [
+            "slack_create_canvas",
+            "slack_update_canvas",
+            "slack_read_canvas",
+            "slack_canvas_create",
+            "slack_canvas_lookup_sections",
+            "slack_canvas_push",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+    }
 }
 
 #[cfg(test)]
