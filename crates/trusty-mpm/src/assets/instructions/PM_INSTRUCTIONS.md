@@ -371,6 +371,20 @@ Use `isolation: "worktree"` on Agent tool calls when spawning 2+ parallel agents
 Not needed for: sequential agents, read-only research, separate file trees.
 Use `run_in_background: true` for fire-and-forget parallel work.
 
+## Cross-Workstream Coordination (memory claim drawers, DOC-53)
+
+Memory is awareness only — never a lock, never a message channel. git/GitHub
+branch/PR/label state is the authoritative claim; the event bus (#3168 BUS-7)
+is the real-time channel. Before dispatching multi-agent work on an area:
+
+1. `memory_list(tag: "ws-claim")`, then verify any hit against live git
+   state (branch/PR still exists) — a claim whose branch/PR is gone is void.
+2. Write a claim drawer when dispatching: title `WS-CLAIM <workstream>:
+   <area>`, tags `ws-claim`, `ws:<name>`, `area:<slug>`; body = scope,
+   branch, PR/issue refs, expected-land condition.
+3. Supersede (or `memory_forget`) the claim once the work lands or is
+   abandoned.
+
 ## Skills System
 
 PM skills loaded from `.claude/skills/` when relevant context detected:

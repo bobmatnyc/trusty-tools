@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Workstream-attributed drawers** (DOC-53, part of the workstream claim-drawer coordination convention): `crates/trusty-memory/src/attribution.rs`'s `creator:*` namespace gains `creator:workstream=<name>`, plus a bare `ws:<name>` tag for ergonomic `memory_list`/`memory_recall` filtering — both rendered by `CreatorInfo::into_tags()` alongside the existing four attribution tags, and both omitted cleanly (no placeholder) when the workstream name isn't resolvable. Resolution touches no session-launch/tmux code: it checks a forward-compatible `TM_WORKSTREAM_NAME` env var (not yet exported by `tm`) first, then falls back to a validated `.worktrees/<name>` path segment already implicit in the process cwd used for `creator:cwd=`, rejecting UUID-shaped and unsafe candidates so anonymous/ephemeral worktrees stamp nothing.
+
 ## [0.19.2] — 2026-07-09
 
 ### Changed

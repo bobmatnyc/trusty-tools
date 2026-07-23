@@ -11,7 +11,8 @@
 use axum::{extract::State, http::HeaderMap, Json};
 
 use crate::attribution::{
-    CreatorInfo, CreatorSource, HTTP_DEFAULT_CLIENT, X_TRUSTY_CLIENT_CWD, X_TRUSTY_CLIENT_NAME,
+    resolve_workstream_name, CreatorInfo, CreatorSource, HTTP_DEFAULT_CLIENT, X_TRUSTY_CLIENT_CWD,
+    X_TRUSTY_CLIENT_NAME,
 };
 use crate::AppState;
 
@@ -50,7 +51,10 @@ pub(super) async fn rpc_handler(
 /// What: pulls `X-Trusty-Client-Name` (default
 /// [`HTTP_DEFAULT_CLIENT`]) and the optional `X-Trusty-Client-Cwd`
 /// header off the request, then builds a `CreatorInfo` with
-/// `source = Http` and the current daemon crate version.
+/// `source = Http` and the current daemon crate version. The workstream
+/// (DOC-53 §4.3) is resolved from the same client-reported cwd — an HTTP
+/// caller has no environment the daemon can read, so `TM_WORKSTREAM_NAME`
+/// never applies here; only the `.worktrees/<name>` cwd fallback can fire.
 /// Test: `drawer_creator_attribution_http_default`,
 /// `drawer_creator_attribution_http_header`.
 pub(crate) fn creator_info_from_http(headers: &HeaderMap) -> CreatorInfo {
@@ -66,11 +70,13 @@ pub(crate) fn creator_info_from_http(headers: &HeaderMap) -> CreatorInfo {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
+    let workstream = resolve_workstream_name(cwd.as_deref());
     CreatorInfo {
         client,
         version: env!("CARGO_PKG_VERSION").to_string(),
         source: CreatorSource::Http,
         cwd,
+        workstream,
     }
 }
 

@@ -102,6 +102,7 @@ mod tests {
             version: "0.0.0".to_string(),
             source: CreatorSource::Mcp,
             cwd: Some("/tmp/test".to_string()),
+            workstream: None,
         }
     }
 
