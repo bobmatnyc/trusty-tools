@@ -77,6 +77,55 @@ fn hysteresis_reclaims_again_once_rss_has_risen() {
     assert!(should_reclaim_now(10_000, 500));
 }
 
+/// Two-tick regression (issue #3683 slice 2, round-2 critic review HIGH):
+/// an `EarlyStop` sweep must NOT let the hysteresis baseline wedge the next
+/// tick, even when RSS is completely FLAT (the worst case for the strict
+/// `rss_mb > last_reclaim_rss_mb` gate) — because the estimate that
+/// justified stopping early ([`ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY`],
+/// documented as uncalibrated) may have overestimated real freed bytes,
+/// leaving genuinely reclaimable, untouched candidates behind.
+///
+/// Tick 1 (simulated): a sweep completes as `EarlyStop` at post-trim RSS
+/// `after` — still over the high-water mark, by construction (an early stop
+/// only happens while genuine memory pressure persists). Tick 2 (simulated):
+/// RSS sampled identical to `after` — no rise at all.
+///
+/// Contrast case pinned in the same test: a genuinely `Exhausted` sweep DOES
+/// trust `after` as the new baseline — flat RSS on the next tick correctly
+/// skips, exactly as it always has (issue #2846's original hysteresis
+/// design, unaffected by this fix).
+#[test]
+fn hysteresis_survives_early_stop_sweep_even_when_rss_is_flat() {
+    let after = 9_500u64; // tick 1's post-trim RSS; still over an assumed high-water mark
+
+    // EarlyStop: the baseline must reset to the "no sweep yet" sentinel...
+    let baseline_after_early_stop =
+        hysteresis_baseline_after_sweep(SweepCompletion::EarlyStop, after);
+    assert_eq!(
+        baseline_after_early_stop, 0,
+        "an EarlyStop sweep must not trust its own RSS sample as a hysteresis baseline"
+    );
+    // ...so tick 2 re-sweeps even though RSS (`after`) did not rise at all
+    // relative to itself — the exact scenario a naive `store(after)` would
+    // have wedged forever (RSS plateaus above the ceiling, sweep never
+    // re-fires, the 2.2x-limit gap this ticket exists to close).
+    assert!(
+        should_reclaim_now(after, baseline_after_early_stop),
+        "tick 2 must re-sweep on flat RSS after an EarlyStop tick 1 — untouched candidates \
+         (and a possibly-wrong estimate) deserve another attempt regardless of whether RSS rose"
+    );
+
+    // Exhausted: the baseline DOES trust `after` — flat RSS on the next tick
+    // correctly skips, unchanged from pre-#3683-slice-2 behaviour.
+    let baseline_after_exhausted =
+        hysteresis_baseline_after_sweep(SweepCompletion::Exhausted, after);
+    assert_eq!(baseline_after_exhausted, after);
+    assert!(
+        !should_reclaim_now(after, baseline_after_exhausted),
+        "an Exhausted sweep's baseline must still gate flat RSS exactly as before this fix"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `run_memory_pressure_tick` — restart-branch orchestration
 // ---------------------------------------------------------------------------
@@ -265,12 +314,18 @@ async fn pressure_sweep_stops_early_once_target_reached_sparing_least_idle() {
 
     // At this point: a is oldest-idle (~120ms), b is mid (~60ms), c is
     // freshest (~0ms) — oldest_idle_first must visit a, then b, then c.
-    let (reclaimed, cleared) = run_pressure_sweep(&Arc::new(state.clone()), 1).await;
+    let (reclaimed, cleared, completion) = run_pressure_sweep(&Arc::new(state.clone()), 1).await;
 
     assert_eq!(cleared, 1, "must stop after clearing exactly one index");
     assert_eq!(
         reclaimed, 600,
         "the one cleared index contributes 600 entries"
+    );
+    assert_eq!(
+        completion,
+        SweepCompletion::EarlyStop,
+        "b and c were spared with candidates left unvisited — must report EarlyStop, \
+         not Exhausted (issue #3683 slice 2 round-2 critic review HIGH)"
     );
 
     let a_count = state
@@ -339,13 +394,18 @@ async fn pressure_sweep_exempts_hot_indexes_under_mild_pressure() {
     state.registry.register(hot); // "hot" was just touched — idle ~0s
 
     // Target reachable from "cold" alone (see the stop-early test's math).
-    let (reclaimed, cleared) = run_pressure_sweep(&Arc::new(state.clone()), 1).await;
+    let (reclaimed, cleared, completion) = run_pressure_sweep(&Arc::new(state.clone()), 1).await;
 
     assert_eq!(
         cleared, 1,
         "only the non-exempt (cold) index should be cleared"
     );
     assert_eq!(reclaimed, 600);
+    assert_eq!(
+        completion,
+        SweepCompletion::EarlyStop,
+        "the exempt (hot) index was spared, unvisited — must report EarlyStop"
+    );
 
     let cold_count = state
         .registry
@@ -396,13 +456,19 @@ async fn pressure_sweep_desperation_pass_clears_hot_indexes_under_extreme_pressu
     state.registry.register(hot);
 
     // Target requires BOTH indexes (600 entries each ⇒ 1MB each ⇒ need 2MB).
-    let (reclaimed, cleared) = run_pressure_sweep(&Arc::new(state.clone()), 2).await;
+    let (reclaimed, cleared, completion) = run_pressure_sweep(&Arc::new(state.clone()), 2).await;
 
     assert_eq!(
         cleared, 2,
         "desperation pass must clear the hot index too once cold alone can't reach the target"
     );
     assert_eq!(reclaimed, 1_200);
+    assert_eq!(
+        completion,
+        SweepCompletion::Exhausted,
+        "both cold and hot were fully visited — nothing left untouched, so this must report \
+         Exhausted, trusting the post-trim RSS as the next hysteresis baseline"
+    );
 
     let cold_count = state
         .registry

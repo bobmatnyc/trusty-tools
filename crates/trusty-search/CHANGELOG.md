@@ -33,7 +33,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS` (default 30s; `0` disables the
   exemption) — falling through to a "desperation" second pass that clears
   hot indexes too if the exemption-respecting pass can't reach the target
-  (avoiding an OOM kill outweighs a hot index's warm cache).
+  (avoiding an OOM kill outweighs a hot index's warm cache). The sweep's
+  stop-early budget reports whether it actually visited every candidate
+  (`Exhausted`) or stopped on its (uncalibrated) freed-bytes estimate while
+  candidates remained (`EarlyStop`); `run_memory_pressure_tick` only trusts
+  the post-sweep RSS as the next hysteresis baseline on `Exhausted` — an
+  `EarlyStop` resets the baseline instead, so a steady-state RSS plateau
+  never wedges the sweep from re-attempting the untouched indexes (round-2
+  critic-review follow-up).
 
 ### Fixed
 

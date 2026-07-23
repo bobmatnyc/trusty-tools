@@ -596,6 +596,43 @@ fn should_reclaim_now(rss_mb: u64, last_reclaim_rss_mb: u64) -> bool {
     last_reclaim_rss_mb == 0 || rss_mb > last_reclaim_rss_mb
 }
 
+/// What `state.last_reclaim_rss_mb` (the [`should_reclaim_now`] hysteresis
+/// baseline) should become after a sweep completing with `completion`,
+/// having sampled `after_rss_mb` post-trim (issue #3683 slice 2, round-2
+/// critic review HIGH).
+///
+/// Why: extracted as a pure function — same rationale as `should_reclaim_now`
+/// itself — so the interaction this fixes is unit-testable without driving
+/// real process RSS. Before the stop-early budget
+/// ([`run_pressure_sweep`]/[`SweepCompletion`]) existed, a completed sweep
+/// ALWAYS meant "every evictable index was actually cleared", so trusting
+/// `after_rss_mb` as the next baseline was safe: if RSS was still high
+/// afterward, only genuine repopulation (a real rise) could justify sweeping
+/// again. [`ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY`] being an uncalibrated
+/// guess breaks that guarantee for [`SweepCompletion::EarlyStop`] — the
+/// sweep may have stopped while real RSS is still over the high-water mark
+/// AND candidates remain unswept. Storing `after_rss_mb` in that case would
+/// let `should_reclaim_now`'s strict `rss_mb > last_reclaim_rss_mb` gate wedge
+/// the daemon indefinitely at a steady-state RSS plateau near the ceiling —
+/// reclaimable memory sitting untouched forever — exactly the 2.2×-limit gap
+/// issue #2846 (and this ticket) exists to close.
+/// What: [`SweepCompletion::Exhausted`] → `after_rss_mb` (trust it, matching
+/// pre-stop-early-budget semantics — there is genuinely nothing left to
+/// reclaim, so only a real RSS rise should re-trigger).
+/// [`SweepCompletion::EarlyStop`] → `0`, the same "no sweep yet" sentinel
+/// [`run_memory_pressure_tick`] uses when RSS falls below the high-water
+/// mark — forces the NEXT tick to reclaim unconditionally
+/// (`should_reclaim_now` returns `true` whenever the baseline is `0`),
+/// regardless of whether RSS rose, so the untouched candidates get a chance
+/// to be swept (or the estimate that skipped them gets corrected on retry).
+/// Test: `hysteresis_survives_early_stop_sweep_even_when_rss_is_flat`.
+fn hysteresis_baseline_after_sweep(completion: SweepCompletion, after_rss_mb: u64) -> u64 {
+    match completion {
+        SweepCompletion::Exhausted => after_rss_mb,
+        SweepCompletion::EarlyStop => 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Budgeted, oldest-idle-first, recency-exempt pressure sweep (issue #3683
 // slice 2 — critic review HIGH: the pressure sweep was still an
@@ -642,9 +679,21 @@ fn memory_pressure_exempt_idle_secs() -> u64 {
 /// of indexes would mean paying that cost hundreds of times per tick. This
 /// estimate lets the sweep decide "stop early" using only cheap arithmetic,
 /// with exactly ONE trim + re-sample at the very end of the tick (unchanged
-/// from before this fix). An UNDER-estimate is safe: `should_reclaim_now`'s
-/// existing hysteresis re-fires the sweep next tick if the real post-trim
-/// RSS is still over the high-water mark.
+/// from before this fix).
+///
+/// **Uncalibrated (round-2 critic review note):** `2048` is a documented
+/// guess, not measured against a real heap profile. It can OVER-estimate
+/// real freed bytes just as easily as under-estimate — average chunk/BM25
+/// entry size varies enormously by corpus (language, chunk granularity,
+/// comment density). An over-estimate makes [`run_pressure_sweep`] stop
+/// "early" while real RSS is still over the high-water mark. That used to be
+/// safe by construction (a completed sweep always meant "cleared every
+/// evictable index"), but a stop-early budget breaks that assumption — see
+/// [`SweepCompletion`] and `run_memory_pressure_tick`'s handling of it for
+/// the fix (issue #3683 slice 2, round-2 critic review HIGH). The tick's
+/// "reclaim sweep complete" log line reports both this estimate and the
+/// REAL post-trim RSS delta side by side specifically so a future pass can
+/// calibrate this constant against production data instead of guessing again.
 const ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY: u64 = 2_048;
 
 /// Estimate MB freed for `reclaimed_entries` reclaimed entries — see
@@ -652,6 +701,42 @@ const ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY: u64 = 2_048;
 fn estimate_freed_mb(reclaimed_entries: usize) -> u64 {
     (reclaimed_entries as u64).saturating_mul(ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY)
         / (1024 * 1024)
+}
+
+/// Whether a [`run_pressure_sweep`] call stopped because every reachable
+/// candidate was actually visited, or because it stopped EARLY on the
+/// (possibly wrong) [`estimate_freed_mb`] budget while candidates remained
+/// untouched (issue #3683 slice 2, round-2 critic review HIGH).
+///
+/// Why: [`ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY`] is an uncalibrated
+/// guess and can OVER-estimate real freed bytes, in which case a sweep that
+/// "stopped early" left real RSS still over the high-water mark with
+/// reachable candidates never visited. Before the stop-early budget existed,
+/// a completed sweep always meant "every evictable index was actually
+/// cleared" — `run_memory_pressure_tick` trusted the post-trim RSS as the
+/// next tick's hysteresis baseline (`state.last_reclaim_rss_mb`) precisely
+/// because of that guarantee. A stop-early sweep does NOT carry that
+/// guarantee, so the caller must react differently — see
+/// `run_memory_pressure_tick`'s match on this enum.
+/// Test: `pressure_sweep_stops_early_once_target_reached_sparing_least_idle`,
+/// `pressure_sweep_exempts_hot_indexes_under_mild_pressure`,
+/// `pressure_sweep_desperation_pass_clears_hot_indexes_under_extreme_pressure`,
+/// `hysteresis_survives_early_stop_sweep_even_when_rss_is_flat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepCompletion {
+    /// The running freed-estimate met `target_freed_mb` while at least one
+    /// candidate (cold or hot) remained unvisited. Those candidates were
+    /// spared ON PURPOSE by the budget, but the budget itself might be
+    /// wrong — the caller must not treat this like "nothing more to
+    /// reclaim".
+    EarlyStop,
+    /// Every candidate that could possibly be visited (all of `cold`, plus
+    /// all of `hot` if the desperation pass ran) actually WAS visited —
+    /// whether or not the target was ever reached. There is nothing left to
+    /// reclaim from any registered index regardless of the estimate's
+    /// accuracy, so this is safe to treat exactly like the pre-stop-early-
+    /// budget "swept everything" semantics.
+    Exhausted,
 }
 
 /// Budgeted, oldest-idle-first, recency-exempt memory-pressure sweep (issue
@@ -676,7 +761,8 @@ fn estimate_freed_mb(reclaimed_entries: usize) -> u64 {
 ///    accumulates [`estimate_freed_mb`] as it clears indexes and stops as
 ///    soon as the running estimate meets or exceeds the target, instead of
 ///    unconditionally clearing every registered index (which could be
-///    hundreds).
+///    hundreds) — see [`SweepCompletion`] for how the caller is told whether
+///    that happened.
 /// 3. **Two-phase: exempt-first, then desperation.** Pass 1 sweeps only
 ///    indexes idle at least [`memory_pressure_exempt_idle_secs`] (a hot
 ///    index is never the first thing cleared), oldest-idle-first among
@@ -686,18 +772,27 @@ fn estimate_freed_mb(reclaimed_entries: usize) -> u64 {
 ///    oldest-idle-first among THEM: avoiding an OOM kill outweighs a hot
 ///    index's warm cache.
 ///
-/// What: returns `(total reclaimed entries, indexes actually cleared)` for
-/// the tick's log line. `target_freed_mb == 0` sweeps nothing and returns
-/// `(0, 0)` — the current caller only invokes this after confirming
-/// over-high-water (so `target_freed_mb` is always `> 0` in production), but
-/// the guard is kept so a future/test caller can pass `0` safely.
+/// What: returns `(total reclaimed entries, indexes actually cleared,
+/// completion)` for the tick's log line and hysteresis decision (see
+/// [`SweepCompletion`]). `target_freed_mb == 0` sweeps nothing and returns
+/// `(0, 0, Exhausted)` — trivially "nothing needed reclaiming" — the current
+/// caller only invokes this after confirming over-high-water (so
+/// `target_freed_mb` is always `> 0` in production, modulo the exact-
+/// boundary case where `rss == high_water_target_mb`), but the guard is kept
+/// so a future/test caller can pass `0` safely. `completion` is computed by
+/// comparing how many candidates were actually visited against the total
+/// snapshotted (`cold.len() + hot.len()`) — `Exhausted` iff every one was
+/// visited, `EarlyStop` otherwise (a `break` fired with candidates left).
 /// Test: `pressure_sweep_stops_early_once_target_reached_sparing_least_idle`,
 /// `pressure_sweep_exempts_hot_indexes_under_mild_pressure`,
 /// `pressure_sweep_desperation_pass_clears_hot_indexes_under_extreme_pressure`
 /// in `memory_pressure_tests`.
-async fn run_pressure_sweep(state: &Arc<SearchAppState>, target_freed_mb: u64) -> (usize, usize) {
+async fn run_pressure_sweep(
+    state: &Arc<SearchAppState>,
+    target_freed_mb: u64,
+) -> (usize, usize, SweepCompletion) {
     if target_freed_mb == 0 {
-        return (0, 0);
+        return (0, 0, SweepCompletion::Exhausted);
     }
     let exempt_secs = memory_pressure_exempt_idle_secs();
     let exempt_floor = Duration::from_secs(exempt_secs);
@@ -721,16 +816,21 @@ async fn run_pressure_sweep(state: &Arc<SearchAppState>, target_freed_mb: u64) -
     }
     oldest_idle_first(&mut cold);
     oldest_idle_first(&mut hot);
+    // Snapshotted BEFORE either pass drains its `Vec` — see the `visited`
+    // comparison at the end, which is how `SweepCompletion` is decided.
+    let total_candidates = cold.len() + hot.len();
 
     let mut reclaimed = 0usize;
     let mut cleared = 0usize;
     let mut freed_mb = 0u64;
+    let mut visited = 0usize;
 
     // Pass 1: non-exempt (cold) indexes only, oldest-idle-first.
     for (id, _idle) in cold {
         if freed_mb >= target_freed_mb {
             break;
         }
+        visited += 1;
         let Some(handle) = state.registry.get(&id) else {
             continue;
         };
@@ -757,6 +857,7 @@ async fn run_pressure_sweep(state: &Arc<SearchAppState>, target_freed_mb: u64) -
             if freed_mb >= target_freed_mb {
                 break;
             }
+            visited += 1;
             let Some(handle) = state.registry.get(&id) else {
                 continue;
             };
@@ -769,7 +870,12 @@ async fn run_pressure_sweep(state: &Arc<SearchAppState>, target_freed_mb: u64) -
         }
     }
 
-    (reclaimed, cleared)
+    let completion = if visited >= total_candidates {
+        SweepCompletion::Exhausted
+    } else {
+        SweepCompletion::EarlyStop
+    };
+    (reclaimed, cleared, completion)
 }
 
 async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
@@ -825,7 +931,7 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
         "memory-pressure: RSS at/over soft high-water mark — reclaiming evictable caches"
     );
 
-    let (reclaimed, indexes_cleared) = run_pressure_sweep(state, target_freed_mb).await;
+    let (reclaimed, indexes_cleared, completion) = run_pressure_sweep(state, target_freed_mb).await;
 
     // Issue #3657: `reclaim_memory_now` empties the in-memory maps (a genuine
     // Rust-level free — no lingering `Arc` holder), but the Linux release
@@ -856,13 +962,28 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
     // self-restart gate below decide on current reality, not the
     // pre-reclaim RSS.
     state.last_rss_mb.store(after, Ordering::Relaxed);
-    // Record the hysteresis baseline for the NEXT tick, regardless of whether
-    // `after` is still over the high-water mark — a sweep that didn't fully
-    // clear the pressure still shouldn't re-fire until RSS rises further.
-    state.last_reclaim_rss_mb.store(after, Ordering::Relaxed);
+    // Record the hysteresis baseline for the NEXT tick (issue #3683 slice 2,
+    // round-2 critic review HIGH): an `Exhausted` sweep trusts `after` as
+    // before (nothing more to reclaim short of real repopulation); an
+    // `EarlyStop` sweep resets to the `0` sentinel instead, so the next tick
+    // reclaims unconditionally rather than being wedged by
+    // `should_reclaim_now`'s strict rise check on an estimate that might
+    // have been wrong — see `hysteresis_baseline_after_sweep`.
+    state.last_reclaim_rss_mb.store(
+        hysteresis_baseline_after_sweep(completion, after),
+        Ordering::Relaxed,
+    );
+    // Issue #3683 slice 2 (critic review OPTIONAL note): log the ESTIMATED
+    // freed MB (from the uncalibrated per-entry constant) alongside the REAL
+    // rss_before/rss_after delta, so a future pass can calibrate
+    // `ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY` against production data
+    // instead of guessing again.
     tracing::warn!(
         reclaimed_entries = reclaimed,
         indexes_cleared,
+        sweep_completion = ?completion,
+        estimated_freed_mb = estimate_freed_mb(reclaimed),
+        actual_freed_mb = rss.saturating_sub(after),
         rss_before_mb = rss,
         rss_after_mb = after,
         limit_mb = limit,
