@@ -253,6 +253,37 @@ fn picker_use_color_requires_tty() {
     assert!(!picker_use_color(false));
 }
 
+/// Why: proves the NO_COLOR branch (previously untested — code-critic
+/// finding on PR #3730), not just the TTY gate. Mutating a process-global
+/// env var races any other test that reads/sets `NO_COLOR` concurrently
+/// (the exact bug class fixed in commit 4716e4a5) — no other test in this
+/// crate touches `NO_COLOR` today, but `#[serial_test::serial(no_color_env)]`
+/// plus save/restore around the mutation keeps this test race-safe even if
+/// one is added later, mirroring the `ENV_MUTEX`/save-restore convention in
+/// `tests_behavior_c_tests.rs`.
+#[test]
+#[serial_test::serial(no_color_env)]
+fn picker_use_color_false_when_no_color_set_even_on_tty() {
+    let prev = std::env::var_os("NO_COLOR");
+    // SAFETY: serialized via #[serial(no_color_env)] against every other
+    // test in this named group; no other test in the crate touches
+    // NO_COLOR, so this is the sole mutator of this key process-wide.
+    unsafe {
+        std::env::set_var("NO_COLOR", "1");
+    }
+    let result = picker_use_color(true);
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("NO_COLOR", v),
+            None => std::env::remove_var("NO_COLOR"),
+        }
+    }
+    assert!(
+        !result,
+        "NO_COLOR must disable color even when stderr is a TTY"
+    );
+}
+
 // ── session_picker_render: format_session_row (#3723 verb removal) ─────────
 
 #[test]

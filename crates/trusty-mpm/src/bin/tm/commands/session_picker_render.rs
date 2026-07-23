@@ -71,7 +71,7 @@ fn ansi_param(color: StateColor) -> Option<&'static str> {
 /// What: `use_color && ansi_param(color).is_some()` → `"\x1b[{param}m{text}\x1b[0m"`;
 /// otherwise `text.to_string()`.
 /// Test: `colorize_wraps_when_color_enabled`, `colorize_plain_when_color_disabled`,
-/// `colorize_plain_variant_never_wraps`.
+/// `colorize_plain_variant_never_wraps_even_with_color_enabled`.
 pub(crate) fn colorize(text: &str, color: StateColor, use_color: bool) -> String {
     match (use_color, ansi_param(color)) {
         (true, Some(param)) => format!("\x1b[{param}m{text}\x1b[0m"),
@@ -115,7 +115,9 @@ pub(crate) fn state_color(state: &str, attached: bool) -> StateColor {
 /// still needs to catch on its own.
 /// What: `stderr_tty && NO_COLOR is unset` (any value, including empty,
 /// per the NO_COLOR spec — https://no-color.org — disables color).
-/// Test: `picker_use_color_*` in `session_picker_tests.rs`.
+/// Test: `picker_use_color_requires_tty`,
+/// `picker_use_color_false_when_no_color_set_even_on_tty` in
+/// `session_picker_tests.rs`.
 pub(crate) fn picker_use_color(stderr_tty: bool) -> bool {
     stderr_tty && std::env::var_os("NO_COLOR").is_none()
 }
