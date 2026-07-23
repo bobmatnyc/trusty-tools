@@ -20,7 +20,6 @@
 
 import type { AppEvent } from './transport';
 import type { Message } from '../stores/app';
-import { isPendingTaskId } from './retask';
 
 /** Web-bus payload for an accumulated token batch. */
 export interface DeltaPayload {
@@ -115,24 +114,25 @@ export class StreamAccumulator {
 export const streamAccumulator = new StreamAccumulator();
 
 /**
- * Fill a streamed token batch into the ONE in-flight assistant bubble, in
- * place, returning the next message list (or the SAME array reference when the
- * write is a no-op so the store — and therefore Svelte's keyed `{#each}` and
- * the scroll reflow — does not churn a redundant re-render).
+ * Fill a streamed token batch into the in-flight assistant bubble whose
+ * `taskId` EXACTLY equals the delta's (globally-unique) backend id, in place,
+ * returning the next message list — or the SAME array reference when nothing
+ * changes (no match, or an identical/duplicate frame) so the store, Svelte's
+ * keyed `{#each}`, and the scroll reflow do not churn a redundant re-render.
  *
  * Why: The chat renders `{#each $activeMessages as msg (msg.id)}`, so a stable
- * bubble requires (a) never changing the matched message's `id` and (b) not
- * dropping early deltas. Before reconciliation the placeholder bubble still
- * carries its client-side `pending-<ts>` id while `task-delta` events already
- * carry the REAL backend id, so a plain id-equality update missed the bubble
- * until the poll loop swapped the id — the first tokens were lost and the poll
- * loop's interim progress text flashed in, which is the flicker the owner saw.
- * This adopts the most recent in-flight `pending-` assistant bubble on the
- * first delta, so token #1 onward render inside the single existing bubble.
- * What: Locates the target bubble by exact `taskId`, else the newest assistant
- * bubble still on a `pending-` id; rewrites its `content` (and `speaker`, when
- * the delta carries one) while preserving its `id`; returns `list` unchanged
- * when nothing would change.
+ * bubble requires never changing the matched message's `id` — we rewrite only
+ * `content`/`speaker` and keep `id`, so the keyed block is patched, never
+ * re-mounted. Attribution is by exact backend id ONLY: an earlier version
+ * adopted "the newest `pending-` bubble" by list position, which — on a retask
+ * race or a background stream after a project switch — let one turn's delta
+ * land in another turn's (or project's) bubble (PR #3763 code-critic HIGH). A
+ * frame whose id matches no bubble here is intentionally dropped (returned
+ * unchanged); the poll loop reconciles the placeholder `pending-<ts>` id to the
+ * real id (`InputArea` → `replaceMessageTaskId`), after which every delta for
+ * that turn matches and fills the one bubble.
+ * What: Rewrites the exact-`taskId` bubble's `content` (and `speaker`, when the
+ * delta carries one), preserving `id`; returns `list` unchanged otherwise.
  * Test: `chatStream.test.ts` (`fillDeltaIntoList`).
  */
 export function fillDeltaIntoList(
@@ -141,29 +141,16 @@ export function fillDeltaIntoList(
   content: string,
   speaker?: string,
 ): Message[] {
-  let idx = list.findIndex((m) => m.taskId === taskId);
-  if (idx === -1) {
-    for (let i = list.length - 1; i >= 0; i--) {
-      const m = list[i];
-      if (m.role === 'assistant' && isPendingTaskId(m.taskId ?? null)) {
-        idx = i;
-        break;
-      }
-    }
-  }
-  if (idx === -1) return list;
+  const idx = list.findIndex((m) => m.taskId === taskId);
+  if (idx === -1) return list; // unattributable frame ⇒ drop (never guess)
 
   const target = list[idx];
   const nextSpeaker = speaker && speaker.length > 0 ? speaker : target.speaker;
-  if (
-    target.taskId === taskId &&
-    target.content === content &&
-    target.speaker === nextSpeaker
-  ) {
+  if (target.content === content && target.speaker === nextSpeaker) {
     return list;
   }
 
   const next = list.slice();
-  next[idx] = { ...target, taskId, content, speaker: nextSpeaker };
+  next[idx] = { ...target, content, speaker: nextSpeaker };
   return next;
 }

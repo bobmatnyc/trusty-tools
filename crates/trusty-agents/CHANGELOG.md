@@ -18,18 +18,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Fixed
 
 - **Chat stream renders inside ONE stable assistant bubble — no mid-stream
-  flicker:** as `task-delta` tokens arrived the reply bubble visibly flashed.
-  Two causes: (1) each delta fired two separate store writes (content, then
+  flicker:** as `task-delta` tokens arrived the reply bubble visibly flashed
+  because each delta fired two separate `messages` store writes (content, then
   speaker), doubling the keyed-`{#each}` re-render + forced scroll reflow per
-  token, and (2) deltas carry the real backend id while the placeholder bubble
-  still held its `pending-<ts>` id, so the first tokens were dropped and the
-  poll loop's interim "Running…" text flashed into the bubble before streaming
-  text replaced it. Now a single `streamDeltaIntoTask` write funnels content +
-  speaker through one store update, adopts the in-flight placeholder on the
-  first delta (`fillDeltaIntoList`) so token #1 lands in the one existing
-  bubble (id preserved ⇒ no keyed-each re-mount), and no-ops on unchanged
-  frames. `InputArea`'s reconcile and `ChatView`'s progress handler both gate
-  on a shared `streamAccumulator` so neither overwrites live streamed text.
+  token. Now a single `streamDeltaIntoTask` write funnels content + speaker
+  into the ONE bubble whose `taskId` matches the delta's globally-unique
+  backend id, rewriting only `content`/`speaker` so the message `id` is
+  preserved (the keyed `{#each}` patches, never re-mounts). Attribution is by
+  exact backend id, searched across every conversation — never by list position
+  and never scoped to the currently-viewed project — so a background stream
+  reaches its own bubble after a project switch and one turn's tokens can never
+  land in another turn's or project's bubble; an unattributable frame (e.g.
+  arriving before the poll loop reconciles the `pending-<ts>` id) is dropped,
+  and its text — held by the shared `streamAccumulator` — appears on the first
+  matching write. No-op frames skip the store `set` entirely, so they notify no
+  subscribers. `InputArea`'s reconcile and `ChatView`'s progress handler both
+  gate on the shared `streamAccumulator` so neither overwrites live streamed
+  text.
 - **Izzie's own tools now reach the `--direct`/`--agent` dispatch path (#3745
   item C):** `tagent --direct izzie` loaded a tool registry of only
   `[git_log, git_status, web_search, delegate_to_agent]` and the model answered

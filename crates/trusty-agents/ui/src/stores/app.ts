@@ -1,4 +1,4 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import { apiBase } from '../lib/api-config';
 import { invoke, isDesktop } from '../lib/transport';
 import {
@@ -358,32 +358,40 @@ export function updateMessageByTask(projectId: string, taskId: string, content: 
 /**
  * Why: Token-streaming (`task-delta`) must grow the SINGLE in-flight assistant
  * bubble in place — one stable node per turn, no per-token re-mount or flash.
- * A plain `updateMessageByTask` misses two things: it does a full second store
- * write for the mid-stream speaker stamp (two re-renders + two scroll reflows
- * per token), and it can't land the first tokens because the bubble still
- * carries its `pending-<ts>` id while deltas already carry the real one. This
- * funnels content + speaker through ONE store write and reconciles the
- * placeholder id on the first delta (see `fillDeltaIntoList`), and no-ops when
- * nothing changed so an idle/duplicate frame triggers no render.
- * What: Applies a delta batch to the in-flight bubble for `projectId`, updating
- * the outer `Map` only when the list actually changed.
- * Test: `chatStream.test.ts` exercises the pure `fillDeltaIntoList` core.
+ * A plain `updateMessageByTask` did a second store write for the mid-stream
+ * speaker stamp (two re-renders + two scroll reflows per token); this funnels
+ * content + speaker through ONE write. Attribution is by the delta's
+ * globally-unique backend `taskId` and is resolved by SEARCHING EVERY
+ * conversation — never the currently-viewed project (`$activeProjectId`) —
+ * because a background stream must reach its own conversation's bubble after a
+ * project switch, and must never write into whatever project happens to be on
+ * screen (PR #3763 code-critic HIGH). A frame whose id matches no in-flight
+ * bubble is dropped. Uses `get` + a conditional `set` (not `update`) so a no-op
+ * frame performs NO `set` at all: because `messages` is a `writable<Map>` and
+ * Svelte's `safe_not_equal` always notifies for object values, returning the
+ * same Map from `update` would still notify subscribers — only skipping `set`
+ * truly suppresses the churn.
+ * What: Applies a delta batch to the bubble whose `taskId` matches, in its
+ * owning project; `set`s the outer `Map` only when a list actually changed.
+ * Test: `app.stream.test.ts` (store-level) + `chatStream.test.ts` (pure core).
  */
-export function streamDeltaIntoTask(
-  projectId: string,
-  taskId: string,
-  content: string,
-  speaker?: string,
-): void {
-  messages.update((map) => {
-    const list = map.get(projectId);
-    if (!list) return map;
+export function streamDeltaIntoTask(taskId: string, content: string, speaker?: string): void {
+  const map = get(messages);
+  let changedProject: string | null = null;
+  let changedList: Message[] | null = null;
+  // taskId is globally unique ⇒ at most one project's list changes; stop early.
+  for (const [projectId, list] of map) {
     const nextList = fillDeltaIntoList(list, taskId, content, speaker);
-    if (nextList === list) return map; // no-op ⇒ no store churn
-    const next = new Map(map);
-    next.set(projectId, nextList);
-    return next;
-  });
+    if (nextList !== list) {
+      changedProject = projectId;
+      changedList = nextList;
+      break;
+    }
+  }
+  if (changedProject === null || changedList === null) return; // no change ⇒ no notify
+  const next = new Map(map);
+  next.set(changedProject, changedList);
+  messages.set(next);
 }
 
 /**

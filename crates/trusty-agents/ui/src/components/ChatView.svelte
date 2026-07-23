@@ -82,14 +82,16 @@
         streams.finalize(p.task_id);
         return;
       }
-      // Grow the SINGLE in-flight bubble in place via one store write. Empty
-      // fragments still `append('')` so the task is marked streaming (gating
-      // progress ticks) and its `pending-` id is reconciled on the very first
-      // delta — so token #1 lands in the one existing bubble rather than being
-      // dropped until the poll loop swaps the id. Content + speaker go through
-      // a single update: no second render, no mid-stream flash/flicker.
+      // Grow the SINGLE in-flight bubble in place via one store write, keyed by
+      // the delta's unique backend id (attributed to its OWNING conversation,
+      // not the viewed one). Empty fragments still `append('')` so the task is
+      // marked streaming (gating progress ticks). Content + speaker go through a
+      // single update: no second render, no mid-stream flash/flicker. Frames
+      // that arrive before the poll loop reconciles the bubble's `pending-` id
+      // match nothing and are dropped; the accumulator keeps their text, so the
+      // first matching write shows everything so far — no lost tokens.
       const full = streams.append(p.task_id, p.text ?? '');
-      streamDeltaIntoTask($activeProjectId, p.task_id, full, p.agent || undefined);
+      streamDeltaIntoTask(p.task_id, full, p.agent || undefined);
     });
     unlistenProgress = await listenEvent<ProgressPayload>('task-progress', (p) => {
       // Don't let a polling "Running…" tick overwrite live streamed text.
