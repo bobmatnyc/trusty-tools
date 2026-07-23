@@ -124,8 +124,12 @@ export function buildRoster(
     entries.push({
       id: agent.name,
       // #3738: prefer the persona's display_name ("CTO Bot") over its stable
-      // id ("cto-assistant") for the human-facing roster label.
-      label: agent.display_name || agent.name,
+      // id ("cto-assistant") for the human-facing roster label. Canonical
+      // single form shared with PR #3739 — `.trim() || name` so a blank or
+      // whitespace-only display_name (the backend already falls back to name,
+      // but a hand-edited overlay could slip one through) never yields an
+      // empty label.
+      label: agent.display_name?.trim() || agent.name,
       description: agent.description || undefined,
       source: 'catalog',
     });
