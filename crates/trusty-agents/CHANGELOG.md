@@ -9,6 +9,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Chat speaker attribution — `GET /api/agents` exposes `display_name`
+  (#3737, epic #3052):** the agents catalog now surfaces each agent's
+  `display_name` (read from the TOML `[agent].display_name`, empty for the
+  nameless base assistant) so the desktop GUI can label each assistant chat
+  bubble with the specific persona that produced it ("Izzie", "CTO Assistant")
+  instead of a generic "agent".
+
 - **Izzie weather + Metro-North tools land as real platform-hosted tools
   (epic #3052):** the `izzie-weather` and `izzie-metro-north` skills named
   three tools — `get_weather`, `get_train_schedule`, `get_train_alerts` — that

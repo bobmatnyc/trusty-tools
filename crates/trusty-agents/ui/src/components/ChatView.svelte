@@ -105,9 +105,14 @@
       {:else if msg.role === 'assistant'}
         <div class="flex justify-start ml-4">
           <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-teal bg-foundry-teal/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm">
-            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-foundry-teal/80">
+            <!-- #3737: label each assistant bubble with the specific persona
+                 that produced it (stamped on the message at send time), never
+                 a generic "agent". `tracking-wide` is kept but `uppercase` is
+                 dropped so a mixed-case display name ("CTO Assistant") reads
+                 as written rather than being flattened to "CTO ASSISTANT". -->
+            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium tracking-wide text-foundry-teal/80">
               <ActionIcon name="agent" size={14} />
-              <span>agent</span>
+              <span>{msg.speaker ?? 'Assistant'}</span>
             </div>
             <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content || '…'}</p>
             <p class="mt-1 text-[10px] text-foundry-teal/70">{fmtTime(msg.timestamp)}</p>

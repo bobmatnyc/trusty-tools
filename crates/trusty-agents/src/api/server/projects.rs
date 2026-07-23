@@ -258,9 +258,11 @@ pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<se
 /// two routes' response shapes from drifting apart.
 /// What: Parses `raw` as TOML; reads `[agent]`'s `name` (falling back to
 /// `fallback_name`, typically the file stem), `role`, `model`, `runner`,
-/// `provider_id`, and `description` (each defaulting to `""` when absent).
-/// Returns `None` when `raw` fails to parse as TOML.
-/// Test: `scan_agents_dir_parses_toml`, `patch_agent_persists_model_and_round_trips`.
+/// `provider_id`, `description`, and `display_name` (each defaulting to `""`
+/// when absent). Returns `None` when `raw` fails to parse as TOML.
+/// Test: `scan_agents_dir_parses_toml`,
+/// `scan_agents_dir_exposes_display_name`,
+/// `patch_agent_persists_model_and_round_trips`.
 pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_json::Value> {
     let parsed: toml::Value = toml::from_str(raw).ok()?;
     let agent = parsed.get("agent");
@@ -278,6 +280,13 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
         "runner": get_str("runner").unwrap_or_default(),
         "provider_id": get_str("provider_id").unwrap_or_default(),
         "description": get_str("description").unwrap_or_default(),
+        // #3737 (per-message chat attribution, epic #3052): the persona's
+        // human-friendly display name ("Izzie", "CTO Assistant") — the GUI's
+        // agent roster uses this to label each assistant chat bubble with
+        // WHICH persona produced it instead of a generic "agent". Empty when
+        // the agent is nameless (the base `assistant`), which the frontend
+        // renders as the fallback label "Assistant".
+        "display_name": get_str("display_name").unwrap_or_default(),
     }))
 }
 

@@ -48,6 +48,17 @@ export interface Message {
   /** Task id returned by the backend; used to route progress events. */
   taskId?: string;
   /**
+   * Why (#3737, per-message chat attribution, epic #3052): the display name
+   * of the persona that produced this message ("Assistant", "Izzie", "CTO
+   * Assistant"), stamped at creation time from the then-active roster
+   * selection. Stamping per-message (rather than reading the live roster at
+   * render time) is what lets a mid-conversation persona switch relabel only
+   * new bubbles — each message keeps the name of whoever produced it.
+   * What: Set for `role === 'assistant'` bubbles by `InputArea`; `ChatView`
+   * renders it, falling back to "Assistant" when absent (older messages).
+   */
+  speaker?: string;
+  /**
    * Why: Recap messages (#371) carry structured table rows we need to render
    * in ChatView as a styled banner. Keeping the rows on the Message itself
    * lets us replay chat history without re-querying the recap store.

@@ -24,6 +24,13 @@ export interface CatalogAgent {
   model?: string;
   runner?: string;
   description?: string;
+  /**
+   * #3737 (per-message chat attribution, epic #3052): the persona's
+   * human-friendly display name ("Izzie", "CTO Assistant"), surfaced by
+   * `GET /api/agents` from the agent TOML's `[agent].display_name`. Empty
+   * (or omitted) for a nameless agent; `buildRoster` falls back to `name`.
+   */
+  display_name?: string;
 }
 
 /** Shape of one entry returned by the Tauri `list_personalization_overlays` command. */
@@ -59,9 +66,18 @@ export interface RosterEntry {
  */
 export const BASE_AGENT_ID = 'assistant';
 
+/**
+ * Why (#3737): the human-friendly label for the base, nameless assistant.
+ * Exported so chat attribution (`rosterDisplayName`) can fall back to it
+ * without re-typing the literal — the base agent has no `display_name` on the
+ * wire (it's intentionally nameless), so both the roster row and any bubble
+ * it produces read "Assistant".
+ */
+export const BASE_AGENT_LABEL = 'Assistant';
+
 const BASE_ENTRY: RosterEntry = {
   id: BASE_AGENT_ID,
-  label: 'Assistant',
+  label: BASE_AGENT_LABEL,
   description: 'General-purpose productivity assistant',
   source: 'base',
 };
@@ -96,12 +112,14 @@ export function slugify(input: string): string {
  * twice. Centralizing the merge means both UIs stay in sync automatically.
  * What: Returns the base entry first, then catalog agents (skipping any
  * named `BASE_AGENT_ID`), then overlay agents (skipping any slug already
- * used by the base or a catalog entry) sorted by label. Overlay labels
+ * used by the base or a catalog entry) sorted by label. Catalog labels
+ * prefer `display_name` (#3737), falling back to `name`. Overlay labels
  * prefer `display_name`, falling back to `name`, falling back to `slug`.
  * Test: `buildRoster_always_includes_base_first`,
  * `buildRoster_dedupes_catalog_entry_named_assistant`,
  * `buildRoster_dedupes_overlay_shadowing_catalog_entry`,
- * `buildRoster_sorts_overlays_by_label`.
+ * `buildRoster_sorts_overlays_by_label`,
+ * `buildRoster_prefers_catalog_display_name`.
  */
 export function buildRoster(
   catalog: CatalogAgent[],
@@ -115,7 +133,11 @@ export function buildRoster(
     seen.add(agent.name);
     entries.push({
       id: agent.name,
-      label: agent.name,
+      // #3737: show the persona's friendly display name ("Izzie", "CTO
+      // Assistant") when the catalog carries one, so both the roster switcher
+      // and per-message chat attribution read the human name rather than the
+      // dispatchable slug. Falls back to the raw name when unset.
+      label: agent.display_name?.trim() || agent.name,
       description: agent.description || undefined,
       source: 'catalog',
     });
@@ -135,6 +157,31 @@ export function buildRoster(
   overlayEntries.sort((a, b) => a.label.localeCompare(b.label));
 
   return [...entries, ...overlayEntries];
+}
+
+/**
+ * Why (#3737, per-message chat attribution, epic #3052): each assistant chat
+ * bubble must be labeled with WHICH persona produced it — the display name of
+ * the agent active when the message was sent — never a generic "agent". The
+ * dispatch axis is `activeAgentId` (see `stores/app.ts`): `null` means no
+ * roster entry is explicitly selected, which routes through the tools-armed
+ * base-assistant session path, so it labels as "Assistant". A non-null id is
+ * looked up in the merged roster for its friendly `label`.
+ * What: Returns the roster entry's `label` for `id`, or `BASE_AGENT_LABEL`
+ * ("Assistant") when `id` is `null`/empty or no entry matches (e.g. a stale
+ * selection, or the roster hasn't loaded yet). Pure — no store access — so
+ * the caller stamps the name onto the message at creation time and a later
+ * persona switch never retroactively relabels older bubbles.
+ * Test: `rosterDisplayName_null_id_is_base_label`,
+ * `rosterDisplayName_resolves_selected_entry`,
+ * `rosterDisplayName_unknown_id_falls_back_to_base`.
+ */
+export function rosterDisplayName(
+  roster: RosterEntry[],
+  id: string | null,
+): string {
+  if (!id) return BASE_AGENT_LABEL;
+  return roster.find((e) => e.id === id)?.label ?? BASE_AGENT_LABEL;
 }
 
 /** Editable fields the create/edit form (#3224) collects for one overlay. */
