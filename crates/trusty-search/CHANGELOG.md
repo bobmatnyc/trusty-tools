@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [0.39.0] — 2026-07-23
+
 ### Changed
 
 - **Cost-scaled idle-eviction threshold + oldest-idle-first sweep ordering

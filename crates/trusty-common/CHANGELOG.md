@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [0.25.0] — 2026-07-23
+
 ### Added
 
 - **`session_naming::dedupe_by_ordinal`** (issue #3692): auto-suffix-on-collision
