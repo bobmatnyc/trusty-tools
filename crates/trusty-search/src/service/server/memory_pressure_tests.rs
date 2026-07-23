@@ -583,10 +583,21 @@ async fn run_memory_pressure_tick_resets_hysteresis_baseline_on_early_stop() {
 
     // Sample RSS and derive the soft limit HERE — immediately before the
     // tick call, after all setup/sleeping above, so the gap between this
-    // sample and the tick's own internal `current_rss_mb()` call is just a
-    // handful of instructions (registry snapshot + Vec allocations), not an
-    // entire index-setup-plus-1.1s-sleep window.
-    let rss = memguard::current_rss_mb().expect("sample this test process's own RSS");
+    // sample and the tick's own internal sample is just a handful of
+    // instructions (registry snapshot + Vec allocations), not an entire
+    // index-setup-plus-1.1s-sleep window.
+    //
+    // Issue #3683 slice 3: the tick's gate now compares against
+    // `enforcement_rss_mb()` (anon RSS by default on Linux), not
+    // `current_rss_mb()` (total RSS) — sampling the latter here would derive
+    // a `limit` a few MB under TOTAL RSS while the tick's own sample is the
+    // (generally smaller) anon-RSS reading, making `over_high_water` false
+    // and the whole tick a no-op before it ever reached the sweep. Sampling
+    // the SAME measure the tick itself will gate on keeps this test's
+    // precondition (small deterministic `target_freed_mb`) valid on every
+    // platform regardless of which measure is the default there.
+    let rss = memguard::enforcement_rss_mb()
+        .expect("sample this test process's own enforcement-measure RSS");
     let limit = rss.saturating_sub(2).max(1); // target_freed_mb == 2 at pct=100
     memguard::set_memory_limit_mb(Some(limit));
 
@@ -625,5 +636,126 @@ async fn run_memory_pressure_tick_resets_hysteresis_baseline_on_early_stop() {
         "an EarlyStop sweep must reset the hysteresis baseline to the 0 sentinel, NOT store \
          the post-trim RSS — a wiring regression reverting to the unconditional store would \
          wedge the next tick's re-sweep on flat RSS (issue #3683 slice 2, round-2/3 critic review)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `run_memory_pressure_tick` — enforcement-measure wiring (issue #3683 slice 3
+// — Defect 3: gate anon RSS, not total RSS)
+// ---------------------------------------------------------------------------
+
+/// RAII guard saving/restoring `TRUSTY_MEMORY_ENFORCE_MEASURE` — this test
+/// module's only mutator of this env var (mirrors `HighWaterPctEnvGuard` /
+/// `ExemptSecsEnvGuard` above).
+struct EnforceMeasureEnvGuard(Option<String>);
+
+impl EnforceMeasureEnvGuard {
+    fn set(v: &str) -> Self {
+        let prior = std::env::var("TRUSTY_MEMORY_ENFORCE_MEASURE").ok();
+        // SAFETY: see struct doc comment.
+        unsafe { std::env::set_var("TRUSTY_MEMORY_ENFORCE_MEASURE", v) };
+        Self(prior)
+    }
+}
+
+impl Drop for EnforceMeasureEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `set`'s comment.
+        unsafe {
+            match &self.0 {
+                Some(v) => std::env::set_var("TRUSTY_MEMORY_ENFORCE_MEASURE", v),
+                None => std::env::remove_var("TRUSTY_MEMORY_ENFORCE_MEASURE"),
+            }
+        }
+    }
+}
+
+/// Explicitly forcing `TRUSTY_MEMORY_ENFORCE_MEASURE=total` must gate on
+/// TOTAL RSS end to end — the operator escape hatch back to pre-slice-3
+/// semantics. Works on every platform (unlike the anon-vs-total
+/// differentiator test below) because forcing `total` always resolves to
+/// `current_rss_mb`, regardless of the platform default.
+///
+/// With zero registered indexes, the sweep trivially `Exhausted`s (nothing to
+/// visit), so a tick that PROCEEDED past the gate stores the post-trim
+/// enforcement RSS (nonzero) as the new hysteresis baseline; a tick that
+/// stayed BELOW high-water resets that baseline to the `0` sentinel instead.
+/// Deriving `limit` from `current_rss_mb() - 2` guarantees "over high-water at
+/// pct=100" when the gate correctly reads total RSS — so observing a nonzero
+/// baseline afterward proves the `total` override actually took effect.
+#[tokio::test]
+#[serial_test::serial]
+async fn run_memory_pressure_tick_respects_total_override_env() {
+    let _mem_guard = MemGuardEnv::capture();
+    let _pct_guard = HighWaterPctEnvGuard::set("100");
+    let _measure_guard = EnforceMeasureEnvGuard::set("total");
+    // SAFETY: mirrors `MemGuardEnv`'s own convention.
+    unsafe { std::env::remove_var("TRUSTY_MEMORY_RESTART_ON_LIMIT") };
+
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+
+    let total = memguard::current_rss_mb().expect("sample this test process's total RSS");
+    let limit = total.saturating_sub(2).max(1);
+    memguard::set_memory_limit_mb(Some(limit));
+
+    run_memory_pressure_tick(&state).await;
+
+    assert_ne!(
+        state.last_reclaim_rss_mb.load(Ordering::Relaxed),
+        0,
+        "TRUSTY_MEMORY_ENFORCE_MEASURE=total must gate on total RSS end to end — a tick that \
+         (incorrectly) read a smaller anon-RSS reading instead could fall below this \
+         total-derived high-water mark and skip the sweep entirely, leaving the baseline at 0"
+    );
+}
+
+/// Linux-only differentiator: with the default (`anon`) enforcement measure,
+/// a limit chosen strictly BETWEEN this test process's real anon and total
+/// RSS readings must NOT trip the gate — proving the tick reads
+/// [`memguard::anon_rss_mb`], not [`memguard::current_rss_mb`]. A wiring
+/// regression back to total RSS would read as over-high-water here (total is
+/// always >= the chosen limit by construction) and proceed into the sweep,
+/// which — same reasoning as the `total`-override test above — is observable
+/// via `state.last_reclaim_rss_mb` becoming nonzero.
+///
+/// Skips (rather than flakes) when this process's anon/total gap is too
+/// small to construct a differentiating limit — e.g. a minimal test binary
+/// with almost no file-backed mappings. Every crate function this test
+/// exercises is still covered platform-independently by
+/// `run_memory_pressure_tick_respects_total_override_env` above and by
+/// `core::memguard::tests::enforcement_rss_mb_for_pid_matches_chosen_measure`.
+#[tokio::test]
+#[serial_test::serial]
+#[cfg(target_os = "linux")]
+async fn run_memory_pressure_tick_gate_uses_anon_not_total_rss_on_linux() {
+    let _mem_guard = MemGuardEnv::capture();
+    let _pct_guard = HighWaterPctEnvGuard::set("100");
+    let _measure_guard = EnforceMeasureEnvGuard::set("anon");
+    // SAFETY: mirrors `MemGuardEnv`'s own convention.
+    unsafe { std::env::remove_var("TRUSTY_MEMORY_RESTART_ON_LIMIT") };
+
+    let total = memguard::current_rss_mb().expect("sample this test process's total RSS");
+    let anon = memguard::anon_rss_mb().expect("sample this test process's anon RSS");
+    if total <= anon + 1 {
+        eprintln!(
+            "skipping run_memory_pressure_tick_gate_uses_anon_not_total_rss_on_linux: \
+             anon={anon}MB total={total}MB gap too small to construct a differentiating limit"
+        );
+        return;
+    }
+    // Strictly between anon and total: anon is NOT over this high-water mark,
+    // total (incorrectly, if the gate regressed) WOULD be.
+    let limit = anon + (total - anon) / 2;
+    memguard::set_memory_limit_mb(Some(limit.max(anon + 1)));
+
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    run_memory_pressure_tick(&state).await;
+
+    assert_eq!(
+        state.last_reclaim_rss_mb.load(Ordering::Relaxed),
+        0,
+        "the gate must have read anon RSS (below this limit by construction) and returned \
+         early, resetting the hysteresis baseline to 0 — a nonzero baseline here would mean \
+         the tick used total RSS instead, which IS over this limit by construction"
     );
 }

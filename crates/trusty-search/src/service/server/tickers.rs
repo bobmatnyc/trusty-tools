@@ -574,6 +574,23 @@ pub(super) fn spawn_memory_pressure_ticker(state: Arc<SearchAppState>) {
 /// "rising-edge" gate, not a fixed cooldown timer, so it naturally adapts to
 /// how fast the host's workload repopulates caches instead of an arbitrary
 /// wait.
+///
+/// Why anon-RSS enforcement (issue #3683 slice 3 — Defect 3): every RSS value
+/// in this function's gate/hysteresis/budget chain (`over_high_water`,
+/// `should_reclaim_now`'s baseline, `target_freed_mb`, and the post-sweep
+/// re-arm decision) reads [`crate::core::memguard::enforcement_rss_mb`], NOT
+/// [`crate::core::memguard::current_rss_mb`] — anonymous RSS by default on
+/// Linux (`TRUSTY_MEMORY_ENFORCE_MEASURE`, default `anon` there / `total` on
+/// macOS). Total RSS on the #3683 production workload was dominated by
+/// file-backed redb mmap pages the kernel reclaims on its own, which read the
+/// daemon as permanently over its ceiling even when a sweep freed almost
+/// nothing durable. Total RSS is still sampled and stays visible in
+/// `/health` (`state.last_rss_mb`) and the tick's log line for operator
+/// context — only the ENFORCEMENT decision moved. Every comparison in this
+/// chain uses the SAME measure end to end; mixing anon and total RSS in one
+/// comparison (e.g. a total-RSS-derived `last_reclaim_rss_mb` compared
+/// against a fresh anon-RSS sample) would make the hysteresis baseline
+/// meaningless.
 /// Pure hysteresis decision: given the current RSS and the RSS observed right
 /// after the last reclaim sweep this pressure episode (`0` = no sweep yet),
 /// should [`run_memory_pressure_tick`] reclaim again this tick?
@@ -887,15 +904,32 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
     let Some(limit) = memguard::memory_limit_mb() else {
         return;
     };
-    let Some(rss) = memguard::current_rss_mb() else {
+    let Some(total_rss) = memguard::current_rss_mb() else {
         return; // Could not sample RSS this tick (rare); try again next tick.
     };
-    // Keep /health's RSS telemetry fresh even when no query has triggered a
-    // sys-metrics sample recently, so operators see approaching-limit RSS.
-    state.last_rss_mb.store(rss, Ordering::Relaxed);
+    // Keep /health's RSS telemetry fresh (and always TOTAL RSS — the figure
+    // operators expect there, matching the reindex pipeline's `over_memory_limit`)
+    // even when no query has triggered a sys-metrics sample recently, so
+    // operators see approaching-limit RSS. Untouched by issue #3683 slice 3's
+    // enforcement-measure switch below: total RSS stays visible for context
+    // regardless of which measure the GATE itself uses.
+    state.last_rss_mb.store(total_rss, Ordering::Relaxed);
+
+    // Issue #3683 slice 3 (Defect 3): the ENFORCEMENT decision below — the
+    // high-water gate, the hysteresis baseline, and the sweep's
+    // `target_freed_mb` — reads whichever measure `enforcement_measure()`
+    // selects (anon RSS by default on Linux, total RSS on macOS), NOT
+    // necessarily `total_rss` above. This is the one substitution this slice
+    // makes; every comparison in this chain must use `enforce_rss`
+    // consistently — mixing it with `total_rss` anywhere in the chain would
+    // make the slice-2 hysteresis baseline meaningless (see
+    // `memguard::enforcement_rss_mb_for_pid`'s doc comment).
+    let Some(enforce_rss) = memguard::enforcement_rss_mb() else {
+        return; // Could not sample the chosen measure this tick; try again next tick.
+    };
 
     let pct = memguard::high_water_pct();
-    if !memguard::over_high_water(rss, limit, pct) {
+    if !memguard::over_high_water(enforce_rss, limit, pct) {
         // Below the high-water mark: reset the hysteresis baseline so the
         // NEXT pressure episode always reclaims on its first crossing rather
         // than inheriting a stale baseline from a prior episode.
@@ -906,9 +940,10 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
     // Hysteresis gate — see `should_reclaim_now`'s doc comment for the design
     // rationale (issue #2846 review — MEDIUM: reclaim/rehydrate thrash).
     let last_reclaim_rss = state.last_reclaim_rss_mb.load(Ordering::Relaxed);
-    if !should_reclaim_now(rss, last_reclaim_rss) {
+    if !should_reclaim_now(enforce_rss, last_reclaim_rss) {
         tracing::debug!(
-            rss_mb = rss,
+            enforce_rss_mb = enforce_rss,
+            total_rss_mb = total_rss,
             last_reclaim_rss_mb = last_reclaim_rss,
             limit_mb = limit,
             high_water_pct = pct,
@@ -922,9 +957,11 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
     // over the high-water mark we actually are, instead of clearing every
     // registered index unconditionally — see `run_pressure_sweep`.
     let high_water_mb = memguard::high_water_target_mb(limit, pct);
-    let target_freed_mb = rss.saturating_sub(high_water_mb);
+    let target_freed_mb = enforce_rss.saturating_sub(high_water_mb);
     tracing::warn!(
-        rss_mb = rss,
+        enforce_rss_mb = enforce_rss,
+        total_rss_mb = total_rss,
+        enforcement_measure = ?memguard::enforcement_measure(),
         limit_mb = limit,
         high_water_pct = pct,
         target_freed_mb,
@@ -950,54 +987,66 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
     // worker thread, and sample RSS inside the same blocking closure so the
     // before/after delta stays honest (no other allocation activity can slip
     // in between the trim and the sample on a different thread).
-    let after = tokio::task::spawn_blocking(|| {
+    // Sample BOTH measures inside the same blocking closure, immediately
+    // after the trim, so neither reading drifts relative to the other or to
+    // the trim itself (matching the pre-slice-3 single-sample discipline —
+    // see the comment above this block).
+    let (after_total, after_enforce) = tokio::task::spawn_blocking(|| {
         memguard::trim_heap();
-        memguard::current_rss_mb()
+        (memguard::current_rss_mb(), memguard::enforcement_rss_mb())
     })
     .await
-    .unwrap_or(None)
-    .unwrap_or(rss);
+    .unwrap_or((None, None));
+    let after_total = after_total.unwrap_or(total_rss);
+    let after_enforce = after_enforce.unwrap_or(enforce_rss);
 
-    // Store the post-reclaim footprint so the log (and /health) and the
-    // self-restart gate below decide on current reality, not the
-    // pre-reclaim RSS.
-    state.last_rss_mb.store(after, Ordering::Relaxed);
+    // Store the post-reclaim TOTAL RSS so /health keeps reporting the
+    // operator-facing figure, unaffected by which measure gates enforcement.
+    state.last_rss_mb.store(after_total, Ordering::Relaxed);
     // Record the hysteresis baseline for the NEXT tick (issue #3683 slice 2,
-    // round-2 critic review HIGH): an `Exhausted` sweep trusts `after` as
-    // before (nothing more to reclaim short of real repopulation); an
-    // `EarlyStop` sweep resets to the `0` sentinel instead, so the next tick
-    // reclaims unconditionally rather than being wedged by
+    // round-2 critic review HIGH) — using `after_enforce`, the SAME measure
+    // the gate above compared against, per issue #3683 slice 3's "never mix
+    // anon and total in one comparison chain" invariant. An `Exhausted` sweep
+    // trusts `after_enforce` as-is (nothing more to reclaim short of real
+    // repopulation); an `EarlyStop` sweep resets to the `0` sentinel instead,
+    // so the next tick reclaims unconditionally rather than being wedged by
     // `should_reclaim_now`'s strict rise check on an estimate that might
     // have been wrong — see `hysteresis_baseline_after_sweep`.
     state.last_reclaim_rss_mb.store(
-        hysteresis_baseline_after_sweep(completion, after),
+        hysteresis_baseline_after_sweep(completion, after_enforce),
         Ordering::Relaxed,
     );
     // Issue #3683 slice 2 (critic review OPTIONAL note): log the ESTIMATED
     // freed MB (from the uncalibrated per-entry constant) alongside the REAL
-    // rss_before/rss_after delta, so a future pass can calibrate
-    // `ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY` against production data
-    // instead of guessing again.
+    // before/after delta on the enforcement measure (the number the budget
+    // was computed against), plus total RSS for operator context — issue
+    // #3683 slice 3 keeps total RSS visible in logs even though it no longer
+    // drives the gate.
     tracing::warn!(
         reclaimed_entries = reclaimed,
         indexes_cleared,
         sweep_completion = ?completion,
         estimated_freed_mb = estimate_freed_mb(reclaimed),
-        actual_freed_mb = rss.saturating_sub(after),
-        rss_before_mb = rss,
-        rss_after_mb = after,
+        enforcement_measure = ?memguard::enforcement_measure(),
+        actual_freed_mb = enforce_rss.saturating_sub(after_enforce),
+        enforce_rss_before_mb = enforce_rss,
+        enforce_rss_after_mb = after_enforce,
+        total_rss_before_mb = total_rss,
+        total_rss_after_mb = after_total,
         limit_mb = limit,
         "memory-pressure: reclaim sweep complete"
     );
 
-    // Last resort (opt-in, default OFF): still over the HARD limit after
-    // reclaiming everything evictable means the growth is un-evictable
-    // (fragmentation / native arenas / a true leak). Under a supervisor a
-    // graceful restart is the only reliable self-cap; warm-boot reloads every
-    // index from disk, so no data is lost.
-    if memguard::over_high_water(after, limit, 100) && memguard::restart_on_limit_enabled() {
+    // Last resort (opt-in, default OFF): still over the HARD limit (on the
+    // enforcement measure) after reclaiming everything evictable means the
+    // growth is un-evictable (fragmentation / native arenas / a true leak).
+    // Under a supervisor a graceful restart is the only reliable self-cap;
+    // warm-boot reloads every index from disk, so no data is lost.
+    if memguard::over_high_water(after_enforce, limit, 100) && memguard::restart_on_limit_enabled()
+    {
         tracing::error!(
-            rss_mb = after,
+            enforce_rss_mb = after_enforce,
+            total_rss_mb = after_total,
             limit_mb = limit,
             "memory-pressure: RSS still over hard limit after reclaim — triggering graceful \
              self-restart (TRUSTY_MEMORY_RESTART_ON_LIMIT enabled) for supervisor respawn"
