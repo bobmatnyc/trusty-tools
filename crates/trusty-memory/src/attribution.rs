@@ -334,7 +334,7 @@ impl CreatorInfo {
     /// Test: `creator_info_renders_all_fields`,
     /// `creator_info_omits_cwd_when_absent`,
     /// `creator_info_renders_workstream_tags_when_resolvable`,
-    /// `creator_info_omits_workstream_tags_when_absent`.
+    /// `creator_info_omits_workstream_tags_when_absent_or_invalid`.
     pub fn into_tags(self) -> Vec<String> {
         let mut out = Vec::with_capacity(6);
         out.push(format!("{CREATOR_CLIENT_PREFIX}{}", self.client));
