@@ -23,6 +23,7 @@ mod settings;
 mod sync_assets;
 #[cfg(test)]
 mod tests;
+mod workstream_label;
 // Injector-specific unit tests live in a dedicated `_tests.rs` file (1500-SLOC
 // test cap) rather than inline in `native_mcp.rs` (500-SLOC production cap).
 #[cfg(test)]
@@ -113,6 +114,21 @@ pub use worktree_sync::resume_self_heal;
 /// Test: covered by `sync_assets`'s own unit tests (this is a plain
 /// re-export, no logic of its own).
 pub use sync_assets::{SyncAssetsError, SyncAssetsReport, sync_session_assets};
+
+/// Re-export of the launch-time `ws/<session-name>` workstream-label ensure
+/// (issue #3726) for the daemon's `spawn_managed_*` call sites.
+///
+/// Why: `mod workstream_label` above is private; this is the public boundary
+/// the spawn paths call through, mirroring the `sync_assets`/`worktree_sync`
+/// re-exports above.
+/// What: re-exports [`workstream_label::ensure_workstream_label`], its
+/// [`workstream_label::LabelOutcome`] result type, and the detached
+/// [`workstream_label::spawn_workstream_label_ensure`] wrapper the daemon
+/// spawn paths actually call (fire-and-forget, never on the launch critical
+/// path).
+/// Test: covered by `workstream_label`'s own unit tests (this is a plain
+/// re-export, no logic of its own).
+pub use workstream_label::{LabelOutcome, ensure_workstream_label, spawn_workstream_label_ensure};
 
 /// Outcome of the pre-launch preparation for one session.
 ///

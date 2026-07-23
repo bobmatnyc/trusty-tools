@@ -63,10 +63,13 @@ mean a different one?" Auto-create only on explicit "create a
 ticket/issue for X."
 
 When a GitHub issue *is* created, apply the shipped trusty-mpm defaults:
-`--assignee @me --label trusty-mpm` (create the label first if missing:
-`gh label create trusty-mpm --description "Created/managed by a trusty-mpm
-session" --color 8250df`). This is multi-harness support — the assignee +
-`trusty-mpm` label mark which issues a trusty-mpm session owns.
+`--assignee @me --label trusty-mpm --label ws/<session-name>` (this session's
+tmux session name; create the labels first if missing: `gh label create
+trusty-mpm --description "Created/managed by a trusty-mpm session" --color
+8250df`). This is multi-harness support — the assignee + `trusty-mpm` label
+mark which issues a trusty-mpm session owns; `ws/<session-name>` tracks which
+workstream is driving it (a label, never a milestone — see
+`PM_INSTRUCTIONS.md`).
 
 ## Ticket-Driven Development Protocol (TkDD)
 

@@ -97,17 +97,21 @@ requires a review verdict (or human approval), not just green CI.
 These trusty-mpm framework defaults override any harness default and apply to
 both the linked issue and the PR:
 
-- **`--assignee @me --label trusty-mpm`** on every `gh issue create` and
-  `gh pr create`. This is multi-harness support: the assignee + `trusty-mpm`
-  label identify which issues/PRs a trusty-mpm session owns and should pick up.
-  Create the label first if missing:
+- **`--assignee @me --label trusty-mpm --label ws/<session-name>`** on every
+  `gh issue create` and `gh pr create`. This is multi-harness support: the
+  assignee + `trusty-mpm` label identify which issues/PRs a trusty-mpm session
+  owns and should pick up; `ws/<session-name>` (this session's own tmux
+  session name, via `tmux display-message -p '#{session_name}'`) is how
+  per-workstream activity is tracked — labels, never milestones, which stay
+  reserved for epics/releases. Full convention + rationale:
+  `PM_INSTRUCTIONS.md` "Commits & Issues". Create the labels first if missing:
 
   ```bash
   gh label create trusty-mpm \
     --description "Created/managed by a trusty-mpm session" --color 8250df \
     2>/dev/null || true
-  gh issue create --assignee @me --label trusty-mpm --title "…" --body "…"
-  gh pr    create --assignee @me --label trusty-mpm --title "…" --body "…"
+  gh issue create --assignee @me --label trusty-mpm --label "ws/<session-name>" --title "…" --body "…"
+  gh pr    create --assignee @me --label trusty-mpm --label "ws/<session-name>" --title "…" --body "…"
   ```
 
 - **Attribution footer** — every commit message and PR body ends with exactly:
@@ -138,8 +142,9 @@ the merge failed; see `docs/reference/worktree-discipline.md`.
 PR creation itself (branch push, `gh pr create`, description, linking the
 issue, requesting reviews) delegates to the **Version Control** agent —
 provide it: work summary, files changed, test status, the trusty-review
-verdict, and the shipped defaults above (`--assignee @me --label trusty-mpm`
-plus the trusty-mpm attribution footer on the PR body). The PM constructs the
+verdict, and the shipped defaults above (`--assignee @me --label trusty-mpm
+--label ws/<session-name>` plus the trusty-mpm attribution footer on the PR
+body). The PM constructs the
 delegation prompt; it does not run `gh pr create` itself (CB#6 boundary — the
 PM stays out of `gh pr`/`gh issue` tooling).
 
