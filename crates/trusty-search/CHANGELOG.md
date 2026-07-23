@@ -19,6 +19,65 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   relative-agreement, and deliberate-allocation-growth checks that keep
   catching a genuinely broken/stale RSS reading without depending on a
   quiet process.
+- **Detached, deduplicated corpus rehydrate — stops the 408 livelock (issue
+  #3683 slice 1).** BM25/chunk rehydration after idle eviction used to run
+  the redb scan AND the map-publish/flag-clear inline inside the caller's
+  own awaited future — including interactive query handlers wrapped in
+  `apply_query_timeout`'s `tokio::time::timeout`. On expiry that whole
+  future was cancelled, discarding completed rehydrate work and leaving the
+  index cold, so the next query paid the full O(corpus) scan again
+  (self-sustaining livelock under repeated timeouts on a large corpus — 27s+
+  observed on a 315K-chunk NFS-backed index). Rehydration now runs as a
+  detached, per-index-deduplicated `tokio::spawn` task (mirroring the
+  #3659 `open_guard` pattern) that commits regardless of how many callers
+  time out waiting for it; `ensure_chunks_loaded` / `ensure_bm25_entities_loaded`
+  are now thin, bounded-wait wrappers around one consolidated scan (also
+  killing a pre-existing double `load_all_chunks()` scan for queries that
+  touch both lanes).
+- **Deterministic BM25 corpus-cap selection across evict/rehydrate cycles
+  (issue #3684).** The rehydrate scan (and warm-boot restore) now sort
+  chunks by their stable id before the cap-truncated BM25 upsert loop, so
+  which subset of an over-cap corpus is lexically searchable no longer
+  shifts with redb's B-tree iteration order between cycles. Cap drops during
+  a rehydrate now log a per-rebuild dropped-count (via
+  `Bm25Index::upsert_document_reporting`) and emit a
+  `trusty_bm25_docs_dropped` gauge, instead of relying on trusty-common's
+  process-wide log-once latch.
+- **Detached rehydrate hardening — code-critic review round 2 (issue
+  #3683).** Three follow-up fixes to the detached rehydrate task above:
+  - Panic-safe gate clearing: the per-index rehydrate-in-flight gate is now
+    cleared by a real `Drop` guard (`RehydrateGateClearOnDrop`), constructed
+    before any fallible work, so a panic anywhere in the commit phases can no
+    longer wedge the gate at `Some(dead_notify)` forever (the exact
+    #3659/#3666 "opposite-polarity" bug recurring in a new guard).
+  - Evict-vs-rehydrate commit race: a new per-index `rehydrate_generation`
+    counter, bumped by every real idle-evict/`reclaim_memory_now` clear, is
+    snapshotted before a rehydrate spawns and checked before its commit — a
+    concurrent evict/reclaim landing mid-rehydrate now invalidates the
+    pending commit instead of silently overwriting `*_evicted` back to
+    `false`.
+  - The bounded per-query rehydrate wait was silently guaranteed to lose
+    against the 27-40s cold-scan latency measured in production; raised to
+    9s (~27s total across retries) and made the degrade observable instead
+    of silent — a sticky `lane_degraded` flag, `trusty_bm25_lane_degraded`
+    gauge, `trusty_bm25_lane_degraded_total` /
+    `trusty_grep_fallback_lane_degraded_total` counters, and a new
+    `meta.bm25_lane_degraded` field on the search HTTP response (mirroring
+    `WarmBootSummary.warm_boot_degraded`) now distinguish "degraded, corpus
+    still rehydrating" from a genuine empty result.
+  - The `trusty_bm25_docs_dropped` gauge above now always reports the
+    current dropped count (including zero), instead of only when nonzero,
+    so it can't hold a stale reading from a prior rehydrate.
+- **Detached rehydrate hardening — code-critic review round 3 (issue
+  #3683), the remaining HIGH.** The evict-vs-rehydrate race fix above still
+  had a narrower load-then-store window: reading `rehydrate_generation` via
+  a bare atomic load, then separately storing the `*_evicted` flags, left a
+  gap in which a concurrent evict's own bump-and-set could land and get
+  silently clobbered by the commit's flag-clear. `rehydrate_generation` is
+  now a `std::sync::Mutex<u64>`; both the evict side (bump generation + set
+  flag `true`) and the commit side (read generation + conditionally clear
+  flags) hold that same lock across their entire sequence, making the two
+  critical sections mutually exclusive with no window left to race.
 
 ---
 ## [0.38.1] — 2026-07-22

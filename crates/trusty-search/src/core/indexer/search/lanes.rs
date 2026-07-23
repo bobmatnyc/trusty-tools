@@ -21,7 +21,8 @@ use super::super::{hash_query, CodeIndexer, SearchQuery};
 use super::path_filter;
 
 /// Bound on the ensure-then-read retry loop in [`CodeIndexer::bm25_search`] /
-/// [`CodeIndexer::grep_fallback_search`] (issue #2846 review).
+/// [`CodeIndexer::grep_fallback_search`] (issue #2846 review; extended to the
+/// cold-start case by issue #3683 slice 1).
 ///
 /// Why: the memory-pressure ticker's high-water cadence is bounded well below
 /// 1 Hz (`TRUSTY_MEMORY_ENFORCE_SECS`, default 30s), so a query lane racing
@@ -29,6 +30,44 @@ use super::path_filter;
 /// steady-state scenario — this cap exists purely to convert a
 /// theoretically-possible adversarial cadence into a graceful empty-result
 /// degradation instead of an unbounded retry loop.
+///
+/// Issue #3683 slice 1: this same loop now also bounds the genuine
+/// **cold-start** case — the first query after an idle eviction of a large
+/// corpus, where `ensure_*_loaded()`'s detached rehydrate (see
+/// `idle_evict::ensure_corpus_rehydrated`) may still be running when its own
+/// bounded wait (`idle_evict::rehydrate_wait_budget`, default 9s) elapses.
+/// Each loop iteration rejoins the SAME still-in-flight detached task (it is
+/// deduplicated, not re-triggered) rather than starting a second scan, so the
+/// worst-case total wait before this lane degrades is roughly
+/// `REHYDRATE_RACE_RETRIES * rehydrate_wait_budget()` (~27s at the defaults) —
+/// just under the default 30s query timeout, and the task itself keeps
+/// running to completion in the background regardless of how many of these
+/// retries (or the whole request) time out.
+///
+/// Code-critic review finding 3 (issue #3683, HIGH): the value that first
+/// shipped here (~12s total) was deliberately LESS than the 27-40s cold-scan
+/// latency this issue's own RCA measured on the production 315K-chunk
+/// corpus, so on that corpus every first cold query was *guaranteed* to
+/// exhaust these retries and degrade — see `idle_evict::DEFAULT_REHYDRATE_WAIT_MS`'s
+/// doc comment for why ~27s (still an intentional trade-off — an interactive
+/// query must never block on an O(corpus) scan — but no longer guaranteed to
+/// lose on the low end of the measured window) replaced it, and for why this
+/// remains a probabilistic improvement, not a guarantee, given the hard 30s
+/// request-timeout ceiling. PROVIDED the degrade is observable: see
+/// [`CodeIndexer::lane_degraded`] and the `trusty_bm25_lane_degraded` gauge
+/// it drives (surfaced in the search HTTP response as
+/// `meta.bm25_lane_degraded` — `service::server::search::search_handler`),
+/// plus the `trusty_bm25_lane_degraded_total` / `trusty_grep_fallback_lane_degraded_total`
+/// counters, at the bottom of `bm25_search` / `grep_fallback_search`. These
+/// are the load-bearing signals distinguishing "degraded, rehydrate still
+/// running" from a genuine empty result (an `Ok(vec![])` alone cannot). The
+/// intended steady state is: the first cold query degrades (loudly, via the
+/// gauge/counter/response-bit) while the detached task keeps converging in
+/// the background, and the NEXT query — independent of any single request's
+/// deadline — is warm, which is also the instant the gauge/flag reset
+/// (finding 5 — see `idle_evict::spawn_detached_rehydrate`'s commit-success
+/// branch). `TRUSTY_REHYDRATE_WAIT_MS` is the per-deployment knob for trading
+/// first-query latency against fewer degraded responses.
 const REHYDRATE_RACE_RETRIES: u32 = 3;
 
 impl CodeIndexer {
@@ -156,7 +195,8 @@ impl CodeIndexer {
     /// every search (~9.5s on a 115k-chunk index). The index is now maintained
     /// incrementally so the search hot path is just a read lock + posting walk.
     ///
-    /// Why the retry loop (issue #2846 review — MEDIUM): `ensure_bm25_entities_loaded`
+    /// Why the retry loop (issue #2846 review — MEDIUM; extended to cold
+    /// start by issue #3683 slice 1): `ensure_bm25_entities_loaded`
     /// and the `bm25.read()` below are two SEPARATE lock acquisitions, so a
     /// memory-pressure reclaim (`reclaim_memory_now`, which fires under active
     /// load by design — unlike idle-evict, which only ever raced this window
@@ -169,9 +209,15 @@ impl CodeIndexer {
     /// unambiguous signal that a reclaim raced us since `ensure()` returned —
     /// as opposed to a genuinely-empty corpus, where the flag stays false and
     /// we return immediately. That case rehydrates and retries rather than
-    /// silently degrading recall.
+    /// silently degrading recall. The identical flag-still-set-after-ensure
+    /// signal also now covers a genuine **cold start**: `ensure_bm25_entities_loaded`
+    /// is bounded (issue #3683 slice 1 — it never blocks past
+    /// `idle_evict::rehydrate_wait_budget()`), so on a large/slow corpus the
+    /// detached rehydrate task may simply not have finished yet when this
+    /// function's own wait returns; the loop rejoins the SAME in-flight task
+    /// on the next iteration rather than re-scanning.
     /// What: rehydrates an idle-evicted or race-evicted BM25 corpus (issue
-    /// #2162 / #2846), then acquires the BM25 read lock and runs
+    /// #2162 / #2846 / #3683), then acquires the BM25 read lock and runs
     /// `score_query_all` (or, when `filter` is set, `score_query_all_with_filter`
     /// — issue #3401: the path/repo scope predicate MUST be evaluated by BM25
     /// itself before its internal `top_k` truncation, not applied by the
@@ -185,7 +231,11 @@ impl CodeIndexer {
     /// `indexer::tests_idle_evict` pins the race-detection retry itself;
     /// `test_path_prefix_filter_recovers_bm25_match_beyond_want` in
     /// `indexer::tests::path_filter_search` pins the pre-truncation filter.
-    pub(super) async fn bm25_search(
+    // pub(crate): also called directly from `tests_idle_evict.rs` (a sibling
+    // of `search`, not a descendant of it) to exercise the BM25 lane without
+    // `grep_fallback_search`'s Definition-intent third-lane contamination —
+    // mirrors `grep_fallback_search`'s own `pub(crate)` visibility below.
+    pub(crate) async fn bm25_search(
         &self,
         query: &str,
         want: usize,
@@ -206,13 +256,40 @@ impl CodeIndexer {
             // A reclaim raced us since `ensure()` returned — drop the read
             // guard and loop back to rehydrate again.
         }
-        // Exhausted retries: a reclaim landed on every attempt, which is not
-        // reachable at the configured (>=30s) enforcement cadence. Degrade to
-        // an empty lexical lane rather than loop forever; the next query
-        // succeeds once the sweep settles.
+        // Exhausted retries: either a reclaim landed on every attempt (not
+        // reachable at the configured >=30s enforcement cadence), or — issue
+        // #3683 slice 1 — the detached rehydrate task is still genuinely
+        // running past `REHYDRATE_RACE_RETRIES * rehydrate_wait_budget()`
+        // (a very large/slow cold-start scan). Either way, degrade to an
+        // empty lexical lane rather than loop forever or burn the whole
+        // request deadline; the task itself keeps running in the background
+        // and the next query succeeds once it completes.
+        //
+        // Code-critic review finding 3 (issue #3683, HIGH): this degrade is
+        // OBSERVABLE, not silent. `REHYDRATE_RACE_RETRIES * rehydrate_wait_budget()`
+        // defaults to ~27s (see the const's doc comment above and
+        // `idle_evict::DEFAULT_REHYDRATE_WAIT_MS` for why), at the low end of
+        // the 27-40s cold-scan latency this PR's own RCA cites for the
+        // production 315K-chunk corpus — narrowing, not eliminating, how
+        // often a cold query on that corpus hits this path. An `Ok(vec![])`
+        // here is otherwise bit-for-bit indistinguishable from a
+        // genuinely-empty corpus at the HTTP layer. Finding 3(a): flip the
+        // sticky per-index flag AND set the gauge —
+        // together these are `meta.bm25_lane_degraded` in the search HTTP
+        // response (`service::server::search::search_handler`) and the
+        // `trusty_bm25_lane_degraded` Prometheus signal, so both a single
+        // caller and a dashboard can tell this apart from a true empty
+        // result without tailing logs. Reset (finding 5) happens in
+        // `idle_evict::spawn_detached_rehydrate`'s commit-success branch,
+        // the actual recovery instant, not on some later query noticing.
+        self.lane_degraded.store(true, Ordering::Relaxed);
+        metrics::gauge!("trusty_bm25_lane_degraded", "index" => self.index_id.clone()).set(1.0);
+        metrics::counter!("trusty_bm25_lane_degraded_total", "index" => self.index_id.clone())
+            .increment(1);
         tracing::warn!(
-            "index '{}': BM25 rehydrate raced by memory-pressure reclaim {REHYDRATE_RACE_RETRIES} \
-             times in a row — returning empty lexical lane for this query",
+            "index '{}': BM25 rehydrate still not ready after {REHYDRATE_RACE_RETRIES} bounded \
+             waits — returning empty lexical lane for this query (degraded, not a true empty \
+             result; issue #3683)",
             self.index_id
         );
         Ok(Vec::new())
@@ -225,11 +302,15 @@ impl CodeIndexer {
     /// real on small / unusual indexes), we want at least an exact-substring
     /// fallback before telling the caller "no results".
     ///
-    /// Why the retry loop (issue #2846 review — MEDIUM): same race as
+    /// Why the retry loop (issue #2846 review — MEDIUM; extended to cold
+    /// start by issue #3683 slice 1): same race as
     /// [`Self::bm25_search`], applied to the `chunks` map / `chunks_evicted`
     /// flag instead of BM25 — `ensure_chunks_loaded` and `chunks.read()` below
     /// are separate lock acquisitions, so a memory-pressure reclaim can clear
-    /// the map in between and this lane would silently scan zero chunks.
+    /// the map in between and this lane would silently scan zero chunks. The
+    /// same flag-still-set check also covers a genuine cold start whose
+    /// detached rehydrate hasn't finished within `ensure_chunks_loaded`'s own
+    /// bounded wait — see `bm25_search`'s identical note.
     /// What: builds a `regex::escape(query)` pattern, rehydrates an
     /// idle-evicted or race-evicted in-memory chunk map, and walks it
     /// collecting up to `want` hits scored at `GREP_FALLBACK_SCORE`. Empty
@@ -285,11 +366,24 @@ impl CodeIndexer {
             }
             return out;
         }
-        // Exhausted retries: see `bm25_search`'s identical tail comment — not
-        // reachable at the configured enforcement cadence.
+        // Exhausted retries: see `bm25_search`'s identical tail comment
+        // (issue #3683 finding 3) — either a reclaim race or a still-running
+        // cold-start rehydrate. Same observability requirement: this degrade
+        // must be distinguishable from a genuine empty result.
+        // Finding 3(a): same sticky flag/gauge as `bm25_search` — grep
+        // fallback shares the identical cold-start root cause (the detached
+        // rehydrate hasn't converged yet), so it's folded into the same
+        // signal rather than adding a second gauge for what is, from an
+        // operator's point of view, the same "this index's lexical results
+        // are degraded" condition.
+        self.lane_degraded.store(true, Ordering::Relaxed);
+        metrics::gauge!("trusty_bm25_lane_degraded", "index" => self.index_id.clone()).set(1.0);
+        metrics::counter!("trusty_grep_fallback_lane_degraded_total", "index" => self.index_id.clone())
+            .increment(1);
         tracing::warn!(
-            "index '{}': chunk rehydrate raced by memory-pressure reclaim {REHYDRATE_RACE_RETRIES} \
-             times in a row — returning empty grep-fallback lane for this query",
+            "index '{}': chunk rehydrate still not ready after {REHYDRATE_RACE_RETRIES} bounded \
+             waits — returning empty grep-fallback lane for this query (degraded, not a true \
+             empty result; issue #3683)",
             self.index_id
         );
         Vec::new()

@@ -81,6 +81,7 @@ fn make_indexer_with_corpus(redb_path: &std::path::Path) -> CodeIndexer {
 /// `search()`) transparently rehydrates both from redb and returns identical
 /// results to before eviction.
 #[tokio::test]
+#[serial_test::serial]
 async fn bm25_entities_idle_eviction_drops_and_lazily_rehydrates() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -247,6 +248,7 @@ async fn bm25_entities_idle_eviction_skips_indexers_without_corpus() {
 /// this removal would rebuild the graph from an empty entity snapshot and the
 /// `Documents` edge would vanish even though `src/owner.rs` was never touched.
 #[tokio::test]
+#[serial_test::serial]
 async fn rebuild_symbol_graph_rehydrates_entities_after_idle_eviction() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -508,6 +510,7 @@ async fn hnsw_idle_demotion_skips_when_disabled_via_env() {
 /// docs, then confirm a search rehydrates and returns the same hit.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::serial]
 async fn memory_pressure_reclaim_now_clears_caches() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
