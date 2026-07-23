@@ -9,6 +9,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`core::memguard_enforce::tests::test_anon_rss_for_self_pid_on_linux` deflaked
+  (issue #3762, recurrence of #3716's flake class).** The test compared two
+  genuinely independent, non-atomic `/proc` reads taken microseconds apart
+  (`anon_rss_mb_for_pid` parses `/proc/<pid>/status` directly;
+  `current_rss_mb_for_pid` re-reads via `sysinfo`), so concurrent
+  `cargo test --workspace` allocation churn could transiently make the anon
+  sample larger than the already-stale total sample (observed in CI: "anon RSS
+  (185 MB) must never exceed total RSS (116 MB)", passed on rerun). Mirrors
+  #3716's fix: replaced the strict `anon <= total` bound with a one-directional
+  structural check plus a generous sampling-skew headroom, rather than
+  tightening/loosening an exact-equality bound.
 - **`core::memguard_enforce::tests::enforcement_rss_mb_for_pid_matches_chosen_measure`
   deflaked for good (issue #3716).** Three successive rounds of calibrating a
   "two live RSS samples of the same measure agree" tolerance on this test
