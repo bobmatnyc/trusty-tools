@@ -325,7 +325,7 @@
 <div class="wsswitch relative">
   <button
     type="button"
-    class="wsswitch-trigger flex items-center gap-1.5 truncate rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-2.5 py-1 font-mono text-[11px] uppercase tracking-wide text-trusty-text-secondary disabled:cursor-not-allowed disabled:opacity-50"
+    class="wsswitch-trigger flex items-center gap-1.5 truncate rounded-sm border-1.5 border-trusty-border-strong bg-trusty-card px-2.5 py-1 font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-text-secondary disabled:cursor-not-allowed disabled:opacity-50"
     disabled={phase !== 'ready' || !list || list.workstreams.length === 0}
     aria-label="switch workstream"
     aria-expanded={open}
@@ -349,11 +349,11 @@
       class="wsswitch-panel absolute left-1/2 top-full z-20 mt-1.5 w-72 -translate-x-1/2 rounded-sm border-1.5 border-trusty-border bg-trusty-raised p-1.5 shadow-lg"
     >
       {#if conflictMessage}
-        <div class="mb-1.5 flex items-center justify-between gap-2 rounded-sm bg-status-error/10 px-2 py-1.5 text-[11px] text-status-error">
+        <div class="mb-1.5 flex items-center justify-between gap-2 rounded-sm bg-status-error/10 px-2 py-1.5 text-[0.6875rem] text-status-error">
           <span>{conflictMessage}</span>
           <button
             type="button"
-            class="shrink-0 rounded-sm border-1.5 border-status-error px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide"
+            class="shrink-0 rounded-sm border-1.5 border-status-error px-1.5 py-0.5 font-mono text-[0.625rem] uppercase tracking-wide"
             onclick={onRefreshConflict}
           >
             refresh
@@ -365,13 +365,13 @@
         <div class="wsswitch-row flex items-center gap-1 rounded-sm px-1.5 py-1.5 hover:bg-trusty-card">
           {#if renameId === w.id}
             <input
-              class="min-w-0 flex-1 rounded-sm border-1.5 border-trusty-primary bg-trusty-card px-1.5 py-0.5 font-mono text-[11px] text-trusty-text"
+              class="min-w-0 flex-1 rounded-sm border-1.5 border-trusty-primary bg-trusty-card px-1.5 py-0.5 font-mono text-[0.6875rem] text-trusty-text"
               bind:value={renameDraft}
               aria-label={`rename ${workstreamLabel(w)}`}
             />
             <button
               type="button"
-              class="shrink-0 font-mono text-[10px] uppercase tracking-wide text-trusty-primary"
+              class="shrink-0 font-mono text-[0.625rem] uppercase tracking-wide text-trusty-primary"
               disabled={renameBusy}
               onclick={saveRename}
             >
@@ -379,7 +379,7 @@
             </button>
             <button
               type="button"
-              class="shrink-0 font-mono text-[10px] uppercase tracking-wide text-trusty-text-muted"
+              class="shrink-0 font-mono text-[0.625rem] uppercase tracking-wide text-trusty-text-muted"
               disabled={renameBusy}
               onclick={cancelRename}
             >
@@ -388,7 +388,7 @@
           {:else}
             <button
               type="button"
-              class="flex min-w-0 flex-1 items-center gap-1.5 truncate text-left font-mono text-[11px] text-trusty-text disabled:cursor-not-allowed disabled:opacity-60"
+              class="flex min-w-0 flex-1 items-center gap-1.5 truncate text-left font-mono text-[0.6875rem] text-trusty-text disabled:cursor-not-allowed disabled:opacity-60"
               disabled={w.state === 'active' || w.state === 'closed' || busyId === w.id}
               title={w.id}
               onclick={() => onActivateClick(w)}
@@ -403,7 +403,7 @@
             {#if closeConfirmId === w.id}
               <button
                 type="button"
-                class="shrink-0 font-mono text-[10px] uppercase tracking-wide text-status-error"
+                class="shrink-0 font-mono text-[0.625rem] uppercase tracking-wide text-status-error"
                 disabled={closeBusy}
                 onclick={() => doClose(w.id)}
               >
@@ -411,7 +411,7 @@
               </button>
               <button
                 type="button"
-                class="shrink-0 font-mono text-[10px] uppercase tracking-wide text-trusty-text-muted"
+                class="shrink-0 font-mono text-[0.625rem] uppercase tracking-wide text-trusty-text-muted"
                 disabled={closeBusy}
                 onclick={() => (closeConfirmId = null)}
               >
@@ -420,7 +420,7 @@
             {:else}
               <button
                 type="button"
-                class="shrink-0 px-1 font-mono text-[11px] text-trusty-text-muted hover:text-trusty-primary disabled:cursor-not-allowed disabled:opacity-50"
+                class="shrink-0 px-1 font-mono text-[0.6875rem] text-trusty-text-muted hover:text-trusty-primary disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={`rename ${workstreamLabel(w)}`}
                 onclick={() => startRename(w)}
               >
@@ -428,7 +428,7 @@
               </button>
               <button
                 type="button"
-                class="shrink-0 px-1 font-mono text-[11px] text-trusty-text-muted hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
+                class="shrink-0 px-1 font-mono text-[0.6875rem] text-trusty-text-muted hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={`close ${workstreamLabel(w)}`}
                 disabled={w.state === 'closed'}
                 onclick={() => (closeConfirmId = w.id)}
@@ -439,7 +439,7 @@
           {/if}
         </div>
       {:else}
-        <p class="px-1.5 py-2 text-[11px] text-trusty-text-muted">no workstreams yet</p>
+        <p class="px-1.5 py-2 text-[0.6875rem] text-trusty-text-muted">no workstreams yet</p>
       {/each}
     </div>
   {/if}

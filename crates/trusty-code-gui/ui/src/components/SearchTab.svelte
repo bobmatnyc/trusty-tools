@@ -212,12 +212,12 @@
         <table class="w-full text-left font-mono text-xs">
           <thead>
             <tr class="border-b border-trusty-border text-trusty-text-muted">
-              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">lane</th>
-              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">query</th>
-              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">hits</th>
-              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">latency</th>
-              <th class="pb-2 pr-3 text-[10px] font-semibold uppercase tracking-wide">agent</th>
-              <th class="pb-2 text-[10px] font-semibold uppercase tracking-wide">age</th>
+              <th class="pb-2 pr-3 text-[0.625rem] font-semibold uppercase tracking-wide">lane</th>
+              <th class="pb-2 pr-3 text-[0.625rem] font-semibold uppercase tracking-wide">query</th>
+              <th class="pb-2 pr-3 text-[0.625rem] font-semibold uppercase tracking-wide">hits</th>
+              <th class="pb-2 pr-3 text-[0.625rem] font-semibold uppercase tracking-wide">latency</th>
+              <th class="pb-2 pr-3 text-[0.625rem] font-semibold uppercase tracking-wide">agent</th>
+              <th class="pb-2 text-[0.625rem] font-semibold uppercase tracking-wide">age</th>
             </tr>
           </thead>
           <tbody>

@@ -10,6 +10,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Base font still too small, take two (issue #3447).** PR #3460's 110% root
+  bump only reached `rem`-based Tailwind utilities; the ~69 hardcoded
+  `text-[9px]`/`text-[10px]`/`text-[11px]` arbitrary-px labels used for
+  badges/status/rail/tab text across `WorkstreamRail`, `StatusBar`,
+  `StartWorkingForm`, `SearchTab`, `ProjectPickerModal`, `AppHeader`,
+  `ServiceNav`, `WorkstreamSwitcher`, `AgentsTab`, `SkillsTab`, and
+  `WorkstreamActivity` never scaled since Tailwind emits arbitrary `px`
+  literals as-is. Converted every one to its rem equivalent
+  (`text-[11px]` -> `text-[0.6875rem]`, `text-[10px]` -> `text-[0.625rem]`,
+  `text-[9px]` -> `text-[0.5625rem]`) so they inherit the root multiplier
+  like every other token, preserving the relative size hierarchy between
+  the three tiers. Root bumped from 110% to 120% (`app.css`) on top of that
+  fix for a perceptibly larger base.
 - **Workstream/agents UX corrections: hide base agents, PM-only agent choice, immutable project (refs #3465).**
   - The Agents tab and the start-working agent selector no longer list the 5
     `BASE-*` composition-template agents (`base-agent`, `base-engineer`,

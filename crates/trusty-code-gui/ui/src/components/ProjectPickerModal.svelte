@@ -144,7 +144,7 @@
            pattern (`bg-status-warn/10` + `text-status-warn`), amber rather
            than red — the picker is still usable, just degraded. -->
       <p
-        class="mt-2 rounded-sm bg-status-warn/10 px-2 py-1.5 text-[11px] text-status-warn"
+        class="mt-2 rounded-sm bg-status-warn/10 px-2 py-1.5 text-[0.6875rem] text-status-warn"
       >
         shared registry unavailable — showing local checkouts only
       </p>
@@ -174,7 +174,7 @@
                    `new-workstream.ts::bindingLabel`'s existing precedent for
                    a small state-driven label suffix (there: git repo vs.
                    plain directory). -->
-              <span class="shrink-0 text-[10px] uppercase tracking-wide text-trusty-text-muted"
+              <span class="shrink-0 text-[0.625rem] uppercase tracking-wide text-trusty-text-muted"
                 >local only</span
               >
             {/if}
@@ -186,7 +186,7 @@
     <div class="mt-3 border-t border-trusty-border pt-3">
       <button
         type="button"
-        class="w-full rounded-sm border-1.5 border-dashed border-trusty-border-strong px-2 py-1.5 text-center font-mono text-[11px] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
+        class="w-full rounded-sm border-1.5 border-dashed border-trusty-border-strong px-2 py-1.5 text-center font-mono text-[0.6875rem] uppercase tracking-wide text-trusty-text-secondary hover:border-trusty-primary hover:text-trusty-primary"
         onclick={pickProjectless}
       >
         start chatting without a project
