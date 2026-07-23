@@ -21,6 +21,14 @@ anyhow = "1"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tracing = "0.1"
 
+[target.'cfg(unix)'.dependencies]
+# Graceful sidecar shutdown: tokio's `Child` only exposes `start_kill`
+# (SIGKILL). We send a SIGTERM first (via `libc::kill`) and fall back to
+# SIGKILL after a grace window, so the `tagent --api` sidecar gets a chance to
+# release its port cleanly on quit (#3372). Unix-only; the SIGTERM path is
+# `#[cfg(unix)]`-gated and non-unix targets go straight to `start_kill`.
+libc = { workspace = true }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

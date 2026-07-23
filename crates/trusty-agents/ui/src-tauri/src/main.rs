@@ -47,7 +47,9 @@ use overlay::{
     delete_personalization_overlay, list_personalization_overlays, read_personalization_overlay,
     write_personalization_overlay,
 };
-use sidecar::{ensure_api_server, kill_sidecar, ApiServerState, SharedApi};
+use sidecar::{
+    ensure_api_server, kill_sidecar, terminate_child, ApiServerState, SharedApi, SIDECAR_GRACE,
+};
 use task_commands::{cancel_task, check_health, list_tasks, send_message};
 
 /// Show and focus the main window (tray "Show" item / tray icon click).
@@ -150,27 +152,58 @@ fn main() {
 
     app.run(|app_handle, event| {
         if let RunEvent::ExitRequested { api, .. } = event {
-            // Real quit path: Cmd+Q or the app-menu Quit item (the tray
-            // "Quit" item already reaped the sidecar itself before calling
-            // `exit`, so this is a no-op in that case thanks to `take()`).
-            // We must not block this callback on the async mutex — the
-            // runtime checks for a pending `prevent_exit()` via a
-            // synchronous `try_recv()` immediately after this closure
-            // returns, so a bare fire-and-forget spawn here can lose the
-            // race and let the process exit before `kill_sidecar` runs.
-            // Try a non-blocking lock first (the common case); if it's
-            // contended, call `prevent_exit()` synchronously *before*
-            // returning, finish the kill asynchronously, then trigger the
-            // real exit ourselves once it's done — mirroring the tray
-            // "Quit" pattern above.
+            // Real quit path: Cmd+Q, the app-menu Quit item, or the tray
+            // "Quit" item (which reaps the sidecar itself, then calls
+            // `AppHandle::exit`, which re-raises `ExitRequested`).
+            //
+            // #3372: the previous fast path only called `child.start_kill()`
+            // and returned *without awaiting the reap* — and did no graceful
+            // shutdown — so the `tagent --api` sidecar could outlive the GUI
+            // and keep holding its fixed port. Graceful-then-forced
+            // termination is inherently async (SIGTERM, then wait up to a
+            // grace window, then SIGKILL), so whenever there is a child to
+            // reap we defer the real exit: call `prevent_exit()` synchronously
+            // *before* this closure returns (the runtime checks for a pending
+            // `prevent_exit` via a synchronous `try_recv()` immediately after
+            // this closure returns — a bare fire-and-forget spawn would lose
+            // that race and let the process exit first), reap the sidecar
+            // asynchronously, then trigger the real exit ourselves.
+            //
+            // Crucially we only defer when a child is actually present. Our own
+            // `handle.exit(0)` below re-raises `ExitRequested`; by then the
+            // child slot is empty (`take()`), so this branch does nothing and
+            // the process exits — which is what breaks the re-entrant loop.
             if let Some(state) = app_handle.try_state::<SharedApi>() {
                 match state.child.try_lock() {
                     Ok(mut guard) => {
-                        if let Some(mut child) = guard.take() {
-                            let _ = child.start_kill();
+                        if let Some(child) = guard.take() {
+                            // Release the lock before awaiting the (up to
+                            // `SIDECAR_GRACE`) termination.
+                            drop(guard);
+                            api.prevent_exit();
+                            let handle = app_handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                terminate_child(child, SIDECAR_GRACE).await;
+                                handle.exit(0);
+                            });
                         }
+                        // else: no child (already reaped by the tray "Quit"
+                        // path, or the re-entrant exit above) — let the exit
+                        // proceed.
                     }
                     Err(_) => {
+                        // Contended path: unlike the `Ok` arm, we cannot see
+                        // whether a child is present without the lock, so we
+                        // defer on *contention* — treating "someone is holding
+                        // the mutex" (a concurrent `ensure_api_server` /
+                        // `kill_sidecar`) as a proxy for "the child may be
+                        // mid-mutation, so play safe and reap via the shared
+                        // path", which re-takes the lock itself. If the slot
+                        // turns out to be empty, `kill_sidecar` is a no-op and
+                        // the subsequent `handle.exit(0)` re-raises
+                        // `ExitRequested` into the uncontended `Ok`/`None`
+                        // branch, which lets the process exit — so this cannot
+                        // loop indefinitely on transient contention.
                         api.prevent_exit();
                         let state = state.inner().clone();
                         let handle = app_handle.clone();
