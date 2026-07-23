@@ -617,6 +617,46 @@ fn agent_message_delta_round_trips_through_json() {
     assert!(!done);
 }
 
+/// Gap A shape: a harness that only exposes a turn's full text once it is
+/// done emits exactly ONE delta carrying the ENTIRE turn text with
+/// `done: true`. This must round-trip identically to the Gap B (many small
+/// chunks) shape above — the wire format makes no distinction between "one
+/// long delta" and "one short delta", so pinning a full-paragraph-sized
+/// `delta` here guards against a future producer/consumer accidentally
+/// assuming deltas are always short token chunks (e.g. truncating, or
+/// chunking on write).
+#[test]
+fn agent_message_delta_full_text_in_one_delta_round_trips() {
+    let full_turn_text = "This is the entire assistant turn's text, delivered \
+        as a single delta because the underlying harness (Gap A) only \
+        exposes a turn once it has finished generating — there is no partial \
+        token stream to forward, so the whole turn arrives in one shot."
+        .to_string();
+    let event = Event::AgentMessageDelta {
+        session_id: "s1".into(),
+        agent: "pm".into(),
+        agent_id: "pm-1".into(),
+        turn_id: "turn-99".into(),
+        delta: full_turn_text.clone(),
+        done: true,
+    };
+    let envelope = SessionEventEnvelope::new("s1".into(), 10, Utc::now(), event);
+    let value = serde_json::to_value(&envelope).unwrap();
+
+    assert_eq!(value["event"]["delta"], full_turn_text);
+    assert_eq!(value["event"]["done"], true);
+
+    let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
+    let Event::AgentMessageDelta { delta, done, .. } = back.event else {
+        panic!("expected AgentMessageDelta");
+    };
+    assert_eq!(
+        delta, full_turn_text,
+        "a full-turn-sized delta must survive the wire byte-for-byte, same as a short chunk"
+    );
+    assert!(done, "Gap A's single delta must carry done: true");
+}
+
 /// `agent_id` on `AgentMessageDelta` is `#[serde(default)]` — a producer
 /// that predates per-spawn ids (or a stripped-down test fixture) must still
 /// deserialize, defaulting to an empty string rather than failing.
