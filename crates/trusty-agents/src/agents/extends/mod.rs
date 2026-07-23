@@ -159,10 +159,12 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 ///     carries a non-neutral value, else inherits base (a `.md` child that
 ///     omits `model` leaves it empty and inherits the base's; a `.toml` child
 ///     always declares `model`);
-///   - `display_name` / `prompt_label`: `Option` child-`Some`-wins — critically
-///     this lets a child set `display_name` even when the base has NONE (owner
-///     naming decision 2026-07-18: bases are nameless, the persona name comes
-///     from the child);
+///   - `display_name` / `prompt_label`: child-`Some`-wins; a child that OMITS
+///     it falls back to its OWN name rather than inheriting the base's
+///     (#3738 — the base `assistant` is now the named generic default
+///     "Assistant", so a nameless overlay must NOT report "Assistant" as its
+///     identity). A child can still set `display_name` even when the base has
+///     none (the reverse case);
 ///   - list fields (`tools.allowed`, `tools.allow`, `tools.scopes`,
 ///     `system_prompt.skills`, and every `capabilities` sub-list): UNION,
 ///     de-duplicated in first-seen base-first order;
@@ -174,11 +176,18 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 /// loader after model resolution.
 /// Test: `extends_two_level_merge`, `extends_prose_base_first`,
 /// `extends_tools_union_dedup`, `extends_child_sets_display_name_over_none`,
+/// `extends_nameless_child_does_not_inherit_named_base_display`,
 /// `extends_scalar_child_override`, `extends_llm_child_overrides_temperature_only`,
 /// `extends_llm_child_overrides_max_tokens_only`,
 /// `extends_llm_child_inherits_when_omitted`.
 pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     let mut merged = base;
+
+    // #3738: capture the base's identity BEFORE overwriting it with the
+    // child's, so the display_name/prompt_label rule below can distinguish a
+    // value the CHILD declared from one it would merely INHERIT from the base
+    // template.
+    let base_name = merged.agent.name.clone();
 
     // Identity always comes from the child — it is the concrete agent being
     // loaded, not the template it extends.
@@ -205,11 +214,26 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     if !child.agent.description.is_empty() {
         merged.agent.description = child.agent.description;
     }
+    // `display_name` / `prompt_label`: a child that declares its own value
+    // wins (child-`Some`-wins). A child that OMITS it must fall back to its
+    // OWN name, NOT silently inherit the base's brand. Before #3738 bases were
+    // nameless (base `display_name == None`), so inheriting was a harmless
+    // no-op; now the base `assistant` is the named generic default
+    // (`display_name = "Assistant"`), and a nameless `extends = "assistant"`
+    // overlay that inherited it would report "Assistant" as its identity
+    // (e.g. `/agent my-overlay` printing "Switched to: Assistant"). A genuine
+    // extends child always has a name distinct from its base, so clear the
+    // inherited value here and let `AgentInfo::display_label` resolve to the
+    // child's own `name`.
     if child.agent.display_name.is_some() {
         merged.agent.display_name = child.agent.display_name;
+    } else if merged.agent.name != base_name {
+        merged.agent.display_name = None;
     }
     if child.agent.prompt_label.is_some() {
         merged.agent.prompt_label = child.agent.prompt_label;
+    } else if merged.agent.name != base_name {
+        merged.agent.prompt_label = None;
     }
     // `runner`: child-overrides when the child chose a non-default runner. The
     // enum has no "unset", so a non-default child value is treated as a

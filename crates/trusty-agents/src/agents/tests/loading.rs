@@ -469,6 +469,49 @@ fn bundled_agents_dir() -> PathBuf {
         .join("agents")
 }
 
+/// #3738 (MEDIUM): `cto-assistant` ships as TWO hand-maintained files — the
+/// flat `cto-assistant.toml` (what `GET /api/agents` scans, so it drives the
+/// GUI label) and the directory package `cto-assistant/agent.toml` (what the
+/// runtime loads, so it drives the actual persona identity). Both hand-carry
+/// `[agent].display_name`/`model`; nothing keeps them in sync. This guard
+/// fails CI if a future single-file edit desyncs the GUI label from the
+/// runtime identity ("CTO Bot" in one, stale in the other).
+/// Test: This function IS the test.
+#[test]
+fn cto_assistant_flat_and_package_display_name_stay_in_sync() {
+    let dir = bundled_agents_dir();
+    let read_agent_field = |path: PathBuf, field: &str| -> Option<String> {
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+        let parsed: toml::Value =
+            toml::from_str(&raw).unwrap_or_else(|e| panic!("{} must parse: {e}", path.display()));
+        parsed
+            .get("agent")
+            .and_then(|a| a.get(field))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    let flat = dir.join("cto-assistant.toml");
+    let package = dir.join("cto-assistant").join("agent.toml");
+
+    let flat_display = read_agent_field(flat.clone(), "display_name");
+    let package_display = read_agent_field(package.clone(), "display_name");
+    assert_eq!(
+        flat_display.as_deref(),
+        Some("CTO Bot"),
+        "flat cto-assistant.toml must declare display_name 'CTO Bot'"
+    );
+    assert_eq!(
+        flat_display, package_display,
+        "cto-assistant flat + package display_name must match (GUI label vs runtime identity)"
+    );
+    assert_eq!(
+        read_agent_field(flat, "model"),
+        read_agent_field(package, "model"),
+        "cto-assistant flat + package model must match"
+    );
+}
+
 #[test]
 fn base_assistant_package_is_generic_default_and_curated() {
     // #3054: The base `assistant` agent must load from its directory-package

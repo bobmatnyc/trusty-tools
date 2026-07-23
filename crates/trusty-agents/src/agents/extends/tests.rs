@@ -302,9 +302,10 @@ content = "b"
 
 #[test]
 fn extends_child_sets_display_name_over_none() {
-    // Owner naming decision 2026-07-18: bases are nameless; the persona name
-    // comes from the child overlay. A child MUST be able to set display_name
-    // even when the base has NONE.
+    // Reverse case (still valid): when a base is nameless (display_name None),
+    // a child MUST be able to set its own. The forward case — a nameless child
+    // over the now-NAMED base `assistant` — is covered by
+    // `extends_nameless_child_does_not_inherit_named_base_display` (#3738).
     let base = cfg(r#"
 [agent]
 name = "assistant"
@@ -336,6 +337,58 @@ content = "c"
     assert_eq!(merged.agent.display_name.as_deref(), Some("Izzie"));
     // Base model inherited (child left it empty).
     assert_eq!(merged.agent.model, "m");
+}
+
+#[test]
+fn extends_nameless_child_does_not_inherit_named_base_display() {
+    // #3738: the base `assistant` is now the NAMED generic default
+    // ("Assistant"). A child overlay that omits its own display_name must NOT
+    // silently inherit that brand — it must fall back to its OWN name (via
+    // `display_label`), so `/agent my-overlay` reads "my-overlay", never
+    // "Assistant". This fixture matches PRODUCTION (base carries
+    // Some("Assistant") + prompt_label "assistant"), unlike the older
+    // `extends_child_sets_display_name_over_none` synthetic (base None).
+    let base = cfg(r#"
+[agent]
+name = "assistant"
+role = "assistant"
+model = "m"
+description = "d"
+display_name = "Assistant"
+prompt_label = "assistant"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+"#);
+    assert_eq!(base.agent.display_name.as_deref(), Some("Assistant"));
+    let ch = cfg(r#"
+[agent]
+name = "my-overlay"
+role = "agent"
+model = ""
+description = ""
+extends = "assistant"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+"#);
+    assert!(ch.agent.display_name.is_none());
+    let merged = merge_extends(base, ch);
+    // Inherited brand cleared → falls back to the child's own identity.
+    assert_eq!(
+        merged.agent.display_name, None,
+        "nameless overlay must not inherit the base's 'Assistant' brand"
+    );
+    assert_eq!(merged.agent.prompt_label, None);
+    assert_eq!(
+        merged.agent.display_label(),
+        "my-overlay",
+        "display_label must resolve to the child's own name, not 'Assistant'"
+    );
 }
 
 #[test]
