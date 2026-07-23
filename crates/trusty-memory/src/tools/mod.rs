@@ -20,6 +20,7 @@
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
 
 pub mod bm25;
+pub mod chat_definitions;
 pub mod chat_ops;
 pub mod definitions;
 pub mod dream_ops;

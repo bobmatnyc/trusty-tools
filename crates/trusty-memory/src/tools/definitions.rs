@@ -9,6 +9,7 @@
 
 use serde_json::{json, Value};
 
+use super::chat_definitions::chat_tool_definitions;
 use super::task_definitions::task_tool_definitions;
 
 /// Marker server type. Reserved for future stateful MCP server impls.
@@ -98,33 +99,6 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         vec!["palace", "short", "full"]
     };
     let discover_aliases_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
-    // spec-001 chat-session tools: `palace` is optional only when a server
-    // default is configured, matching the convention used by every other
-    // palace-scoped tool above.
-    let chat_session_palace_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
-    let chat_session_get_required: Vec<&str> = if has_default {
-        vec!["session_id"]
-    } else {
-        vec!["palace", "session_id"]
-    };
-    let chat_session_add_turn_required: Vec<&str> = if has_default {
-        vec!["session_id", "role", "content"]
-    } else {
-        vec!["palace", "session_id", "role", "content"]
-    };
-    let dream_consolidate_room_required: Vec<&str> =
-        if has_default { vec![] } else { vec!["palace"] };
-    // chat_turn_append requires palace + session_id + prompt + response.
-    let chat_turn_append_required: Vec<&str> = if has_default {
-        vec!["session_id", "prompt", "response"]
-    } else {
-        vec!["palace", "session_id", "prompt", "response"]
-    };
-    let chat_session_delete_required: Vec<&str> = if has_default {
-        vec!["session_id"]
-    } else {
-        vec!["palace", "session_id"]
-    };
 
     let mut result = json!({
         "tools": [
@@ -140,7 +114,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "tags":    {"type": "array", "items": {"type": "string"}},
                         "force":   {"type": "boolean", "description": "Explicit operator override: bypasses the content-QUALITY gates for this write — the blocklist (auto-capture noise patterns), the short-content check, the dedup window, and the noise-pattern filter. Issue #2520: does NOT bypass secret/credential detection — a force=true write of secret-shaped content (API keys, tokens) is still rejected. Use sparingly; intended for app-managed writers (e.g. session/turn recorders) that need deterministic storage regardless of heuristic false positives.", "default": false},
                         "allow_secret_like": {"type": "boolean", "description": "DANGEROUS, rarely needed: bypasses the secret/credential heuristic gate specifically, on top of whatever `force` already bypasses. Only set this when you are DELIBERATELY storing content that looks like a credential (e.g. a redacted example or test fixture) and have confirmed it contains no real secret. Automated writers (turn recorders, auto-capture hooks) must NOT set this — it exists for rare, explicit human/operator overrides only.", "default": false},
-                        "context": {"type": "string", "description": "Optional surrounding context. When supplied alongside very short content (< 4 words), the context is prepended (separated by `---`) so the stored memory has standalone meaning; without it, short content is dropped (issue #215)."}
+                        "context": {"type": "string", "description": "Optional surrounding context. When supplied alongside very short content (< 4 words), the context is prepended (separated by `---`) so the stored memory has standalone meaning; without it, short content is dropped (issue #215)."},
+                        "cwd":         {"type": "string", "description": "DOC-53: optional caller working directory, used to derive the writer's `creator:workstream=`/`ws:` attribution tags (via the `.worktrees/<name>` path segment). The MCP stdio bridge sets this automatically per-request; you normally do not need to pass it yourself. Never falls back to this shared daemon's own cwd."},
+                        "workstream":  {"type": "string", "description": "DOC-53: optional explicit workstream/session name for the `creator:workstream=`/`ws:` attribution tags — wins over any value derived from `cwd`. The MCP stdio bridge sets this automatically per-request; you normally do not need to pass it yourself."}
                     },
                     "required": memory_remember_required,
                 }
@@ -154,7 +130,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "palace":  {"type": "string"},
                         "content": {"type": "string", "description": "Brief fact to remember"},
                         "tags":    {"type": "array", "items": {"type": "string"}},
-                        "context": {"type": "string", "description": "Optional surrounding context. Prepended to `content` (separated by `---`) when supplied; with very short content (< 4 words) and no context the write is skipped (issue #215)."}
+                        "context": {"type": "string", "description": "Optional surrounding context. Prepended to `content` (separated by `---`) when supplied; with very short content (< 4 words) and no context the write is skipped (issue #215)."},
+                        "cwd":         {"type": "string", "description": "DOC-53: optional caller working directory, used to derive the writer's `creator:workstream=`/`ws:` attribution tags. The MCP stdio bridge sets this automatically per-request."},
+                        "workstream":  {"type": "string", "description": "DOC-53: optional explicit workstream/session name for the `creator:workstream=`/`ws:` attribution tags — wins over any value derived from `cwd`. The MCP stdio bridge sets this automatically per-request."}
                     },
                     "required": memory_note_required,
                 }
@@ -403,7 +381,9 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "to_palace":   {"type": "string", "description": "Recipient palace id (repo slug)."},
                         "purpose":     {"type": "string", "description": "Free-text purpose / category (e.g. `task`, `notify`, `reply`)."},
                         "content":     {"type": "string", "description": "Message body — plain text, no length limit. Rendered into the recipient session as a Markdown block."},
-                        "from_palace": {"type": "string", "description": "Sender palace id (optional, defaults to cwd-derived slug)."}
+                        "from_palace": {"type": "string", "description": "Sender palace id (optional, defaults to cwd-derived slug)."},
+                        "cwd":         {"type": "string", "description": "DOC-53: optional caller working directory, used to derive the sender's `creator:workstream=`/`ws:` attribution tags. The MCP stdio bridge sets this automatically per-request."},
+                        "workstream":  {"type": "string", "description": "DOC-53: optional explicit workstream/session name for the sender's `creator:workstream=`/`ws:` attribution tags — wins over any value derived from `cwd`. The MCP stdio bridge sets this automatically per-request."}
                     },
                     "required": ["to_palace", "purpose", "content"],
                 }
@@ -420,130 +400,17 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "required": []
                 }
             },
-            {
-                "name": "chat_session_create",
-                "description": "Create a new chat session in a palace (spec-001 chat-session manager). Returns the session id, its creation timestamp, and the message count (0 for a fresh session). Pass an optional session_id to use a caller-chosen id (idempotent — an existing session is returned unchanged); pass an optional title to name a server-generated session. Sessions are stored in the palace's dedicated redb chat store, NOT the generic memory drawer surface.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace":     {"type": "string", "description": "Palace slug (optional if server started with --palace)"},
-                        "session_id": {"type": "string", "description": "Optional caller-supplied session id; a UUID is generated when omitted."},
-                        "title":      {"type": "string", "description": "Optional session name (applied only when session_id is omitted)."}
-                    },
-                    "required": chat_session_palace_required,
-                }
-            },
-            {
-                "name": "chat_session_add_turn",
-                "description": "Append a message (prompt or response) to a chat session's history. Creates the session if it does not yet exist. Returns the new message_count and updated_at. Bypasses the memory_remember signal/noise + dedup gates so sequential conversational turns persist verbatim.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace":     {"type": "string"},
-                        "session_id": {"type": "string"},
-                        "role":       {"type": "string", "enum": ["user", "assistant", "system"]},
-                        "content":    {"type": "string"}
-                    },
-                    "required": chat_session_add_turn_required,
-                }
-            },
-            {
-                "name": "chat_session_get",
-                "description": "Retrieve a full chat session: metadata plus every turn in chronological order. Errors if the session id is unknown.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace":     {"type": "string"},
-                        "session_id": {"type": "string"}
-                    },
-                    "required": chat_session_get_required,
-                }
-            },
-            {
-                "name": "chat_session_list",
-                "description": "List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. Does not include message bodies. Returns { sessions, total_count }.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace": {"type": "string"},
-                        "limit":  {"type": "integer", "default": 50},
-                        "offset": {"type": "integer", "default": 0}
-                    },
-                    "required": chat_session_palace_required,
-                }
-            },
-            {
-                "name": "dream_consolidate_room",
-                "description": "Trigger LLM-driven semantic consolidation for one room (or all rooms) of a palace, on demand and synchronously (spec-001). Consolidates facts older than max_age_days into canonical summaries, then evicts the superseded originals so history shrinks. Task drawers are always skipped. No-op (zero counts) when no inference backend (OpenRouter key / local model) is configured. Returns { summary_facts_created, facts_evicted }.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace":       {"type": "string"},
-                        "room":         {"type": "string", "description": "Room to scope to (e.g. Backend, Planning, or a custom name). Omit or null to consolidate all rooms."},
-                        "max_age_days": {"type": "integer", "default": 7, "description": "Only consolidate facts older than this many days."}
-                    },
-                    "required": dream_consolidate_room_required,
-                }
-            },
-            {
-                "name": "palace_dream",
-                "description": "On-demand LLM-driven consolidation for a palace (issue #1721). Alias for dream_consolidate_room with the same parameters; use this name when following the palace_* convention. Triggers a scoped dream/consolidation cycle immediately for the named palace, optionally filtered to one room. Task drawers are always skipped. Gracefully returns zero counts when no inference backend is configured. Returns { palace, room, summary_facts_created, facts_evicted }.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace":       {"type": "string"},
-                        "room":         {"type": "string", "description": "Room to scope to. Omit or null to consolidate all rooms."},
-                        "max_age_days": {"type": "integer", "default": 7, "description": "Only consolidate facts older than this many days."}
-                    },
-                    "required": dream_consolidate_room_required,
-                }
-            },
-            {
-                "name": "chat_session_recall",
-                "description": "Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). Errors if the session id is unknown.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace":     {"type": "string"},
-                        "session_id": {"type": "string"}
-                    },
-                    "required": chat_session_get_required,
-                }
-            },
-            {
-                "name": "chat_session_delete",
-                "description": "Delete a chat session (and its full history) from a palace. Idempotent: deleting an unknown session id is a no-op, not an error. Returns { deleted: session_id }.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace":     {"type": "string"},
-                        "session_id": {"type": "string"}
-                    },
-                    "required": chat_session_delete_required,
-                }
-            },
-            {
-                "name": "chat_turn_append",
-                "description": "Append a prompt/response PAIR to a chat session as two consecutive messages (user role then assistant role). Atomic at the session level — both messages are written together. Creates the session implicitly when it does not exist. Returns { message_count, updated_at }.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "palace":     {"type": "string"},
-                        "session_id": {"type": "string"},
-                        "prompt":     {"type": "string", "description": "User-side message (stored with role=user)."},
-                        "response":   {"type": "string", "description": "Assistant-side message (stored with role=assistant)."}
-                    },
-                    "required": chat_turn_append_required,
-                }
-            },
             crate::console_metrics::descriptor()
         ]
     });
-    // spec-001 Phase 4 (issue #1722): splice task tool schemas.
-    // Defined in task_definitions.rs to respect the 500-SLOC cap on this file.
+    // spec-001 Phase 4 (issue #1722) + DOC-53 (2026-07-23): splice task and
+    // chat-session/dream tool schemas. Defined in sibling modules
+    // (task_definitions.rs, chat_definitions.rs) to respect the 500-SLOC
+    // production cap on this file.
     let tools = result["tools"].as_array_mut().expect("tools is array");
     let metrics = tools.pop().expect("console_metrics sentinel");
     tools.extend(task_tool_definitions(has_default));
+    tools.extend(chat_tool_definitions(has_default));
     tools.push(metrics);
     result
 }

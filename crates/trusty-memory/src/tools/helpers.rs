@@ -514,13 +514,45 @@ pub(crate) fn parse_tags(args: &Value) -> Vec<String> {
 /// carry the writer identity so the activity panel and audit logs can attribute
 /// the write. Issue #202 also projects a bare-UUID session tag into the
 /// reserved `creator:session=<first-8>` slot when present.
+///
+/// Why (CRITICAL fix, DOC-53 §4.3): this handler runs inside the SHARED
+/// `trusty-memory` daemon serving every concurrently-attached session from
+/// one process — it previously used `CreatorInfo::new_self`, which resolves
+/// `std::env::current_dir()`/`TM_WORKSTREAM_NAME` from the DAEMON's own
+/// process, stamping the identical `ws:`/`creator:workstream=` tag onto
+/// every caller's writes regardless of which session actually wrote them.
+/// `args["cwd"]`/`args["workstream"]` are populated per-request by the MCP
+/// stdio bridge (`commands::serve_stdio_bridge::inject_caller_context`,
+/// mirroring the existing `args["cwd"]` precedent in
+/// `tools::palace_ops::handle_palace_create`) — [`CreatorInfo::new_for_caller`]
+/// trusts only that per-request value, never the daemon's own identity.
 /// What: appends the session-tag projection (when one is found in the input
-/// tags) then merges the canonical `CreatorInfo::new_self(MCP, Mcp)` into the
-/// vec. Mutates in place to match the original code path.
-/// Test: covered indirectly by `dispatch_remember_then_recall`.
-pub(crate) fn attach_mcp_attribution(tags: &mut Vec<String>) {
+/// tags) then merges `CreatorInfo::new_for_caller(MCP, Mcp, args["cwd"],
+/// args["workstream"])` into the vec via [`CreatorInfo::merge_into_deduped`]
+/// — deduped (not plain `merge_into`) because a hand-written claim drawer
+/// (DOC-53 §3.1) already carries `ws:<name>` in its own caller-supplied tags
+/// by convention, and a plain merge would duplicate it (MEDIUM 1).
+/// Test: `dispatch_remember_then_recall` (attribution present);
+/// `mcp_writes_carry_distinct_ws_tags_per_caller_over_rpc` (the caller-vs-
+/// daemon isolation this exists to fix — `web::tests::attribution_tests`);
+/// `attach_mcp_attribution_dedupes_hand_written_ws_claim_tag`.
+pub(crate) fn attach_mcp_attribution(tags: &mut Vec<String>, args: &Value) {
     if let Some(session_tag) = session_tag_from_tags(tags) {
         tags.push(session_tag);
     }
-    CreatorInfo::new_self(MCP_CLIENT_NAME, CreatorSource::Mcp).merge_into(tags);
+    let caller_cwd = args
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let caller_workstream = args
+        .get("workstream")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    CreatorInfo::new_for_caller(
+        MCP_CLIENT_NAME,
+        CreatorSource::Mcp,
+        caller_cwd,
+        caller_workstream,
+    )
+    .merge_into_deduped(tags);
 }

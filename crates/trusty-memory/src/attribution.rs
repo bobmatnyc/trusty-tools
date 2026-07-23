@@ -23,6 +23,10 @@
 //!
 //! Test: see the `tests` module at the bottom — covers tag composition,
 //! prefix detection, and round-trip via `is_creator_tag`.
+//!
+//! # Spec References
+//!
+//! - [`SPEC-WSCLAIM-03~draft`](docs/specs/DOC-53-workstream-claim-drawer-convention.md#SPEC-WSCLAIM-03~draft) (§4 workstream-attributed memory)
 
 use crate::ActivitySource;
 
@@ -77,6 +81,45 @@ pub const CREATOR_CWD_PREFIX: &str = "creator:cwd=";
 /// Test: `session_tag_from_tags_returns_first_uuid_short`.
 pub const CREATOR_SESSION_PREFIX: &str = "creator:session=";
 
+/// Tag prefix carrying the originating tm workstream's name (DOC-53).
+///
+/// Why: mirrors the rest of the `creator:*` namespace, but for the *workstream*
+/// (tm PM session) that wrote the drawer rather than the writing *client*
+/// binary. Lets operators (and the claim-drawer convention, DOC-53 §3) answer
+/// "which workstream wrote this?" the same grep-able way `creator:client=`
+/// answers "which binary wrote this?".
+/// What: rendered only when [`resolve_workstream_name`] returns `Some` — never
+/// a placeholder value.
+/// Test: `creator_info_renders_workstream_tags_when_resolvable`.
+pub const CREATOR_WORKSTREAM_PREFIX: &str = "creator:workstream=";
+
+/// Bare, non-namespaced tag carrying the same workstream name as
+/// [`CREATOR_WORKSTREAM_PREFIX`] (DOC-53 §4.2).
+///
+/// Why: `creator:*` tags are hidden from the primary tag chips
+/// ([`is_creator_tag`]) and from `memory_list`'s exact-tag filter unless the
+/// caller already knows the reserved-prefix form. A first-class `ws:<name>`
+/// tag lets `memory_list(tag: "ws:<name>")` find every drawer a workstream
+/// touched — both auto-stamped writes (this module) and hand-written claim
+/// drawers (DOC-53 §3.1), which use the identical `ws:<name>` tag by
+/// convention.
+/// What: always rendered together with `creator:workstream=`, never alone.
+/// Test: `creator_info_renders_workstream_tags_when_resolvable`.
+pub const WORKSTREAM_TAG_PREFIX: &str = "ws:";
+
+/// Environment variable carrying an explicit, human-readable workstream name
+/// (DOC-53 §4.3).
+///
+/// Why: `tm` does not currently export this — the only session-identity
+/// environment variable a managed session inherits today is
+/// `TM_MANAGED_SESSION_ID` (a UUID). This constant exists so resolution is
+/// forward-compatible: the day `tm` starts exporting a human-readable
+/// workstream name under this key, [`resolve_workstream_name`] picks it up
+/// with no code change here. Until then, resolution falls back to the
+/// cwd-derived heuristic (see that function).
+/// Test: `resolve_workstream_name_prefers_env_var`.
+pub const WORKSTREAM_NAME_ENV: &str = "TM_WORKSTREAM_NAME";
+
 /// HTTP request header carrying the writing client's short name.
 ///
 /// Why: lets remote HTTP callers self-identify so the recipient daemon
@@ -96,6 +139,20 @@ pub const X_TRUSTY_CLIENT_NAME: &str = "x-trusty-client-name";
 /// daemon's own cwd, which would be wrong.
 /// Test: `drawer_creator_attribution_http_default`.
 pub const X_TRUSTY_CLIENT_CWD: &str = "x-trusty-client-cwd";
+
+/// HTTP request header carrying the writing client's explicit workstream
+/// name (DOC-53 §4.3), the HTTP-transport counterpart of the MCP
+/// `args["workstream"]` field the stdio bridge injects
+/// (`commands::serve_stdio_bridge::inject_caller_context`).
+///
+/// Why: symmetric with [`X_TRUSTY_CLIENT_CWD`] — an HTTP caller that already
+/// knows its own workstream name (rather than relying on the
+/// `.worktrees/<name>` cwd-path heuristic [`resolve_workstream_name`]
+/// applies) can self-report it directly. Absent header → `creator:workstream=`
+/// falls back to the cwd heuristic, same precedence
+/// [`CreatorInfo::new_for_caller`] applies to the MCP path.
+/// Test: `drawer_creator_attribution_http_workstream_header`.
+pub const X_TRUSTY_CLIENT_WORKSTREAM: &str = "x-trusty-client-workstream";
 
 /// Default client name used when an HTTP caller omits the
 /// `X-Trusty-Client-Name` header.
@@ -178,27 +235,90 @@ pub struct CreatorInfo {
     pub version: String,
     pub source: CreatorSource,
     pub cwd: Option<String>,
+    pub workstream: Option<String>,
 }
 
 impl CreatorInfo {
     /// Build a `CreatorInfo` with the supplied client + source, defaulting
-    /// the version to this crate's `CARGO_PKG_VERSION` and the cwd to
-    /// whatever the writing process has at construction time.
+    /// the version to this crate's `CARGO_PKG_VERSION` and the cwd/workstream
+    /// to whatever *this process* has at construction time.
     ///
-    /// Why: most call sites want a one-liner; explicit overrides remain
-    /// available by mutating the returned value.
+    /// # ⚠️ Daemon-vs-caller hazard — read before calling this from a shared
+    /// # server dispatch path
+    ///
+    /// `new_self` resolves identity from the CALLING PROCESS' own
+    /// environment (`std::env::current_dir()`, `TM_WORKSTREAM_NAME`). That is
+    /// correct only when the process constructing the `CreatorInfo` genuinely
+    /// **is** the writer — a standalone CLI invocation, or a hook that runs
+    /// once per invocation in the caller's own process tree. It is **WRONG**
+    /// for any handler that runs inside `trusty-memory`'s shared HTTP/MCP
+    /// daemon (every `crate::tools::*` handler, reached via `POST /rpc` from
+    /// the stdio bridge or any other remote caller): the daemon is ONE
+    /// long-lived process serving MANY concurrently-attached sessions, so
+    /// `new_self` there would resolve the **daemon's own** cwd/env — the same
+    /// value for every caller — producing cross-session mis-attribution (the
+    /// exact bug DOC-53's caller-supplied design (`new_for_caller`) exists to
+    /// prevent). Use [`CreatorInfo::new_for_caller`] for any write reached
+    /// through the shared daemon's dispatch surface; reserve `new_self` for
+    /// code that truly executes in the writer's own process.
     /// What: `client.into()` + `env!("CARGO_PKG_VERSION").into()` +
-    /// `std::env::current_dir().ok().map(...)`.
+    /// `std::env::current_dir().ok().map(...)` + [`resolve_own_workstream_name`].
     /// Test: `creator_info_self_populates_version_and_cwd`.
     pub fn new_self(client: impl Into<String>, source: CreatorSource) -> Self {
         let cwd = std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().into_owned());
+        let workstream = resolve_own_workstream_name(cwd.as_deref());
         Self {
             client: client.into(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             source,
             cwd,
+            workstream,
+        }
+    }
+
+    /// Build a `CreatorInfo` for a write reached through the shared daemon's
+    /// dispatch surface (MCP `tools/call`/direct-method, or HTTP), using ONLY
+    /// caller-supplied context — never the daemon process' own env/cwd.
+    ///
+    /// Why (critical fix, DOC-53 §4.3): the daemon serves every
+    /// concurrently-attached session from ONE process. `new_self`'s
+    /// `std::env::current_dir()`/`TM_WORKSTREAM_NAME` reads would resolve the
+    /// *daemon's* identity, identically for every caller — this is the
+    /// constructor that instead trusts only what the specific request
+    /// carried, mirroring the existing `args["cwd"]` precedent in
+    /// `tools::palace_ops::handle_palace_create` (caller value wins; no
+    /// silent daemon-identity fallback for either field).
+    /// What: `cwd` is `caller_cwd` verbatim (empty-string treated as absent,
+    /// never re-derived from the daemon's own cwd). `workstream` prefers
+    /// `caller_workstream` when it passes [`is_valid_workstream_name`] — an
+    /// explicit-but-invalid value resolves to `None`, NOT a silent fallback
+    /// to the cwd heuristic (same "explicit-but-bad is `None`" rule
+    /// [`resolve_own_workstream_name`] already applies to the env var) —
+    /// else falls back to [`resolve_workstream_name`] against `caller_cwd`.
+    /// Neither field ever touches this process' own env or cwd.
+    /// Test: `new_for_caller_prefers_explicit_workstream_over_cwd`,
+    /// `new_for_caller_falls_back_to_cwd_when_workstream_absent`,
+    /// `new_for_caller_omits_workstream_when_neither_resolvable`,
+    /// `new_for_caller_invalid_explicit_workstream_returns_none_not_cwd_fallback`.
+    pub fn new_for_caller(
+        client: impl Into<String>,
+        source: CreatorSource,
+        caller_cwd: Option<&str>,
+        caller_workstream: Option<&str>,
+    ) -> Self {
+        let cwd = caller_cwd.map(str::to_string).filter(|c| !c.is_empty());
+        let workstream = match caller_workstream.filter(|w| !w.is_empty()) {
+            Some(w) => is_valid_workstream_name(w).then(|| w.to_string()),
+            None => resolve_workstream_name(cwd.as_deref()),
+        };
+        Self {
+            client: client.into(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            source,
+            cwd,
+            workstream,
         }
     }
 
@@ -206,19 +326,26 @@ impl CreatorInfo {
     ///
     /// Why: stable order keeps tests deterministic and gives operators a
     /// predictable layout when they grep through palaces with `jq`.
-    /// What: `[client, version, source, cwd?]`. `cwd` is omitted when
-    /// absent rather than rendered as an empty string so downstream
-    /// consumers can distinguish "writer didn't share a cwd" from
-    /// "writer's cwd was literally empty".
+    /// What: `[client, version, source, cwd?, creator:workstream?, ws?]`.
+    /// `cwd` and the workstream pair are each omitted when absent rather
+    /// than rendered with an empty/placeholder value, so downstream
+    /// consumers can distinguish "writer didn't share this" from "writer's
+    /// value was literally empty" (DOC-53 §4.1 — no placeholder ever).
     /// Test: `creator_info_renders_all_fields`,
-    /// `creator_info_omits_cwd_when_absent`.
+    /// `creator_info_omits_cwd_when_absent`,
+    /// `creator_info_renders_workstream_tags_when_resolvable`,
+    /// `creator_info_omits_workstream_tags_when_absent`.
     pub fn into_tags(self) -> Vec<String> {
-        let mut out = Vec::with_capacity(4);
+        let mut out = Vec::with_capacity(6);
         out.push(format!("{CREATOR_CLIENT_PREFIX}{}", self.client));
         out.push(format!("{CREATOR_VERSION_PREFIX}{}", self.version));
         out.push(format!("{CREATOR_SOURCE_PREFIX}{}", self.source.as_str()));
         if let Some(cwd) = self.cwd.filter(|c| !c.is_empty()) {
             out.push(format!("{CREATOR_CWD_PREFIX}{cwd}"));
+        }
+        if let Some(ws) = self.workstream.filter(|w| is_valid_workstream_name(w)) {
+            out.push(format!("{CREATOR_WORKSTREAM_PREFIX}{ws}"));
+            out.push(format!("{WORKSTREAM_TAG_PREFIX}{ws}"));
         }
         out
     }
@@ -236,6 +363,30 @@ impl CreatorInfo {
             dst.push(tag);
         }
     }
+
+    /// Render the tags and append them to an existing tag list, skipping any
+    /// tag already present verbatim in `dst`.
+    ///
+    /// Why (MEDIUM 1, DOC-53 §3.1): a hand-written claim drawer already
+    /// carries `ws:<name>` in its caller-supplied tags by convention (the
+    /// claim-drawer shape); [`merge_into`] would then append a *second*,
+    /// identical `ws:<name>` (and, since the caller-supplied workstream and
+    /// the auto-stamped one are the same value, an identical
+    /// `creator:workstream=<name>` too if the caller happened to write that
+    /// literal tag). Use this instead of `merge_into` for any write path
+    /// where the caller's own tags may already overlap the auto-stamped
+    /// namespace — currently [`crate::tools::helpers::attach_mcp_attribution`].
+    /// What: exact-string dedup only (not case-insensitive, not prefix-aware)
+    /// — a tag is skipped iff it already appears verbatim in `dst`.
+    /// Test: `merge_into_deduped_skips_tags_already_present`,
+    /// `merge_into_deduped_appends_when_no_overlap`.
+    pub fn merge_into_deduped(self, dst: &mut Vec<String>) {
+        for tag in self.into_tags() {
+            if !dst.contains(&tag) {
+                dst.push(tag);
+            }
+        }
+    }
 }
 
 /// Return `true` when a tag belongs to the `creator:*` reserved namespace.
@@ -248,6 +399,100 @@ impl CreatorInfo {
 /// Test: `is_creator_tag_detects_namespace`.
 pub fn is_creator_tag(tag: &str) -> bool {
     tag.starts_with("creator:")
+}
+
+/// Resolve a workstream name from a cwd, if any (DOC-53 §4.3).
+///
+/// Why: the sole heuristic available for a cwd whose owner is not
+/// necessarily this process — a `.worktrees/<name>` path segment is already
+/// implicit in the cwd used for `creator:cwd=` (self-reported by an MCP/CLI
+/// call, or client-reported over HTTP via `X-Trusty-Client-Cwd`), so no new
+/// input is required to try it. Deliberately does **not** consult
+/// [`WORKSTREAM_NAME_ENV`] — that variable describes *this process'*
+/// environment, which is meaningless for a remote HTTP caller's cwd; only
+/// [`resolve_own_workstream_name`] (this process' own identity) reads it.
+/// What: the path segment immediately following a `.worktrees` component in
+/// `cwd`, gated by [`is_valid_workstream_name`] — an invalid candidate
+/// (empty, UUID-shaped, unsafe characters, too long) resolves to `None`,
+/// never a sanitized substitute.
+/// Test: `resolve_workstream_name_falls_back_to_worktrees_cwd_segment`,
+/// `resolve_workstream_name_rejects_uuid_shaped_cwd_segment`,
+/// `resolve_workstream_name_none_when_unresolvable`.
+pub fn resolve_workstream_name(cwd: Option<&str>) -> Option<String> {
+    let cwd = cwd?;
+    let mut components = cwd.split('/');
+    while let Some(part) = components.next() {
+        if part == ".worktrees" {
+            let candidate = components.next()?;
+            return is_valid_workstream_name(candidate).then(|| candidate.to_string());
+        }
+    }
+    None
+}
+
+/// Resolve *this process'* workstream name (DOC-53 §4.3).
+///
+/// Why: `tm` does not currently export a human-readable workstream-name
+/// environment variable to a managed session (only `TM_MANAGED_SESSION_ID`,
+/// a UUID) — see DOC-53 §4.3 for the investigation. Rather than block the
+/// feature on a session-launch change (a surface with several in-flight PRs
+/// at spec-authoring time), resolution uses only context this process
+/// already has: [`WORKSTREAM_NAME_ENV`] first (forward-compatible — the key
+/// `tm` would use if it starts exporting one), else the
+/// [`resolve_workstream_name`] cwd fallback. An env var that is *set but
+/// invalid* is treated as an explicit-but-bad signal and resolves to `None`
+/// rather than silently falling through to the cwd the caller never asked
+/// for.
+/// What: called from [`CreatorInfo::new_self`] (code that truly runs in its
+/// own writer process — see that method's doc for the daemon-vs-caller
+/// hazard) and from the MCP stdio bridge
+/// (`commands::serve_stdio_bridge::run_stdio_bridge`), which — unlike the
+/// shared daemon it proxies to — genuinely IS a fresh, per-session process,
+/// so resolving "this process' own identity" there is correct and is the
+/// mechanism that turns into the caller-supplied `args["workstream"]` the
+/// daemon-side [`CreatorInfo::new_for_caller`] then trusts. The HTTP write
+/// path (`web::rpc::creator_info_from_http`) and the daemon-side MCP
+/// dispatch handlers instead call [`resolve_workstream_name`] /
+/// [`CreatorInfo::new_for_caller`] directly against caller-supplied context,
+/// since the shared daemon's own environment says nothing about a specific
+/// caller's identity.
+/// Test: `resolve_workstream_name_prefers_env_var`,
+/// `resolve_workstream_name_invalid_env_var_returns_none`.
+pub(crate) fn resolve_own_workstream_name(cwd: Option<&str>) -> Option<String> {
+    if let Ok(name) = std::env::var(WORKSTREAM_NAME_ENV) {
+        return is_valid_workstream_name(&name).then_some(name);
+    }
+    resolve_workstream_name(cwd)
+}
+
+/// Validate a workstream-name candidate before it is ever rendered into a
+/// tag (DOC-53 §4.3).
+///
+/// Why: two independent hazards must both be rejected — an empty/overlong/
+/// unsafe-character candidate would corrupt the tag grammar, and a
+/// UUID-shaped candidate (the naming convention for ephemeral/anonymous
+/// scratch worktrees, as opposed to named workstream worktrees) would stamp
+/// noise indistinguishable from a real workstream name. Rejecting both means
+/// the caller omits the tag cleanly rather than sanitizing-and-including.
+/// What: non-empty, at most 64 bytes, matches
+/// `^[A-Za-z0-9][A-Za-z0-9_.-]*$`, and does not parse as a [`uuid::Uuid`].
+/// Test: `is_valid_workstream_name_accepts_slugs`,
+/// `is_valid_workstream_name_rejects_uuid_and_unsafe_names`.
+pub fn is_valid_workstream_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 {
+        return false;
+    }
+    if uuid::Uuid::parse_str(name).is_ok() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
 }
 
 /// Build a `creator:session=<first-8-chars>` tag from the first bare UUID
@@ -305,6 +550,7 @@ mod tests {
             version: "0.1.2".into(),
             source: CreatorSource::Http,
             cwd: Some("/tmp/proj".into()),
+            workstream: None,
         };
         let tags = info.into_tags();
         assert_eq!(
@@ -330,6 +576,7 @@ mod tests {
             version: "0.1.0".into(),
             source: CreatorSource::Mcp,
             cwd: None,
+            workstream: None,
         };
         assert_eq!(info.into_tags().len(), 3);
 
@@ -338,6 +585,7 @@ mod tests {
             version: "0.1.0".into(),
             source: CreatorSource::Mcp,
             cwd: Some(String::new()),
+            workstream: None,
         };
         assert_eq!(info_empty.into_tags().len(), 3);
     }
@@ -346,10 +594,18 @@ mod tests {
     /// sites use; it must populate the version from the crate version and
     /// the cwd from the running process so tests don't have to wire it up
     /// by hand.
-    /// What: constructs and asserts version + cwd are non-empty.
+    /// What: constructs and asserts version + cwd are non-empty. Serialises
+    /// on [`crate::commands::env_test_lock`] and clears
+    /// [`WORKSTREAM_NAME_ENV`] first since `new_self` now also resolves a
+    /// workstream name from the environment.
     /// Test: itself.
-    #[test]
-    fn creator_info_self_populates_version_and_cwd() {
+    #[tokio::test]
+    async fn creator_info_self_populates_version_and_cwd() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        // SAFETY: serialised by env_test_lock; only this var is touched.
+        unsafe {
+            std::env::remove_var(WORKSTREAM_NAME_ENV);
+        }
         let info = CreatorInfo::new_self("client", CreatorSource::Cli);
         assert!(!info.version.is_empty(), "version must be populated");
         assert!(info.cwd.is_some(), "cwd should resolve in tests");
@@ -369,6 +625,7 @@ mod tests {
             version: "1".into(),
             source: CreatorSource::Cli,
             cwd: None,
+            workstream: None,
         }
         .merge_into(&mut tags);
         assert_eq!(
@@ -469,5 +726,320 @@ mod tests {
             CreatorSource::from(ActivitySource::Hook),
             CreatorSource::Hook
         );
+    }
+
+    /// Why: `into_tags` must render both the reserved `creator:workstream=`
+    /// tag and the ergonomic bare `ws:` tag, in that order, immediately
+    /// after `cwd` — DOC-53 §4.1/§4.2.
+    /// What: constructs a `CreatorInfo` with a resolvable workstream and
+    /// asserts both trailing tags.
+    /// Test: itself.
+    #[test]
+    fn creator_info_renders_workstream_tags_when_resolvable() {
+        let info = CreatorInfo {
+            client: "mcp".into(),
+            version: "0.1.0".into(),
+            source: CreatorSource::Mcp,
+            cwd: Some("/tmp/proj".into()),
+            workstream: Some("feat-ws-memory-claims".into()),
+        };
+        let tags = info.into_tags();
+        assert_eq!(
+            tags,
+            vec![
+                "creator:client=mcp".to_string(),
+                "creator:version=0.1.0".to_string(),
+                "creator:source=mcp".to_string(),
+                "creator:cwd=/tmp/proj".to_string(),
+                "creator:workstream=feat-ws-memory-claims".to_string(),
+                "ws:feat-ws-memory-claims".to_string(),
+            ]
+        );
+    }
+
+    /// Why: DOC-53 §4.1's "no placeholder, ever" rule must hold both when
+    /// `workstream` is `None` (the common case) AND when a caller manually
+    /// sets an invalid value — `into_tags` must re-validate rather than
+    /// trust its input, since [`CreatorInfo`] is a public struct any caller
+    /// can construct directly.
+    /// What: `None` renders no trailing tags; an unsafe/UUID-shaped value
+    /// also renders none, rather than being sanitized and included.
+    /// Test: itself.
+    #[test]
+    fn creator_info_omits_workstream_tags_when_absent_or_invalid() {
+        let absent = CreatorInfo {
+            client: "mcp".into(),
+            version: "0.1.0".into(),
+            source: CreatorSource::Mcp,
+            cwd: None,
+            workstream: None,
+        };
+        assert_eq!(absent.into_tags().len(), 3);
+
+        let invalid = CreatorInfo {
+            client: "mcp".into(),
+            version: "0.1.0".into(),
+            source: CreatorSource::Mcp,
+            cwd: None,
+            workstream: Some("11111111-1111-1111-1111-111111111111".into()),
+        };
+        assert_eq!(invalid.into_tags().len(), 3);
+    }
+
+    /// Why (CRITICAL fix, DOC-53 §4.3): `new_for_caller` is the ONLY
+    /// constructor the shared daemon's dispatch handlers should use — it
+    /// must never touch this process' own env/cwd, only what the caller
+    /// supplied. This is the base case: an explicit, valid workstream wins
+    /// even when a plausible cwd fallback is also present.
+    /// What: supplies both a caller cwd and a distinct caller workstream;
+    /// asserts the explicit workstream is used, not one derived from cwd.
+    /// Test: itself.
+    #[test]
+    fn new_for_caller_prefers_explicit_workstream_over_cwd() {
+        let info = CreatorInfo::new_for_caller(
+            "trusty-memory-mcp",
+            CreatorSource::Mcp,
+            Some("/x/.worktrees/cwd-derived-name"),
+            Some("explicit-ws"),
+        );
+        assert_eq!(info.workstream.as_deref(), Some("explicit-ws"));
+        assert_eq!(info.cwd.as_deref(), Some("/x/.worktrees/cwd-derived-name"));
+    }
+
+    /// Why: when the caller omits `workstream` entirely (but supplies
+    /// `cwd`), the cwd-derived heuristic is the correct fallback — same
+    /// derivation [`resolve_workstream_name`] already provides for the HTTP
+    /// path.
+    /// What: caller workstream `None`, caller cwd a `.worktrees/<name>`
+    /// path; asserts the derived name.
+    /// Test: itself.
+    #[test]
+    fn new_for_caller_falls_back_to_cwd_when_workstream_absent() {
+        let info = CreatorInfo::new_for_caller(
+            "trusty-memory-mcp",
+            CreatorSource::Mcp,
+            Some("/x/.worktrees/cwd-derived-name"),
+            None,
+        );
+        assert_eq!(info.workstream.as_deref(), Some("cwd-derived-name"));
+    }
+
+    /// Why: no caller cwd AND no caller workstream is the honest "we don't
+    /// know" case — DOC-53 §4.1's omit-cleanly rule, at the caller-supplied
+    /// constructor.
+    /// What: both `None`; asserts `workstream` is `None` (never falls back
+    /// to this process' own identity).
+    /// Test: itself.
+    #[test]
+    fn new_for_caller_omits_workstream_when_neither_resolvable() {
+        let info = CreatorInfo::new_for_caller("trusty-memory-mcp", CreatorSource::Mcp, None, None);
+        assert_eq!(info.workstream, None);
+        assert_eq!(info.cwd, None);
+    }
+
+    /// Why: an explicit-but-invalid caller workstream (unsafe chars,
+    /// UUID-shaped, empty) is an explicit-but-bad signal — DOC-53 §4.3
+    /// treats that as `None`, NOT a silent fallback to the cwd heuristic the
+    /// caller didn't ask for (mirrors [`resolve_own_workstream_name`]'s
+    /// identical rule for the env var).
+    /// What: an invalid explicit workstream alongside a valid cwd fallback;
+    /// asserts `None`, not the cwd-derived value.
+    /// Test: itself.
+    #[test]
+    fn new_for_caller_invalid_explicit_workstream_returns_none_not_cwd_fallback() {
+        let info = CreatorInfo::new_for_caller(
+            "trusty-memory-mcp",
+            CreatorSource::Mcp,
+            Some("/x/.worktrees/cwd-derived-name"),
+            Some("not a valid name!"),
+        );
+        assert_eq!(info.workstream, None);
+    }
+
+    /// Why (MEDIUM 1, DOC-53 §3.1): a hand-written claim drawer's own tags
+    /// may already carry `ws:<name>` (and, less commonly, a literal
+    /// `creator:workstream=<name>`) — `merge_into_deduped` must not append a
+    /// second copy of either.
+    /// What: seeds `dst` with `ws:feat-x` already present, merges a
+    /// `CreatorInfo` whose rendered tags include `ws:feat-x`, asserts the
+    /// tag appears exactly once while the OTHER rendered tags (which were
+    /// not already present) still land.
+    /// Test: itself.
+    #[test]
+    fn merge_into_deduped_skips_tags_already_present() {
+        let mut tags = vec!["user-tag".to_string(), "ws:feat-x".to_string()];
+        CreatorInfo {
+            client: "trusty-memory-mcp".into(),
+            version: "0.1.0".into(),
+            source: CreatorSource::Mcp,
+            cwd: None,
+            workstream: Some("feat-x".into()),
+        }
+        .merge_into_deduped(&mut tags);
+        assert_eq!(
+            tags.iter().filter(|t| *t == "ws:feat-x").count(),
+            1,
+            "ws:feat-x must not be duplicated; got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"creator:client=trusty-memory-mcp".to_string()),
+            "non-overlapping tags must still be appended; got {tags:?}"
+        );
+        assert!(
+            tags.contains(&"creator:workstream=feat-x".to_string()),
+            "creator:workstream= must still be appended (only ws: overlapped); got {tags:?}"
+        );
+    }
+
+    /// Why: dedup must not become a no-append bug — when nothing overlaps,
+    /// every rendered tag lands exactly as `merge_into` would produce.
+    /// What: seeds `dst` with an unrelated tag only; asserts all rendered
+    /// tags are present.
+    /// Test: itself.
+    #[test]
+    fn merge_into_deduped_appends_when_no_overlap() {
+        let mut tags = vec!["unrelated".to_string()];
+        CreatorInfo {
+            client: "trusty-memory-mcp".into(),
+            version: "0.1.0".into(),
+            source: CreatorSource::Mcp,
+            cwd: None,
+            workstream: Some("feat-x".into()),
+        }
+        .merge_into_deduped(&mut tags);
+        assert_eq!(
+            tags,
+            vec![
+                "unrelated".to_string(),
+                "creator:client=trusty-memory-mcp".to_string(),
+                "creator:version=0.1.0".to_string(),
+                "creator:source=mcp".to_string(),
+                "creator:workstream=feat-x".to_string(),
+                "ws:feat-x".to_string(),
+            ]
+        );
+    }
+
+    /// Why: [`WORKSTREAM_NAME_ENV`] is the forward-compatible primary
+    /// source (DOC-53 §4.3) and must win over the cwd fallback whenever
+    /// set. Serialises on `env_test_lock` since it mutates process-wide
+    /// state.
+    /// What: sets the env var, passes an unrelated (even a `.worktrees`-
+    /// bearing) cwd, and asserts the env value wins.
+    /// Test: itself.
+    #[tokio::test]
+    async fn resolve_workstream_name_prefers_env_var() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        // SAFETY: serialised by env_test_lock; only this var is touched,
+        // and it is always cleared before returning.
+        unsafe {
+            std::env::set_var(WORKSTREAM_NAME_ENV, "explicit-ws");
+        }
+        let resolved = resolve_own_workstream_name(Some("/x/.worktrees/other-name"));
+        unsafe {
+            std::env::remove_var(WORKSTREAM_NAME_ENV);
+        }
+        assert_eq!(resolved, Some("explicit-ws".to_string()));
+    }
+
+    /// Why: an env var that is SET but fails validation (DOC-53 §4.3) is an
+    /// explicit-but-bad signal — it must resolve to `None`, not silently
+    /// fall through to the cwd heuristic the writer never asked for.
+    /// What: sets an unsafe env value with a plausible cwd fallback present
+    /// and asserts `None`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn resolve_workstream_name_invalid_env_var_returns_none() {
+        let _guard = crate::commands::env_test_lock().lock().await;
+        // SAFETY: serialised by env_test_lock.
+        unsafe {
+            std::env::set_var(WORKSTREAM_NAME_ENV, "not a valid name!");
+        }
+        let resolved = resolve_own_workstream_name(Some("/x/.worktrees/other-name"));
+        unsafe {
+            std::env::remove_var(WORKSTREAM_NAME_ENV);
+        }
+        assert_eq!(resolved, None);
+    }
+
+    /// Why: the common case — a `tm`-managed PM session running directly in
+    /// its own `.worktrees/<name>` checkout — must resolve without any `tm`
+    /// changes (DOC-53 §4.3). [`resolve_workstream_name`] is pure cwd-based
+    /// (no env var involved, see its doc comment), so no locking is needed.
+    /// What: feeds a realistic worktree cwd, asserts the segment
+    /// immediately after `.worktrees` is returned.
+    /// Test: itself.
+    #[test]
+    fn resolve_workstream_name_falls_back_to_worktrees_cwd_segment() {
+        let resolved = resolve_workstream_name(Some(
+            "/Users/bob/trusty-tools/.base/.worktrees/feat-ws-memory-claims",
+        ));
+        assert_eq!(resolved, Some("feat-ws-memory-claims".to_string()));
+    }
+
+    /// Why: ephemeral/anonymous scratch worktrees are named by UUID, not by
+    /// workstream (DOC-53 §4.3) — stamping one would produce noise
+    /// indistinguishable from a real name, so it must resolve to `None`.
+    /// What: feeds a UUID-named `.worktrees/<uuid>` cwd, asserts `None`.
+    /// Test: itself.
+    #[test]
+    fn resolve_workstream_name_rejects_uuid_shaped_cwd_segment() {
+        let resolved = resolve_workstream_name(Some(
+            "/Users/bob/trusty-tools/.base/.worktrees/2eb72dca-de08-481b-8dfa-22ab7f81b1f9",
+        ));
+        assert_eq!(resolved, None);
+    }
+
+    /// Why: a cwd with no `.worktrees` component (or no cwd at all) is the
+    /// honest "can't resolve this" case — DOC-53 §4.1's omit-cleanly rule,
+    /// exercised at the resolver level.
+    /// What: cwd `None`; then a cwd with no `.worktrees` segment. Both
+    /// resolve to `None`.
+    /// Test: itself.
+    #[test]
+    fn resolve_workstream_name_none_when_unresolvable() {
+        assert_eq!(resolve_workstream_name(None), None);
+        assert_eq!(
+            resolve_workstream_name(Some("/Users/bob/some/other/project")),
+            None
+        );
+    }
+
+    /// Why: the validator is the single gate standing between untrusted
+    /// input (env var or cwd segment) and a rendered tag — it must accept
+    /// ordinary slugs.
+    /// What: table of accepted names.
+    /// Test: itself.
+    #[test]
+    fn is_valid_workstream_name_accepts_slugs() {
+        for name in [
+            "feat-ws-memory-claims",
+            "tm_search_eviction_01",
+            "a",
+            "release.0.20.0",
+        ] {
+            assert!(is_valid_workstream_name(name), "expected valid: {name}");
+        }
+    }
+
+    /// Why: the validator must reject both structurally-unsafe candidates
+    /// (empty, overlong, unsafe characters, non-alnum leading char) and
+    /// UUID-shaped candidates (DOC-53 §4.3's anonymous-worktree exclusion),
+    /// since a caller (env var or cwd) is untrusted input.
+    /// What: table of rejected names.
+    /// Test: itself.
+    #[test]
+    fn is_valid_workstream_name_rejects_uuid_and_unsafe_names() {
+        for name in [
+            "",
+            "2eb72dca-de08-481b-8dfa-22ab7f81b1f9",
+            "-leading-dash",
+            "has space",
+            "has/slash",
+            "has;semicolon",
+            &"x".repeat(65),
+        ] {
+            assert!(!is_valid_workstream_name(name), "expected invalid: {name}");
+        }
     }
 }

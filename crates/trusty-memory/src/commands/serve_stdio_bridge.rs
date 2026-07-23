@@ -13,6 +13,21 @@
 //! (2) forwards each non-notification request to `POST /rpc` on the daemon
 //! and returns the daemon response verbatim to the MCP client.
 //!
+//! Caller-identity injection (DOC-53 §4.3, critical fix): the daemon this
+//! bridge proxies to is ONE shared process serving every concurrently-
+//! attached session — it cannot tell which caller a given `/rpc` request
+//! came from except from what the request itself carries. THIS bridge
+//! process, by contrast, is spawned fresh per `serve --stdio` invocation and
+//! genuinely does run inside its caller's own process tree/environment.
+//! `inject_caller_context` resolves this bridge's own workstream identity
+//! ONCE at startup (via [`crate::attribution::resolve_own_workstream_name`])
+//! and stamps it into every forwarded request's tool `arguments` (as
+//! `workstream`, alongside the bridge's own `cwd`) — mirroring
+//! `inject_default_palace`'s existing `--palace` injection — so the daemon's
+//! MCP dispatch handlers (`tools::helpers::attach_mcp_attribution`,
+//! `CreatorInfo::new_for_caller`) can attribute the write correctly without
+//! ever reading their own (shared, meaningless-per-caller) environment.
+//!
 //! STDOUT hygiene: NEVER write to stdout -- it is the JSON-RPC channel.
 //! All diagnostic output goes to stderr.
 //!
@@ -166,6 +181,17 @@ pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
     // caller doesn't already include one.
     let default_palace = palace;
 
+    // DOC-53 §4.3 (critical fix): resolve THIS bridge process' own identity
+    // once at startup -- see the module doc comment for why this process
+    // (unlike the shared daemon it proxies to) is the correct place to read
+    // `TM_WORKSTREAM_NAME`/cwd. Resolved once because neither changes for
+    // the lifetime of a `serve --stdio` process, mirroring `default_palace`
+    // above.
+    let caller_cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let caller_workstream = crate::attribution::resolve_own_workstream_name(caller_cwd.as_deref());
+
     // Step 2: build the shared HTTP client once.
     let client = build_rpc_client()?;
 
@@ -176,6 +202,8 @@ pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
         let client = client.clone();
         let base_url = base_url.clone();
         let default_palace = default_palace.clone();
+        let caller_cwd = caller_cwd.clone();
+        let caller_workstream = caller_workstream.clone();
 
         async move {
             // Decide suppression from the REQUEST before touching the daemon.
@@ -188,8 +216,15 @@ pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
             }
 
             // Serialise the MCP request envelope into the value we'll POST.
-            // We need to potentially inject a default palace into params.
+            // We need to potentially inject a default palace into params,
+            // then this bridge's own resolved caller identity (DOC-53 §4.3)
+            // into the tool arguments so the daemon never has to guess.
             let req_value = inject_default_palace(req_to_value(&req), default_palace.as_deref());
+            let req_value = inject_caller_context(
+                req_value,
+                caller_workstream.as_deref(),
+                caller_cwd.as_deref(),
+            );
 
             match forward_rpc(&client, &base_url, req_value).await {
                 Ok(resp_value) => value_to_mcp_response(resp_value),
@@ -263,6 +298,99 @@ fn inject_default_palace(
     // Only inject if the caller didn't already specify a palace.
     if params.get("palace").is_none() {
         params["palace"] = serde_json::Value::String(palace.to_string());
+    }
+
+    req
+}
+
+/// Inject this bridge's own resolved `workstream` and `cwd` into a JSON-RPC
+/// request's TOOL ARGUMENTS, when the caller hasn't already supplied them
+/// (DOC-53 §4.3, critical fix).
+///
+/// Why: the shared daemon this bridge proxies to cannot resolve per-caller
+/// identity from its own (one, shared) process — see the module doc
+/// comment. This bridge process genuinely IS a fresh, per-session process,
+/// so its own `TM_WORKSTREAM_NAME`/cwd resolution
+/// ([`crate::attribution::resolve_own_workstream_name`], called once in
+/// [`run_stdio_bridge`]) is the correct caller identity to attach. Every
+/// non-notification request forwarded to `/rpc` gets this stamp, mirroring
+/// [`inject_default_palace`]'s `--palace` injection.
+///
+/// What: unlike [`inject_default_palace`] — which only injects into
+/// top-level `params` and is therefore only actually effective against the
+/// "direct method-per-tool" dispatch shape (`method: "<tool-name>"`,
+/// `params: <arguments>`) — this function ALSO handles the standard MCP
+/// `tools/call` envelope (`method: "tools/call"`, `params: {name,
+/// arguments}`) that a real MCP client (Claude Code) actually sends over
+/// stdio: it locates `params.arguments` for that shape and injects there
+/// instead, since that is the object [`crate::transport::rpc::dispatch`]'s
+/// `tools/call` branch actually hands to
+/// [`crate::tools::dispatch_tool`] (the sibling-of-`arguments`
+/// `params.palace` placement `inject_default_palace` uses is a pre-existing,
+/// separate gap in that function, out of scope here). Only injects fields
+/// the caller didn't already set — caller intent always wins. A no-op when
+/// both `workstream` and `cwd` are `None` (nothing resolvable — DOC-53
+/// §4.1's omit-cleanly rule, applied at the injection point too).
+/// Test: `inject_caller_context_direct_dispatch_shape`,
+/// `inject_caller_context_tools_call_shape`,
+/// `inject_caller_context_preserves_existing_caller_values`,
+/// `inject_caller_context_noop_when_nothing_resolved`.
+fn inject_caller_context(
+    mut req: serde_json::Value,
+    workstream: Option<&str>,
+    cwd: Option<&str>,
+) -> serde_json::Value {
+    if workstream.is_none() && cwd.is_none() {
+        return req;
+    }
+
+    let is_tools_call = req.get("method").and_then(|m| m.as_str()) == Some("tools/call");
+
+    // Find or create the params object (same three-way shape as
+    // `inject_default_palace`).
+    let params = match req.get_mut("params") {
+        Some(p) if p.is_object() => p,
+        Some(p) if p.is_null() => {
+            *p = serde_json::json!({});
+            p
+        }
+        None => {
+            req["params"] = serde_json::json!({});
+            req.get_mut("params").expect("just inserted")
+        }
+        _ => return req,
+    };
+
+    // For `tools/call`, the tool's actual argument object is nested one
+    // level deeper at `params.arguments` -- that's what `dispatch_tool`
+    // receives. For direct method-per-tool dispatch, `params` IS the
+    // argument object already.
+    let args = if is_tools_call {
+        match params.get_mut("arguments") {
+            Some(a) if a.is_object() => a,
+            Some(a) if a.is_null() => {
+                *a = serde_json::json!({});
+                a
+            }
+            None => {
+                params["arguments"] = serde_json::json!({});
+                params.get_mut("arguments").expect("just inserted")
+            }
+            _ => return req,
+        }
+    } else {
+        params
+    };
+
+    if let Some(ws) = workstream {
+        if args.get("workstream").is_none() {
+            args["workstream"] = serde_json::Value::String(ws.to_string());
+        }
+    }
+    if let Some(c) = cwd {
+        if args.get("cwd").is_none() {
+            args["cwd"] = serde_json::Value::String(c.to_string());
+        }
     }
 
     req
@@ -379,6 +507,99 @@ mod tests {
         });
         let out = inject_default_palace(req, Some("my-palace"));
         assert_eq!(out["params"]["palace"], "my-palace");
+    }
+
+    // -----------------------------------------------------------------------
+    // inject_caller_context (DOC-53 §4.3, critical fix)
+    // -----------------------------------------------------------------------
+
+    /// Why: the "direct method-per-tool" dispatch shape (`method:
+    /// "<tool-name>"`, `params: <arguments>`) is the simpler of the two
+    /// wire shapes -- `params` itself IS the argument object.
+    /// What: injects both workstream and cwd into a request with no
+    /// existing values; asserts both land directly under `params`.
+    /// Test: itself.
+    #[test]
+    fn inject_caller_context_direct_dispatch_shape() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "memory_remember",
+            "params": {"text": "hello"}
+        });
+        let out = inject_caller_context(req, Some("feat-x"), Some("/x/.worktrees/feat-x"));
+        assert_eq!(out["params"]["workstream"], "feat-x");
+        assert_eq!(out["params"]["cwd"], "/x/.worktrees/feat-x");
+        assert_eq!(out["params"]["text"], "hello");
+    }
+
+    /// Why: a real MCP client (Claude Code) sends the `tools/call` envelope
+    /// (`method: "tools/call"`, `params: {name, arguments}`) -- the tool's
+    /// actual argument object `dispatch_tool` receives is nested one level
+    /// deeper at `params.arguments`, NOT `params` itself. This is the shape
+    /// [`inject_default_palace`] gets wrong (injects into the wrong level);
+    /// `inject_caller_context` must inject into `arguments`.
+    /// What: injects into a `tools/call` envelope; asserts the values land
+    /// under `params.arguments`, not as siblings of `name`/`arguments`.
+    /// Test: itself.
+    #[test]
+    fn inject_caller_context_tools_call_shape() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_remember",
+                "arguments": {"text": "hello"}
+            }
+        });
+        let out = inject_caller_context(req, Some("feat-x"), Some("/x/.worktrees/feat-x"));
+        assert_eq!(out["params"]["arguments"]["workstream"], "feat-x");
+        assert_eq!(out["params"]["arguments"]["cwd"], "/x/.worktrees/feat-x");
+        assert_eq!(out["params"]["arguments"]["text"], "hello");
+        assert!(
+            out["params"].get("workstream").is_none(),
+            "must not land as a sibling of name/arguments"
+        );
+    }
+
+    /// Why: an MCP caller that already set its own `workstream`/`cwd`
+    /// arguments (e.g. a non-bridge caller, or a test) must win -- the
+    /// bridge's resolved identity is a default, not an override.
+    /// What: pre-populates both fields in `arguments`; asserts they survive
+    /// unchanged after injection with different bridge-resolved values.
+    /// Test: itself.
+    #[test]
+    fn inject_caller_context_preserves_existing_caller_values() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_remember",
+                "arguments": {"text": "hello", "workstream": "caller-ws", "cwd": "/caller/cwd"}
+            }
+        });
+        let out = inject_caller_context(req, Some("bridge-ws"), Some("/bridge/cwd"));
+        assert_eq!(out["params"]["arguments"]["workstream"], "caller-ws");
+        assert_eq!(out["params"]["arguments"]["cwd"], "/caller/cwd");
+    }
+
+    /// Why: when the bridge could resolve neither its own workstream nor
+    /// cwd, the request must pass through byte-for-byte unmodified --
+    /// matches `inject_default_palace_noop_when_none`'s contract.
+    /// What: both `None`; asserts the request is unchanged.
+    /// Test: itself.
+    #[test]
+    fn inject_caller_context_noop_when_nothing_resolved() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "memory_remember", "arguments": {"text": "hello"}}
+        });
+        let out = inject_caller_context(req.clone(), None, None);
+        assert_eq!(out, req);
     }
 
     // -----------------------------------------------------------------------

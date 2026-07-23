@@ -1981,3 +1981,38 @@ fn bm25_hits_hydrate_from_handle_during_warmup() {
     assert_eq!(results[0].score, 4.2);
     assert_eq!(results[0].layer, 4, "BM25-hydrated hits use layer 4");
 }
+
+/// Why (MEDIUM 1, DOC-53 §3.1): a hand-written claim drawer already carries
+/// `ws:<name>` in its own caller-supplied tags by convention — dispatched
+/// through `attach_mcp_attribution` with a matching `args["workstream"]`
+/// (the same value a real claim-drawer write would supply), the auto-stamp
+/// must not duplicate that tag.
+/// What: seeds `tags` with a `ws-claim`-shaped tag list (including
+/// `ws:feat-x` already present, exactly as DOC-53 §3.1 instructs a PM to
+/// write), calls `attach_mcp_attribution` with `args = {"workstream":
+/// "feat-x"}`, and asserts `ws:feat-x` appears exactly once while the
+/// non-overlapping `creator:*` tags still land.
+/// Test: itself.
+#[test]
+fn attach_mcp_attribution_dedupes_hand_written_ws_claim_tag() {
+    let mut tags = vec![
+        "ws-claim".to_string(),
+        "ws:feat-x".to_string(),
+        "area:health-endpoint".to_string(),
+    ];
+    let args = json!({"workstream": "feat-x"});
+    helpers::attach_mcp_attribution(&mut tags, &args);
+    assert_eq!(
+        tags.iter().filter(|t| *t == "ws:feat-x").count(),
+        1,
+        "ws:feat-x must not be duplicated by the auto-stamp; got {tags:?}"
+    );
+    assert!(
+        tags.contains(&"creator:workstream=feat-x".to_string()),
+        "creator:workstream= must still be stamped; got {tags:?}"
+    );
+    assert!(
+        tags.contains(&"creator:client=trusty-memory-mcp".to_string()),
+        "non-overlapping creator tags must still be appended; got {tags:?}"
+    );
+}
