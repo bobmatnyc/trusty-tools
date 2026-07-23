@@ -162,6 +162,50 @@ fn filter_persona_tool_names_delegation_tools_surface_when_allowed() {
     );
 }
 
+/// #3052: izzie's three new platform-hosted tools (`get_weather`,
+/// `get_train_schedule`, `get_train_alerts`) — registered unconditionally
+/// into the persona registry — are admitted through the filter by izzie's
+/// exact-name `[tools].allow` entries. They carry no OpenRPC scope and no
+/// restricted tier, so they pass the tier + scope gates unconditionally, the
+/// same way `system_status` does. Regression guard that adding the tools to
+/// the registry AND the allowlist actually surfaces them.
+#[test]
+fn filter_persona_tool_names_admits_izzie_weather_and_metro_tools() {
+    let all_names = vec![
+        "get_weather".to_string(),
+        "get_train_schedule".to_string(),
+        "get_train_alerts".to_string(),
+        // a co-registered tool izzie does NOT allow — must stay hidden
+        "run_bash".to_string(),
+    ];
+    // The exact entries added to `izzie/agent.toml`'s `[tools].allow`.
+    let patterns = vec![
+        "get_weather".to_string(),
+        "get_train_schedule".to_string(),
+        "get_train_alerts".to_string(),
+        "web_search".to_string(),
+    ];
+    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
+
+    let kept = filter_persona_tool_names(
+        all_names,
+        &patterns,
+        &allowed_by_tier,
+        &std::collections::HashMap::new(),
+        &[],
+    );
+
+    assert_eq!(
+        kept,
+        vec![
+            "get_weather".to_string(),
+            "get_train_schedule".to_string(),
+            "get_train_alerts".to_string(),
+        ],
+        "izzie's three tools surface; run_bash (unallowed) does not"
+    );
+}
+
 /// RBAC tier filtering is an independent second gate — even a
 /// `[tools].allow` glob of `"*"` must not surface a name the tier filter
 /// excludes. Mirrors how `allowed_by_tier` (derived from

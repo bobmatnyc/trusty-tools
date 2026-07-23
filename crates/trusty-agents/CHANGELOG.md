@@ -9,6 +9,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Izzie weather + Metro-North tools land as real platform-hosted tools
+  (epic #3052):** the `izzie-weather` and `izzie-metro-north` skills named
+  three tools — `get_weather`, `get_train_schedule`, `get_train_alerts` — that
+  the persona advertised but that were never implemented, so the assistant
+  could only refuse. All three now exist under `tools/izzie/`, are registered
+  into the persona dispatch superset alongside git / ticketing / `system_status`,
+  and are admitted by izzie's `[tools].allow`. `get_weather` returns current
+  conditions + a short daily forecast (Open-Meteo) plus active US severe-weather
+  alerts (NWS), keyless. `get_train_schedule` / `get_train_alerts` read the
+  keyless MTA Metro-North GTFS-Realtime feed via a small dependency-free
+  protobuf decoder, resolve station names to real GTFS stop_ids, and return the
+  next departures (with assigned track and downstream arrival) / active service
+  alerts as structured JSON in Eastern time. Any optional gateway credential is
+  read from `MTA_API_KEY` with graceful degradation; the feed URL is overridable
+  via `IZZIE_MNR_GTFS_RT_URL`.
+
 - **Fireworks AI is reachable as an inference provider (#2410 Step 3, epic
   #2400):** `fireworks/<model>` now resolves to a dedicated
   `FireworksAdapter` (new `Provider::Fireworks` / `AuthSource::Fireworks`)
