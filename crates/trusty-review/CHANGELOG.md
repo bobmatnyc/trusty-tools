@@ -9,6 +9,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`context_gate` no longer treats a degraded-but-serving trusty-search as
+  unreachable** (closes
+  [#3693](https://github.com/bobmatnyc/trusty-tools/issues/3693)):
+  trusty-search 0.38.1 intentionally reports `status: "degraded"` on
+  EFS/NFS-mounted repos (file watcher auto-disabled, search itself 100%
+  functional), but `context_gate` string-matched `status == "ok"` as its
+  reachability test, so every review on such a deployment fail-closed with
+  verdict `UNKNOWN`. `HealthResponse` gains `is_serving`, which inspects the
+  structured `warmboot_summary.warm_boot_degraded` flag trusty-search
+  already reports instead of guessing from the status string: `"ok"` always
+  serves; `"degraded"` serves only when `warm_boot_degraded` is false (the
+  benign watcher-disable case) and logs a WARN instead of skipping; a
+  genuinely broken search (embedder dead, indexes unloadable, TCC-denied,
+  scan-timed-out, or a `"degraded"` response with no `warmboot_summary` at
+  all) still fails the gate exactly as before.
+
 - **`/health` no longer hangs when trusty-search is slow, not down**
   (closes [#3658](https://github.com/bobmatnyc/trusty-tools/issues/3658),
   follow-on to [#722](https://github.com/bobmatnyc/trusty-tools/issues/722)):
