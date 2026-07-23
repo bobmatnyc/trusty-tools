@@ -14,7 +14,11 @@
 //! [`enforcement_rss_mb`] resolve `TRUSTY_MEMORY_ENFORCE_MEASURE` and route
 //! every enforcement-path RSS read through one function so the gate, its
 //! hysteresis baseline, and its sweep budget never mix anon and total RSS in
-//! one comparison chain.
+//! one comparison chain. If the `anon` measure is selected but `RssAnon` is
+//! permanently unavailable on this host (pre-4.5 kernel, hardened/restricted
+//! container), [`enforcement_rss_mb_for_pid`] degrades to total RSS (once,
+//! with a `tracing::warn!`) rather than returning `None` forever — see
+//! [`resolve_anon_measure_reading`]'s doc comment for why that matters.
 //! Test: see this module's own `tests` submodule.
 
 use crate::core::memguard::current_rss_mb_for_pid;
@@ -201,6 +205,70 @@ pub fn enforcement_measure() -> EnforcementMeasure {
     }
 }
 
+/// Emit a one-time (`tracing::warn!`, never per-tick spam) notice that
+/// enforcement degraded from `anon` to `total` RSS because the anon reading
+/// was unavailable (issue #3683 slice 3, HIGH critic-review finding).
+///
+/// Why a function-local `Once`: `run_memory_pressure_tick`'s default cadence
+/// is every 30s — logging this on every tick for the rest of the process's
+/// lifetime would be noise, not signal. A `Once` fires it exactly once per
+/// process regardless of how many ticks hit the fallback path.
+/// Test: covered via [`resolve_anon_measure_reading`]'s tests, which exercise
+/// the code path that calls this (a panic here would fail those tests even
+/// without asserting on log output directly).
+fn warn_anon_measure_degraded_to_total_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "TRUSTY_MEMORY_ENFORCE_MEASURE=anon selected but the anon-RSS reading is \
+             unavailable for this process (RssAnon field missing — pre-4.5 kernel or a \
+             hardened/restricted container — or /proc unreadable); falling back to total-RSS \
+             enforcement gating for the remainder of this process's lifetime. Set \
+             TRUSTY_MEMORY_ENFORCE_MEASURE=total explicitly to silence this warning, or \
+             investigate why RssAnon is missing on this host."
+        );
+    });
+}
+
+/// What the `Anon` measure should resolve to, given the anon reader's own
+/// result (`primary`) and a total-RSS reader (`total_reader`, only invoked
+/// when `primary` is `None`) — issue #3683 slice 3, HIGH critic-review
+/// finding.
+///
+/// Why the fallback matters: `run_memory_pressure_tick`'s
+/// `let Some(enforce_rss) = memguard::enforcement_rss_mb() else { return; };`
+/// treats `None` as "try again next tick". That is the right read for a
+/// TRANSIENT sampling hiccup, but `RssAnon` being absent (a pre-4.5 kernel, or
+/// a hardened/restricted container's `/proc`) is a PERMANENT property of the
+/// host — every future tick would hit the exact same `None` forever. Without
+/// a fallback, that silently disables the ENTIRE tick: the gate, the
+/// hysteresis baseline, and the opt-in `TRUSTY_MEMORY_RESTART_ON_LIMIT`
+/// last-resort restart would never run again for the rest of the process's
+/// lifetime — the enforcement equivalent of the #3683 root defect this whole
+/// issue exists to close. Falling back to total RSS keeps enforcement alive
+/// (degraded, but alive) instead of silently disabling it.
+/// What: `primary` as-is when `Some`. When `None`, warns once (see
+/// [`warn_anon_measure_degraded_to_total_once`]) and returns
+/// `total_reader()` — which may itself be `None` in the genuinely rare case
+/// that total RSS is ALSO unsampleable; the caller's "try again next tick"
+/// still correctly applies in that narrower case, since THAT really is a
+/// transient sampling hiccup rather than a permanent host property.
+/// Test: `tests::anon_measure_uses_primary_reading_when_available`,
+/// `tests::anon_measure_falls_back_to_total_when_anon_reader_returns_none`,
+/// `tests::anon_measure_falls_back_to_none_when_total_also_unavailable`.
+fn resolve_anon_measure_reading(
+    primary: Option<u64>,
+    total_reader: impl FnOnce() -> Option<u64>,
+) -> Option<u64> {
+    match primary {
+        Some(mb) => Some(mb),
+        None => {
+            warn_anon_measure_degraded_to_total_once();
+            total_reader()
+        }
+    }
+}
+
 /// RSS (MB) for `pid` under the currently-active [`enforcement_measure`] —
 /// what `run_memory_pressure_tick` feeds to `over_high_water`,
 /// `should_reclaim_now`, and the sweep's `target_freed_mb` calculation.
@@ -212,10 +280,20 @@ pub fn enforcement_measure() -> EnforcementMeasure {
 /// total-RSS baseline compared against a fresh anon-RSS sample). Routing
 /// every enforcement-path RSS read through this one function makes that
 /// invariant structural rather than a convention callers have to remember.
-/// Test: `tests::enforcement_rss_mb_for_pid_matches_chosen_measure`.
+///
+/// Why `Anon` degrades to `Total` instead of returning `None`: see
+/// [`resolve_anon_measure_reading`]'s doc comment — a host where `RssAnon` is
+/// permanently absent must not permanently disable enforcement.
+/// Test: `tests::enforcement_rss_mb_for_pid_matches_chosen_measure`,
+/// `tests::anon_measure_falls_back_to_total_when_anon_reader_returns_none`.
 pub fn enforcement_rss_mb_for_pid(pid: u32) -> Option<u64> {
+    if pid == 0 {
+        return None;
+    }
     match enforcement_measure() {
-        EnforcementMeasure::Anon => anon_rss_mb_for_pid(pid),
+        EnforcementMeasure::Anon => {
+            resolve_anon_measure_reading(anon_rss_mb_for_pid(pid), || current_rss_mb_for_pid(pid))
+        }
         EnforcementMeasure::Total => current_rss_mb_for_pid(pid),
     }
 }
@@ -391,6 +469,42 @@ mod tests {
         assert_eq!(enforcement_measure(), default_enforcement_measure());
     }
 
+    /// Assert two live RSS samples of the SAME underlying measure (taken a
+    /// handful of instructions apart) agree within a generous RELATIVE bound
+    /// — mirrors `memguard::tests::test_rss_for_self_pid`'s design (issue
+    /// #3702: a fixed-MB or exact-equality bound between two independently
+    /// re-sampled live readings flakes under `cargo test --workspace`'s
+    /// shared-process concurrent-allocation churn — CI observed `Some(107)`
+    /// vs `Some(243)` MB for this exact test under that load, the same flake
+    /// class #3702 fixed for `current_rss_mb_for_pid` itself).
+    ///
+    /// Why this is still a meaningful assertion (not a tautology): `a` and
+    /// `b` are sampled via two DIFFERENT call paths that must resolve to the
+    /// same underlying reader (`enforcement_rss_mb_for_pid` under a forced
+    /// measure vs. that measure's reader called directly) — a dispatch bug
+    /// that routed to the WRONG reader (e.g. `total` selected but anon
+    /// returned) would show a gap far larger than concurrent-allocation
+    /// noise, since anon and total RSS commonly differ by tens to thousands
+    /// of MB on a real workload, not by the single-digit-to-double-digit MB
+    /// drift transient concurrent allocation produces.
+    fn assert_live_samples_of_same_measure_agree(a: Option<u64>, b: Option<u64>, label: &str) {
+        let (Some(a), Some(b)) = (a, b) else {
+            // Either None means the platform/measure couldn't resolve this
+            // pid this call; tolerate it rather than fail CI on an
+            // environment quirk (mirrors `test_rss_for_self_pid`'s same
+            // tolerance).
+            return;
+        };
+        let diff = (a as i64 - b as i64).unsigned_abs();
+        let baseline = a.max(b).max(1);
+        assert!(
+            diff * 100 <= baseline * 60,
+            "{label}: two independent samples of the same measure disagree by {diff}MB, more \
+             than 60% of {baseline}MB ({a}MB vs {b}MB) — suspect enforcement_rss_mb_for_pid \
+             dispatched to the WRONG underlying reader for this measure"
+        );
+    }
+
     /// `enforcement_rss_mb_for_pid` must delegate to exactly the reading
     /// [`enforcement_measure`] selects — the structural invariant that keeps
     /// `run_memory_pressure_tick`'s gate, hysteresis baseline, and
@@ -403,14 +517,68 @@ mod tests {
         let pid = std::process::id();
         {
             let _guard = EnforceMeasureEnvGuard::set("total");
-            assert_eq!(enforcement_rss_mb_for_pid(pid), current_rss_mb_for_pid(pid));
+            assert_live_samples_of_same_measure_agree(
+                enforcement_rss_mb_for_pid(pid),
+                current_rss_mb_for_pid(pid),
+                "total",
+            );
         }
         {
             let _guard = EnforceMeasureEnvGuard::set("anon");
-            assert_eq!(enforcement_rss_mb_for_pid(pid), anon_rss_mb_for_pid(pid));
+            assert_live_samples_of_same_measure_agree(
+                enforcement_rss_mb_for_pid(pid),
+                anon_rss_mb_for_pid(pid),
+                "anon",
+            );
         }
         // pid=0 sentinel must still short-circuit to None regardless of
         // which measure is selected.
         assert_eq!(enforcement_rss_mb_for_pid(0), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // `resolve_anon_measure_reading` — anon→total fallback (issue #3683
+    // slice 3, HIGH critic-review finding)
+    // -----------------------------------------------------------------------
+
+    /// When the anon reader succeeds, its reading must be used as-is and the
+    /// total-RSS fallback reader must NEVER be invoked (asserted here via a
+    /// reader that panics if called) — the common case pays no extra cost.
+    #[test]
+    fn anon_measure_uses_primary_reading_when_available() {
+        let result = resolve_anon_measure_reading(Some(999), || {
+            panic!("total fallback reader must not be invoked when the anon reading succeeded")
+        });
+        assert_eq!(result, Some(999));
+    }
+
+    /// The core fallback fix: when the anon reader returns `None` (RssAnon
+    /// field missing — pre-4.5 kernel or a hardened/restricted container's
+    /// `/proc` — or `/proc` unreadable), enforcement must fall back to the
+    /// total-RSS reading, NEVER silently return `None` while total RSS is
+    /// available. Without this, `run_memory_pressure_tick`'s
+    /// `let Some(enforce_rss) = ... else { return; }` would skip the ENTIRE
+    /// tick — forever, on an affected host — since `RssAnon` absence is a
+    /// permanent host property, not a transient sampling hiccup.
+    #[test]
+    fn anon_measure_falls_back_to_total_when_anon_reader_returns_none() {
+        let result = resolve_anon_measure_reading(None, || Some(4_321));
+        assert_eq!(
+            result,
+            Some(4_321),
+            "anon reader returning None must fall back to the total-RSS reading, not None"
+        );
+    }
+
+    /// The genuinely rare edge case: even the total-RSS fallback reader
+    /// fails. `resolve_anon_measure_reading` must still return `None` here
+    /// (not panic, not fabricate a value) — the caller's "try again next
+    /// tick" semantics correctly apply in this narrower case, since total
+    /// RSS being unsampleable really is a transient hiccup (matching
+    /// `current_rss_mb`'s own pre-existing rare-`None` contract), unlike
+    /// `RssAnon`'s absence which is a permanent host property.
+    #[test]
+    fn anon_measure_falls_back_to_none_when_total_also_unavailable() {
+        assert_eq!(resolve_anon_measure_reading(None, || None), None);
     }
 }

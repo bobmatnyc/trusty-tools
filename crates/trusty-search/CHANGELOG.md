@@ -56,7 +56,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and this ticker's log lines for operator context regardless of which
   measure gates enforcement; every comparison in the enforcement chain uses
   the same measure end to end so the slice-2 hysteresis baseline is never
-  compared against a different measure than the one that set it.
+  compared against a different measure than the one that set it. If `anon`
+  is selected but `RssAnon` is permanently unavailable (pre-4.5 kernel,
+  hardened/restricted container), enforcement now degrades to total RSS
+  automatically (once, with a `tracing::warn!`) instead of silently
+  disabling the enforcement ticker forever (critic-review HIGH finding).
+  **Upgrade note:** since anon RSS is always `<=` total RSS, the same
+  `TRUSTY_MEMORY_LIMIT_MB` now trips the sweep and the hard-limit restart
+  LATER (at a higher real footprint) on Linux than before — re-validate a
+  limit tuned as an OOM backstop, or set `TRUSTY_MEMORY_ENFORCE_MEASURE=total`
+  to preserve the prior trip point exactly.
 
 ### Fixed
 

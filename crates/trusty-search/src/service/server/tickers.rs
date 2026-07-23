@@ -924,8 +924,15 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
     // consistently — mixing it with `total_rss` anywhere in the chain would
     // make the slice-2 hysteresis baseline meaningless (see
     // `memguard::enforcement_rss_mb_for_pid`'s doc comment).
+    // Issue #3683 slice 3 (HIGH critic-review finding): `enforcement_rss_mb`
+    // itself already degrades `anon` → `total` internally (with a one-time
+    // warn) when the anon reading is permanently unavailable on this host —
+    // see `memguard::resolve_anon_measure_reading`'s doc comment. So reaching
+    // `None` HERE means even the total-RSS fallback failed too, which really
+    // is the same rare, transient sampling hiccup `current_rss_mb()` above
+    // already tolerates — "try again next tick" is accurate for that case.
     let Some(enforce_rss) = memguard::enforcement_rss_mb() else {
-        return; // Could not sample the chosen measure this tick; try again next tick.
+        return; // Could not sample RSS by any measure this tick (rare); try again next tick.
     };
 
     let pct = memguard::high_water_pct();
