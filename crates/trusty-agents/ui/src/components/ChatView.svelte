@@ -19,7 +19,6 @@
   import { workflowState } from '../stores/workflow';
 
   let scrollEl: HTMLDivElement | undefined;
-  let unlistenProgress: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
   let unlistenDelta: UnlistenFn | null = null;
@@ -32,10 +31,6 @@
   // handler consults the SAME streaming state and never overwrites live text.
   const streams = streamAccumulator;
 
-  interface ProgressPayload {
-    task_id: string;
-    message: string;
-  }
   interface CompletePayload {
     id: string;
     narrative?: string;
@@ -93,11 +88,12 @@
       const full = streams.append(p.task_id, p.text ?? '');
       streamDeltaIntoTask(p.task_id, full, p.agent || undefined);
     });
-    unlistenProgress = await listenEvent<ProgressPayload>('task-progress', (p) => {
-      // Don't let a polling "Running…" tick overwrite live streamed text.
-      if (streams.isStreaming(p.task_id)) return;
-      updateMessageByTask($activeProjectId, p.task_id, p.message);
-    });
+    // Note: `task-progress` events are intentionally NOT consumed here. Their
+    // only former job was writing interim "Running…" status text into the
+    // bubble; that text is no longer shown (the spinner is the sole waiting
+    // indicator), so the bubble stays empty until the first `task-delta` or the
+    // final `task-complete` narrative. The pending→real id reconcile still
+    // happens in InputArea's own one-shot progress listener.
     unlistenComplete = await listenEvent<CompletePayload>('task-complete', (p) => {
       // Drop any streamed buffer FIRST so the authoritative narrative replaces
       // (never appends to) the accumulation — the streaming dedupe contract.
@@ -126,7 +122,6 @@
   });
 
   onDestroy(() => {
-    unlistenProgress?.();
     unlistenComplete?.();
     unlistenError?.();
     unlistenDelta?.();
