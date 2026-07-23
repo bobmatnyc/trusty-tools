@@ -96,8 +96,8 @@ pub(super) fn render_list<'a>(
 /// `marker` (`"-"` or `"{ordinal}."`) is ASCII-only, so its byte length
 /// equals its rendered column width; the checkbox, if any, is never part of
 /// this calculation.
-/// Test: `task_list_item_with_multi_paragraph_content_round_trips`,
-/// `ordered_item_ge_ten_with_continuation_round_trips`.
+/// Test: `task_list_item_with_multi_paragraph_content_round_trips_through_reparse`,
+/// `ordered_item_ge_ten_with_continuation_round_trips_through_reparse`.
 fn render_item<'a>(
     node: &'a AstNode<'a>,
     marker: &str,

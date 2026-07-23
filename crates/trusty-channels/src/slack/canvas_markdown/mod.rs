@@ -100,7 +100,7 @@ pub enum TranslationError {
 /// unsupported construct downgrades with a warning instead of failing.
 /// Test: `translates_every_supported_construct`, `downgrades_h4_to_h3`,
 /// `strips_html_with_warning`, `flattens_footnotes`,
-/// `passes_through_slack_mention_images`, `drops_non_mention_images`,
+/// `passes_through_slack_mention_images`, `drops_non_mention_images_with_warning`,
 /// `table_over_cap_is_a_hard_error`.
 pub fn to_canvas_markdown(input: &str) -> Result<TranslationResult, TranslationError> {
     let arena = Arena::new();
@@ -167,8 +167,8 @@ pub(super) fn longest_backtick_run(s: &str) -> usize {
 /// What: returns `s` unchanged when it's at or under the cap; otherwise the
 /// first 200 characters plus a `…` marker and the true length, so the
 /// truncation itself is visible rather than silently lossy.
-/// Test: `truncates_long_text_and_notes_original_length`,
-/// `leaves_short_text_unchanged`.
+/// Test: `truncate_for_warning_caps_long_text_and_notes_original_length`,
+/// `truncate_for_warning_leaves_short_text_unchanged`.
 pub(super) fn truncate_for_warning(s: &str) -> String {
     const MAX_WARNING_TEXT_CHARS: usize = 200;
     let total = s.chars().count();
