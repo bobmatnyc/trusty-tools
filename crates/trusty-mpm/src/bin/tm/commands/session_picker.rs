@@ -752,8 +752,8 @@ pub(crate) async fn run_tty_picker(
             .map(|s| !s.deleted && super::guided_resume::needs_restart(&s.state))
             .unwrap_or(false);
         if sessions.is_empty() {
-            eprintln!("tm:   [Enter] launch new session");
-            eprintln!("tm:   [q]     quit");
+            eprintln!("[Enter] launch new session");
+            eprintln!("[q]     quit");
         } else {
             if stale_slots {
                 eprintln!(
@@ -776,10 +776,10 @@ pub(crate) async fn run_tty_picker(
                     super::session_picker_render::format_session_row(num, s, use_color)
                 );
             }
-            eprintln!("tm:   [{new_idx}] launch new session");
-            eprintln!("tm:   [d<N>] delete session N (e.g. d1)");
-            eprintln!("tm:   [r<N> <new-name>] rename session N (e.g. r1 tm-my-new-name)");
-            eprintln!("tm:   [q] quit");
+            eprintln!("[{new_idx}] launch new session");
+            eprintln!("[d<N>] delete session N (e.g. d1)");
+            eprintln!("[r<N> <new-name>] rename session N (e.g. r1 tm-my-new-name)");
+            eprintln!("[q] quit");
             let first = &sessions[0];
             let first_num = shown_slot(&sessions, 0);
             if first.deleted {
