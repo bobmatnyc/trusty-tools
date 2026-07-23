@@ -1,7 +1,8 @@
 //! `slack_create_canvas`/`slack_canvas_create`, `slack_update_canvas`,
-//! `slack_read_canvas`, and `slack_canvas_lookup_sections` — the `canvases.*`
-//! document tools (issue #3612; `slack_canvas_create` and
-//! `slack_canvas_lookup_sections` added by issue #3744 slice 1).
+//! `slack_read_canvas`, `slack_canvas_lookup_sections`, and
+//! `slack_canvas_push` — the `canvases.*` document tools (issue #3612;
+//! `slack_canvas_create` and `slack_canvas_lookup_sections` added by issue
+//! #3744 slice 1; `slack_canvas_push` added by issue #3744 slice 2).
 //!
 //! Why: canvases are Slack's persistent rich-document surface (distinct from
 //! channel messages); creating, editing, and inspecting them programmatically
@@ -42,6 +43,29 @@
 //! module implements that path. If a caller specifically needs the *editable*
 //! markdown source back, there is currently no API for that; only the
 //! rendered HTML export is retrievable.
+//! `slack_canvas_push` (issue #3744 slice 2): runs caller-supplied CommonMark
+//! through [`crate::slack::canvas_markdown::to_canvas_markdown`], then pushes
+//! the result onto an existing canvas. `append` is a single `canvases.edit`
+//! call with an `insert_at_end` operation. `replace_all` first calls
+//! `canvases.sections.lookup` (`any_header` criteria) to enumerate the
+//! canvas's top-level header-delimited sections, then issues **sequential**
+//! single-operation `canvases.edit` calls — despite the plural field name,
+//! Slack's `changes` array reliably accepts only one operation per call in
+//! practice (the same constraint [`update_canvas`] already documents) — one
+//! `delete` per existing section, followed by one final `insert_at_end` with
+//! the translated content. This is **not atomic**: a failure partway through
+//! the delete sequence leaves the canvas with some old sections removed and
+//! others still present, and the new content not yet inserted; see
+//! [`push_replace_all`]'s doc for the empty-canvas / no-headers cases and
+//! [`canvas_push`]'s tool-list description for the caller-facing warning.
+//! Test: `tests/tools_http.rs::canvas_push_append_single_edit_call`,
+//! `::canvas_push_replace_all_deletes_then_inserts_sequentially`,
+//! `::canvas_push_replace_all_with_no_sections_only_inserts`,
+//! `::canvas_push_surfaces_ok_false_as_slack_error`,
+//! `::canvas_push_retries_editing_locked_then_succeeds`,
+//! `::canvas_push_editing_locked_exhausts_retries`,
+//! `::canvas_push_rejects_invalid_mode`,
+//! `::canvas_push_table_over_cap_is_invalid_args`.
 //! Test: `tests/tools_http.rs::create_canvas_returns_id`,
 //! `::create_canvas_with_channel_and_markdown`,
 //! `::canvas_create_requires_markdown`,
@@ -53,6 +77,8 @@
 //! `::lookup_sections_omits_absent_criteria_fields`,
 //! `::lookup_sections_requires_canvas_id`.
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use super::args::{opt_str, opt_str_array, require_str};
@@ -60,6 +86,7 @@ use super::clean::field_str;
 use super::{CANVASES_CREATE, CANVASES_EDIT, CANVASES_SECTIONS_LOOKUP, FILES_INFO};
 use crate::slack::api::client::BaseClient;
 use crate::slack::api::error::SlackError;
+use crate::slack::canvas_markdown::to_canvas_markdown;
 use crate::slack::server::ToolCallError;
 use trusty_common::slack_format::mrkdwn_escape;
 
@@ -270,4 +297,190 @@ pub(super) async fn lookup_sections(
         "canvas_id": canvas_id,
         "section_ids": section_ids,
     }))
+}
+
+/// Bounded retry budget for a `canvas_editing_locked` response.
+///
+/// Why: another client mid-edit is a transient collision, not a hard
+/// failure. `canvas_editing_locked` arrives as an `ok:false` body (a normal
+/// Slack API error, not an HTTP 429), so it never goes through
+/// [`BaseClient::call_method`]'s own rate-limit backoff — this handler-level
+/// loop mirrors that backoff's bounded spirit instead, per issue #3744 slice
+/// 2's spec.
+const MAX_EDITING_LOCKED_RETRIES: u32 = 3;
+
+/// Base delay before an editing-locked retry; multiplied by the attempt
+/// number for simple linear backoff. See [`MAX_EDITING_LOCKED_RETRIES`].
+const EDITING_LOCKED_RETRY_DELAY: Duration = Duration::from_millis(400);
+
+/// POST one `canvases.edit` change, retrying a transient
+/// `canvas_editing_locked` response up to [`MAX_EDITING_LOCKED_RETRIES`]
+/// times before surfacing it.
+///
+/// Why: shared by every `canvases.edit` call [`canvas_push`] makes (each
+/// delete and the final insert) so the retry policy can't drift between
+/// call sites.
+/// What: on `ok:true`, returns immediately. On `SlackError::Api("canvas_editing_locked")`,
+/// sleeps [`EDITING_LOCKED_RETRY_DELAY`] * attempt number and retries, up to
+/// the bounded budget; any other error (including an exhausted retry budget)
+/// propagates via `?`.
+/// Test: `tests/tools_http.rs::canvas_push_retries_editing_locked_then_succeeds`,
+/// `::canvas_push_editing_locked_exhausts_retries`.
+async fn edit_with_retry(client: &BaseClient, body: &Value) -> Result<(), ToolCallError> {
+    let mut attempt = 0u32;
+    loop {
+        match client.call_method(CANVASES_EDIT, body).await {
+            Ok(_) => return Ok(()),
+            Err(SlackError::Api(slug))
+                if slug == "canvas_editing_locked" && attempt < MAX_EDITING_LOCKED_RETRIES =>
+            {
+                attempt += 1;
+                tokio::time::sleep(EDITING_LOCKED_RETRY_DELAY * attempt).await;
+            }
+            Err(e) => return Err(ToolCallError::from(e)),
+        }
+    }
+}
+
+/// `slack_canvas_push` (issue #3744 slice 2): translate CommonMark to Slack
+/// canvas markdown and push it onto an existing canvas (requires
+/// `canvases:write`; `replace_all` additionally needs `canvases:read` for its
+/// `canvases.sections.lookup` pre-scan).
+///
+/// Why: closes the write-side gap `slack_update_canvas` doesn't cover —
+/// callers write CommonMark, not Slack's canvas markdown dialect, and
+/// `replace_all` needs a section-aware clear-then-insert sequence rather
+/// than `update_canvas`'s single whole-document `replace` (see the module
+/// doc's non-atomic-push caveat).
+/// What: requires `canvas_id`, `markdown` (CommonMark), and `mode`
+/// (`"append"` | `"replace_all"`). Runs `markdown` through
+/// [`to_canvas_markdown`] first — a translation error (currently only the
+/// 300-cell table cap) surfaces as [`ToolCallError::InvalidArgs`] before any
+/// network call. `append` issues one `insert_at_end` edit. `replace_all`
+/// delegates to [`push_replace_all`]. Returns `{ok, canvas_id,
+/// operations_applied, warnings}` — `warnings` carries every translator
+/// downgrade note plus, for `replace_all` on a canvas with no header-
+/// delimited sections, the caveat documented on [`push_replace_all`]. Never
+/// passes through Slack's raw response envelope (injection-safety
+/// convention shared with [`lookup_sections`] — only platform-controlled
+/// ids/counts and the translator's own warning strings reach the caller).
+/// Test: `tests/tools_http.rs::canvas_push_append_single_edit_call`,
+/// `::canvas_push_replace_all_deletes_then_inserts_sequentially`,
+/// `::canvas_push_rejects_invalid_mode`,
+/// `::canvas_push_table_over_cap_is_invalid_args`.
+pub(super) async fn canvas_push(client: &BaseClient, args: Value) -> Result<Value, ToolCallError> {
+    let canvas_id = require_str(&args, "canvas_id")?;
+    let markdown = require_str(&args, "markdown")?;
+    let mode = require_str(&args, "mode")?;
+    if mode != "append" && mode != "replace_all" {
+        return Err(ToolCallError::InvalidArgs(format!(
+            "'mode' must be \"append\" or \"replace_all\"; got '{mode}'"
+        )));
+    }
+
+    let translation =
+        to_canvas_markdown(&markdown).map_err(|e| ToolCallError::InvalidArgs(e.to_string()))?;
+    let mut warnings = translation.warnings;
+
+    let operations_applied = if mode == "append" {
+        let body = json!({
+            "canvas_id": canvas_id.as_str(),
+            "changes": [{
+                "operation": "insert_at_end",
+                "document_content": document_content(&translation.markdown),
+            }],
+        });
+        edit_with_retry(client, &body).await?;
+        1u32
+    } else {
+        push_replace_all(client, &canvas_id, &translation.markdown, &mut warnings).await?
+    };
+
+    Ok(json!({
+        "ok": true,
+        "canvas_id": canvas_id,
+        "operations_applied": operations_applied,
+        "warnings": warnings,
+    }))
+}
+
+/// `replace_all`'s section-aware clear-then-insert sequence.
+///
+/// Why: Slack has no single "replace the whole canvas" edit operation beyond
+/// the whole-document `replace` [`update_canvas`] already uses (kept as a
+/// distinct, simpler tool); `slack_canvas_push`'s spec instead enumerates and
+/// deletes each existing top-level section before inserting the new content,
+/// so a caller relying on `replace_all` gets a sequence whose partial-failure
+/// behaviour is predictable (old sections gone one at a time, in a fixed
+/// order) rather than an opaque single call.
+/// What: looks up every `any_header`-matching top-level section via
+/// `canvases.sections.lookup`; issues one sequential `delete` edit per
+/// section found; then one final `insert_at_end` edit with `new_markdown`.
+/// **Empty-canvas case**: lookup returns zero sections, so zero deletes run
+/// and the single insert is a true "replace" (there was nothing to clear).
+/// **No-headers case**: a canvas with existing non-header content (plain
+/// paragraphs, no h1/h2/h3) also makes `any_header` lookup return zero
+/// sections — Slack's API has no way to address non-header content for
+/// deletion at all, so this case is indistinguishable from "empty" at the API
+/// level. Rather than silently leaving stale content behind unremarked, a
+/// warning is pushed onto `warnings` whenever the lookup returns zero
+/// sections, naming the ambiguity explicitly.
+/// Test: `tests/tools_http.rs::canvas_push_replace_all_deletes_then_inserts_sequentially`,
+/// `::canvas_push_replace_all_with_no_sections_only_inserts`.
+async fn push_replace_all(
+    client: &BaseClient,
+    canvas_id: &str,
+    new_markdown: &str,
+    warnings: &mut Vec<String>,
+) -> Result<u32, ToolCallError> {
+    let lookup_body = json!({
+        "canvas_id": canvas_id,
+        "criteria": { "section_types": ["any_header"] },
+    });
+    let lookup_resp = client
+        .call_method(CANVASES_SECTIONS_LOOKUP, &lookup_body)
+        .await?;
+    let section_ids: Vec<String> = lookup_resp
+        .get("sections")
+        .and_then(Value::as_array)
+        .map(|sections| {
+            sections
+                .iter()
+                .map(|s| field_str(s, "id"))
+                .filter(|id| !id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if section_ids.is_empty() {
+        warnings.push(
+            "no header-delimited sections found (the canvas may be empty, or its existing \
+             content has no h1/h2/h3 headers) — replace_all appended the new content via \
+             insert_at_end rather than clearing existing content, since \
+             canvases.sections.lookup can only target header-delimited sections for deletion"
+                .to_string(),
+        );
+    }
+
+    let mut applied = 0u32;
+    for section_id in &section_ids {
+        let body = json!({
+            "canvas_id": canvas_id,
+            "changes": [{ "operation": "delete", "section_id": section_id }],
+        });
+        edit_with_retry(client, &body).await?;
+        applied += 1;
+    }
+
+    let insert_body = json!({
+        "canvas_id": canvas_id,
+        "changes": [{
+            "operation": "insert_at_end",
+            "document_content": document_content(new_markdown),
+        }],
+    });
+    edit_with_retry(client, &insert_body).await?;
+    applied += 1;
+
+    Ok(applied)
 }

@@ -11346,6 +11346,7 @@ name = "trusty-channels"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "comrak",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
