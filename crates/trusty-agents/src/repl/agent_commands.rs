@@ -80,37 +80,43 @@ impl TrustyAgentsRepl {
     /// Handle `/switch [<persona>]` — flip the active front-end "voice".
     ///
     /// Why: Users want a single discoverable command to switch between the
-    /// blessed personas (ctrl, Izzie, CTO Assistant, assistant #3303) without
+    /// blessed personas (Assistant #3738/#3303, Izzie, CTO Bot, ctrl) without
     /// memorising TOML stems. `/agent` is the more general primitive (any
     /// agent in the dir); `/switch` is the curated subset.
-    /// What: Accepts friendly aliases — "ctrl" / "izzie" / "Izzie" /
-    /// "cto" / "cto-assistant" / "CTO Assistant" / "assistant"
-    /// (case-insensitive). Empty arg lists the choices (the no-arg picker
-    /// path is handled upstream in `ReplBridge`). Switching to "ctrl" clears
-    /// any active persona.
+    /// What: Accepts friendly aliases — "assistant" (the generic default,
+    /// #3738) / "izzie" / "Izzie" / "cto" / "cto-assistant" / "cto bot" /
+    /// "ctrl" (case-insensitive). Empty arg lists the choices (the no-arg
+    /// picker path is handled upstream in `ReplBridge`). Switching to "ctrl"
+    /// (deprecated) clears any active persona.
     /// Test: `try_handle_slash_switch_*` unit tests below.
     pub(crate) fn handle_switch_command_into(&mut self, arg: &str, out: &mut String) {
         if arg.is_empty() {
             let _ = writeln!(out, "Usage: /switch <persona>");
             let _ = writeln!(out, "Available personas:");
+            // #3738: Assistant is the default; ctrl is deprecated (kept
+            // reachable, but nothing starts on it).
             let _ = writeln!(
                 out,
-                "  ctrl            project-aware orchestrator (default)"
+                "  Assistant       generic productivity assistant (default)"
             );
             let _ = writeln!(out, "  Izzie           friendly personal assistant");
-            let _ = writeln!(out, "  CTO Assistant   strategic Duetto-aware advisor");
-            let _ = writeln!(out, "  assistant       base productivity assistant");
+            let _ = writeln!(out, "  CTO Bot         strategic Duetto-aware advisor");
+            let _ = writeln!(
+                out,
+                "  ctrl            project-aware orchestrator (deprecated)"
+            );
             return;
         }
         let stem = match arg.to_lowercase().trim() {
             "ctrl" => "ctrl",
             "izzie" => "izzie",
             "assistant" => "assistant",
-            "cto" | "cto-assistant" | "cto assistant" => "cto-assistant",
+            // #3738: "cto bot" is the current display name; older aliases stay.
+            "cto" | "cto-assistant" | "cto assistant" | "cto bot" => "cto-assistant",
             other => {
                 let _ = writeln!(
                     out,
-                    "Unknown persona: {}. Valid: ctrl, Izzie, CTO Assistant, assistant",
+                    "Unknown persona: {}. Valid: Assistant, Izzie, CTO Bot, ctrl",
                     other
                 );
                 return;
@@ -148,11 +154,9 @@ impl TrustyAgentsRepl {
         cfg: &crate::agents::AgentConfig,
         out: &mut String,
     ) {
-        let display = cfg
-            .agent
-            .display_name
-            .clone()
-            .unwrap_or_else(|| cfg.agent.name.clone());
+        // #3738: single canonical accessor for the speaker label — see
+        // `AgentInfo::display_label`.
+        let display = cfg.agent.display_label().to_string();
         let label = cfg
             .agent
             .prompt_label

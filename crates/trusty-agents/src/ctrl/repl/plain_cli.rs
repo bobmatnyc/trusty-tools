@@ -42,9 +42,10 @@ use crate::agents::RunnerKind;
 use crate::ctrl::state::ConversationTurn;
 
 /// Persona the plain CLI defaults its conversational agent to at startup
-/// (owner decision, #3406 follow-up): the assistant (Opus) is what an SSH
-/// tester is actually exercising, not the `ctrl` machine-coordination
-/// persona (local ollama). `ctrl` stays one `/switch ctrl` away.
+/// (owner decision, #3406 follow-up; reaffirmed by #3738): the generic
+/// "Assistant" is the default starting agent an SSH tester exercises, NOT the
+/// deprecated `ctrl` machine-coordination persona (local ollama). `ctrl`
+/// stays one `/switch ctrl` away but nothing defaults to it.
 const DEFAULT_PERSONA: &str = "assistant";
 
 /// Cap on retained conversation turns for the plain CLI loop.
@@ -261,5 +262,18 @@ fn resolved_credential_label(runner: RunnerKind) -> String {
              openrouter/anthropic/claude-code)",
             other.join(", ")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_PERSONA;
+
+    /// #3738/#3406: the plain CLI must default to the generic "assistant"
+    /// persona at startup, never the deprecated `ctrl` coordinator.
+    #[test]
+    fn default_persona_is_generic_assistant_not_ctrl() {
+        assert_eq!(DEFAULT_PERSONA, "assistant");
+        assert_ne!(DEFAULT_PERSONA, "ctrl");
     }
 }

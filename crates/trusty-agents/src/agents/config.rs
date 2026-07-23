@@ -375,6 +375,26 @@ pub struct AgentInfo {
     pub extends: Option<String>,
 }
 
+impl AgentInfo {
+    /// The human-facing speaker label for this persona (#3738).
+    ///
+    /// Why: The chat surface (GUI per-message speaker attribution, the REPL
+    /// `/switch` "Switched to:" line, the `GET /api/agents` catalog) all need
+    /// the SAME "Assistant" / "Izzie" / "CTO Bot" string, resolved one way:
+    /// the persona's declared `display_name`, falling back to its stable
+    /// `name` id when a persona (e.g. a worker agent) declares none. Centralizing
+    /// this here is the single canonical accessor the owner decision asked for,
+    /// so the backend and every front end stay in agreement without each
+    /// re-deriving the mapping (which is how "CTO Assistant" vs "CTO Bot" drift
+    /// creeps in).
+    /// What: Returns `display_name` when set, else `name`.
+    /// Test: `display_label_prefers_display_name`,
+    /// `display_label_falls_back_to_name`.
+    pub fn display_label(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
 /// Declarative capability tags for `AgentRegistry` matching (#167).
 ///
 /// Why: Replaces hard-coded delegation logic with data-driven agent
