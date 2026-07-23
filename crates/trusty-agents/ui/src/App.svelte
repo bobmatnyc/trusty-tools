@@ -8,6 +8,10 @@
   import RecapPanel from './components/RecapPanel.svelte';
   import Header from './components/Header.svelte';
   import PersonalityPanel from './components/PersonalityPanel.svelte';
+  import SlackMirror from './components/SlackMirror.svelte';
+  // #3752: live Slack conversation mirror — the SSE bridge feeds these two
+  // event kinds into the store the SlackMirror pane renders.
+  import { pushSlackEvent, slackMirror } from './lib/slack-mirror';
   import { invoke, isDesktop, connectEventSource, listenEvent, emitWebEvent, type AppEvent } from './lib/transport';
   import { bridgeDelta } from './lib/chatStream';
   import { apiAuthRequired, getCurrentApiToken, setApiToken, addMessage } from './stores/app';
@@ -358,6 +362,14 @@
         }
         break;
       }
+      case 'slack_message_received':
+      case 'slack_reply_sent':
+        // #3752: live Slack conversation mirror. These are conversation-scoped
+        // (no session_id), so they don't belong on the task web-bus — fold them
+        // straight into the SlackMirror store and stop (no default fall-through
+        // to a `task-progress` emit).
+        pushSlackEvent(ev);
+        break;
       case 'ping':
       case 'lag':
         // Diagnostic — no UI action; consumers that care can listen for the
@@ -516,6 +528,11 @@
             <InputArea />
           </div>
           <RecapPanel />
+          <!-- #3752: the live Slack mirror only mounts once there's activity,
+               so normal (non-Slack) usage is visually unchanged. -->
+          {#if $slackMirror.length > 0}
+            <SlackMirror />
+          {/if}
         </div>
       {:else if activeView === 'projects'}
         <ProjectsView on:navigate={(e) => switchView(e.detail.view)} />

@@ -269,6 +269,43 @@ pub enum Event {
         table_rows: Vec<(String, String)>,
     },
 
+    // -- Slack conversation mirror (#3752, epic #3052) --
+    /// Emitted (via the `--api` relay endpoint) when the Slack gateway
+    /// receives an inbound human message it is about to dispatch to ctrl.
+    ///
+    /// Why: The GUI mirrors both sides of a live Slack conversation so an
+    /// operator watching the desktop app sees what the bot is fielding in
+    /// real time. This is the inbound half; `SlackReplySent` is the reply.
+    /// `tier` is the resolved RBAC `ServiceTier` label (`all` / `analytics`
+    /// / `read_only`) so the UI can render an honest access-level badge —
+    /// only introspectable facts, never an invented auth state.
+    /// What: `channel` is the Slack channel id; `user_display` is the RBAC
+    /// display name; `text` is the raw inbound message; `tier` is the
+    /// snake_case tier label. Carries no `session_id` (see `session_id`).
+    /// Test: `slack_message_received_round_trips`.
+    SlackMessageReceived {
+        channel: String,
+        user_display: String,
+        text: String,
+        tier: String,
+    },
+
+    /// Emitted (via the `--api` relay endpoint) after the Slack gateway has
+    /// successfully posted the bot's reply back to the channel.
+    ///
+    /// Why: The reply half of the live Slack mirror. `identity` is the
+    /// honest speaker label — the bot always replies *as itself*; there is
+    /// no impersonation ("as-Bob") mode in code, so the UI must not fabricate
+    /// one.
+    /// What: `channel` is the Slack channel id; `text` is the reply body;
+    /// `identity` is the honest bot-identity label. Carries no `session_id`.
+    /// Test: `slack_reply_sent_round_trips`.
+    SlackReplySent {
+        channel: String,
+        text: String,
+        identity: String,
+    },
+
     // -- Keepalive --
     Ping,
 }
@@ -306,7 +343,10 @@ impl Event {
             | Event::AgentStarted { session_id, .. }
             | Event::ReportGenerated { session_id, .. }
             | Event::RecapGenerated { session_id, .. } => Some(session_id),
-            Event::Ping => None,
+            // Slack-mirror events are conversation-scoped, not task-scoped:
+            // like `Ping` they carry no `session_id`, so they always pass the
+            // SSE session filter and reach the GUI's app-lifetime EventSource.
+            Event::SlackMessageReceived { .. } | Event::SlackReplySent { .. } | Event::Ping => None,
         }
     }
 }
@@ -509,6 +549,62 @@ mod tests {
         assert_eq!(out.chars().count(), 4); // 3 + ellipsis
         assert!(out.starts_with("abc"));
         assert!(out.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn slack_message_received_round_trips() {
+        let ev = Event::SlackMessageReceived {
+            channel: "C0123ABC".into(),
+            user_display: "Masa".into(),
+            text: "what's the deploy status?".into(),
+            tier: "all".into(),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"type\":\"slack_message_received\""), "{s}");
+        assert!(s.contains("\"tier\":\"all\""), "{s}");
+        // Slack-mirror events must not carry a session_id (always pass the filter).
+        assert_eq!(ev.session_id(), None);
+        let back: Event = serde_json::from_str(&s).unwrap();
+        match back {
+            Event::SlackMessageReceived {
+                channel,
+                user_display,
+                text,
+                tier,
+            } => {
+                assert_eq!(channel, "C0123ABC");
+                assert_eq!(user_display, "Masa");
+                assert_eq!(text, "what's the deploy status?");
+                assert_eq!(tier, "all");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slack_reply_sent_round_trips() {
+        let ev = Event::SlackReplySent {
+            channel: "C0123ABC".into(),
+            text: "Deploy is green.".into(),
+            identity: "CTO Bot (as itself)".into(),
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"type\":\"slack_reply_sent\""), "{s}");
+        assert!(s.contains("CTO Bot (as itself)"), "{s}");
+        assert_eq!(ev.session_id(), None);
+        let back: Event = serde_json::from_str(&s).unwrap();
+        match back {
+            Event::SlackReplySent {
+                channel,
+                text,
+                identity,
+            } => {
+                assert_eq!(channel, "C0123ABC");
+                assert_eq!(text, "Deploy is green.");
+                assert_eq!(identity, "CTO Bot (as itself)");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]

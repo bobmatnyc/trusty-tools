@@ -28,6 +28,7 @@ mod format;
 mod handlers;
 mod pairing;
 mod rbac;
+mod relay;
 
 #[cfg(test)]
 mod tests;
