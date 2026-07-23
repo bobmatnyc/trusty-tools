@@ -15,11 +15,17 @@
 //! `event:`/`data:` framing off `Response::chunk()` (no extra deps — reqwest's
 //! chunk reader is available without the `stream` feature), and for every
 //! `agent_message_delta` frame emits `app.emit("task-delta", DeltaPayload)`.
-//! Ping/lag/other events are ignored (the poll loop still drives
-//! progress/complete). The connection auto-reconnects with a short backoff so
-//! a sidecar restart or idle reap doesn't permanently kill streaming.
+//! #3752: it ALSO forwards the two Slack-mirror kinds
+//! (`slack_message_received` / `slack_reply_sent`) as a `slack-event` Tauri
+//! event carrying the raw event object — otherwise the SlackMirror pane would
+//! populate only in browser mode (App.svelte's browser SSE bridge is skipped
+//! on `isDesktop()`), leaving the packaged demo app blank. Ping/lag/other
+//! events are ignored (the poll loop still drives progress/complete). The
+//! connection auto-reconnects with a short backoff so a sidecar restart or idle
+//! reap doesn't permanently kill streaming.
 //! Test: `parse_dispatches_agent_message_delta`,
-//! `parse_ignores_non_delta_frames`, `parse_handles_split_frames`.
+//! `parse_ignores_non_delta_frames`, `parse_handles_split_frames`,
+//! `parse_slack_frame_matches_both_kinds`, `parse_slack_frame_ignores_others`.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -74,12 +80,27 @@ async fn pump_stream(app: &AppHandle, url: &str) -> Result<(), String> {
     let mut parser = SseParser::default();
     while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read: {e}"))? {
         for data in parser.push(&chunk) {
-            if let Some(payload) = parse_delta_frame(&data) {
-                let _ = app.emit("task-delta", payload);
-            }
+            dispatch_frame(app, &data);
         }
     }
     Ok(())
+}
+
+/// Route one completed SSE `data:` payload to the matching Tauri event.
+///
+/// Why: The desktop shell forwards two disjoint event families — streaming
+/// `agent_message_delta` (→ `task-delta`, browser-parity) and the Slack-mirror
+/// kinds (→ `slack-event`, #3752). Everything else stays on the poll loop.
+/// What: Emits `task-delta` for a delta frame, else `slack-event` (carrying the
+/// raw event object) for a Slack frame, else nothing.
+/// Test: `parse_dispatches_agent_message_delta`,
+/// `parse_slack_frame_matches_both_kinds`.
+fn dispatch_frame(app: &AppHandle, data: &str) {
+    if let Some(payload) = parse_delta_frame(data) {
+        let _ = app.emit("task-delta", payload);
+    } else if let Some(value) = parse_slack_frame(data) {
+        let _ = app.emit("slack-event", value);
+    }
 }
 
 /// Incremental SSE frame parser.
@@ -148,6 +169,24 @@ fn parse_delta_frame(data: &str) -> Option<DeltaPayload> {
     })
 }
 
+/// Parse an SSE `data:` JSON payload into the raw event `Value` iff it is one
+/// of the two Slack-mirror kinds; otherwise `None`. (#3752)
+///
+/// Why: The desktop SlackMirror pane consumes the SAME event shape the browser
+/// bridge feeds `pushSlackEvent`, so we forward the whole object unchanged
+/// rather than reshaping it into a bespoke payload — the frontend listener
+/// calls `pushSlackEvent` on it identically in both transports.
+/// What: JSON-decodes `data`, returns it iff `type` is `slack_message_received`
+/// or `slack_reply_sent`.
+/// Test: `parse_slack_frame_matches_both_kinds`, `parse_slack_frame_ignores_others`.
+fn parse_slack_frame(data: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    match value.get("type").and_then(|t| t.as_str()) {
+        Some("slack_message_received") | Some("slack_reply_sent") => Some(value),
+        _ => None,
+    }
+}
+
 fn field_str(value: &serde_json::Value, key: &str) -> String {
     value
         .get(key)
@@ -193,6 +232,28 @@ mod tests {
         assert_eq!(parse_delta_frame(&frames[0]).unwrap().text, "hi");
         // Ping frame yields nothing.
         assert!(p.push(b"event: ping\ndata: {}\n\n").is_empty());
+    }
+
+    #[test]
+    fn parse_slack_frame_matches_both_kinds() {
+        // #3752: both Slack-mirror kinds are forwarded verbatim (raw object).
+        let inbound = r#"{"type":"slack_message_received","channel":"C0","user_display":"Masa","text":"hi","tier":"all"}"#;
+        let v = parse_slack_frame(inbound).expect("inbound should match");
+        assert_eq!(v.get("type").unwrap(), "slack_message_received");
+        assert_eq!(v.get("tier").unwrap(), "all");
+
+        let reply = r#"{"type":"slack_reply_sent","channel":"C0","text":"ok","identity":"CTO Bot (as itself)"}"#;
+        let v = parse_slack_frame(reply).expect("reply should match");
+        assert_eq!(v.get("type").unwrap(), "slack_reply_sent");
+        assert_eq!(v.get("identity").unwrap(), "CTO Bot (as itself)");
+    }
+
+    #[test]
+    fn parse_slack_frame_ignores_others() {
+        // A streaming delta is NOT a slack frame (it goes to `task-delta`).
+        assert!(parse_slack_frame(r#"{"type":"agent_message_delta","text":"x"}"#).is_none());
+        assert!(parse_slack_frame(r#"{"type":"pm_thinking","text":"x"}"#).is_none());
+        assert!(parse_slack_frame("not json").is_none());
     }
 
     #[test]

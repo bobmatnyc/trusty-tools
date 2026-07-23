@@ -436,10 +436,24 @@
     }).then((fn) => {
       unlistenWorkflowProgress = fn;
     });
+    // #3752: desktop parity for the Slack mirror. In browser mode
+    // `bridgeEventToWebBus` calls `pushSlackEvent` directly off the SSE stream;
+    // the Tauri shell skips that browser bridge (`startEventStream` early-
+    // returns on `isDesktop()`), so its Rust `sse_bridge` re-emits the two
+    // Slack kinds as a `slack-event` Tauri event that we fold in here. This
+    // listener is a harmless no-op in browser mode (nothing emits `slack-event`
+    // on the web bus), so exactly one push happens per event in each transport.
+    let unlistenSlack: (() => void) | null = null;
+    listenEvent<AppEvent>('slack-event', (ev) => {
+      pushSlackEvent(ev);
+    }).then((fn) => {
+      unlistenSlack = fn;
+    });
     return () => {
       window.removeEventListener('beforeunload', onUnload);
       unlistenWorkflowComplete?.();
       unlistenWorkflowProgress?.();
+      unlistenSlack?.();
       stopEventStream();
     };
   });

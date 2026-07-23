@@ -9,6 +9,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Live Slack mirror reaches the desktop shell (#3752):** `sse_bridge.rs` now
+  also forwards the two Slack-mirror event kinds (`slack_message_received` /
+  `slack_reply_sent`) from the sidecar's `/api/events` as a `slack-event` Tauri
+  event carrying the raw event object. Without this the `SlackMirror` pane would
+  populate only in browser mode (the Tauri shell skips App.svelte's browser SSE
+  bridge on `isDesktop()`), leaving the packaged demo app blank; App.svelte's
+  `onMount` listens for `slack-event` and calls `pushSlackEvent`, a no-op in
+  browser mode so exactly one push happens per event in each transport.
+
 - **Live token streaming in the chat reply bubble (desktop + browser):** when
   the backend streams a reply (the new `agent_message_delta` SSE event), the
   in-flight assistant bubble now grows token-by-token instead of showing a
