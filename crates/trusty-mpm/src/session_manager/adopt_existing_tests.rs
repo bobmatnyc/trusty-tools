@@ -339,6 +339,15 @@ async fn manager_adopt_existing_suffixes_recycled_name() {
         "expected rename_session(tm-recycled -> tm-recycled-2), got {:?}",
         fake.rename_calls.lock().unwrap()
     );
+    // #3692 review MEDIUM: the stale record's pane is provably dead (a
+    // different pane owns its name), yet it claimed Active — adopt must
+    // converge it to Stopped eagerly (what reconcile would do at the next
+    // pass) instead of leaving a live-looking record squatting on the name.
+    assert_eq!(
+        mgr.get(&first.id).await.expect("get stale").state,
+        ManagedSessionState::Stopped,
+        "the provably-dead Active collider must be converged to Stopped"
+    );
 }
 
 /// A THIRD adoption attempt for the same recycled name must skip the

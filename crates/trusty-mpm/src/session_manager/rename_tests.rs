@@ -146,6 +146,49 @@ async fn rename_suffix_skips_to_next_free_ordinal() {
     assert_eq!(second.tmux_name, format!("{b_name}-3"));
 }
 
+/// Two CONCURRENT renames of two different STOPPED sessions to the same
+/// target name must land on distinct names (#3692 review HIGH-3).
+///
+/// Why: a stopped record has no live tmux session, so nothing outside the
+/// store lock serializes its rename — with a lock-free dedupe snapshot, both
+/// tasks could observe the target as free, both pick it (or the same
+/// ordinal), and both persist: two non-terminal records sharing one
+/// `tmux_name`, the literal #3692 defect reintroduced by the fix's own
+/// rename path. `rename` therefore holds the store write guard across its
+/// whole check/dedupe/persist sequence.
+/// What: seeds two Stopped records, fires both renames to `tm-contested`
+/// concurrently via `tokio::join!`, and asserts the persisted names are
+/// distinct — one bare, one `-2`-suffixed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rename_concurrent_stopped_renames_to_same_target_never_collide() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let a = ManagedSessionId::new();
+    let b = ManagedSessionId::new();
+    seed_record(&mgr, &dir, a, ManagedSessionState::Stopped, false).await;
+    seed_record(&mgr, &dir, b, ManagedSessionState::Stopped, false).await;
+
+    let (ra, rb) = tokio::join!(
+        mgr.rename(&a, "tm-contested"),
+        mgr.rename(&b, "tm-contested")
+    );
+    let ra = ra.expect("rename a");
+    let rb = rb.expect("rename b");
+
+    assert_ne!(
+        ra.tmux_name, rb.tmux_name,
+        "concurrent renames to one target must never both claim the same name"
+    );
+    let mut names = [ra.tmux_name.as_str(), rb.tmux_name.as_str()];
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["tm-contested", "tm-contested-2"],
+        "one wins the bare name, the other takes the -2 suffix"
+    );
+}
+
 /// `rename` rejects an invalid new name with `InvalidState`.
 #[tokio::test]
 async fn rename_rejects_invalid_name() {

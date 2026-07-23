@@ -9,7 +9,9 @@
 //! What: [`session_rename`] resolves the target (an explicit id/name, or the
 //! CURRENT session from `$TM_MANAGED_SESSION_ID` when only a new name is given),
 //! PATCHes `/api/v1/sessions/managed/{id}` with `{ "name": … }`, and renders the
-//! 400/404/409/success outcomes. The in-session form cross-checks the env var
+//! 400/404/success outcomes — printing the DAEMON-confirmed name from the
+//! response body, which may be an auto-suffixed variant of the requested one
+//! when it collided (#3692; see [`rename_success_message`]). The in-session form cross-checks the env var
 //! against this process's own tmux pane before trusting it (issue #3600, see
 //! [`confirm_rename_target_pane`]) — `$TM_MANAGED_SESSION_ID` is published
 //! SESSION-scoped (`tmux set-environment -t <session>`), so a sibling pane can
@@ -161,7 +163,8 @@ pub(crate) async fn session_rename(
 
 /// Issue the PATCH and render the 404/409/400/success outcomes — shared by
 /// both `session_rename` branches (explicit target and the in-session,
-/// pane-cross-checked form).
+/// pane-cross-checked form). Thin printing shell over [`do_rename_request`]
+/// (the testable part).
 async fn finish_rename(
     client: &reqwest::Client,
     url: &str,
@@ -169,6 +172,35 @@ async fn finish_rename(
     id: &str,
     new_name: String,
 ) -> anyhow::Result<()> {
+    let msg = do_rename_request(client, url, target, id, new_name).await?;
+    println!("{msg}");
+    Ok(())
+}
+
+/// Issue the rename PATCH and build the success message from the DAEMON'S
+/// confirmed name, not the locally-requested one (issue #3692 review HIGH-1).
+///
+/// Why: since #3692, `SessionManager::rename` never rejects a collision — it
+/// auto-suffixes, so the name the daemon actually applied (in the response
+/// body's session summary) can differ from the one the operator asked for.
+/// Printing the requested name would tell the operator a rename happened that
+/// didn't ("renamed → tm-x" when the session is really `tm-x-2`), poisoning
+/// their next `tmux attach`/resume-by-name.
+/// What: PATCHes `{ "name": … }`; 404 bails; 400 (and the legacy 409, kept for
+/// older daemons) surfaces the daemon's message on stderr and errors. On
+/// success, parses the response body's `name` field and returns
+/// [`rename_success_message`] built from it — falling back to the requested
+/// name only when the body carries none (an older daemon). Returns the
+/// message rather than printing so tests can assert it.
+/// Test: `do_rename_request_reports_server_confirmed_suffixed_name`,
+/// `do_rename_request_reports_plain_success` (`rename_tests.rs`).
+async fn do_rename_request(
+    client: &reqwest::Client,
+    url: &str,
+    target: &str,
+    id: &str,
+    new_name: String,
+) -> anyhow::Result<String> {
     let resp = client
         .patch(format!("{url}/api/v1/sessions/managed/{id}"))
         .json(&serde_json::json!({ "name": new_name }))
@@ -179,17 +211,46 @@ async fn finish_rename(
             anyhow::bail!("managed session '{target}' not found");
         }
         reqwest::StatusCode::CONFLICT | reqwest::StatusCode::BAD_REQUEST => {
-            // Name collision (409) or invalid name (400): surface the daemon's
-            // actionable message on stderr and fail (non-zero exit).
+            // Invalid name (400) — or a collision (409) from a pre-#3692
+            // daemon that still rejects instead of auto-suffixing: surface the
+            // daemon's actionable message on stderr and fail (non-zero exit).
             let msg = resp.text().await.unwrap_or_default();
             eprintln!("error: {msg}");
             Err(anyhow::anyhow!("rename rejected: {msg}"))
         }
         _ => {
-            resp.error_for_status()?;
-            println!("renamed {id} -> {new_name}");
-            Ok(())
+            let resp = resp.error_for_status()?;
+            // The daemon's summary carries the name it ACTUALLY applied,
+            // which may be an auto-suffixed variant of what we sent (#3692).
+            let confirmed = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string));
+            Ok(rename_success_message(id, &new_name, confirmed.as_deref()))
         }
+    }
+}
+
+/// Build the rename success line from the server-confirmed name (issue #3692
+/// review HIGH-1) — pure, so the collided-and-suffixed wording is unit-tested.
+///
+/// Why: see [`do_rename_request`] — the printed name must be the one the
+/// daemon applied, and a silent suffix would leave the operator believing the
+/// requested name stuck.
+/// What: `confirmed = None` (older daemon, no parseable body) falls back to
+/// the requested name. When the confirmed name differs from the requested
+/// one, the message says so explicitly ("was taken; auto-suffixed").
+/// Test: `rename_success_message_plain`,
+/// `rename_success_message_notes_suffix_on_collision`,
+/// `rename_success_message_falls_back_without_body` (`rename_tests.rs`).
+fn rename_success_message(id: &str, requested: &str, confirmed: Option<&str>) -> String {
+    match confirmed {
+        Some(actual) if actual != requested => format!(
+            "renamed {id} -> {actual} (requested name '{requested}' was taken; auto-suffixed)"
+        ),
+        Some(actual) => format!("renamed {id} -> {actual}"),
+        None => format!("renamed {id} -> {requested}"),
     }
 }
 

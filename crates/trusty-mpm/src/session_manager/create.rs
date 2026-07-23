@@ -117,7 +117,8 @@ impl SessionManager {
     /// used verbatim as the tmux session name — no `name_hint`/`repo_url`/`cwd`
     /// derivation runs here at all.
     /// Test: exercised transitively by the in-project spawn integration tests;
-    /// `manager_create_with_reserved_name_skips_derivation` in `tests.rs`.
+    /// `create_with_reserved_name_suffixes_stale_reservation` in
+    /// `super::naming_tests` (the #3692 stale-reservation safety net).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_with_reserved_name(
         &self,
@@ -158,12 +159,22 @@ impl SessionManager {
     /// Why: extracting this (#2032) means the name-derivation callers and the
     /// pre-reserved-name caller share one create+persist implementation instead
     /// of two near-duplicate copies of the tmux-guard/correlation/upsert dance.
-    /// What: creates the tmux session at `cwd` via the driver, arms a
+    /// What: re-checks the resolved name for collision immediately before the
+    /// tmux create — auto-suffixing via
+    /// [`SessionManager::dedupe_session_name`], never rejecting (#3692) — then
+    /// creates the tmux session at `cwd` via the driver, arms a
     /// [`super::session_guard::TmuxSessionGuard`] so a failed persist reaps the
     /// orphaned session (#1452/#1453), builds the [`SessionRecord`] in state
-    /// `Provisioning`, and persists it.
-    /// Test: covered transitively by every `create_with_id`/
-    /// `create_with_reserved_name` test.
+    /// `Provisioning`, and persists it. The dedupe is the create path's FINAL
+    /// safety net: `resolve_session_name`'s snapshot and this tmux create are
+    /// separated by real work (clone/worktree provisioning — the documented
+    /// TOCTOU window), and `create_with_reserved_name` trusts a name reserved
+    /// even earlier; re-checking here narrows that window to a few
+    /// instructions (fully closing it would need a lock spanning the external
+    /// tmux/store processes — out of scope).
+    /// Test: `create_with_reserved_name_suffixes_stale_reservation` in
+    /// `super::naming_tests`; covered transitively by every
+    /// `create_with_id`/`create_with_reserved_name` test.
     #[allow(clippy::too_many_arguments)]
     async fn create_with_resolved_name(
         &self,
@@ -178,6 +189,21 @@ impl SessionManager {
         ephemeral: bool,
         owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
+        // #3692 final safety net: the name was resolved/reserved some time ago
+        // (clone + worktree provisioning may have run in between) — re-check
+        // and auto-suffix at the last moment before the tmux session springs
+        // into existence, so a reservation gone stale never yields a second
+        // live session under an already-taken name.
+        let resolved_name = tmux_name;
+        let tmux_name = self.dedupe_session_name(&resolved_name, None).await?;
+        if tmux_name != resolved_name {
+            warn!(
+                id = %id,
+                requested = %resolved_name,
+                actual = %tmux_name,
+                "resolved/reserved session name went stale before the tmux create; auto-suffixed (#3692)"
+            );
+        }
         let workdir = cwd.to_string_lossy().to_string();
         self.tmux
             .create_session(&tmux_name, &workdir)

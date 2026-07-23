@@ -13,7 +13,6 @@
 //! Test: `manager_adopt_existing_*` in `super::tests`;
 //! `derive_source_id_*` unit tests at the bottom of this module.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -123,10 +122,14 @@ impl SessionManager {
     ///   a genuinely different pane now answers to the same name — in which case the
     ///   new adoption is auto-suffixed (smallest free `-N` ordinal) and the LIVE tmux
     ///   session is physically renamed to match, so the record and its pane never
-    ///   drift apart. When `pane_id` is unknown on either side, (a) is assumed (the
-    ///   safe default). A TERMINAL (`Decommissioned`/`Deleted`) record's name was
-    ///   already excluded from ever being over-broad — this method now filters to
-    ///   non-terminal records only, matching `rename`'s long-standing rule.
+    ///   drift apart; a stale collider still CLAIMING liveness
+    ///   (`Active`/`Provisioning`) is additionally converged to `Stopped` in the
+    ///   same guard scope (its pane is provably dead — this is what
+    ///   `reconcile_on_boot` would do at the next pass, done eagerly). When
+    ///   `pane_id` is unknown on either side, (a) is assumed (the safe default). A
+    ///   TERMINAL (`Decommissioned`/`Deleted`) record's name never blocks — this
+    ///   method filters to non-terminal records only, matching `rename`'s
+    ///   long-standing rule.
     /// - **The collision check, dedupe, tmux rename, and upsert all run under ONE
     ///   held write lock.** Reading the store to test for the name and then
     ///   upserting must be atomic — otherwise two concurrent `adopt_existing` calls
@@ -203,7 +206,8 @@ impl SessionManager {
         // is gone for good and reusable as-is.
         let colliding = existing
             .iter()
-            .find(|r| r.tmux_name == tmux_name && !r.state.is_terminal());
+            .find(|r| r.tmux_name == tmux_name && !r.state.is_terminal())
+            .cloned();
         let final_name = match colliding {
             None => tmux_name.to_string(),
             Some(existing_record) => {
@@ -222,22 +226,30 @@ impl SessionManager {
                 // Auto-suffix (never reject, #3692) and physically rename the
                 // live tmux session so the new record and its pane stay in
                 // lock-step.
-                let mut taken: HashSet<String> = self
-                    .tmux
-                    .list_sessions()
-                    .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?
-                    .into_iter()
-                    .collect();
-                taken.extend(
-                    existing
-                        .iter()
-                        .filter(|r| !r.state.is_terminal())
-                        .map(|r| r.tmux_name.clone()),
-                );
-                let deduped = trusty_common::session_naming::dedupe_by_ordinal(tmux_name, |c| {
-                    taken.contains(c)
-                });
+                let taken = self.taken_name_set(&existing, None)?;
+                let deduped = Self::dedupe_name_against(tmux_name, &taken);
                 self.tmux.rename_session(tmux_name, &deduped)?;
+                // #3692 review MEDIUM: the pane-id mismatch above is proof the
+                // stale record's own pane is DEAD (tmux enforces name
+                // uniqueness — a different pane answering to its name means
+                // its pane is gone). If that record still CLAIMS to be live
+                // (Active/Provisioning), converge it to `Stopped` now, under
+                // this same guard, instead of leaving a live-looking record
+                // whose name points at somebody else's pane until the next
+                // reconcile pass. `Stopped` (not a terminal state) is
+                // deliberate: it matches what `reconcile_on_boot` would do on
+                // discovering the dead pane, and keeps the record resumable —
+                // its name stays reserved for it (non-terminal ⇒ taken), which
+                // is exactly why THIS adoption takes the suffix instead.
+                if matches!(
+                    existing_record.state,
+                    ManagedSessionState::Active | ManagedSessionState::Provisioning
+                ) {
+                    let mut stale = existing_record;
+                    stale.state = ManagedSessionState::Stopped;
+                    stale.last_activity_at = Some(Utc::now());
+                    store.upsert(stale).await?;
+                }
                 deduped
             }
         };
