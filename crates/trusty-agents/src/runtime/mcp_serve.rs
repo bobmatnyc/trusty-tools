@@ -15,11 +15,17 @@
 //!   - `dispatch_task`: wraps the existing opaque, RBAC-gated `PmBridgeTool`
 //!     (`crate::tools::pm_bridge`) rooted at the server process's cwd.
 //! Every `tools/call` result is wrapped in the MCP `{content:[{type:"text",
-//! text}], isError}` envelope, mirroring trusty-memory's `handle_message`.
-//! What's DEFERRED to epic #3633: HTTP/SSE transport, `rpc.discover`, tool
-//! namespacing, auth, and mapping external callers onto RBAC service tiers —
-//! this slice registers `dispatch_task` with NO new RBAC wiring (it is already
-//! opaque + tier-restricted at its own `restricted_tiers()`).
+//! text}], isError}` envelope. Unlike trusty-memory's `handle_message` (which
+//! turns a tool `Err` into a JSON-RPC `-32603` error), a failing tool here
+//! stays a normal `tools/call` result with `isError:true` — the MCP-idiomatic
+//! shape that lets the client read the failure text without special-casing the
+//! RPC error channel.
+//! RBAC: this surface applies NO tier restriction. `PmBridgeTool` carries a
+//! `restricted_tiers()` list, but external MCP callers are not mapped onto RBAC
+//! service tiers at all in this slice, and the loop does not consult it — so
+//! `dispatch_task` is reachable by any connected client. Gating external
+//! callers by tier is explicitly DEFERRED to epic #3633, alongside HTTP/SSE
+//! transport, `rpc.discover`, tool namespacing, and auth.
 //! Test: `mcp_serve_tests` drives the `dispatch` fn in-memory
 //! (initialize → tools/list → tools/call list_agents → unknown-method error),
 //! mirroring `run_stdio_loop`'s own test style; a live smoke pipes JSON-RPC
@@ -41,13 +47,43 @@ use crate::tools::traits::ToolExecutor;
 /// Why: dispatched in `runtime::run` BEFORE `run_startup_init` (like the
 /// `config` credential CLI) so the JSON-RPC stdout stream is never polluted by
 /// startup banners or message-bus side effects, and the server stays
-/// daemon-less.
-/// What: hands the module-level [`dispatch`] fn to
+/// daemon-less. But because it bypasses `run_startup_init`, this fn must itself
+/// perform the two startup steps the tool surface actually depends on — bundled
+/// agent deployment and tracing init — since nothing else will.
+/// What: (1) deploys/refreshes the bundled agent roster to
+/// `$HOME/.trusty-agents/agents/` best-effort so `list_agents` reports the real
+/// personas even when `tagent` is launched from a fresh `$HOME` (mirrors
+/// `startup.rs`'s `.inspect_err(...).unwrap_or_default()` call — it emits
+/// nothing on stdout); (2) installs a minimal stderr-writing tracing subscriber
+/// so `dispatch_task`'s diagnostics (e.g. the orphaned-tm-session WARN in
+/// `pm_bridge_backend`) are not silently dropped, keeping stdout clean; (3)
+/// hands the module-level [`dispatch`] fn to
 /// [`trusty_common::mcp::run_stdio_loop`], which reads stdin line-by-line and
 /// writes one JSON-RPC response line per request (notifications suppressed).
 /// Test: exercised by the live binary smoke; the per-message logic is unit
 /// tested via [`dispatch`] directly.
 pub async fn run_mcp_serve() -> anyhow::Result<()> {
+    // Minimal stderr tracing (MEDIUM 1): the early dispatch skips
+    // `run_startup_init`, so without this every `tracing` event on the
+    // `dispatch_task` path — including the orphaned-tm-session WARN whose doc
+    // mandates it be logged — is dropped. Write to stderr so the JSON-RPC
+    // stdout stream stays clean. `try_init` is a no-op if a subscriber already
+    // exists (it never does on this path, but keeps this defensive).
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+
+    // Deploy the bundled agent roster (HIGH): `run_startup_init` normally does
+    // this (startup.rs), populating `$HOME/.trusty-agents/agents/`. Bypassing
+    // it means `list_agents` returns `{"agents":[]}` on a fresh `$HOME`; run
+    // the same best-effort deploy here. Emits nothing on stdout per its own doc.
+    let _ = crate::agents::bundled::ensure_bundled_agents_deployed()
+        .inspect_err(|e| tracing::warn!(error = %e, "mcp-serve: failed to deploy bundled agents to $HOME"))
+        .unwrap_or_default();
+
     run_stdio_loop(dispatch).await
 }
 
@@ -181,16 +217,33 @@ async fn call_tool(name: &str, args: Value) -> ToolCallOutcome {
             // injection vector. Mirrors `runtime::pm_mode` / `ctrl::pm_task`.
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
             let tool = PmBridgeTool::new(Arc::new(ProcessPmBridge::from_project(cwd)));
-            let result = tool.execute(args).await;
-            ToolCallOutcome {
-                is_error: result.is_error(),
-                text: result.content().to_string(),
-            }
+            dispatch_task_outcome(&tool, args).await
         }
         other => ToolCallOutcome {
             text: format!("unknown tool: {other}"),
             is_error: true,
         },
+    }
+}
+
+/// Run a `dispatch_task` call through an already-constructed [`PmBridgeTool`]
+/// and normalise its `ToolResult` to a [`ToolCallOutcome`].
+///
+/// Why: the DI seam. Production builds the tool over `ProcessPmBridge` (a real
+/// subprocess); tests inject a `RecordingBackend` (the same seam
+/// `pm_bridge_tests.rs` uses) so the argument-validation and result-mapping
+/// path is testable without spawning `tm`/`tcode`.
+/// What: forwards `args` to `tool.execute()` and maps `is_error()` /
+/// `content()` onto the outcome. `PmBridgeTool::execute` already validates the
+/// required `task` argument (missing/empty → recoverable error), which surfaces
+/// here as `isError:true`.
+/// Test: `dispatch_task_missing_argument_is_error` (through `dispatch`) and
+/// `dispatch_task_forwards_to_backend` (through this fn with a RecordingBackend).
+async fn dispatch_task_outcome(tool: &PmBridgeTool, args: Value) -> ToolCallOutcome {
+    let result = tool.execute(args).await;
+    ToolCallOutcome {
+        is_error: result.is_error(),
+        text: result.content().to_string(),
     }
 }
 
@@ -281,6 +334,64 @@ mod mcp_serve_tests {
                 .unwrap()
                 .contains("unknown tool")
         );
+    }
+
+    /// Why: `dispatch_task` requires a `task` argument; a call that omits it
+    /// must fail SOFT (a `tools/call` result with `isError:true`), not panic or
+    /// spawn a backend. This is the argument-validation path
+    /// (`PmBridgeTool::execute`'s guard) reached end-to-end through `dispatch`,
+    /// and it short-circuits before any subprocess is spawned.
+    /// What: calls `dispatch_task` with empty arguments and asserts the error
+    /// envelope carries the "missing 'task'" message.
+    #[tokio::test]
+    async fn dispatch_task_missing_argument_is_error() {
+        let params = json!({ "name": "dispatch_task", "arguments": {} });
+        let resp = dispatch(req("tools/call", 7, Some(params))).await;
+        let result = resp.result.expect("tools/call result");
+        assert_eq!(result["isError"], true);
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("missing 'task'")
+        );
+    }
+
+    /// Why: proves the `dispatch_task` execution path — argument forwarding and
+    /// success-result mapping — via the same DI seam `pm_bridge_tests.rs` uses,
+    /// without spawning `tm`/`tcode`.
+    /// What: builds a `PmBridgeTool` over a `RecordingBackend` that echoes a
+    /// fixed transcript, drives it through [`dispatch_task_outcome`], and
+    /// asserts the backend saw the task and the outcome is a non-error carrying
+    /// the transcript.
+    #[tokio::test]
+    async fn dispatch_task_forwards_to_backend() {
+        use crate::intent::route::BridgeRoute;
+        use crate::tools::pm_bridge_backend::PmBridgeBackend;
+        use std::sync::Mutex;
+
+        struct RecordingBackend {
+            seen: Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl PmBridgeBackend for RecordingBackend {
+            async fn run(&self, _route: BridgeRoute, task: &str) -> anyhow::Result<String> {
+                self.seen.lock().unwrap().push(task.to_string());
+                Ok("backend transcript".into())
+            }
+        }
+
+        let backend = Arc::new(RecordingBackend {
+            seen: Mutex::new(Vec::new()),
+        });
+        let tool = PmBridgeTool::new(backend.clone());
+        let outcome = dispatch_task_outcome(&tool, json!({ "task": "check the backlog" })).await;
+
+        assert!(!outcome.is_error, "expected success: {}", outcome.text);
+        assert_eq!(outcome.text, "backend transcript");
+        let seen = backend.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], "check the backlog");
     }
 
     /// Why: JSON-RPC requires unknown methods to return a `-32601` error rather
