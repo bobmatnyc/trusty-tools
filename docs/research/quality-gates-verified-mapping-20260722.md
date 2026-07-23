@@ -24,7 +24,7 @@
 | SBOM generation | **GAP** | No `cargo-cyclonedx` or equivalent; `git grep -l "SBOM\|sbom\|cargo-cyclonedx"` across workflows/Cargo files — zero hits. |
 | Secret scanning | **HAVE** | `.pre-commit-config.yaml` + `.secrets.baseline` (detect-secrets). |
 | Custom project-specific static/policy linters (beyond the article's taxonomy) | **HAVE — exceeds article** | Nine dedicated CI guard workflows not named by the article at all: `line-cap.yml` (500-line file cap, branch-protection-required), `sld-lint.yml` (spec-reference resolution), `instruction-floor-guard.yml`, `token-drift.yml`, `version-parity.yml`, `generation-artifact-lint.yml`, `claude-md-guard.yml`, `capabilities-drift.yml`, `test-pointers.yml`. These are real, CI-enforced, and more granular than the article's generic "static" bucket. |
-| Package-install approval gate (anti-slopsquatting) | **GAP** | No explicit approval gate before an agent runs `cargo add`/`pip install`/etc.; no slopsquatting-specific defense found (`git grep -l "slopsquat"` — one unrelated doc hit only). |
+| Package-install approval gate (anti-slopsquatting) | **GAP** | No explicit approval gate before an agent runs `cargo add`/`pip install`/etc.; no slopsquatting-specific defense found (`git grep -l "slopsquat"` — zero hits). |
 
 ### 3. Semantic (AI code review, grounding, semantic diff, spec drift)
 
