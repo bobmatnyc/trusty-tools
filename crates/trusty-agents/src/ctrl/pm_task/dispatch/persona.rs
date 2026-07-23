@@ -175,7 +175,6 @@ pub async fn run_pm_task_with_persona(
         persona_cfg.agent.model = m.clone();
     }
 
-    let _ = sid;
     let creds = resolve_overridden_credentials(&mut persona_cfg, overrides.provider.as_deref())?;
     let claude_cli_short_circuit = apply_credential_routing(&mut persona_cfg, &creds);
     tracing::info!(
@@ -241,7 +240,12 @@ pub async fn run_pm_task_with_persona(
             let runner: Arc<dyn AgentRunner> =
                 Arc::new(SubprocessAgentRunner::new().with_config_dir(Some(config_dir.clone())));
             registry.register(Arc::new(
-                DelegateToAgentTool::new(runner).with_config_dir(config_dir.clone()),
+                // #3737: thread the session id so a persona that delegates
+                // onward attributes the answer to the specialist that produced
+                // it (chat-bubble responder attribution).
+                DelegateToAgentTool::new(runner)
+                    .with_config_dir(config_dir.clone())
+                    .with_session_id(sid.clone()),
             ));
             registry.register(Arc::new(AddProjectTool));
             registry.register(Arc::new(ListProjectsTool));

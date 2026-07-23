@@ -171,7 +171,10 @@ async fn clear_recent_tasks_removes_terminal_only() {
     failed.status = PmStatus::Failed;
     state.upsert("done-fail".to_string(), failed).await;
     state
-        .upsert("still-running".to_string(), PmResponse::running("still-running"))
+        .upsert(
+            "still-running".to_string(),
+            PmResponse::running("still-running"),
+        )
         .await;
 
     let app = router(state.clone());

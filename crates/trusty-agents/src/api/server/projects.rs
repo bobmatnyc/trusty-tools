@@ -258,8 +258,11 @@ pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<se
 /// two routes' response shapes from drifting apart.
 /// What: Parses `raw` as TOML; reads `[agent]`'s `name` (falling back to
 /// `fallback_name`, typically the file stem), `role`, `model`, `runner`,
-/// `provider_id`, `description`, and `display_name` (each defaulting to `""`
-/// when absent). Returns `None` when `raw` fails to parse as TOML.
+/// `provider_id`, and `description` (each defaulting to `""` when absent),
+/// plus `display_name` — which, per the shared cross-PR contract (#3740),
+/// is NEVER empty: a blank/absent/whitespace-only `display_name` falls back
+/// to the agent `name` rather than `""`. Returns `None` when `raw` fails to
+/// parse as TOML.
 /// Test: `scan_agents_dir_parses_toml`, `patch_agent_persists_model_and_round_trips`,
 /// `parse_agent_toml_surfaces_display_name`, `scan_agents_dir_exposes_display_name`.
 pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_json::Value> {
@@ -272,12 +275,17 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
             .map(str::to_string)
     };
     let name = get_str("name").unwrap_or_else(|| fallback_name.to_string());
-    // #3738: surface `display_name` ("Assistant" / "Izzie" / "CTO Bot") so the
-    // GUI's per-message speaker attribution reads the persona's human-facing
-    // label straight from the catalog. Falls back to `name` (matching
-    // `AgentInfo::display_label`'s contract) rather than "" so a consumer can
-    // always render SOME label without re-deriving the mapping client-side.
-    let display_name = get_str("display_name").unwrap_or_else(|| name.clone());
+    // #3738/#3739: surface `display_name` ("Assistant" / "Izzie" / "CTO Bot")
+    // so the GUI's per-message speaker attribution reads the persona's
+    // human-facing label straight from the catalog. Per the cross-PR contract
+    // (#3740) it is NEVER empty: falls back to `name` (matching
+    // `AgentInfo::display_label`'s contract) — and the `.filter(!empty)` guard
+    // (#3739) additionally treats a blank/whitespace-only value (e.g. a
+    // hand-edited manifest) as absent, so a consumer can always render SOME
+    // non-empty label without re-deriving the mapping client-side.
+    let display_name = get_str("display_name")
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| name.clone());
     Some(serde_json::json!({
         "name": name,
         "role": get_str("role").unwrap_or_default(),

@@ -9,6 +9,7 @@ import {
   buildOverlayMarkdown,
   buildRoster,
   parseOverlayMarkdown,
+  responderDisplayName,
   rosterDisplayName,
   slugify,
   type CatalogAgent,
@@ -156,6 +157,34 @@ describe('rosterDisplayName (#3737)', () => {
   it('falls back to the base label for an unknown/stale id', () => {
     expect(rosterDisplayName(roster, 'deleted-overlay')).toBe(BASE_AGENT_LABEL);
     expect(rosterDisplayName([], 'anything')).toBe(BASE_AGENT_LABEL);
+  });
+});
+
+describe('responderDisplayName (#3737)', () => {
+  const roster = buildRoster(
+    [
+      { name: 'izzie', display_name: 'Izzie' },
+      { name: 'cto-assistant', display_name: 'CTO Assistant' },
+    ],
+    [],
+  );
+
+  it('resolves a known responder agent name to its display name', () => {
+    expect(responderDisplayName(roster, 'izzie')).toBe('Izzie');
+    expect(responderDisplayName(roster, 'cto-assistant')).toBe('CTO Assistant');
+  });
+
+  it('falls back to the RAW agent name for an unknown responder (never "Assistant")', () => {
+    // A delegated worker not enumerated by /api/agents must keep its own
+    // name, not be mislabeled as the base assistant.
+    expect(responderDisplayName(roster, 'engineer')).toBe('engineer');
+    expect(responderDisplayName([], 'qa-agent')).toBe('qa-agent');
+  });
+
+  it('returns null for a blank/absent responder so the caller keeps the request-time stamp', () => {
+    expect(responderDisplayName(roster, null)).toBeNull();
+    expect(responderDisplayName(roster, undefined)).toBeNull();
+    expect(responderDisplayName(roster, '   ')).toBeNull();
   });
 });
 

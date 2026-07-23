@@ -347,7 +347,7 @@ impl AppState {
     }
 
     /// Clear terminal (non-`Running`) tasks, preserving any still in flight,
-    /// and return the count removed (#3737).
+    /// and return `(removed, retained_running)` (#3737).
     ///
     /// Why: The GUI's "Recent tasks" panel needs a "Clear" affordance that
     /// wipes the finished-task history without the collateral damage
@@ -364,11 +364,14 @@ impl AppState {
     /// their handle removed by `finalize_task`/`try_cancel` — but stay in
     /// lockstep defensively), re-persists the trimmed snapshot so the removal
     /// survives a restart (the store is reloaded from `tasks.json` on boot),
-    /// and returns how many were removed. Emits no events: nothing was
-    /// cancelled.
-    /// Test: `clear_terminal_tasks_removes_terminal_keeps_running`.
-    pub(super) async fn clear_terminal_tasks(&self) -> usize {
-        let (removed, snapshot) = {
+    /// and returns `(removed, retained_running)`. BOTH counts are computed
+    /// under the SINGLE lock guard so they are internally consistent — a prior
+    /// version derived `retained_running` from a separate `list()` call in the
+    /// handler, which could disagree under a concurrent status transition
+    /// (code-critic TOCTOU finding). Emits no events: nothing was cancelled.
+    /// Test: `clear_recent_tasks_removes_terminal_only`.
+    pub(super) async fn clear_terminal_tasks(&self) -> (usize, usize) {
+        let (removed, retained_running, snapshot) = {
             let mut store = self.inner.lock().await;
             let to_remove: Vec<String> = store
                 .responses
@@ -384,12 +387,15 @@ impl AppState {
                 responses, order, ..
             } = &mut *store;
             order.retain(|id| responses.contains_key(id));
-            (to_remove.len(), responses.clone())
+            // Only `Running` entries remain, so the retained count is simply
+            // what's left — computed here, under the same guard, so it can't
+            // race a concurrent finalize/cancel.
+            (to_remove.len(), responses.len(), responses.clone())
         };
         // Persist outside the lock — a restart reloads from tasks.json, so the
         // cleared list must be written back to actually stick.
         persist_tasks(&snapshot).await;
-        removed
+        (removed, retained_running)
     }
 }
 

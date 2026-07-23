@@ -336,7 +336,12 @@ pub async fn run_pm_task_with_history(
 
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(
-        DelegateToAgentTool::new(runner).with_config_dir(config_dir.clone()),
+        // #3737: thread the task's session id so a successful delegation emits
+        // `AgentSpawned` and the API server can attribute the answer to the
+        // specialist that produced it (chat-bubble responder attribution).
+        DelegateToAgentTool::new(runner)
+            .with_config_dir(config_dir.clone())
+            .with_session_id(sid.clone()),
     ));
     // #3052 PR B (lane 3): the opaque tm<->tcode bridge, distinct from lane 2
     // (`delegate_to_agent` above). RBAC-locked to deny ReadOnly + Analytics.

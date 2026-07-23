@@ -1,12 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy, afterUpdate } from 'svelte';
   import { Loader2 } from 'lucide-svelte';
+  import { get } from 'svelte/store';
   import {
     activeMessages,
     activeProjectId,
+    agentRoster,
+    setMessageSpeakerByTask,
     updateMessageByTask,
     isRunning,
   } from '../stores/app';
+  import { responderDisplayName } from '../lib/roster';
   import { listenEvent, type UnlistenFn } from '../lib/transport';
   import ActionIcon from '../lib/icons/ActionIcon.svelte';
   import WorkflowPhaseCard from './WorkflowPhaseCard.svelte';
@@ -25,6 +29,13 @@
     id: string;
     narrative?: string;
     status?: string;
+    /**
+     * #3737: server-authoritative name of the specialist that actually
+     * answered, present only when the turn delegated. When set, it overrides
+     * the request-time speaker stamp so the bubble reflects who ANSWERED
+     * (e.g. "Izzie") rather than who was asked ("Assistant").
+     */
+    responder_agent?: string;
   }
   interface ErrorPayload {
     task_id: string;
@@ -48,6 +59,12 @@
     unlistenComplete = await listenEvent<CompletePayload>('task-complete', (p) => {
       const text = p.narrative && p.narrative.length > 0 ? p.narrative : '(no narrative)';
       updateMessageByTask($activeProjectId, p.id, text);
+      // #3737: if the turn delegated, relabel the bubble to the agent that
+      // actually answered (resolved to its display name via the roster).
+      const responder = responderDisplayName(get(agentRoster), p.responder_agent);
+      if (responder) {
+        setMessageSpeakerByTask($activeProjectId, p.id, responder);
+      }
       isRunning.set(false);
     });
     unlistenError = await listenEvent<ErrorPayload>('task-error', (p) => {

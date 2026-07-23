@@ -172,6 +172,11 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
             id,
             narrative,
             status: resp.status,
+            // #3737: forward the server's responder attribution so the browser
+            // fallback relabels a delegated bubble the same way the Tauri path
+            // does (that path emits the full PmResponse, which already carries
+            // this field).
+            responder_agent: resp.responder_agent,
           });
           return narrative;
         }

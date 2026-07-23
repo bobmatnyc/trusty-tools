@@ -104,6 +104,10 @@ pub fn build_from_workflow(
         out_dir: out_dir_str,
         errors,
         phases_completed,
+        // #3737: the subprocess workflow path carries no in-process delegation
+        // signal to attribute; the in-process chat path sets this in
+        // `api/server/handlers.rs::submit_task` instead.
+        responder_agent: None,
     }
 }
 

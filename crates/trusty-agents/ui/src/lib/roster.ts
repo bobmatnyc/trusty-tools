@@ -187,6 +187,32 @@ export function rosterDisplayName(
   return roster.find((e) => e.id === id)?.label ?? BASE_AGENT_LABEL;
 }
 
+/**
+ * Why (#3737): chat attribution must reflect who ANSWERED. When a turn
+ * delegates (base "Assistant" → Izzie for a weather question), the server
+ * reports the responder's agent NAME in `PmResponse.responder_agent`; the GUI
+ * overwrites the bubble's request-time speaker stamp with that agent's display
+ * name on `task-complete`. This differs from `rosterDisplayName`: a delegated
+ * responder is always a real named specialist, so an id missing from the
+ * roster (e.g. a bundled worker not enumerated by `/api/agents`' flat scan)
+ * must fall back to the raw agent name — NOT to "Assistant", which would be a
+ * fresh mis-attribution.
+ * What: Returns the roster entry's `label` for `agentName`, else `agentName`
+ * verbatim. Trims; returns `null` for a blank/empty input so callers can skip
+ * the overwrite (keeping the request-time stamp).
+ * Test: `responderDisplayName_resolves_known_agent`,
+ * `responderDisplayName_falls_back_to_raw_name_for_unknown`,
+ * `responderDisplayName_blank_returns_null`.
+ */
+export function responderDisplayName(
+  roster: RosterEntry[],
+  agentName: string | null | undefined,
+): string | null {
+  const name = agentName?.trim();
+  if (!name) return null;
+  return roster.find((e) => e.id === name)?.label ?? name;
+}
+
 /** Editable fields the create/edit form (#3224) collects for one overlay. */
 export interface OverlayDraft {
   displayName: string;

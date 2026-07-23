@@ -50,9 +50,11 @@ async fn list_agents_returns_agents_envelope() {
 /// Why (#3737, per-message chat attribution, epic #3052): the GUI's agent
 /// roster labels each assistant chat bubble with the persona's `display_name`
 /// ("Izzie", "CTO Assistant"), so `GET /api/agents` must surface that field.
-/// A named agent carries its `display_name`; a nameless one (the base
-/// `assistant`) defaults to `""`, which the frontend renders as "Assistant".
-/// What: Writes one named + one nameless fixture, scans, asserts the field.
+/// A named agent carries its `display_name`; an agent WITHOUT one falls back
+/// to its `name` per the cross-PR contract (#3740) — `display_name` is never
+/// empty, so consumers always have a non-empty label to render.
+/// What: Writes one named + one display_name-less fixture, scans, asserts the
+/// field (present → verbatim; absent → the agent name).
 #[tokio::test]
 async fn scan_agents_dir_exposes_display_name() {
     let tmp = tempfile::tempdir().unwrap();
@@ -62,17 +64,17 @@ async fn scan_agents_dir_exposes_display_name() {
     )
     .unwrap();
     std::fs::write(
-        tmp.path().join("assistant.toml"),
-        "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n",
+        tmp.path().join("engineer.toml"),
+        "[agent]\nname = \"engineer\"\nrole = \"engineer\"\n",
     )
     .unwrap();
 
     let agents = scan_agents_dir(tmp.path()).await;
-    // Sorted by name: assistant < izzie.
-    assert_eq!(agents[0]["name"], "assistant");
+    // Sorted by name: engineer < izzie.
+    assert_eq!(agents[0]["name"], "engineer");
     assert_eq!(
-        agents[0]["display_name"], "",
-        "nameless base agent must default display_name to empty"
+        agents[0]["display_name"], "engineer",
+        "an agent without display_name falls back to its name, never empty (#3740 contract)"
     );
     assert_eq!(agents[1]["name"], "izzie");
     assert_eq!(agents[1]["display_name"], "Izzie");

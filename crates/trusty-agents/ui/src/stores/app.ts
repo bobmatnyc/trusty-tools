@@ -355,6 +355,35 @@ export function updateMessageByTask(projectId: string, taskId: string, content: 
 }
 
 /**
+ * Why (#3737): chat attribution must reflect who ANSWERED. On `task-complete`
+ * the server-authoritative `responder_agent` (present only when the turn
+ * delegated) overrides the request-time speaker stamp so a base-"Assistant"
+ * turn that delegated a weather question to Izzie relabels the bubble to
+ * "Izzie". Kept separate from `updateMessageByTask` (content) so a complete
+ * event can set the speaker without disturbing the narrative flow.
+ * What: Sets `speaker` on the message currently tagged with `taskId` inside
+ * `projectId`. No-op when no message matches.
+ * Test: covered by ChatView's task-complete handling (manual) + the
+ * `responderDisplayName` resolver unit tests.
+ */
+export function setMessageSpeakerByTask(
+  projectId: string,
+  taskId: string,
+  speaker: string,
+): void {
+  messages.update((map) => {
+    const list = map.get(projectId);
+    if (!list) return map;
+    const next = new Map(map);
+    next.set(
+      projectId,
+      list.map((m) => (m.taskId === taskId ? { ...m, speaker } : m)),
+    );
+    return next;
+  });
+}
+
+/**
  * Why: When a message is first added to the store it carries a client-side
  * placeholder task id (e.g. `pending-<ts>`) because the backend hasn't yet
  * returned the real id. As soon as the first `task-progress` event arrives

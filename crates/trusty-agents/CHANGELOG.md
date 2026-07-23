@@ -30,12 +30,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `AgentIdentity` carrier, and records the whole capability under its tracking
   issue.
 
-- **Chat speaker attribution — `GET /api/agents` exposes `display_name`
-  (#3737, epic #3052):** the agents catalog now surfaces each agent's
-  `display_name` (read from the TOML `[agent].display_name`, empty for the
-  nameless base assistant) so the desktop GUI can label each assistant chat
-  bubble with the specific persona that produced it ("Izzie", "CTO Assistant")
-  instead of a generic "agent".
+- **Chat speaker attribution reflects who ANSWERED (#3737, epic #3052):** two
+  API-layer additions so the desktop GUI can label each assistant chat bubble
+  with the specific persona that produced it ("Izzie", "CTO Assistant") instead
+  of a generic "agent". (1) `GET /api/agents` surfaces each agent's
+  `display_name` (from the TOML `[agent].display_name`; per the #3740 contract
+  it is never empty — a blank/absent value falls back to the agent name).
+  (2) `PmResponse` gains a `responder_agent` field: when a conversational/
+  research turn DELEGATES (e.g. base "Assistant" hands a weather question to
+  Izzie via `delegate_to_agent`), the server records the specialist that
+  actually answered — `delegate_to_agent` now emits `AgentSpawned` on a
+  successful delegation and `submit_task` captures the last such event for the
+  turn — so the GUI relabels the bubble to the responder rather than the caller.
+  `responder_agent` is omitted from the wire when no delegation fired, keeping
+  the common-case shape byte-identical.
 
 - **`DELETE /api/tasks` clears the finished-task history (#3737, epic
   #3052):** backs the GUI's "Recent tasks" Clear affordance. Removes only
