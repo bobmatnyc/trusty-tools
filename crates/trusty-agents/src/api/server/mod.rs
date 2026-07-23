@@ -33,6 +33,7 @@ mod handlers;
 mod models;
 mod project_registration;
 mod projects;
+mod relay;
 mod routes;
 mod state;
 mod task_runner;

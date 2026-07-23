@@ -309,6 +309,19 @@ pub(super) async fn handle_message(
         "slack dispatch"
     );
 
+    // #3752: mirror the inbound human message to the GUI live-activity pane.
+    // Detached (fire-and-forget) so a slow/absent `--api` process never delays
+    // the Slack reply; the honest RBAC-tier badge comes from the resolved
+    // identity, not an invented auth state.
+    tokio::spawn(super::relay::relay_event(
+        crate::events::Event::SlackMessageReceived {
+            channel: channel.clone(),
+            user_display: user_cfg.name.clone(),
+            text: text.clone(),
+            tier: super::relay::tier_label(&user_identity.tier).to_string(),
+        },
+    ));
+
     let result = ctrl::run_pm_task_with_persona(
         &path,
         &active_persona,
@@ -343,7 +356,24 @@ pub(super) async fn handle_message(
         }
     };
 
-    send_long_message(bot_token, &channel, thread_ts.as_deref(), &response_text).await
+    let send_result =
+        send_long_message(bot_token, &channel, thread_ts.as_deref(), &response_text).await;
+
+    // #3752: mirror the reply to the GUI only after it was actually posted to
+    // Slack, so the pane never shows a reply the channel never received. The
+    // identity label is honest — the bot replies as itself (no impersonation
+    // mode exists). Detached so relay latency/failure never affects the reply.
+    if send_result.is_ok() {
+        tokio::spawn(super::relay::relay_event(
+            crate::events::Event::SlackReplySent {
+                channel: channel.clone(),
+                text: response_text.clone(),
+                identity: super::relay::BOT_IDENTITY.to_string(),
+            },
+        ));
+    }
+
+    send_result
 }
 
 /// Post a single message via `chat.postMessage`.

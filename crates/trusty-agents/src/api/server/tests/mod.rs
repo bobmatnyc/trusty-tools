@@ -12,6 +12,7 @@ mod ctrl_sessions;
 mod guard;
 mod listing;
 mod models;
+mod relay;
 
 use super::routes::{build_router, build_router_with_config};
 use super::state::{AppState, MAX_RETAINED};

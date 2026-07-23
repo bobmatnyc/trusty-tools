@@ -36,6 +36,7 @@ use super::handlers::{
 use super::models::get_models;
 use super::project_registration::{connect_project, get_project_config};
 use super::projects::{list_agents_route, list_projects, list_sessions_route};
+use super::relay::relay_event_handler;
 use super::state::AppState;
 use super::tm::{
     tm_capture_pane, tm_create_session, tm_kill_session, tm_list_sessions, tm_pause_session,
@@ -176,6 +177,12 @@ pub fn build_router_with_origins(
         .route("/api/tm/tell", post(tm_tell))
         // #192 Phase B: SSE event stream — replaces 2s stderr polling.
         .route("/api/events", get(events_handler))
+        // #3752: internal loopback relay — the separate `tagent --slack`
+        // process POSTs its Slack-mirror events here so they reach this
+        // process's bus (and the GUI's `/api/events` stream). Guarded by the
+        // router-wide same-origin/bearer stack applied below; the handler
+        // additionally whitelists only `Slack*` event kinds.
+        .route("/api/internal/relay-event", post(relay_event_handler))
         // #460: unified rpc.discover from linked ServiceDescriptor impls.
         // JSON-RPC POST endpoint that returns the merged OpenRPC manifest
         // covering every in-process MCP service (trusty-memory linked,

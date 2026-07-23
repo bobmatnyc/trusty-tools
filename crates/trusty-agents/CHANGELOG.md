@@ -52,6 +52,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   covering ordered fragments, the terminal `done` flag, and assembled-text
   equality.
 
+- **Live Slack conversation mirror in the GUI (#3752, epic #3052):** when the
+  CTO Bot converses on Slack (`tagent --slack`), the trusty-agents GUI now shows
+  both sides of the exchange live — the inbound human message (with an honest
+  RBAC-tier badge resolved from `ChatSession.user_identity`) and the bot's reply
+  (badged `CTO Bot (as itself)`, the honest label — there is no impersonation
+  mode in code). Implemented as a **low-risk relay**, not a process merge: two
+  additive `Event` variants (`SlackMessageReceived` / `SlackReplySent`); a new
+  `POST /api/internal/relay-event` endpoint on the `--api` server, gated by a
+  **mandatory shared secret** (`TAGENT_RELAY_TOKEN`, sent as `x-relay-token`) —
+  the endpoint **fails closed**, rejecting every post when the secret is unset
+  server-side, since the origin guard alone admits absent-`Origin` local callers
+  who could otherwise forge a reply with a fabricated identity badge. It also
+  whitelists only those two `Slack*` kinds, validates the inbound `tier` against
+  the closed `ServiceTier` set, and re-publishes survivors onto the bus feeding
+  `/api/events`; a fire-and-forget relay call from
+  `slack/handlers.rs` (inbound after dispatch, reply after `post_message`
+  succeeds — Slack handling never blocks or fails on relay errors,
+  `TAGENT_API_RELAY_URL` default `http://127.0.0.1:8765`); and a Foundry-styled
+  `SlackMirror` pane that mounts only once Slack activity arrives. Badges surface
+  only introspectable facts (RBAC tier + bot identity); no invented auth states.
 - **Agent context knows "now", "here", and "who" (#3469, epic #3052):** the
   `## User Context` block prefixed onto every tagent system prompt (PM, persona,
   and ctrl turns) now carries three things the model previously had to guess at,

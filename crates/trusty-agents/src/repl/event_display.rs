@@ -97,6 +97,9 @@ pub fn format_event(event: &Event) -> Option<String> {
         | Event::AgentStarted { .. }
         | Event::ReportGenerated { .. }
         | Event::AstOperation { .. } => None,
+        // #3752: Slack-mirror events are a GUI-only concern (injected onto the
+        // `--api` bus via the relay endpoint); the REPL never surfaces them.
+        Event::SlackMessageReceived { .. } | Event::SlackReplySent { .. } => None,
         // #371: render a one-line recap banner when a session recap is generated.
         Event::RecapGenerated { summary, .. } => {
             Some(dim.paint(format!("  ※ recap: {summary}")).to_string())
