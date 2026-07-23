@@ -364,9 +364,10 @@ fn profile_resolves_from_env_without_interactive_prompt() {
 /// fallback tier and the plain CLI's default `/switch assistant` resolves
 /// the REAL bundled assistant persona — not a test fixture — without ever
 /// touching the developer machine's actual `$HOME`.
-/// What: asserts the startup banner shows `Switched to: assistant` (not a
-/// degrade to ctrl) and that the bundled `assistant/agent.toml` actually
-/// landed on disk under the isolated `$HOME`.
+/// What: asserts the startup banner shows `Switched to: Assistant` (the
+/// generic default persona's display name, #3738 — not a degrade to ctrl) and
+/// that the bundled `assistant/agent.toml` actually landed on disk under the
+/// isolated `$HOME`.
 /// Test: itself.
 #[test]
 fn plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier() {
@@ -381,7 +382,10 @@ fn plain_cli_resolves_assistant_via_bundled_deploy_when_no_project_tier() {
         run_piped(&["--plain"], &[("HOME", home_str.as_str())], "/quit\n");
     assert!(success, "should exit 0 on /quit; stderr:\n{stderr}");
     assert!(
-        stdout.contains("Switched to: assistant"),
+        // #3738: the base assistant is the named generic default, so the
+        // banner now shows its display name "Assistant" (was lowercase
+        // "assistant" when the base was nameless).
+        stdout.contains("Switched to: Assistant"),
         "expected the plain CLI to default-switch to the bundled assistant persona \
          deployed to $HOME/.trusty-agents/agents/; got stdout:\n{stdout}\nstderr:\n{stderr}"
     );

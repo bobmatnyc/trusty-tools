@@ -153,16 +153,18 @@ async fn try_handle_slash_switch_accepts_aliases() {
 /// picker path is opened by `ReplBridge` upstream; once the slash
 /// handler sees an empty arg it means the user typed `/switch`
 /// literally and wants the text help).
-/// What: Assert the listing mentions all three personas.
+/// What: Assert the listing mentions all personas by their #3738 display
+/// names (Assistant default, Izzie, CTO Bot) and still lists ctrl.
 /// Test: Self-explanatory.
 #[tokio::test]
 async fn try_handle_slash_switch_empty_lists_choices() {
     let mut repl = TrustyAgentsRepl::new(None).unwrap();
     let r = repl.try_handle_slash("/switch").await.unwrap().unwrap();
     assert!(r.0);
-    assert!(r.1.contains("ctrl"));
+    assert!(r.1.contains("Assistant"));
     assert!(r.1.contains("Izzie"));
-    assert!(r.1.contains("CTO Assistant"));
+    assert!(r.1.contains("CTO Bot"));
+    assert!(r.1.contains("ctrl"));
 }
 
 /// Why: Garbage args must not silently activate a persona; surface a

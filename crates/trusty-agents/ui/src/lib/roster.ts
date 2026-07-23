@@ -24,6 +24,14 @@ export interface CatalogAgent {
   model?: string;
   runner?: string;
   description?: string;
+  /**
+   * #3738: the persona's human-facing speaker label ("Assistant" / "Izzie" /
+   * "CTO Bot"), served straight from `[agent].display_name` (falling back to
+   * `name` backend-side — see `parse_agent_toml`). The roster row's `label`
+   * and the per-message speaker attribution both read this so the display
+   * name is never re-derived client-side.
+   */
+  display_name?: string;
 }
 
 /** Shape of one entry returned by the Tauri `list_personalization_overlays` command. */
@@ -115,7 +123,13 @@ export function buildRoster(
     seen.add(agent.name);
     entries.push({
       id: agent.name,
-      label: agent.name,
+      // #3738: prefer the persona's display_name ("CTO Bot") over its stable
+      // id ("cto-assistant") for the human-facing roster label. Canonical
+      // single form shared with PR #3739 — `.trim() || name` so a blank or
+      // whitespace-only display_name (the backend already falls back to name,
+      // but a hand-edited overlay could slip one through) never yields an
+      // empty label.
+      label: agent.display_name?.trim() || agent.name,
       description: agent.description || undefined,
       source: 'catalog',
     });
