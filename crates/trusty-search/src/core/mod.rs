@@ -11,6 +11,7 @@ pub mod extract;
 pub mod git;
 pub mod indexer;
 pub mod memguard;
+mod memguard_enforce;
 pub mod memory_policy;
 pub mod migration;
 pub mod mmr;

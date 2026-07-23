@@ -505,6 +505,16 @@ pub fn over_high_water(rss_mb: u64, limit_mb: u64, pct: u8) -> bool {
     rss_mb >= high_water_target_mb(limit_mb, pct)
 }
 
+// Anonymous-RSS reading + enforcement-measure selection (issue #3683 slice 3
+// — Defect 3) live in `memguard_enforce` (kept there to stay under this
+// file's own 500-SLOC cap) and are re-exported here so callers keep writing
+// `memguard::enforcement_rss_mb()` etc. unchanged. See that module's
+// doc comment for the full design rationale.
+pub use crate::core::memguard_enforce::{
+    anon_rss_mb, anon_rss_mb_for_pid, enforcement_measure, enforcement_rss_mb,
+    enforcement_rss_mb_for_pid, EnforcementMeasure,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

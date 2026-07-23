@@ -41,6 +41,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `EarlyStop` resets the baseline instead, so a steady-state RSS plateau
   never wedges the sweep from re-attempting the untouched indexes (round-2
   critic-review follow-up).
+- **Anonymous-RSS memory-pressure enforcement gate (issue #3683 slice 3 —
+  final slice, Defect 3).** The steady-state memory-pressure ENFORCEMENT
+  decision (`over_high_water`, its hysteresis baseline, and the sweep's
+  `target_freed_mb` budget) now reads anonymous RSS (`/proc/<pid>/status`'s
+  `RssAnon`) by default on Linux instead of total RSS — on the #3683
+  production workload, file-backed redb mmap pages (kernel-reclaimable on
+  their own) dominated total RSS, reading the daemon as permanently over its
+  ceiling even when a sweep freed almost nothing durable. New env
+  `TRUSTY_MEMORY_ENFORCE_MEASURE=anon|total` lets operators pick the
+  enforcement measure explicitly (default `anon` on Linux, `total` on
+  macOS, where `current_rss_mb` already reads `phys_footprint` — itself
+  already anon-equivalent in spirit). Total RSS stays visible in `/health`
+  and this ticker's log lines for operator context regardless of which
+  measure gates enforcement; every comparison in the enforcement chain uses
+  the same measure end to end so the slice-2 hysteresis baseline is never
+  compared against a different measure than the one that set it. If `anon`
+  is selected but `RssAnon` is permanently unavailable (pre-4.5 kernel,
+  hardened/restricted container), enforcement now degrades to total RSS
+  automatically (once, with a `tracing::warn!`) instead of silently
+  disabling the enforcement ticker forever (critic-review HIGH finding).
+  **Upgrade note:** since anon RSS is always `<=` total RSS, the same
+  `TRUSTY_MEMORY_LIMIT_MB` now trips the sweep and the hard-limit restart
+  LATER (at a higher real footprint) on Linux than before — re-validate a
+  limit tuned as an OOM backstop, or set `TRUSTY_MEMORY_ENFORCE_MEASURE=total`
+  to preserve the prior trip point exactly.
 
 ### Fixed
 
