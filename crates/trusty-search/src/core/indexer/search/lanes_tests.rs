@@ -58,6 +58,7 @@ async fn let_background_task_reach_its_read_lock() {
 /// `bm25_search` must recover from a reclaim landing strictly between its
 /// `ensure_bm25_entities_loaded()` call and its `bm25.read()` acquisition.
 #[tokio::test]
+#[serial_test::serial]
 async fn bm25_search_survives_reclaim_race_between_ensure_and_read() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");
@@ -111,6 +112,7 @@ async fn bm25_search_survives_reclaim_race_between_ensure_and_read() {
 /// between its `ensure_chunks_loaded()` call and its `chunks.read()`
 /// acquisition — the same race as `bm25_search`, applied to the `chunks` map.
 #[tokio::test]
+#[serial_test::serial]
 async fn grep_fallback_survives_reclaim_race_between_ensure_and_read() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");

@@ -388,7 +388,11 @@ pub(crate) fn dep_probe_timeout() -> Duration {
 /// `bounded_probe_timeout_on_stalled_future`,
 /// `health_unhealthy_search_response_reports_state_unreachable` (the
 /// `Ok(Ok(v))` + `is_healthy(v) == false` branch exercised end-to-end through
-/// a real `SearchClient`, e.g. a degraded embedder) in `handlers_tests.rs`.
+/// a real `SearchClient`, e.g. a degraded embedder),
+/// `health_degraded_but_serving_stays_ok` (issue #3693: `probe_deps` passes
+/// `HealthResponse::is_serving` — not `is_healthy` — as the `is_healthy`
+/// closure param here, so a `status: "degraded"` response caused only by a
+/// benign watcher-disable reports `reachable: true`) in `handlers_tests.rs`.
 async fn bounded_probe<Fut, T, E>(
     fut: Fut,
     timeout: Duration,
@@ -433,7 +437,13 @@ where
 pub async fn probe_deps(state: &AppState) -> DepStatus {
     let timeout = dep_probe_timeout();
 
-    let search_probe = bounded_probe(state.search.health(), timeout, |r| r.is_healthy());
+    // Issue #3693: `is_serving()` (not `is_healthy()`) — a trusty-search
+    // `status: "degraded"` caused solely by an intentional, benign
+    // watcher-disable on a network-mounted (EFS/NFS) root must still report
+    // `reachable: true` here; a genuinely broken search (embedder dead,
+    // indexes unloadable) still reports `false`. See
+    // `HealthResponse::is_serving` for the full rationale.
+    let search_probe = bounded_probe(state.search.health(), timeout, |r| r.is_serving());
     let analyze_probe = async {
         match &state.analyze {
             Some(a) => bounded_probe(a.health(), timeout, |_| true).await,

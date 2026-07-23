@@ -292,23 +292,51 @@ impl BM25Index {
     /// `TRUSTY_BM25_CORPUS_CAP` (default 50 000) **and** this is a brand-new
     /// `doc_id`, the upsert is dropped. Updates to existing documents are
     /// always honoured — they don't grow the corpus. A single tracing warn
-    /// is emitted the first time the cap is hit; subsequent drops are
-    /// silent to avoid log spam during full reindexes of oversized corpora.
+    /// is emitted the first time the cap is hit (per process); subsequent
+    /// drops are silent to avoid log spam during full reindexes of oversized
+    /// corpora. A bulk caller that wants a per-rebuild dropped-count instead
+    /// of this one-time latch (e.g. a rehydrate rebuild — issue #3684) should
+    /// use [`Self::upsert_document_reporting`] directly and own its own
+    /// logging.
     pub fn upsert_document(&mut self, doc_id: &str, text: &str) {
+        if !self.upsert_document_reporting(doc_id, text)
+            && !BM25_CAP_LOGGED.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                cap = bm25_corpus_cap(),
+                live_docs = self.live_docs,
+                "BM25 corpus cap reached — dropping further new documents \
+                 (override with TRUSTY_BM25_CORPUS_CAP)"
+            );
+        }
+    }
+
+    /// Insert-or-update `doc_id`, reporting whether it was accepted rather
+    /// than logging a process-wide latch (issue #3684).
+    ///
+    /// Why: [`Self::upsert_document`]'s cap enforcement logs via a
+    /// process-wide "log once ever" latch, which is right for the steady
+    /// incremental-ingest path (one call per changed chunk, spread over the
+    /// process lifetime) but wrong for a bulk rebuild — idle-evict rehydrate
+    /// (`trusty-search::core::indexer::idle_evict`) or warm-boot restore
+    /// (`trusty-search::core::indexer::persist::load_chunks_from_redb`) — which
+    /// re-runs the entire cap-truncation decision on every rebuild and wants
+    /// a fresh per-rebuild dropped-count, not a single one-time warning that
+    /// went stale after the first rebuild.
+    /// What: identical cap/tokenize/insert logic to `upsert_document`, minus
+    /// the static latch/log — returns `true` when the document was inserted
+    /// or updated, `false` when a brand-new `doc_id` was dropped because
+    /// `live_docs >= TRUSTY_BM25_CORPUS_CAP`. The caller owns counting drops
+    /// and logging a summary.
+    /// Test: `upsert_document_reporting_returns_false_when_capped`,
+    /// `upsert_document_delegates_to_reporting_and_still_logs_once`.
+    pub fn upsert_document_reporting(&mut self, doc_id: &str, text: &str) -> bool {
         if self.id_to_slot.contains_key(doc_id) {
             self.remove_document(doc_id);
         } else {
             let cap = bm25_corpus_cap();
             if self.live_docs >= cap {
-                if !BM25_CAP_LOGGED.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        cap,
-                        live_docs = self.live_docs,
-                        "BM25 corpus cap reached — dropping further new documents \
-                         (override with TRUSTY_BM25_CORPUS_CAP)"
-                    );
-                }
-                return;
+                return false;
             }
         }
         let slot = self.allocate_slot(doc_id);
@@ -334,6 +362,7 @@ impl BM25Index {
                 .push((slot, count));
         }
         self.doc_terms[slot] = Some(tokens);
+        true
     }
 
     /// Legacy slot-based add. Retained so the in-tree `score(query, doc_id)`
@@ -532,197 +561,4 @@ impl Default for BM25Index {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bm25_scores_relevant_doc_higher() {
-        let mut idx = BM25Index::new();
-        idx.add_document(0, "authentication login password secure");
-        idx.add_document(1, "rendering ui components svelte");
-        let s0 = idx.score("authentication", 0);
-        let s1 = idx.score("authentication", 1);
-        assert!(s0 > s1, "relevant doc should score higher: {s0} vs {s1}");
-    }
-
-    #[test]
-    fn tokenize_splits_code() {
-        let tokens = tokenize("fn search_hybrid(query: &str) -> Vec<Hit>");
-        // snake_case parts split via outer non-alphanumeric split.
-        assert!(tokens.contains(&"search".to_string()));
-        assert!(tokens.contains(&"hybrid".to_string()));
-        assert!(tokens.contains(&"query".to_string()));
-    }
-
-    #[test]
-    fn tokenize_camel_case_pascal() {
-        let tokens = tokenize("CodeIndexer");
-        assert!(tokens.contains(&"code".to_string()), "got {tokens:?}");
-        assert!(tokens.contains(&"indexer".to_string()), "got {tokens:?}");
-        assert!(
-            tokens.contains(&"codeindexer".to_string()),
-            "got {tokens:?}"
-        );
-    }
-
-    #[test]
-    fn tokenize_pascal_two_words() {
-        let tokens = tokenize("UsearchStore");
-        assert!(tokens.contains(&"usearch".to_string()), "got {tokens:?}");
-        assert!(tokens.contains(&"store".to_string()), "got {tokens:?}");
-    }
-
-    #[test]
-    fn tokenize_snake_case() {
-        let tokens = tokenize("use_kg_first");
-        assert!(tokens.contains(&"use".to_string()), "got {tokens:?}");
-        assert!(tokens.contains(&"kg".to_string()), "got {tokens:?}");
-        assert!(tokens.contains(&"first".to_string()), "got {tokens:?}");
-    }
-
-    #[test]
-    fn tokenize_alpha_digit_split() {
-        let tokens = tokenize("HTTP2Client");
-        assert!(tokens.contains(&"http".to_string()), "got {tokens:?}");
-        assert!(tokens.contains(&"2".to_string()), "got {tokens:?}");
-        assert!(tokens.contains(&"client".to_string()), "got {tokens:?}");
-    }
-
-    #[test]
-    fn tokenize_acronym_then_word() {
-        // Pass 2 boundary: "HTTPSClient" → ["HTTPS", "Client"]
-        let tokens = tokenize("HTTPSClient");
-        assert!(tokens.contains(&"https".to_string()), "got {tokens:?}");
-        assert!(tokens.contains(&"client".to_string()), "got {tokens:?}");
-    }
-
-    #[test]
-    fn bm25_incremental_upsert_and_remove() {
-        let mut idx = BM25Index::new();
-        idx.upsert_document("a", "authentication login password");
-        idx.upsert_document("b", "rendering ui components svelte");
-        idx.upsert_document("c", "database connection pool postgres");
-        assert_eq!(idx.len(), 3);
-
-        let hits = idx.score_query_all("authentication", 10);
-        assert!(hits.iter().any(|(id, _)| id == "a"));
-        assert!(!hits.iter().any(|(id, _)| id == "b"));
-
-        // Removing a doc must drop it from results AND keep the rest scoring.
-        idx.remove_document("a");
-        assert_eq!(idx.len(), 2);
-        let hits_after = idx.score_query_all("authentication", 10);
-        assert!(!hits_after.iter().any(|(id, _)| id == "a"));
-        let svelte_hits = idx.score_query_all("svelte", 10);
-        assert!(svelte_hits.iter().any(|(id, _)| id == "b"));
-    }
-
-    #[test]
-    fn bm25_upsert_replaces_existing_doc() {
-        // Re-upserting an existing doc_id must not double-count terms.
-        let mut idx = BM25Index::new();
-        idx.upsert_document("a", "alpha beta gamma");
-        idx.upsert_document("a", "delta epsilon");
-        assert_eq!(idx.len(), 1);
-        // "alpha" was in the first version only — must be gone.
-        assert!(idx.score_query_all("alpha", 10).is_empty());
-        assert!(!idx.score_query_all("delta", 10).is_empty());
-    }
-
-    #[test]
-    fn score_query_all_returns_sorted_unique_results() {
-        let mut idx = BM25Index::new();
-        idx.upsert_document("a", "search rust async tokio");
-        idx.upsert_document("b", "search rust");
-        idx.upsert_document("c", "unrelated content");
-        let hits = idx.score_query_all("rust async", 10);
-        // Must be sorted by score desc.
-        for w in hits.windows(2) {
-            assert!(w[0].1 >= w[1].1, "results must be sorted desc: {hits:?}");
-        }
-        // No duplicates.
-        let mut ids: Vec<&str> = hits.iter().map(|(id, _)| id.as_str()).collect();
-        ids.sort();
-        let unique = ids.len();
-        ids.dedup();
-        assert_eq!(unique, ids.len());
-    }
-
-    /// Pins the pre-truncation guarantee `score_query_all_with_filter` exists
-    /// for (issue #3401, trusty-tools): the filter must be evaluated BEFORE
-    /// `top_k` truncation, not after, so a document that genuinely matches
-    /// the filter — and has real lexical overlap with the query — is never
-    /// lost just because it ranks outside the UNFILTERED top `top_k`.
-    #[test]
-    fn score_query_all_with_filter_recovers_match_beyond_top_k() {
-        let mut idx = BM25Index::new();
-        // 5 filler docs with higher term frequency (all outrank the target).
-        for i in 0..5 {
-            idx.upsert_document(&format!("filler{i}"), "rust rust rust async");
-        }
-        // The target: real overlap, but lower term frequency, so it ranks
-        // last among the 6 matching documents.
-        idx.upsert_document("target", "rust async");
-
-        // Precondition: unfiltered top_k=3 never returns "target" — it
-        // genuinely ranks below the cutoff.
-        let unfiltered = idx.score_query_all("rust async", 3);
-        assert_eq!(unfiltered.len(), 3);
-        assert!(
-            unfiltered.iter().all(|(id, _)| id != "target"),
-            "precondition failed: target must rank below top_k=3 unfiltered; \
-             got {unfiltered:?}"
-        );
-
-        // A naive "filter after the call" can't recover it — it was already
-        // discarded by the internal `truncate(3)`. The filter-aware entry
-        // point must, because it evaluates the filter BEFORE truncation.
-        let filtered = idx.score_query_all_with_filter("rust async", 3, &|id: &str| id == "target");
-        assert_eq!(
-            filtered.len(),
-            1,
-            "the filter admits only \"target\" — it must be the one result: {filtered:?}"
-        );
-        assert_eq!(filtered[0].0, "target");
-    }
-
-    #[test]
-    fn tokenize_dedups_and_sorts() {
-        let tokens = tokenize("foo foo bar");
-        let foos: Vec<&String> = tokens.iter().filter(|t| t.as_str() == "foo").collect();
-        assert_eq!(foos.len(), 1, "duplicates must collapse: {tokens:?}");
-        let mut sorted = tokens.clone();
-        sorted.sort();
-        assert_eq!(tokens, sorted, "tokens must be sorted: {tokens:?}");
-    }
-
-    #[test]
-    fn bm25_corpus_cap_env_override() {
-        // Why: confirm `TRUSTY_BM25_CORPUS_CAP=0` falls back to the default
-        // (not "no cap"), and a positive override is honoured. This pins the
-        // safety property that a bogus env value never silently disables the
-        // cap.
-        // SAFETY: this test is the only mutator of TRUSTY_BM25_CORPUS_CAP in
-        // this module's tests; cargo runs unit tests in this module on a
-        // single thread by default for `Cell`/`Mutex` purity, but we still
-        // restore the var before returning so unrelated tests in the binary
-        // are unaffected.
-        let prev = std::env::var("TRUSTY_BM25_CORPUS_CAP").ok();
-        unsafe {
-            std::env::set_var("TRUSTY_BM25_CORPUS_CAP", "0");
-        }
-        assert_eq!(
-            bm25_corpus_cap(),
-            DEFAULT_BM25_CORPUS_CAP,
-            "zero must fall back to default"
-        );
-        unsafe {
-            std::env::set_var("TRUSTY_BM25_CORPUS_CAP", "123");
-        }
-        assert_eq!(bm25_corpus_cap(), 123, "positive value must be honoured");
-        match prev {
-            Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", v) },
-            None => unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") },
-        }
-    }
-}
+mod tests;

@@ -114,6 +114,7 @@ impl SearchClient for OkSearch {
         Ok(HealthResponse {
             status: "ok".to_string(),
             embedder: EmbedderState::Bool(true),
+            warmboot_summary: None,
         })
     }
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {

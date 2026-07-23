@@ -159,6 +159,13 @@ impl CodeIndexer {
     /// four-phase publish. Returns the number of chunks restored. A `None`
     /// corpus store (test indexer) or an empty store yields `Ok(0)` so the
     /// caller cleanly falls through to the JSON migration branch.
+    ///
+    /// Issue #3684: chunks are sorted by their stable `id` before the
+    /// cap-truncated BM25 upsert loop below, identically to
+    /// `idle_evict::spawn_detached_rehydrate`'s post-eviction rehydrate — so
+    /// warm boot and a post-eviction rehydrate agree on the same surviving
+    /// BM25 subset for an over-cap corpus, instead of each depending on
+    /// redb's (unrelated, cycle-dependent) B-tree iteration order.
     /// Test: `tests::test_corpus_store_roundtrip`.
     pub async fn load_chunks_from_redb(&self) -> Result<usize> {
         let Some(corpus) = self.corpus.clone() else {
@@ -167,7 +174,11 @@ impl CodeIndexer {
         // redb's transaction API is synchronous; do the (potentially large)
         // deserialize on a blocking worker so we don't pin a runtime thread.
         let (chunks, entities) = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
-            let chunks = corpus.load_all_chunks()?;
+            let mut chunks = corpus.load_all_chunks()?;
+            // Issue #3684: see the doc comment above — stable id order makes
+            // the BM25 cap truncation deterministic across warm boot,
+            // ingest, and post-eviction rehydrate.
+            chunks.sort_by(|a, b| a.id.cmp(&b.id));
             let entities = corpus.load_all_entities()?;
             Ok((chunks, entities))
         })

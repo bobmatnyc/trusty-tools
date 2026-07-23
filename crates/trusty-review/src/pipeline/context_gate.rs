@@ -88,7 +88,11 @@ pub enum GateOutcome {
 /// skips_when_analyze_down, proceeds_when_both_healthy,
 /// interactive_surface_defaults_to_degraded_when_search_down,
 /// hosted_surface_defaults_to_skip_when_search_down,
-/// degraded_reason_prefers_health_error_detail}`.
+/// degraded_reason_prefers_health_error_detail,
+/// degraded_but_serving_proceeds, degraded_not_serving_skips}` (issue #3693:
+/// a `status: "degraded"` health response now proceeds when trusty-search's
+/// own `warmboot_summary.warm_boot_degraded` flag says it is still serving,
+/// and still skips when that flag says it is genuinely broken).
 pub async fn preflight_context(
     config: &ReviewConfig,
     deps: &ReviewDeps,
@@ -114,11 +118,31 @@ pub async fn preflight_context(
     // Captures the health probe's own error text (e.g. a `NullSearchClient`'s
     // `--source-root` notice) so the Degraded branch below can surface it
     // verbatim instead of a generic message that discards it.
+    //
+    // Issue #3693: this used to be `h.is_healthy()`, i.e. a hard
+    // `status == "ok"` string match. trusty-search 0.38.1 intentionally
+    // reports `status: "degraded"` on EFS/NFS-mounted repos purely because it
+    // auto-disabled its file watcher (a benign, OS-level capability gap —
+    // search itself stays 100% functional), which made every review on such
+    // a deployment fail-closed. `HealthResponse::is_serving` inspects the
+    // structured `warmboot_summary.warm_boot_degraded` flag instead of
+    // guessing from the status string, so this scenario now proceeds (with a
+    // WARN noting the reason) while a genuinely broken search (embedder
+    // dead, indexes unloadable, TCC-denied, scan-timed-out) still gates shut.
     let mut search_error_detail: Option<String> = None;
     let search_ok = match &search_health {
-        Ok(h) if h.is_healthy() => true,
+        Ok(h) if h.is_serving() => {
+            if h.status != "ok" {
+                warn!(
+                    status = %h.status,
+                    "trusty-search reports a non-'ok' status but is confirmed serving \
+                     (warm_boot_degraded=false) — proceeding (#3693)"
+                );
+            }
+            true
+        }
         Ok(h) => {
-            warn!(status = %h.status, "trusty-search health is not 'ok'");
+            warn!(status = %h.status, "trusty-search health is not serving");
             false
         }
         Err(e) => {

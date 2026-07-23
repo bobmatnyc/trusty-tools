@@ -52,6 +52,8 @@ pub(crate) use ingest::PROGRESS_CHUNK_INTERVAL;
 #[cfg(test)]
 pub(crate) use search::KG_REFINE_THRESHOLD;
 #[cfg(test)]
+mod rehydrate_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_cursor;
@@ -169,6 +171,91 @@ pub struct CodeIndexer {
     /// / [`Self::ensure_bm25_entities_loaded`] in `idle_evict.rs`.
     pub(super) bm25_entities_evicted: Arc<AtomicBool>,
 
+    /// Dedup guard for the detached corpus-rehydrate task (issue #3683 slice
+    /// 1). `Some(notify)` while a rehydrate is in flight for this index;
+    /// `None` otherwise. See `idle_evict::ensure_corpus_rehydrated` for the
+    /// full design — this field only needs to exist once per indexer, unlike
+    /// `open_guard`'s path-keyed global registry, because a `CodeIndexer` is
+    /// already one-per-index.
+    ///
+    /// A `std::sync::Mutex`, not `tokio::sync::Mutex` (code-critic review
+    /// finding 1, issue #3683): the detached task's gate-clear must run from
+    /// inside a synchronous `Drop` impl so it fires even when a PANIC unwinds
+    /// through the commit phase, and `Drop::drop` cannot `.await` an async
+    /// mutex. Every lock/unlock of this field is a short, non-blocking,
+    /// never-awaited-while-held critical section, so a std mutex is safe here.
+    pub(super) rehydrate_inflight: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>>,
+
+    /// Monotonic counter bumped every time `clear_bm25_entities` /
+    /// `clear_in_memory_chunks` actually clears a non-empty structure (issue
+    /// #3683 code-critic review finding 2), now a `std::sync::Mutex<u64>`
+    /// rather than a bare atomic (round-3 review — the remaining HIGH).
+    ///
+    /// Why: a detached rehydrate's commit (clearing `*_evicted` back to
+    /// `false`) is NOT synchronized with a concurrent idle-evict or
+    /// memory-pressure `reclaim_memory_now` (which can fire mid-rehydrate,
+    /// under active load, unlike idle-evict). Without this counter, a
+    /// rehydrate that started BEFORE such an evict/reclaim would
+    /// unconditionally overwrite `*_evicted` back to `false` after the evict
+    /// already set it `true` — silently un-doing a legitimate, newer
+    /// eviction and breaking the `evicted == false` implies "maps are
+    /// populated" invariant, with no self-healing path (the next evict tick
+    /// sees non-empty maps and evicts again, but a query landing in between
+    /// sees a false "warm" signal over data that may already be stale/gone).
+    ///
+    /// Round-3 finding (HIGH): an `AtomicU64` only made the counter ITSELF
+    /// atomic — it did nothing to stop a concurrent evict's bump-generation-
+    /// then-set-flag-true pair from landing strictly BETWEEN the commit's own
+    /// `load(generation)` and its subsequent `store(false)` calls, since
+    /// those were three independent atomic operations, not one critical
+    /// section. That interleaving reproduces the exact finding-2 bug through
+    /// a narrower window: the commit reads a still-matching generation, the
+    /// evict then bumps it and sets the flag `true` on (now-genuinely-empty)
+    /// data, and the commit's `store(false)` — still in flight — silently
+    /// clobbers that `true` back to `false` over empty maps. Wrapping the
+    /// counter in a `Mutex` and holding its guard across both the generation
+    /// compare/bump and the flag store on either side (see
+    /// [`Self::clear_bm25_entities`] / [`Self::clear_in_memory_chunks`] for
+    /// the evict side, `idle_evict::spawn_detached_rehydrate`'s commit branch
+    /// for the other) makes the two sequences mutually exclusive — there is
+    /// no window left for the interleaving to land in.
+    /// What: `ensure_corpus_rehydrated` snapshots this value (under the lock)
+    /// before spawning the detached task; the task's commit locks the same
+    /// mutex, compares, and — while STILL holding it — either clears the
+    /// `*_evicted` flags (generation unchanged) or leaves them alone
+    /// (generation bumped by a racing evict), so a concurrent evict can never
+    /// observe or produce a torn intermediate state.
+    /// Test: `rehydrate_commit_skips_flag_clear_when_evict_races_it` (race
+    /// landing BEFORE the generation read) and
+    /// `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
+    /// (round-3: race landing INSIDE the compare-then-clear critical section
+    /// itself) in `indexer::rehydrate_tests`.
+    pub(super) rehydrate_generation: Arc<Mutex<u64>>,
+
+    /// `true` when the most recent `bm25_search` / `grep_fallback_search`
+    /// call degraded to an empty lane because the detached rehydrate
+    /// (`idle_evict::ensure_corpus_rehydrated`) had not yet converged after
+    /// [`super::search::lanes::REHYDRATE_RACE_RETRIES`] bounded waits
+    /// (code-critic review finding 3, issue #3683, HIGH).
+    ///
+    /// Why: an `Ok(vec![])` lexical lane is bit-for-bit indistinguishable
+    /// from a genuinely empty corpus at the HTTP layer — exactly the "quiet
+    /// wrong answer" the reviewer flagged as worse than the pre-fix loud
+    /// 408. This flag (plus the `trusty_bm25_lane_degraded` gauge it drives —
+    /// see `search::lanes::bm25_search` / `grep_fallback_search`) is the
+    /// machine-readable signal that closes that gap, surfaced in the search
+    /// HTTP response's `meta.bm25_lane_degraded` field
+    /// (`service::server::search::search_handler`) mirroring how
+    /// `WarmBootSummary.warm_boot_degraded` is surfaced on `/health`.
+    /// What: set `true` by either lane's retry-exhausted tail; reset to
+    /// `false` by `idle_evict::spawn_detached_rehydrate`'s commit-success
+    /// branch (finding 5: this is the "recovery" instant, so the flag never
+    /// reports a stale degraded state once the corpus is actually warm
+    /// again — a later query doesn't need to run first to clear it).
+    /// Test: `lane_degraded_flag_sets_on_exhausted_retries_and_clears_on_rehydrate`
+    /// in `indexer::rehydrate_tests`.
+    pub(super) lane_degraded: Arc<AtomicBool>,
+
     /// Issue #1158: `true` when the redb corpus file existed but could NOT be
     /// opened on this boot (e.g. incompatible page format, corruption).
     ///
@@ -285,6 +372,9 @@ impl CodeIndexer {
             last_activity_ms: Arc::new(AtomicU64::new(0)),
             chunks_evicted: Arc::new(AtomicBool::new(false)),
             bm25_entities_evicted: Arc::new(AtomicBool::new(false)),
+            rehydrate_inflight: Arc::new(std::sync::Mutex::new(None)),
+            rehydrate_generation: Arc::new(Mutex::new(0)),
+            lane_degraded: Arc::new(AtomicBool::new(false)),
             corpus_open_failed: false,
             hnsw_load_failed: false,
             skip_kg: false,
@@ -327,6 +417,15 @@ impl CodeIndexer {
     /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`.
     pub async fn in_memory_chunk_count(&self) -> usize {
         self.chunks.read().await.len()
+    }
+
+    /// Whether this index's most recent lexical query degraded because the
+    /// detached corpus rehydrate hadn't converged yet (code-critic review
+    /// finding 3, issue #3683). See [`Self::lane_degraded`]'s doc comment.
+    /// Test: `lane_degraded_flag_sets_on_exhausted_retries_and_clears_on_rehydrate`
+    /// in `indexer::rehydrate_tests`.
+    pub fn lane_degraded(&self) -> bool {
+        self.lane_degraded.load(Ordering::Relaxed)
     }
 
     /// Drop the in-memory `chunks` map when the index has been idle longer
@@ -375,10 +474,17 @@ impl CodeIndexer {
     /// exactly one place so the two paths can never drift.
     /// What: a no-op returning 0 when no durable corpus is wired (nothing to
     /// rehydrate from) or the map is already empty. Otherwise clears + shrinks
-    /// the map, marks `chunks_evicted` so the next reader rehydrates from redb,
-    /// and returns the reclaimed chunk count. Callers own any logging.
+    /// the map, then — under `rehydrate_generation`'s lock (round-3 review;
+    /// see that field's doc comment) — marks `chunks_evicted` and bumps the
+    /// generation counter TOGETHER as one critical section, so a concurrent
+    /// rehydrate commit can never read the pre-bump generation and then clear
+    /// this flag back to `false` after the fact. Returns the reclaimed chunk
+    /// count. Callers own any logging.
     /// Test: exercised by `idle_eviction_drops_and_lazily_rehydrates_chunks`
-    /// (idle path) and `memory_pressure_reclaim_now_clears_caches` (pressure path).
+    /// (idle path) and `memory_pressure_reclaim_now_clears_caches` (pressure
+    /// path); `rehydrate_commit_skips_flag_clear_when_evict_races_it` and
+    /// `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
+    /// in `indexer::rehydrate_tests` pin the race itself.
     async fn clear_in_memory_chunks(&self) -> usize {
         if self.corpus.is_none() {
             return 0;
@@ -391,51 +497,45 @@ impl CodeIndexer {
         chunks.clear();
         chunks.shrink_to_fit();
         drop(chunks);
-        self.chunks_evicted.store(true, Ordering::Relaxed);
+        // Issue #3683 round-3 review (remaining HIGH): the flag-set and the
+        // generation bump MUST happen under the same lock acquisition as a
+        // single critical section — see `rehydrate_generation`'s doc comment.
+        // A short, never-awaited-while-held std Mutex critical section (no
+        // I/O, no `.await` inside it).
+        {
+            let mut generation = self
+                .rehydrate_generation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.chunks_evicted.store(true, Ordering::Relaxed);
+            *generation += 1;
+        }
         evicted
     }
 
     /// Repopulate the in-memory `chunks` map from the durable corpus if it was
     /// previously evicted while idle.
     ///
-    /// Why: the in-memory readers must observe a populated map; after an idle
-    /// eviction the map is empty and `chunks_evicted` is set.
-    /// What: a fast no-op (single relaxed atomic load) when the map was never
-    /// evicted. When evicted, reloads every chunk from `CorpusStore` on a
-    /// blocking worker and refills the map, then clears the flag.
-    /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`.
+    /// Why (issue #3683 slice 1): this used to run the redb scan + map
+    /// publish inline, awaited directly by the caller — including interactive
+    /// query handlers wrapped in `apply_query_timeout`'s
+    /// `tokio::time::timeout`. On a query-deadline cancellation the whole
+    /// awaited future (scan + publish) was dropped mid-flight, discarding
+    /// completed work and leaving the index cold for the next query
+    /// (livelock under repeated timeouts on a large corpus — see
+    /// `idle_evict::ensure_corpus_rehydrated`). It's also the exact same
+    /// `load_all_chunks()` scan `ensure_bm25_entities_loaded` independently
+    /// re-ran, doubling the O(corpus) cost for a query that touches both
+    /// lanes.
+    /// What: thin wrapper delegating to `idle_evict::ensure_corpus_rehydrated`,
+    /// the single consolidated rehydrate path shared with
+    /// `ensure_bm25_entities_loaded` — one detached, deduplicated scan
+    /// populates chunks + BM25 + entities and survives this caller's own
+    /// cancellation.
+    /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`;
+    /// `detached_rehydrate_survives_caller_cancellation` (issue #3683).
     pub(super) async fn ensure_chunks_loaded(&self) {
-        if !self.chunks_evicted.load(Ordering::Relaxed) {
-            return;
-        }
-        let Some(corpus) = self.corpus.clone() else {
-            self.chunks_evicted.store(false, Ordering::Relaxed);
-            return;
-        };
-        let index_id = self.index_id.clone();
-        let loaded = tokio::task::spawn_blocking(move || corpus.load_all_chunks()).await;
-        match loaded {
-            Ok(Ok(chunks)) => {
-                let n = chunks.len();
-                let mut map = self.chunks.write().await;
-                for chunk in chunks {
-                    map.insert(chunk.id.clone(), chunk);
-                }
-                drop(map);
-                self.chunks_evicted.store(false, Ordering::Relaxed);
-                tracing::info!(
-                    "index '{index_id}': rehydrated {n} chunks from redb after idle eviction"
-                );
-            }
-            Ok(Err(e)) => tracing::warn!(
-                "index '{index_id}': failed to rehydrate chunks from redb ({e}); \
-                 will retry on next access"
-            ),
-            Err(e) => tracing::warn!(
-                "index '{index_id}': chunk rehydration task panicked ({e}); \
-                 will retry on next access"
-            ),
-        }
+        self.ensure_corpus_rehydrated().await;
     }
 
     /// Builder-style setter for the per-index domain vocabulary.

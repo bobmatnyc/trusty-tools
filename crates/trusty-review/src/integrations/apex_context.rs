@@ -178,6 +178,7 @@ mod tests {
             Ok(HealthResponse {
                 status: "ok".to_string(),
                 embedder: EmbedderState::Bool(true),
+                warmboot_summary: None,
             })
         }
 

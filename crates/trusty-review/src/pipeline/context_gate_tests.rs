@@ -51,6 +51,7 @@ impl SearchClient for StubSearch {
             Some(ok) => Ok(HealthResponse {
                 status: if ok { "ok" } else { "starting" }.to_string(),
                 embedder: EmbedderState::Bool(ok),
+                warmboot_summary: None,
             }),
             None => Err(SearchClientError::Unavailable("down".to_string())),
         }
@@ -271,6 +272,93 @@ async fn explicit_require_skips_even_interactive_surface() {
         preflight_context(&cfg, &d, InvocationSurface::Interactive).await,
         GateOutcome::Skip(_)
     ));
+}
+
+// ── Degraded-but-serving (#3693) ───────────────────────────────────────────────
+
+/// Search stub whose `/health` reports a fixed `status` + `warmboot_summary`
+/// pair, independent of the `Some(bool)`/`None` shape `StubSearch` uses —
+/// needed to exercise the `"degraded"` status with an explicit
+/// `warm_boot_degraded` value (#3693).
+struct DegradedSearch {
+    warm_boot_degraded: bool,
+}
+
+#[async_trait]
+impl SearchClient for DegradedSearch {
+    async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+        Ok(HealthResponse {
+            status: "degraded".to_string(),
+            embedder: EmbedderState::Bool(true),
+            warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
+                warm_boot_degraded: self.warm_boot_degraded,
+            }),
+        })
+    }
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
+fn deps_with_search(search: Arc<dyn SearchClient>, analyze_ready: bool) -> ReviewDeps {
+    ReviewDeps {
+        llm: Arc::new(StubLlm),
+        verifier: None,
+        search,
+        analyze: Some(Arc::new(StubAnalyze {
+            ready: analyze_ready,
+        })),
+        dedup: None,
+    }
+}
+
+/// The exact #3693 scenario: trusty-search reports `status: "degraded"`
+/// purely because its file watcher was auto-disabled on a network mount
+/// (`warm_boot_degraded == false`) — search is fully functional, so the gate
+/// must PROCEED (not skip), even with the default `require_search=true`.
+#[tokio::test]
+async fn degraded_but_serving_proceeds() {
+    let cfg = config(); // defaults: require_search=true
+    let d = deps_with_search(
+        Arc::new(DegradedSearch {
+            warm_boot_degraded: false,
+        }),
+        true,
+    );
+    assert_eq!(
+        preflight_context(&cfg, &d, InvocationSurface::Hosted).await,
+        GateOutcome::Proceed,
+        "degraded-but-serving (benign watcher disable) must proceed, not skip (#3693)"
+    );
+}
+
+/// A genuinely broken trusty-search (`warm_boot_degraded == true` — TCC
+/// denial, scan timeout, corpus-open failure, or mass index loss) reporting
+/// `status: "degraded"` must still fail-closed under the default
+/// `require_search=true`.
+#[tokio::test]
+async fn degraded_not_serving_skips() {
+    let cfg = config();
+    let d = deps_with_search(
+        Arc::new(DegradedSearch {
+            warm_boot_degraded: true,
+        }),
+        true,
+    );
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
+        GateOutcome::Skip(msg) => assert!(msg.contains("trusty-search"), "msg: {msg}"),
+        other => {
+            panic!("genuinely broken (warm_boot_degraded=true) search must Skip, got {other:?}")
+        }
+    }
 }
 
 #[test]

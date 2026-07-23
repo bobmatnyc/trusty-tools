@@ -64,6 +64,19 @@ pub(crate) fn embedding_cache_cap() -> usize {
 /// small amount of rehydration latency on the next query (a redb read,
 /// typically well under 100ms) for materially lower steady-state RSS on
 /// hosts tracking many projects. Still fully overridable per-deployment.
+///
+/// Correction (issue #3683): "typically well under 100ms" held for the small
+/// indexes this default was tuned against, but was off by roughly three
+/// orders of magnitude for a 315K-chunk index on NFS-backed storage
+/// (27-40s/scan), where this aggressive window turned nearly every query into
+/// a cold start. This slice does not change this constant or the eviction
+/// cadence — it fixes what used to happen on a slow rehydrate (a synchronous,
+/// discard-on-cancel scan inline in the query path — see
+/// `idle_evict::ensure_corpus_rehydrated`) so a slow scan degrades a query
+/// instead of livelocking the whole index. Retuning this default/making it
+/// adaptive to measured rehydrate cost is the eviction-policy RCA finding in
+/// #3683 (idle-evict window + pressure-sweep tuning) — a later slice, and
+/// intentionally out of scope here.
 pub(crate) const DEFAULT_CHUNKS_IDLE_EVICT_SECS: u64 = 60;
 
 /// Resolve the in-memory-chunks / BM25 / entities idle-eviction window (in

@@ -300,9 +300,12 @@ pub fn current_rss_mb() -> Option<u64> {
 /// sample), or if the platform call fails.
 ///
 /// Test: `tests::test_rss_for_self_pid` calls this with `std::process::id()`
-/// and asserts the result matches `current_rss_mb()` within 10 MB (trivially
-/// true now that both delegate to this function). Negative cases (pid=0,
-/// bogus pid) assert `None`.
+/// and checks the result is sane, loosely agrees with `current_rss_mb()`
+/// (trivially true now that both delegate to this function, modulo
+/// concurrent-allocation drift between the two calls — see that test's doc
+/// for why the bound is relative rather than a fixed MB count), and that RSS
+/// visibly grows after a deliberate allocation (issue #3702). Negative
+/// cases (pid=0, bogus pid) assert `None`.
 pub fn current_rss_mb_for_pid(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
@@ -542,28 +545,105 @@ mod tests {
         }
     }
 
-    /// `current_rss_mb_for_pid(self_pid)` must return the same order-of-magnitude
-    /// RSS as `current_rss_mb()` — both read the same process.
+    /// `current_rss_mb_for_pid(self_pid)` must return a live, sane,
+    /// unit-correct RSS reading that agrees (loosely) with `current_rss_mb()`
+    /// — both read the same process, indeed the same underlying call (see
+    /// [`current_rss_mb`]'s doc, which just forwards to this one with
+    /// `std::process::id()`).
     ///
-    /// Why: validates the pid-parameterised helper against the known-working
-    /// self-pid path. A mismatch would indicate a platform quirk in the
-    /// `sysinfo::ProcessesToUpdate::Some(&[pid])` path.
-    /// What: call both, assert abs-difference < 10 MB (transient allocations
-    /// between the two calls can shift RSS slightly).
+    /// Why (issue #3702): the original version asserted the two sequential
+    /// samples agreed within a fixed 10 MB, which is really testing "two
+    /// back-to-back samples in a quiet process are numerically close" — true
+    /// in isolation, but not a property CI's shared-process
+    /// `cargo test --workspace` run can uphold: many sibling tests allocate
+    /// and free concurrently in between the two calls, and CI observed
+    /// diffs of 28/11/30 MB across 3 consecutive runs on PR #3690, a PR that
+    /// never touched this file. Widening the constant wouldn't fix the
+    /// underlying mismatch between what the test measures (transient
+    /// concurrent-allocation noise) and what it's meant to guard (that the
+    /// sampler is alive and correct), so the assertions are restructured
+    /// instead of just loosened.
+    /// What:
+    ///   1. both samples must be present (`Some`) and land inside a broad
+    ///      sanity band for a live test-binary RSS — this alone would catch
+    ///      a regression that returns `0`, a negative/garbage value, or a
+    ///      value off by a unit conversion (e.g. bytes instead of MB, ~1024x
+    ///      off), independent of any peer comparison;
+    ///   2. the two peer samples agree within a generous *relative* bound
+    ///      (60% of the larger reading) rather than a fixed MB count — wide
+    ///      enough to absorb the CI-observed concurrent-churn diffs above,
+    ///      while still failing if the two sampling paths genuinely
+    ///      diverge;
+    ///   3. after deliberately committing and touching a fresh 128 MB
+    ///      buffer, a re-measurement must show RSS grew by at least a
+    ///      quarter of that (32 MB) — this is the check that actually
+    ///      proves the sampler tracks *live* memory rather than a
+    ///      stale/cached number, a bug class the peer-agreement check alone
+    ///      cannot catch (a frozen value could coincidentally agree with a
+    ///      fresh one). The margin (32 MB required vs. 128 MB committed)
+    ///      comfortably absorbs the largest concurrent-churn diff CI has
+    ///      observed (30 MB) even in the adversarial case where sibling
+    ///      tests are simultaneously freeing memory elsewhere in the
+    ///      process.
+    ///
     /// Test: this test.
     #[test]
     fn test_rss_for_self_pid() {
         let self_pid = std::process::id();
-        if let (Some(a), Some(b)) = (current_rss_mb(), current_rss_mb_for_pid(self_pid)) {
-            // Allow up to 10 MB drift between the two samples.
-            let diff = (a as i64 - b as i64).unsigned_abs();
+        let (Some(a), Some(b)) = (current_rss_mb(), current_rss_mb_for_pid(self_pid)) else {
+            // Either None means the platform couldn't resolve the PID; tolerate it.
+            return;
+        };
+
+        // Sanity band: catches a 0/negative/garbage/wrong-unit regression
+        // without being sensitive to how much memory this test binary
+        // happens to be using on any given CI runner.
+        const MIN_SANE_RSS_MB: u64 = 1;
+        const MAX_SANE_RSS_MB: u64 = 32 * 1024; // 32 GB - generous for a test binary
+        for (label, v) in [("current_rss_mb()", a), ("current_rss_mb_for_pid()", b)] {
             assert!(
-                diff < 10,
-                "current_rss_mb()={a}MB and current_rss_mb_for_pid({self_pid})={b}MB \
-                 differ by {diff}MB (> 10 MB tolerance)"
+                (MIN_SANE_RSS_MB..=MAX_SANE_RSS_MB).contains(&v),
+                "{label} returned {v}MB, outside sane band [{MIN_SANE_RSS_MB}, {MAX_SANE_RSS_MB}] MB"
             );
         }
-        // Either None means the platform couldn't resolve the PID; tolerate it.
+
+        // Relative-drift bound: scales with the measurement itself instead
+        // of a fixed MB count, so it tolerates CI-observed concurrent-test
+        // churn (up to ~30MB seen in #3702) while still failing if the two
+        // paths genuinely disagree.
+        let diff = (a as i64 - b as i64).unsigned_abs();
+        let baseline = a.max(b).max(1);
+        assert!(
+            diff * 100 <= baseline * 60,
+            "current_rss_mb()={a}MB and current_rss_mb_for_pid({self_pid})={b}MB differ by \
+             {diff}MB, more than 60% of {baseline}MB - suspect the two sampling paths diverged"
+        );
+
+        // Deliberately grow RSS and confirm the sampler notices. Unlike the
+        // peer-agreement check above, this catches a sampler that returns a
+        // plausible-looking but *stale* value (e.g. cached at process
+        // start), since a frozen reading would show ~0 growth here
+        // regardless of what it happens to agree with above.
+        const GROW_MB: u64 = 128;
+        const MIN_EXPECTED_GROWTH_MB: u64 = GROW_MB / 4;
+        let mut buf = vec![0u8; (GROW_MB * 1024 * 1024) as usize];
+        // Touch every page so it's actually resident, not just reserved
+        // address space (a zeroed Vec's pages can otherwise be lazily
+        // backed by the OS until first write).
+        for chunk in buf.chunks_mut(4096) {
+            chunk[0] = 1;
+        }
+        std::hint::black_box(&buf);
+        if let Some(after) = current_rss_mb_for_pid(self_pid) {
+            let grown = after.saturating_sub(b);
+            assert!(
+                grown >= MIN_EXPECTED_GROWTH_MB,
+                "expected RSS to grow by at least {MIN_EXPECTED_GROWTH_MB}MB after committing \
+                 a fresh {GROW_MB}MB buffer, but it only grew by {grown}MB (before={b}MB, \
+                 after={after}MB) - sampler may be returning a stale reading"
+            );
+        }
+        drop(buf);
     }
 
     /// `current_rss_mb_for_pid(0)` must return `None` (sentinel for "no PID").
