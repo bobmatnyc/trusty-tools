@@ -21,11 +21,18 @@
 //! `.worktrees/<name>` directory or `session/<name>` branch already exists on
 //! disk (a collision surface the plain tmux-name check knows nothing about;
 //! see `daemon::managed_routes::inproject::create_session_worktree`).
+//! Also home to [`SessionManager::dedupe_session_name`] (issue #3692): the
+//! auto-suffix-never-reject counterpart used by `rename`/`adopt_existing`/the
+//! create path's final safety net, for names that are operator-supplied or
+//! already resolved rather than derived fresh via `resolve_session_name`'s own
+//! per-project serial allocator.
 //! Test: `naming_tests.rs`.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use super::manager::{ManagedError, SessionManager};
+use super::record::ManagedSessionId;
 
 impl SessionManager {
     /// Resolve a fresh, collision-free tmux session name (issues #1955, #2032).
@@ -94,5 +101,60 @@ impl SessionManager {
             "no free `tm-<leaf>-NN` name after {MAX_NAME_ALLOCATION_ATTEMPTS} attempts \
              (sustained concurrent creates for the same project)"
         )))
+    }
+
+    /// Disambiguate `candidate` against every live/tracked name — auto-suffix
+    /// on collision, NEVER reject (owner decision, issue #3692: two distinct
+    /// managed sessions were found sharing one name, making name-based resume
+    /// ambiguous and the picker show duplicate rows).
+    ///
+    /// Why: [`Self::resolve_session_name`] already guarantees a fresh,
+    /// collision-free `tm-<leaf>-NN` name for the derive-from-scratch create
+    /// path via its own per-project serial allocator. The other two
+    /// name-allocation surfaces — `rename` (an operator-chosen target name)
+    /// and `adopt_existing` (a caller-supplied display name for a recycled
+    /// tmux name) — hand this method an ALREADY-CHOSEN candidate that must be
+    /// disambiguated rather than derived, so they share this one
+    /// implementation instead of three copies of the same
+    /// union-the-taken-set-then-suffix logic.
+    /// What: unions the live tmux session-name set with every NON-terminal
+    /// store record's `tmux_name` (a `Decommissioned`/`Deleted` tombstone's
+    /// name is NOT taken — it is reusable immediately, unsuffixed), excluding
+    /// `exclude_id`'s own current name so a record renaming to a name only it
+    /// holds is never suffixed against itself. Hands the resulting set to
+    /// [`trusty_common::session_naming::dedupe_by_ordinal`], which returns
+    /// `candidate` unchanged when free, or the smallest free `-N` ordinal
+    /// variant otherwise.
+    /// Residual race window (same class as [`Self::resolve_session_name`]'s,
+    /// documented above): the "taken" set is a snapshot; the caller's actual
+    /// tmux rename/persist happens a few lines later. Closing this fully
+    /// would need a distributed lock across the external `tmux`/store
+    /// processes — out of scope, same as the create path.
+    /// Test: `rename_suffixes_collision_with_record`,
+    /// `rename_suffixes_collision_with_live_tmux`,
+    /// `rename_suffix_skips_to_next_free_ordinal`,
+    /// `manager_adopt_existing_suffixes_recycled_name` in `super::tests`.
+    pub(crate) async fn dedupe_session_name(
+        &self,
+        candidate: &str,
+        exclude_id: Option<&ManagedSessionId>,
+    ) -> Result<String, ManagedError> {
+        let mut taken: HashSet<String> = self
+            .tmux
+            .list_sessions()
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?
+            .into_iter()
+            .collect();
+        taken.extend(
+            self.list()
+                .await
+                .into_iter()
+                .filter(|r| exclude_id != Some(&r.id) && !r.state.is_terminal())
+                .map(|r| r.tmux_name),
+        );
+        Ok(trusty_common::session_naming::dedupe_by_ordinal(
+            candidate,
+            |c| taken.contains(c),
+        ))
     }
 }

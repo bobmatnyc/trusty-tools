@@ -7,6 +7,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`session_naming::dedupe_by_ordinal`** (issue #3692): auto-suffix-on-collision
+  name deduplication shared by every trusty-mpm name-allocation site (`rename`,
+  `adopt_existing`, `create`'s final safety net) — picks the smallest free `-N`
+  ordinal, incrementing an existing trailing ordinal in place rather than
+  double-suffixing. Lives in the new `session_naming::dedupe` submodule (split
+  out to keep `session_naming` under its 500-SLOC production cap).
+
 ---
 ## [0.24.2] — 2026-07-22
 

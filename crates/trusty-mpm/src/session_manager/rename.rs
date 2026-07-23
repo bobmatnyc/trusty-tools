@@ -66,20 +66,24 @@ impl SessionManager {
     /// missing id surfaces as [`ManagedError::SessionNotFound`]). A rename to
     /// the SAME name is a no-op that returns the record unchanged. A terminal
     /// record (`Decommissioned`/`Deleted`) is refused with `InvalidState`.
-    /// Refuses — with [`ManagedError::NameCollision`] — a name already taken by
-    /// another NON-terminal managed record or by a live tmux session (a terminal
-    /// tombstone's name is reusable). Otherwise, when a live tmux session backs
-    /// the record it is renamed via
+    /// Auto-suffixes — NEVER rejects (owner decision, issue #3692) — a name
+    /// already taken by another NON-terminal managed record or by a live tmux
+    /// session, via [`SessionManager::dedupe_session_name`] (a terminal
+    /// tombstone's name is reusable as-is, unsuffixed). Otherwise, when a live
+    /// tmux session backs the record it is renamed via
     /// [`ManagedTmuxDriver::rename_session`](super::driver::ManagedTmuxDriver::rename_session)
     /// FIRST (re-verifying `tmux_name` immediately beforehand to catch a
     /// concurrent rename), then the record's `tmux_name` is updated,
     /// `last_activity_at` is stamped, and the record is persisted. If the store
     /// write fails AFTER the tmux rename, the tmux rename is rolled back so the
     /// live session and the record never desync; a failed rollback surfaces an
-    /// explicit manual-recovery error. Returns the updated [`SessionRecord`].
+    /// explicit manual-recovery error. Returns the updated [`SessionRecord`]
+    /// (its `tmux_name` may differ from the requested `new_name` if it was
+    /// auto-suffixed).
     /// Test: `rename_updates_name_and_persists`,
-    /// `rename_same_name_is_noop`, `rename_rejects_collision_with_record`,
-    /// `rename_rejects_collision_with_live_tmux`,
+    /// `rename_same_name_is_noop`, `rename_suffixes_collision_with_record`,
+    /// `rename_suffixes_collision_with_live_tmux`,
+    /// `rename_suffix_skips_to_next_free_ordinal`,
     /// `rename_rejects_invalid_name`, `rename_rejects_terminal_record`,
     /// `rename_renames_live_tmux_session`,
     /// `rename_reuses_name_freed_by_a_deleted_record` in `super::rename_tests`.
@@ -106,22 +110,14 @@ impl SessionManager {
             ));
         }
 
-        // Collision guard: no OTHER *live* managed record may already carry the
-        // name. A TERMINAL tombstone's `tmux_name` does NOT block reuse (it is
-        // gone for good) — so a name freed by delete/decommission is
-        // immediately reusable; only `prune` still holds the on-disk record.
-        if self
-            .list()
-            .await
-            .into_iter()
-            .any(|r| r.id != *id && r.tmux_name == new_name && !r.state.is_terminal())
-        {
-            return Err(ManagedError::NameCollision(new_name));
-        }
-        // …and no live tmux session (managed or foreign) may hold it either.
-        if self.tmux.session_exists(&new_name) {
-            return Err(ManagedError::NameCollision(new_name));
-        }
+        // Auto-suffix on collision — NEVER reject (owner decision, issue
+        // #3692): a name already held by another non-terminal managed record
+        // or a live tmux session (managed or foreign) is disambiguated with
+        // the smallest free `-N` ordinal rather than refusing the rename. A
+        // TERMINAL tombstone's `tmux_name` does NOT count as taken (it is gone
+        // for good) — a name freed by delete/decommission is reused as-is,
+        // unsuffixed; only `prune` still holds the on-disk tombstone.
+        let new_name = self.dedupe_session_name(&new_name, Some(id)).await?;
 
         let old_name = record.tmux_name.clone();
         let tmux_live = self.tmux.session_exists(&old_name);

@@ -26,7 +26,11 @@
 //! What: two embedded wordlists and [`name_from_uuid`]; folder-basename
 //! derivation via [`name_from_dir`]/[`leaf_slug_from_dir`]; and the
 //! serial-numbered [`build_managed_session_name`]/[`build_session_name`] pair
-//! that is now the primary entry point for `tm session new`.
+//! that is now the primary entry point for `tm session new`. The sibling
+//! [`dedupe`] submodule (issue #3692) holds the auto-suffix-on-collision
+//! primitive shared by every OTHER name-allocation site (`rename`,
+//! `adopt_existing`, and `create`'s final safety net) — split out to keep
+//! this file under its own 500-SLOC production cap.
 //! Test: `cargo test -p trusty-common -- session_naming` asserts determinism,
 //! format, serial
 //! allocation (including gap-reuse and exhaustion), and that legacy prefixes
@@ -37,6 +41,9 @@ use std::path::Path;
 
 use thiserror::Error;
 use uuid::Uuid;
+
+mod dedupe;
+pub use dedupe::dedupe_by_ordinal;
 
 /// Adjective half of the wordlist (50 short, neutral words).
 const ADJECTIVES: &[&str] = &[

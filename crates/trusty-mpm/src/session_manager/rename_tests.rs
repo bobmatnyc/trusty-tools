@@ -79,9 +79,10 @@ async fn rename_same_name_is_noop() {
     assert_eq!(same.tmux_name, current);
 }
 
-/// `rename` refuses a name already held by ANOTHER managed record.
+/// `rename` auto-suffixes — never rejects (issue #3692) — a name already held
+/// by ANOTHER managed record, appending the smallest free `-N` ordinal.
 #[tokio::test]
-async fn rename_rejects_collision_with_record() {
+async fn rename_suffixes_collision_with_record() {
     let dir = TempDir::new().unwrap();
     let (mgr, _fake) = make_manager(&dir).await;
     let a = ManagedSessionId::new();
@@ -90,16 +91,19 @@ async fn rename_rejects_collision_with_record() {
     seed_record(&mgr, &dir, b, ManagedSessionState::Stopped, false).await;
     let b_name = mgr.get(&b).await.expect("get b").tmux_name;
 
-    let err = mgr
+    let updated = mgr
         .rename(&a, &b_name)
         .await
-        .expect_err("must refuse a name another record already holds");
-    assert!(matches!(err, ManagedError::NameCollision(_)), "got {err:?}");
+        .expect("collision must auto-suffix, never reject");
+    assert_eq!(updated.tmux_name, format!("{b_name}-2"));
+    // `b`'s own record is untouched.
+    assert_eq!(mgr.get(&b).await.expect("get b").tmux_name, b_name);
 }
 
-/// `rename` refuses a name held by a LIVE tmux session (even a foreign one).
+/// `rename` auto-suffixes — never rejects (issue #3692) — a name held by a
+/// LIVE tmux session (even a foreign one not backed by any managed record).
 #[tokio::test]
-async fn rename_rejects_collision_with_live_tmux() {
+async fn rename_suffixes_collision_with_live_tmux() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake) = make_manager(&dir).await;
     let id = ManagedSessionId::new();
@@ -108,11 +112,38 @@ async fn rename_rejects_collision_with_live_tmux() {
     fake.create_session("tm-foreign-live", "/tmp")
         .expect("register foreign tmux");
 
-    let err = mgr
+    let updated = mgr
         .rename(&id, "tm-foreign-live")
         .await
-        .expect_err("must refuse a name a live tmux session holds");
-    assert!(matches!(err, ManagedError::NameCollision(_)), "got {err:?}");
+        .expect("collision with a live foreign session must auto-suffix, never reject");
+    assert_eq!(updated.tmux_name, "tm-foreign-live-2");
+}
+
+/// `rename` picks the smallest FREE ordinal — a second collision on top of an
+/// already-taken `-2` must skip to `-3`, not fail or loop back.
+#[tokio::test]
+async fn rename_suffix_skips_to_next_free_ordinal() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let a = ManagedSessionId::new();
+    let b = ManagedSessionId::new();
+    let c = ManagedSessionId::new();
+    seed_record(&mgr, &dir, a, ManagedSessionState::Stopped, false).await;
+    seed_record(&mgr, &dir, b, ManagedSessionState::Stopped, false).await;
+    seed_record(&mgr, &dir, c, ManagedSessionState::Stopped, false).await;
+    let b_name = mgr.get(&b).await.expect("get b").tmux_name;
+
+    let first = mgr
+        .rename(&a, &b_name)
+        .await
+        .expect("first collision suffixes to -2");
+    assert_eq!(first.tmux_name, format!("{b_name}-2"));
+
+    let second = mgr
+        .rename(&c, &b_name)
+        .await
+        .expect("second collision must skip the now-taken -2 and land on -3");
+    assert_eq!(second.tmux_name, format!("{b_name}-3"));
 }
 
 /// `rename` rejects an invalid new name with `InvalidState`.
