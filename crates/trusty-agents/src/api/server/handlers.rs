@@ -228,6 +228,48 @@ fn session_overrides_for(req: &TaskRequest) -> crate::ctrl::SessionOverrides {
     }
 }
 
+/// Drain already-buffered events and return the agent that last delegation
+/// handed the turn to, if any (#3737, per-message chat attribution).
+///
+/// Why: Chat attribution must reflect who ANSWERED, not who was asked. When a
+/// turn delegates (e.g. base "Assistant" hands a weather question to Izzie via
+/// `delegate_to_agent`), `delegate.rs` publishes `AgentSpawned { session_id,
+/// agent }` on the process event bus. The caller subscribes BEFORE running the
+/// turn, then calls this AFTER it returns to read back the last delegation
+/// target for this session — the substantive responder. `None` means no
+/// delegation fired, so the caller keeps the request-time speaker stamp.
+/// What: Non-blocking drain of `rx` via `try_recv` (all relevant events were
+/// published synchronously during the just-finished turn, so they are already
+/// buffered). Filters to `sid`; the LAST `AgentSpawned`/`PmDelegating` agent
+/// wins (multiple delegations → the final one answered). A `Lagged` receiver
+/// keeps draining its retained tail (a late `AgentSpawned` is among the most
+/// recent events); an exhausted/closed channel ends the drain.
+/// Test: `drain_last_responder_returns_last_delegated_agent`.
+fn drain_last_responder(
+    rx: &mut tokio::sync::broadcast::Receiver<Event>,
+    sid: &str,
+) -> Option<String> {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut responder = None;
+    loop {
+        match rx.try_recv() {
+            Ok(ev) => {
+                if ev.session_id() == Some(sid) {
+                    match ev {
+                        Event::AgentSpawned { agent, .. } | Event::PmDelegating { agent, .. } => {
+                            responder = Some(agent);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(TryRecvError::Lagged(_)) => continue,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+        }
+    }
+    responder
+}
+
 /// `POST /api/task` — kick off a workflow/agent/conversational run.
 ///
 /// Why: Single entry point the WebUI / CLI hit to submit work; the server
@@ -332,6 +374,11 @@ pub(super) async fn submit_task(
             };
 
             let join = tokio::spawn(async move {
+                // #3737: subscribe BEFORE running so a delegation's
+                // `AgentSpawned` event (published inside `delegate_to_agent`)
+                // is captured for responder attribution — reflecting who
+                // actually ANSWERED, not who was asked.
+                let mut ev_rx = crate::events::subscribe();
                 let result = if let Some(agent_name) = agent_bg {
                     crate::ctrl::run_pm_task_with_persona(
                         &project_path,
@@ -359,12 +406,18 @@ pub(super) async fn submit_task(
                     .await
                 };
 
+                // #3737: after the turn finishes, read back who (if anyone)
+                // it delegated to. `None` → the caller answered itself, so the
+                // GUI keeps its request-time speaker stamp.
+                let responder = drain_last_responder(&mut ev_rx, &id_bg);
+
                 let resp = match result {
                     Ok(content) => {
                         let mut r = PmResponse::running(&id_bg);
                         r.response_type = crate::api::types::PmResponseType::AgentResponse;
                         r.status = PmStatus::Success;
                         r.narrative = content;
+                        r.responder_agent = responder;
                         r
                     }
                     Err(e) => {
@@ -473,6 +526,45 @@ pub(super) async fn list_tasks(State(state): State<AppState>) -> Json<Vec<PmResp
     Json(state.list().await)
 }
 
+/// Response body for `DELETE /api/tasks`.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ClearRecentTasksBody {
+    cleared: bool,
+    /// Number of terminal (finished) tasks removed from the history.
+    removed: usize,
+    /// Number of still-running tasks left untouched (kept visible).
+    retained_running: usize,
+}
+
+/// `DELETE /api/tasks` — clear the finished-task history, keeping running
+/// tasks (#3737).
+///
+/// Why: The GUI's "Recent tasks" panel offers a "Clear" affordance. Unlike
+/// `POST /api/clear-context` (which aborts in-flight tasks and wipes the whole
+/// store), clearing the *history list* must not kill work that is still
+/// running — a user tidying the list should keep any in-flight task visible
+/// and cancellable. This deletes only terminal entries; because the task
+/// store persists to `.trusty-agents/state/tasks.json` and reloads on
+/// restart, the removal is written back so it sticks.
+/// What: Delegates to `AppState::clear_terminal_tasks`, then reports how many
+/// were removed and how many running tasks remain, so the client can refresh
+/// its list deterministically.
+/// Test: `clear_recent_tasks_removes_terminal_only` (route-level, in
+/// `super::tests`).
+pub(super) async fn clear_recent_tasks(
+    State(state): State<AppState>,
+) -> Json<ClearRecentTasksBody> {
+    // Both counts come from a single lock guard inside `clear_terminal_tasks`
+    // so they can't disagree under a concurrent status transition (code-critic
+    // TOCTOU finding — was previously a separate `list()` + subtraction).
+    let (removed, retained_running) = state.clear_terminal_tasks().await;
+    Json(ClearRecentTasksBody {
+        cleared: true,
+        removed,
+        retained_running,
+    })
+}
+
 /// Response body for `POST /api/clear-context`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ClearContextBody {
@@ -556,6 +648,42 @@ mod tests {
             model_id: None,
             provider_id: None,
         }
+    }
+
+    /// #3737: `drain_last_responder` returns the LAST agent this session
+    /// delegated to (who actually answered), ignores other sessions' events,
+    /// and returns `None` when no delegation fired (the caller answered
+    /// itself, so the GUI keeps its request-time speaker stamp).
+    #[tokio::test]
+    async fn drain_last_responder_returns_last_delegated_agent() {
+        let sid = "responder-drain-test";
+        let mut rx = events::subscribe();
+
+        // A delegation to another session must be ignored.
+        events::publish(Event::AgentSpawned {
+            session_id: "some-other-session".to_string(),
+            agent: "not-me".to_string(),
+        });
+        // Two delegations for our session; the LAST one is the responder.
+        events::publish(Event::PmDelegating {
+            session_id: sid.to_string(),
+            agent: "engineer".to_string(),
+            task_preview: "first".to_string(),
+        });
+        events::publish(Event::AgentSpawned {
+            session_id: sid.to_string(),
+            agent: "izzie".to_string(),
+        });
+
+        assert_eq!(drain_last_responder(&mut rx, sid).as_deref(), Some("izzie"));
+
+        // With no delegation events, the responder is None.
+        let mut rx2 = events::subscribe();
+        events::publish(Event::PmThinking {
+            session_id: sid.to_string(),
+            text: "thinking".to_string(),
+        });
+        assert_eq!(drain_last_responder(&mut rx2, sid), None);
     }
 
     #[test]

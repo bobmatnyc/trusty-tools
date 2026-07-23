@@ -80,6 +80,17 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
       if (!r.ok) throw new Error(`list_tasks: ${r.status}`);
       return r.json();
     }
+    case 'clear_recent_tasks': {
+      // #3737: browser-mode twin of the `clear_recent_tasks` Tauri command —
+      // DELETE the finished-task history (running tasks are preserved
+      // server-side). Returns the `{cleared, removed, retained_running}` body.
+      const r = await fetch(`${base}/api/tasks`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (!r.ok) throw new Error(`clear_recent_tasks: ${r.status}`);
+      return r.json();
+    }
     case 'send_message': {
       // #3223 (regression fix, code-critic on PR #3279): forward the
       // roster's active agent selection so the browser fallback path
@@ -161,6 +172,11 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
             id,
             narrative,
             status: resp.status,
+            // #3737: forward the server's responder attribution so the browser
+            // fallback relabels a delegated bubble the same way the Tauri path
+            // does (that path emits the full PmResponse, which already carries
+            // this field).
+            responder_agent: resp.responder_agent,
           });
           return narrative;
         }

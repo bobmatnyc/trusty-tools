@@ -46,6 +46,24 @@ pub struct PmResponse {
     /// Test: `phase_progress_serializes_to_json`.
     #[serde(default)]
     pub phases_completed: Vec<PhaseProgress>,
+    /// #3737 (per-message chat attribution, epic #3052): the name of the
+    /// specialist agent that actually produced this answer, when the turn
+    /// delegated away from the caller. `None` for a turn the caller answered
+    /// itself (no delegation fired). Populated server-side from the session's
+    /// last `AgentSpawned`/`PmDelegating` event (`api/server/handlers.rs`).
+    ///
+    /// Why: chat attribution must reflect who ANSWERED, not who was asked —
+    /// e.g. base "Assistant" delegating a weather question to Izzie must label
+    /// the bubble "Izzie", not "Assistant". This carries the server-authoritative
+    /// responder identity so the GUI can overwrite its request-time speaker
+    /// stamp on `task-complete`. It is an agent NAME (roster id); the GUI maps
+    /// it to a display name via the `/api/agents` catalog.
+    /// What: `Option<String>`; `skip_serializing_if` keeps the wire shape
+    /// byte-identical to pre-#3737 for the common (no-delegation) case, and
+    /// `default` keeps deserializing older persisted `tasks.json` snapshots.
+    /// Test: `responder_agent_defaults_to_none_and_omits_when_absent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responder_agent: Option<String>,
 }
 
 /// One entry in the live progress stream returned by `GET /api/task/:id`.
@@ -161,6 +179,7 @@ impl PmResponse {
             out_dir: None,
             errors: Vec::new(),
             phases_completed: Vec::new(),
+            responder_agent: None,
         }
     }
 
@@ -179,6 +198,7 @@ impl PmResponse {
             out_dir: None,
             errors: vec![m],
             phases_completed: Vec::new(),
+            responder_agent: None,
         }
     }
 
@@ -206,6 +226,7 @@ impl PmResponse {
             out_dir: None,
             errors: Vec::new(),
             phases_completed: Vec::new(),
+            responder_agent: None,
         }
     }
 }
@@ -275,6 +296,33 @@ mod tests {
     fn pm_response_running_includes_empty_phases_completed() {
         let r = PmResponse::running("abc");
         assert!(r.phases_completed.is_empty());
+    }
+
+    /// #3737: `responder_agent` defaults to `None`, is OMITTED from the wire
+    /// when absent (so the common no-delegation case is byte-identical to the
+    /// pre-#3737 shape), and round-trips when present (the delegated case the
+    /// GUI reads to relabel a bubble to the agent that actually answered).
+    #[test]
+    fn responder_agent_defaults_to_none_and_omits_when_absent() {
+        let r = PmResponse::running("abc");
+        assert_eq!(r.responder_agent, None);
+        let j = serde_json::to_string(&r).unwrap();
+        assert!(
+            !j.contains("responder_agent"),
+            "absent responder must be omitted from the wire, got: {j}"
+        );
+
+        let mut delegated = PmResponse::running("abc");
+        delegated.responder_agent = Some("izzie".to_string());
+        let j2 = serde_json::to_string(&delegated).unwrap();
+        assert!(j2.contains("\"responder_agent\":\"izzie\""), "got: {j2}");
+        let back: PmResponse = serde_json::from_str(&j2).unwrap();
+        assert_eq!(back.responder_agent.as_deref(), Some("izzie"));
+
+        // An older snapshot without the field still deserializes.
+        let legacy = r#"{"id":"x","timestamp":"t","type":"task_submitted","status":"running","narrative":"","metadata":{"processing_time_ms":0,"total_tokens_in":0,"total_tokens_out":0,"cache_read_tokens":0,"cache_creation_tokens":0,"total_cost_usd":0.0,"model":null,"workflow":null,"build_number":null},"phases":[],"files_modified":[],"out_dir":null,"errors":[]}"#;
+        let parsed: PmResponse = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.responder_agent, None);
     }
 
     #[test]

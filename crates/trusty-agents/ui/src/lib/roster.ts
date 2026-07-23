@@ -67,9 +67,18 @@ export interface RosterEntry {
  */
 export const BASE_AGENT_ID = 'assistant';
 
+/**
+ * Why (#3737): the human-friendly label for the base, nameless assistant.
+ * Exported so chat attribution (`rosterDisplayName`) can fall back to it
+ * without re-typing the literal — the base agent has no `display_name` on the
+ * wire (it's intentionally nameless), so both the roster row and any bubble
+ * it produces read "Assistant".
+ */
+export const BASE_AGENT_LABEL = 'Assistant';
+
 const BASE_ENTRY: RosterEntry = {
   id: BASE_AGENT_ID,
-  label: 'Assistant',
+  label: BASE_AGENT_LABEL,
   description: 'General-purpose productivity assistant',
   source: 'base',
 };
@@ -104,12 +113,14 @@ export function slugify(input: string): string {
  * twice. Centralizing the merge means both UIs stay in sync automatically.
  * What: Returns the base entry first, then catalog agents (skipping any
  * named `BASE_AGENT_ID`), then overlay agents (skipping any slug already
- * used by the base or a catalog entry) sorted by label. Overlay labels
+ * used by the base or a catalog entry) sorted by label. Catalog labels
+ * prefer `display_name` (#3737), falling back to `name`. Overlay labels
  * prefer `display_name`, falling back to `name`, falling back to `slug`.
  * Test: `buildRoster_always_includes_base_first`,
  * `buildRoster_dedupes_catalog_entry_named_assistant`,
  * `buildRoster_dedupes_overlay_shadowing_catalog_entry`,
- * `buildRoster_sorts_overlays_by_label`.
+ * `buildRoster_sorts_overlays_by_label`,
+ * `buildRoster_prefers_catalog_display_name`.
  */
 export function buildRoster(
   catalog: CatalogAgent[],
@@ -149,6 +160,57 @@ export function buildRoster(
   overlayEntries.sort((a, b) => a.label.localeCompare(b.label));
 
   return [...entries, ...overlayEntries];
+}
+
+/**
+ * Why (#3737, per-message chat attribution, epic #3052): each assistant chat
+ * bubble must be labeled with WHICH persona produced it — the display name of
+ * the agent active when the message was sent — never a generic "agent". The
+ * dispatch axis is `activeAgentId` (see `stores/app.ts`): `null` means no
+ * roster entry is explicitly selected, which routes through the tools-armed
+ * base-assistant session path, so it labels as "Assistant". A non-null id is
+ * looked up in the merged roster for its friendly `label`.
+ * What: Returns the roster entry's `label` for `id`, or `BASE_AGENT_LABEL`
+ * ("Assistant") when `id` is `null`/empty or no entry matches (e.g. a stale
+ * selection, or the roster hasn't loaded yet). Pure — no store access — so
+ * the caller stamps the name onto the message at creation time and a later
+ * persona switch never retroactively relabels older bubbles.
+ * Test: `rosterDisplayName_null_id_is_base_label`,
+ * `rosterDisplayName_resolves_selected_entry`,
+ * `rosterDisplayName_unknown_id_falls_back_to_base`.
+ */
+export function rosterDisplayName(
+  roster: RosterEntry[],
+  id: string | null,
+): string {
+  if (!id) return BASE_AGENT_LABEL;
+  return roster.find((e) => e.id === id)?.label ?? BASE_AGENT_LABEL;
+}
+
+/**
+ * Why (#3737): chat attribution must reflect who ANSWERED. When a turn
+ * delegates (base "Assistant" → Izzie for a weather question), the server
+ * reports the responder's agent NAME in `PmResponse.responder_agent`; the GUI
+ * overwrites the bubble's request-time speaker stamp with that agent's display
+ * name on `task-complete`. This differs from `rosterDisplayName`: a delegated
+ * responder is always a real named specialist, so an id missing from the
+ * roster (e.g. a bundled worker not enumerated by `/api/agents`' flat scan)
+ * must fall back to the raw agent name — NOT to "Assistant", which would be a
+ * fresh mis-attribution.
+ * What: Returns the roster entry's `label` for `agentName`, else `agentName`
+ * verbatim. Trims; returns `null` for a blank/empty input so callers can skip
+ * the overwrite (keeping the request-time stamp).
+ * Test: `responderDisplayName_resolves_known_agent`,
+ * `responderDisplayName_falls_back_to_raw_name_for_unknown`,
+ * `responderDisplayName_blank_returns_null`.
+ */
+export function responderDisplayName(
+  roster: RosterEntry[],
+  agentName: string | null | undefined,
+): string | null {
+  const name = agentName?.trim();
+  if (!name) return null;
+  return roster.find((e) => e.id === name)?.label ?? name;
 }
 
 /** Editable fields the create/edit form (#3224) collects for one overlay. */

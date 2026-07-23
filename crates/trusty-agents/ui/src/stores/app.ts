@@ -48,6 +48,17 @@ export interface Message {
   /** Task id returned by the backend; used to route progress events. */
   taskId?: string;
   /**
+   * Why (#3737, per-message chat attribution, epic #3052): the display name
+   * of the persona that produced this message ("Assistant", "Izzie", "CTO
+   * Assistant"), stamped at creation time from the then-active roster
+   * selection. Stamping per-message (rather than reading the live roster at
+   * render time) is what lets a mid-conversation persona switch relabel only
+   * new bubbles — each message keeps the name of whoever produced it.
+   * What: Set for `role === 'assistant'` bubbles by `InputArea`; `ChatView`
+   * renders it, falling back to "Assistant" when absent (older messages).
+   */
+  speaker?: string;
+  /**
    * Why: Recap messages (#371) carry structured table rows we need to render
    * in ChatView as a styled banner. Keeping the rows on the Message itself
    * lets us replay chat history without re-querying the recap store.
@@ -338,6 +349,35 @@ export function updateMessageByTask(projectId: string, taskId: string, content: 
     next.set(
       projectId,
       list.map((m) => (m.taskId === taskId ? { ...m, content } : m)),
+    );
+    return next;
+  });
+}
+
+/**
+ * Why (#3737): chat attribution must reflect who ANSWERED. On `task-complete`
+ * the server-authoritative `responder_agent` (present only when the turn
+ * delegated) overrides the request-time speaker stamp so a base-"Assistant"
+ * turn that delegated a weather question to Izzie relabels the bubble to
+ * "Izzie". Kept separate from `updateMessageByTask` (content) so a complete
+ * event can set the speaker without disturbing the narrative flow.
+ * What: Sets `speaker` on the message currently tagged with `taskId` inside
+ * `projectId`. No-op when no message matches.
+ * Test: covered by ChatView's task-complete handling (manual) + the
+ * `responderDisplayName` resolver unit tests.
+ */
+export function setMessageSpeakerByTask(
+  projectId: string,
+  taskId: string,
+  speaker: string,
+): void {
+  messages.update((map) => {
+    const list = map.get(projectId);
+    if (!list) return map;
+    const next = new Map(map);
+    next.set(
+      projectId,
+      list.map((m) => (m.taskId === taskId ? { ...m, speaker } : m)),
     );
     return next;
   });

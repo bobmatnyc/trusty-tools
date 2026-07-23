@@ -47,6 +47,39 @@ async fn list_agents_returns_agents_envelope() {
     assert_eq!(arr[1]["runner"], "claude-code");
 }
 
+/// Why (#3737, per-message chat attribution, epic #3052): the GUI's agent
+/// roster labels each assistant chat bubble with the persona's `display_name`
+/// ("Izzie", "CTO Assistant"), so `GET /api/agents` must surface that field.
+/// A named agent carries its `display_name`; an agent WITHOUT one falls back
+/// to its `name` per the cross-PR contract (#3740) — `display_name` is never
+/// empty, so consumers always have a non-empty label to render.
+/// What: Writes one named + one display_name-less fixture, scans, asserts the
+/// field (present → verbatim; absent → the agent name).
+#[tokio::test]
+async fn scan_agents_dir_exposes_display_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("izzie.toml"),
+        "[agent]\nname = \"izzie\"\nrole = \"assistant\"\ndisplay_name = \"Izzie\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("engineer.toml"),
+        "[agent]\nname = \"engineer\"\nrole = \"engineer\"\n",
+    )
+    .unwrap();
+
+    let agents = scan_agents_dir(tmp.path()).await;
+    // Sorted by name: engineer < izzie.
+    assert_eq!(agents[0]["name"], "engineer");
+    assert_eq!(
+        agents[0]["display_name"], "engineer",
+        "an agent without display_name falls back to its name, never empty (#3740 contract)"
+    );
+    assert_eq!(agents[1]["name"], "izzie");
+    assert_eq!(agents[1]["display_name"], "Izzie");
+}
+
 /// Why: When the agents directory is missing, the route must still
 /// return a valid empty envelope so the UI does not crash.
 /// What: Points scan at a nonexistent path, asserts empty vec.

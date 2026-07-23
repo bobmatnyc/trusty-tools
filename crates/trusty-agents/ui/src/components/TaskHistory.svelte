@@ -10,6 +10,57 @@
   let errorMessage = '';
 
   /**
+   * Why (#3737): "Recent tasks" is backed by the server's task store, which
+   * persists to `.trusty-agents/state/tasks.json` and reloads on restart — so
+   * clearing it deletes durable history. Per the two-step requirement for a
+   * destructive-to-persisted-history action, the Clear affordance arms on the
+   * first click (`confirming`) and only actually clears on a second click.
+   * `clearing` disables the button while the request is in flight.
+   * What: `confirming` toggles the button into its "Confirm?" state, auto-
+   * disarming after a few seconds so a stray first click doesn't stay armed.
+   * Test: Manual — click Clear (label becomes "Confirm?"), click again, the
+   * finished tasks disappear while any running task stays.
+   */
+  let confirming = false;
+  let clearing = false;
+  let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function disarm() {
+    confirming = false;
+    if (confirmTimer) {
+      clearTimeout(confirmTimer);
+      confirmTimer = null;
+    }
+  }
+
+  /**
+   * Why: Clears the finished-task history without aborting any in-flight task
+   * (the backend `DELETE /api/tasks` keeps running tasks). Two-step: arm on
+   * the first click, execute on the second.
+   * What: First click arms `confirming` (auto-disarms after 4s). Second click
+   * invokes `clear_recent_tasks` then refreshes the list from the server.
+   * Test: Manual — see the panel's Clear button.
+   */
+  async function handleClear() {
+    if (clearing) return;
+    if (!confirming) {
+      confirming = true;
+      confirmTimer = setTimeout(disarm, 4000);
+      return;
+    }
+    disarm();
+    clearing = true;
+    try {
+      await invoke('clear_recent_tasks');
+      await refresh();
+    } catch (e) {
+      errorMessage = `${e}`;
+    } finally {
+      clearing = false;
+    }
+  }
+
+  /**
    * Why (#3221): `GET /api/tasks` (wired via `invoke('list_tasks')`) returns
    * the server's full `PmResponse` array — it carries `phases_completed`
    * even though the frontend's `TaskHistoryEntry` interface (stores/app.ts)
@@ -93,6 +144,7 @@
   onDestroy(() => {
     unlistenComplete?.();
     unlistenError?.();
+    if (confirmTimer) clearTimeout(confirmTimer);
   });
 
   function shortTask(t: string): string {
@@ -108,9 +160,30 @@
 </script>
 
 <section>
-  <h2 class="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-foundry-teal">
-    Recent tasks
-  </h2>
+  <div class="mb-2 flex items-center justify-between px-2">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-foundry-teal">
+      Recent tasks
+    </h2>
+    {#if $taskHistory.length > 0}
+      <!-- #3737: two-step Clear affordance for the recent-tasks list. Styled
+           to sit quietly beside the section heading (teal, matching the panel)
+           until armed, then red to signal the confirm step — reusing the
+           red-state utilities already used elsewhere in this app rather than
+           introducing a new token, and restyling nothing else in the panel. -->
+      <button
+        type="button"
+        class="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide transition-colors disabled:opacity-40 {confirming
+          ? 'text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/20'
+          : 'text-foundry-light-muted dark:text-foundry-text/50 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-teal'}"
+        disabled={clearing}
+        on:click={handleClear}
+        on:blur={disarm}
+        title="Clear finished tasks (running tasks are kept)"
+      >
+        {clearing ? 'Clearing…' : confirming ? 'Confirm?' : 'Clear'}
+      </button>
+    {/if}
+  </div>
 
   {#if errorMessage}
     <p class="px-2 text-xs text-red-500 dark:text-red-400">{errorMessage}</p>

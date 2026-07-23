@@ -30,7 +30,8 @@ use super::ctrl_sessions::{
 };
 use super::events_sse::events_handler;
 use super::handlers::{
-    clear_context, docs_search, get_session_recap, get_task, health, list_tasks, submit_task,
+    clear_context, clear_recent_tasks, docs_search, get_session_recap, get_task, health,
+    list_tasks, submit_task,
 };
 use super::models::get_models;
 use super::project_registration::{connect_project, get_project_config};
@@ -107,7 +108,10 @@ pub fn build_router_with_origins(
         // #3063: DELETE aborts an in-flight task (cancellation/retask
         // primitive — see `cancel::cancel_task` for the full contract).
         .route("/api/task/{id}", get(get_task).delete(cancel_task))
-        .route("/api/tasks", get(list_tasks))
+        // #3737: GET lists recent tasks; DELETE clears the finished-task
+        // history while keeping any still-running task (distinct from
+        // /api/clear-context, which also aborts in-flight work).
+        .route("/api/tasks", get(list_tasks).delete(clear_recent_tasks))
         .route("/api/clear-context", post(clear_context))
         .route("/api/health", get(health))
         .route("/api/config", config_route)

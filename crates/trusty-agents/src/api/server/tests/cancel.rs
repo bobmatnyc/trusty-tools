@@ -154,6 +154,51 @@ async fn clear_context_now_aborts_running_task() {
     );
 }
 
+/// #3737: `DELETE /api/tasks` clears the finished-task history but must leave
+/// a still-running task in place (unlike `POST /api/clear-context`, which
+/// aborts and wipes everything). Verifies the route removes only terminal
+/// entries, keeps the running one visible, and reports accurate counts.
+#[tokio::test]
+async fn clear_recent_tasks_removes_terminal_only() {
+    let state = AppState::default();
+
+    // Two terminal tasks + one running placeholder (no background future — we
+    // only care that the running record survives, not about abort wiring).
+    let mut ok = PmResponse::running("done-ok");
+    ok.status = PmStatus::Success;
+    state.upsert("done-ok".to_string(), ok).await;
+    let mut failed = PmResponse::running("done-fail");
+    failed.status = PmStatus::Failed;
+    state.upsert("done-fail".to_string(), failed).await;
+    state
+        .upsert(
+            "still-running".to_string(),
+            PmResponse::running("still-running"),
+        )
+        .await;
+
+    let app = router(state.clone());
+    let req = Request::builder()
+        .method(Method::DELETE)
+        .uri("/api/tasks")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["cleared"], true);
+    assert_eq!(v["removed"], 2);
+    assert_eq!(v["retained_running"], 1);
+
+    // Terminal tasks gone; the running one survives and is still listed.
+    assert!(state.get("done-ok").await.is_none());
+    assert!(state.get("done-fail").await.is_none());
+    let running = state.get("still-running").await.expect("running task kept");
+    assert_eq!(running.status, PmStatus::Running);
+    assert_eq!(state.list().await.len(), 1);
+}
+
 /// Regression test for the FIFO-eviction bug found in code review (#3063):
 /// `insert_and_trim` used to evict strictly by insertion order (index 0),
 /// so a long-running task submitted first and left running while

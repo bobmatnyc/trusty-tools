@@ -1,12 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy, afterUpdate } from 'svelte';
   import { Loader2 } from 'lucide-svelte';
+  import { get } from 'svelte/store';
   import {
     activeMessages,
     activeProjectId,
+    agentRoster,
+    setMessageSpeakerByTask,
     updateMessageByTask,
     isRunning,
   } from '../stores/app';
+  import { responderDisplayName } from '../lib/roster';
   import { listenEvent, type UnlistenFn } from '../lib/transport';
   import ActionIcon from '../lib/icons/ActionIcon.svelte';
   import WorkflowPhaseCard from './WorkflowPhaseCard.svelte';
@@ -25,6 +29,13 @@
     id: string;
     narrative?: string;
     status?: string;
+    /**
+     * #3737: server-authoritative name of the specialist that actually
+     * answered, present only when the turn delegated. When set, it overrides
+     * the request-time speaker stamp so the bubble reflects who ANSWERED
+     * (e.g. "Izzie") rather than who was asked ("Assistant").
+     */
+    responder_agent?: string;
   }
   interface ErrorPayload {
     task_id: string;
@@ -48,6 +59,12 @@
     unlistenComplete = await listenEvent<CompletePayload>('task-complete', (p) => {
       const text = p.narrative && p.narrative.length > 0 ? p.narrative : '(no narrative)';
       updateMessageByTask($activeProjectId, p.id, text);
+      // #3737: if the turn delegated, relabel the bubble to the agent that
+      // actually answered (resolved to its display name via the roster).
+      const responder = responderDisplayName(get(agentRoster), p.responder_agent);
+      if (responder) {
+        setMessageSpeakerByTask($activeProjectId, p.id, responder);
+      }
       isRunning.set(false);
     });
     unlistenError = await listenEvent<ErrorPayload>('task-error', (p) => {
@@ -105,9 +122,14 @@
       {:else if msg.role === 'assistant'}
         <div class="flex justify-start ml-4">
           <div class="max-w-[85%] rounded-r-2xl rounded-bl-2xl border-l-4 border-foundry-teal bg-foundry-teal/10 px-4 py-2 text-foundry-light-text dark:text-foundry-text shadow-sm">
-            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-foundry-teal/80">
+            <!-- #3737: label each assistant bubble with the specific persona
+                 that produced it (stamped on the message at send time), never
+                 a generic "agent". `tracking-wide` is kept but `uppercase` is
+                 dropped so a mixed-case display name ("CTO Assistant") reads
+                 as written rather than being flattened to "CTO ASSISTANT". -->
+            <div class="mb-1 flex items-center gap-1 text-[10px] font-medium tracking-wide text-foundry-teal/80">
               <ActionIcon name="agent" size={14} />
-              <span>agent</span>
+              <span>{msg.speaker ?? 'Assistant'}</span>
             </div>
             <p class="whitespace-pre-wrap text-sm leading-relaxed">{msg.content || '…'}</p>
             <p class="mt-1 text-[10px] text-foundry-teal/70">{fmtTime(msg.timestamp)}</p>

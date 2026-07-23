@@ -7,6 +7,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **Per-message agent attribution in the chat stream (#3737, epic #3052):**
+  every assistant bubble is now labeled with the display name of the persona
+  that produced it — "Assistant" for the default tools-armed path, or the
+  roster persona's friendly name ("Izzie", "CTO Assistant") when one is
+  selected — stamped per-message at send time, so a mid-conversation persona
+  switch relabels only later bubbles. Attribution reflects who ANSWERED, not
+  who was asked: when a turn delegates (base "Assistant" hands a weather
+  question to Izzie), the server reports the responding specialist in
+  `PmResponse.responder_agent` and the bubble is relabeled to that agent on
+  `task-complete`. The roster switcher likewise shows friendly display names
+  (sourced from the new `GET /api/agents` `display_name` field) rather than
+  dispatchable slugs.
+
+- **Clearable "Recent tasks" (#3737, epic #3052):** the sidebar's "Recent
+  tasks" panel gains a two-step "Clear" affordance (arm → confirm) wired
+  through a new `clear_recent_tasks` command to `DELETE /api/tasks`. It clears
+  finished tasks only and keeps any in-flight task visible; it is two-step
+  because the task history is persisted across restarts.
+
 ### Fixed
 
 - **The `tagent --api` sidecar is now reaped on quit (#3372):** quitting the

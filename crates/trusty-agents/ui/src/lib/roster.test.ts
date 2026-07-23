@@ -5,9 +5,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   BASE_AGENT_ID,
+  BASE_AGENT_LABEL,
   buildOverlayMarkdown,
   buildRoster,
   parseOverlayMarkdown,
+  responderDisplayName,
+  rosterDisplayName,
   slugify,
   type CatalogAgent,
   type OverlayAgent,
@@ -114,6 +117,74 @@ describe('buildRoster', () => {
     const roster = buildRoster([], overlays);
     const overlayLabels = roster.filter((r) => r.source === 'overlay').map((r) => r.label);
     expect(overlayLabels).toEqual(['Alpha', 'Zed']);
+  });
+
+  it('prefers a catalog entry display_name over its dispatchable name for the label (#3737)', () => {
+    const catalog: CatalogAgent[] = [
+      { name: 'cto-assistant', display_name: 'CTO Assistant' },
+      { name: 'izzie', display_name: 'Izzie' },
+      { name: 'python-engineer' }, // no display_name → falls back to name
+      { name: 'blank-display', display_name: '   ' }, // whitespace → falls back
+    ];
+    const roster = buildRoster(catalog, []);
+    expect(roster.find((r) => r.id === 'cto-assistant')?.label).toBe('CTO Assistant');
+    expect(roster.find((r) => r.id === 'izzie')?.label).toBe('Izzie');
+    expect(roster.find((r) => r.id === 'python-engineer')?.label).toBe('python-engineer');
+    expect(roster.find((r) => r.id === 'blank-display')?.label).toBe('blank-display');
+  });
+});
+
+describe('rosterDisplayName (#3737)', () => {
+  const roster = buildRoster(
+    [
+      { name: 'cto-assistant', display_name: 'CTO Assistant' },
+      { name: 'izzie', display_name: 'Izzie' },
+    ],
+    [],
+  );
+
+  it('returns the base label "Assistant" when no agent is selected (null id)', () => {
+    expect(rosterDisplayName(roster, null)).toBe(BASE_AGENT_LABEL);
+    expect(rosterDisplayName(roster, '')).toBe(BASE_AGENT_LABEL);
+  });
+
+  it('resolves a selected roster entry to its friendly display name', () => {
+    expect(rosterDisplayName(roster, 'izzie')).toBe('Izzie');
+    expect(rosterDisplayName(roster, 'cto-assistant')).toBe('CTO Assistant');
+    expect(rosterDisplayName(roster, BASE_AGENT_ID)).toBe(BASE_AGENT_LABEL);
+  });
+
+  it('falls back to the base label for an unknown/stale id', () => {
+    expect(rosterDisplayName(roster, 'deleted-overlay')).toBe(BASE_AGENT_LABEL);
+    expect(rosterDisplayName([], 'anything')).toBe(BASE_AGENT_LABEL);
+  });
+});
+
+describe('responderDisplayName (#3737)', () => {
+  const roster = buildRoster(
+    [
+      { name: 'izzie', display_name: 'Izzie' },
+      { name: 'cto-assistant', display_name: 'CTO Assistant' },
+    ],
+    [],
+  );
+
+  it('resolves a known responder agent name to its display name', () => {
+    expect(responderDisplayName(roster, 'izzie')).toBe('Izzie');
+    expect(responderDisplayName(roster, 'cto-assistant')).toBe('CTO Assistant');
+  });
+
+  it('falls back to the RAW agent name for an unknown responder (never "Assistant")', () => {
+    // A delegated worker not enumerated by /api/agents must keep its own
+    // name, not be mislabeled as the base assistant.
+    expect(responderDisplayName(roster, 'engineer')).toBe('engineer');
+    expect(responderDisplayName([], 'qa-agent')).toBe('qa-agent');
+  });
+
+  it('returns null for a blank/absent responder so the caller keeps the request-time stamp', () => {
+    expect(responderDisplayName(roster, null)).toBeNull();
+    expect(responderDisplayName(roster, undefined)).toBeNull();
+    expect(responderDisplayName(roster, '   ')).toBeNull();
   });
 });
 
