@@ -136,6 +136,46 @@ fn make_tool_state_fail_search(llm: Arc<dyn LlmProvider>) -> AppState {
     )
 }
 
+/// A search stub whose `health()` reports `status: "degraded"` purely from a
+/// benign, intentional watcher-disable on a network mount
+/// (`warm_boot_degraded: false`) — the issue #3693 scenario.
+struct DegradedButServingSearchTool;
+
+#[async_trait]
+impl SearchClient for DegradedButServingSearchTool {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        Ok(SearchHealth {
+            status: "degraded".into(),
+            embedder: EmbedderState::Bool(true),
+            warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
+                warm_boot_degraded: false,
+            }),
+        })
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
+fn make_tool_state_degraded_but_serving_search(llm: Arc<dyn LlmProvider>) -> AppState {
+    AppState::new(
+        ReviewConfig::load(None),
+        llm,
+        Arc::new(DegradedButServingSearchTool),
+        None,
+    )
+}
+
 // ── Tool-descriptor tests ─────────────────────────────────────────────────────
 
 #[test]
@@ -293,6 +333,36 @@ async fn review_health_optional_dep_down_ok() {
     assert_eq!(
         health["deps"]["trusty_analyze"]["reachable"], false,
         "trusty_analyze.reachable must be false (no analyze configured)"
+    );
+}
+
+/// review_health MCP tool stays `status: "ok"` when trusty-search reports
+/// `status: "degraded"` for a benign reason (issue #3693: a network-mount
+/// watcher-disable, `warm_boot_degraded: false`) — this tool's own doc
+/// comment names it as the primary consumer MPM uses to gate `review_pr`, so
+/// this is the call site that most directly reproduces the #3693 symptom for
+/// external callers if it were left on `is_healthy()`.
+///
+/// Why: `call_review_health` shares `probe_deps` with the HTTP `/health`
+/// handler, so this exercises the same `is_serving()` gate end-to-end
+/// through the MCP path specifically.
+/// What: builds AppState with OkLlmTool + DegradedButServingSearchTool; calls
+/// call_review_health; asserts status is "ok" and trusty_search.reachable is
+/// true.
+/// Test: this test itself.
+#[tokio::test]
+async fn review_health_degraded_but_serving_search_stays_ok() {
+    let state = make_tool_state_degraded_but_serving_search(Arc::new(OkLlmTool));
+    let result = call_review_health(&state).await;
+    let text = result["content"][0]["text"].as_str().expect("text field");
+    let health: Value = serde_json::from_str(text).expect("valid JSON");
+    assert_eq!(
+        health["status"], "ok",
+        "degraded-but-serving trusty-search (benign watcher-disable) must not degrade status (#3693)"
+    );
+    assert_eq!(
+        health["deps"]["trusty_search"]["reachable"], true,
+        "trusty_search.reachable must be true when only degraded due to benign watcher-disable (#3693)"
     );
 }
 

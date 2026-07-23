@@ -141,6 +141,39 @@ impl SearchClient for UnhealthySearch {
     }
 }
 
+/// A search stub whose `health()` reports `status: "degraded"` purely from a
+/// benign, intentional watcher-disable on a network mount
+/// (`warm_boot_degraded: false`) — the exact issue #3693 scenario: search is
+/// fully functional, so `handle_health` must still report `reachable: true`
+/// / top-level `status: "ok"`.
+pub(super) struct DegradedButServingSearch;
+
+#[async_trait]
+impl SearchClient for DegradedButServingSearch {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        Ok(SearchHealth {
+            status: "degraded".to_string(),
+            embedder: EmbedderState::Bool(true),
+            warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
+                warm_boot_degraded: false,
+            }),
+        })
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _index_id: &str,
+        _query: &str,
+        _top_k: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
 // ── Fake LLM that returns auth error ─────────────────────────────────────────
 
 pub(super) struct AuthErrorLlm;
@@ -718,6 +751,47 @@ async fn health_unhealthy_search_response_reports_state_unreachable() {
     assert_eq!(
         body["deps"]["trusty_search"]["state"], "unreachable",
         "an unhealthy-but-answering dep must be state:unreachable, not state:timeout (#3658)"
+    );
+}
+
+/// The exact issue #3693 scenario, exercised end-to-end through
+/// `handle_health`: trusty-search reports `status: "degraded"` solely
+/// because its file watcher was auto-disabled on a network mount
+/// (`warm_boot_degraded: false`) — search itself is fully functional. Before
+/// this fix `probe_deps` gated on `HealthResponse::is_healthy()`
+/// (`status == "ok"`), so this reported `reachable: false` /
+/// `status: "degraded"` and external callers (load balancers, MPM) would
+/// treat a fully-serving instance as unhealthy.
+///
+/// Why: `handle_health` is one of three call sites (alongside the MCP
+/// `review_health` tool and `console_metrics`) that must all use
+/// `is_serving()` for this fix to actually resolve #3693 for external
+/// callers, not just for `context_gate`'s own reachability check.
+/// What: builds `AppState` with `DegradedButServingSearch`; calls
+/// `handle_health`; asserts `reachable: true` and the top-level
+/// `status: "ok"`.
+/// Test: this test itself.
+#[tokio::test]
+async fn health_degraded_but_serving_stays_ok() {
+    let state = AppState::new(
+        crate::config::ReviewConfig::load(None),
+        Arc::new(FakeLlm),
+        Arc::new(DegradedButServingSearch),
+        None,
+    );
+    let response = handle_health(State(state)).await;
+    let resp: axum::response::Response = response.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body_bytes = to_bytes(resp.into_body(), 65536).await.expect("body bytes");
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("valid JSON");
+
+    assert_eq!(
+        body["deps"]["trusty_search"]["reachable"], true,
+        "a degraded-but-serving trusty-search (benign watcher-disable) must report reachable:true (#3693)"
+    );
+    assert_eq!(
+        body["status"], "ok",
+        "top-level status must stay ok when the only degradation is a benign watcher-disable (#3693)"
     );
 }
 

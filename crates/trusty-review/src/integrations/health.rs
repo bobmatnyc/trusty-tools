@@ -117,17 +117,26 @@ pub struct HealthResponse {
     /// Warm-boot health summary (issue #3693).
     ///
     /// Why: trusty-search downgrades its top-level `status` to `"degraded"`
-    /// for two very different reasons: (1) a benign, intentional capability
-    /// gap — the file watcher was auto-disabled on a network-mounted
-    /// (EFS/NFS) root, indexes stay fully queryable/reindexable via the
-    /// explicit `index-file`/`remove-file` API — or (2) a real fault —
-    /// TCC/FDA denial, a scan timeout, a corpus that failed to open, or a
-    /// large fraction of indexes missing after warm-boot. Only trusty-search
-    /// itself can tell these apart; it already does, via
-    /// `warmboot_summary.warm_boot_degraded`, which is `true` only for
-    /// reason (2). Absent on older trusty-search versions or transport
-    /// errors, in which case callers must treat degraded as "unknown, assume
-    /// not serving" (see `is_serving`'s doc comment).
+    /// for two very different reasons when it does downgrade: (1) a benign,
+    /// intentional capability gap — the file watcher was auto-disabled on a
+    /// network-mounted (EFS/NFS) root, indexes stay fully
+    /// queryable/reindexable via the explicit `index-file`/`remove-file`
+    /// API — or (2) `indexes_corpus_failed > 0` — a corpus that failed to
+    /// open. `warmboot_summary.warm_boot_degraded` is `true` for reason (2)
+    /// (and also for TCC/FDA denial, a scan timeout, or a large fraction of
+    /// indexes missing after warm-boot — see trusty-search's own
+    /// `WarmBootSummary::warm_boot_degraded` doc), but as of trusty-search
+    /// 0.38.1 those latter three conditions do NOT flip the top-level
+    /// `status` to `"degraded"` on their own — trusty-search issue #3706
+    /// tracks folding them in. Until that ships, a warm-boot broken only by
+    /// TCC-denial / scan-timeout / mass-index-loss (no corpus-open failure)
+    /// reports `status: "ok"` and `is_serving` never gets to inspect this
+    /// field for it — a pre-existing gap, not introduced or worsened by
+    /// #3693 (the prior `is_healthy` had the identical blind spot, since it
+    /// too only ever looked at the top-level `status` string). Absent on
+    /// older trusty-search versions or transport errors, in which case
+    /// callers must treat degraded as "unknown, assume not serving" (see
+    /// `is_serving`'s doc comment).
     /// Test: `health_response_degraded_watcher_only_is_serving`,
     /// `health_response_degraded_warmboot_degraded_is_not_serving`,
     /// `health_response_degraded_missing_summary_is_not_serving`.
@@ -148,12 +157,28 @@ pub struct HealthResponse {
 /// trusty-search side never break parsing here.
 /// What: `warm_boot_degraded == true` means trusty-search itself considers
 /// its warm-boot state broken, regardless of the top-level `status` string.
-/// Test: see `HealthResponse` test list above.
+/// Test: see `HealthResponse` test list above; `warm_boot_summary_wire_shape_is_pinned`
+/// below pins the exact field name this type deserialises against.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WarmBootSummary {
     /// `true` when trusty-search's own warm-boot health check considers
     /// itself degraded for a real reason (not merely a network-mount
     /// watcher disable).
+    ///
+    /// Danger (fail-open direction): `#[serde(default)]` means a future
+    /// trusty-search rename/removal of this JSON key (e.g. a typo fix or a
+    /// schema refactor upstream) silently deserialises this field as `false`
+    /// rather than erroring — `is_serving()` would then read a *genuinely*
+    /// degraded response as `warm_boot_degraded: false` and report it as
+    /// serving. This is the deliberate trade-off for forward-compatibility
+    /// (an unrelated trusty-search field addition must never break parsing
+    /// here), but it means a rename on the wire is invisible at the type
+    /// level — only `warm_boot_summary_wire_shape_is_pinned` (which
+    /// hardcodes today's exact key name) would catch it, by failing to
+    /// compile/assert against a wire fixture that no longer contains the
+    /// field it expects. Treat a failure in that test as a signal to check
+    /// whether trusty-search actually renamed the field vs. the fixture
+    /// merely going stale.
     #[serde(default)]
     pub warm_boot_degraded: bool,
 }
@@ -180,10 +205,18 @@ impl HealthResponse {
     /// 100% functional. Treating every non-`"ok"` status as "unreachable"
     /// (the pre-fix behaviour) fail-closed the gate and skipped every review
     /// on such deployments. This method inspects the structured
-    /// `warmboot_summary.warm_boot_degraded` flag — trusty-search's own
-    /// "am I actually broken" signal — rather than guessing from the status
-    /// string, so a genuinely broken search (embedder dead, indexes
-    /// unloadable, TCC-denied, scan-timed-out) still reports `false`.
+    /// `warmboot_summary.warm_boot_degraded` flag — trusty-search's own "am I
+    /// actually broken" signal — rather than guessing from the status
+    /// string, so a genuinely broken search that trusty-search itself
+    /// reports as `status: "degraded"` (embedder dead — caught separately by
+    /// the embedder-readiness check below — or an unloadable/corpus-open-failed
+    /// index) still reports `false`. Caveat (trusty-search issue #3706): TCC
+    /// denial, a scan timeout, and mass index loss also set
+    /// `warm_boot_degraded: true`, but as of trusty-search 0.38.1 they do NOT
+    /// by themselves flip the top-level `status` away from `"ok"` — this
+    /// method inherits that upstream blind spot unchanged from the prior
+    /// `is_healthy` (both only ever look at `status`); it is not made worse
+    /// by this fix, and closing it is out of scope here (see #3706).
     /// What: `false` if the embedder is not ready. Otherwise: `status ==
     /// "ok"` → `true`; `status == "degraded"` → `true` only when
     /// `warmboot_summary` is present AND `warm_boot_degraded == false`
@@ -434,5 +467,55 @@ mod tests {
         let json = r#"{"status":"starting","embedder":"ready"}"#;
         let resp: HealthResponse = serde_json::from_str(json).unwrap();
         assert!(!resp.is_serving(), "status=starting must not serve");
+    }
+
+    /// Pins the exact wire shape `WarmBootSummary` deserialises against.
+    ///
+    /// Why: `#[serde(default)]` on `warm_boot_degraded` is a deliberately
+    /// fail-open direction (see the field's doc comment) — a future
+    /// trusty-search rename/removal of the `warm_boot_degraded` JSON key
+    /// would silently parse as `false` (not serving-relevant/degraded)
+    /// rather than erroring, which `is_serving()` would then misread as "not
+    /// actually broken." There is no type-level way to catch a silent rename
+    /// against an unknown-fields-tolerant struct; this test is the guard
+    /// instead — it hardcodes today's exact key name inside a full
+    /// `warmboot_summary` object shaped like a real trusty-search
+    /// response, and asserts the parsed value is `true`. If trusty-search
+    /// ever renames the key, THIS SPECIFIC ASSERTION starts failing (the
+    /// value would silently come back `false` due to `#[serde(default)]`)
+    /// even though `serde_json::from_str` itself still reports success —
+    /// that combination (parse ok, assertion fails) is the signal to go
+    /// check trusty-search's actual `/health` payload for a rename before
+    /// assuming this test fixture merely went stale.
+    /// What: deserialises a `warmboot_summary: {"warm_boot_degraded": true, ...}`
+    /// object (with sibling counters present, mirroring the real payload) and
+    /// asserts `warm_boot_degraded == true` round-trips.
+    /// Test: this test itself.
+    #[test]
+    fn warm_boot_summary_wire_shape_is_pinned() {
+        let json = r#"{
+            "status": "degraded",
+            "embedder": "ready",
+            "warmboot_summary": {
+                "indexes_loaded": 40,
+                "indexes_skipped_tcc": 2,
+                "indexes_skipped_timeout": 0,
+                "warm_boot_degraded": true,
+                "indexes_lazy": 0,
+                "indexes_corpus_failed": 0
+            }
+        }"#;
+        let resp: HealthResponse =
+            serde_json::from_str(json).expect("must parse a real-shaped warmboot_summary object");
+        assert_eq!(
+            resp.warmboot_summary.as_ref().map(|w| w.warm_boot_degraded),
+            Some(true),
+            "warm_boot_degraded=true in the wire payload must deserialise as Some(true), not \
+             silently default to Some(false)/None on a key-name mismatch"
+        );
+        assert!(
+            !resp.is_serving(),
+            "a warm_boot_degraded=true response must not serve, end to end through is_serving()"
+        );
     }
 }

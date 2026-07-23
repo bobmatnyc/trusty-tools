@@ -21,9 +21,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   already reports instead of guessing from the status string: `"ok"` always
   serves; `"degraded"` serves only when `warm_boot_degraded` is false (the
   benign watcher-disable case) and logs a WARN instead of skipping; a
-  genuinely broken search (embedder dead, indexes unloadable, TCC-denied,
-  scan-timed-out, or a `"degraded"` response with no `warmboot_summary` at
-  all) still fails the gate exactly as before.
+  genuinely broken search (embedder dead, indexes unloadable, or a
+  `"degraded"` response with no `warmboot_summary` at all) still fails the
+  gate exactly as before. The same swap (`is_healthy` → `is_serving`) also
+  landed in the three sibling call sites that share the `probe_deps` helper —
+  the HTTP `GET /health` handler, the `review_health` MCP tool, and the
+  `console_metrics` MCP tool — so external callers (load balancers, MPM's
+  `review_pr` gate, the console dashboard) see the same fix, not just
+  `context_gate`'s own internal reachability check. Known residual gap
+  (tracked separately, [trusty-search#3706](https://github.com/bobmatnyc/trusty-tools/issues/3706),
+  pre-existing and unrelated to this fix): a warm-boot broken only by TCC
+  denial, a scan timeout, or mass index loss (no corpus-open failure) still
+  reports `status: "ok"` from trusty-search today, so `is_serving` never gets
+  to inspect `warm_boot_degraded` for those specific cases either — same
+  blind spot the old `is_healthy` had, since both only ever look at the
+  top-level `status` string.
 
 - **`/health` no longer hangs when trusty-search is slow, not down**
   (closes [#3658](https://github.com/bobmatnyc/trusty-tools/issues/3658),
