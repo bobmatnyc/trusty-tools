@@ -30,6 +30,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Cmd+Q now actually reaps the sidecar; sidecar self-exits if the GUI dies
+  any other way (#3734):** the #3372 reap was DEFERRED onto an async task
+  (`prevent_exit()` + `spawn` + `handle.exit(0)`), which never ran on macOS
+  Cmd+Q — that quit is a synchronous AppKit teardown that exits the process in
+  ~3ms, before the task is polled, so the sidecar was orphaned and kept holding
+  port 8765 (live-reproduced). The quit reap is now SYNCHRONOUS: the
+  `RunEvent::ExitRequested`/`Exit` handler blocks on `kill_sidecar` for a short
+  bounded window (500ms) so SIGTERM→(wait)→SIGKILL completes before control
+  returns to AppKit — no `prevent_exit`/`handle.exit` dance. As a guaranteed
+  backstop for every GUI failure mode the Tauri event loop can miss (Cmd+Q race,
+  crash, external SIGTERM/SIGKILL), the GUI now spawns the sidecar with
+  `--parent-pid <gui_pid>`, arming the sidecar's own parent-death watchdog
+  (trusty-agents #3734). The tray "Quit" item is simplified to route through the
+  same single synchronous reap.
+
 - **The `tagent --api` sidecar is now reaped on quit (#3372):** quitting the
   desktop app (tray "Quit", Cmd+Q, app-menu Quit, or an AppleScript `quit`)
   previously left the sidecar running and holding its fixed port, so repeated

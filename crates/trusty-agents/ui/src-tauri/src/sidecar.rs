@@ -35,11 +35,15 @@ use tokio::sync::Mutex;
 /// How long we let the sidecar shut down gracefully after SIGTERM before we
 /// escalate to SIGKILL.
 ///
-/// Why: `tagent --api` handles SIGTERM and releases its port cleanly, but a
-/// hung or wedged sidecar must not stall app quit indefinitely. Two seconds is
-/// long enough for a healthy sidecar to unbind its listener and short enough
-/// that a wedged one doesn't make quit feel broken during the demo.
-pub(crate) const SIDECAR_GRACE: Duration = Duration::from_secs(2);
+/// Why: On macOS the Cmd+Q quit path is a SYNCHRONOUS AppKit teardown
+/// (`applicationShouldTerminate:` → reply → exit) that completes in a few
+/// milliseconds (#3734 root cause). The Tauri-side reap therefore has to run
+/// synchronously inside the quit event and must stay short so it does not make
+/// quit feel laggy. 500ms is ample for a healthy `tagent --api` to catch
+/// SIGTERM and unbind its listener; anything slower is covered by the sidecar's
+/// own parent-death watchdog (#3734), which is the real guarantee against
+/// orphans — so a short bounded window here is safe.
+pub(crate) const SIDECAR_GRACE: Duration = Duration::from_millis(500);
 
 /// Shared handle to the spawned `trusty-agents --api` sidecar.
 ///
@@ -132,10 +136,17 @@ pub async fn ensure_api_server(port: u16, state: State<'_, SharedApi>) -> Result
         "spawning trusty-agents --api sidecar"
     );
 
+    // #3734: pass our own pid as `--parent-pid` so the sidecar arms its
+    // parent-death watchdog and self-exits if this GUI dies by any path the
+    // Tauri quit-event reap can miss (macOS Cmd+Q sudden teardown, a crash, an
+    // external SIGTERM/SIGKILL) — no orphan can then hold the port across a
+    // GUI restart.
     let child = tokio::process::Command::new(&binary)
         .arg("--api")
         .arg("--port")
         .arg(port.to_string())
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
         .env("TAGENT_PROJECT_DIR", &project_root)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())

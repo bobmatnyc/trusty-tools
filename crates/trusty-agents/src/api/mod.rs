@@ -12,6 +12,7 @@
 pub mod builder;
 pub mod server;
 pub mod types;
+pub mod watchdog;
 
 #[allow(unused_imports)]
 pub use types::{PhaseProgress, PhaseResult, PmMetadata, PmResponse, PmResponseType, PmStatus};
