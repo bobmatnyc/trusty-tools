@@ -257,8 +257,27 @@ async fn load_tm_projects_from_disk() -> Vec<TmProject> {
 /// Test: `scan_agent_catalog_dedupes_across_dirs`,
 /// `scan_agents_dir_resolves_packages_flat_and_dedupes`.
 pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<serde_json::Value> {
+    Json(agent_roster().await)
+}
+
+/// Shared agent-roster computation — the `{"agents": [...]}` envelope returned
+/// by both `GET /api/agents` ([`list_agents_route`]) and the `list_agents`
+/// MCP tool ([`crate::runtime::mcp_serve`], #3633 core).
+///
+/// Why: the MCP `list_agents` tool must surface the EXACT same roster the HTTP
+/// route (and therefore the GUI picker) shows — Assistant, Izzie, CTO Bot, and
+/// the specialist personas resolved from [`crate::agents::agents_dir_candidates`].
+/// Extracting the computation out of the axum handler into one plain async fn
+/// keeps the two surfaces from drifting, exactly as [`parse_agent_toml`] keeps
+/// the GET and PATCH shapes aligned.
+/// What: scans every candidate agents directory via [`scan_agent_catalog`]
+/// (package + flat resolution, deduped, name-sorted) and wraps the result in
+/// the `{"agents": [...]}` envelope. Read-only; no side effects.
+/// Test: covered indirectly by `scan_agent_catalog_dedupes_across_dirs` (the
+/// scan) and the `mcp_serve` dispatcher's `tools/call` unit test (the envelope).
+pub(crate) async fn agent_roster() -> serde_json::Value {
     let dirs = crate::agents::agents_dir_candidates();
-    Json(serde_json::json!({ "agents": scan_agent_catalog(&dirs).await }))
+    serde_json::json!({ "agents": scan_agent_catalog(&dirs).await })
 }
 
 /// Parse one agent TOML file's `[agent]` table into the JSON shape shared by

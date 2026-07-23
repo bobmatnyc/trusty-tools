@@ -7,6 +7,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`tagent mcp-serve` — stdio MCP server exposing trusty-agents to external MCP
+  clients (Claude Code, etc.) (#3633 core):** a line-delimited JSON-RPC / MCP
+  server over stdio, built on the shared `trusty_common::mcp` framework
+  (`run_stdio_loop` + `initialize_response`, protocol `2024-11-05`) with zero new
+  dependencies. Ships two tools — `list_agents` (read-only; returns the same
+  roster the `GET /api/agents` route serves, via a newly-extracted shared
+  `agent_roster` fn) and `dispatch_task` (wraps the existing opaque, RBAC-gated
+  `PmBridgeTool` rooted at the server's cwd). Dispatched before `run_startup_init`
+  so the JSON-RPC stdout stream is never polluted by startup output. Deferred to
+  epic #3633: HTTP/SSE transport, `rpc.discover`, tool namespacing, auth, and
+  RBAC tier-mapping of external callers.
+
 ### Changed
 
 - **Base `assistant` persona defaults to Sonnet instead of Opus (#3688):**

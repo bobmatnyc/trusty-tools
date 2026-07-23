@@ -104,6 +104,10 @@ pub(super) async fn dispatch_subcommands(args: &[String]) -> Result<bool> {
         "resume",
         // system_status epic (#3052): `system status [--json]`.
         "system",
+        // #3633 core: `mcp-serve` — stdio MCP server (dispatched even earlier in
+        // `runtime::run`, before startup init; listed here only so a near-miss
+        // typo still gets a suggestion).
+        "mcp-serve",
     ];
     if args.len() > 1 {
         let candidate = &args[1];
