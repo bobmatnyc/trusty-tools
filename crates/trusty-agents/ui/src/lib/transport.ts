@@ -145,8 +145,16 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
       });
       const startMs = Date.now();
       const deadline = startMs + 10 * 60 * 1000;
+      // #3741 (perceived-latency fix): mirrors the Tauri `send_message` poll
+      // cadence — a flat 1500ms added up to +1.5s of dead time on top of the
+      // LLM call (a trivial turn measured ~2.1s backend but felt ~3.5s). Poll
+      // every 250ms for the first ~20 polls (~5s, covering most turns), then
+      // back off to 500ms so a long turn doesn't hammer the server.
+      let polls = 0;
       while (Date.now() < deadline) {
-        await new Promise((res) => setTimeout(res, 1500));
+        const intervalMs = polls < 20 ? 250 : 500;
+        polls += 1;
+        await new Promise((res) => setTimeout(res, intervalMs));
         const r = await fetch(`${base}/api/task/${id}`, { headers: authHeaders() });
         if (!r.ok) {
           const err = `poll failed: ${r.status}`;

@@ -187,6 +187,13 @@ pub async fn send_message(
     // Poll until terminal.
     let poll_url = format!("{}/api/task/{}", api_base(port), task_id);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10 * 60);
+    // #3741 (perceived-latency fix): a flat 1500ms poll added up to +1.5s of
+    // dead time on top of the LLM call — a trivial turn measured ~2.1s at the
+    // backend but felt ~3.5s. Poll every 250ms for the first ~20 polls (the
+    // first ~5s, which covers the vast majority of turns) so a fast result is
+    // surfaced almost immediately, then back off to 500ms so a genuinely long
+    // turn doesn't hammer the sidecar for minutes.
+    let mut polls: u32 = 0;
     loop {
         if std::time::Instant::now() > deadline {
             let err = "task timed out after 10 minutes";
@@ -199,7 +206,9 @@ pub async fn send_message(
             );
             return Err(err.into());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let interval_ms = if polls < 20 { 250 } else { 500 };
+        polls += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
 
         let poll = client
             .get(&poll_url)
