@@ -19,6 +19,8 @@
 // Test: `chatStream.test.ts`.
 
 import type { AppEvent } from './transport';
+import type { Message } from '../stores/app';
+import { isPendingTaskId } from './retask';
 
 /** Web-bus payload for an accumulated token batch. */
 export interface DeltaPayload {
@@ -96,4 +98,72 @@ export class StreamAccumulator {
   finalize(taskId: string): boolean {
     return this.buffers.delete(taskId);
   }
+}
+
+/**
+ * Why: The streaming write path spans TWO components — `ChatView` grows the
+ * bubble from `task-delta` events, while `InputArea`'s poll-loop reconcile
+ * must NOT overwrite that live text with a "Running…" progress tick. Both need
+ * the same "is task T streaming?" answer, so a single shared instance is the
+ * source of truth instead of a per-component `new StreamAccumulator()` (which
+ * left `InputArea` blind to `ChatView`'s streaming state, so its reconcile
+ * clobbered streamed text — a visible mid-stream flash). Finalized per task on
+ * completion, so nothing leaks across turns.
+ * What: The process-wide accumulator both components import.
+ * Test: `chatStream.test.ts` (`streamAccumulator singleton`).
+ */
+export const streamAccumulator = new StreamAccumulator();
+
+/**
+ * Fill a streamed token batch into the ONE in-flight assistant bubble, in
+ * place, returning the next message list (or the SAME array reference when the
+ * write is a no-op so the store — and therefore Svelte's keyed `{#each}` and
+ * the scroll reflow — does not churn a redundant re-render).
+ *
+ * Why: The chat renders `{#each $activeMessages as msg (msg.id)}`, so a stable
+ * bubble requires (a) never changing the matched message's `id` and (b) not
+ * dropping early deltas. Before reconciliation the placeholder bubble still
+ * carries its client-side `pending-<ts>` id while `task-delta` events already
+ * carry the REAL backend id, so a plain id-equality update missed the bubble
+ * until the poll loop swapped the id — the first tokens were lost and the poll
+ * loop's interim progress text flashed in, which is the flicker the owner saw.
+ * This adopts the most recent in-flight `pending-` assistant bubble on the
+ * first delta, so token #1 onward render inside the single existing bubble.
+ * What: Locates the target bubble by exact `taskId`, else the newest assistant
+ * bubble still on a `pending-` id; rewrites its `content` (and `speaker`, when
+ * the delta carries one) while preserving its `id`; returns `list` unchanged
+ * when nothing would change.
+ * Test: `chatStream.test.ts` (`fillDeltaIntoList`).
+ */
+export function fillDeltaIntoList(
+  list: Message[],
+  taskId: string,
+  content: string,
+  speaker?: string,
+): Message[] {
+  let idx = list.findIndex((m) => m.taskId === taskId);
+  if (idx === -1) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      if (m.role === 'assistant' && isPendingTaskId(m.taskId ?? null)) {
+        idx = i;
+        break;
+      }
+    }
+  }
+  if (idx === -1) return list;
+
+  const target = list[idx];
+  const nextSpeaker = speaker && speaker.length > 0 ? speaker : target.speaker;
+  if (
+    target.taskId === taskId &&
+    target.content === content &&
+    target.speaker === nextSpeaker
+  ) {
+    return list;
+  }
+
+  const next = list.slice();
+  next[idx] = { ...target, taskId, content, speaker: nextSpeaker };
+  return next;
 }

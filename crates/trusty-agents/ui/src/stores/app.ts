@@ -9,6 +9,7 @@ import {
   type RosterEntry,
 } from '../lib/roster';
 import type { ModelsCatalogResponse, PickerEntry } from '../lib/models';
+import { fillDeltaIntoList } from '../lib/chatStream';
 
 /**
  * Why: The sidebar needs a single source of truth for the list of chat
@@ -350,6 +351,37 @@ export function updateMessageByTask(projectId: string, taskId: string, content: 
       projectId,
       list.map((m) => (m.taskId === taskId ? { ...m, content } : m)),
     );
+    return next;
+  });
+}
+
+/**
+ * Why: Token-streaming (`task-delta`) must grow the SINGLE in-flight assistant
+ * bubble in place — one stable node per turn, no per-token re-mount or flash.
+ * A plain `updateMessageByTask` misses two things: it does a full second store
+ * write for the mid-stream speaker stamp (two re-renders + two scroll reflows
+ * per token), and it can't land the first tokens because the bubble still
+ * carries its `pending-<ts>` id while deltas already carry the real one. This
+ * funnels content + speaker through ONE store write and reconciles the
+ * placeholder id on the first delta (see `fillDeltaIntoList`), and no-ops when
+ * nothing changed so an idle/duplicate frame triggers no render.
+ * What: Applies a delta batch to the in-flight bubble for `projectId`, updating
+ * the outer `Map` only when the list actually changed.
+ * Test: `chatStream.test.ts` exercises the pure `fillDeltaIntoList` core.
+ */
+export function streamDeltaIntoTask(
+  projectId: string,
+  taskId: string,
+  content: string,
+  speaker?: string,
+): void {
+  messages.update((map) => {
+    const list = map.get(projectId);
+    if (!list) return map;
+    const nextList = fillDeltaIntoList(list, taskId, content, speaker);
+    if (nextList === list) return map; // no-op ⇒ no store churn
+    const next = new Map(map);
+    next.set(projectId, nextList);
     return next;
   });
 }
