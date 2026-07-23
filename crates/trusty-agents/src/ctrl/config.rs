@@ -114,6 +114,25 @@ pub(crate) fn resolve_overridden_credentials(
     }
 }
 
+/// The resolved agent/model/provider/runner quartet for one dispatch (#3469).
+///
+/// Why: The assistant persona once answered "What model and provider are you
+/// using?" with a confident *wrong* answer — claiming Anthropic's API while
+/// actually running `claude-opus-4-6` via OpenRouter. The harness already
+/// resolves these values for the turn's real LLM call (`creds.label()`,
+/// `agent.runner`, `agent.model`); bundling them into one borrowed struct lets
+/// `render_user_context_block` emit a self-identification line built from the
+/// SAME resolved values, so the injected sentence can never disagree with what
+/// is actually dispatching. This is introspection, not a hardcoded literal:
+/// every field is read from the live resolution, only the sentence template is
+/// fixed.
+/// What: Borrowed string slices for the agent name, model id, runner (the
+/// `Debug` form of `RunnerKind`), and provider label (`LlmCredentials::label()`).
+/// Purely a parameter bundle — carries no behavior of its own.
+/// Test: `render_user_context_block_includes_self_identification` asserts the
+/// rendered sentence names each field verbatim.
+// #3469: self-identification carrier — resolves the descope/re-scope drift from
+// PR #3461 by making the struct's own doc record match the shipped behavior.
 pub(crate) struct AgentIdentity<'a> {
     pub agent_name: &'a str,
     pub model: &'a str,
@@ -162,23 +181,27 @@ pub(crate) fn render_user_datetime(
     }
 }
 
-/// Render the `## User Context` block: user profile fields plus a fresh
-/// tz-aware date/time line (#3052 follow-up).
+/// Render the `## User Context` block: user profile fields, a fresh tz-aware
+/// date/time line, and an agent self-identification line (#3052 → #3469).
 ///
 /// Why: Split out of `build_user_context_prefix` so `ctrl_chat_turn`'s
 /// system-prompt assembly (which appends context AFTER the base prompt,
 /// rather than prefixing it) can reuse the exact same block instead of
 /// hand-rolling a second, drifted copy — the original defect this whole
-/// helper exists to prevent. Note: agent/model/provider self-identification
-/// is deliberately NOT part of this block — that's handled by dedicated
-/// self-inspection tools, not a literal injected into the prompt.
+/// helper exists to prevent. Self-identification (agent/model/provider/runner)
+/// IS part of this block, authorized by #3469: it is built from `identity`,
+/// whose fields are the SAME values resolved for the turn's real LLM dispatch,
+/// so the injected sentence can never disagree with what is actually running.
+/// (An earlier iteration of PR #3461 declared this line descoped; #3469
+/// re-scoped it and this doc now matches the shipped behavior — see the
+/// `AgentIdentity` doc for the full history.)
 /// What: Loads `UserProfile` fresh (so a `config profile set` mid-session
 /// takes effect on the very next turn); when a profile with a non-empty name
 /// exists, emits `user_name`/optional `email`/optional `timezone`/optional
 /// `location` lines (each omitted when unset — no placeholders, no
 /// guessing); otherwise emits `user_name = "(unknown)"`. Always appends a
-/// freshly-computed `render_user_datetime` line, regardless of profile
-/// state.
+/// freshly-computed `render_user_datetime` line, then the self-identification
+/// sentence, regardless of profile state.
 /// Test: `render_user_context_block_includes_location_when_set`,
 /// `render_user_context_block_omits_location_when_unset`,
 /// `render_user_context_block_unknown_user_still_gets_datetime`,
@@ -209,6 +232,8 @@ pub(crate) fn render_user_context_block(identity: &AgentIdentity<'_>) -> String 
         }
     }
     block.push('\n');
+    // #3469: self-identification from the resolved dispatch values, so the
+    // model can answer "what model/provider am I?" without guessing.
     block.push_str(&format!(
         "\nYou are running as agent '{}' on model {} via {} (runner: {}, trusty-agents v{}).\n",
         identity.agent_name,

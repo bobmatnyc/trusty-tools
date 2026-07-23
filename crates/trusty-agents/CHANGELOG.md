@@ -9,6 +9,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Agent context knows "now", "here", and "who" (#3469, epic #3052):** the
+  `## User Context` block prefixed onto every tagent system prompt (PM, persona,
+  and ctrl turns) now carries three things the model previously had to guess at,
+  which matters for the weather / Metro-North tools that answer time- and
+  location-sensitive questions. (1) A per-turn, timezone-aware date/time line
+  with explicit day-of-week, rendered in the user's configured IANA zone via
+  `chrono-tz` (falling back to UTC and saying so when the zone is missing or
+  unparseable) — fixing the "hope your Sunday's going well" / "happy Monday!"
+  drift from a once-computed timestamp. (2) An optional, user-supplied
+  `location` profile field (`tagent config profile set --location`,
+  `TAGENT_USER_LOCATION`, or the first-run interview; no IP geolocation, no
+  inference from timezone, omitted entirely when unset). (3) An agent
+  self-identification sentence built from the SAME resolved values used for the
+  turn's real LLM dispatch (`creds.label()`, `agent.runner`, `agent.model`), so
+  the persona can no longer claim "Anthropic's API" while actually running via
+  OpenRouter. This change reconciles the self-identification decision-record
+  that had drifted out of sync after PR #3461 (whose body declared the line
+  descoped even though it shipped), documents the previously-undocumented
+  `AgentIdentity` carrier, and records the whole capability under its tracking
+  issue.
+
 - **Izzie weather + Metro-North tools land as real platform-hosted tools
   (epic #3052):** the `izzie-weather` and `izzie-metro-north` skills named
   three tools — `get_weather`, `get_train_schedule`, `get_train_alerts` — that
