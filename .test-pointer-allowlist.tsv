@@ -539,8 +539,6 @@ crates/trusty-mpm/src/daemon/managed_routes/inproject/untracked_sync.rs	append_t
 crates/trusty-mpm/src/daemon/managed_routes/inproject/untracked_sync.rs	disabled_copies_nothing
 crates/trusty-mpm/src/daemon/managed_routes/inproject/untracked_sync.rs	subdirectory_pattern_matches_one_level
 crates/trusty-mpm/src/daemon/managed_routes/inproject/untracked_sync.rs	top_level_pattern_matches_only_root_files
-crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	ensure_deployment_complete_repairs_and_succeeds
-crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	spawn_managed_cloned_launches_despite_incomplete_deployment
 crates/trusty-mpm/src/daemon/managed_routes/mod.rs	adopt_existing_double_is_409
 crates/trusty-mpm/src/daemon/managed_routes/mod.rs	adopt_existing_missing_is_404
 crates/trusty-mpm/src/daemon/managed_routes/mod.rs	adopt_existing_registers_record

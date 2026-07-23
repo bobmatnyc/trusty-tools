@@ -39,6 +39,16 @@ async fn health_returns_ok_and_version() {
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body["status"], "ok");
     assert!(body["version"].is_string());
+    // #3734: parentage fields let a GUI verify it spawned this sidecar.
+    assert!(
+        body["pid"].is_number(),
+        "health must report the sidecar pid"
+    );
+    // `ppid` is present (a number) on unix, null off unix; either is valid JSON.
+    assert!(
+        body.get("ppid").is_some(),
+        "health must include a ppid field"
+    );
 }
 
 #[tokio::test]

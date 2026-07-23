@@ -75,6 +75,33 @@ pub(super) fn opt_bool(args: &Value, key: &str) -> Option<bool> {
     args.get(key).and_then(Value::as_bool)
 }
 
+/// Read an optional array-of-strings argument (absent, wrong-typed, or empty
+/// → `None`).
+///
+/// Why: `slack_canvas_lookup_sections`' `section_types` is the first handler
+/// argument shaped as a string array; centralising the extraction here keeps
+/// the same absent/wrong-type/empty → `None` contract as the other `opt_*`
+/// helpers rather than letting the canvas handler grow a one-off inline
+/// filter.
+/// What: returns the non-string elements of a present array filtered out
+/// silently (a caller-supplied non-string entry is simply dropped, not a hard
+/// error — this mirrors `opt_str`'s permissive absent/wrong-type handling);
+/// `None` when the key is absent, not an array, or filters down to empty.
+/// Test: `opt_str_array_reads_present_and_absent`.
+pub(super) fn opt_str_array(args: &Value, key: &str) -> Option<Vec<String>> {
+    let items: Vec<String> = args
+        .get(key)
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
 /// Require a Slack timestamp ("ts") string argument, validating its shape.
 ///
 /// Why: Slack ts values are exact-match strings of the form
@@ -238,6 +265,26 @@ mod tests {
         assert_eq!(opt_i64(&args, "missing"), None);
         assert_eq!(opt_bool(&args, "is_private"), Some(true));
         assert_eq!(opt_bool(&args, "missing"), None);
+    }
+
+    #[test]
+    fn opt_str_array_reads_present_and_absent() {
+        let args = json!({
+            "section_types": ["h1", "h2", 7, "any_header"],
+            "empty": [],
+            "not_array": "h1",
+        });
+        assert_eq!(
+            opt_str_array(&args, "section_types"),
+            Some(vec![
+                "h1".to_string(),
+                "h2".to_string(),
+                "any_header".to_string()
+            ])
+        );
+        assert_eq!(opt_str_array(&args, "empty"), None);
+        assert_eq!(opt_str_array(&args, "not_array"), None);
+        assert_eq!(opt_str_array(&args, "missing"), None);
     }
 
     #[test]

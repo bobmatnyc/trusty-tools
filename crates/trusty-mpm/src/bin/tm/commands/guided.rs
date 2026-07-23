@@ -636,15 +636,42 @@ pub(crate) fn tty_gate(
     is_tty
 }
 
+/// Format one project-context session row (#3741: no `tm:` prefix, leads
+/// with the `[N]` index — matching `session_picker_render::format_session_row`'s
+/// convention for the interactive picker's rows).
+///
+/// Why: extracted to a pure, directly assertable function rather than only
+/// exercised via `print_project_context`'s `eprintln!` side effect — the
+/// #3741 code-critic finding was exactly this row silently drifting back to
+/// the old `tm:   [N] …` shape with no test pinning its exact text.
+/// What: `[{i+1}] {name}  state={state}  last={activity}` — `i+1` is this
+/// listing's plain 1-based position (deliberately NOT the picker's stable
+/// `shown_slot` numbering; unifying the two is out of scope for #3741).
+/// Test: `guided_format_project_context_row_*` in `tests_behavior_c_tests.rs`.
+pub(crate) fn format_project_context_row(
+    index: usize,
+    s: &trusty_mpm::client::ManagedSessionSummary,
+) -> String {
+    let activity = s.last_activity_at.as_deref().unwrap_or("—");
+    format!(
+        "[{}] {}  state={}  last={activity}",
+        index + 1,
+        s.name,
+        s.state
+    )
+}
+
 /// Print the detected project and session list to stderr.
 ///
 /// Why: the operator needs to see at a glance which project was detected, where
 /// the managed workspace lives (so it is clear the live checkout is untouched),
 /// and which sessions are available before being prompted.
 /// What: prints the source_id, workspace path, and a numbered session list (or
-/// "(none)" when empty). All output goes to stderr (stdout stays clean).
+/// "(none)" when empty). All output goes to stderr (stdout stays clean). Row
+/// text comes from [`format_project_context_row`] (#3741: no `tm:` prefix).
 /// Test: `guided_print_project_context_does_not_panic_no_sessions`,
-/// `guided_print_project_context_does_not_panic_with_sessions`.
+/// `guided_print_project_context_does_not_panic_with_sessions`,
+/// `guided_format_project_context_row_*`.
 pub(crate) fn print_project_context(
     source_id: &str,
     workspace: &std::path::Path,
@@ -660,13 +687,7 @@ pub(crate) fn print_project_context(
     } else {
         eprintln!("tm: sessions:");
         for (i, s) in sessions.iter().enumerate() {
-            let activity = s.last_activity_at.as_deref().unwrap_or("—");
-            eprintln!(
-                "tm:   [{}] {}  state={}  last={activity}",
-                i + 1,
-                s.name,
-                s.state
-            );
+            eprintln!("{}", format_project_context_row(i, s));
         }
     }
 }

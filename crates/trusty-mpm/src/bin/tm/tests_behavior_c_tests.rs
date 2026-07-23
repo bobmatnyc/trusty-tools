@@ -27,8 +27,8 @@ use crate::commands::first_run::needs_first_run_clone;
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
     CwdProject, NestedFallbackAction, classify_cwd_project, cwd_owns_git_entry, derive_project,
-    fallback_protected, github_host, inplace_self_relaunch_hint, is_github_remote,
-    ls_tree_reports_tracked_dir, nested_fallback_action, nested_guard_notice,
+    fallback_protected, format_project_context_row, github_host, inplace_self_relaunch_hint,
+    is_github_remote, ls_tree_reports_tracked_dir, nested_fallback_action, nested_guard_notice,
     non_github_refusal_message, print_non_tty_hint, print_project_context, tty_gate,
     untracked_ancestor_message,
 };
@@ -853,6 +853,31 @@ fn guided_print_project_context_does_not_panic_with_sessions() {
         &PathBuf::from("/home/user/repos/owner/repo"),
         &sessions,
     );
+}
+
+// ── format_project_context_row (#3741: no `tm:` prefix on picker-adjacent rows) ──
+
+#[test]
+fn guided_format_project_context_row_leads_with_index_no_tm_prefix() {
+    // Why: pins the exact row text `print_project_context` prints per session
+    // (code-critic finding on #3742 — this row still carried the old
+    // `tm:   [N] …` prefix after the interactive picker's own rows had
+    // already dropped it, so bare-`tm` printed two differently-formatted
+    // numbered lists on the same screen).
+    let s = make_session("tm-frontend-1", "running", Some("2026-06-25T12:00:00Z"));
+    let row = format_project_context_row(0, &s);
+    assert_eq!(
+        row,
+        "[1] tm-frontend-1  state=running  last=2026-06-25T12:00:00Z"
+    );
+    assert!(!row.starts_with("tm:"), "row must not carry the tm: prefix");
+}
+
+#[test]
+fn guided_format_project_context_row_missing_activity_uses_em_dash() {
+    let s = make_session("tm-api-2", "stopped", None);
+    let row = format_project_context_row(4, &s);
+    assert_eq!(row, "[5] tm-api-2  state=stopped  last=—");
 }
 
 #[test]

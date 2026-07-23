@@ -47,9 +47,7 @@ use overlay::{
     delete_personalization_overlay, list_personalization_overlays, read_personalization_overlay,
     write_personalization_overlay,
 };
-use sidecar::{
-    ensure_api_server, kill_sidecar, terminate_child, ApiServerState, SharedApi, SIDECAR_GRACE,
-};
+use sidecar::{ensure_api_server, kill_sidecar, ApiServerState, SharedApi};
 use task_commands::{cancel_task, check_health, clear_recent_tasks, list_tasks, send_message};
 
 /// Show and focus the main window (tray "Show" item / tray icon click).
@@ -101,17 +99,11 @@ fn main() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => show_main_window(app),
                     "quit" => {
-                        // Reap the sidecar fully before exiting so we don't
-                        // race the process teardown, then trigger the real
-                        // exit (which also fires `RunEvent::ExitRequested`,
-                        // but `kill_sidecar` is idempotent by then).
-                        let handle = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            if let Some(state) = handle.try_state::<SharedApi>() {
-                                kill_sidecar(&state).await;
-                            }
-                            handle.exit(0);
-                        });
+                        // Just trigger the real exit. The sidecar reap is
+                        // centralized in the synchronous `RunEvent::ExitRequested`
+                        // handler below (which this `exit` raises), so every quit
+                        // path — tray, Cmd+Q, app-menu — reaps through one place.
+                        app.exit(0);
                     }
                     _ => {}
                 })
@@ -152,68 +144,45 @@ fn main() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
-        if let RunEvent::ExitRequested { api, .. } = event {
-            // Real quit path: Cmd+Q, the app-menu Quit item, or the tray
-            // "Quit" item (which reaps the sidecar itself, then calls
-            // `AppHandle::exit`, which re-raises `ExitRequested`).
-            //
-            // #3372: the previous fast path only called `child.start_kill()`
-            // and returned *without awaiting the reap* — and did no graceful
-            // shutdown — so the `tagent --api` sidecar could outlive the GUI
-            // and keep holding its fixed port. Graceful-then-forced
-            // termination is inherently async (SIGTERM, then wait up to a
-            // grace window, then SIGKILL), so whenever there is a child to
-            // reap we defer the real exit: call `prevent_exit()` synchronously
-            // *before* this closure returns (the runtime checks for a pending
-            // `prevent_exit` via a synchronous `try_recv()` immediately after
-            // this closure returns — a bare fire-and-forget spawn would lose
-            // that race and let the process exit first), reap the sidecar
-            // asynchronously, then trigger the real exit ourselves.
-            //
-            // Crucially we only defer when a child is actually present. Our own
-            // `handle.exit(0)` below re-raises `ExitRequested`; by then the
-            // child slot is empty (`take()`), so this branch does nothing and
-            // the process exits — which is what breaks the re-entrant loop.
+        // Reap the `tagent --api` sidecar on the way out. We match BOTH
+        // `ExitRequested` and `Exit` deliberately.
+        //
+        // #3734 root cause: PR #3728 handled ONLY `RunEvent::ExitRequested`, and
+        // deferred the reap onto an async task (`prevent_exit()` +
+        // `tauri::async_runtime::spawn` + `handle.exit(0)`). In this app's TRAY
+        // configuration the window is never destroyed on Cmd+Q (CloseRequested
+        // only hides it), and tao 0.35.2's macOS backend maps a Cmd+Q with no
+        // window teardown to `applicationWillTerminate:` — i.e. it emits
+        // `RunEvent::Exit`, NOT `ExitRequested`. So #3728's `ExitRequested`-only
+        // handler NEVER FIRED on Cmd+Q; the process exited in ~3ms with zero
+        // Rust log lines and the sidecar was orphaned (reparented to launchd,
+        // still holding port 8765). Two independent bugs stacked: the wrong
+        // event was matched, and even the matched path deferred work that AppKit
+        // never let run.
+        //
+        // The fix: handle `Exit` too, and reap SYNCHRONOUSLY — block this
+        // handler on `kill_sidecar` for a short bounded window (`SIDECAR_GRACE`,
+        // 500ms) so SIGTERM→(bounded wait)→SIGKILL completes BEFORE control
+        // returns to AppKit. `block_on` is safe here: this closure runs on the
+        // main event-loop thread, not a Tokio worker. `kill_sidecar` `take()`s
+        // the child, so if both events fire the second is a no-op. The sidecar's
+        // own parent-death watchdog (#3734) backstops anything this still misses
+        // (a crash, SIGKILL, or lock contention here).
+        //
+        // The eprintln is intentional and load-bearing for verification: a
+        // packaged-app Cmd+Q must show this line in the console, proving the
+        // reap branch actually ENTERS — a released port alone is insufficient
+        // evidence, because the watchdog would free the port even if this
+        // handler never ran (see the PR's manual-verification note).
+        let should_reap = matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit);
+        if should_reap {
             if let Some(state) = app_handle.try_state::<SharedApi>() {
-                match state.child.try_lock() {
-                    Ok(mut guard) => {
-                        if let Some(child) = guard.take() {
-                            // Release the lock before awaiting the (up to
-                            // `SIDECAR_GRACE`) termination.
-                            drop(guard);
-                            api.prevent_exit();
-                            let handle = app_handle.clone();
-                            tauri::async_runtime::spawn(async move {
-                                terminate_child(child, SIDECAR_GRACE).await;
-                                handle.exit(0);
-                            });
-                        }
-                        // else: no child (already reaped by the tray "Quit"
-                        // path, or the re-entrant exit above) — let the exit
-                        // proceed.
-                    }
-                    Err(_) => {
-                        // Contended path: unlike the `Ok` arm, we cannot see
-                        // whether a child is present without the lock, so we
-                        // defer on *contention* — treating "someone is holding
-                        // the mutex" (a concurrent `ensure_api_server` /
-                        // `kill_sidecar`) as a proxy for "the child may be
-                        // mid-mutation, so play safe and reap via the shared
-                        // path", which re-takes the lock itself. If the slot
-                        // turns out to be empty, `kill_sidecar` is a no-op and
-                        // the subsequent `handle.exit(0)` re-raises
-                        // `ExitRequested` into the uncontended `Ok`/`None`
-                        // branch, which lets the process exit — so this cannot
-                        // loop indefinitely on transient contention.
-                        api.prevent_exit();
-                        let state = state.inner().clone();
-                        let handle = app_handle.clone();
-                        tauri::async_runtime::spawn(async move {
-                            kill_sidecar(&state).await;
-                            handle.exit(0);
-                        });
-                    }
-                }
+                eprintln!("[trusty-agents-ui] quit event: reaping tagent sidecar (bounded)");
+                let state = state.inner().clone();
+                tauri::async_runtime::block_on(async move {
+                    kill_sidecar(&state).await;
+                });
+                eprintln!("[trusty-agents-ui] quit event: sidecar reap complete");
             }
         }
     });

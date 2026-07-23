@@ -7,6 +7,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **Base `assistant` persona defaults to Sonnet instead of Opus (#3688):**
+  `claude-opus-4-6` → `claude-sonnet-4-6` on `assistant/agent.toml`, trading a
+  small quality margin for materially lower per-turn latency (a trivial turn
+  measured ~2.1s on Opus via OpenRouter). `pm` is unaffected and stays on Opus
+  per the prior owner ruling (PR #3360).
+
+### Fixed
+
+- **Izzie's own tools now reach the `--direct`/`--agent` dispatch path (#3745
+  item C):** `tagent --direct izzie` loaded a tool registry of only
+  `[git_log, git_status, web_search, delegate_to_agent]` and the model answered
+  "weather tool unavailable" — despite `izzie/agent.toml` declaring
+  `get_weather`, `get_train_schedule`, and `get_train_alerts` in `[tools].allow`.
+  Root cause: the assistant-tier subprocess registry
+  (`runtime::tool_registry::build_assistant_tier_registry`) never registered the
+  izzie platform-hosted executors, so `scope_assistant_allowed_tools` intersected
+  the (correct) allow list against a registry lacking those tools and dropped
+  them. The persona-chat REPL path (`run_pm_task_with_persona`) already registered
+  them via `crate::tools::izzie::izzie_tools()`; the two dispatch paths had
+  diverged. Fix registers `izzie_tools()` into the assistant-tier registry so both
+  paths behave identically — reachability is still gated per-persona by
+  `[tools].allow`, so no other assistant-tier persona is widened. Config
+  resolution (package-vs-flat, `extends` merge) was verified correct and is
+  unchanged.
+
 ### Added
 
 - **Agent context knows "now", "here", and "who" (#3469, epic #3052):** the
@@ -133,6 +160,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   unchanged — no tool scopes moved.
 
 ### Fixed
+
+- **`tagent --api` self-exits when its parent GUI dies (#3734):** the sidecar
+  now accepts `--parent-pid <pid>` and, when given one, arms a parent-death
+  watchdog that self-exits the process once that parent is gone (detected by
+  reparenting away from it — on macOS to launchd, pid 1 — or the pid vanishing
+  outright). This closes the orphan class the Tauri-side quit reap cannot cover:
+  a GUI killed by macOS's synchronous Cmd+Q teardown, a crash, or an external
+  SIGTERM/SIGKILL previously left `tagent --api` running and holding its fixed
+  port, so a later GUI launch could fail to bind or attach to a stale backend.
+  Absent the flag (e.g. a hand-run `tagent --api` in a shell) the watchdog is
+  simply not armed. Unix-only; a no-op on other targets. `GET /api/health` now
+  also reports the sidecar's `pid` and `ppid` so a GUI can verify it is talking
+  to the sidecar it spawned rather than a reparented orphan on the same port.
 
 - **A parallel phase could not fail when its merge failed (#3671):**
   `executor::dispatch` folded `ConflictResolver::merge`'s `Err` into a
