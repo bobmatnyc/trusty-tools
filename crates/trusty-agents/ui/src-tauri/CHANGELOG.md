@@ -30,6 +30,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Cmd+Q now actually reaps the sidecar; sidecar self-exits if the GUI dies
+  any other way (#3734):** the #3372 reap only matched `RunEvent::ExitRequested`
+  and deferred the work onto an async task. In this tray app the window is never
+  destroyed on Cmd+Q (close only hides it), so tao maps that quit to
+  `applicationWillTerminate:` and emits `RunEvent::Exit`, NOT `ExitRequested` —
+  #3728's handler never fired, and even if it had, the deferred task never ran
+  before the ~3ms process teardown. The sidecar was orphaned and kept holding
+  port 8765 (live-reproduced). Now the handler matches BOTH `ExitRequested` and
+  `Exit` and reaps SYNCHRONOUSLY: it blocks on `kill_sidecar` for a short bounded
+  window (500ms) so SIGTERM→(wait)→SIGKILL completes before control returns to
+  AppKit — no `prevent_exit`/`handle.exit` dance. The tray "Quit" item routes
+  through the same single synchronous reap.
+- **Guaranteed backstop + no stale-sidecar adoption (#3734):** the GUI now
+  spawns the sidecar with `--parent-pid <gui_pid>`, arming the sidecar's own
+  parent-death watchdog (trusty-agents #3734) so no GUI failure mode the event
+  loop can miss (crash, SIGKILL) leaves an orphan. The health probe is now
+  parentage-aware: it accepts a sidecar as "healthy" only when it reports it is
+  parented to THIS GUI (via the new `/api/health` `ppid` field), so a fresh GUI
+  can no longer silently adopt — or mark itself ready against — a reparented
+  orphan of a previous GUI still answering on the port during the watchdog's
+  poll window. `ensure_api_server` then spawns its own sidecar and the boot
+  retry heals once the orphan releases the port.
+
 - **The `tagent --api` sidecar is now reaped on quit (#3372):** quitting the
   desktop app (tray "Quit", Cmd+Q, app-menu Quit, or an AppleScript `quit`)
   previously left the sidecar running and holding its fixed port, so repeated

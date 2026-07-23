@@ -35,11 +35,15 @@ use tokio::sync::Mutex;
 /// How long we let the sidecar shut down gracefully after SIGTERM before we
 /// escalate to SIGKILL.
 ///
-/// Why: `tagent --api` handles SIGTERM and releases its port cleanly, but a
-/// hung or wedged sidecar must not stall app quit indefinitely. Two seconds is
-/// long enough for a healthy sidecar to unbind its listener and short enough
-/// that a wedged one doesn't make quit feel broken during the demo.
-pub(crate) const SIDECAR_GRACE: Duration = Duration::from_secs(2);
+/// Why: On macOS the Cmd+Q quit path is a SYNCHRONOUS AppKit teardown
+/// (`applicationShouldTerminate:` → reply → exit) that completes in a few
+/// milliseconds (#3734 root cause). The Tauri-side reap therefore has to run
+/// synchronously inside the quit event and must stay short so it does not make
+/// quit feel laggy. 500ms is ample for a healthy `tagent --api` to catch
+/// SIGTERM and unbind its listener; anything slower is covered by the sidecar's
+/// own parent-death watchdog (#3734), which is the real guarantee against
+/// orphans — so a short bounded window here is safe.
+pub(crate) const SIDECAR_GRACE: Duration = Duration::from_millis(500);
 
 /// Shared handle to the spawned `trusty-agents --api` sidecar.
 ///
@@ -132,10 +136,17 @@ pub async fn ensure_api_server(port: u16, state: State<'_, SharedApi>) -> Result
         "spawning trusty-agents --api sidecar"
     );
 
+    // #3734: pass our own pid as `--parent-pid` so the sidecar arms its
+    // parent-death watchdog and self-exits if this GUI dies by any path the
+    // Tauri quit-event reap can miss (macOS Cmd+Q sudden teardown, a crash, an
+    // external SIGTERM/SIGKILL) — no orphan can then hold the port across a
+    // GUI restart.
     let child = tokio::process::Command::new(&binary)
         .arg("--api")
         .arg("--port")
         .arg(port.to_string())
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
         .env("TAGENT_PROJECT_DIR", &project_root)
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -234,15 +245,45 @@ fn which(name: &str) -> Result<std::path::PathBuf, ()> {
     Err(())
 }
 
+/// Probe `/api/health`, returning `true` only when a sidecar THIS process owns
+/// is answering on `port`.
+///
+/// Why: #3734 adoption race. A plain 200 is not enough. If a previous GUI died
+/// without its sidecar being reaped, that orphan keeps answering on the fixed
+/// port until its own parent-death watchdog fires (~2s). Both callers of this
+/// function would otherwise trust it: `ensure_api_server`'s fast path would
+/// ADOPT it (recording no child, so it can never respawn it) and `check_health`
+/// would mark the app READY against it — either way the app goes dark the
+/// instant the orphan self-exits, with no auto-heal. Gating on parentage makes
+/// "healthy" mean "MY sidecar is up": `ensure_api_server` then spawns its own
+/// and the boot loop's `ensure`-retry heals once the orphan releases the port.
+/// What: Accepts a 200 only when the reported `ppid` equals our pid. If the
+/// sidecar does not report `ppid` (older build, or non-unix where `getppid` is
+/// absent), falls back to trusting the 200 so those setups still work.
+/// Test: covered end-to-end by the desktop app; the parentage field it reads is
+/// unit-tested server-side by `health_returns_ok_and_version`.
 pub(crate) async fn http_health(port: u16) -> bool {
     let url = format!("{}/api/health", api_base(port));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(500))
         .build();
     let Ok(client) = client else { return false };
-    match client.get(&url).send().await {
-        Ok(r) => r.status().is_success(),
-        Err(_) => false,
+    let Ok(resp) = client.get(&url).send().await else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    let Ok(body) = resp.json::<serde_json::Value>().await else {
+        // 200 but the body did not parse — trust liveness (defensive; the real
+        // server always returns JSON here).
+        return true;
+    };
+    match body.get("ppid").and_then(serde_json::Value::as_u64) {
+        // Only OUR sidecar (parented to this GUI process) counts as healthy.
+        Some(ppid) => ppid == u64::from(std::process::id()),
+        // Sidecar didn't report parentage (older/non-unix) — trust the 200.
+        None => true,
     }
 }
 

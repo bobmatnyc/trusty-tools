@@ -1,5 +1,6 @@
 //! Live `tools/call` handlers for the Slack MCP tools (issues #2639, #2640,
-//! and epic #3611's parity batch: #3612-#3618).
+//! epic #3611's parity batch: #3612-#3618, and epic #3744 slice 1's
+//! `slack_canvas_*`-namespaced canvas tools).
 //!
 //! Why: the MCP dispatcher in [`crate::slack::server`] routes a `tools/call` by
 //! name; the actual Slack Web API work — request shaping, response cleaning, and
@@ -97,6 +98,11 @@ pub(super) const CANVASES_CREATE: &str = "canvases.create";
 /// Bot-scope, requires `canvases:write`: replaces a canvas's document content
 /// (issue #3612).
 pub(super) const CANVASES_EDIT: &str = "canvases.edit";
+/// Bot-scope, requires `canvases:read`: looks up section ids/anchors within a
+/// canvas by section type and/or contained text (issue #3744 slice 1). Slack
+/// has no full-canvas-content-read method — this returns section anchors, not
+/// document text.
+pub(super) const CANVASES_SECTIONS_LOOKUP: &str = "canvases.sections.lookup";
 /// Bot-scope, requires `files:read`: returns file (and canvas) metadata,
 /// including the `url_private_download` used to fetch content (issues
 /// #3612/#3615).
@@ -159,8 +165,10 @@ pub async fn dispatch(
         "slack_create_conversation" => conversations::create_conversation(client, args).await,
         "slack_list_channel_members" => conversations::list_channel_members(client, args).await,
         "slack_create_canvas" => canvas::create_canvas(client, args).await,
+        "slack_canvas_create" => canvas::canvas_create(client, args).await,
         "slack_update_canvas" => canvas::update_canvas(client, args).await,
         "slack_read_canvas" => canvas::read_canvas(client, args).await,
+        "slack_canvas_lookup_sections" => canvas::lookup_sections(client, args).await,
         "slack_read_file" => files::read_file(client, args).await,
         "slack_search_emojis" => search::search_emojis(client, args).await,
         "slack_search_users" => search::search_users(client, args).await,
