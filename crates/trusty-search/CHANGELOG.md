@@ -16,11 +16,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   chunk-count-estimated) rehydrate cost — an expensive-to-rehydrate index
   (the i-0076 production incident's 315K-chunk / 27-40s-scan corpus) earns
   proportionally more idle time before eviction than a cheap one, directly
-  addressing the #3683 RCA's thrash-eviction root cause. The sweep itself
-  now processes indexes oldest-idle-first rather than the registry's
+  addressing the #3683 RCA's thrash-eviction root cause. The idle sweep
+  itself now processes indexes oldest-idle-first rather than the registry's
   arbitrary iteration order. New env override `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS`
   (default 1000ms per extra base-window multiple; `0` disables cost-scaling).
   `TRUSTY_CHUNKS_IDLE_EVICT_SECS` continues to set the base window.
+- **Budgeted, oldest-idle-first, recency-exempt memory-pressure sweep (issue
+  #3683 slice 2 — critic-review follow-up).** The pressure sweep
+  (`TRUSTY_MEMORY_ENFORCE_SECS` / `TRUSTY_MEMORY_HIGH_WATER_PCT`) no longer
+  unconditionally clears every registered index the instant RSS crosses the
+  high-water mark. It now: (1) processes indexes oldest-idle-first (here the
+  ordering is load-bearing, unlike the idle-eviction ticker's cosmetic use of
+  the same sort); (2) stops once it has (estimatedly) freed enough to reach
+  the high-water mark, instead of sweeping the whole fleet; (3) exempts
+  recently-queried (hot) indexes from the first pass — new env
+  `TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS` (default 30s; `0` disables the
+  exemption) — falling through to a "desperation" second pass that clears
+  hot indexes too if the exemption-respecting pass can't reach the target
+  (avoiding an OOM kill outweighs a hot index's warm cache).
 
 ### Fixed
 

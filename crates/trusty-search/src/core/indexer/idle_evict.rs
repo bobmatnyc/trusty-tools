@@ -442,14 +442,18 @@ impl CodeIndexer {
     /// indexes are all "recently active" keeps growing until the OS OOM-killer
     /// intervenes — exactly the production failure #2846 reports (RSS reached
     /// 2.2× the configured 12 GB soft ceiling). When the pressure ticker sees
-    /// RSS cross the high-water mark it calls this on every resident index to
-    /// shed the largest anonymous-heap consumers immediately. Every structure
-    /// cleared here is 100% recoverable from the durable redb corpus and lazily
-    /// rehydrates on next access, so a pressure reclaim is non-destructive to
-    /// the DATA. It is, however, a genuine race against any concurrent query:
-    /// firing under active load (unlike idle-evict, which only ever raced this
-    /// window after 60s of quiet) can land strictly between a racing
-    /// `bm25_search` / `grep_fallback_search` call's own `ensure_*_loaded()`
+    /// RSS cross the high-water mark it calls this on the indexes selected by
+    /// `service::server::tickers::run_pressure_sweep` (issue #3683 slice 2 —
+    /// a budgeted, oldest-idle-first, recency-exempt-unless-desperate subset,
+    /// NOT unconditionally every resident index) to shed the largest
+    /// anonymous-heap consumers. Every structure cleared here is 100%
+    /// recoverable from the durable redb corpus and lazily rehydrates on next
+    /// access, so a pressure reclaim is non-destructive to the DATA. It is,
+    /// however, a genuine race against any concurrent query: firing under
+    /// active load (unlike idle-evict, which only ever races this window
+    /// after the index's own idle threshold has elapsed) can land strictly
+    /// between a racing `bm25_search` / `grep_fallback_search` call's own
+    /// `ensure_*_loaded()`
     /// check and its read-lock acquisition. Both of those lanes now detect and
     /// retry that exact window (issue #2846 PR review — see their doc
     /// comments in `search/lanes.rs`), so the worst case for a racing query is

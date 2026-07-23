@@ -32,8 +32,12 @@
 //! Test: `cargo test -p trusty-search -- memory_pressure`
 
 use super::*;
+use crate::core::corpus::CorpusStore;
+use crate::core::indexer::CodeIndexer;
 use crate::core::memguard;
-use crate::core::registry::IndexRegistry;
+use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+use std::path::PathBuf;
+use tokio::sync::RwLock as TokioRwLock;
 
 // ---------------------------------------------------------------------------
 // `should_reclaim_now` — pure hysteresis gate
@@ -162,5 +166,266 @@ async fn restart_branch_does_not_fire_when_disabled_by_default() {
     assert!(
         changed.is_err(),
         "restart tier defaults OFF — shutdown_tx must NOT be signalled"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `run_pressure_sweep` — budgeted, oldest-idle-first, recency-exempt sweep
+// (issue #3683 slice 2, critic review HIGH)
+// ---------------------------------------------------------------------------
+
+/// Build a bare, corpus-backed (BM25-only, no embedder/HNSW store) handle for
+/// `id` — mirrors `residency_sweep_tests::bare_handle` /
+/// `idle_eviction_tests::bare_corpus_handle`.
+fn bare_corpus_handle(id: &str, redb_path: &std::path::Path) -> IndexHandle {
+    let index_id = IndexId::new(id.to_string());
+    let root = PathBuf::from(format!("/tmp/pressure-sweep-test-{id}"));
+    let mut idx = CodeIndexer::new(id, &root);
+    let store = CorpusStore::open(redb_path).expect("open corpus store");
+    idx.set_corpus_store(Arc::new(store));
+    let indexer = Arc::new(TokioRwLock::new(idx));
+    IndexHandle::bare(index_id, indexer, root)
+}
+
+/// RAII guard saving/restoring `TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS` —
+/// this env var's only reader/writer in the crate's test suite besides the
+/// other two tests below (all three are `#[serial_test::serial]`, matching
+/// this file's existing convention for shared process env state).
+struct ExemptSecsEnvGuard(Option<String>);
+
+impl ExemptSecsEnvGuard {
+    fn set(v: &str) -> Self {
+        let prior = std::env::var("TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS").ok();
+        // SAFETY: see struct doc comment.
+        unsafe { std::env::set_var("TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS", v) };
+        Self(prior)
+    }
+}
+
+impl Drop for ExemptSecsEnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: see struct doc comment.
+        unsafe {
+            match &self.0 {
+                Some(v) => std::env::set_var("TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS", v),
+                None => std::env::remove_var("TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS"),
+            }
+        }
+    }
+}
+
+/// Index `n` tiny files into `idx` (BM25-only ingest — no embedder/store
+/// needed), producing `n` chunks + `n` BM25 documents (`2n` reclaimable
+/// entries via `reclaim_memory_now`).
+async fn index_n_files(idx: &CodeIndexer, prefix: &str, n: usize) {
+    let files: Vec<(String, String)> = (0..n)
+        .map(|i| {
+            (
+                format!("src/{prefix}_{i}.rs"),
+                format!("fn f_{prefix}_{i}() {{}}"),
+            )
+        })
+        .collect();
+    idx.index_files_batch(&files).await.expect("index batch");
+}
+
+/// Core acceptance test: with the recency exemption disabled (isolating the
+/// stop-early budget from the exemption mechanism), three equally-sized
+/// indexes go idle at three DIFFERENT wall-clock times. A `target_freed_mb`
+/// reachable by reclaiming just the single OLDEST-idle index must stop the
+/// sweep there — the two less-idle indexes must survive untouched. This is
+/// the direct fix for the critic's "no stop-after-target" finding: the sweep
+/// must not clear every registered index once it has already freed enough.
+#[tokio::test]
+#[serial_test::serial]
+async fn pressure_sweep_stops_early_once_target_reached_sparing_least_idle() {
+    let _exempt_guard = ExemptSecsEnvGuard::set("0"); // disable exemption for this test
+
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let dir_c = tempfile::tempdir().unwrap();
+    let state = SearchAppState::new(IndexRegistry::new());
+
+    // 300 chunks + 300 BM25 docs = 600 entries/index ⇒
+    // estimate_freed_mb(600) == 1 (600 * 2048 / 1_048_576 == 1), so a
+    // target_freed_mb of 1 is satisfied by reclaiming ANY single index.
+    let a = bare_corpus_handle("a", &dir_a.path().join("index.redb"));
+    index_n_files(&*a.indexer.read().await, "a", 300).await;
+    state.registry.register(a);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let b = bare_corpus_handle("b", &dir_b.path().join("index.redb"));
+    index_n_files(&*b.indexer.read().await, "b", 300).await;
+    state.registry.register(b);
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let c = bare_corpus_handle("c", &dir_c.path().join("index.redb"));
+    index_n_files(&*c.indexer.read().await, "c", 300).await;
+    state.registry.register(c);
+
+    // At this point: a is oldest-idle (~120ms), b is mid (~60ms), c is
+    // freshest (~0ms) — oldest_idle_first must visit a, then b, then c.
+    let (reclaimed, cleared) = run_pressure_sweep(&Arc::new(state.clone()), 1).await;
+
+    assert_eq!(cleared, 1, "must stop after clearing exactly one index");
+    assert_eq!(
+        reclaimed, 600,
+        "the one cleared index contributes 600 entries"
+    );
+
+    let a_count = state
+        .registry
+        .get(&IndexId::new("a".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+    let b_count = state
+        .registry
+        .get(&IndexId::new("b".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+    let c_count = state
+        .registry
+        .get(&IndexId::new("c".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+
+    assert_eq!(
+        a_count, 0,
+        "the OLDEST-idle index ('a') must be the one cleared"
+    );
+    assert_eq!(
+        b_count, 300,
+        "'b' (mid-idle) must be spared once the target is met"
+    );
+    assert_eq!(
+        c_count, 300,
+        "'c' (least-idle) must be spared once the target is met"
+    );
+}
+
+/// Mild pressure: a target reachable entirely from non-exempt (cold) indexes
+/// must never touch a recently-queried (hot) index — the critic's "hot index
+/// unconditionally cleared" finding.
+#[tokio::test]
+#[serial_test::serial]
+async fn pressure_sweep_exempts_hot_indexes_under_mild_pressure() {
+    let _exempt_guard = ExemptSecsEnvGuard::set("1"); // 1s exemption floor
+
+    let dir_cold = tempfile::tempdir().unwrap();
+    let dir_hot = tempfile::tempdir().unwrap();
+    let state = SearchAppState::new(IndexRegistry::new());
+
+    let cold = bare_corpus_handle("cold", &dir_cold.path().join("index.redb"));
+    index_n_files(&*cold.indexer.read().await, "cold", 300).await;
+    state.registry.register(cold);
+
+    // Push "cold" past the 1s exemption floor before "hot" is even indexed.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let hot = bare_corpus_handle("hot", &dir_hot.path().join("index.redb"));
+    index_n_files(&*hot.indexer.read().await, "hot", 300).await;
+    state.registry.register(hot); // "hot" was just touched — idle ~0s
+
+    // Target reachable from "cold" alone (see the stop-early test's math).
+    let (reclaimed, cleared) = run_pressure_sweep(&Arc::new(state.clone()), 1).await;
+
+    assert_eq!(
+        cleared, 1,
+        "only the non-exempt (cold) index should be cleared"
+    );
+    assert_eq!(reclaimed, 600);
+
+    let cold_count = state
+        .registry
+        .get(&IndexId::new("cold".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+    let hot_count = state
+        .registry
+        .get(&IndexId::new("hot".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+
+    assert_eq!(cold_count, 0, "the non-exempt cold index must be cleared");
+    assert_eq!(
+        hot_count, 300,
+        "a recently-queried (hot) index must survive mild pressure"
+    );
+}
+
+/// Extreme pressure ("desperation"): a target UNREACHABLE from non-exempt
+/// indexes alone must fall through to clearing exempt (hot) indexes too —
+/// avoiding an OOM kill outweighs a hot index's warm cache.
+#[tokio::test]
+#[serial_test::serial]
+async fn pressure_sweep_desperation_pass_clears_hot_indexes_under_extreme_pressure() {
+    let _exempt_guard = ExemptSecsEnvGuard::set("1"); // 1s exemption floor
+
+    let dir_cold = tempfile::tempdir().unwrap();
+    let dir_hot = tempfile::tempdir().unwrap();
+    let state = SearchAppState::new(IndexRegistry::new());
+
+    let cold = bare_corpus_handle("cold", &dir_cold.path().join("index.redb"));
+    index_n_files(&*cold.indexer.read().await, "cold", 300).await;
+    state.registry.register(cold);
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+    let hot = bare_corpus_handle("hot", &dir_hot.path().join("index.redb"));
+    index_n_files(&*hot.indexer.read().await, "hot", 300).await;
+    state.registry.register(hot);
+
+    // Target requires BOTH indexes (600 entries each ⇒ 1MB each ⇒ need 2MB).
+    let (reclaimed, cleared) = run_pressure_sweep(&Arc::new(state.clone()), 2).await;
+
+    assert_eq!(
+        cleared, 2,
+        "desperation pass must clear the hot index too once cold alone can't reach the target"
+    );
+    assert_eq!(reclaimed, 1_200);
+
+    let cold_count = state
+        .registry
+        .get(&IndexId::new("cold".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+    let hot_count = state
+        .registry
+        .get(&IndexId::new("hot".to_string()))
+        .unwrap()
+        .indexer
+        .read()
+        .await
+        .in_memory_chunk_count()
+        .await;
+
+    assert_eq!(cold_count, 0);
+    assert_eq!(
+        hot_count, 0,
+        "extreme pressure must clear even a recently-queried (hot) index"
     );
 }
