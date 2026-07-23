@@ -100,10 +100,14 @@ impl DaemonClient {
         // bare `tmux new-session` here would silently bypass them — the
         // exact QA-caught regression this consolidation closes).
         let new_session =
-            crate::core::tmux::create_managed_session(None, &body.name, Some(workdir))
-                .map(|output| output.status);
+            crate::core::tmux::create_managed_session(None, &body.name, Some(workdir));
         match new_session {
-            Ok(status) if status.success() => {
+            Ok(outcome) if outcome.output.status.success() => {
+                // #3386 review: operator-visible (not just grep-able) notice
+                // — this client is shared by the TUI/bot surfaces, so the
+                // `tracing::error!` `warn_if_options_unverified` emits is the
+                // channel every one of them can observe.
+                crate::core::tmux::warn_if_options_unverified(&outcome, &body.name);
                 let send = crate::core::tmux::send_line(
                     None,
                     &crate::core::tmux::TmuxTarget::session(&body.name),
@@ -204,10 +208,11 @@ impl DaemonClient {
         // crate's single session-creation choke point, so the configured
         // scrollback/mouse ergonomics are applied before the pane exists.
         let new_session =
-            crate::core::tmux::create_managed_session(None, &body.name, Some(workdir))
-                .map(|output| output.status);
+            crate::core::tmux::create_managed_session(None, &body.name, Some(workdir));
         match new_session {
-            Ok(status) if status.success() => {
+            Ok(outcome) if outcome.output.status.success() => {
+                // #3386 review: see `launch_session`'s identical notice above.
+                crate::core::tmux::warn_if_options_unverified(&outcome, &body.name);
                 if !already_running {
                     let send = crate::core::tmux::send_line(
                         None,

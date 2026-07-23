@@ -343,10 +343,19 @@ pub(crate) async fn launch(
     //     (a bare `tmux new-session` here would silently bypass them, the
     //     exact QA-caught regression this consolidation closes).
     let new_session =
-        trusty_mpm::core::tmux::create_managed_session(None, &tmux_name, Some(&managed_workdir))
-            .map(|output| output.status);
-    if !matches!(new_session, Ok(s) if s.success()) {
-        anyhow::bail!("failed to create tmux session {tmux_name} in {managed_workdir}");
+        trusty_mpm::core::tmux::create_managed_session(None, &tmux_name, Some(&managed_workdir));
+    let outcome = match new_session {
+        Ok(o) if o.output.status.success() => o,
+        _ => anyhow::bail!("failed to create tmux session {tmux_name} in {managed_workdir}"),
+    };
+    if !outcome.options_verified {
+        // #3386 review: a caller-visible one-line notice — never silently
+        // proceed as if the pane's scrollback limit landed.
+        eprintln!(
+            "warning: tmux scrollback limit could not be verified for session {tmux_name} — \
+             the pane may be capped at tmux's factory 2000-line history-limit instead of the \
+             configured value; see issue #3386"
+        );
     }
     // RAII guard — disarmed only after successful attach so the session persists
     // when the user detaches normally. On any error path (including attach
@@ -533,10 +542,19 @@ pub(crate) async fn connect(
     //    are applied before the pane exists.
     let already_running = tmux_has_session(&tmux_name);
     let new_session =
-        trusty_mpm::core::tmux::create_managed_session(None, &tmux_name, Some(&workdir))
-            .map(|output| output.status);
-    if !matches!(new_session, Ok(s) if s.success()) {
-        anyhow::bail!("failed to create tmux session {tmux_name} in {workdir}");
+        trusty_mpm::core::tmux::create_managed_session(None, &tmux_name, Some(&workdir));
+    let outcome = match new_session {
+        Ok(o) if o.output.status.success() => o,
+        _ => anyhow::bail!("failed to create tmux session {tmux_name} in {workdir}"),
+    };
+    if !outcome.options_verified {
+        // #3386 review: a caller-visible one-line notice — never silently
+        // proceed as if the pane's scrollback limit landed.
+        eprintln!(
+            "warning: tmux scrollback limit could not be verified for session {tmux_name} — \
+             the pane may be capped at tmux's factory 2000-line history-limit instead of the \
+             configured value; see issue #3386"
+        );
     }
     // Guard only needed for freshly-created sessions; if the session was already
     // running we must NOT kill it on attach failure — another user may be attached.
