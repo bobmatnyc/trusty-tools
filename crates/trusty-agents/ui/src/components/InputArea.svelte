@@ -17,7 +17,6 @@
   import { get } from 'svelte/store';
   import { cancelTask, invoke, listenEvent, type CancelTaskResult } from '../lib/transport';
   import { buildRetaskPayload, isPendingTaskId } from '../lib/retask';
-  import { streamAccumulator } from '../lib/chatStream';
   import { resolveOverride } from '../lib/models';
   import { agentRoster } from '../stores/app';
   import { rosterDisplayName } from '../lib/roster';
@@ -160,22 +159,19 @@
     // the reconciliation point for a queued cancel (see `queueCancel` above).
     let reconciled = false;
     let unlistenReconcile: (() => void) | null = null;
-    const unlistenP = await listenEvent<{ task_id: string; message: string }>(
+    const unlistenP = await listenEvent<{ task_id: string }>(
       'task-progress',
       (p) => {
         if (reconciled || !p.task_id || mySeq !== submissionSeq) return;
         reconciled = true;
+        // Reconcile the placeholder id to the real backend id — load-bearing:
+        // it's what lets subsequent `task-delta`/`task-complete` events (keyed
+        // by the real id) find and fill this bubble. We deliberately do NOT
+        // write the progress message's status text into the bubble: interim
+        // "Running…"/"submitted…" strings are not shown in the response bubble
+        // (the spinner is the sole waiting indicator); the bubble stays empty
+        // until the first streamed delta or the final narrative arrives.
         replaceMessageTaskId(projectId, placeholderTaskId, p.task_id);
-        // Apply the message that triggered the swap so it isn't lost — but NOT
-        // while the bubble is streaming token deltas: writing this interim
-        // "Running…" progress text over the live streamed text is exactly the
-        // mid-stream flash the single-bubble fix removes. ChatView's own
-        // progress handler is likewise gated on the shared streaming state, so
-        // during a stream the authoritative `task-complete` narrative is what
-        // finally replaces the accumulated text.
-        if (!streamAccumulator.isStreaming(p.task_id)) {
-          updateMessageByTask(projectId, p.task_id, p.message);
-        }
         activeTaskId.set(p.task_id);
         if (cancelQueued) {
           cancelQueued = false;

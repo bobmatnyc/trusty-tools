@@ -9,6 +9,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **No interim status text in the chat response bubble — the spinner is the
+  sole waiting indicator:** the assistant bubble no longer fills with
+  "Running…"/"submitted…"-style `task-progress` status strings. It stays empty
+  (with a bare animated spinner shown beneath the thread — no "Running…" text
+  label; `role="status"` + `aria-label` preserve the accessible busy-state
+  name) until the first streamed `task-delta` or, for non-streaming providers,
+  the final `task-complete` narrative arrives. Removed the two progress-text
+  writes into message content (`ChatView`'s `task-progress` listener, dropped
+  entirely; `InputArea`'s poll-reconcile write) and the spinner-row text label;
+  the pending→real id reconcile itself is retained (it's load-bearing for
+  streamed-delta attribution).
 - **Base `assistant` persona defaults to Sonnet instead of Opus (#3688):**
   `claude-opus-4-6` → `claude-sonnet-4-6` on `assistant/agent.toml`, trading a
   small quality margin for materially lower per-turn latency (a trivial turn
