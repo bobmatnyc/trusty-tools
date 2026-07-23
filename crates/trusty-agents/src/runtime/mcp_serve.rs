@@ -81,7 +81,9 @@ pub async fn run_mcp_serve() -> anyhow::Result<()> {
     // it means `list_agents` returns `{"agents":[]}` on a fresh `$HOME`; run
     // the same best-effort deploy here. Emits nothing on stdout per its own doc.
     let _ = crate::agents::bundled::ensure_bundled_agents_deployed()
-        .inspect_err(|e| tracing::warn!(error = %e, "mcp-serve: failed to deploy bundled agents to $HOME"))
+        .inspect_err(
+            |e| tracing::warn!(error = %e, "mcp-serve: failed to deploy bundled agents to $HOME"),
+        )
         .unwrap_or_default();
 
     run_stdio_loop(dispatch).await
@@ -204,8 +206,7 @@ async fn call_tool(name: &str, args: Value) -> ToolCallOutcome {
     match name {
         "list_agents" => {
             let roster = crate::api::server::agent_roster().await;
-            let text = serde_json::to_string_pretty(&roster)
-                .unwrap_or_else(|_| roster.to_string());
+            let text = serde_json::to_string_pretty(&roster).unwrap_or_else(|_| roster.to_string());
             ToolCallOutcome {
                 text,
                 is_error: false,
@@ -315,7 +316,10 @@ mod mcp_serve_tests {
             .expect("content text is a string");
         assert_eq!(result["content"][0]["type"], "text");
         let parsed: Value = serde_json::from_str(text).expect("roster text is JSON");
-        assert!(parsed["agents"].is_array(), "roster carries an agents array");
+        assert!(
+            parsed["agents"].is_array(),
+            "roster carries an agents array"
+        );
     }
 
     /// Why: an unknown tool name must fail soft (surfaced to the client as a
