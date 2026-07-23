@@ -11,10 +11,56 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::mpsc;
-use trusty_common::chat::{ChatEvent, ToolCall};
+use anyhow::anyhow;
+use async_trait::async_trait;
+use tokio::sync::mpsc::{self, Sender};
+use trusty_common::ChatMessage;
+use trusty_common::chat::{ChatEvent, ChatProvider, ToolCall, ToolDef};
 
 use super::*;
+
+/// Controllable fake `ChatProvider` for exercising `stream_with_provider`'s
+/// error branches without a live API key: it replays a fixed script of
+/// `ChatEvent`s into `tx`, then returns `ret` (or panics first if `panic`).
+struct FakeProvider {
+    script: Vec<ChatEvent>,
+    ret: Result<(), String>,
+    panic: bool,
+}
+
+impl FakeProvider {
+    fn ok(script: Vec<ChatEvent>) -> Self {
+        Self {
+            script,
+            ret: Ok(()),
+            panic: false,
+        }
+    }
+}
+
+#[async_trait]
+impl ChatProvider for FakeProvider {
+    fn name(&self) -> &str {
+        "fake"
+    }
+    fn model(&self) -> &str {
+        "fake-model"
+    }
+    async fn chat_stream(
+        &self,
+        _messages: Vec<ChatMessage>,
+        _tools: Vec<ToolDef>,
+        tx: Sender<ChatEvent>,
+    ) -> anyhow::Result<()> {
+        if self.panic {
+            panic!("fake provider panic");
+        }
+        for ev in &self.script {
+            let _ = tx.send(ev.clone()).await;
+        }
+        self.ret.clone().map_err(|m| anyhow!(m))
+    }
+}
 
 /// Feed `events` into a fresh channel and drive the stream, returning both the
 /// captured `(text, done)` emissions and the assembled result.
@@ -165,6 +211,73 @@ fn streaming_supported_gates_on_provider() {
 fn streaming_supported_respects_anthropic_direct() {
     // Anthropic-direct bypasses the OpenRouter client entirely.
     assert!(!streaming_supported("anthropic/claude-3.5-sonnet", true));
+}
+
+// --- stream_with_provider error-branch coverage (item 5, critic MEDIUM) ---
+
+const FAST: Duration = Duration::ZERO;
+
+#[tokio::test]
+async fn stream_with_provider_propagates_error_frame() {
+    // A mid-stream Error frame must surface as Err so the caller falls back.
+    let provider = FakeProvider::ok(vec![
+        ChatEvent::Delta("partial".into()),
+        ChatEvent::Error("upstream exploded".into()),
+    ]);
+    let out = stream_with_provider(provider, vec![], "s1", "agent", FAST).await;
+    assert!(out.is_err(), "error frame should fail the stream");
+    assert!(out.unwrap_err().to_string().contains("upstream exploded"));
+}
+
+#[tokio::test]
+async fn stream_with_provider_propagates_provider_err() {
+    // The provider itself returning Err (e.g. HTTP 500) must propagate even if
+    // some content was already streamed.
+    let provider = FakeProvider {
+        script: vec![ChatEvent::Delta("hi".into())],
+        ret: Err("openrouter HTTP 500".into()),
+        panic: false,
+    };
+    let out = stream_with_provider(provider, vec![], "s1", "agent", FAST).await;
+    assert!(out.is_err());
+    assert!(out.unwrap_err().to_string().contains("chat_stream failed"));
+}
+
+#[tokio::test]
+async fn stream_with_provider_guards_empty_stream() {
+    // A clean Done with no content and no tool calls is the silent-failure case
+    // the guard must convert into Err so the blocking fallback engages.
+    let provider = FakeProvider::ok(vec![ChatEvent::Done]);
+    let out = stream_with_provider(provider, vec![], "s1", "agent", FAST).await;
+    assert!(out.is_err(), "empty stream should be treated as failed");
+    assert!(out.unwrap_err().to_string().contains("no content"));
+}
+
+#[tokio::test]
+async fn stream_with_provider_propagates_panic() {
+    let provider = FakeProvider {
+        script: vec![],
+        ret: Ok(()),
+        panic: true,
+    };
+    let out = stream_with_provider(provider, vec![], "s1", "agent", FAST).await;
+    assert!(out.is_err());
+    assert!(out.unwrap_err().to_string().contains("panicked"));
+}
+
+#[tokio::test]
+async fn stream_with_provider_returns_assembled_content() {
+    // Positive control: a normal stream returns the assembled text.
+    let provider = FakeProvider::ok(vec![
+        ChatEvent::Delta("Hello, ".into()),
+        ChatEvent::Delta("world".into()),
+        ChatEvent::Done,
+    ]);
+    let out = stream_with_provider(provider, vec![], "s1", "agent", FAST)
+        .await
+        .expect("stream should succeed");
+    assert_eq!(out.content, "Hello, world");
+    assert!(out.error.is_none());
 }
 
 #[test]

@@ -25,12 +25,15 @@
 //! follow-up, not fixed in this pass.
 
 use std::process::ExitStatus;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::process::Child;
 use tokio::sync::Mutex;
+
+use crate::sse_bridge::start_event_bridge;
 
 /// How long we let the sidecar shut down gracefully after SIGTERM before we
 /// escalate to SIGKILL.
@@ -58,6 +61,10 @@ pub(crate) const SIDECAR_GRACE: Duration = Duration::from_millis(500);
 pub struct ApiServerState {
     pub child: Mutex<Option<Child>>,
     pub port: Mutex<Option<u16>>,
+    /// Set once the desktop SSE→Tauri event bridge has been spawned, so
+    /// repeated `ensure_api_server` calls (every `App.svelte::onMount`) start
+    /// exactly one long-lived listener.
+    pub bridge_started: AtomicBool,
 }
 
 pub type SharedApi = Arc<ApiServerState>;
@@ -78,11 +85,18 @@ pub fn api_base(port: u16) -> String {
 /// Test: Call this twice — second call returns early; kill the child and
 /// call again — it re-spawns.
 #[tauri::command]
-pub async fn ensure_api_server(port: u16, state: State<'_, SharedApi>) -> Result<(), String> {
-    // Fast path: if the server already answers, there is nothing to do.
+pub async fn ensure_api_server(
+    app: AppHandle,
+    port: u16,
+    state: State<'_, SharedApi>,
+) -> Result<(), String> {
+    // Fast path: if the server already answers, there is nothing to do (but
+    // still ensure the streaming bridge is running).
     if http_health(port).await {
         let mut p = state.port.lock().await;
         *p = Some(port);
+        drop(p);
+        maybe_start_bridge(&app, &state, port);
         return Ok(());
     }
 
@@ -154,9 +168,30 @@ pub async fn ensure_api_server(port: u16, state: State<'_, SharedApi>) -> Result
         .map_err(|e| format!("failed to spawn {}: {e}", binary.display()))?;
 
     *guard = Some(child);
+    drop(guard);
     let mut p = state.port.lock().await;
     *p = Some(port);
+    drop(p);
+    maybe_start_bridge(&app, &state, port);
     Ok(())
+}
+
+/// Spawn the desktop SSE→Tauri streaming bridge exactly once.
+///
+/// Why: `ensure_api_server` is called on every `App.svelte::onMount`, but the
+/// bridge is a single long-lived listener that serves every task — spawning it
+/// per call would leak duplicate connections all emitting the same
+/// `task-delta` events. The `bridge_started` flag makes the first caller win.
+/// What: Atomically flips `bridge_started`; on the transition from `false` the
+/// caller spawns [`start_event_bridge`]. The connection tolerates the sidecar
+/// not being healthy yet — it reconnects with backoff until `/api/events`
+/// answers.
+/// Test: exercised manually (desktop launch → streamed bubble); the parser it
+/// drives is unit-tested in `sse_bridge::tests`.
+fn maybe_start_bridge(app: &AppHandle, state: &SharedApi, port: u16) {
+    if !state.bridge_started.swap(true, Ordering::SeqCst) {
+        start_event_bridge(app.clone(), port);
+    }
 }
 
 /// Env var letting power users point the sidecar spawn at an explicit binary

@@ -246,6 +246,45 @@ pub async fn stream_reply(
     }
 
     let provider = OpenRouterProvider::new(api_key, model.to_string());
+    stream_with_provider(provider, messages, session_id, agent, cadence).await
+}
+
+/// Provider-generic streaming core: drive any [`ChatProvider`], publish deltas,
+/// and enforce the failed-stream guard.
+///
+/// Why: Split out of [`stream_reply`] so the error branches can be unit-tested
+/// with a controllable fake provider (no live API key) — and so the
+/// failed-stream detection lives in exactly one place. The upstream SSE pump
+/// (`trusty_common::chat`) never emits `ChatEvent::Error`: a mid-stream error
+/// frame, a truncated EOF, or a non-SSE `200` all currently arrive as a clean
+/// `Done`. Without a guard those would return an empty (or partial-but-treated-
+/// as-complete) success and the caller's blocking fallback would never engage,
+/// leaving the user staring at an empty bubble. This function turns the
+/// unambiguous failure signal — a stream that yielded NO content and NO tool
+/// calls — into an `Err` so the caller falls back to the blocking chat path.
+/// (A partial-then-error stream that already produced some text is NOT caught
+/// here; robustly detecting that needs the pump to emit `ChatEvent::Error`,
+/// which is deferred to avoid destabilizing the shared tcode/memory consumers.)
+/// What: Spawns `provider.chat_stream` into a bounded channel, drives
+/// [`drive_delta_stream`] with a sink that publishes each batch as an
+/// [`Event::AgentMessageDelta`] tagged with `session_id`/`agent`, joins the
+/// pump (propagating its `Err` and panics), surfaces an explicit
+/// `ChatEvent::Error`, then applies the empty-stream guard.
+/// Test: `stream_with_provider_propagates_error_frame`,
+/// `stream_with_provider_propagates_provider_err`,
+/// `stream_with_provider_guards_empty_stream`,
+/// `stream_with_provider_propagates_panic`,
+/// `stream_with_provider_returns_assembled_content`.
+pub async fn stream_with_provider<P>(
+    provider: P,
+    messages: Vec<ChatMessage>,
+    session_id: &str,
+    agent: &str,
+    cadence: Duration,
+) -> Result<StreamAssembly>
+where
+    P: ChatProvider + Send + 'static,
+{
     let (tx, rx) = mpsc::channel::<ChatEvent>(STREAM_CHANNEL_CAPACITY);
 
     // Spawn the provider's SSE pump; it writes `ChatEvent`s into `tx`.
@@ -265,11 +304,18 @@ pub async fn stream_reply(
 
     match pump.await {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(e.context("OpenRouter chat_stream failed")),
+        Ok(Err(e)) => return Err(e.context("chat_stream failed")),
         Err(join_err) => return Err(anyhow!("streaming task panicked: {join_err}")),
     }
     if let Some(message) = &assembly.error {
         return Err(anyhow!("stream terminated with error: {message}"));
+    }
+    // Failed-stream guard (see fn docs): a stream that produced nothing usable
+    // is a silent failure — force the blocking fallback.
+    if assembly.content.is_empty() && assembly.tool_calls.is_empty() {
+        return Err(anyhow!(
+            "stream produced no content (treating as a failed stream so the blocking path takes over)"
+        ));
     }
 
     Ok(assembly)

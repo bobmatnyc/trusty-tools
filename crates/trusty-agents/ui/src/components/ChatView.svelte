@@ -69,6 +69,17 @@
     // accumulation, so we do NOT clear the buffer here (that happens on
     // completion) to keep suppressing progress ticks until the real result lands.
     unlistenDelta = await listenEvent<DeltaPayload>('task-delta', (p) => {
+      if (p.done) {
+        // End-of-stream marker (fires on BOTH success and failure — the
+        // backend always emits it, even when it then falls back to a blocking
+        // call). Finalize now so we stop suppressing progress ticks: on the
+        // fallback path the blocking call's second run then shows "Running…"
+        // and the authoritative `task-complete` narrative replaces the stale
+        // partial text (never frozen). The accumulated text already lives in
+        // the bubble; finalize only drops the internal buffer + streaming flag.
+        streams.finalize(p.task_id);
+        return;
+      }
       if (p.text) {
         const full = streams.append(p.task_id, p.text);
         updateMessageByTask($activeProjectId, p.task_id, full);

@@ -35,6 +35,7 @@
 
 mod overlay;
 mod sidecar;
+mod sse_bridge;
 mod task_commands;
 
 use std::sync::Arc;
