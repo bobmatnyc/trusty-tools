@@ -317,6 +317,17 @@ pub(super) async fn search_handler(
     let before = results.len();
     results.retain(|r| file_is_within_root(&r.file, &root));
     let filtered_out = before.saturating_sub(results.len());
+    // Issue #3683 code-critic review finding 3 (HIGH): read the degraded
+    // flag while the indexer read-guard is still held (it's about to be
+    // dropped below) so the response reflects THIS query's lane state, not
+    // a state that could shift between the search call and the response
+    // being built. `true` here means the lexical (BM25/grep-fallback) lane
+    // above may have returned fewer/no results because the detached
+    // rehydrate hadn't converged yet — an `Ok(vec![])`/short result set is
+    // otherwise indistinguishable from a genuine empty match. Mirrors how
+    // `WarmBootSummary.warm_boot_degraded` surfaces warm-boot degradation
+    // on `/health`, just scoped to a single query instead of a boot.
+    let bm25_lane_degraded = indexer.lane_degraded();
     if filtered_out > 0 {
         // Issue #541: increment the process-wide Prometheus counter so operators
         // can alert on a rising drop rate without log scraping.
@@ -385,6 +396,14 @@ pub(super) async fn search_handler(
             // normal case (no drops); `true` means the operator should run
             // `trusty-search index <path>` to re-register with a fresh root.
             "stale_index_root": filtered_out > 0,
+            // Issue #3683 code-critic review finding 3 (HIGH): `true` means
+            // this query's lexical lane (BM25 and/or grep-fallback) degraded
+            // to empty/partial because the detached corpus rehydrate hadn't
+            // converged within its bounded wait — NOT a genuine "no match"
+            // result. Clients should treat results under a `true` flag as
+            // provisional and may retry shortly; the background rehydrate
+            // keeps running regardless and the next query is warm.
+            "bm25_lane_degraded": bm25_lane_degraded,
         },
     })))
 }

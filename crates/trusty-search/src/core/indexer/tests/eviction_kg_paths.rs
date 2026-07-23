@@ -54,6 +54,7 @@ fn idle_evict_secs_default_and_env_override() {
 /// `chunks` map once idle past the threshold, and the next in-memory read
 /// transparently rehydrates it from redb.
 #[tokio::test]
+#[serial_test::serial]
 async fn idle_eviction_drops_and_lazily_rehydrates_chunks() {
     let dir = tempfile::tempdir().unwrap();
     let redb_path = dir.path().join("index.redb");

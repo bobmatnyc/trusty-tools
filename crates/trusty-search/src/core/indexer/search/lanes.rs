@@ -35,14 +35,39 @@ use super::path_filter;
 /// **cold-start** case — the first query after an idle eviction of a large
 /// corpus, where `ensure_*_loaded()`'s detached rehydrate (see
 /// `idle_evict::ensure_corpus_rehydrated`) may still be running when its own
-/// bounded wait (`idle_evict::rehydrate_wait_budget`, default 4s) elapses.
+/// bounded wait (`idle_evict::rehydrate_wait_budget`, default 9s) elapses.
 /// Each loop iteration rejoins the SAME still-in-flight detached task (it is
 /// deduplicated, not re-triggered) rather than starting a second scan, so the
 /// worst-case total wait before this lane degrades is roughly
-/// `REHYDRATE_RACE_RETRIES * rehydrate_wait_budget()` — comfortably inside the
-/// default 30s query timeout, and the task itself keeps running to
-/// completion in the background regardless of how many of these retries (or
-/// the whole request) time out.
+/// `REHYDRATE_RACE_RETRIES * rehydrate_wait_budget()` (~27s at the defaults) —
+/// just under the default 30s query timeout, and the task itself keeps
+/// running to completion in the background regardless of how many of these
+/// retries (or the whole request) time out.
+///
+/// Code-critic review finding 3 (issue #3683, HIGH): the value that first
+/// shipped here (~12s total) was deliberately LESS than the 27-40s cold-scan
+/// latency this issue's own RCA measured on the production 315K-chunk
+/// corpus, so on that corpus every first cold query was *guaranteed* to
+/// exhaust these retries and degrade — see `idle_evict::DEFAULT_REHYDRATE_WAIT_MS`'s
+/// doc comment for why ~27s (still an intentional trade-off — an interactive
+/// query must never block on an O(corpus) scan — but no longer guaranteed to
+/// lose on the low end of the measured window) replaced it, and for why this
+/// remains a probabilistic improvement, not a guarantee, given the hard 30s
+/// request-timeout ceiling. PROVIDED the degrade is observable: see
+/// [`CodeIndexer::lane_degraded`] and the `trusty_bm25_lane_degraded` gauge
+/// it drives (surfaced in the search HTTP response as
+/// `meta.bm25_lane_degraded` — `service::server::search::search_handler`),
+/// plus the `trusty_bm25_lane_degraded_total` / `trusty_grep_fallback_lane_degraded_total`
+/// counters, at the bottom of `bm25_search` / `grep_fallback_search`. These
+/// are the load-bearing signals distinguishing "degraded, rehydrate still
+/// running" from a genuine empty result (an `Ok(vec![])` alone cannot). The
+/// intended steady state is: the first cold query degrades (loudly, via the
+/// gauge/counter/response-bit) while the detached task keeps converging in
+/// the background, and the NEXT query — independent of any single request's
+/// deadline — is warm, which is also the instant the gauge/flag reset
+/// (finding 5 — see `idle_evict::spawn_detached_rehydrate`'s commit-success
+/// branch). `TRUSTY_REHYDRATE_WAIT_MS` is the per-deployment knob for trading
+/// first-query latency against fewer degraded responses.
 const REHYDRATE_RACE_RETRIES: u32 = 3;
 
 impl CodeIndexer {
@@ -239,9 +264,32 @@ impl CodeIndexer {
         // empty lexical lane rather than loop forever or burn the whole
         // request deadline; the task itself keeps running in the background
         // and the next query succeeds once it completes.
+        //
+        // Code-critic review finding 3 (issue #3683, HIGH): this degrade is
+        // OBSERVABLE, not silent. `REHYDRATE_RACE_RETRIES * rehydrate_wait_budget()`
+        // defaults to ~27s (see the const's doc comment above and
+        // `idle_evict::DEFAULT_REHYDRATE_WAIT_MS` for why), at the low end of
+        // the 27-40s cold-scan latency this PR's own RCA cites for the
+        // production 315K-chunk corpus — narrowing, not eliminating, how
+        // often a cold query on that corpus hits this path. An `Ok(vec![])`
+        // here is otherwise bit-for-bit indistinguishable from a
+        // genuinely-empty corpus at the HTTP layer. Finding 3(a): flip the
+        // sticky per-index flag AND set the gauge —
+        // together these are `meta.bm25_lane_degraded` in the search HTTP
+        // response (`service::server::search::search_handler`) and the
+        // `trusty_bm25_lane_degraded` Prometheus signal, so both a single
+        // caller and a dashboard can tell this apart from a true empty
+        // result without tailing logs. Reset (finding 5) happens in
+        // `idle_evict::spawn_detached_rehydrate`'s commit-success branch,
+        // the actual recovery instant, not on some later query noticing.
+        self.lane_degraded.store(true, Ordering::Relaxed);
+        metrics::gauge!("trusty_bm25_lane_degraded", "index" => self.index_id.clone()).set(1.0);
+        metrics::counter!("trusty_bm25_lane_degraded_total", "index" => self.index_id.clone())
+            .increment(1);
         tracing::warn!(
             "index '{}': BM25 rehydrate still not ready after {REHYDRATE_RACE_RETRIES} bounded \
-             waits — returning empty lexical lane for this query (issue #3683)",
+             waits — returning empty lexical lane for this query (degraded, not a true empty \
+             result; issue #3683)",
             self.index_id
         );
         Ok(Vec::new())
@@ -319,11 +367,23 @@ impl CodeIndexer {
             return out;
         }
         // Exhausted retries: see `bm25_search`'s identical tail comment
-        // (issue #3683) — either a reclaim race or a still-running cold-start
-        // rehydrate.
+        // (issue #3683 finding 3) — either a reclaim race or a still-running
+        // cold-start rehydrate. Same observability requirement: this degrade
+        // must be distinguishable from a genuine empty result.
+        // Finding 3(a): same sticky flag/gauge as `bm25_search` — grep
+        // fallback shares the identical cold-start root cause (the detached
+        // rehydrate hasn't converged yet), so it's folded into the same
+        // signal rather than adding a second gauge for what is, from an
+        // operator's point of view, the same "this index's lexical results
+        // are degraded" condition.
+        self.lane_degraded.store(true, Ordering::Relaxed);
+        metrics::gauge!("trusty_bm25_lane_degraded", "index" => self.index_id.clone()).set(1.0);
+        metrics::counter!("trusty_grep_fallback_lane_degraded_total", "index" => self.index_id.clone())
+            .increment(1);
         tracing::warn!(
             "index '{}': chunk rehydrate still not ready after {REHYDRATE_RACE_RETRIES} bounded \
-             waits — returning empty grep-fallback lane for this query (issue #3683)",
+             waits — returning empty grep-fallback lane for this query (degraded, not a true \
+             empty result; issue #3683)",
             self.index_id
         );
         Vec::new()

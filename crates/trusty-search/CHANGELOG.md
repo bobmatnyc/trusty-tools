@@ -33,6 +33,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `Bm25Index::upsert_document_reporting`) and emit a
   `trusty_bm25_docs_dropped` gauge, instead of relying on trusty-common's
   process-wide log-once latch.
+- **Detached rehydrate hardening — code-critic review round 2 (issue
+  #3683).** Three follow-up fixes to the detached rehydrate task above:
+  - Panic-safe gate clearing: the per-index rehydrate-in-flight gate is now
+    cleared by a real `Drop` guard (`RehydrateGateClearOnDrop`), constructed
+    before any fallible work, so a panic anywhere in the commit phases can no
+    longer wedge the gate at `Some(dead_notify)` forever (the exact
+    #3659/#3666 "opposite-polarity" bug recurring in a new guard).
+  - Evict-vs-rehydrate commit race: a new per-index `rehydrate_generation`
+    counter, bumped by every real idle-evict/`reclaim_memory_now` clear, is
+    snapshotted before a rehydrate spawns and checked before its commit — a
+    concurrent evict/reclaim landing mid-rehydrate now invalidates the
+    pending commit instead of silently overwriting `*_evicted` back to
+    `false`.
+  - The bounded per-query rehydrate wait was silently guaranteed to lose
+    against the 27-40s cold-scan latency measured in production; raised to
+    9s (~27s total across retries) and made the degrade observable instead
+    of silent — a sticky `lane_degraded` flag, `trusty_bm25_lane_degraded`
+    gauge, `trusty_bm25_lane_degraded_total` /
+    `trusty_grep_fallback_lane_degraded_total` counters, and a new
+    `meta.bm25_lane_degraded` field on the search HTTP response (mirroring
+    `WarmBootSummary.warm_boot_degraded`) now distinguish "degraded, corpus
+    still rehydrating" from a genuine empty result.
+  - The `trusty_bm25_docs_dropped` gauge above now always reports the
+    current dropped count (including zero), instead of only when nonzero,
+    so it can't hold a stale reading from a prior rehydrate.
 
 ---
 ## [0.38.1] — 2026-07-22
