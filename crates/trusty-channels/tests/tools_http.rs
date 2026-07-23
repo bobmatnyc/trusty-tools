@@ -13,6 +13,7 @@
 
 use serde_json::json;
 use trusty_channels::slack::api::client::BaseClient;
+use trusty_channels::slack::api::error::SlackError;
 use trusty_channels::slack::handlers::dispatch;
 use trusty_channels::slack::server::ToolCallError;
 use wiremock::matchers::{body_partial_json, method, path};
@@ -1005,6 +1006,199 @@ async fn read_canvas_without_download_url_returns_empty_content() {
         .expect("read canvas with no download url should still succeed");
 
     assert_eq!(out["content"], "");
+}
+
+// ── slack_canvas_create / slack_canvas_lookup_sections (issue #3744 slice 1) ─
+
+#[tokio::test]
+async fn canvas_create_requires_markdown() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.create"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_canvas_create",
+        json!({ "title": "Runbook" }),
+    )
+    .await
+    .expect_err("missing markdown should error before any network call");
+    assert!(matches!(err, ToolCallError::InvalidArgs(_)));
+}
+
+#[tokio::test]
+async fn canvas_create_posts_document_content_and_channel() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.create"))
+        .and(body_partial_json(json!({
+            "title": "Runbook",
+            "channel_id": "C1",
+            "document_content": { "type": "markdown", "markdown": "# Runbook" },
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "canvas_id": "F789",
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_canvas_create",
+        json!({ "title": "Runbook", "channel_id": "C1", "markdown": "# Runbook" }),
+    )
+    .await
+    .expect("canvas_create with markdown should succeed");
+
+    assert_eq!(out["canvas_id"], "F789");
+}
+
+#[tokio::test]
+async fn canvas_create_surfaces_slack_api_error() {
+    // Slack errors like `missing_scope` / `canvas_creation_failed` /
+    // `canvas_disabled_user_team` / `free_teams_cannot_create_non_tabbed_canvases`
+    // must surface through the existing SlackError::Api path unchanged.
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "canvases.create",
+        json!({ "ok": false, "error": "free_teams_cannot_create_non_tabbed_canvases" }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_canvas_create",
+        json!({ "markdown": "# Runbook" }),
+    )
+    .await
+    .expect_err("Slack ok:false must surface as an error");
+    match err {
+        ToolCallError::Slack(SlackError::Api(slug)) => {
+            assert_eq!(slug, "free_teams_cannot_create_non_tabbed_canvases");
+        }
+        other => panic!("expected ToolCallError::Slack(SlackError::Api(_)), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn lookup_sections_posts_criteria_and_returns_ids() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.sections.lookup"))
+        .and(body_partial_json(json!({
+            "canvas_id": "F123",
+            "criteria": { "section_types": ["h1", "any_header"], "contains_text": "status" },
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "sections": [{ "id": "Sc001" }, { "id": "Sc002" }],
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_canvas_lookup_sections",
+        json!({
+            "canvas_id": "F123",
+            "section_types": ["h1", "any_header"],
+            "contains_text": "status",
+        }),
+    )
+    .await
+    .expect("lookup_sections should succeed");
+
+    assert_eq!(out["canvas_id"], "F123");
+    assert_eq!(out["section_ids"], json!(["Sc001", "Sc002"]));
+    // Slack's raw `sections` envelope must never be forwarded — only the
+    // allow-listed `section_ids` field is returned (code-critic finding 1 on
+    // PR #3749: a raw passthrough could carry unescaped workspace-authored
+    // text from an undocumented future response field).
+    assert!(out.get("sections").is_none());
+}
+
+#[tokio::test]
+async fn lookup_sections_omits_absent_criteria_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.sections.lookup"))
+        .and(body_partial_json(
+            json!({ "canvas_id": "F123", "criteria": {} }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "sections": [],
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let out = dispatch(
+        &client,
+        "slack_canvas_lookup_sections",
+        json!({ "canvas_id": "F123" }),
+    )
+    .await
+    .expect("lookup_sections with no filters should still succeed");
+
+    assert_eq!(out["section_ids"], json!([]));
+}
+
+#[tokio::test]
+async fn lookup_sections_requires_canvas_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/canvases.sections.lookup"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_canvas_lookup_sections",
+        json!({ "section_types": ["h1"] }),
+    )
+    .await
+    .expect_err("missing canvas_id should error before any network call");
+    assert!(matches!(err, ToolCallError::InvalidArgs(_)));
+}
+
+#[tokio::test]
+async fn lookup_sections_surfaces_slack_api_error() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "canvases.sections.lookup",
+        json!({ "ok": false, "error": "canvas_not_found" }),
+    )
+    .await;
+
+    let client = client_for(&server);
+    let err = dispatch(
+        &client,
+        "slack_canvas_lookup_sections",
+        json!({ "canvas_id": "F999" }),
+    )
+    .await
+    .expect_err("Slack ok:false must surface as an error");
+    match err {
+        ToolCallError::Slack(SlackError::Api(slug)) => {
+            assert_eq!(slug, "canvas_not_found");
+        }
+        other => panic!("expected ToolCallError::Slack(SlackError::Api(_)), got {other:?}"),
+    }
 }
 
 // ── slack_read_file (issue #3615) ──────────────────────────────────────────
