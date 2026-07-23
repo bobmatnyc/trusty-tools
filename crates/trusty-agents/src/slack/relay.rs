@@ -32,6 +32,16 @@ pub(super) const DEFAULT_RELAY_URL: &str = "http://127.0.0.1:8765";
 /// must not stall the Slack reply path, so we cap the attempt aggressively.
 const RELAY_TIMEOUT_MS: u64 = 500;
 
+/// Env var holding the mandatory shared relay secret. MUST be set to the SAME
+/// value on the `--api` process, which rejects (401) any post whose
+/// `x-relay-token` header does not match — and rejects ALL posts when the
+/// secret is unset there (fail closed). See `api::server::relay`.
+pub(super) const RELAY_TOKEN_ENV: &str = "TAGENT_RELAY_TOKEN";
+
+/// Header carrying the shared relay secret. MUST match
+/// `crate::api::server::relay::RELAY_TOKEN_HEADER`.
+const RELAY_TOKEN_HEADER: &str = "x-relay-token";
+
 /// Honest reply-speaker label. The bot always replies AS ITSELF — there is no
 /// "as-Bob" impersonation mode in code, so the mirror must never claim one.
 pub(super) const BOT_IDENTITY: &str = "CTO Bot (as itself)";
@@ -72,20 +82,43 @@ pub(super) fn relay_endpoint() -> String {
 ///
 /// Why: Best-effort telemetry — see the module doc. Owns its `Event` so it is
 /// `'static` and can be detached via `tokio::spawn` from the Slack handler,
-/// guaranteeing the reply path never awaits the network.
-/// What: Resolves the endpoint, POSTs the JSON event (attaching a bearer token
-/// from `TAGENT_API_TOKEN` when the API is token-guarded), and logs — never
-/// returns — on any error.
+/// guaranteeing the reply path never awaits the network. All env reads happen
+/// HERE (not in `post_event`) so the inner POST is env-free and unit-testable
+/// without racing the process environment.
+/// What: Resolves the endpoint + the shared relay secret (`TAGENT_RELAY_TOKEN`,
+/// sent as `x-relay-token` — REQUIRED by the `--api` side) + an optional
+/// `TAGENT_API_TOKEN` bearer (when the API is `--api-token`-guarded), then
+/// delegates to `post_event`.
 /// Test: `relay_tolerates_unreachable_server`.
 pub(super) async fn relay_event(event: Event) {
-    post_event(&relay_endpoint(), &event).await;
+    let relay_token = std::env::var(RELAY_TOKEN_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let api_token = std::env::var("TAGENT_API_TOKEN")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    post_event(
+        &relay_endpoint(),
+        &event,
+        relay_token.as_deref(),
+        api_token.as_deref(),
+    )
+    .await;
 }
 
-/// Inner POST against an explicit endpoint, so tests can target a closed port
-/// without mutating process env.
+/// Inner POST against an explicit endpoint with explicit tokens, so tests can
+/// target a closed port without mutating process env.
 ///
+/// What: Attaches `x-relay-token: <relay_token>` (the shared secret the API
+/// side mandates) and, when present, an `Authorization: Bearer <api_token>`.
+/// Logs — never returns — on any error.
 /// Test: `relay_tolerates_unreachable_server`.
-async fn post_event(endpoint: &str, event: &Event) {
+async fn post_event(
+    endpoint: &str,
+    event: &Event,
+    relay_token: Option<&str>,
+    api_token: Option<&str>,
+) {
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_millis(RELAY_TIMEOUT_MS))
         .build()
@@ -97,10 +130,11 @@ async fn post_event(endpoint: &str, event: &Event) {
         }
     };
     let mut req = client.post(endpoint).json(event);
-    if let Ok(token) = std::env::var("TAGENT_API_TOKEN")
-        && !token.trim().is_empty()
-    {
-        req = req.bearer_auth(token.trim());
+    if let Some(t) = relay_token {
+        req = req.header(RELAY_TOKEN_HEADER, t.trim());
+    }
+    if let Some(t) = api_token {
+        req = req.bearer_auth(t.trim());
     }
     match req.send().await {
         Ok(resp) if resp.status().is_success() => {}
@@ -142,12 +176,19 @@ mod tests {
     #[tokio::test]
     async fn relay_tolerates_unreachable_server() {
         // Port 59999 has no listener → connection refused. The relay must
-        // return (not panic, not hang) — the fire-and-forget contract.
+        // return (not panic, not hang) — the fire-and-forget contract. Passes
+        // explicit tokens so it never reads process env (race-free).
         let ev = Event::SlackReplySent {
             channel: "C0".into(),
             text: "hi".into(),
             identity: BOT_IDENTITY.into(),
         };
-        post_event("http://127.0.0.1:59999/api/internal/relay-event", &ev).await;
+        post_event(
+            "http://127.0.0.1:59999/api/internal/relay-event",
+            &ev,
+            Some("secret"),
+            None,
+        )
+        .await;
     }
 }

@@ -59,9 +59,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (badged `CTO Bot (as itself)`, the honest label — there is no impersonation
   mode in code). Implemented as a **low-risk relay**, not a process merge: two
   additive `Event` variants (`SlackMessageReceived` / `SlackReplySent`); a new
-  loopback-guarded `POST /api/internal/relay-event` endpoint on the `--api`
-  server that whitelists only those two `Slack*` kinds and re-publishes them onto
-  the bus feeding `/api/events`; a fire-and-forget relay call from
+  `POST /api/internal/relay-event` endpoint on the `--api` server, gated by a
+  **mandatory shared secret** (`TAGENT_RELAY_TOKEN`, sent as `x-relay-token`) —
+  the endpoint **fails closed**, rejecting every post when the secret is unset
+  server-side, since the origin guard alone admits absent-`Origin` local callers
+  who could otherwise forge a reply with a fabricated identity badge. It also
+  whitelists only those two `Slack*` kinds, validates the inbound `tier` against
+  the closed `ServiceTier` set, and re-publishes survivors onto the bus feeding
+  `/api/events`; a fire-and-forget relay call from
   `slack/handlers.rs` (inbound after dispatch, reply after `post_message`
   succeeds — Slack handling never blocks or fails on relay errors,
   `TAGENT_API_RELAY_URL` default `http://127.0.0.1:8765`); and a Foundry-styled
