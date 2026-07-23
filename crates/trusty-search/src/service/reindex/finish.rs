@@ -431,9 +431,16 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
     // Issue #923: spawn the background embedding job if deferred.
     // Issue #2984 Phase 1: never spawn it for a skip_vector index — the
     // embedder must never run, not just be deferred.
-    let has_embedder = handle.indexer.read().await.has_embedder();
+    // Issue #3748 slice A: read chunk_count in the SAME read-lock acquisition
+    // as has_embedder — it's the size-ordering key the deferred-embed catch-up
+    // queue uses to drain small repos before a giant one, and costs nothing
+    // extra since the lock is already held here.
+    let (has_embedder, total_chunks) = {
+        let indexer = handle.indexer.read().await;
+        (indexer.has_embedder(), indexer.chunk_count())
+    };
     if defer_embed && !aborted_memory && has_embedder && !handle.skip_vector {
-        spawn_deferred_embed_pass(handle, progress.clone());
+        spawn_deferred_embed_pass(handle, progress.clone(), total_chunks);
     }
 
     // Issue #75: GC the progress entry after a short delay.

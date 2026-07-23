@@ -683,8 +683,15 @@ async fn defer_embed_semantic_stage_not_ready_before_background_pass_completes()
     );
 
     // Eventually the deferred pass finishes and semantic really does flip Ready.
+    // Issue #3748 slice A: the deferred-embed catch-up queue now cooperatively
+    // polls a shared size-ordered heap (see `reindex::defer_embed_queue`)
+    // rather than racing `background_reindex_semaphore` immediately on spawn.
+    // A slightly longer budget than the old strictly-FIFO model gives headroom
+    // for the queue's `MAX_WAIT` anti-starvation gate under this crate's full
+    // parallel test suite (dozens of OTHER tests' background reindexes sharing
+    // the same process-global 1-permit semaphore).
     let mut final_status = semantic_status;
-    for _ in 0..100 {
+    for _ in 0..150 {
         final_status = handle.stages.read().await.semantic.status;
         if final_status == StageStatus::Ready {
             break;

@@ -22,8 +22,8 @@
 //! `failing_deferred_embed_pass_marks_semantic_failed` in
 //! `service::reindex::defer_embed::tests`.
 
+use super::defer_embed_queue;
 use super::progress::ReindexProgress;
-use super::semaphore::{background_reindex_semaphore, index_semaphore};
 use super::stages::now_rfc3339;
 use crate::core::registry::{IndexHandle, StageState, StageStatus};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,40 +33,26 @@ use std::sync::Arc;
 ///
 /// Why: the fast pass (C1) stored all chunks in BM25 + redb without embedding
 /// them so the index was searchable lexically within seconds. This function
-/// spawns the catch-up job that embeds all corpus chunks and upserts the
+/// enqueues the catch-up job that embeds all corpus chunks and upserts the
 /// resulting vectors into HNSW, then marks the semantic stage `Ready`.
 ///
-/// What: acquires the background reindex semaphore (one permit) so the embed
-/// pass never races with a concurrent reindex, then delegates to
-/// [`run_embed_catch_up`] for the actual embed/commit/mark-ready work.
+/// What: pushes the job onto the size-ordered catch-up queue (issue #3748
+/// slice A — see `defer_embed_queue` module docs), which acquires the
+/// background reindex semaphore (one permit, so the embed pass never races a
+/// concurrent reindex) before delegating to [`run_embed_catch_up`] for the
+/// actual embed/commit/mark-ready work. `total_chunks` is the size-ordering
+/// key; callers read it from the same indexer read-lock they already hold
+/// right before calling this (see `finish::finish_reindex`).
 ///
 /// Test: `deferred_embed_pass_marks_semantic_ready_and_is_idempotent` and
-/// `failing_deferred_embed_pass_marks_semantic_failed` in this module's tests.
-pub(super) fn spawn_deferred_embed_pass(handle: Arc<IndexHandle>, progress: Arc<ReindexProgress>) {
-    let index_id = handle.id.clone();
-    tokio::spawn(async move {
-        // Re-use the background semaphore to avoid racing with a concurrent
-        // reindex or another deferred-embed pass on the same handle.
-        let _permit = match background_reindex_semaphore().acquire().await {
-            Ok(p) => p,
-            Err(_) => {
-                tracing::warn!(
-                    "deferred_embed[{}]: background semaphore closed — skipping embed pass",
-                    index_id.0,
-                );
-                return;
-            }
-        };
-        // Issue #2984 Phase 1 CRITICAL finding 2: also hold this index's
-        // per-index mutual-exclusion permit for the whole pass — the SAME
-        // semaphore the component-toggle handler and `run_reindex` acquire
-        // for this index, so this pass can never race a runtime component
-        // catch-up or a reindex on the SAME index.
-        let _index_permit = index_semaphore(&index_id).acquire_owned().await.expect(
-            "per-index semaphore is never closed — it is a fresh Semaphore per IndexId, never dropped",
-        );
-        run_embed_catch_up(handle, progress).await;
-    });
+/// `failing_deferred_embed_pass_marks_semantic_failed` in this module's
+/// tests; queue ordering is covered in `defer_embed_queue`'s tests.
+pub(super) fn spawn_deferred_embed_pass(
+    handle: Arc<IndexHandle>,
+    progress: Arc<ReindexProgress>,
+    total_chunks: usize,
+) {
+    defer_embed_queue::enqueue(handle, progress, total_chunks);
 }
 
 /// Embed every un-embedded corpus chunk and mark the semantic stage
@@ -260,7 +246,7 @@ mod tests {
             root,
         ));
         let progress = Arc::new(ReindexProgress::new());
-        spawn_deferred_embed_pass(handle.clone(), progress.clone());
+        spawn_deferred_embed_pass(handle.clone(), progress.clone(), 0);
 
         // Poll until semantic stage transitions out of Pending.
         for _ in 0..100 {
@@ -359,7 +345,7 @@ mod tests {
             root,
         ));
         let progress = Arc::new(ReindexProgress::new());
-        spawn_deferred_embed_pass(handle.clone(), progress.clone());
+        spawn_deferred_embed_pass(handle.clone(), progress.clone(), 1);
 
         // Poll until semantic stage transitions out of Pending.
         for _ in 0..100 {
@@ -438,7 +424,7 @@ mod tests {
             root,
         ));
         let progress = Arc::new(ReindexProgress::new());
-        spawn_deferred_embed_pass(handle.clone(), progress.clone());
+        spawn_deferred_embed_pass(handle.clone(), progress.clone(), 1);
 
         // Poll until total is populated (pre-seeded before embed starts).
         let mut total_seen: Option<usize> = None;

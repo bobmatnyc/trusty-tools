@@ -53,6 +53,9 @@ mod stages;
 
 // ── pre-existing sibling modules ─────────────────────────────────────────────
 mod defer_embed;
+// Issue #3748 slice A: size-ordered dispatch queue for `defer_embed`'s C2
+// catch-up pass — see its module docs.
+mod defer_embed_queue;
 mod hash_cache;
 mod prune;
 pub mod quarantine;
@@ -83,6 +86,18 @@ pub use quarantine::ReindexQuarantine;
 /// What: delegates to `semaphore::background_reindex_queue_depth`.
 /// Test: `background_reindex_queue_depth_increments_and_decrements` in `tests.rs`.
 pub use semaphore::background_reindex_queue_depth;
+
+/// Re-export the deferred-embed catch-up queue's depth + completion-epoch
+/// accessors (issue #3748 slice A) so `server::health` can surface the
+/// backlog on `/health` and detect drain events to recompute
+/// `warm_boot_degraded`.
+///
+/// Why: the queue lives in the private `defer_embed_queue` submodule.
+/// What: delegates to `defer_embed_queue::{deferred_embed_queue_depth,
+/// deferred_embed_completion_epoch}`.
+/// Test: `defer_embed_queue`'s own tests cover the counters directly;
+/// `server::tests_health_degraded` covers the recompute consumer.
+pub use defer_embed_queue::{deferred_embed_completion_epoch, deferred_embed_queue_depth};
 
 /// Re-export `background_reindex_semaphore` (test-only — see the
 /// `#[cfg(test)]` internal re-exports below) so

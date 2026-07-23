@@ -9,6 +9,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Deferred-embed catch-up queue is now size-ordered; `warm_boot_degraded`
+  recomputes instead of staying sticky until restart (issue #3748 slice A).**
+  The warm-boot deferred-embed (C2) catch-up queue was strictly serial and
+  size-blind: one oversized repo (e.g. 94k chunks) that finished its fast
+  pass before smaller repos would head-of-line-block every other index's
+  semantic readiness for hours, and the boot-time `warm_boot_degraded` flag
+  never re-evaluated once catch-up finished. `service::reindex::defer_embed_queue`
+  (new module) now dispatches catch-up jobs ascending by chunk count (FIFO
+  tiebreak for equal sizes), with a wall-clock anti-starvation gate
+  (`MAX_WAIT` = 750ms) so a large job can never be starved indefinitely by a
+  steady trickle of newer, smaller arrivals. `GET /health`'s
+  `warmboot_summary.warm_boot_degraded` now recomputes when the catch-up
+  queue fully drains, folding in a live scan for any index with a `Failed`
+  stage (so a genuinely failed embed pass still counts as degraded) instead
+  of remaining frozen at its boot-time value forever. No embedder-concurrency
+  or worker-pool changes (tracked separately as slice B).
 - **`core::memguard_enforce::tests::enforcement_rss_mb_for_pid_matches_chosen_measure`
   deflaked for good (issue #3716).** Three successive rounds of calibrating a
   "two live RSS samples of the same measure agree" tolerance on this test
