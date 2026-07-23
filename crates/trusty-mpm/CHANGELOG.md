@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [0.21.0] — 2026-07-23
+
 ### Added
 
 - **Cross-workstream coordination via trusty-memory claim drawers** (DOC-53, [docs/specs/DOC-53-workstream-claim-drawer-convention.md](../../docs/specs/DOC-53-workstream-claim-drawer-convention.md), motivated by epic #3524 slices 5+6 independently duplicating `/health` work): `PM_INSTRUCTIONS.md` gains a concise "Cross-Workstream Coordination" section — before dispatching multi-agent work on an area, recall `memory_list(tag: "ws-claim")` and verify any hit against live git/GitHub state (a claim whose branch/PR no longer exists is void); write a `WS-CLAIM <workstream>: <area>` drawer when dispatching; supersede it on land or abandon. Memory remains awareness-only — git/GitHub branch/PR/label state stays the authoritative claim and the event bus (#3168 BUS-7) remains the real-time channel; this does not add any new memory locking or messaging primitive.

@@ -8,6 +8,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-07-23
+
+Folds in the never-published 0.20.0 (see below — version bumped in source but
+no tag/crates.io release was ever cut for it) plus the new DOC-53 workstream
+attribution work.
+
 ### Added
 
 - **Workstream-attributed drawers** (DOC-53, part of the workstream claim-drawer coordination convention): `crates/trusty-memory/src/attribution.rs`'s `creator:*` namespace gains `creator:workstream=<name>`, plus a bare `ws:<name>` tag for ergonomic `memory_list`/`memory_recall` filtering — both rendered by `CreatorInfo::into_tags()` alongside the existing four attribution tags, and both omitted cleanly (no placeholder) when the workstream name isn't resolvable. New `X-Trusty-Client-Workstream` HTTP header and MCP `args["workstream"]`/`args["cwd"]` fields (mirroring the existing `args["cwd"]` precedent on `palace_create`) let a caller self-report its identity; the MCP stdio bridge (`commands::serve_stdio_bridge`) auto-injects its own resolved identity into every forwarded request, mirroring the existing `--palace` default-injection mechanism.
