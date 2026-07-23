@@ -488,7 +488,7 @@ pub mod search_readiness;
 /// [`session_naming::is_managed_session_name`], [`session_naming::name_from_uuid`],
 /// [`session_naming::name_from_dir`], [`session_naming::build_managed_session_name`]
 /// / [`session_naming::build_session_name`] and the serial helpers.
-/// Test: `cargo test -p trusty-common -- session_naming`.
+/// Test: `cargo test -p trusty-common --features session-naming -- session_naming`.
 #[cfg(feature = "session-naming")]
 pub mod session_naming;
 

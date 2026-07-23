@@ -31,7 +31,7 @@
 //! primitive shared by every OTHER name-allocation site (`rename`,
 //! `adopt_existing`, and `create`'s final safety net) — split out to keep
 //! this file under its own 500-SLOC production cap.
-//! Test: `cargo test -p trusty-common -- session_naming` asserts determinism,
+//! Test: `cargo test -p trusty-common --features session-naming -- session_naming` asserts determinism,
 //! format, serial
 //! allocation (including gap-reuse and exhaustion), and that legacy prefixes
 //! remain recognized by [`is_managed_session_name`].

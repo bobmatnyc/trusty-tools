@@ -397,3 +397,80 @@ async fn manager_adopt_existing_recycled_name_skips_to_next_free_ordinal() {
         .expect("third adopt must skip the taken -2 and land on -3");
     assert_eq!(third.tmux_name, "tm-recycled-3");
 }
+
+/// A store failure AFTER the recycled-name tmux rename must roll the rename
+/// back (#3698 round-2 HIGH-B): a live renamed session tracked by NO record
+/// is the untracked-session defect class #3692 exists to prevent — and this
+/// path alone could mint one (pre-#3692 adopt never mutated tmux).
+///
+/// What: adopts a pane under `tm-roll`, simulates the name being recycled
+/// (different live `pane_id`), makes the store directory read-only so the
+/// next persist fails, adopts again, and asserts the call errored, the
+/// driver saw BOTH the forward rename (`tm-roll` → `tm-roll-2`) and its
+/// compensating rollback (`tm-roll-2` → `tm-roll`), and the live session
+/// answers to its ORIGINAL name again.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[tokio::test]
+async fn manager_adopt_existing_rolls_back_tmux_rename_when_store_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::manager::ManagedError;
+
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    *fake.pane_id_override.lock().unwrap() = Some("pane-old".into());
+    fake.seeded_names.lock().unwrap().push("tm-roll".into());
+    mgr.adopt_existing(
+        "tm-roll",
+        PathBuf::from("/tmp/first"),
+        "first pane".into(),
+        crate::runtime::RuntimeKind::default(),
+        false,
+    )
+    .await
+    .expect("first adopt succeeds");
+
+    // The name is recycled: a DIFFERENT pane now answers to it.
+    *fake.pane_id_override.lock().unwrap() = Some("pane-new".into());
+
+    // Make the store dir read-only: reads (the reload) still work, but the
+    // save's `sessions.json.tmp` creation fails — a targeted persist failure
+    // landing AFTER the tmux rename.
+    let dir_perms = std::fs::metadata(dir.path()).expect("meta").permissions();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
+        .expect("make store dir read-only");
+
+    let err = mgr
+        .adopt_existing(
+            "tm-roll",
+            PathBuf::from("/tmp/second"),
+            "recycled pane".into(),
+            crate::runtime::RuntimeKind::default(),
+            false,
+        )
+        .await
+        .expect_err("adopt must fail when the store write fails");
+
+    // Restore permissions FIRST so TempDir cleanup works even on assert failure.
+    std::fs::set_permissions(dir.path(), dir_perms).expect("restore perms");
+
+    assert!(
+        matches!(err, ManagedError::InvalidState(_, _)),
+        "got {err:?}"
+    );
+    let renames = fake.rename_calls.lock().unwrap();
+    assert!(
+        renames
+            .iter()
+            .any(|(o, n)| o == "tm-roll" && n == "tm-roll-2"),
+        "the forward rename must have happened: {renames:?}"
+    );
+    assert!(
+        renames
+            .iter()
+            .any(|(o, n)| o == "tm-roll-2" && n == "tm-roll"),
+        "the compensating rollback rename must have happened: {renames:?}"
+    );
+}

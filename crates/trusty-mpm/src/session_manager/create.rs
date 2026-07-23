@@ -170,8 +170,17 @@ impl SessionManager {
     /// separated by real work (clone/worktree provisioning — the documented
     /// TOCTOU window), and `create_with_reserved_name` trusts a name reserved
     /// even earlier; re-checking here narrows that window to a few
-    /// instructions (fully closing it would need a lock spanning the external
-    /// tmux/store processes — out of scope).
+    /// instructions.
+    /// Residual (ACCEPTED, tracked as issue #3707 — #3698 round-2 decision):
+    /// the narrowed window is NOT closed, and because `create_session` runs
+    /// `tmux new-session -A -d`, two truly concurrent creators that compute
+    /// the SAME deduped name both "succeed" — `-A` silently ATTACHES the
+    /// loser to the winner's physical session and two records get persisted
+    /// aliasing one pane. A rename-style re-verify-under-lock cannot fix
+    /// this here: the loser never created anything it may safely destroy,
+    /// and the armed [`super::session_guard::TmuxSessionGuard`] below would
+    /// reap the WINNER's live session on a detected conflict. The real fix
+    /// (fail-loud non-`-A` create + guard-aware retry) is scoped in #3707.
     /// Test: `create_with_reserved_name_suffixes_stale_reservation` in
     /// `super::naming_tests`; covered transitively by every
     /// `create_with_id`/`create_with_reserved_name` test.

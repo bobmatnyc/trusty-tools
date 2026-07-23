@@ -70,20 +70,26 @@ impl SessionManager {
     /// already taken by another NON-terminal managed record or by a live tmux
     /// session, via [`SessionManager::taken_name_set`] +
     /// [`SessionManager::dedupe_name_against`] (a terminal tombstone's name is
-    /// reusable as-is, unsuffixed). The record lookup, collision check, dedupe,
-    /// live-tmux rename, and persist ALL run under ONE held store write guard
-    /// (#3692 review HIGH-3): for a STOPPED record nothing else serializes two
-    /// concurrent renames, so a lock-free dedupe snapshot would let both compute
-    /// the same free ordinal and both persist — recreating the very
-    /// two-records-one-name defect this fix exists for. Holding the guard also
-    /// subsumes the old pre-tmux-rename "did someone rename me concurrently?"
-    /// re-verify: no other in-process rename can interleave at all. When a live
-    /// tmux session backs the record it is renamed via
-    /// [`ManagedTmuxDriver::rename_session`](super::driver::ManagedTmuxDriver::rename_session)
-    /// FIRST (a tmux failure aborts before the store is mutated), then the
-    /// record's `tmux_name` is updated, `last_activity_at` is stamped, and the
-    /// record is persisted through the same guard. If the store write fails
-    /// AFTER the tmux rename, the tmux rename is rolled back so the live
+    /// reusable as-is, unsuffixed).
+    ///
+    /// Locking design (#3692 review HIGH-3, revised by #3698 round-2 HIGH-A):
+    /// tmux subprocess calls are NEVER made while the store write guard is
+    /// held — `store.write()` gates every session-manager mutation daemon-wide,
+    /// and `rename_session`/`list_sessions` are blocking fork/exec/waits (a
+    /// hung tmux under the guard would stall the whole daemon; every other
+    /// write path in this module keeps tmux outside the lock). Instead:
+    /// the live-tmux snapshot is fetched FIRST (unlocked); then lookup +
+    /// collision-check/dedupe run under the guard. A record with NO live tmux
+    /// (stopped) persists under that SAME guard — this is the HIGH-3
+    /// guarantee: two concurrent stopped-session renames to one target are
+    /// fully serialized and can never both claim the same name. A record WITH
+    /// a live tmux session releases the guard, renames tmux (unlocked), then
+    /// RE-ACQUIRES the guard and RE-VERIFIES before persisting that (a) the
+    /// record still exists, non-terminal, still under its old name, and (b)
+    /// nobody claimed the deduped name while the lock was released; on
+    /// re-verify failure the tmux rename is rolled back and a retryable
+    /// `InvalidState` error is returned. If the store write itself fails
+    /// after the tmux rename, the tmux rename is rolled back so the live
     /// session and the record never desync; a failed rollback surfaces an
     /// explicit manual-recovery error. Returns the updated [`SessionRecord`]
     /// (its `tmux_name` may differ from the requested `new_name` if it was
@@ -104,14 +110,18 @@ impl SessionManager {
         let new_name = validate_session_name(new_name)
             .map_err(|msg| ManagedError::InvalidState(id.to_string(), msg))?;
 
-        // ── Everything below runs under ONE held store write guard (#3692
-        // review HIGH-3): lookup, collision-check/dedupe, tmux rename, and
-        // upsert. Two concurrent renames — including of two STOPPED records,
-        // where no live tmux accidentally serializes them — are therefore
-        // fully ordered: the second recomputes its ordinal AFTER the first
-        // has persisted, so they can never both claim the same name. NOTE:
-        // do not call `self.get`/`self.list`/`self.dedupe_session_name` in
-        // here — they take this same lock (deadlock); read through the guard.
+        // Live-tmux snapshot BEFORE the guard (#3698 round-2 HIGH-A):
+        // `list_sessions` is a blocking tmux subprocess and must never run
+        // under the store write lock that gates every other mutation.
+        let live_names = self
+            .tmux
+            .list_sessions()
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+
+        // ── Guard 1: lookup + collision-check/dedupe (no tmux calls held).
+        // NOTE: do not call `self.get`/`self.list`/`self.dedupe_session_name`
+        // in here — they take this same lock (deadlock); read through the
+        // guard.
         let mut store = self.store.write().await;
         let records = store.all().await?;
         let record = records
@@ -140,41 +150,98 @@ impl SessionManager {
         // TERMINAL tombstone's `tmux_name` does NOT count as taken (it is gone
         // for good) — a name freed by delete/decommission is reused as-is,
         // unsuffixed; only `prune` still holds the on-disk tombstone.
-        let taken = self.taken_name_set(&records, Some(id))?;
+        let taken = Self::taken_name_set(&live_names, &records, Some(id));
         let new_name = Self::dedupe_name_against(&new_name, &taken);
 
         let old_name = record.tmux_name.clone();
-        let tmux_live = self.tmux.session_exists(&old_name);
-
-        // Rename the live tmux session FIRST when one backs the record: a tmux
-        // failure aborts here, before the store is mutated. A stopped session
-        // has no live tmux to rename — only the record changes. (The held
-        // guard above already excludes a concurrent in-process rename of this
-        // record, so no pre-rename re-verify is needed anymore.)
-        if tmux_live {
-            self.tmux.rename_session(&old_name, &new_name)?;
-        }
+        let tmux_live = live_names.iter().any(|n| n == &old_name);
 
         let mut updated = record;
         updated.tmux_name = new_name.clone();
         updated.last_activity_at = Some(Utc::now());
-        if let Err(e) = store.upsert(updated.clone()).await {
-            // Compensation: the tmux session was already renamed but the store
-            // write failed, so the live tmux name and the (unchanged) record
-            // would desync. Roll the tmux rename back; if THAT also fails, surface
-            // an explicit manual-recovery error rather than leaving a silent split.
-            if tmux_live && let Err(rollback) = self.tmux.rename_session(&new_name, &old_name) {
-                return Err(ManagedError::InvalidState(
-                    id.to_string(),
-                    format!(
-                        "rename half-applied: tmux is now '{new_name}' but the store still \
-                         records '{old_name}', and the rollback failed ({rollback}) — manually \
-                         run `tmux rename-session -t {new_name} {old_name}` (store error: {e})"
-                    ),
-                ));
+
+        if !tmux_live {
+            // Stopped path: nothing external to mutate — persist under the
+            // SAME guard (#3692 HIGH-3): two concurrent stopped-session
+            // renames are fully serialized here, so the second recomputes its
+            // ordinal AFTER the first persisted and they can never collide.
+            store.upsert(updated.clone()).await?;
+            return Ok(updated);
+        }
+        drop(store);
+
+        // Live path: rename tmux OUTSIDE any lock (#3698 round-2 HIGH-A) —
+        // a slow/hung tmux must never stall the daemon-wide store guard.
+        self.tmux.rename_session(&old_name, &new_name)?;
+
+        // ── Guard 2: re-verify, then persist. The lock was released across
+        // the tmux call, so both sides of the check-then-act must be
+        // re-established before the write.
+        let mut store = self.store.write().await;
+        let records = match store.all().await {
+            Ok(r) => r,
+            Err(e) => {
+                drop(store);
+                return Err(self.rollback_rename(&new_name, &old_name, id, &e.to_string()));
             }
-            return Err(e.into());
+        };
+        let self_unchanged = records
+            .iter()
+            .any(|r| r.id == *id && r.tmux_name == old_name && !r.state.is_terminal());
+        let name_still_free = !records
+            .iter()
+            .any(|r| r.id != *id && r.tmux_name == new_name && !r.state.is_terminal());
+        if !(self_unchanged && name_still_free) {
+            drop(store);
+            return Err(self.rollback_rename(
+                &new_name,
+                &old_name,
+                id,
+                "lost a concurrent rename race while tmux was being renamed — retry the rename",
+            ));
+        }
+        if let Err(e) = store.upsert(updated.clone()).await {
+            drop(store);
+            return Err(self.rollback_rename(&new_name, &old_name, id, &e.to_string()));
         }
         Ok(updated)
+    }
+
+    /// Roll a half-applied tmux rename back (`new` → `old`) and build the
+    /// error the caller should surface — shared by `rename`'s re-verify and
+    /// store-write failure paths.
+    ///
+    /// Why: once tmux has been renamed OUTSIDE the store guard (#3698 round-2
+    /// HIGH-A), any later failure — reload error, lost re-verify race, failed
+    /// upsert — leaves the live session and the record desynced unless the
+    /// tmux rename is compensated. Centralising the rollback keeps all three
+    /// failure paths byte-identical.
+    /// What: renames tmux back; on success returns a retryable
+    /// [`ManagedError::InvalidState`] carrying `cause`; on rollback failure
+    /// returns the explicit manual-recovery error naming the exact
+    /// `tmux rename-session` command to run.
+    /// Test: `rename_rolls_back_tmux_when_store_write_fails` in
+    /// `super::rename_tests`.
+    fn rollback_rename(
+        &self,
+        new_name: &str,
+        old_name: &str,
+        id: &ManagedSessionId,
+        cause: &str,
+    ) -> ManagedError {
+        match self.tmux.rename_session(new_name, old_name) {
+            Ok(()) => ManagedError::InvalidState(
+                id.to_string(),
+                format!("rename aborted and rolled back ({cause}) — retry the rename"),
+            ),
+            Err(rollback) => ManagedError::InvalidState(
+                id.to_string(),
+                format!(
+                    "rename half-applied: tmux is now '{new_name}' but the store still \
+                     records '{old_name}', and the rollback failed ({rollback}) — manually \
+                     run `tmux rename-session -t {new_name} {old_name}` (cause: {cause})"
+                ),
+            ),
+        }
     }
 }

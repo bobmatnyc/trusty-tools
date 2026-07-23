@@ -68,9 +68,13 @@ impl SessionManager {
     /// caller's actual `create_session`/`git worktree add` a few lines later.
     /// `create_session` shells out to `tmux new-session -A -d`, and `-A` makes
     /// tmux ATTACH to an existing session of the same name instead of failing,
-    /// so a lost race is an aliasing risk, not a crash. Closing this fully
-    /// would require a distributed lock across the external `tmux`/`git`
-    /// processes — out of scope; tracked as a follow-up if it proves to matter.
+    /// so a lost race is an ALIASING risk — two persisted records driving one
+    /// physical session — not a crash. `create_with_resolved_name`'s final
+    /// pre-create dedupe (#3692) narrows this window to a few instructions
+    /// but does NOT close it; the residual is accepted and tracked as issue
+    /// #3707 (fixing it properly needs `-A` fail-loud semantics plus a
+    /// `TmuxSessionGuard` reaper that can never kill the race winner's
+    /// session).
     /// Test: `manager_serial_reuses_decommissioned_gap`,
     /// `resolve_session_name_rejects_extra_collision` in `naming_tests.rs`.
     pub(crate) async fn resolve_session_name(
@@ -106,8 +110,8 @@ impl SessionManager {
         )))
     }
 
-    /// Build the daemon-wide "taken" name set: live tmux sessions ∪ every
-    /// NON-terminal store record's `tmux_name` (issue #3692).
+    /// Build the daemon-wide "taken" name set: a PRE-FETCHED live tmux
+    /// snapshot ∪ every NON-terminal store record's `tmux_name` (issue #3692).
     ///
     /// Why: split from [`Self::dedupe_session_name`] so callers that already
     /// hold the store WRITE guard (`rename`, `adopt_existing` — which must
@@ -115,32 +119,31 @@ impl SessionManager {
     /// HIGH-3 finding) can pass the records they read THROUGH that guard,
     /// instead of calling `self.list()` (which takes the same lock →
     /// deadlock) or using a lock-free snapshot (which reintroduces the exact
-    /// two-writers-pick-the-same-ordinal race this fixes).
-    /// What: unions the driver's live session names with `records`' non-
-    /// terminal `tmux_name`s (a `Decommissioned`/`Deleted` tombstone's name
-    /// is NOT taken — reusable immediately, unsuffixed), excluding
-    /// `exclude_id`'s own current name so a record renaming to a name only
-    /// it holds is never suffixed against itself.
+    /// two-writers-pick-the-same-ordinal race this fixes). `live_tmux_names`
+    /// is a parameter — NOT fetched here — because `list_sessions` is a
+    /// blocking tmux subprocess and `store.write()` gates every session-
+    /// manager mutation daemon-wide (#3698 round-2 HIGH-A): callers must
+    /// fetch the snapshot BEFORE taking the guard, never under it.
+    /// What: unions `live_tmux_names` with `records`' non-terminal
+    /// `tmux_name`s (a `Decommissioned`/`Deleted` tombstone's name is NOT
+    /// taken — reusable immediately, unsuffixed), excluding `exclude_id`'s
+    /// own current name so a record renaming to a name only it holds is
+    /// never suffixed against itself.
     /// Test: exercised via every `dedupe_session_name` /
     /// `rename_suffixes_*` / `manager_adopt_existing_suffixes_*` test.
     pub(crate) fn taken_name_set(
-        &self,
+        live_tmux_names: &[String],
         records: &[super::record::SessionRecord],
         exclude_id: Option<&ManagedSessionId>,
-    ) -> Result<HashSet<String>, ManagedError> {
-        let mut taken: HashSet<String> = self
-            .tmux
-            .list_sessions()
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?
-            .into_iter()
-            .collect();
+    ) -> HashSet<String> {
+        let mut taken: HashSet<String> = live_tmux_names.iter().cloned().collect();
         taken.extend(
             records
                 .iter()
                 .filter(|r| exclude_id != Some(&r.id) && !r.state.is_terminal())
                 .map(|r| r.tmux_name.clone()),
         );
-        Ok(taken)
+        taken
     }
 
     /// Disambiguate `candidate` against a pre-built taken set — auto-suffix
@@ -192,13 +195,24 @@ impl SessionManager {
     /// (not fully closing — that would need a lock spanning the external
     /// tmux/store processes) that window.
     /// NOTE for other callers: `rename` and `adopt_existing` must NOT use
-    /// this snapshot wrapper — they hold the store write guard across their
-    /// whole check/dedupe/persist sequence and go through
-    /// [`Self::taken_name_set`] + [`Self::dedupe_name_against`] directly
-    /// (calling this here would deadlock on the store lock, and a snapshot
-    /// would reintroduce the #3692 race for two concurrent stopped-session
-    /// renames).
-    /// What: [`Self::taken_name_set`] over a fresh `self.list()` snapshot,
+    /// this snapshot wrapper — they serialize their check/dedupe/persist
+    /// against the store write guard (tmux calls kept OUTSIDE it, with a
+    /// re-verify before persisting) and go through [`Self::taken_name_set`]
+    /// plus [`Self::dedupe_name_against`] directly (calling this here would
+    /// deadlock on the store lock, and a snapshot would reintroduce the
+    /// #3692 race for two concurrent stopped-session renames).
+    /// Residual (ACCEPTED, tracked as issue #3707): because this is a
+    /// lock-free snapshot and `create_session` shells out to
+    /// `tmux new-session -A -d`, two truly concurrent creators that compute
+    /// the same deduped name both "succeed" — `-A` silently ATTACHES the
+    /// loser to the winner's session, persisting two records that alias one
+    /// physical pane. Closing that needs `-A` semantics + `TmuxSessionGuard`
+    /// reaper changes (the loser must never kill the winner's session) — see
+    /// #3707 for the plan; the docs here exist so the acceptance is loud,
+    /// not silent.
+    /// What: [`Self::taken_name_set`] over a fresh tmux `list_sessions`
+    /// snapshot (fetched BEFORE `self.list()` takes the store lock — never
+    /// under it, #3698 round-2 HIGH-A) + a fresh `self.list()` snapshot,
     /// then [`Self::dedupe_name_against`].
     /// Test: `create_with_reserved_name_suffixes_stale_reservation` in
     /// `super::naming_tests`.
@@ -207,8 +221,12 @@ impl SessionManager {
         candidate: &str,
         exclude_id: Option<&ManagedSessionId>,
     ) -> Result<String, ManagedError> {
+        let live_names = self
+            .tmux
+            .list_sessions()
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         let records = self.list().await;
-        let taken = self.taken_name_set(&records, exclude_id)?;
+        let taken = Self::taken_name_set(&live_names, &records, exclude_id);
         Ok(Self::dedupe_name_against(candidate, &taken))
     }
 }
