@@ -18,6 +18,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   friendly display names (sourced from the new `GET /api/agents` `display_name`
   field) rather than dispatchable slugs.
 
+- **Clearable "Recent tasks" (#3737, epic #3052):** the sidebar's "Recent
+  tasks" panel gains a two-step "Clear" affordance (arm → confirm) wired
+  through a new `clear_recent_tasks` command to `DELETE /api/tasks`. It clears
+  finished tasks only and keeps any in-flight task visible; it is two-step
+  because the task history is persisted across restarts.
+
 ### Fixed
 
 - **The `tagent --api` sidecar is now reaped on quit (#3372):** quitting the

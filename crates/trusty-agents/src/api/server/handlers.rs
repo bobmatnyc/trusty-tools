@@ -473,6 +473,44 @@ pub(super) async fn list_tasks(State(state): State<AppState>) -> Json<Vec<PmResp
     Json(state.list().await)
 }
 
+/// Response body for `DELETE /api/tasks`.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ClearRecentTasksBody {
+    cleared: bool,
+    /// Number of terminal (finished) tasks removed from the history.
+    removed: usize,
+    /// Number of still-running tasks left untouched (kept visible).
+    retained_running: usize,
+}
+
+/// `DELETE /api/tasks` — clear the finished-task history, keeping running
+/// tasks (#3737).
+///
+/// Why: The GUI's "Recent tasks" panel offers a "Clear" affordance. Unlike
+/// `POST /api/clear-context` (which aborts in-flight tasks and wipes the whole
+/// store), clearing the *history list* must not kill work that is still
+/// running — a user tidying the list should keep any in-flight task visible
+/// and cancellable. This deletes only terminal entries; because the task
+/// store persists to `.trusty-agents/state/tasks.json` and reloads on
+/// restart, the removal is written back so it sticks.
+/// What: Delegates to `AppState::clear_terminal_tasks`, then reports how many
+/// were removed and how many running tasks remain, so the client can refresh
+/// its list deterministically.
+/// Test: `clear_recent_tasks_removes_terminal_only` (route-level, in
+/// `super::tests`).
+pub(super) async fn clear_recent_tasks(
+    State(state): State<AppState>,
+) -> Json<ClearRecentTasksBody> {
+    let before = state.list().await.len();
+    let removed = state.clear_terminal_tasks().await;
+    let retained_running = before.saturating_sub(removed);
+    Json(ClearRecentTasksBody {
+        cleared: true,
+        removed,
+        retained_running,
+    })
+}
+
 /// Response body for `POST /api/clear-context`.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ClearContextBody {

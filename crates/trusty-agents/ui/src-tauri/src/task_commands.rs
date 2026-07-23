@@ -44,6 +44,37 @@ pub async fn list_tasks(state: State<'_, SharedApi>) -> Result<Value, String> {
         .map_err(|e| format!("list_tasks parse failed: {e}"))
 }
 
+/// `DELETE /api/tasks` — clear the finished-task history (#3737).
+///
+/// Why: The "Recent tasks" panel's "Clear" affordance needs a command that
+/// wipes the finished-task list WITHOUT the `clear-context` side effect of
+/// aborting in-flight work — the backend `DELETE /api/tasks` handler
+/// (`crates/trusty-agents/src/api/server/handlers.rs::clear_recent_tasks`)
+/// removes only terminal tasks and keeps any running one. This just forwards
+/// to it and returns the `{cleared, removed, retained_running}` body so the
+/// frontend can refresh its list.
+/// What: Issues `DELETE {api_base}/api/tasks`; a non-2xx status is a genuine
+/// `Err` (unlike `cancel_task`, there's no expected-race status to fold in).
+/// Test: Run `trusty-agents --api`, submit + finish a task, call this command,
+/// assert `removed >= 1` and `GET /api/tasks` no longer lists it.
+#[tauri::command]
+pub async fn clear_recent_tasks(state: State<'_, SharedApi>) -> Result<Value, String> {
+    let port = state.port.lock().await.unwrap_or(8765);
+    let url = format!("{}/api/tasks", api_base(port));
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(&url)
+        .send()
+        .await
+        .map_err(|e| format!("clear_recent_tasks request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("clear_recent_tasks: HTTP {}", resp.status()));
+    }
+    resp.json::<Value>()
+        .await
+        .map_err(|e| format!("clear_recent_tasks parse failed: {e}"))
+}
+
 #[derive(Debug, Serialize, Clone)]
 struct ProgressEvent<'a> {
     task_id: &'a str,

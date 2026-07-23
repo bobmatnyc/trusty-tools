@@ -345,6 +345,52 @@ impl AppState {
         }
         cancelled
     }
+
+    /// Clear terminal (non-`Running`) tasks, preserving any still in flight,
+    /// and return the count removed (#3737).
+    ///
+    /// Why: The GUI's "Recent tasks" panel needs a "Clear" affordance that
+    /// wipes the finished-task history without the collateral damage
+    /// `clear_tasks` (`POST /api/clear-context`) inflicts — that one aborts
+    /// every running task and drops the whole store, which is the wrong
+    /// semantics for "clear the history list": a user tidying the list should
+    /// not thereby kill work that is still running. This retains `Running`
+    /// entries (and their abort handles) untouched so an in-flight task stays
+    /// visible and cancellable, and only drops rows that have reached a
+    /// terminal status (`Success`/`Failed`/`Partial`/`Cancelled`).
+    /// What: Removes every response whose status isn't `Running` from
+    /// `responses`, prunes `order` to match, drops any stray handles for
+    /// removed ids (there should be none — terminal tasks have already had
+    /// their handle removed by `finalize_task`/`try_cancel` — but stay in
+    /// lockstep defensively), re-persists the trimmed snapshot so the removal
+    /// survives a restart (the store is reloaded from `tasks.json` on boot),
+    /// and returns how many were removed. Emits no events: nothing was
+    /// cancelled.
+    /// Test: `clear_terminal_tasks_removes_terminal_keeps_running`.
+    pub(super) async fn clear_terminal_tasks(&self) -> usize {
+        let (removed, snapshot) = {
+            let mut store = self.inner.lock().await;
+            let to_remove: Vec<String> = store
+                .responses
+                .iter()
+                .filter(|(_, r)| r.status != PmStatus::Running)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &to_remove {
+                store.responses.remove(id);
+                store.handles.remove(id);
+            }
+            let TaskStore {
+                responses, order, ..
+            } = &mut *store;
+            order.retain(|id| responses.contains_key(id));
+            (to_remove.len(), responses.clone())
+        };
+        // Persist outside the lock — a restart reloads from tasks.json, so the
+        // cleared list must be written back to actually stick.
+        persist_tasks(&snapshot).await;
+        removed
+    }
 }
 
 /// In-memory task result store.
