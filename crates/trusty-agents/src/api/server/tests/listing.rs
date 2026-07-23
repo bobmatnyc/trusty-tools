@@ -95,13 +95,15 @@ async fn scan_agents_dir_resolves_packages_flat_and_dedupes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
-    // Package-only agent: izzie/agent.toml
+    // Package-only agent: izzie/{agent.toml, persona.md}. A valid package
+    // requires BOTH files (see `scan_agents_dir_requires_persona_md_for_package`).
     std::fs::create_dir(root.join("izzie")).unwrap();
     std::fs::write(
         root.join("izzie").join("agent.toml"),
         "[agent]\nname = \"izzie\"\nrole = \"assistant\"\ndisplay_name = \"Izzie\"\n",
     )
     .unwrap();
+    std::fs::write(root.join("izzie").join("persona.md"), "You are Izzie.").unwrap();
 
     // Flat-only agent: engineer.toml
     std::fs::write(
@@ -121,6 +123,11 @@ async fn scan_agents_dir_resolves_packages_flat_and_dedupes() {
     std::fs::write(
         root.join("cto-assistant").join("agent.toml"),
         "[agent]\nname = \"cto-assistant\"\nrole = \"assistant\"\ndisplay_name = \"CTO Bot\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("cto-assistant").join("persona.md"),
+        "You are the CTO assistant.",
     )
     .unwrap();
 
@@ -157,6 +164,101 @@ async fn scan_agents_dir_resolves_packages_flat_and_dedupes() {
     assert_eq!(izzie["display_name"], "Izzie");
     // The STALE backup must never have overridden the live izzie.
     assert_ne!(izzie["display_name"], "STALE");
+}
+
+/// Why (#3745 critic HIGH-1): the runtime `load_agent_package` REQUIRES both
+/// `agent.toml` AND `persona.md` and HARD-FAILS `by_name` without `persona.md`
+/// (never falling through to a flat file). So an `agent.toml`-only package is
+/// non-dispatchable AND blocks the name — surfacing it (or a same-named flat
+/// file) would make a broken agent picker-selectable. A complete package must
+/// surface; an incomplete one must be excluded AND block a same-named flat.
+/// What: `good/` (complete package) surfaces; `broke/` (agent.toml only) does
+/// NOT; `broke.toml` (a flat file shadowed by the broken package) also does
+/// NOT (the runtime would hard-error before reaching it).
+#[tokio::test]
+async fn scan_agents_dir_requires_persona_md_for_package() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    // Complete package — must surface.
+    std::fs::create_dir(root.join("good")).unwrap();
+    std::fs::write(
+        root.join("good").join("agent.toml"),
+        "[agent]\nname = \"good\"\ndisplay_name = \"Good\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("good").join("persona.md"), "prompt").unwrap();
+
+    // Incomplete package (no persona.md) + a same-named flat file it shadows.
+    std::fs::create_dir(root.join("broke")).unwrap();
+    std::fs::write(
+        root.join("broke").join("agent.toml"),
+        "[agent]\nname = \"broke\"\ndisplay_name = \"Broken Package\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("broke.toml"),
+        "[agent]\nname = \"broke\"\ndisplay_name = \"Shadowed Flat\"\n",
+    )
+    .unwrap();
+
+    let agents = scan_agents_dir(root).await;
+    let names: Vec<&str> = agents.iter().filter_map(|a| a["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["good"],
+        "only the complete package surfaces; the incomplete package blocks its \
+         name even from a same-named flat file (matches runtime hard-fail)"
+    );
+}
+
+/// Why (#3745 critic HIGH-2): flat `<name>.md` overlays are the PRIMARY
+/// documented `extends:` personalization surface (loader tier 3). They must be
+/// visible in the catalog — otherwise a user's `.md` overlay dispatches fine
+/// but is invisible in the picker. A package/flat-toml of the same name still
+/// wins (higher tier), but a `.md`-only agent must appear with its
+/// name/display_name.
+/// What: a `.md` overlay with frontmatter surfaces (name + display_name); when
+/// a flat `.toml` of the same name also exists, the `.toml` (higher tier) wins.
+#[tokio::test]
+async fn scan_agents_dir_surfaces_flat_md_overlay() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    // `.md`-only overlay — must surface via parse_md_agent.
+    std::fs::write(
+        root.join("my-overlay.md"),
+        "---\nname: my-overlay\nrole: assistant\ndisplay_name: My Overlay\n---\n\nYou are my overlay.\n",
+    )
+    .unwrap();
+
+    // A name present as BOTH flat `.md` and flat `.toml` — the `.toml` (tier 1)
+    // outranks the `.md` (tier 0).
+    std::fs::write(
+        root.join("dual.md"),
+        "---\nname: dual\ndisplay_name: MD Loser\n---\n\nbody\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("dual.toml"),
+        "[agent]\nname = \"dual\"\ndisplay_name = \"TOML Wins\"\n",
+    )
+    .unwrap();
+
+    let agents = scan_agents_dir(root).await;
+    let names: Vec<&str> = agents.iter().filter_map(|a| a["name"].as_str()).collect();
+    assert_eq!(names, vec!["dual", "my-overlay"]);
+
+    let overlay = agents.iter().find(|a| a["name"] == "my-overlay").unwrap();
+    assert_eq!(
+        overlay["display_name"], "My Overlay",
+        "a flat .md overlay must surface with its display_name"
+    );
+    let dual = agents.iter().find(|a| a["name"] == "dual").unwrap();
+    assert_eq!(
+        dual["display_name"], "TOML Wins",
+        "flat .toml (tier 1) outranks flat .md (tier 0) for the same name"
+    );
 }
 
 /// Why (#3741): the catalog spans multiple candidate directories (project-local

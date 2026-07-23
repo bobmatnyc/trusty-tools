@@ -50,6 +50,25 @@ function authHeaders(): Record<string, string> {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+/**
+ * Why (#3745, critic MEDIUM-3): the browser-fallback poll loop replaced a flat
+ * 1500ms interval (up to +1.5s dead time per turn) with a fast-then-backoff
+ * cadence. Extracting the interval selection makes the 250/500/boundary
+ * contract unit-testable without driving the whole `send_message` fetch loop.
+ * What: 250ms for the first `FAST_POLL_COUNT` (20) polls (the ~5s window that
+ * covers most turns), then 500ms so a long turn doesn't hammer the server.
+ * Kept in lock-step with `poll_interval_ms` in
+ * `ui/src-tauri/src/task_commands.rs` (the Tauri path).
+ * Test: `transport.test.ts` — `pollIntervalMs` table incl. the 19/20 boundary.
+ */
+export const FAST_POLL_COUNT = 20;
+export const FAST_POLL_MS = 250;
+export const SLOW_POLL_MS = 500;
+
+export function pollIntervalMs(polls: number): number {
+  return polls < FAST_POLL_COUNT ? FAST_POLL_MS : SLOW_POLL_MS;
+}
+
 async function tauriInvoke(command: string, args?: Record<string, unknown>): Promise<unknown> {
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke(command, args);
@@ -152,7 +171,7 @@ async function fetchFallback(command: string, args?: Record<string, unknown>): P
       // back off to 500ms so a long turn doesn't hammer the server.
       let polls = 0;
       while (Date.now() < deadline) {
-        const intervalMs = polls < 20 ? 250 : 500;
+        const intervalMs = pollIntervalMs(polls);
         polls += 1;
         await new Promise((res) => setTimeout(res, intervalMs));
         const r = await fetch(`${base}/api/task/${id}`, { headers: authHeaders() });
