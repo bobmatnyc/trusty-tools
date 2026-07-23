@@ -27,6 +27,7 @@ mod http;
 pub mod inference_bridge;
 pub mod inference_client;
 mod single_turn;
+pub mod stream;
 pub mod thinking_classifier;
 mod tool_loop;
 

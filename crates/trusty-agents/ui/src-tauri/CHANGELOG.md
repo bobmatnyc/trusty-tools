@@ -9,6 +9,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Live token streaming in the chat reply bubble:** when the backend streams a
+  reply (the new `agent_message_delta` SSE event), the in-flight assistant
+  bubble now grows token-by-token instead of showing a spinner until the whole
+  response lands. The SSE bridge forwards each fragment on a dedicated
+  `task-delta` web-bus channel; ChatView accumulates fragments (a new
+  `lib/chatStream.ts` `StreamAccumulator`), suppresses the polling loop's
+  "Running…" ticks while a task is streaming so they can't clobber the live
+  text, keeps per-message speaker attribution (#3739) truthful mid-stream via
+  the delta's `agent` field, and — on `task-complete` — replaces the
+  accumulation with the authoritative `PmResponse` narrative (dedupe, no double
+  render). The poll loop remains the fallback for transports without SSE (Tauri
+  desktop). Unit-tested in `lib/chatStream.test.ts` (delta mapping, ordered
+  accumulation, and the stream→complete dedupe lifecycle).
+
 - **Per-message agent attribution in the chat stream (#3737, epic #3052):**
   every assistant bubble is now labeled with the display name of the persona
   that produced it — "Assistant" for the default tools-armed path, or the

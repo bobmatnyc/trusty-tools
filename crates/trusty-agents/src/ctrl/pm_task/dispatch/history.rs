@@ -259,6 +259,45 @@ pub async fn run_pm_task_with_history(
             local_route = local_qualifies,
             "ctrl LLM call start (conversational fast path)"
         );
+
+        // Chat-streaming demo: when NOT routed to local ollama and the model
+        // reaches an OpenRouter-transport endpoint, stream the reply
+        // token-by-token onto the event bus and return the assembled full text
+        // (identical to the blocking path downstream). Local-inference and any
+        // streaming failure fall through to the blocking `chat_with_tools_gated`
+        // call below.
+        if !local_qualifies
+            && llm::stream::streaming_supported(&effective_model, effective_use_direct)
+        {
+            let messages =
+                llm::stream::build_messages(&system_prompt, &truncated_history, user_input);
+            match llm::stream::stream_reply(
+                &effective_model,
+                messages,
+                &sid,
+                &pm_cfg.agent.name,
+                llm::stream::DEFAULT_STREAM_CADENCE,
+            )
+            .await
+            {
+                Ok(assembly) => {
+                    tracing::info!(
+                        model = %effective_model,
+                        llm_ms = llm_t0.elapsed().as_millis() as u64,
+                        response_chars = assembly.content.len(),
+                        "ctrl conversational fast path: streamed LLM call complete"
+                    );
+                    return Ok(assembly.content);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "conversational streaming failed; falling back to blocking chat"
+                    );
+                }
+            }
+        }
+
         let local_call = llm::chat_with_tools_gated(
             &client,
             &effective_model,

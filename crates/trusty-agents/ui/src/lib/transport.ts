@@ -324,6 +324,10 @@ export interface AppEvent {
   task_preview?: string;
   project?: string;
   error?: string;
+  // `agent_message_delta` (token-level streaming): `true` exactly once, last,
+  // to mark end-of-stream; the accumulated fragments are then replaced by the
+  // authoritative `task-complete` narrative.
+  done?: boolean;
   [key: string]: unknown;
 }
 

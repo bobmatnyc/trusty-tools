@@ -17,6 +17,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Token-level streaming for the conversational / persona chat turn:** the
+  no-tools conversational fast path and tools-off persona chat now stream the
+  model reply token-by-token when the turn routes over the OpenRouter transport
+  (not Bedrock / Fireworks / Anthropic-direct). A new `Event::AgentMessageDelta
+  { session_id, agent, text, done }` variant is published per coalesced ~60ms
+  batch (bounding bus pressure) and relayed unchanged over the existing
+  `/api/events` SSE stream; the assembled full text is still returned so
+  history, `PmResponse`, and responder attribution (#3739) behave exactly as
+  the blocking path. Streaming can be disabled wholesale with
+  `TAGENT_CHAT_STREAMING=0`, and any streaming failure transparently falls back
+  to the blocking chat call — non-streaming providers are unaffected. New
+  `llm::stream` module (`drive_delta_stream` batching core, `stream_reply`
+  provider wiring, `streaming_supported` capability gate) with unit tests
+  covering ordered fragments, the terminal `done` flag, and assembled-text
+  equality.
+
 - **Agent context knows "now", "here", and "who" (#3469, epic #3052):** the
   `## User Context` block prefixed onto every tagent system prompt (PM, persona,
   and ctrl turns) now carries three things the model previously had to guess at,

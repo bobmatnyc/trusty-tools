@@ -88,6 +88,31 @@ pub enum Event {
         agent: String,
         text: String,
     },
+
+    /// Token-level streaming fragment for an in-flight conversational / persona
+    /// reply (chat-streaming demo).
+    ///
+    /// Why: `AgentMessage` carries a whole finished message; the chat GUI needs
+    /// to render a reply as it is produced. This variant is published
+    /// repeatedly as fragments arrive from a streaming provider, then once more
+    /// with `done: true` to signal end-of-stream. The GUI accumulates fragments
+    /// into the live reply bubble and, on `done` (or the task-complete event),
+    /// replaces the accumulation with the authoritative `PmResponse` text so no
+    /// text is double-rendered.
+    /// What: `text` is the incremental fragment (empty on the terminal `done`
+    /// marker); `agent` preserves per-message speaker attribution (#3739) so the
+    /// bubble stays truthfully labeled mid-stream (empty string ⇒ keep the
+    /// request-time speaker). `done` is `true` exactly once, last.
+    /// Test: `agent_message_delta_serializes_with_type_tag`,
+    /// `agent_message_delta_round_trips`; emission is covered by
+    /// `llm::stream::tests`.
+    AgentMessageDelta {
+        session_id: String,
+        agent: String,
+        text: String,
+        done: bool,
+    },
+
     AgentDone {
         session_id: String,
         agent: String,
@@ -265,6 +290,7 @@ impl Event {
             | Event::PmDelegating { session_id, .. }
             | Event::AgentSpawned { session_id, .. }
             | Event::AgentMessage { session_id, .. }
+            | Event::AgentMessageDelta { session_id, .. }
             | Event::AgentDone { session_id, .. }
             | Event::AgentFailed { session_id, .. }
             | Event::ToolCalled { session_id, .. }
@@ -390,6 +416,46 @@ mod tests {
         let s = serde_json::to_string(&Event::Ping).unwrap();
         let back: Event = serde_json::from_str(&s).unwrap();
         assert!(matches!(back, Event::Ping));
+    }
+
+    #[test]
+    fn agent_message_delta_serializes_with_type_tag() {
+        let ev = Event::AgentMessageDelta {
+            session_id: "s1".into(),
+            agent: "izzie".into(),
+            text: "hel".into(),
+            done: false,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"type\":\"agent_message_delta\""), "{s}");
+        assert!(s.contains("\"done\":false"), "{s}");
+        assert!(s.contains("\"agent\":\"izzie\""), "{s}");
+    }
+
+    #[test]
+    fn agent_message_delta_round_trips() {
+        let ev = Event::AgentMessageDelta {
+            session_id: "abc".into(),
+            agent: String::new(),
+            text: String::new(),
+            done: true,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        let back: Event = serde_json::from_str(&s).unwrap();
+        match back {
+            Event::AgentMessageDelta {
+                session_id,
+                done,
+                text,
+                ..
+            } => {
+                assert_eq!(session_id, "abc");
+                assert!(done);
+                assert!(text.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert_eq!(ev.session_id(), Some("abc"));
     }
 
     #[test]

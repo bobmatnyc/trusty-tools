@@ -39,6 +39,10 @@ pub fn format_event(event: &Event) -> Option<String> {
             Some(dim.paint(format!("  [SPAWN] {agent}")).to_string())
         }
         Event::AgentMessage { agent, text, .. } => Some(format!("  [{agent}] {text}")),
+        // Token-level deltas are for the streaming GUI surface only — the REPL
+        // shows the assembled reply once the turn returns, so suppress the
+        // per-fragment noise here.
+        Event::AgentMessageDelta { .. } => None,
         Event::ToolCalled { tool, preview, .. } => {
             Some(dim.paint(format!("  [TOOL] {tool}: {preview}")).to_string())
         }

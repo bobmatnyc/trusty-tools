@@ -421,6 +421,48 @@ pub async fn run_pm_task_with_persona(
         }
     };
 
+    // Chat-streaming demo: for a tools-off persona turn on an OpenRouter-routed
+    // model, stream the reply token-by-token onto the event bus (relayed to the
+    // GUI via `/api/events`) and return the assembled full text — byte-identical
+    // to the blocking path from the caller's perspective, so history /
+    // `PmResponse` / attribution downstream are unaffected. A tool-armed persona
+    // (`!persona_tool_names.is_empty()`) keeps the multi-turn tool loop below,
+    // and any streaming failure falls through to that same blocking path.
+    if persona_tool_names.is_empty()
+        && llm::stream::streaming_supported(
+            &persona_cfg.agent.model,
+            persona_cfg.llm.use_anthropic_direct,
+        )
+    {
+        let messages = llm::stream::build_messages(&system_prompt, history, user_input);
+        match llm::stream::stream_reply(
+            &persona_cfg.agent.model,
+            messages,
+            &sid,
+            &persona_cfg.agent.name,
+            llm::stream::DEFAULT_STREAM_CADENCE,
+        )
+        .await
+        {
+            Ok(assembly) => {
+                tracing::info!(
+                    persona = %persona_name,
+                    llm_ms = persona_llm_t0.elapsed().as_millis() as u64,
+                    response_chars = assembly.content.len(),
+                    "run_pm_task_with_persona: streamed LLM call complete"
+                );
+                return Ok(assembly.content);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    persona = %persona_name,
+                    error = %e,
+                    "persona streaming failed; falling back to blocking chat"
+                );
+            }
+        }
+    }
+
     let mut initial_messages: Vec<ChatCompletionRequestMessage> = Vec::new();
     initial_messages.push(
         ChatCompletionRequestSystemMessageArgs::default()

@@ -12,6 +12,7 @@
   } from '../stores/app';
   import { responderDisplayName } from '../lib/roster';
   import { listenEvent, type UnlistenFn } from '../lib/transport';
+  import { StreamAccumulator, type DeltaPayload } from '../lib/chatStream';
   import ActionIcon from '../lib/icons/ActionIcon.svelte';
   import WorkflowPhaseCard from './WorkflowPhaseCard.svelte';
   import { workflowState } from '../stores/workflow';
@@ -20,6 +21,14 @@
   let unlistenProgress: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
+  let unlistenDelta: UnlistenFn | null = null;
+
+  // Token-streaming accumulator: grows the in-flight reply bubble from
+  // `task-delta` fragments and lets the progress handler know which tasks are
+  // streaming (so "Running…" ticks don't clobber the live text). Cleared on
+  // task completion so the authoritative narrative replaces — not appends to —
+  // the accumulation.
+  const streams = new StreamAccumulator();
 
   interface ProgressPayload {
     task_id: string;
@@ -53,10 +62,34 @@
    * `task-complete`.
    */
   async function wireListeners() {
+    // Token-level streaming: each fragment grows the in-flight bubble. The
+    // fragment's `agent` (when present) keeps per-message attribution (#3739)
+    // truthful mid-stream. The terminal `done` marker carries no text — the
+    // authoritative `task-complete` narrative is what finally replaces the
+    // accumulation, so we do NOT clear the buffer here (that happens on
+    // completion) to keep suppressing progress ticks until the real result lands.
+    unlistenDelta = await listenEvent<DeltaPayload>('task-delta', (p) => {
+      if (p.text) {
+        const full = streams.append(p.task_id, p.text);
+        updateMessageByTask($activeProjectId, p.task_id, full);
+      } else {
+        // Ensure the task is marked streaming even if the first fragment was
+        // empty, so progress ticks stay suppressed until completion.
+        streams.append(p.task_id, '');
+      }
+      if (p.agent) {
+        setMessageSpeakerByTask($activeProjectId, p.task_id, p.agent);
+      }
+    });
     unlistenProgress = await listenEvent<ProgressPayload>('task-progress', (p) => {
+      // Don't let a polling "Running…" tick overwrite live streamed text.
+      if (streams.isStreaming(p.task_id)) return;
       updateMessageByTask($activeProjectId, p.task_id, p.message);
     });
     unlistenComplete = await listenEvent<CompletePayload>('task-complete', (p) => {
+      // Drop any streamed buffer FIRST so the authoritative narrative replaces
+      // (never appends to) the accumulation — the streaming dedupe contract.
+      streams.finalize(p.id);
       const text = p.narrative && p.narrative.length > 0 ? p.narrative : '(no narrative)';
       updateMessageByTask($activeProjectId, p.id, text);
       // #3737: if the turn delegated, relabel the bubble to the agent that
@@ -68,6 +101,7 @@
       isRunning.set(false);
     });
     unlistenError = await listenEvent<ErrorPayload>('task-error', (p) => {
+      streams.finalize(p.task_id);
       updateMessageByTask($activeProjectId, p.task_id, `Error: ${p.error}`);
       isRunning.set(false);
     });
@@ -83,6 +117,7 @@
     unlistenProgress?.();
     unlistenComplete?.();
     unlistenError?.();
+    unlistenDelta?.();
   });
 
   afterUpdate(() => {
