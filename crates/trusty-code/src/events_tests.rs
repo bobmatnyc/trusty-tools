@@ -561,6 +561,85 @@ fn session_event_envelope_round_trips_through_json() {
     assert_eq!(back.seq, 7);
 }
 
+/// `AgentMessageDelta` (tcode streaming epic #3696 Slice 0) must round-trip
+/// through JSON with every field intact, and `kind()`/`session_id()` must
+/// agree with the serde tag and the carried `session_id`.
+///
+/// Why: this variant is the wire contract every downstream streaming slice
+/// builds on — a field that silently failed to round-trip (or a `kind()`/
+/// `session_id()` arm that drifted from the serde tag) would strand every
+/// later slice on a broken foundation. `done: false` is exercised here since
+/// it is the more failure-prone case (`bool` defaults can hide a missed
+/// field); the Gap A single-delta `done: true` shape is documented on the
+/// variant itself and is structurally identical.
+/// Test: this test.
+#[test]
+fn agent_message_delta_round_trips_through_json() {
+    let event = Event::AgentMessageDelta {
+        session_id: "s1".into(),
+        agent: "python-engineer".into(),
+        agent_id: "eng-1".into(),
+        turn_id: "turn-42".into(),
+        delta: "partial toke".into(),
+        done: false,
+    };
+    assert_eq!(event.kind(), "agent_message_delta");
+    assert_eq!(event.session_id(), Some("s1"));
+
+    let envelope = SessionEventEnvelope::new("s1".into(), 9, Utc::now(), event);
+    let value = serde_json::to_value(&envelope).unwrap();
+
+    assert_eq!(value["kind"], "agent_message_delta");
+    assert_eq!(value["event"]["type"], "agent_message_delta");
+    assert_eq!(value["event"]["agent"], "python-engineer");
+    assert_eq!(value["event"]["agent_id"], "eng-1");
+    assert_eq!(value["event"]["turn_id"], "turn-42");
+    assert_eq!(value["event"]["delta"], "partial toke");
+    assert_eq!(value["event"]["done"], false);
+
+    let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
+    let Event::AgentMessageDelta {
+        session_id,
+        agent,
+        agent_id,
+        turn_id,
+        delta,
+        done,
+    } = back.event
+    else {
+        panic!("expected AgentMessageDelta");
+    };
+    assert_eq!(session_id, "s1");
+    assert_eq!(agent, "python-engineer");
+    assert_eq!(agent_id, "eng-1");
+    assert_eq!(turn_id, "turn-42");
+    assert_eq!(delta, "partial toke");
+    assert!(!done);
+}
+
+/// `agent_id` on `AgentMessageDelta` is `#[serde(default)]` — a producer
+/// that predates per-spawn ids (or a stripped-down test fixture) must still
+/// deserialize, defaulting to an empty string rather than failing.
+#[test]
+fn agent_message_delta_deserializes_without_agent_id() {
+    let old_shape = serde_json::json!({
+        "type": "agent_message_delta",
+        "session_id": "s1",
+        "agent": "pm",
+        "turn_id": "turn-1",
+        "delta": "hello",
+        "done": true
+    });
+    let back: Event = serde_json::from_value(old_shape).unwrap();
+    match back {
+        Event::AgentMessageDelta { agent_id, done, .. } => {
+            assert_eq!(agent_id, "");
+            assert!(done);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
 #[test]
 fn preview_truncates_at_char_boundary() {
     assert_eq!(preview("hi", 5), "hi");
