@@ -12,7 +12,13 @@
 //! future must never discard the rehydrate's completed work),
 //! `rehydrate_dedupes_concurrent_callers_onto_one_scan`, and
 //! `rehydrate_is_deterministic_across_repeated_cycles_over_cap` (issue
-//! #3684's determinism guarantee).
+//! #3684's determinism guarantee). Also the code-critic review findings
+//! (issue #3683): `rehydrate_gate_clears_after_a_panic_in_the_commit_phase`
+//! (finding 1), `rehydrate_commit_skips_flag_clear_when_evict_races_it` +
+//! `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
+//! (finding 2, the latter round-3's remaining HIGH), and
+//! `lane_degraded_flag_sets_on_exhausted_retries_and_clears_on_rehydrate` /
+//! `lane_degraded_stays_false_for_a_genuinely_empty_corpus` (findings 3+5).
 //! Test: this module.
 
 use std::sync::atomic::Ordering;
@@ -468,6 +474,119 @@ async fn rehydrate_commit_skips_flag_clear_when_evict_races_it() {
         idx.chunks_evicted.load(Ordering::Relaxed),
         "a rehydrate whose commit races a concurrent evict must NOT clear \
          chunks_evicted (issue #3683 finding 2)"
+    );
+
+    // Self-heals: a subsequent, un-raced rehydrate still succeeds normally.
+    idx.ensure_bm25_entities_loaded().await;
+    assert!(
+        !idx.bm25_entities_evicted.load(Ordering::Relaxed),
+        "a later, un-raced rehydrate must still succeed and clear the flag"
+    );
+    assert!(idx.bm25.read().await.len() >= 2);
+}
+
+/// Round-3 code-critic review (issue #3683, the remaining HIGH after finding
+/// 2's fix): a race landing STRICTLY BETWEEN the commit's generation load
+/// and its flag-stores must not be possible.
+///
+/// Unlike `rehydrate_commit_skips_flag_clear_when_evict_races_it` above
+/// (which pins a race landing BEFORE the generation read, via
+/// `TEST_DELAY_BEFORE_COMMIT_MS`), this uses
+/// `TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS` to hold
+/// `rehydrate_generation`'s lock itself across an injected delay, placed
+/// strictly between the read and the conditional stores — the exact window
+/// the round-3 finding identified as uncovered. Requires a real multi-thread
+/// runtime so the concurrently-spawned evict call can genuinely contend for
+/// the same lock on a different OS thread instead of merely running later
+/// by cooperative single-thread scheduling (which would prove nothing about
+/// the lock actually excluding it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn rehydrate_commit_survives_evict_racing_the_generation_critical_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+    let idx = Arc::new(make_indexer_with_corpus(&redb_path));
+
+    idx.index_files_batch(&[
+        ("src/auth.rs".into(), "fn authenticate() {}".into()),
+        ("src/token.rs".into(), "fn verify_token() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    idx.evict_bm25_entities_if_idle(Duration::from_nanos(1))
+        .await;
+    idx.evict_chunks_if_idle(Duration::from_nanos(1)).await;
+    assert!(idx.bm25_entities_evicted.load(Ordering::Relaxed));
+    assert!(idx.chunks_evicted.load(Ordering::Relaxed));
+
+    // Hold `rehydrate_generation`'s mutex across a synchronous sleep,
+    // strictly between the commit's generation load and its flag-stores.
+    super::idle_evict::TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS.store(300, Ordering::Relaxed);
+
+    let idx_bg = Arc::clone(&idx);
+    let rehydrate_task = tokio::spawn(async move { idx_bg.ensure_bm25_entities_loaded().await });
+
+    // Give the detached task time to finish its (fast, tiny-corpus) scan and
+    // Phase 1-3 writes, and land inside the injected critical-section delay
+    // — i.e. it now holds `rehydrate_generation`'s lock, mid-sleep.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !idx.bm25.read().await.is_empty(),
+        "precondition: Phase 1 must have already repopulated BM25 by now"
+    );
+
+    // The race: attempt a concurrent evict WHILE the commit holds the
+    // generation lock mid-sleep, on its OWN spawned task so it can actually
+    // contend on a second OS thread rather than running after this test
+    // task's own await point. On the pre-round-3 code (a bare atomic load
+    // then separate stores, no shared lock) this evict's bump-and-set could
+    // land in the gap and get silently clobbered by the commit's
+    // `store(false)`. On the fixed code this call must BLOCK on
+    // `rehydrate_generation.lock()` until the commit's critical section
+    // finishes and releases it.
+    let idx_evict = Arc::clone(&idx);
+    let evict_task = tokio::spawn(async move {
+        let evicted_bm25 = idx_evict
+            .evict_bm25_entities_if_idle(Duration::from_nanos(1))
+            .await;
+        let evicted_chunks = idx_evict
+            .evict_chunks_if_idle(Duration::from_nanos(1))
+            .await;
+        (evicted_bm25, evicted_chunks)
+    });
+
+    rehydrate_task.await.expect("rehydrate task panicked");
+    let (evicted_bm25, evicted_chunks) = evict_task.await.expect("evict task panicked");
+    super::idle_evict::TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS.store(0, Ordering::Relaxed);
+
+    assert!(
+        evicted_bm25 > 0,
+        "the racing evict must have found live BM25 docs to clear — it runs \
+         to completion strictly after the commit's critical section, not \
+         starved or erroring out"
+    );
+    assert!(
+        evicted_chunks > 0,
+        "the racing evict must have found live chunks to clear"
+    );
+
+    // The load-bearing assertion: the evict — which can only have actually
+    // cleared non-empty structures (asserted above) strictly AFTER the
+    // commit released the generation lock — must be the state that
+    // survives. If the pre-round-3 load-then-store gap still existed, this
+    // evict's bump-and-set could interleave with the commit's
+    // read-then-store and get silently clobbered back to `false`.
+    assert!(
+        idx.bm25_entities_evicted.load(Ordering::Relaxed),
+        "a concurrent evict racing the commit's generation critical section \
+         must never be silently clobbered back to false (issue #3683 \
+         round-3 review, the remaining HIGH)"
+    );
+    assert!(
+        idx.chunks_evicted.load(Ordering::Relaxed),
+        "same invariant for chunks_evicted"
     );
 
     // Self-heals: a subsequent, un-raced rehydrate still succeeds normally.

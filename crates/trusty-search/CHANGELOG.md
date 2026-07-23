@@ -58,6 +58,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - The `trusty_bm25_docs_dropped` gauge above now always reports the
     current dropped count (including zero), instead of only when nonzero,
     so it can't hold a stale reading from a prior rehydrate.
+- **Detached rehydrate hardening — code-critic review round 3 (issue
+  #3683), the remaining HIGH.** The evict-vs-rehydrate race fix above still
+  had a narrower load-then-store window: reading `rehydrate_generation` via
+  a bare atomic load, then separately storing the `*_evicted` flags, left a
+  gap in which a concurrent evict's own bump-and-set could land and get
+  silently clobbered by the commit's flag-clear. `rehydrate_generation` is
+  now a `std::sync::Mutex<u64>`; both the evict side (bump generation + set
+  flag `true`) and the commit side (read generation + conditionally clear
+  flags) hold that same lock across their entire sequence, making the two
+  critical sections mutually exclusive with no window left to race.
 
 ---
 ## [0.38.1] — 2026-07-22

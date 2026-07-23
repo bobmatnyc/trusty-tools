@@ -95,6 +95,21 @@
 //!    counter is unchanged — a concurrent evict invalidates the commit
 //!    instead of being silently overwritten.
 //!
+//!    **Round-3 review (remaining HIGH): the fix above still had a narrower
+//!    load-then-store race.** Reading `rehydrate_generation` via a bare
+//!    atomic `load`, then separately `store`-ing the `*_evicted` flags, left
+//!    a window strictly BETWEEN those two operations for a concurrent
+//!    evict's own bump-and-set to land — the commit's `store(false)` would
+//!    then silently clobber that fresh `true` right back to `false`, the
+//!    same bug through a narrower door. [`CodeIndexer::rehydrate_generation`]
+//!    is now a `std::sync::Mutex<u64>`; both sides — the evict-side
+//!    `{set flag = true; bump generation}` ([`CodeIndexer::clear_bm25_entities`],
+//!    [`CodeIndexer::clear_in_memory_chunks`]) and the commit-side
+//!    `{read generation; conditionally clear flags}` below — now hold that
+//!    SAME lock across their entire read/bump/store sequence, so the two
+//!    critical sections are mutually exclusive and the interleaving has no
+//!    window left to land in.
+//!
 //! ### A third finding, addressed in `search/lanes.rs` + here (issue #3683)
 //!
 //! 3. **Silent degrade on a slow production cold-start (HIGH — "the
@@ -128,6 +143,7 @@
 //! `rehydrate_is_deterministic_across_repeated_cycles_over_cap`,
 //! `rehydrate_gate_clears_after_a_panic_in_the_commit_phase`,
 //! `rehydrate_commit_skips_flag_clear_when_evict_races_it`,
+//! `rehydrate_commit_survives_evict_racing_the_generation_critical_section`,
 //! `lane_degraded_flag_sets_on_exhausted_retries_and_clears_on_rehydrate` in
 //! `indexer::rehydrate_tests`.
 
@@ -207,6 +223,38 @@ pub(crate) static TEST_PANIC_IN_COMMIT_PHASE: std::sync::atomic::AtomicBool =
 /// tests.
 #[cfg(test)]
 pub(crate) static TEST_DELAY_BEFORE_COMMIT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Test-only hook: hold `rehydrate_generation`'s mutex across a SYNCHRONOUS
+/// sleep, injected strictly BETWEEN the commit's generation load and its
+/// conditional flag-stores (code-critic review round 3 — the remaining
+/// HIGH after finding 2's fix).
+///
+/// Why: [`TEST_DELAY_BEFORE_COMMIT_MS`] above only covers a race landing
+/// BEFORE the generation read (the commit hasn't taken the lock yet). The
+/// round-3 finding is narrower and landed INSIDE the old
+/// read-then-store gap that used to exist between the generation load and
+/// the flag stores — proving THAT window is closed requires a test that
+/// holds the lock across it and shows a concurrently-spawned evict call
+/// genuinely blocks on the same mutex (not merely "happens to run later")
+/// until the critical section finishes, so the evict's own bump-and-set can
+/// never land in between.
+/// What: `std::thread::sleep` (deliberately NOT `.await` — never block on
+/// I/O/await while holding a `std::sync::Mutex` guard; this parks the
+/// current OS worker thread for the duration, which is fine for a
+/// `#[cfg(test)]`-only hook exercised under a multi-thread tokio runtime,
+/// where a second worker thread keeps the racing evict task running) for
+/// this many milliseconds while the commit branch's `generation_guard` is
+/// held. Zero (the default) is a no-op. Requires the test's runtime to have
+/// at least 2 worker threads (`#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`)
+/// so the concurrently-spawned evict call can actually attempt the lock
+/// (and block on it) on a different OS thread while this one sleeps —
+/// otherwise a single-threaded runtime would just serialize the two tasks
+/// without ever exercising real contention.
+/// Test: `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
+/// in `indexer::rehydrate_tests`.
+#[cfg(test)]
+pub(crate) static TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// Restored (chunks, per-file entities) pair read from the durable corpus.
@@ -336,11 +384,23 @@ impl CodeIndexer {
         entities.shrink_to_fit();
         drop(entities);
 
-        self.bm25_entities_evicted.store(true, Ordering::Relaxed);
-        // Issue #3683 code-critic finding 2: see `CodeIndexer::rehydrate_generation`
-        // doc comment — bumping this invalidates any rehydrate commit already
-        // in flight for this index.
-        self.rehydrate_generation.fetch_add(1, Ordering::Relaxed);
+        // Issue #3683 round-3 review (remaining HIGH): the flag-set and the
+        // generation bump MUST happen under the same lock acquisition as a
+        // single critical section — see `CodeIndexer::rehydrate_generation`'s
+        // doc comment. Without this, a concurrent rehydrate commit could read
+        // the pre-bump generation, get preempted, have THIS eviction land
+        // (bump + set `true`), then resume and clear the flag back to `false`
+        // over the now-empty maps this eviction just cleared. A short,
+        // never-awaited-while-held std Mutex critical section (no I/O, no
+        // `.await` inside it).
+        {
+            let mut generation = self
+                .rehydrate_generation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.bm25_entities_evicted.store(true, Ordering::Relaxed);
+            *generation += 1;
+        }
         evicted
     }
 
@@ -484,7 +544,15 @@ impl CodeIndexer {
                     // Snapshot BEFORE spawning (issue #3683 finding 2): any
                     // clear_bm25_entities/clear_in_memory_chunks call that
                     // lands from here on invalidates this attempt's commit.
-                    let generation_at_start = self.rehydrate_generation.load(Ordering::Relaxed);
+                    // A momentary race between this read and a concurrent
+                    // evict bumping the counter around the same instant is
+                    // fine either way — whichever value we snapshot, the
+                    // commit-side compare (round-3 review) is what actually
+                    // decides correctness, not this read.
+                    let generation_at_start = *self
+                        .rehydrate_generation
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     self.spawn_detached_rehydrate(corpus, Arc::clone(&fresh), generation_at_start);
                     fresh
                 }
@@ -636,14 +704,48 @@ impl CodeIndexer {
                         }
                     }
 
-                    // Commit (finding 2): only clear the flags if no
-                    // concurrent evict/reclaim landed since this attempt
-                    // started. A generation mismatch means a NEWER clear
-                    // already ran (and re-set `*_evicted = true`, possibly
-                    // over data this task just wrote) — skip the flag-clear
-                    // so the next access re-triggers a fresh rehydrate
-                    // instead of us silently overwriting that newer state.
-                    let generation_now = rehydrate_generation.load(Ordering::Relaxed);
+                    // Commit (finding 2; hardened round-3 — remaining HIGH):
+                    // only clear the flags if no concurrent evict/reclaim
+                    // landed since this attempt started. The generation
+                    // compare and the flag-clear now happen under ONE lock
+                    // acquisition on `rehydrate_generation` (see that field's
+                    // doc comment) — the earlier version read the counter via
+                    // a bare atomic load, then stored the flags as separate
+                    // operations, leaving a window in which a concurrent
+                    // evict's own bump-and-set could land strictly between
+                    // the read and the stores and get silently clobbered.
+                    // Holding the lock across BOTH the compare and (when it
+                    // matches) the flag-clears makes that interleaving
+                    // impossible: either the evict's critical section runs
+                    // entirely before this one (generation_now mismatches,
+                    // we skip) or entirely after (our clears already
+                    // committed and released the lock before the evict's
+                    // `true` can land, so its `true` is the state that
+                    // survives — never torn). A generation mismatch means a
+                    // NEWER clear already ran (and re-set `*_evicted = true`,
+                    // possibly over data this task just wrote) — skip the
+                    // flag-clear so the next access re-triggers a fresh
+                    // rehydrate instead of us silently overwriting that newer
+                    // state.
+                    let generation_guard = rehydrate_generation
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let generation_now = *generation_guard;
+                    // Round-3 test hook: see this static's doc comment — lets
+                    // a test hold this exact lock across an injected delay
+                    // placed STRICTLY BETWEEN the generation load above and
+                    // the conditional flag-stores below, to prove a
+                    // concurrent evict attempting the same critical section
+                    // blocks (rather than racing in) until this one
+                    // completes and releases the lock.
+                    #[cfg(test)]
+                    {
+                        let delay_ms =
+                            TEST_DELAY_IN_GENERATION_CRITICAL_SECTION_MS.load(Ordering::Relaxed);
+                        if delay_ms > 0 {
+                            std::thread::sleep(Duration::from_millis(delay_ms));
+                        }
+                    }
                     if generation_now == generation_at_start {
                         chunks_evicted.store(false, Ordering::Relaxed);
                         bm25_entities_evicted.store(false, Ordering::Relaxed);
@@ -670,6 +772,7 @@ impl CodeIndexer {
                              next access retriggers a fresh rehydrate (issue #3683 finding 2)"
                         );
                     }
+                    drop(generation_guard);
                 }
                 Ok(Err(e)) => tracing::warn!(
                     "index '{index_id}': failed to rehydrate corpus from redb ({e}); \

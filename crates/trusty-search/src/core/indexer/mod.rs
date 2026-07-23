@@ -188,7 +188,8 @@ pub struct CodeIndexer {
 
     /// Monotonic counter bumped every time `clear_bm25_entities` /
     /// `clear_in_memory_chunks` actually clears a non-empty structure (issue
-    /// #3683 code-critic review finding 2).
+    /// #3683 code-critic review finding 2), now a `std::sync::Mutex<u64>`
+    /// rather than a bare atomic (round-3 review — the remaining HIGH).
     ///
     /// Why: a detached rehydrate's commit (clearing `*_evicted` back to
     /// `false`) is NOT synchronized with a concurrent idle-evict or
@@ -201,15 +202,35 @@ pub struct CodeIndexer {
     /// populated" invariant, with no self-healing path (the next evict tick
     /// sees non-empty maps and evicts again, but a query landing in between
     /// sees a false "warm" signal over data that may already be stale/gone).
-    /// What: `ensure_corpus_rehydrated` snapshots this value before spawning
-    /// the detached task; the task's commit only clears the `*_evicted`
-    /// flags if the counter is UNCHANGED from that snapshot — a concurrent
-    /// clear bumps it, which invalidates the pending commit (the flags stay
-    /// `true`, exactly as the concurrent evict left them, and the next
-    /// access triggers a fresh rehydrate).
-    /// Test: `rehydrate_commit_skips_flag_clear_when_evict_races_it` in
-    /// `indexer::rehydrate_tests`.
-    pub(super) rehydrate_generation: Arc<AtomicU64>,
+    ///
+    /// Round-3 finding (HIGH): an `AtomicU64` only made the counter ITSELF
+    /// atomic — it did nothing to stop a concurrent evict's bump-generation-
+    /// then-set-flag-true pair from landing strictly BETWEEN the commit's own
+    /// `load(generation)` and its subsequent `store(false)` calls, since
+    /// those were three independent atomic operations, not one critical
+    /// section. That interleaving reproduces the exact finding-2 bug through
+    /// a narrower window: the commit reads a still-matching generation, the
+    /// evict then bumps it and sets the flag `true` on (now-genuinely-empty)
+    /// data, and the commit's `store(false)` — still in flight — silently
+    /// clobbers that `true` back to `false` over empty maps. Wrapping the
+    /// counter in a `Mutex` and holding its guard across both the generation
+    /// compare/bump and the flag store on either side (see
+    /// [`Self::clear_bm25_entities`] / [`Self::clear_in_memory_chunks`] for
+    /// the evict side, `idle_evict::spawn_detached_rehydrate`'s commit branch
+    /// for the other) makes the two sequences mutually exclusive — there is
+    /// no window left for the interleaving to land in.
+    /// What: `ensure_corpus_rehydrated` snapshots this value (under the lock)
+    /// before spawning the detached task; the task's commit locks the same
+    /// mutex, compares, and — while STILL holding it — either clears the
+    /// `*_evicted` flags (generation unchanged) or leaves them alone
+    /// (generation bumped by a racing evict), so a concurrent evict can never
+    /// observe or produce a torn intermediate state.
+    /// Test: `rehydrate_commit_skips_flag_clear_when_evict_races_it` (race
+    /// landing BEFORE the generation read) and
+    /// `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
+    /// (round-3: race landing INSIDE the compare-then-clear critical section
+    /// itself) in `indexer::rehydrate_tests`.
+    pub(super) rehydrate_generation: Arc<Mutex<u64>>,
 
     /// `true` when the most recent `bm25_search` / `grep_fallback_search`
     /// call degraded to an empty lane because the detached rehydrate
@@ -352,7 +373,7 @@ impl CodeIndexer {
             chunks_evicted: Arc::new(AtomicBool::new(false)),
             bm25_entities_evicted: Arc::new(AtomicBool::new(false)),
             rehydrate_inflight: Arc::new(std::sync::Mutex::new(None)),
-            rehydrate_generation: Arc::new(AtomicU64::new(0)),
+            rehydrate_generation: Arc::new(Mutex::new(0)),
             lane_degraded: Arc::new(AtomicBool::new(false)),
             corpus_open_failed: false,
             hnsw_load_failed: false,
@@ -453,14 +474,17 @@ impl CodeIndexer {
     /// exactly one place so the two paths can never drift.
     /// What: a no-op returning 0 when no durable corpus is wired (nothing to
     /// rehydrate from) or the map is already empty. Otherwise clears + shrinks
-    /// the map, marks `chunks_evicted` so the next reader rehydrates from redb,
-    /// bumps `rehydrate_generation` (issue #3683 finding 2 — invalidates any
-    /// rehydrate commit already in flight), and returns the reclaimed chunk
+    /// the map, then — under `rehydrate_generation`'s lock (round-3 review;
+    /// see that field's doc comment) — marks `chunks_evicted` and bumps the
+    /// generation counter TOGETHER as one critical section, so a concurrent
+    /// rehydrate commit can never read the pre-bump generation and then clear
+    /// this flag back to `false` after the fact. Returns the reclaimed chunk
     /// count. Callers own any logging.
     /// Test: exercised by `idle_eviction_drops_and_lazily_rehydrates_chunks`
     /// (idle path) and `memory_pressure_reclaim_now_clears_caches` (pressure
-    /// path); `rehydrate_commit_skips_flag_clear_when_evict_races_it` in
-    /// `indexer::rehydrate_tests` pins the race itself.
+    /// path); `rehydrate_commit_skips_flag_clear_when_evict_races_it` and
+    /// `rehydrate_commit_survives_evict_racing_the_generation_critical_section`
+    /// in `indexer::rehydrate_tests` pin the race itself.
     async fn clear_in_memory_chunks(&self) -> usize {
         if self.corpus.is_none() {
             return 0;
@@ -473,12 +497,19 @@ impl CodeIndexer {
         chunks.clear();
         chunks.shrink_to_fit();
         drop(chunks);
-        self.chunks_evicted.store(true, Ordering::Relaxed);
-        // Issue #3683 code-critic finding 2: bump the shared generation
-        // counter so any rehydrate already in flight (which snapshotted the
-        // counter before this clear) detects it raced a fresh eviction and
-        // skips its now-stale flag-clear commit.
-        self.rehydrate_generation.fetch_add(1, Ordering::Relaxed);
+        // Issue #3683 round-3 review (remaining HIGH): the flag-set and the
+        // generation bump MUST happen under the same lock acquisition as a
+        // single critical section — see `rehydrate_generation`'s doc comment.
+        // A short, never-awaited-while-held std Mutex critical section (no
+        // I/O, no `.await` inside it).
+        {
+            let mut generation = self
+                .rehydrate_generation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            self.chunks_evicted.store(true, Ordering::Relaxed);
+            *generation += 1;
+        }
         evicted
     }
 
