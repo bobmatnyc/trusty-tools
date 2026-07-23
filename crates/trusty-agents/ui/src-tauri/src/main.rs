@@ -192,9 +192,18 @@ fn main() {
                         // proceed.
                     }
                     Err(_) => {
-                        // Lock contended by a concurrent
-                        // `ensure_api_server`/`kill_sidecar`. Defer and reap
-                        // via the shared path, which re-takes the lock itself.
+                        // Contended path: unlike the `Ok` arm, we cannot see
+                        // whether a child is present without the lock, so we
+                        // defer on *contention* — treating "someone is holding
+                        // the mutex" (a concurrent `ensure_api_server` /
+                        // `kill_sidecar`) as a proxy for "the child may be
+                        // mid-mutation, so play safe and reap via the shared
+                        // path", which re-takes the lock itself. If the slot
+                        // turns out to be empty, `kill_sidecar` is a no-op and
+                        // the subsequent `handle.exit(0)` re-raises
+                        // `ExitRequested` into the uncontended `Ok`/`None`
+                        // branch, which lets the process exit — so this cannot
+                        // loop indefinitely on transient contention.
                         api.prevent_exit();
                         let state = state.inner().clone();
                         let handle = app_handle.clone();

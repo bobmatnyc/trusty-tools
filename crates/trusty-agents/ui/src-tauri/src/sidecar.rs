@@ -424,11 +424,20 @@ mod tests {
             .spawn()
             .expect("spawn true");
         // Let it run to completion, but do NOT reap it here — leave that to
-        // `terminate_child` so we exercise the already-exited branch.
+        // `terminate_child` so we exercise the already-exited branch. Bound the
+        // wait with a hard deadline so a wedged `true` fails loudly instead of
+        // hanging the test runner (condition-based-waiting).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break,
-                Ok(None) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Ok(None) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "`true` did not exit within 5s"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 Err(e) => panic!("try_wait failed: {e}"),
             }
         }
@@ -437,6 +446,90 @@ mod tests {
         assert!(
             status.is_some(),
             "an already-exited child must be reaped, not left hanging"
+        );
+    }
+
+    /// Pins the SIGKILL-escalation branch: a child that *ignores* SIGTERM must
+    /// still be forcibly reaped after the grace window elapses. We spawn a
+    /// `python3` that installs `SIG_IGN` for SIGTERM and only then touches a
+    /// marker file — we wait for that marker before signalling, otherwise the
+    /// SIGTERM could race process startup and land before the handler is
+    /// installed (which would let the graceful phase succeed and never exercise
+    /// escalation). We assert (a) at least `grace` elapsed — proof we waited out
+    /// the graceful window rather than killing immediately, (b) the child died
+    /// from signal 9 (SIGKILL), and (c) its pid is gone. Skips cleanly if
+    /// `python3` isn't on PATH.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminate_child_escalates_to_sigkill_when_sigterm_ignored() {
+        use std::os::unix::process::ExitStatusExt;
+
+        // Unique marker path this child touches once its SIGTERM handler is in.
+        let marker = std::env::temp_dir().join(format!(
+            "trusty-3372-sigterm-ignore-{}-{}.marker",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        ));
+        // Best-effort clean slate in case a previous run left one behind.
+        let _ = std::fs::remove_file(&marker);
+
+        let spawn = tokio::process::Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import signal,sys,time\n\
+                 signal.signal(signal.SIGTERM, signal.SIG_IGN)\n\
+                 open(sys.argv[1], 'w').close()\n\
+                 time.sleep(300)",
+            )
+            .arg(&marker)
+            .spawn();
+        let child = match spawn {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("skipping: python3 not available on PATH");
+                return;
+            }
+        };
+        let pid = child.id().expect("running child has a pid") as libc::pid_t;
+
+        // Wait (bounded) until the child has installed its SIGTERM handler.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !marker.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child never signalled SIGTERM-handler readiness within 5s"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let grace = Duration::from_millis(200);
+        let start = std::time::Instant::now();
+        let status = terminate_child(child, grace).await;
+        let elapsed = start.elapsed();
+        let _ = std::fs::remove_file(&marker);
+
+        assert!(
+            elapsed >= grace,
+            "must wait out the full grace window before SIGKILL (elapsed {elapsed:?} < {grace:?})"
+        );
+        let status = status.expect("child must be reaped and yield an ExitStatus");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "a SIGTERM-ignoring child must be killed by SIGKILL (signal 9)"
+        );
+
+        // The pid must be gone (reaped): kill(pid, 0) fails with ESRCH.
+        // SAFETY: signal 0, existence check only.
+        let rc = unsafe { libc::kill(pid, 0) };
+        assert_eq!(rc, -1, "reaped child's pid must no longer exist");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "kill on the reaped pid must fail with ESRCH (no such process)"
         );
     }
 }
