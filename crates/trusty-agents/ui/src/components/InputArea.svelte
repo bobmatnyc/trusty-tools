@@ -18,6 +18,8 @@
   import { cancelTask, invoke, listenEvent, type CancelTaskResult } from '../lib/transport';
   import { buildRetaskPayload, isPendingTaskId } from '../lib/retask';
   import { resolveOverride } from '../lib/models';
+  import { agentRoster } from '../stores/app';
+  import { rosterDisplayName } from '../lib/roster';
 
   let input = '';
   let textareaEl: HTMLTextAreaElement;
@@ -112,13 +114,21 @@
     // Assistant placeholder. `taskId` is set to a temp id and patched once
     // the backend returns the real id via the resolved promise OR the first
     // progress event (whichever arrives first).
+    //
+    // #3737: stamp the placeholder with the display name of the persona
+    // active RIGHT NOW (the same `activeAgentId` this submission forwards as
+    // its `agent` field below). Resolving it here — at message creation —
+    // means a persona switch after this message is sent relabels only later
+    // bubbles; this one keeps whoever produced it.
     const placeholderTaskId = `pending-${now}`;
+    const speaker = rosterDisplayName(get(agentRoster), get(activeAgentId));
     addMessage(projectId, {
       id: `asst-${now}`,
       role: 'assistant',
       content: '',
       timestamp: now,
       taskId: placeholderTaskId,
+      speaker,
     });
 
     isRunning.set(true);

@@ -261,7 +261,7 @@ pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<se
 /// `provider_id`, `description`, and `display_name` (each defaulting to `""`
 /// when absent). Returns `None` when `raw` fails to parse as TOML.
 /// Test: `scan_agents_dir_parses_toml`, `patch_agent_persists_model_and_round_trips`,
-/// `parse_agent_toml_surfaces_display_name`.
+/// `parse_agent_toml_surfaces_display_name`, `scan_agents_dir_exposes_display_name`.
 pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_json::Value> {
     let parsed: toml::Value = toml::from_str(raw).ok()?;
     let agent = parsed.get("agent");
