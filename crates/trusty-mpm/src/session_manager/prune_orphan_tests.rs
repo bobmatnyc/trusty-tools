@@ -567,3 +567,66 @@ fn git_worktree_list_agrees_false_for_untracked_dir() {
         "a directory git never registered as a worktree must disagree"
     );
 }
+
+/// The #1845 F3 canonicalize-fallback streak must escalate to `error!` at
+/// exactly [`CANONICALIZE_FAILURE_STREAK_THRESHOLD`] consecutive failures,
+/// not before (#3715 item 3).
+///
+/// Why: this is pure counter logic — no daemon, no timing, no filesystem —
+/// exercised directly against [`CanonicalizeFailureStreaks`] so the test is
+/// deterministic and independent of the real ~60s sweep cadence.
+/// What: calls `record_failure` repeatedly for the same path and asserts the
+/// returned streak length increments 1..=N, crossing the threshold on the
+/// Nth call.
+#[test]
+fn canonicalize_streak_escalates_at_threshold() {
+    let mut streaks = CanonicalizeFailureStreaks::default();
+    let path = std::path::Path::new("/some/vanished/workspace");
+
+    for expected in 1..CANONICALIZE_FAILURE_STREAK_THRESHOLD {
+        let streak = streaks.record_failure(path);
+        assert_eq!(streak, expected, "streak must increment by 1 per failure");
+        assert!(
+            streak < CANONICALIZE_FAILURE_STREAK_THRESHOLD,
+            "must not have reached the escalation threshold yet"
+        );
+    }
+
+    let final_streak = streaks.record_failure(path);
+    assert_eq!(final_streak, CANONICALIZE_FAILURE_STREAK_THRESHOLD);
+    assert!(
+        final_streak >= CANONICALIZE_FAILURE_STREAK_THRESHOLD,
+        "the Nth consecutive failure must cross the escalation threshold"
+    );
+}
+
+/// A single successful canonicalize must fully reset the streak for that
+/// path — a subsequent failure starts back at 1, not N+1 (#3715 item 3).
+///
+/// What: drives a path partway toward the threshold, calls `record_success`,
+/// then asserts the next `record_failure` call returns 1 again. Also checks
+/// that a DIFFERENT path's streak is unaffected by another path's reset.
+#[test]
+fn canonicalize_streak_resets_on_success() {
+    let mut streaks = CanonicalizeFailureStreaks::default();
+    let path_a = std::path::Path::new("/workspace/a");
+    let path_b = std::path::Path::new("/workspace/b");
+
+    streaks.record_failure(path_a);
+    streaks.record_failure(path_a);
+    streaks.record_failure(path_a);
+    streaks.record_failure(path_b);
+    streaks.record_failure(path_b);
+
+    streaks.record_success(path_a);
+    assert_eq!(
+        streaks.record_failure(path_a),
+        1,
+        "streak must restart at 1 after a success resets it"
+    );
+    assert_eq!(
+        streaks.record_failure(path_b),
+        3,
+        "an unrelated path's streak must be untouched by another path's reset"
+    );
+}

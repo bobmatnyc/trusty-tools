@@ -223,15 +223,14 @@ async fn session_resume_not_found_errors() {
 /// [`trusty_mpm::session_manager::real_tmux::FakeNoopTmuxDriver`] — no real
 /// tmux process is ever spawned server-side, so nothing here depends on this
 /// test process's own tmux/TTY environment. `create_with_id` does NOT touch
-/// the filesystem itself (`ws` genuinely does not exist afterward), but
-/// `SessionManager::stop`'s non-fatal pre-kill snapshot capture DOES:
-/// `capture_into` unconditionally `mkdir -p`'s `<workspace_path>/.trusty-mpm/`
-/// to write a (here, empty — the fake driver's `capture` returns `""`)
-/// scrollback file, which recreates `ws` as a side effect (confirmed
-/// empirically). So the directory is removed a SECOND time, after `stop`,
-/// immediately before the router starts serving, to end up with a record
-/// that is genuinely `Stopped` AND genuinely workspace-less at `/resume`
-/// time. Returns `(base_url, id)`.
+/// the filesystem itself (`ws` genuinely does not exist afterward). Before
+/// #3715, `SessionManager::stop`'s non-fatal pre-kill snapshot capture would
+/// silently `mkdir -p` `<workspace_path>/.trusty-mpm/` and recreate `ws` as a
+/// side effect even though the workspace root never existed — that hazard is
+/// now guarded (`capture_into` refuses to write when the workspace root is
+/// missing), so `ws` genuinely stays absent through `stop()` with no extra
+/// cleanup needed, giving a record that is genuinely `Stopped` AND genuinely
+/// workspace-less at `/resume` time. Returns `(base_url, id)`.
 async fn spawn_test_daemon_with_unrestartable_stopped_session() -> (String, String) {
     use trusty_mpm::daemon::{api, state::DaemonState};
     use trusty_mpm::runtime::RuntimeKind;
@@ -258,9 +257,10 @@ async fn spawn_test_daemon_with_unrestartable_stopped_session() -> (String, Stri
     .await
     .expect("seed session");
     mgr.stop(&id).await.expect("mark seeded session Stopped");
-    tokio::fs::remove_dir_all(&ws)
-        .await
-        .expect("remove the dir stop()'s snapshot capture recreated, so it is genuinely absent");
+    assert!(
+        !ws.exists(),
+        "#3715: stop()'s snapshot capture must NOT recreate a vanished workspace root"
+    );
 
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

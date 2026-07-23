@@ -10,12 +10,28 @@
 //! returns. All I/O failures are non-fatal (logged as warnings) so callers can
 //! proceed to the tmux kill unconditionally.
 //! Test: `capture_into_no_workspace_skips_write`,
-//! `capture_into_driver_failure_is_nonfatal`.
+//! `capture_into_driver_failure_is_nonfatal`,
+//! `capture_into_missing_workspace_root_refuses_to_recreate`,
+//! `capture_into_creates_trusty_mpm_subdir_when_root_exists`.
+//!
+//! ## Vanished-workspace-root hardening (#3715)
+//!
+//! `write_scrollback`'s `tokio::fs::create_dir_all(parent)` recreates every
+//! missing ancestor directory — including the workspace ROOT itself if it has
+//! been deleted out-of-band (e.g. the git worktree was removed by something
+//! other than `decommission`). Left unchecked, a stop/reap on such a session
+//! silently reconstitutes a bare, non-git, config-less shell in place of the
+//! real workspace, masking data loss instead of surfacing it. [`capture_into`]
+//! now checks [`workspace_root_exists`] before ever touching the filesystem
+//! and refuses the write (loud `warn!`, no directory created) when the root
+//! is gone. The normal first-write case — root present, `.trusty-mpm/`
+//! subdir absent — is unaffected and still upgrades to `info!` so directory
+//! creation stops being invisible.
 
 use std::path::Path;
 use std::sync::OnceLock;
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::manager::ManagedTmuxDriver;
 use super::record::SessionRecord;
@@ -57,26 +73,53 @@ static REDACT_RE: OnceLock<regex::Regex> = OnceLock::new();
 /// write them to `<workspace_path>/.trusty-mpm/scrollback.txt`, setting
 /// `record.scrollback_path` on success; (2) queries `driver.get_pane_cwd()` and
 /// sets `record.last_cwd` on success. Skips step (1) if `workspace_path` is
-/// absent (no place to write the file). All errors are logged and swallowed.
+/// absent (no place to write the file) OR if the workspace root no longer
+/// exists on disk (#3715 — see [`workspace_root_exists`]; refusing to recreate
+/// a vanished workspace root takes priority over capturing the pane, so the
+/// `driver.capture` call is never even made in that case). All errors are
+/// logged and swallowed.
 /// Test: `capture_into_no_workspace_skips_write`,
-/// `capture_into_driver_failure_is_nonfatal`.
+/// `capture_into_driver_failure_is_nonfatal`,
+/// `capture_into_missing_workspace_root_refuses_to_recreate`,
+/// `capture_into_creates_trusty_mpm_subdir_when_root_exists`.
 pub async fn capture_into(record: &mut SessionRecord, driver: &dyn ManagedTmuxDriver) {
     let name = &record.tmux_name;
 
     // Step 1: scrollback snapshot (only if we have a workspace dir to write into).
     if let Some(ws) = record.workspace_path.as_ref() {
-        match driver.capture(name, SCROLLBACK_LINES) {
-            Ok(text) => {
-                let dest = ws.join(SCROLLBACK_SUBPATH);
-                if let Err(e) = write_scrollback(&dest, &text).await {
-                    warn!(name = %name, path = %dest.display(), "snapshot: scrollback write failed: {e}");
-                } else {
-                    debug!(name = %name, path = %dest.display(), "snapshot: scrollback written ({} bytes)", text.len());
-                    record.scrollback_path = Some(dest);
+        if !workspace_root_exists(ws).await {
+            warn!(
+                name = %name,
+                path = %ws.display(),
+                "snapshot: workspace root missing — refusing to recreate; \
+                 skipping scrollback write (#3715)"
+            );
+        } else {
+            match driver.capture(name, SCROLLBACK_LINES) {
+                Ok(text) => {
+                    let dest = ws.join(SCROLLBACK_SUBPATH);
+                    match write_scrollback(&dest, &text).await {
+                        Ok(created_dir) => {
+                            if created_dir {
+                                info!(
+                                    name = %name,
+                                    path = %dest.display(),
+                                    "snapshot: created .trusty-mpm/ dir and wrote scrollback ({} bytes)",
+                                    text.len()
+                                );
+                            } else {
+                                debug!(name = %name, path = %dest.display(), "snapshot: scrollback written ({} bytes)", text.len());
+                            }
+                            record.scrollback_path = Some(dest);
+                        }
+                        Err(e) => {
+                            warn!(name = %name, path = %dest.display(), "snapshot: scrollback write failed: {e}");
+                        }
+                    }
                 }
-            }
-            Err(e) => {
-                warn!(name = %name, "snapshot: capture-pane failed (non-fatal): {e}");
+                Err(e) => {
+                    warn!(name = %name, "snapshot: capture-pane failed (non-fatal): {e}");
+                }
             }
         }
     } else {
@@ -90,24 +133,52 @@ pub async fn capture_into(record: &mut SessionRecord, driver: &dyn ManagedTmuxDr
     }
 }
 
+/// Check whether a session's workspace ROOT still exists on disk.
+///
+/// Why: `tokio::fs::create_dir_all` recreates every missing ancestor
+/// directory, so calling it (directly or transitively, via
+/// [`write_scrollback`]) against a path under a workspace root that has
+/// vanished — deleted out-of-band, or never resolvable — silently
+/// reconstitutes a bare, non-git, config-less shell in its place. That masks
+/// real data loss instead of surfacing it (#3715). Every write path that
+/// derives a directory from a session's `workspace_path` must check this
+/// FIRST and skip (never recreate) the root.
+/// What: `tokio::fs::metadata(root).await.is_ok()` — true only if `root`
+/// currently resolves to something on disk. A non-directory hit is
+/// intentionally still "exists" here; the caller's own write will surface
+/// that mismatch on its own.
+/// Test: `capture_into_missing_workspace_root_refuses_to_recreate`,
+/// `capture_into_creates_trusty_mpm_subdir_when_root_exists`.
+async fn workspace_root_exists(root: &Path) -> bool {
+    tokio::fs::metadata(root).await.is_ok()
+}
+
 /// Write `content` to `dest` with secret redaction and restrictive permissions.
 ///
 /// Why: pane scrollback is a classic secret-leak vector (API keys, Bearer
 /// tokens, env echoes). Redacting before write and restricting the file to
 /// 0600 / parent dir to 0700 provides defence-in-depth for other processes
-/// running as the same uid.
-/// What: creates parent dirs, sets the parent dir to 0700 (best-effort),
+/// running as the same uid. Callers are responsible for verifying the
+/// workspace ROOT exists before calling this (#3715 —
+/// [`workspace_root_exists`]); this function only decides whether the
+/// `.trusty-mpm/` SUBDIRECTORY needs creating, which is the normal, expected
+/// first-write case and safe to create unconditionally.
+/// What: creates parent dirs (returning `true` if `parent` did not already
+/// exist, so the caller can log directory creation at `info!` instead of
+/// `debug!` — #3715 item 2), sets the parent dir to 0700 (best-effort),
 /// redacts the content via [`redact_secrets`], and writes the file with mode
 /// 0600 on Unix (falling back to a plain async write on non-Unix).
 /// Test: `scrollback_file_has_restrictive_permissions`,
-/// `redaction_scrubs_secrets_before_write`.
-async fn write_scrollback(dest: &Path, content: &str) -> std::io::Result<()> {
+/// `redaction_scrubs_secrets_before_write`,
+/// `capture_into_creates_trusty_mpm_subdir_when_root_exists`.
+async fn write_scrollback(dest: &Path, content: &str) -> std::io::Result<bool> {
     let parent = dest.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "scrollback path has no parent directory",
         )
     })?;
+    let parent_existed = tokio::fs::try_exists(parent).await.unwrap_or(false);
     tokio::fs::create_dir_all(parent).await?;
 
     // Best-effort: restrict the .trusty-mpm/ snapshot dir to owner-only.
@@ -133,7 +204,7 @@ async fn write_scrollback(dest: &Path, content: &str) -> std::io::Result<()> {
     #[cfg(not(unix))]
     tokio::fs::write(dest, redacted.as_bytes()).await?;
 
-    Ok(())
+    Ok(!parent_existed)
 }
 
 /// Create (or truncate) `path` and write `data` with mode 0600 on Unix.
@@ -315,6 +386,77 @@ mod tests {
             "capture failure → no file"
         );
         assert!(record.last_cwd.is_none(), "cwd None from driver stays None");
+    }
+
+    /// Why: the central regression guard for #3715 — a `workspace_path` that
+    /// points at a vanished directory must NEVER be silently recreated by the
+    /// scrollback write's `create_dir_all`. Losing the scrollback snapshot is
+    /// acceptable; fabricating a bare workspace shell is not.
+    /// What: builds a record whose `workspace_path` is a path inside a tempdir
+    /// that is never created (so it does not exist on disk), calls
+    /// `capture_into` with a driver that WOULD succeed if asked to capture,
+    /// then asserts (a) the missing root was NOT created, (b) no
+    /// `.trusty-mpm/` subdir exists anywhere on disk, and (c)
+    /// `scrollback_path` stays `None` (skip, not error — matches the existing
+    /// non-fatal skip semantics of `capture_into_no_workspace_skips_write`).
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn capture_into_missing_workspace_root_refuses_to_recreate() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing_root = tmp.path().join("vanished-workspace");
+        assert!(!missing_root.exists(), "precondition: root must not exist");
+
+        let mut record = make_record(Some(missing_root.clone()));
+        let driver = StubDriver {
+            capture_result: Ok("some output".into()),
+            cwd: Some(PathBuf::from("/tmp/src")),
+        };
+        capture_into(&mut record, &driver).await;
+
+        assert!(
+            !missing_root.exists(),
+            "capture_into must NOT recreate a vanished workspace root (#3715)"
+        );
+        assert!(
+            record.scrollback_path.is_none(),
+            "missing root → scrollback write skipped, not attempted"
+        );
+        // last_cwd is independent of the workspace-root guard and must still
+        // be captured from the driver.
+        assert_eq!(record.last_cwd, Some(PathBuf::from("/tmp/src")));
+    }
+
+    /// Why: the normal first-write case — workspace root exists but
+    /// `.trusty-mpm/` does not yet — must be preserved unchanged by the
+    /// #3715 guard: `write_scrollback` should still create the subdir (and
+    /// report that it did, for the info!-level visibility upgrade).
+    /// What: passes an EXISTING tempdir (root present) with no `.trusty-mpm/`
+    /// subdir yet; asserts the subdir and file are created and
+    /// `scrollback_path` is populated.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn capture_into_creates_trusty_mpm_subdir_when_root_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(
+            !tmp.path().join(".trusty-mpm").exists(),
+            "precondition: .trusty-mpm/ must not exist yet"
+        );
+
+        let mut record = make_record(Some(tmp.path().to_path_buf()));
+        let driver = StubDriver {
+            capture_result: Ok("first write".into()),
+            cwd: None,
+        };
+        capture_into(&mut record, &driver).await;
+
+        assert!(
+            tmp.path().join(".trusty-mpm").is_dir(),
+            "root exists → .trusty-mpm/ subdir creation is the normal case"
+        );
+        let path = record
+            .scrollback_path
+            .expect("scrollback_path should be set");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first write");
     }
 
     /// Why: the happy path must write the scrollback file and populate both fields.

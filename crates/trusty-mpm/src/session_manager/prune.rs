@@ -18,7 +18,7 @@
 use std::fmt;
 
 use chrono::{Duration, Utc};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
@@ -40,6 +40,85 @@ use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 /// Test: `reap_aged_ephemeral_picks_old_ephemeral_only` drives both the "too
 /// young" and "non-ephemeral" exclusions against this threshold.
 pub const MAX_EPHEMERAL_AGE_HOURS: i64 = 24;
+
+/// Consecutive per-sweep canonicalize failures on the same path before the
+/// #1845 F3 fallback escalates from `warn!` to `error!` (#3715 item 3).
+///
+/// Why: the F3 fallback WARN fired every minute for ~8h on the same path
+/// before the underlying vanished-workspace-root issue (#3715) was noticed —
+/// a per-tick WARN buried in a large log carries no signal that distinguishes
+/// "just started" from "sustained for hours". The orphan-GC sweep runs on a
+/// ~60s cadence (`ORPHAN_GC_INTERVAL_SECS`), so 10 consecutive failures is
+/// roughly 10 minutes of sustained failure: long enough to rule out a single
+/// transient blip (an NFS hiccup, a momentary permission race), short enough
+/// that an operator still has a wide window to react before whatever wrote
+/// the workspace root's death eventually triggers the #3715 silent-recreate
+/// write-path this streak is an early-warning system for.
+/// What: the threshold [`CanonicalizeFailureStreaks::record_failure`] compares
+/// its return value against, to decide `warn!` vs `error!`.
+/// Test: `canonicalize_streak_escalates_at_threshold`.
+const CANONICALIZE_FAILURE_STREAK_THRESHOLD: u32 = 10;
+
+/// In-memory, per-path consecutive-failure counter for the #1845 F3
+/// canonicalize fallback (#3715 item 3).
+///
+/// Why: a lone per-tick WARN gives no sense of DURATION — the F3 fallback for
+/// the path behind #3715 fired unnoticed for ~8h because every occurrence
+/// looked identical in the log. Tracking a streak lets the sweep escalate to
+/// `error!` once failure has been sustained past
+/// [`CANONICALIZE_FAILURE_STREAK_THRESHOLD`] consecutive sweeps, making it
+/// greppable and a future alerting target, without adding persistence or an
+/// external alerting pipeline — deliberately kept as simple in-process state
+/// scoped to one sweep loop's lifetime (reset on daemon restart, which is
+/// acceptable: a restart re-establishes a clean baseline for the same
+/// underlying condition to re-accumulate if it is still present).
+/// What: `record_failure` increments (or starts at 1) the counter for `path`
+/// and returns the new streak length; `record_success` clears any existing
+/// entry for `path` (a single successful canonicalize breaks the streak).
+/// Test: `canonicalize_streak_escalates_at_threshold`,
+/// `canonicalize_streak_resets_on_success`.
+#[derive(Debug, Default)]
+struct CanonicalizeFailureStreaks {
+    counts: std::collections::HashMap<std::path::PathBuf, u32>,
+}
+
+impl CanonicalizeFailureStreaks {
+    /// Record one more consecutive failure for `path`, returning the new streak length.
+    fn record_failure(&mut self, path: &std::path::Path) -> u32 {
+        let count = self.counts.entry(path.to_path_buf()).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Record a success for `path`, resetting (removing) any existing streak.
+    fn record_success(&mut self, path: &std::path::Path) {
+        self.counts.remove(path);
+    }
+}
+
+/// Process-global streak state backing [`CanonicalizeFailureStreaks`] (#3715
+/// item 3).
+///
+/// Why: a single daemon process runs exactly one orphan-GC sweep loop, so
+/// process-global state is equivalent to per-`SessionManager` state in
+/// production, and keeps this change confined to `prune.rs` rather than
+/// adding a field (and constructor-init site) to the shared `SessionManager`
+/// struct in `manager.rs`. Deliberately unpersisted — see the type's own doc.
+/// What: lazily-initialized `Mutex`-guarded counter map, accessed only via
+/// [`canonicalize_failure_streaks`].
+/// Test: covered indirectly by `canonicalize_streak_escalates_at_threshold`
+/// and `canonicalize_streak_resets_on_success`, which exercise
+/// [`CanonicalizeFailureStreaks`] directly (no global state involved) to stay
+/// deterministic and independent of test execution order.
+static CANONICALIZE_FAILURE_STREAKS: std::sync::OnceLock<
+    std::sync::Mutex<CanonicalizeFailureStreaks>,
+> = std::sync::OnceLock::new();
+
+/// Accessor for the process-global [`CanonicalizeFailureStreaks`] instance.
+fn canonicalize_failure_streaks() -> &'static std::sync::Mutex<CanonicalizeFailureStreaks> {
+    CANONICALIZE_FAILURE_STREAKS
+        .get_or_init(|| std::sync::Mutex::new(CanonicalizeFailureStreaks::default()))
+}
 
 /// Which managed-session records a prune targets (#1508).
 ///
@@ -734,17 +813,39 @@ impl SessionManager {
         let fresh_active: HashSet<std::path::PathBuf> = {
             let mut set = HashSet::new();
             for r in self.store.read().await.cached_all() {
+                let session_id = r.id;
                 let Some(p) = r.workspace_path else {
                     continue;
                 };
                 if let Ok(c) = std::fs::canonicalize(&p) {
                     set.insert(c);
+                    // Success breaks any in-flight failure streak (#3715 item 3).
+                    canonicalize_failure_streaks()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .record_success(&p);
                 } else {
-                    warn!(
-                        path = %p.display(),
-                        "prune-worktrees: active session path failed to canonicalize; \
-                         using raw path as protective fallback (#1845 F3)"
-                    );
+                    let streak = canonicalize_failure_streaks()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .record_failure(&p);
+                    if streak >= CANONICALIZE_FAILURE_STREAK_THRESHOLD {
+                        error!(
+                            session = %session_id,
+                            path = %p.display(),
+                            streak,
+                            "prune-worktrees: active session path has failed to \
+                             canonicalize for {streak} consecutive sweeps — sustained \
+                             failure, investigate before a stop/reap silently \
+                             reconstitutes this workspace root (#3715)"
+                        );
+                    } else {
+                        warn!(
+                            path = %p.display(),
+                            "prune-worktrees: active session path failed to canonicalize; \
+                             using raw path as protective fallback (#1845 F3)"
+                        );
+                    }
                 }
                 // Always insert the raw path so the raw-form check below catches
                 // cases where the active side failed to canonicalize.
