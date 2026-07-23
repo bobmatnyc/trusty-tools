@@ -111,6 +111,16 @@ pub(super) struct TaskSubmittedBody {
 pub(super) struct HealthBody {
     status: &'static str,
     version: &'static str,
+    /// This sidecar process's own pid.
+    pid: u32,
+    /// This sidecar's parent pid (`getppid`), or `None` off unix.
+    ///
+    /// Why: #3734 — a desktop GUI must be able to tell the sidecar IT spawned
+    /// apart from a reparented orphan of a previous GUI still answering on the
+    /// same fixed port (whose own parent-death watchdog has not fired yet).
+    /// Adopting such an orphan, or marking the app "ready" against it, would go
+    /// dark the instant it self-exits. The GUI compares this to its own pid.
+    ppid: Option<u32>,
 }
 
 /// Directory under `.trusty-agents/` holding per-project TOML configs.
@@ -136,12 +146,34 @@ pub(super) fn agents_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(".trusty-agents/agents")
 }
 
-/// `GET /api/health` — liveness + version probe.
+/// `GET /api/health` — liveness + version + parentage probe.
+///
+/// Why: Beyond liveness, a GUI sidecar caller uses `pid`/`ppid` to verify it is
+/// talking to the sidecar it spawned rather than a reparented orphan on the same
+/// fixed port (#3734 adoption race).
+/// What: Returns `status`/`version` plus this process's `pid` and, on unix, its
+/// `getppid()`.
+/// Test: `health_returns_ok_and_version` (asserts the pid field is present).
 pub(super) async fn health() -> Json<HealthBody> {
     Json(HealthBody {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+        pid: std::process::id(),
+        ppid: parent_pid(),
     })
+}
+
+/// This process's parent pid, or `None` where `getppid` is unavailable.
+#[cfg(unix)]
+fn parent_pid() -> Option<u32> {
+    // SAFETY: `getppid` takes no arguments and is always safe to call.
+    Some(unsafe { libc::getppid() } as u32)
+}
+
+/// Non-unix stub: no `getppid`, so parentage is unreported.
+#[cfg(not(unix))]
+fn parent_pid() -> Option<u32> {
+    None
 }
 
 /// Extract a non-empty agent override from a task request (#3223).

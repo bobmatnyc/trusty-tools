@@ -143,7 +143,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   SIGTERM/SIGKILL previously left `tagent --api` running and holding its fixed
   port, so a later GUI launch could fail to bind or attach to a stale backend.
   Absent the flag (e.g. a hand-run `tagent --api` in a shell) the watchdog is
-  simply not armed. Unix-only; a no-op on other targets.
+  simply not armed. Unix-only; a no-op on other targets. `GET /api/health` now
+  also reports the sidecar's `pid` and `ppid` so a GUI can verify it is talking
+  to the sidecar it spawned rather than a reparented orphan on the same port.
 
 - **A parallel phase could not fail when its merge failed (#3671):**
   `executor::dispatch` folded `ConflictResolver::merge`'s `Err` into a

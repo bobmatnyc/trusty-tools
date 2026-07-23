@@ -144,35 +144,45 @@ fn main() {
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
-        // Reap the `tagent --api` sidecar on the way out. This fires for every
-        // quit path — Cmd+Q, app-menu Quit, and the tray "Quit" item (which
-        // raises `ExitRequested` via `AppHandle::exit`).
+        // Reap the `tagent --api` sidecar on the way out. We match BOTH
+        // `ExitRequested` and `Exit` deliberately.
         //
-        // #3734 root cause: PR #3728 DEFERRED the reap onto an async task
-        // (`prevent_exit()` + `tauri::async_runtime::spawn` + `handle.exit(0)`).
-        // On macOS, Cmd+Q is a SYNCHRONOUS AppKit teardown —
-        // `applicationShouldTerminate:` is answered and the process exits in a
-        // few milliseconds. `prevent_exit()` does not retract AppKit's native
-        // termination, and the spawned task was never polled before the process
-        // was gone (live logs showed the entire quit completing in ~3.2ms with
-        // ZERO Rust log lines from the reap task). The sidecar was orphaned,
-        // reparented to launchd, and kept holding port 8765.
+        // #3734 root cause: PR #3728 handled ONLY `RunEvent::ExitRequested`, and
+        // deferred the reap onto an async task (`prevent_exit()` +
+        // `tauri::async_runtime::spawn` + `handle.exit(0)`). In this app's TRAY
+        // configuration the window is never destroyed on Cmd+Q (CloseRequested
+        // only hides it), and tao 0.35.2's macOS backend maps a Cmd+Q with no
+        // window teardown to `applicationWillTerminate:` — i.e. it emits
+        // `RunEvent::Exit`, NOT `ExitRequested`. So #3728's `ExitRequested`-only
+        // handler NEVER FIRED on Cmd+Q; the process exited in ~3ms with zero
+        // Rust log lines and the sidecar was orphaned (reparented to launchd,
+        // still holding port 8765). Two independent bugs stacked: the wrong
+        // event was matched, and even the matched path deferred work that AppKit
+        // never let run.
         //
-        // The fix is to reap SYNCHRONOUSLY inside the quit event, blocking this
-        // handler for a short bounded window (`SIDECAR_GRACE`, 500ms) so the
-        // SIGTERM→(bounded wait)→SIGKILL reap completes BEFORE we hand control
-        // back to AppKit — no deferral, no `prevent_exit`/`handle.exit` dance.
-        // `kill_sidecar` `take()`s the child, so the re-entrant `ExitRequested`
-        // (Exit follows ExitRequested) finds `None` and is a no-op. The
-        // sidecar's own parent-death watchdog (#3734) backstops any residual
-        // case (contention here, or a quit path that never reaches this event).
+        // The fix: handle `Exit` too, and reap SYNCHRONOUSLY — block this
+        // handler on `kill_sidecar` for a short bounded window (`SIDECAR_GRACE`,
+        // 500ms) so SIGTERM→(bounded wait)→SIGKILL completes BEFORE control
+        // returns to AppKit. `block_on` is safe here: this closure runs on the
+        // main event-loop thread, not a Tokio worker. `kill_sidecar` `take()`s
+        // the child, so if both events fire the second is a no-op. The sidecar's
+        // own parent-death watchdog (#3734) backstops anything this still misses
+        // (a crash, SIGKILL, or lock contention here).
+        //
+        // The eprintln is intentional and load-bearing for verification: a
+        // packaged-app Cmd+Q must show this line in the console, proving the
+        // reap branch actually ENTERS — a released port alone is insufficient
+        // evidence, because the watchdog would free the port even if this
+        // handler never ran (see the PR's manual-verification note).
         let should_reap = matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit);
         if should_reap {
             if let Some(state) = app_handle.try_state::<SharedApi>() {
+                eprintln!("[trusty-agents-ui] quit event: reaping tagent sidecar (bounded)");
                 let state = state.inner().clone();
                 tauri::async_runtime::block_on(async move {
                     kill_sidecar(&state).await;
                 });
+                eprintln!("[trusty-agents-ui] quit event: sidecar reap complete");
             }
         }
     });

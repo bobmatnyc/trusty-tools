@@ -245,15 +245,45 @@ fn which(name: &str) -> Result<std::path::PathBuf, ()> {
     Err(())
 }
 
+/// Probe `/api/health`, returning `true` only when a sidecar THIS process owns
+/// is answering on `port`.
+///
+/// Why: #3734 adoption race. A plain 200 is not enough. If a previous GUI died
+/// without its sidecar being reaped, that orphan keeps answering on the fixed
+/// port until its own parent-death watchdog fires (~2s). Both callers of this
+/// function would otherwise trust it: `ensure_api_server`'s fast path would
+/// ADOPT it (recording no child, so it can never respawn it) and `check_health`
+/// would mark the app READY against it — either way the app goes dark the
+/// instant the orphan self-exits, with no auto-heal. Gating on parentage makes
+/// "healthy" mean "MY sidecar is up": `ensure_api_server` then spawns its own
+/// and the boot loop's `ensure`-retry heals once the orphan releases the port.
+/// What: Accepts a 200 only when the reported `ppid` equals our pid. If the
+/// sidecar does not report `ppid` (older build, or non-unix where `getppid` is
+/// absent), falls back to trusting the 200 so those setups still work.
+/// Test: covered end-to-end by the desktop app; the parentage field it reads is
+/// unit-tested server-side by `health_returns_ok_and_version`.
 pub(crate) async fn http_health(port: u16) -> bool {
     let url = format!("{}/api/health", api_base(port));
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(500))
         .build();
     let Ok(client) = client else { return false };
-    match client.get(&url).send().await {
-        Ok(r) => r.status().is_success(),
-        Err(_) => false,
+    let Ok(resp) = client.get(&url).send().await else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    let Ok(body) = resp.json::<serde_json::Value>().await else {
+        // 200 but the body did not parse — trust liveness (defensive; the real
+        // server always returns JSON here).
+        return true;
+    };
+    match body.get("ppid").and_then(serde_json::Value::as_u64) {
+        // Only OUR sidecar (parented to this GUI process) counts as healthy.
+        Some(ppid) => ppid == u64::from(std::process::id()),
+        // Sidecar didn't report parentage (older/non-unix) — trust the 200.
+        None => true,
     }
 }
 
