@@ -194,7 +194,15 @@ async fn finish_rename(
 /// message rather than printing so tests can assert it.
 /// Test: `do_rename_request_reports_server_confirmed_suffixed_name`,
 /// `do_rename_request_reports_plain_success` (`rename_tests.rs`).
-async fn do_rename_request(
+///
+/// `pub(super)` (rather than private): the `tm ls`/bare-`tm` picker's `r<N>
+/// <new-name>` rename input mode (`commands::session_picker_rename`) calls
+/// this directly — it already holds a resolved `id` from the numbered
+/// session menu, so it skips `session_rename`'s name/env-var resolution and
+/// #3600 pane cross-check entirely, but reuses this exact hardened PATCH +
+/// #3692 auto-suffix-aware response handling rather than reimplementing any
+/// of it.
+pub(super) async fn do_rename_request(
     client: &reqwest::Client,
     url: &str,
     target: &str,
