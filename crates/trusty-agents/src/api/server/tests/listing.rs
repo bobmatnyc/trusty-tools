@@ -9,7 +9,7 @@
 //! session history loaders.
 //! Test: This module IS the test.
 
-use crate::api::server::projects::{load_sessions_from, scan_agents_dir};
+use crate::api::server::projects::{load_sessions_from, scan_agent_catalog, scan_agents_dir};
 
 /// Why: Confirms `/api/agents` returns the `{"agents": [...]}` envelope
 /// with the spec-required fields (name, role, model, runner) parsed from
@@ -78,6 +78,136 @@ async fn scan_agents_dir_exposes_display_name() {
     );
     assert_eq!(agents[1]["name"], "izzie");
     assert_eq!(agents[1]["display_name"], "Izzie");
+}
+
+/// Why (#3741 — Bob's "picker does not list Izzie or CTO Bot" report): the
+/// catalog must resolve directory PACKAGES (`<name>/agent.toml`), not just
+/// flat `<name>.toml`, because `izzie`/`cto-assistant`/`assistant` ship as
+/// packages. Within one directory a package must win over a flat file of the
+/// same name (matching the runtime's resolution order), and archived
+/// `*.stale.bak` copies must be ignored so they never shadow the live agent.
+/// What: A fixture dir with a package-only agent, a flat-only agent, a name
+/// present as BOTH (package must win), and a `*.stale.bak` backup dir + file
+/// (must be skipped). Asserts exactly the three real agents, package-wins, and
+/// no backup leakage.
+#[tokio::test]
+async fn scan_agents_dir_resolves_packages_flat_and_dedupes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    // Package-only agent: izzie/agent.toml
+    std::fs::create_dir(root.join("izzie")).unwrap();
+    std::fs::write(
+        root.join("izzie").join("agent.toml"),
+        "[agent]\nname = \"izzie\"\nrole = \"assistant\"\ndisplay_name = \"Izzie\"\n",
+    )
+    .unwrap();
+
+    // Flat-only agent: engineer.toml
+    std::fs::write(
+        root.join("engineer.toml"),
+        "[agent]\nname = \"engineer\"\nrole = \"engineer\"\n",
+    )
+    .unwrap();
+
+    // Present as BOTH: a flat cto-assistant.toml AND a cto-assistant/ package.
+    // The PACKAGE must win (display_name "CTO Bot", not "Flat Loser").
+    std::fs::write(
+        root.join("cto-assistant.toml"),
+        "[agent]\nname = \"cto-assistant\"\nrole = \"assistant\"\ndisplay_name = \"Flat Loser\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.join("cto-assistant")).unwrap();
+    std::fs::write(
+        root.join("cto-assistant").join("agent.toml"),
+        "[agent]\nname = \"cto-assistant\"\nrole = \"assistant\"\ndisplay_name = \"CTO Bot\"\n",
+    )
+    .unwrap();
+
+    // Archived backups that must be skipped entirely.
+    std::fs::create_dir(root.join("izzie.stale.bak")).unwrap();
+    std::fs::write(
+        root.join("izzie.stale.bak").join("agent.toml"),
+        "[agent]\nname = \"izzie\"\nrole = \"assistant\"\ndisplay_name = \"STALE\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("engineer.toml.stale.bak"),
+        "[agent]\nname = \"engineer\"\ndisplay_name = \"STALE\"\n",
+    )
+    .unwrap();
+
+    let agents = scan_agents_dir(root).await;
+    let names: Vec<&str> = agents.iter().filter_map(|a| a["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["cto-assistant", "engineer", "izzie"],
+        "exactly the three real agents, name-sorted, no backup leakage"
+    );
+
+    let cto = agents
+        .iter()
+        .find(|a| a["name"] == "cto-assistant")
+        .unwrap();
+    assert_eq!(
+        cto["display_name"], "CTO Bot",
+        "the directory package must win over the flat file of the same name"
+    );
+    let izzie = agents.iter().find(|a| a["name"] == "izzie").unwrap();
+    assert_eq!(izzie["display_name"], "Izzie");
+    // The STALE backup must never have overridden the live izzie.
+    assert_ne!(izzie["display_name"], "STALE");
+}
+
+/// Why (#3741): the catalog spans multiple candidate directories (project-local
+/// then `$HOME` bundle tier); a name defined in the FIRST (higher-priority)
+/// directory must shadow a same-named agent in a later one, matching
+/// `agents_dir_candidates()`'s precedence. This is what lets a project-local
+/// override win while still surfacing bundled personas from `$HOME`.
+/// What: Two dirs both defining `izzie` (+ a dir-unique agent each); asserts
+/// the first dir's `izzie` wins and both unique agents appear.
+#[tokio::test]
+async fn scan_agent_catalog_dedupes_across_dirs() {
+    let primary = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+
+    std::fs::write(
+        primary.path().join("izzie.toml"),
+        "[agent]\nname = \"izzie\"\ndisplay_name = \"Primary Izzie\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        primary.path().join("project-only.toml"),
+        "[agent]\nname = \"project-only\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("izzie.toml"),
+        "[agent]\nname = \"izzie\"\ndisplay_name = \"Home Izzie\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("cto-assistant.toml"),
+        "[agent]\nname = \"cto-assistant\"\ndisplay_name = \"CTO Bot\"\n",
+    )
+    .unwrap();
+
+    let dirs = vec![primary.path().to_path_buf(), home.path().to_path_buf()];
+    let agents = scan_agent_catalog(&dirs).await;
+    let names: Vec<&str> = agents.iter().filter_map(|a| a["name"].as_str()).collect();
+    assert_eq!(names, vec!["cto-assistant", "izzie", "project-only"]);
+
+    let izzie = agents.iter().find(|a| a["name"] == "izzie").unwrap();
+    assert_eq!(
+        izzie["display_name"], "Primary Izzie",
+        "the first (higher-priority) directory's agent must shadow the $HOME one"
+    );
+    // The bundled-tier-only agent still surfaces.
+    let cto = agents
+        .iter()
+        .find(|a| a["name"] == "cto-assistant")
+        .unwrap();
+    assert_eq!(cto["display_name"], "CTO Bot");
 }
 
 /// Why: When the agents directory is missing, the route must still
