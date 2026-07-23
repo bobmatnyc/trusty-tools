@@ -23,8 +23,8 @@ fn drive(bytes: &[u8]) -> Vec<ChatStreamEvent> {
         .into_iter()
         .map(|r| r.expect("no error expected"))
         .collect();
-    if let Some(ev) = dec.finish() {
-        out.push(ev);
+    if let Some(res) = dec.finish() {
+        out.push(res.expect("no terminal error expected"));
     }
     out
 }
@@ -70,8 +70,8 @@ fn decode_handles_split_chunks() {
             events.push(r.expect("no error"));
         }
     }
-    if let Some(ev) = dec.finish() {
-        events.push(ev);
+    if let Some(res) = dec.finish() {
+        events.push(res.expect("no terminal error"));
     }
     assert_eq!(events, drive(HAPPY.as_bytes()));
 }
@@ -163,6 +163,89 @@ fn decode_surfaces_error_chunk() {
     // Post-error input is ignored (no second terminal).
     assert!(dec.feed(b"data: [DONE]\n\n").is_empty());
     assert!(dec.finish().is_none());
+}
+
+/// Why: real OpenAI-compat providers report quota/rate-limit failures with a
+/// STRING `code` (`"insufficient_quota"`, `"rate_limit_exceeded"`), which does
+/// not fit a numeric field; the decoder must still surface it as a terminal
+/// `Err` (not silently drop it as an unparseable chunk) with the string code
+/// preserved.
+/// Test: itself.
+#[test]
+fn decode_surfaces_string_code_error() {
+    let mut dec = SseDecoder::new();
+    let results = dec.feed(
+        b"data: {\"error\":{\"message\":\"You exceeded your quota\",\"code\":\"insufficient_quota\"}}\n\n",
+    );
+    assert_eq!(results.len(), 1);
+    match &results[0] {
+        Err(InferenceError::Api { status, body }) => {
+            assert_eq!(*status, 0, "string code has no numeric status");
+            assert!(
+                body.contains("insufficient_quota"),
+                "code preserved: {body}"
+            );
+            assert!(
+                body.contains("You exceeded your quota"),
+                "message kept: {body}"
+            );
+        }
+        other => panic!("expected Api error, got {other:?}"),
+    }
+    assert!(
+        dec.finish().is_none(),
+        "error already terminated the stream"
+    );
+}
+
+/// Why: a stream cut off mid-frame (no `[DONE]`, no transport error, trailing
+/// bytes with no closing newline) must NOT resolve as a clean `Done` — that is
+/// indistinguishable from a complete short answer. `finish()` must surface an
+/// incomplete-frame error so the caller knows the answer was truncated.
+/// Test: itself.
+#[test]
+fn decode_eof_mid_frame_errors() {
+    let mut dec = SseDecoder::new();
+    // A complete delta, then a truncated frame (no terminating newline).
+    let events = dec.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo");
+    // The first (complete) frame surfaced its delta.
+    assert_eq!(
+        events
+            .into_iter()
+            .map(|r| r.expect("ok"))
+            .collect::<Vec<_>>(),
+        vec![ChatStreamEvent::Delta("Hel".into())]
+    );
+    // EOF with a buffered, unterminated frame is a truncation, not a clean end.
+    match dec.finish() {
+        Some(Err(InferenceError::Transport(msg))) => {
+            assert!(msg.contains("incomplete"), "message: {msg}");
+        }
+        other => panic!("expected incomplete-frame Transport error, got {other:?}"),
+    }
+}
+
+/// Why: some providers/proxies use CRLF (`\r\n`) SSE line endings; the decoder
+/// must treat them identically to LF (behaviour is already correct — this pins
+/// it against regression).
+/// Test: itself.
+#[test]
+fn decode_tolerates_crlf_line_endings() {
+    let stream = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\r\n\r\n\
+data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\n\
+data: [DONE]\r\n\r\n";
+    let events = drive(stream.as_bytes());
+    assert_eq!(
+        events,
+        vec![
+            ChatStreamEvent::Delta("Hi".into()),
+            ChatStreamEvent::Done(StreamCompletion {
+                finish_reason: Some(StopReason::Stop),
+                usage: Usage::default(),
+            }),
+        ]
+    );
 }
 
 /// Why: a malformed JSON frame must be skipped best-effort (not abort the whole

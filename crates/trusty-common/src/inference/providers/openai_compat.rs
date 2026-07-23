@@ -24,7 +24,7 @@ use serde_json::Value;
 use crate::inference::adapter::InferenceAdapter;
 use crate::inference::error::InferenceError;
 use crate::inference::registry::ProviderCapabilities;
-use crate::inference::streaming::{ChatStream, decode_event_stream};
+use crate::inference::streaming::{ChatStream, buffered_stream, decode_event_stream};
 use crate::inference::types::{ChatRequest, ChatResponse, RequestUsageConfig, SecretString};
 
 /// Per-provider configuration for an [`OpenAiCompatAdapter`].
@@ -239,16 +239,20 @@ impl InferenceAdapter for OpenAiCompatAdapter {
     /// `Err(Api{..})` BEFORE any stream is returned, letting the caller retry
     /// non-streaming rather than the adapter silently degrading.
     /// What: serialises [`Self::stream_body`], POSTs it with the same
-    /// `Authorization`/attribution headers as [`Self::chat`], and — on a 2xx —
-    /// returns the response's byte stream decoded into
-    /// [`crate::inference::ChatStreamEvent`]s via [`decode_event_stream`]. A
-    /// transport failure or non-2xx status maps to
-    /// [`InferenceError::Transport`]/[`InferenceError::Api`]. Dropping the
-    /// returned stream drops the reqwest response, aborting the HTTP request. The
-    /// API key is only ever placed in the auth header and never appears in a
-    /// returned error.
+    /// `Authorization`/attribution headers as [`Self::chat`], and — on a 2xx
+    /// `text/event-stream` response — returns the byte stream decoded into
+    /// [`crate::inference::ChatStreamEvent`]s via [`decode_event_stream`]. If a
+    /// (mis)behaving gateway/LB answers 2xx with a buffered, non-streaming body
+    /// (e.g. `application/json`), it degrades gracefully: the full body is parsed
+    /// as a [`ChatResponse`] and replayed via [`buffered_stream`] so the answer is
+    /// never silently dropped as "zero deltas then Done". A transport failure or
+    /// non-2xx status maps to [`InferenceError::Transport`]/[`InferenceError::Api`];
+    /// a non-stream body that will not parse maps to [`InferenceError::Deserialise`]
+    /// (retryable by the caller). Dropping the returned stream drops the reqwest
+    /// response, aborting the HTTP request. The API key is only ever placed in the
+    /// auth header and never appears in a returned error.
     /// Test: `crates/trusty-common/tests/inference_adapters.rs` streaming
-    /// round-trip against the axum mock server.
+    /// round-trip + non-stream-body degrade against the axum mock server.
     async fn chat_stream(&self, request: &ChatRequest) -> Result<ChatStream, InferenceError> {
         let body = self.stream_body(request)?;
 
@@ -280,7 +284,33 @@ impl InferenceAdapter for OpenAiCompatAdapter {
             });
         }
 
-        Ok(decode_event_stream(resp.bytes_stream()))
+        // A conformant provider answers a `stream:true` request with an SSE body.
+        // Some gateways/LBs strip streaming and return a buffered JSON body at 2xx;
+        // feeding THAT to the SSE decoder yields zero deltas + a clean Done, which
+        // would silently drop the entire answer. Guard on the content type.
+        let is_sse = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_ascii_lowercase().contains("text/event-stream"))
+            .unwrap_or(false);
+        if is_sse {
+            return Ok(decode_event_stream(resp.bytes_stream()));
+        }
+
+        // Non-streaming body: degrade gracefully by parsing the buffered response
+        // and replaying it as a one-shot stream (rather than dropping it).
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| InferenceError::Transport(e.to_string()))?;
+        let response = serde_json::from_str::<ChatResponse>(&text).map_err(|e| {
+            InferenceError::Deserialise {
+                message: e.to_string(),
+                body: text,
+            }
+        })?;
+        Ok(buffered_stream(response))
     }
 }
 

@@ -841,3 +841,52 @@ async fn chat_stream_surfaces_http_error_for_caller_retry() {
     let sent = server.last_request().expect("captured request");
     assert_eq!(sent.body.expect("json body")["stream"], json!(true));
 }
+
+/// Why: a (mis)behaving gateway/LB can answer a `stream:true` request with 200
+/// and a buffered, non-streaming JSON body (Content-Type `application/json`).
+/// Feeding that to the SSE decoder would yield zero deltas + a clean `Done` and
+/// silently drop the whole answer. `chat_stream` must detect the non-SSE body and
+/// degrade gracefully — parse the buffered response and replay it — so the answer
+/// still reaches the caller. (`MockInferenceServer` returns `application/json`.)
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn chat_stream_degrades_when_body_not_sse() {
+    use futures_util::StreamExt;
+    use trusty_common::inference::ChatStreamEvent;
+
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(200, text_response_body())
+        .await
+        .expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenRouter,
+        Box::new(move |r: &ResolvedProvider| openrouter::build(r, &base)),
+    );
+    let adapter = cfg.build("openai/gpt-4o-mini", &store).expect("build");
+
+    let req = ChatRequest::new("openai/gpt-4o-mini", vec![ChatMessage::user("ping")]);
+    let stream = adapter
+        .chat_stream(&req)
+        .await
+        .expect("non-SSE 200 must degrade to a buffered stream, not error");
+    let events: Vec<ChatStreamEvent> = stream.map(|r| r.expect("event ok")).collect().await;
+
+    // The full buffered answer is replayed, not dropped.
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatStreamEvent::Delta(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "pong");
+    match events.last().expect("terminal event") {
+        ChatStreamEvent::Done(done) => assert_eq!(done.usage.total_tokens(), 8),
+        other => panic!("expected terminal Done, got {other:?}"),
+    }
+}

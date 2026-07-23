@@ -21,12 +21,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   overrides `chat_stream` with a real SSE transport (`stream:true` +
   `stream_options.include_usage`), yielding ordered text/tool deltas followed
   by one terminal event carrying the finish reason + usage. Handles
-  keep-alives, split-mid-token / mid-codepoint chunks, in-band error chunks,
-  `[DONE]`, and cancellation (dropping the stream aborts the request); a
+  keep-alives, split-mid-token / mid-codepoint chunks, CRLF line endings,
+  `[DONE]`, and cancellation (dropping the stream aborts the request).
+  Fail-loud on the failure modes a naive decoder silently completes: in-band
+  error chunks with either a numeric OR a string `code`
+  (`"insufficient_quota"`) surface as a terminal `Err`; a stream truncated
+  mid-frame at EOF surfaces an incomplete-frame `Err` (not a clean `Done`); a
   non-2xx `stream=true` handshake surfaces as an `Err` the caller can retry
-  non-streaming rather than degrading silently. The non-streaming `chat()`
-  path is unchanged, and `ChatRequest` gains no new field (the `stream` flag is
-  injected only on the streaming wire body).
+  non-streaming; and a 2xx response whose body is NOT `text/event-stream` (a
+  buffering gateway/LB) degrades gracefully — the buffered body is parsed and
+  replayed — rather than being dropped as zero deltas. The non-streaming
+  `chat()` path is unchanged, and `ChatRequest` gains no new field (the
+  `stream` flag is injected only on the streaming wire body).
 - **`TmuxCommand::StartServer` / `TmuxCommand::ShowGlobalOption`** (trusty-mpm
   issue #3386): two new shared `tmux` command variants — `start-server`
   (idempotent server-existence guarantee) and `show-options -g -v <name>`

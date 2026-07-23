@@ -110,13 +110,14 @@ pub struct StreamCompletion {
 /// One `data:` chunk from an OpenAI-compatible SSE stream.
 ///
 /// Why: each streamed frame is a partial completion object; deserialising into a
-/// permissive struct (every field defaulted) lets a content-only frame, a
-/// usage-only final frame, and an error frame all parse without branching on
-/// shape first.
+/// permissive struct (every field defaulted) lets a content-only frame and a
+/// usage-only final frame both parse without branching on shape first. In-band
+/// error frames are detected on the raw JSON BEFORE this struct is built (see
+/// [`SseDecoder::flush_event`]) so a malformed-but-error payload is never
+/// silently dropped as an unparseable chunk.
 /// What: `choices` carries the per-choice deltas (empty on a usage-only frame);
 /// `usage` is the optional final accounting (present when
-/// `stream_options.include_usage` was requested); `error` is the in-band error
-/// object OpenRouter emits mid-stream instead of an HTTP status.
+/// `stream_options.include_usage` was requested).
 /// Test: `decode_surfaces_error_chunk`, `decode_carries_usage_in_terminal`.
 #[derive(Debug, Default, Deserialize)]
 struct StreamChunk {
@@ -124,24 +125,38 @@ struct StreamChunk {
     choices: Vec<StreamChoice>,
     #[serde(default)]
     usage: Option<UsageBlock>,
-    #[serde(default)]
-    error: Option<StreamError>,
 }
 
-/// The in-band error object a provider may emit as a `data:` frame.
+/// Build an [`InferenceError`] from a provider's in-band `error` object.
 ///
-/// Why: OpenRouter can report a mid-stream failure as a JSON error chunk rather
-/// than a non-2xx status (the connection already succeeded); the decoder must
-/// surface it as a terminal `Err` so the caller stops rather than hanging.
-/// What: `message` is the human-readable failure; `code` is the optional
-/// provider status code (mapped into [`InferenceError::Api`] when numeric).
-/// Test: `decode_surfaces_error_chunk`.
-#[derive(Debug, Default, Deserialize)]
-struct StreamError {
-    #[serde(default)]
-    message: String,
-    #[serde(default)]
-    code: Option<u16>,
+/// Why: OpenRouter and other gateways report a mid-stream failure as a JSON
+/// `{"error": {...}}` frame rather than a non-2xx status (the connection already
+/// succeeded), and the `code` is provider-dependent — a NUMBER (`429`) on some,
+/// a STRING (`"insufficient_quota"`, `"rate_limit_exceeded"`) on others.
+/// Mapping both shapes without assuming either keeps a real quota/rate-limit
+/// error from being silently dropped.
+/// What: reads `message` (defaulting to a generic label); a numeric `code`
+/// becomes the [`InferenceError::Api`] status, a string `code` is preserved in
+/// the body (status `0`) so it is never lost; a missing/other code yields status
+/// `0`.
+/// Test: `decode_surfaces_error_chunk`, `decode_surfaces_string_code_error`.
+fn error_from_chunk(err: &serde_json::Value) -> InferenceError {
+    let message = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("provider streaming error")
+        .to_string();
+    let code = err.get("code");
+    let status = code
+        .and_then(|c| c.as_u64())
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(0);
+    let body = match code.and_then(|c| c.as_str()) {
+        Some(s) if status == 0 && !s.is_empty() => format!("{s}: {message}"),
+        _ => message,
+    };
+    InferenceError::Api { status, body }
 }
 
 /// One choice's per-frame delta.
@@ -346,19 +361,23 @@ impl SseDecoder {
             self.done = true;
             return;
         }
-        let chunk: StreamChunk = match serde_json::from_str(payload) {
-            Ok(c) => c,
-            Err(_) => return, // Best-effort: skip a malformed frame.
+        // Parse to a generic `Value` FIRST so an in-band `error` frame is detected
+        // independently of whether the rest of the chunk fits `StreamChunk` — a
+        // real quota/rate-limit error (whose `code` may be a string) must never be
+        // dropped as an "unparseable chunk".
+        let value: serde_json::Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return, // Best-effort: skip a non-JSON frame.
         };
-        if let Some(err) = chunk.error {
-            let status = err.code.unwrap_or(0);
-            out.push(Err(InferenceError::Api {
-                status,
-                body: err.message,
-            }));
+        if let Some(err) = value.get("error") {
+            out.push(Err(error_from_chunk(err)));
             self.done = true;
             return;
         }
+        let chunk: StreamChunk = match serde_json::from_value(value) {
+            Ok(c) => c,
+            Err(_) => return, // Best-effort: skip a malformed (non-error) frame.
+        };
         if let Some(block) = chunk.usage {
             self.usage = block.into_usage();
         }
@@ -397,22 +416,36 @@ impl SseDecoder {
         })
     }
 
-    /// Flush the terminal event at end-of-stream if the provider never sent
-    /// `[DONE]`.
+    /// Resolve the stream at end-of-input: a terminal event, an
+    /// incomplete-frame error, or nothing.
     ///
-    /// Why: not every provider emits the `[DONE]` sentinel; a clean socket EOF
-    /// must still yield exactly one terminal event so the consumer's loop ends
-    /// normally rather than truncating.
-    /// What: returns the terminal [`ChatStreamEvent::Done`] once if no terminal
-    /// was already dispatched; `None` afterwards (so EOF after `[DONE]` adds
-    /// nothing).
-    /// Test: `decode_eof_without_done_still_terminates`.
-    pub fn finish(&mut self) -> Option<ChatStreamEvent> {
+    /// Why: a clean socket EOF must be distinguished from a TRUNCATED one. Not
+    /// every provider emits `[DONE]`, so a stream that ended on a complete frame
+    /// boundary still needs a synthetic terminal event — but a stream cut off
+    /// mid-frame (bytes still buffered with no closing newline, or an
+    /// unterminated `data:` payload) is a FAILURE that must surface as an `Err`,
+    /// not a clean `Done` the caller would mistake for a complete short answer.
+    /// This is the fix for "clean end == success" when the end was actually a
+    /// truncation.
+    /// What: `None` if a terminal (or error) was already dispatched. Otherwise, if
+    /// any non-whitespace bytes remain unflushed in the line buffer or the
+    /// accumulated `data:` payload, returns `Some(Err(..))` (incomplete frame);
+    /// else returns `Some(Ok(Done))` with the accumulated finish reason + usage.
+    /// Test: `decode_eof_without_done_still_terminates`,
+    /// `decode_eof_mid_frame_errors`.
+    pub fn finish(&mut self) -> Option<Result<ChatStreamEvent, InferenceError>> {
         if self.done {
             return None;
         }
         self.done = true;
-        Some(self.terminal_event())
+        let buf_incomplete = self.buf.iter().any(|b| !b.is_ascii_whitespace());
+        let data_incomplete = !self.data.trim().is_empty();
+        if buf_incomplete || data_incomplete {
+            return Some(Err(InferenceError::Transport(
+                "stream ended with an incomplete SSE frame".to_string(),
+            )));
+        }
+        Some(Ok(self.terminal_event()))
     }
 }
 
@@ -468,8 +501,8 @@ where
                 }
                 None => {
                     st.done = true;
-                    if let Some(ev) = st.decoder.finish() {
-                        return Some((Ok(ev), st));
+                    if let Some(res) = st.decoder.finish() {
+                        return Some((res, st));
                     }
                     return None;
                 }
