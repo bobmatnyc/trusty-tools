@@ -290,7 +290,7 @@ fn picker_use_color_false_when_no_color_set_even_on_tty() {
 fn format_session_row_normal_is_verbless() {
     let s = session("tm-proj-01", "active", 5);
     let row = format_session_row(5, &s, false);
-    assert_eq!(row, "tm:   [5] tm-proj-01 (active)");
+    assert_eq!(row, "[5] tm-proj-01 (active)");
     assert!(!row.contains("resume"));
     assert!(!row.contains("restart"));
 }
@@ -299,7 +299,7 @@ fn format_session_row_normal_is_verbless() {
 fn format_session_row_stopped_is_verbless() {
     let s = session("tm-proj-01", "stopped", 11);
     let row = format_session_row(11, &s, false);
-    assert_eq!(row, "tm:   [11] tm-proj-01 (stopped)");
+    assert_eq!(row, "[11] tm-proj-01 (stopped)");
     assert!(!row.contains("restart"));
 }
 
@@ -308,7 +308,7 @@ fn format_session_row_attached_uses_attached_word() {
     let mut s = session("tm-proj-01", "active", 2);
     s.attached = true;
     let row = format_session_row(2, &s, false);
-    assert_eq!(row, "tm:   [2] tm-proj-01 (attached)");
+    assert_eq!(row, "[2] tm-proj-01 (attached)");
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn format_session_row_deleted_notice() {
     let mut s = session("gone", "deleted", 7);
     s.deleted = true;
     let row = format_session_row(7, &s, false);
-    assert_eq!(row, "tm:   [7] -- deleted --");
+    assert_eq!(row, "[7] -- deleted --");
 }
 
 #[test]
@@ -326,7 +326,7 @@ fn format_session_row_unresumable_notice() {
     let row = format_session_row(9, &s, false);
     assert_eq!(
         row,
-        "tm:   [9] tm-dead-01 (stopped) — DEAD: workspace removed; use [d9] to remove the record"
+        "[9] tm-dead-01 (stopped) — DEAD: workspace removed; use [d9] to remove the record"
     );
 }
 
@@ -334,7 +334,7 @@ fn format_session_row_unresumable_notice() {
 fn format_session_row_color_enabled_wraps_state_word_only() {
     let s = session("tm-proj-01", "active", 5);
     let row = format_session_row(5, &s, true);
-    assert_eq!(row, "tm:   [5] tm-proj-01 (\x1b[32mactive\x1b[0m)");
+    assert_eq!(row, "[5] tm-proj-01 (\x1b[32mactive\x1b[0m)");
 }
 
 #[test]
