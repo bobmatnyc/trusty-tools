@@ -159,6 +159,7 @@ afterEach(() => {
   }
   target.remove();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe('WorkstreamActivity phases', () => {
@@ -633,5 +634,131 @@ describe('WorkstreamActivity SSE subscription reactivity (code-critic PR #3392 r
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// tcode streaming epic #3696, Slice 3: the session-scoped `GET
+// /sessions/{id}/events` delta stream, gated behind `VITE_TCODE_SSE`
+// (`vi.stubEnv` — Vitest reflects a stubbed env var onto `import.meta.env` the
+// same way Vite's dev/build modes do, so this exercises the exact
+// `SSE_ENABLED` check the component reads). Reuses the same
+// stub-`globalThis.EventSource` technique as the reactivity describe block
+// above, but this fake also exposes `emit` so the test can push a fabricated
+// `SessionEventEnvelope` frame through `onmessage` the way a real SSE
+// connection would deliver one.
+describe('WorkstreamActivity live delta streaming (tcode streaming epic #3696, Slice 3)', () => {
+  class FakeEventSource {
+    static instances: FakeEventSource[] = [];
+    url: string;
+    onmessage: ((e: MessageEvent) => void) | null = null;
+    constructor(url: string) {
+      this.url = url;
+      FakeEventSource.instances.push(this);
+    }
+    close() {
+      /* no-op */
+    }
+    emit(data: unknown) {
+      this.onmessage?.({ data: JSON.stringify(data) } as MessageEvent);
+    }
+  }
+
+  function agentMessageDeltaEnvelope(seq: number, overrides: Record<string, unknown> = {}) {
+    return {
+      seq,
+      event: {
+        type: 'agent_message_delta',
+        session_id: 'bound-session',
+        agent: 'python-engineer',
+        agent_id: 'agent-1',
+        turn_id: 'turn-1',
+        delta: '',
+        done: false,
+        ...overrides,
+      },
+    };
+  }
+
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+  });
+
+  it('stays poll-only (no session-scoped EventSource) when VITE_TCODE_SSE is unset (default OFF)', async () => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-1',
+        workstreams: [ws('ws-1', 'my workstream', ['bound-session'])],
+        sessions: [session('bound-session', 'running', '2026-07-20T14:00:00Z', 'ship the feature')],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
+    expect(
+      FakeEventSource.instances.some((s) => s.url.endsWith('/sessions/bound-session/events')),
+    ).toBe(false);
+  });
+
+  it('renders incremental text as deltas arrive, then finalizes the bubble on done:true', async () => {
+    vi.stubEnv('VITE_TCODE_SSE', 'true');
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-1',
+        workstreams: [ws('ws-1', 'my workstream', ['bound-session'])],
+        sessions: [session('bound-session', 'running', '2026-07-20T14:00:00Z', 'ship the feature')],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
+    await waitFor(() =>
+      FakeEventSource.instances.some((s) => s.url.endsWith('/sessions/bound-session/events')),
+    );
+    const sessionSource = FakeEventSource.instances.find((s) =>
+      s.url.endsWith('/sessions/bound-session/events'),
+    )!;
+
+    sessionSource.emit(agentMessageDeltaEnvelope(1, { delta: 'Hel', done: false }));
+    await waitFor(() => target.textContent?.includes('Hel') ?? false);
+    // Incremental text visible BEFORE the final delta — not yet the full word.
+    expect(target.textContent).not.toContain('Hello');
+    expect(target.querySelector('[title="streaming…"]')).toBeTruthy();
+
+    sessionSource.emit(agentMessageDeltaEnvelope(2, { delta: 'lo', done: true }));
+    await waitFor(() => target.textContent?.includes('Hello') ?? false);
+    // The bubble finalizes: streaming affordance removed once done:true lands.
+    expect(target.querySelector('[title="streaming…"]')).toBeNull();
+  });
+
+  it('ignores envelopes that are not agent_message_delta and malformed frames, without throwing', async () => {
+    vi.stubEnv('VITE_TCODE_SSE', 'true');
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.stubGlobal(
+      'fetch',
+      fakeDaemon({
+        activeWorkstreamId: 'ws-1',
+        workstreams: [ws('ws-1', 'my workstream', ['bound-session'])],
+        sessions: [session('bound-session', 'running', '2026-07-20T14:00:00Z', 'ship the feature')],
+      }),
+    );
+    instance = mount(WorkstreamActivity, { target }) as unknown as Record<string, unknown>;
+
+    await waitFor(() => target.textContent?.includes('ship the feature') ?? false);
+    await waitFor(() =>
+      FakeEventSource.instances.some((s) => s.url.endsWith('/sessions/bound-session/events')),
+    );
+    const sessionSource = FakeEventSource.instances.find((s) =>
+      s.url.endsWith('/sessions/bound-session/events'),
+    )!;
+
+    expect(() => sessionSource.onmessage?.({ data: 'not json' } as MessageEvent)).not.toThrow();
+    expect(() =>
+      sessionSource.emit({ seq: 1, event: { type: 'tool_called', session_id: 'bound-session' } }),
+    ).not.toThrow();
+    expect(target.querySelector('[title="streaming…"]')).toBeNull();
   });
 });
