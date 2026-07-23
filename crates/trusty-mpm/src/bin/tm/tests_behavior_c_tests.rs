@@ -29,8 +29,8 @@ use crate::commands::guided::{
     CwdProject, NestedFallbackAction, classify_cwd_project, cwd_owns_git_entry, derive_project,
     fallback_protected, github_host, inplace_self_relaunch_hint, is_github_remote,
     ls_tree_reports_tracked_dir, nested_fallback_action, nested_guard_notice, nested_managed_match,
-    non_github_refusal_message, print_non_tty_hint, print_project_context, tty_gate,
-    untracked_ancestor_message,
+    non_github_refusal_message, pick_least_ambiguous, print_non_tty_hint, print_project_context,
+    tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
@@ -1862,7 +1862,7 @@ fn daily_banner_two_panel_version_in_title_bar_not_content() {
 #[test]
 fn nested_managed_match_by_session_name() {
     let sessions = vec![make_session("tm-proj-01", "active", None)];
-    let matched = nested_managed_match(Some("tm-proj-01"), None, &sessions);
+    let matched = nested_managed_match(Some("tm-proj-01"), None, None, &sessions);
     assert_eq!(matched.map(|s| s.name.as_str()), Some("tm-proj-01"));
 }
 
@@ -1870,7 +1870,7 @@ fn nested_managed_match_by_session_name() {
 fn nested_managed_match_by_env_id() {
     let sessions = vec![make_session("tm-proj-01", "active", None)];
     // make_session sets id = "<name>-id".
-    let matched = nested_managed_match(None, Some("tm-proj-01-id"), &sessions);
+    let matched = nested_managed_match(None, Some("tm-proj-01-id"), None, &sessions);
     assert_eq!(matched.map(|s| s.name.as_str()), Some("tm-proj-01"));
 }
 
@@ -1879,7 +1879,12 @@ fn nested_managed_match_none_when_no_match() {
     let sessions = vec![make_session("tm-proj-01", "active", None)];
     // Neither the session name nor the env id matches any record — e.g. a
     // plain terminal opened outside any managed tmux session.
-    let matched = nested_managed_match(Some("some-other-session"), Some("unrelated-id"), &sessions);
+    let matched = nested_managed_match(
+        Some("some-other-session"),
+        Some("unrelated-id"),
+        None,
+        &sessions,
+    );
     assert!(matched.is_none());
 }
 
@@ -1888,7 +1893,7 @@ fn nested_managed_match_none_when_both_inputs_absent() {
     // The "not inside tmux" case: the guard's I/O wrapper passes None for
     // both keys, which must never spuriously match any record.
     let sessions = vec![make_session("tm-proj-01", "active", None)];
-    let matched = nested_managed_match(None, None, &sessions);
+    let matched = nested_managed_match(None, None, None, &sessions);
     assert!(matched.is_none());
 }
 
@@ -1902,7 +1907,7 @@ fn nested_managed_match_finds_record_missing_from_source_id_filtered_list() {
     let mut orphaned = make_session("tm-orphan-02", "active", None);
     orphaned.source_id = None;
     let sessions = vec![orphaned];
-    let matched = nested_managed_match(Some("tm-orphan-02"), None, &sessions);
+    let matched = nested_managed_match(Some("tm-orphan-02"), None, None, &sessions);
     assert!(
         matched.is_some(),
         "must match by session name regardless of source_id"
@@ -1937,7 +1942,7 @@ fn nested_managed_match_prefers_live_over_recycled_decommissioned_name() {
     live.id = "new-id".to_string();
     let sessions = vec![decommissioned, live];
 
-    let matched = nested_managed_match(Some("tm-proj-01"), None, &sessions);
+    let matched = nested_managed_match(Some("tm-proj-01"), None, None, &sessions);
     assert_eq!(
         matched.map(|s| s.id.as_str()),
         Some("new-id"),
@@ -1953,7 +1958,7 @@ fn nested_managed_match_falls_back_to_decommissioned_when_no_live_candidate() {
     // recycled by a new session) — the guard must still match it so the
     // in-place revive path can run.
     let sessions = vec![make_session("tm-apex-01", "decommissioned", None)];
-    let matched = nested_managed_match(Some("tm-apex-01"), None, &sessions);
+    let matched = nested_managed_match(Some("tm-apex-01"), None, None, &sessions);
     assert_eq!(
         matched.map(|s| s.name.as_str()),
         Some("tm-apex-01"),
@@ -1974,8 +1979,92 @@ fn nested_managed_match_prefers_most_recent_live_among_multiple() {
     newer.id = "newer-id".to_string();
     let sessions = vec![older, newer];
 
-    let matched = nested_managed_match(Some("tm-proj-02"), None, &sessions);
+    let matched = nested_managed_match(Some("tm-proj-02"), None, None, &sessions);
     assert_eq!(matched.map(|s| s.id.as_str()), Some("newer-id"));
+}
+
+// ── #3714: live-pane tie-break, pane-identity, and disambiguation refusal ────
+
+#[test]
+fn nested_managed_match_prefers_verifiably_alive_pane_over_dead_duplicate() {
+    // The exact #3714 reproduction: a STALE duplicate sharing the live
+    // session's name was created LATER than the live session — the pre-#3714
+    // `max_by_key(created_at)` picked the stale one purely on recency. Since
+    // #3714 part 3, `state` is server-reconciled PANE-scoped (not a bare
+    // name-string check), so the stale duplicate correctly reads "stopped"
+    // here even though its NAME is shared with a live session — and the
+    // live-state tier must win regardless of which one is newer.
+    let mut live = make_session_at("tm-tagents", "active", "2026-07-14T05:19:51Z");
+    live.id = "f443c12d".to_string();
+    let mut stale = make_session_at("tm-tagents", "stopped", "2026-07-18T19:17:52Z");
+    stale.id = "7dabd521".to_string();
+    let sessions = vec![stale, live];
+
+    let matched = nested_managed_match(Some("tm-tagents"), None, None, &sessions);
+    assert_eq!(
+        matched.map(|s| s.id.as_str()),
+        Some("f443c12d"),
+        "the verifiably-alive record must win over a newer-but-dead duplicate"
+    );
+}
+
+#[test]
+fn nested_managed_match_prefers_own_pane_identity_over_recency() {
+    // Bullet 2 of the proposed fix: when invoked from inside an existing
+    // managed session, the invoking process's OWN tmux pane identity is
+    // proof-positive and must win even over a newer AND "active"-reading
+    // duplicate (an adversarial ordering that would otherwise defeat tier 2).
+    let mut mine = make_session_at("tm-tagents", "active", "2026-01-01T00:00:00Z");
+    mine.id = "mine-id".to_string();
+    mine.pane_id = Some("%652".to_string());
+    let mut other = make_session_at("tm-tagents", "active", "2026-06-01T00:00:00Z");
+    other.id = "other-id".to_string();
+    other.pane_id = Some("%999".to_string());
+    let sessions = vec![other, mine];
+
+    let matched = nested_managed_match(Some("tm-tagents"), None, Some("%652"), &sessions);
+    assert_eq!(
+        matched.map(|s| s.id.as_str()),
+        Some("mine-id"),
+        "the invoking process's own confirmed pane must win over a newer sibling"
+    );
+}
+
+#[test]
+fn nested_managed_match_refuses_and_lists_ids_when_still_tied() {
+    // Every tie-break tier exhausted: two "active" candidates sharing an
+    // identical created_at, no pane-identity signal available — must refuse
+    // (`None`) rather than guess, never silently pick a row.
+    let mut a = make_session_at("tm-dup-01", "active", "2026-01-01T00:00:00Z");
+    a.id = "id-a".to_string();
+    let mut b = make_session_at("tm-dup-01", "active", "2026-01-01T00:00:00Z");
+    b.id = "id-b".to_string();
+    let sessions = vec![a, b];
+
+    let matched = nested_managed_match(Some("tm-dup-01"), None, None, &sessions);
+    assert!(
+        matched.is_none(),
+        "an unresolvable tie must refuse, never silently pick either candidate"
+    );
+}
+
+#[test]
+fn pick_least_ambiguous_returns_tied_set_on_refusal() {
+    // Direct coverage of the tie-break helper's `Err` branch — the caller
+    // (`nested_managed_match`) uses this to print the full-id disambiguation
+    // listing (#3714's "never silently pick a row" requirement).
+    let mut a = make_session_at("tm-dup-02", "active", "2026-02-02T00:00:00Z");
+    a.id = "id-a".to_string();
+    let mut b = make_session_at("tm-dup-02", "active", "2026-02-02T00:00:00Z");
+    b.id = "id-b".to_string();
+    let candidates = vec![&a, &b];
+
+    let result = pick_least_ambiguous(candidates, None);
+    let tied = result.expect_err("a genuine tie must be Err, not a guessed Ok");
+    assert_eq!(tied.len(), 2, "both tied candidates must be reported");
+    let mut ids: Vec<&str> = tied.iter().map(|s| s.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["id-a", "id-b"]);
 }
 
 // ── pane_identity_confirmed (#2456 review finding 1, ROUND 2) ────────────────

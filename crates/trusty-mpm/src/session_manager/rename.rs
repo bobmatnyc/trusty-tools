@@ -16,6 +16,7 @@
 //! Test: `rename_*` in `super::rename_tests`.
 
 use chrono::Utc;
+use tracing::warn;
 
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, SessionRecord};
@@ -94,6 +95,16 @@ impl SessionManager {
     /// explicit manual-recovery error. Returns the updated [`SessionRecord`]
     /// (its `tmux_name` may differ from the requested `new_name` if it was
     /// auto-suffixed).
+    ///
+    /// Tmux-identity guard (#3714 remediation): "does a live tmux entity need
+    /// renaming" is decided by this record's OWN recorded `pane_id` — verified
+    /// pane-scoped via `ManagedTmuxDriver::pane_exists` — never by a bare
+    /// name-string membership check against `list_sessions`. A duplicate-name
+    /// record (the #3692 condition) whose own pane is gone must never have its
+    /// rename physically retarget an UNRELATED live session that happens to
+    /// hold the same name; when that mismatch is detected, only the DB record
+    /// is renamed (with a `warn!` notice) and the live tmux entity is left
+    /// untouched.
     /// Test: `rename_updates_name_and_persists`,
     /// `rename_same_name_is_noop`, `rename_suffixes_collision_with_record`,
     /// `rename_suffixes_collision_with_live_tmux`,
@@ -101,6 +112,8 @@ impl SessionManager {
     /// `rename_concurrent_stopped_renames_to_same_target_never_collide`,
     /// `rename_rejects_invalid_name`, `rename_rejects_terminal_record`,
     /// `rename_renames_live_tmux_session`,
+    /// `rename_never_renames_unrelated_live_session_sharing_a_stale_name`,
+    /// `rename_renames_live_session_when_pane_confirmed_alive`,
     /// `rename_reuses_name_freed_by_a_deleted_record` in `super::rename_tests`.
     pub async fn rename(
         &self,
@@ -154,7 +167,37 @@ impl SessionManager {
         let new_name = Self::dedupe_name_against(&new_name, &taken);
 
         let old_name = record.tmux_name.clone();
-        let tmux_live = live_names.iter().any(|n| n == &old_name);
+        // #3714 (remediation addendum): a bare `live_names.contains(old_name)`
+        // proves only that SOME tmux session is currently using this NAME — a
+        // duplicate-name record (the #3692 condition) can have its OWN pane
+        // long gone while an UNRELATED, genuinely live session (owned by a
+        // DIFFERENT record) still happens to hold that exact name. Physically
+        // renaming "whatever tmux session currently holds `old_name`" in that
+        // case hijacks the unrelated live session out from under its own
+        // operator — the exact remediation-comment incident (`tm sessions
+        // rename` retitled the attached `tm-tagents` session while trying to
+        // rename an unrelated stale duplicate). When this record has a
+        // captured `pane_id`, liveness is only trusted once the driver
+        // confirms THAT SPECIFIC pane still lives inside a session named
+        // `old_name` (`pane_exists` is pane-scoped, never a name-string
+        // match) — tying the check to this record's OWN tmux identity. A
+        // legacy record with no captured `pane_id` (pre-#2453) falls back to
+        // the prior name-only check; no stronger signal exists for it.
+        let name_live = live_names.iter().any(|n| n == &old_name);
+        let tmux_live = match record.pane_id.as_deref() {
+            Some(pane_id) => name_live && self.tmux.pane_exists(&old_name, pane_id),
+            None => name_live,
+        };
+        if name_live && !tmux_live {
+            warn!(
+                id = %id,
+                name = %old_name,
+                "rename: a tmux session named '{old_name}' is live but does not contain \
+                 this record's own recorded pane — it belongs to a DIFFERENT session \
+                 (duplicate-name collision, #3714); renaming the DB record only and \
+                 leaving the live tmux session untouched"
+            );
+        }
 
         let mut updated = record;
         updated.tmux_name = new_name.clone();

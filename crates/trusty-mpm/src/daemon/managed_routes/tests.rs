@@ -39,6 +39,34 @@ impl ManagedTmuxDriver for EnumErrTmux {
     }
 }
 
+/// A tmux driver whose `pane_exists` is controllable per test — used to prove
+/// `reconcile_live_state`'s pane-scoped liveness check (#3714): a name being
+/// live is not enough, the record's OWN recorded pane must also be confirmed
+/// present.
+struct PaneAwareTmux {
+    pane_alive: bool,
+}
+impl ManagedTmuxDriver for PaneAwareTmux {
+    fn create_session(&self, _n: &str, _w: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _n: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _n: &str, _t: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(Vec::new())
+    }
+    fn pane_exists(&self, _name: &str, _pane_id: &str) -> bool {
+        self.pane_alive
+    }
+}
+
 /// Build a minimal [`SessionRecord`] suitable for serialization tests.
 fn make_record(source_id: Option<&str>) -> SessionRecord {
     SessionRecord {
@@ -85,13 +113,21 @@ fn reconcile_live_state_flips_stopped_to_active_when_alive() {
     // Live + attached → reconciles to active, attached flag set.
     let live: HashSet<String> = ["tm-worker-01".to_string()].into_iter().collect();
     let attached: HashSet<String> = ["tm-worker-01".to_string()].into_iter().collect();
-    reconcile_live_state(&mut summaries, &records, &live, &attached);
+    // `pane_id: None` (legacy record) — falls back to the name-only check, so
+    // the driver's own `pane_exists` answer is irrelevant here.
+    reconcile_live_state(&EnumErrTmux, &mut summaries, &records, &live, &attached);
     assert_eq!(summaries[0].state, "active", "live tmux → active");
     assert!(summaries[0].attached, "attached client → attached flag");
 
     // No live tmux → stays stopped, not attached.
     let mut summaries2: Vec<_> = records.iter().map(record_to_summary).collect();
-    reconcile_live_state(&mut summaries2, &records, &HashSet::new(), &HashSet::new());
+    reconcile_live_state(
+        &EnumErrTmux,
+        &mut summaries2,
+        &records,
+        &HashSet::new(),
+        &HashSet::new(),
+    );
     assert_eq!(summaries2[0].state, "stopped", "no tmux → stopped");
     assert!(!summaries2[0].attached);
 }
@@ -116,7 +152,13 @@ fn reconcile_live_state_leaves_persisted_state_untouched() {
     // must keep reporting the TRUE record state ("active") so the CLI's
     // resume-decision logic can still tell this apart from a genuinely
     // stopped session.
-    reconcile_live_state(&mut summaries, &records, &HashSet::new(), &HashSet::new());
+    reconcile_live_state(
+        &EnumErrTmux,
+        &mut summaries,
+        &records,
+        &HashSet::new(),
+        &HashSet::new(),
+    );
     assert_eq!(
         summaries[0].state, "stopped",
         "display state still reconciles to stopped when tmux is gone"
@@ -171,12 +213,95 @@ fn reconcile_live_state_leaves_terminal_states() {
         let records = vec![rec];
         let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
         let before = summaries[0].state.clone();
-        reconcile_live_state(&mut summaries, &records, &live, &empty);
+        reconcile_live_state(&EnumErrTmux, &mut summaries, &records, &live, &empty);
         assert_eq!(
             summaries[0].state, before,
             "{state:?} must not be reconciled by liveness"
         );
     }
+}
+
+/// #3714 core fix: a NAME being live is not enough — when the record carries
+/// a `pane_id`, its OWN pane must be confirmed present in that named session
+/// before the record reads `"active"`. Reproduces the reported
+/// `state: "active"` / `persisted_state: "stopped"` contradiction: the record
+/// is persisted `Stopped`, its NAME is in the live set (an unrelated
+/// duplicate-name session), but its own recorded pane is confirmed gone.
+#[test]
+fn reconcile_live_state_prefers_pane_scoped_liveness_over_name_membership() {
+    use std::collections::HashSet;
+    let mut rec = make_record(None);
+    rec.state = ManagedSessionState::Stopped;
+    rec.tmux_name = "tm-tagents".into();
+    rec.pane_id = Some("%3".to_string());
+    let records = vec![rec];
+    let live: HashSet<String> = ["tm-tagents".to_string()].into_iter().collect();
+    let empty = HashSet::new();
+
+    // The NAME is live (an unrelated session happens to share it), but this
+    // record's OWN pane (%3) is confirmed gone — must stay "stopped", not
+    // resurrect to "active".
+    let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
+    reconcile_live_state(
+        &PaneAwareTmux { pane_alive: false },
+        &mut summaries,
+        &records,
+        &live,
+        &empty,
+    );
+    assert_eq!(
+        summaries[0].state, "stopped",
+        "a live NAME must not resurrect the record when its OWN pane is confirmed gone"
+    );
+    assert_eq!(
+        summaries[0].persisted_state, "stopped",
+        "persisted_state must never disagree with the (correctly reconciled) display state here"
+    );
+
+    // The same record, but its OWN pane IS confirmed present this time —
+    // must reconcile to "active" exactly as before #3714.
+    let mut summaries2: Vec<_> = records.iter().map(record_to_summary).collect();
+    reconcile_live_state(
+        &PaneAwareTmux { pane_alive: true },
+        &mut summaries2,
+        &records,
+        &live,
+        &empty,
+    );
+    assert_eq!(
+        summaries2[0].state, "active",
+        "a live NAME whose own pane is confirmed present must still reconcile to active"
+    );
+}
+
+/// A legacy record with no captured `pane_id` (pre-#2453) has no stronger
+/// signal available — it must keep the pre-#3714 name-only reconciliation
+/// rather than being newly refused liveness it cannot prove.
+#[test]
+fn reconcile_live_state_legacy_record_without_pane_id_uses_name_only() {
+    use std::collections::HashSet;
+    let mut rec = make_record(None);
+    rec.state = ManagedSessionState::Stopped;
+    rec.tmux_name = "tm-legacy-01".into();
+    rec.pane_id = None;
+    let records = vec![rec];
+    let live: HashSet<String> = ["tm-legacy-01".to_string()].into_iter().collect();
+    let empty = HashSet::new();
+
+    let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
+    // Even a driver that would report the pane as gone must not matter here —
+    // a legacy record has no `pane_id` to probe in the first place.
+    reconcile_live_state(
+        &PaneAwareTmux { pane_alive: false },
+        &mut summaries,
+        &records,
+        &live,
+        &empty,
+    );
+    assert_eq!(
+        summaries[0].state, "active",
+        "a legacy record with no pane_id falls back to the name-only check"
+    );
 }
 
 /// Why: both the MCP path (`record_to_json`) and the HTTP path
