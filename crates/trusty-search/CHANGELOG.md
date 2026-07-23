@@ -7,6 +7,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **Cost-scaled idle-eviction threshold + oldest-idle-first sweep ordering
+  (issue #3683 slice 2).** The idle-chunk/BM25/entity-eviction window is
+  raised from a flat 60s (issue #2166) to a 300s floor, now scaled per-index
+  by that index's own measured (or, before its first rehydrate, on-disk
+  chunk-count-estimated) rehydrate cost — an expensive-to-rehydrate index
+  (the i-0076 production incident's 315K-chunk / 27-40s-scan corpus) earns
+  proportionally more idle time before eviction than a cheap one, directly
+  addressing the #3683 RCA's thrash-eviction root cause. The idle sweep
+  itself now processes indexes oldest-idle-first rather than the registry's
+  arbitrary iteration order. New env override `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS`
+  (default 1000ms per extra base-window multiple; `0` disables cost-scaling).
+  `TRUSTY_CHUNKS_IDLE_EVICT_SECS` continues to set the base window.
+- **Budgeted, oldest-idle-first, recency-exempt memory-pressure sweep (issue
+  #3683 slice 2 — critic-review follow-up).** The pressure sweep
+  (`TRUSTY_MEMORY_ENFORCE_SECS` / `TRUSTY_MEMORY_HIGH_WATER_PCT`) no longer
+  unconditionally clears every registered index the instant RSS crosses the
+  high-water mark. It now: (1) processes indexes oldest-idle-first (here the
+  ordering is load-bearing, unlike the idle-eviction ticker's cosmetic use of
+  the same sort); (2) stops once it has (estimatedly) freed enough to reach
+  the high-water mark, instead of sweeping the whole fleet; (3) exempts
+  recently-queried (hot) indexes from the first pass — new env
+  `TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS` (default 30s; `0` disables the
+  exemption) — falling through to a "desperation" second pass that clears
+  hot indexes too if the exemption-respecting pass can't reach the target
+  (avoiding an OOM kill outweighs a hot index's warm cache). The sweep's
+  stop-early budget reports whether it actually visited every candidate
+  (`Exhausted`) or stopped on its (uncalibrated) freed-bytes estimate while
+  candidates remained (`EarlyStop`); `run_memory_pressure_tick` only trusts
+  the post-sweep RSS as the next hysteresis baseline on `Exhausted` — an
+  `EarlyStop` resets the baseline instead, so a steady-state RSS plateau
+  never wedges the sweep from re-attempting the untouched indexes (round-2
+  critic-review follow-up).
+
 ### Fixed
 
 - **Deflake `test_rss_for_self_pid` under `cargo test --workspace` (issue

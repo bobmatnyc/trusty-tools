@@ -16,6 +16,8 @@
 //! tests (`test_embed_batch_size_env_clamp`,
 //! `idle_evict_secs_default_and_env_override`, etc.).
 
+use std::time::Duration;
+
 use crate::core::chunker::RawChunk;
 use crate::core::entity::RawEntity;
 
@@ -65,19 +67,27 @@ pub(crate) fn embedding_cache_cap() -> usize {
 /// typically well under 100ms) for materially lower steady-state RSS on
 /// hosts tracking many projects. Still fully overridable per-deployment.
 ///
-/// Correction (issue #3683): "typically well under 100ms" held for the small
-/// indexes this default was tuned against, but was off by roughly three
-/// orders of magnitude for a 315K-chunk index on NFS-backed storage
+/// Correction (issue #3683 slice 1): "typically well under 100ms" held for
+/// the small indexes this default was tuned against, but was off by roughly
+/// three orders of magnitude for a 315K-chunk index on NFS-backed storage
 /// (27-40s/scan), where this aggressive window turned nearly every query into
-/// a cold start. This slice does not change this constant or the eviction
-/// cadence — it fixes what used to happen on a slow rehydrate (a synchronous,
-/// discard-on-cancel scan inline in the query path — see
+/// a cold start. Slice 1 fixed what used to happen on a slow rehydrate (a
+/// synchronous, discard-on-cancel scan inline in the query path — see
 /// `idle_evict::ensure_corpus_rehydrated`) so a slow scan degrades a query
-/// instead of livelocking the whole index. Retuning this default/making it
-/// adaptive to measured rehydrate cost is the eviction-policy RCA finding in
-/// #3683 (idle-evict window + pressure-sweep tuning) — a later slice, and
-/// intentionally out of scope here.
-pub(crate) const DEFAULT_CHUNKS_IDLE_EVICT_SECS: u64 = 60;
+/// instead of livelocking the whole index, but deliberately left this
+/// constant and the eviction cadence untouched.
+///
+/// Retuning (issue #3683 slice 2): 60s matched hosts of small, cheap indexes
+/// but meant a large-corpus index went cold roughly once a minute even under
+/// light interactive traffic. Raised to 300s (5 min, the pre-#2166 value) as
+/// a flat FLOOR, now additionally scaled per-index by measured/estimated
+/// rehydrate cost — see [`scaled_idle_evict_threshold`] and
+/// `CodeIndexer::cost_scaled_idle_threshold` in `idle_evict.rs`. A cheap
+/// index (sub-millisecond rehydrate) still idle-evicts at roughly this flat
+/// floor; an expensive one (the i-0076 315K-chunk / 27-40s-scan corpus) earns
+/// proportionally more idle time before eviction, directly addressing the
+/// thrash-eviction root cause in the #3683 production incident.
+pub(crate) const DEFAULT_CHUNKS_IDLE_EVICT_SECS: u64 = 300;
 
 /// Resolve the in-memory-chunks / BM25 / entities idle-eviction window (in
 /// seconds) from the environment, falling back to
@@ -106,6 +116,97 @@ pub(crate) fn idle_evict_secs() -> u64 {
         },
         _ => DEFAULT_CHUNKS_IDLE_EVICT_SECS,
     }
+}
+
+// ─── Cost-scaled idle-eviction window (issue #3683 slice 2) ────────────────
+
+/// On-disk chunks a rehydrate scan is estimated to process per millisecond,
+/// used only as a same-process fallback before an index has ever actually
+/// been rehydrated (see `CodeIndexer::rehydrate_cost_estimate_ms`).
+///
+/// Why: the #3683 production RCA measured 27-40s cold rehydrate scans for a
+/// 315,423-chunk NFS-backed corpus — roughly 0.086-0.127 ms/chunk. `10`
+/// (i.e. 0.1 ms/chunk, ⇒ ~31.5s for that corpus) sits inside that measured
+/// band. Once a real scan completes, its MEASURED duration always takes
+/// precedence over this estimate.
+const ESTIMATED_CHUNKS_PER_MS: u64 = 10;
+
+/// Estimate rehydrate cost (milliseconds) for a corpus of `chunk_count`
+/// chunks, calibrated against the #3683 production incident (see
+/// [`ESTIMATED_CHUNKS_PER_MS`]).
+///
+/// Why: an index that has never rehydrated in this process's lifetime has no
+/// measured cost yet; a cheap, redb-metadata-only chunk count
+/// (`CorpusStore::chunk_count`) is the best same-process signal available
+/// without forcing a scan just to estimate one.
+/// What: integer division — a corpus small enough to divide to zero
+/// estimates zero extra cost (falls back to the flat base window in
+/// [`scaled_idle_evict_threshold`]).
+/// Test: `estimate_rehydrate_cost_ms_matches_production_incident_band`.
+pub(crate) fn estimate_rehydrate_cost_ms(chunk_count: u64) -> u64 {
+    chunk_count / ESTIMATED_CHUNKS_PER_MS
+}
+
+/// Default milliseconds of rehydrate cost that earn one additional multiple
+/// of the base idle-eviction window (issue #3683 slice 2). Override via
+/// `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS`; `0` disables cost-scaling entirely
+/// (every index uses the flat base window, i.e. pre-slice-2 behaviour modulo
+/// the raised [`DEFAULT_CHUNKS_IDLE_EVICT_SECS`]).
+const DEFAULT_REHYDRATE_COST_SCALE_UNIT_MS: u64 = 1_000;
+
+/// Ceiling on the cost-scaled idle-eviction window: 6 hours.
+///
+/// Why: without a cap, a pathologically large corpus could compute a window
+/// of many days, effectively disabling idle-eviction for it entirely. The
+/// memory-pressure sweep (`CodeIndexer::reclaim_memory_now`, issue #2846)
+/// remains the backstop for genuine memory pressure regardless of this cap.
+const MAX_SCALED_IDLE_EVICT_SECS: u64 = 6 * 60 * 60;
+
+/// Resolve the rehydrate-cost scaling unit (milliseconds) from
+/// `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS`, falling back to
+/// [`DEFAULT_REHYDRATE_COST_SCALE_UNIT_MS`] when unset or unparseable. `0` is
+/// returned verbatim — [`scaled_idle_evict_threshold`] treats it as "disable
+/// scaling", matching the `TRUSTY_CHUNKS_IDLE_EVICT_SECS=0` "disable"
+/// precedent.
+fn rehydrate_cost_scale_unit_ms() -> u64 {
+    std::env::var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_REHYDRATE_COST_SCALE_UNIT_MS)
+}
+
+/// Scale `base_secs` by measured/estimated rehydrate cost (issue #3683 slice
+/// 2 — the #3683 RCA's Defect 2 retuning: "an index whose rehydrate is
+/// expensive should idle far longer before eviction than a cheap one").
+///
+/// Why: a flat idle window (previously 60s) treated a 315K-chunk NFS-backed
+/// index (27-40s rehydrate) identically to a handful-of-chunks index
+/// (sub-millisecond rehydrate) — thrash-evicting the expensive one on every
+/// idle tick and turning nearly every query into a cold start (the #3683
+/// production incident). Scaling proportionally to cost means the sweep only
+/// thrashes indexes it can cheaply afford to re-warm.
+/// What: `base_secs == 0` (eviction disabled) always returns
+/// [`Duration::ZERO`] regardless of cost — scaling a disabled window is
+/// meaningless. Otherwise computes
+/// `base_secs * (1 + rehydrate_cost_ms / scale_unit_ms)`, capped at
+/// [`MAX_SCALED_IDLE_EVICT_SECS`]. A `scale_unit_ms` of `0`
+/// (`TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS=0`) disables scaling — every index
+/// gets exactly `base_secs`, regardless of cost.
+/// Test: `scaled_idle_evict_threshold_disabled_when_base_is_zero`,
+/// `scaled_idle_evict_threshold_env_override_and_scaling`.
+pub(crate) fn scaled_idle_evict_threshold(base_secs: u64, rehydrate_cost_ms: u64) -> Duration {
+    if base_secs == 0 {
+        return Duration::ZERO;
+    }
+    let scale_unit = rehydrate_cost_scale_unit_ms();
+    let multiples = rehydrate_cost_ms
+        .checked_div(scale_unit)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let scaled = base_secs
+        .saturating_mul(multiples)
+        .min(MAX_SCALED_IDLE_EVICT_SECS);
+    Duration::from_secs(scaled)
 }
 
 /// Default idle window (seconds) after which a live index's FSEvents watcher is
@@ -538,6 +639,104 @@ mod tests {
             match prior {
                 Some(v) => std::env::set_var("TRUSTY_WATCH_IDLE_SUSPEND_SECS", v),
                 None => std::env::remove_var("TRUSTY_WATCH_IDLE_SUSPEND_SECS"),
+            }
+        }
+    }
+
+    /// Sanity-pins [`ESTIMATED_CHUNKS_PER_MS`] against the #3683 production
+    /// incident's own measured band (315,423 chunks, 27-40s cold scans), so a
+    /// future edit to the calibration constant fails loudly if it drifts
+    /// outside the band it was chosen to match.
+    #[test]
+    fn estimate_rehydrate_cost_ms_matches_production_incident_band() {
+        let est = estimate_rehydrate_cost_ms(315_423);
+        assert!(
+            (27_000..=40_000).contains(&est),
+            "estimate {est}ms falls outside the #3683 measured 27-40s band"
+        );
+    }
+
+    /// A disabled idle-eviction window (`base_secs == 0`) must never scale up
+    /// regardless of cost — scaling a disabled window is meaningless, and
+    /// this path must never even read the scaling env var.
+    #[test]
+    fn scaled_idle_evict_threshold_disabled_when_base_is_zero() {
+        assert_eq!(
+            scaled_idle_evict_threshold(0, 1_000_000),
+            Duration::ZERO,
+            "base_secs=0 must stay disabled no matter the rehydrate cost"
+        );
+    }
+
+    /// `scaled_idle_evict_threshold` honours the default scaling unit, the
+    /// `TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS` override (including `0` =
+    /// disabled), and caps at [`MAX_SCALED_IDLE_EVICT_SECS`] — all in one
+    /// test function. `#[serial_test::serial]` (this env var's only other
+    /// reader is `indexer::tests_idle_evict::cost_scaled_idle_threshold_scales_with_rehydrate_cost`,
+    /// also tagged serial) avoids the cross-test env-mutation race class from
+    /// #3629.
+    #[test]
+    #[serial_test::serial]
+    fn scaled_idle_evict_threshold_env_override_and_scaling() {
+        let prior = std::env::var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS").ok();
+
+        // Default scale unit (1000ms/multiple): a cheap index (no cost) gets
+        // exactly the base window...
+        // SAFETY: this test is the only reader/writer of this env var.
+        unsafe { std::env::remove_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS") };
+        assert_eq!(
+            scaled_idle_evict_threshold(300, 0),
+            Duration::from_secs(300),
+            "zero rehydrate cost must keep the flat base window"
+        );
+        // ...while an expensive index (30s measured/estimated cost, in the
+        // #3683 incident's ballpark) idles far longer before eviction.
+        let costly = scaled_idle_evict_threshold(300, 30_000);
+        assert_eq!(
+            costly,
+            Duration::from_secs(300 * 31),
+            "30s of cost should earn 30 extra base-window multiples at the default 1000ms unit"
+        );
+        assert!(
+            costly > Duration::from_secs(300 * 10),
+            "an expensive index must idle MUCH longer than a cheap one, not just marginally"
+        );
+
+        // A coarser explicit override changes the earn rate.
+        // SAFETY: see above.
+        unsafe { std::env::set_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS", "10000") };
+        assert_eq!(
+            scaled_idle_evict_threshold(300, 30_000),
+            Duration::from_secs(300 * 4),
+            "30s of cost / 10s-per-multiple unit == 3 extra multiples (+1 base) == 4x"
+        );
+
+        // 0 disables scaling outright: every index gets the flat base
+        // window regardless of cost.
+        // SAFETY: see above.
+        unsafe { std::env::set_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS", "0") };
+        assert_eq!(
+            scaled_idle_evict_threshold(300, 30_000),
+            Duration::from_secs(300),
+            "scale unit 0 must disable scaling entirely"
+        );
+
+        // A pathologically large cost must cap at MAX_SCALED_IDLE_EVICT_SECS
+        // (6h) rather than growing unbounded.
+        // SAFETY: see above.
+        unsafe { std::env::set_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS", "1") };
+        assert_eq!(
+            scaled_idle_evict_threshold(300, 10_000_000),
+            Duration::from_secs(MAX_SCALED_IDLE_EVICT_SECS),
+            "an extreme cost must cap the scaled window rather than grow unbounded"
+        );
+
+        // Restore.
+        // SAFETY: see above.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS", v),
+                None => std::env::remove_var("TRUSTY_REHYDRATE_COST_SCALE_UNIT_MS"),
             }
         }
     }

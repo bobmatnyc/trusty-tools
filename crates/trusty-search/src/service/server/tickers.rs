@@ -100,7 +100,8 @@ pub(super) fn spawn_disk_size_ticker(state: Arc<SearchAppState>) {
 /// BM25 corpus, and per-file entity map, and demotes its HNSW vector store
 /// back to mmap-view mode, after the index has been idle past the configured
 /// window (issue #83 follow-up; BM25/entities added by issue #2162; HNSW
-/// re-view added by issue #2164).
+/// re-view added by issue #2164; cost-scaled threshold + oldest-idle-first
+/// ordering added by issue #3683 slice 2).
 ///
 /// Why (idle-memory audit): the durable redb corpus already serves the query
 /// hot path, so an index that hasn't been queried or ingested for a while is
@@ -112,19 +113,16 @@ pub(super) fn spawn_disk_size_ticker(state: Arc<SearchAppState>) {
 /// every registered index. It mirrors the `spawn_*_ticker` pattern: a
 /// detached task holding a `Weak<SearchAppState>` so it stops when the daemon
 /// drops its last `Arc`.
-/// What: every 60 s, resolves the shared idle window via
+/// What: every 60 s, resolves the shared base idle window via
 /// `crate::core::indexer::idle_evict_secs()` (env `TRUSTY_CHUNKS_IDLE_EVICT_SECS`;
-/// `0` disables both evictions and the ticker idles), then walks the registry
-/// and calls `evict_chunks_if_idle` followed by `evict_bm25_entities_if_idle`
-/// on each indexer. Both calls are themselves no-ops for active indexes,
-/// indexes without a durable corpus, and already-empty structures, so the
-/// walk is cheap. Each eviction acquires the relevant read lock only to check
-/// `corpus`/idle state and a brief write lock only when it actually clears
-/// its structure.
+/// `0` disables both evictions and the ticker idles) and delegates the sweep
+/// itself to [`run_idle_eviction_tick`] — see that function for the
+/// per-index cost-scaled threshold and oldest-idle-first ordering.
 /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`,
 /// `bm25_entities_idle_eviction_drops_and_lazily_rehydrates`, and
 /// `hnsw_idle_demotion_reviews_clean_promoted_store` cover the per-indexer
-/// logic directly; the ticker is a thin scheduling wrapper.
+/// logic directly; `idle_eviction_tests` covers [`run_idle_eviction_tick`]'s
+/// orchestration; this function is a thin scheduling wrapper.
 pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
     let weak = Arc::downgrade(&state);
     tokio::spawn(async move {
@@ -144,18 +142,8 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
                 // of this loop — but do no work this tick.
                 continue;
             }
-            let threshold = Duration::from_secs(secs);
             let rss_before = crate::core::memguard::current_rss_mb();
-            let mut total_evicted = 0usize;
-            for id in state.registry.list() {
-                let Some(handle) = state.registry.get(&id) else {
-                    continue;
-                };
-                let indexer = handle.indexer.read().await;
-                total_evicted += indexer.evict_chunks_if_idle(threshold).await;
-                total_evicted += indexer.evict_bm25_entities_if_idle(threshold).await;
-                indexer.demote_vector_store_if_idle(threshold).await;
-            }
+            let total_evicted = run_idle_eviction_tick(&state, secs).await;
             // Issue #3657: per-index eviction above genuinely empties the
             // `chunks`/`bm25`/`entities` maps (no lingering `Arc` holder — see
             // `CodeIndexer::clear_in_memory_chunks` / `clear_bm25_entities`),
@@ -193,6 +181,109 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
             }
         }
     });
+}
+
+/// Sort a snapshot of `(index id, idle duration)` pairs so the LONGEST-idle
+/// (oldest / least-recently-used) index sorts FIRST (issue #3683 slice 2 —
+/// Defect 2's "the sweep should evict the cheapest-loss index first" fix).
+///
+/// Why: extracted as a pure function so the ordering rule is unit-testable
+/// with synthetic idle durations — mirrors `should_reclaim_now`'s extraction
+/// for the identical reason (driving a REAL index's idle clock to specific
+/// values on demand in a test is impractical). The #3683 production RCA
+/// found the sweep processed every registered index in whatever order
+/// `registry.list()` happened to return — effectively arbitrary — so an
+/// index that had gone idle a second ago and one that had sat idle for hours
+/// were treated identically. The longer an index has sat idle, the less
+/// likely it is to be queried again imminently, making it the safest /
+/// cheapest-to-lose candidate; this makes that priority explicit and
+/// mechanically enforced rather than accidental.
+/// What: sorts `candidates` in place, descending by idle [`Duration`] (ties
+/// broken by original relative order — `sort_by` is a stable sort).
+/// Test: `oldest_idle_first_orders_most_idle_index_first_ties_stable` in
+/// `idle_eviction_tests`.
+pub(super) fn oldest_idle_first(candidates: &mut [(IndexId, Duration)]) {
+    candidates.sort_by_key(|(_, idle)| std::cmp::Reverse(*idle));
+}
+
+/// One idle-chunk-eviction tick: snapshot every registered index's idle
+/// duration, process them OLDEST-IDLE-FIRST, and evict each past ITS OWN
+/// cost-scaled threshold (issue #3683 slice 2). Extracted from
+/// [`spawn_idle_chunk_eviction_ticker`] so the orchestration is separable
+/// from the `tokio::spawn` scaffolding and directly testable, mirroring
+/// [`run_memory_pressure_tick`] / [`run_residency_sweep_tick`].
+///
+/// Why: the #3683 production RCA's Defect 2 found two compounding policy
+/// bugs: (1) every index shared one flat idle window regardless of how
+/// expensive it was to rehydrate, and (2) the sweep visited indexes in
+/// whatever arbitrary order the registry returned. Fix (1) is
+/// `CodeIndexer::cost_scaled_idle_threshold` — an index with a large,
+/// expensive-to-rehydrate corpus earns proportionally more idle time before
+/// eviction than a small, cheap one, using that index's OWN measured/
+/// estimated rehydrate cost (`CodeIndexer::rehydrate_cost_estimate_ms`)
+/// rather than a single number shared by every index. Fix (2) is
+/// [`oldest_idle_first`]: processing the least-recently-used (safest to
+/// lose) index first, rather than an arbitrary order, so the ordering
+/// itself is a deliberate, testable policy rather than an accident of
+/// `HashMap`/registry iteration.
+/// What: takes an already-resolved `base_secs` (the caller has already
+/// handled the `idle_evict_secs() == 0` "disabled" short-circuit, matching
+/// `run_memory_pressure_tick`'s "no soft ceiling configured" early return
+/// style) — but is still defensively a no-op when `base_secs == 0`, so a
+/// test (or a future caller) can pass it directly. Snapshots `(id,
+/// idle_duration)` for every registered index in ONE read-lock pass, sorts
+/// via [`oldest_idle_first`], then in a SECOND pass computes each index's
+/// own `cost_scaled_idle_threshold(base_secs)` and calls
+/// `evict_chunks_if_idle` / `evict_bm25_entities_if_idle` /
+/// `demote_vector_store_if_idle` with that per-index threshold. Returns the
+/// total evicted-entry count across every index this tick.
+///
+/// Ordering is COSMETIC here, not load-bearing (issue #3683 slice 2, critic
+/// review — contrast with [`run_pressure_sweep`], where it is): every index
+/// is evicted (or not) purely by comparing ITS OWN idle duration against ITS
+/// OWN `cost_scaled_idle_threshold`, independent of every other index and
+/// with no stop-early budget — visiting the whole snapshot in a different
+/// order would evict the exact same set of indexes, just in a different
+/// sequence. `oldest_idle_first` is applied anyway for log-ordering
+/// consistency (the oldest, safest-to-lose index is reported first) and
+/// because it's the natural order to visit for a human reading the tracing
+/// output — but no test should assert that changing this order changes
+/// WHICH indexes get evicted, because it provably doesn't.
+/// Test: `oldest_idle_first_orders_most_idle_index_first_ties_stable`,
+/// `run_idle_eviction_tick_evicts_cheap_index_but_spares_costly_one`,
+/// `run_idle_eviction_tick_is_noop_when_secs_is_zero` in `idle_eviction_tests`.
+async fn run_idle_eviction_tick(state: &Arc<SearchAppState>, base_secs: u64) -> usize {
+    if base_secs == 0 {
+        return 0;
+    }
+
+    // Pass 1: snapshot idle duration for every registered index BEFORE
+    // evicting anything, so the sweep can process oldest-idle-first
+    // regardless of `registry.list()`'s arbitrary order.
+    let mut candidates: Vec<(IndexId, Duration)> = Vec::new();
+    for id in state.registry.list() {
+        let Some(handle) = state.registry.get(&id) else {
+            continue;
+        };
+        let idle = handle.indexer.read().await.idle_duration();
+        candidates.push((id, idle));
+    }
+    oldest_idle_first(&mut candidates);
+
+    // Pass 2: evict oldest-idle-first, each against ITS OWN cost-scaled
+    // threshold rather than one flat window shared by every index.
+    let mut total_evicted = 0usize;
+    for (id, _idle) in candidates {
+        let Some(handle) = state.registry.get(&id) else {
+            continue;
+        };
+        let indexer = handle.indexer.read().await;
+        let threshold = indexer.cost_scaled_idle_threshold(base_secs);
+        total_evicted += indexer.evict_chunks_if_idle(threshold).await;
+        total_evicted += indexer.evict_bm25_entities_if_idle(threshold).await;
+        indexer.demote_vector_store_if_idle(threshold).await;
+    }
+    total_evicted
 }
 
 /// Spawn a background ticker that suspends the FSEvents watcher of any index
@@ -390,7 +481,9 @@ pub(super) fn spawn_residency_sweep_ticker(state: Arc<SearchAppState>) {
     });
 }
 
-/// Spawn the steady-state memory-limit enforcement ticker (issue #2846).
+/// Spawn the steady-state memory-limit enforcement ticker (issue #2846;
+/// budgeted/oldest-idle-first/recency-exempt sweep added by issue #3683
+/// slice 2).
 ///
 /// Why: the daemon accepts a `memory_limit_mb` soft ceiling (auto-tuned to
 /// ~25% of host RAM, or `TRUSTY_MEMORY_LIMIT_MB`) but, before this ticker,
@@ -399,13 +492,15 @@ pub(super) fn spawn_residency_sweep_ticker(state: Arc<SearchAppState>) {
 /// production daemon reached ~26.6 GB, 2.2× its own 12 GB stated limit, over
 /// ~20 days and was ultimately OOM-killed. This ticker closes that gap: it
 /// samples process RSS on a fixed cadence and, once RSS crosses the configured
-/// high-water mark, sheds every index's evictable in-memory caches (raw chunk
-/// text, the tokenized BM25 corpus, per-file entities, and the promoted HNSW
-/// heap copy) via [`CodeIndexer::reclaim_memory_now`]. All of those are
-/// durable-corpus-backed and rehydrate lazily, so reclaim is non-destructive.
-/// As an opt-in last resort for un-evictable growth (allocator fragmentation /
-/// native arenas / a true leak), if RSS is *still* over the hard limit after a
-/// reclaim sweep and `TRUSTY_MEMORY_RESTART_ON_LIMIT` is enabled, it triggers a
+/// high-water mark, sheds evictable in-memory caches (raw chunk text, the
+/// tokenized BM25 corpus, per-file entities, and the promoted HNSW heap
+/// copy) via [`CodeIndexer::reclaim_memory_now`] — see [`run_pressure_sweep`]
+/// for how it now BUDGETS that sweep instead of clearing every registered
+/// index unconditionally. All of those structures are durable-corpus-backed
+/// and rehydrate lazily, so reclaim is non-destructive. As an opt-in last
+/// resort for un-evictable growth (allocator fragmentation / native arenas /
+/// a true leak), if RSS is *still* over the hard limit after a reclaim
+/// sweep and `TRUSTY_MEMORY_RESTART_ON_LIMIT` is enabled, it triggers a
 /// graceful drain-and-exit for the supervisor (launchd/systemd) to respawn —
 /// mirroring the ops workaround (a sibling instance restarted daily never
 /// accumulates the growth). The restart tier defaults OFF so an unsupervised
@@ -417,6 +512,7 @@ pub(super) fn spawn_residency_sweep_ticker(state: Arc<SearchAppState>) {
 /// [`run_memory_pressure_tick`].
 /// Test: the threshold decision is covered by `memguard::tests::test_over_high_water`;
 /// the reclaim mechanics by `indexer::tests::memory_pressure_reclaim_now_clears_caches`;
+/// the budgeted sweep by `memory_pressure_tests`' `pressure_sweep_*` tests;
 /// this function is a thin scheduling wrapper.
 pub(super) fn spawn_memory_pressure_ticker(state: Arc<SearchAppState>) {
     let secs = crate::core::memguard::enforce_interval_secs();
@@ -453,6 +549,17 @@ pub(super) fn spawn_memory_pressure_ticker(state: Arc<SearchAppState>) {
 /// brought the daemon back under the ceiling never triggers an unnecessary
 /// restart; only genuinely un-evictable growth reaches that branch.
 ///
+/// Why (issue #3683 slice 2 — critic review HIGH): the reclaim sweep itself
+/// used to be `for id in registry.list() { reclaim_memory_now() }` —
+/// unconditional, in whatever order the registry returned, with no notion of
+/// "enough" or "this index is busy". That cleared a HOT, actively-queried
+/// index the instant RSS crossed the high-water mark, on the very same
+/// tick that first noticed the pressure. The sweep now delegates to
+/// [`run_pressure_sweep`], which computes `target_freed_mb` (how far RSS
+/// sits above the high-water mark) and stops once that's been (estimated to
+/// be) reclaimed, oldest-idle-first, exempting recently-queried indexes
+/// unless a desperation pass is required — see that function's doc comment.
+///
 /// Why hysteresis (issue #2846 review — MEDIUM): without it, a host whose
 /// steady-state RSS simply sits at/above the high-water mark (independent of
 /// evictable caches — e.g. baseline usage genuinely close to the ceiling)
@@ -487,6 +594,288 @@ pub(super) fn spawn_memory_pressure_ticker(state: Arc<SearchAppState>) {
 /// hysteresis_skips_when_rss_has_not_risen, hysteresis_reclaims_again_once_rss_has_risen}`.
 fn should_reclaim_now(rss_mb: u64, last_reclaim_rss_mb: u64) -> bool {
     last_reclaim_rss_mb == 0 || rss_mb > last_reclaim_rss_mb
+}
+
+/// What `state.last_reclaim_rss_mb` (the [`should_reclaim_now`] hysteresis
+/// baseline) should become after a sweep completing with `completion`,
+/// having sampled `after_rss_mb` post-trim (issue #3683 slice 2, round-2
+/// critic review HIGH).
+///
+/// Why: extracted as a pure function — same rationale as `should_reclaim_now`
+/// itself — so the interaction this fixes is unit-testable without driving
+/// real process RSS. Before the stop-early budget
+/// ([`run_pressure_sweep`]/[`SweepCompletion`]) existed, a completed sweep
+/// ALWAYS meant "every evictable index was actually cleared", so trusting
+/// `after_rss_mb` as the next baseline was safe: if RSS was still high
+/// afterward, only genuine repopulation (a real rise) could justify sweeping
+/// again. [`ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY`] being an uncalibrated
+/// guess breaks that guarantee for [`SweepCompletion::EarlyStop`] — the
+/// sweep may have stopped while real RSS is still over the high-water mark
+/// AND candidates remain unswept. Storing `after_rss_mb` in that case would
+/// let `should_reclaim_now`'s strict `rss_mb > last_reclaim_rss_mb` gate wedge
+/// the daemon indefinitely at a steady-state RSS plateau near the ceiling —
+/// reclaimable memory sitting untouched forever — exactly the 2.2×-limit gap
+/// issue #2846 (and this ticket) exists to close.
+/// What: [`SweepCompletion::Exhausted`] → `after_rss_mb` (trust it, matching
+/// pre-stop-early-budget semantics — there is genuinely nothing left to
+/// reclaim, so only a real RSS rise should re-trigger).
+/// [`SweepCompletion::EarlyStop`] → `0`, the same "no sweep yet" sentinel
+/// [`run_memory_pressure_tick`] uses when RSS falls below the high-water
+/// mark — forces the NEXT tick to reclaim unconditionally
+/// (`should_reclaim_now` returns `true` whenever the baseline is `0`),
+/// regardless of whether RSS rose, so the untouched candidates get a chance
+/// to be swept (or the estimate that skipped them gets corrected on retry).
+/// Test: `hysteresis_survives_early_stop_sweep_even_when_rss_is_flat`.
+fn hysteresis_baseline_after_sweep(completion: SweepCompletion, after_rss_mb: u64) -> u64 {
+    match completion {
+        SweepCompletion::Exhausted => after_rss_mb,
+        SweepCompletion::EarlyStop => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Budgeted, oldest-idle-first, recency-exempt pressure sweep (issue #3683
+// slice 2 — critic review HIGH: the pressure sweep was still an
+// undifferentiated full-fleet clear).
+// ---------------------------------------------------------------------------
+
+/// Default idle-duration floor (seconds) below which an index is EXEMPT from
+/// the memory-pressure sweep's first pass (issue #3683 slice 2). Override
+/// via `TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS`; `0` disables the exemption
+/// entirely (every index is a pass-1 candidate, matching the pre-this-fix
+/// behaviour of clearing whatever the sweep reaches before its budget runs
+/// out).
+///
+/// Why: the #3683 production incident's pressure sweep cleared a HOT,
+/// actively-queried 315K-chunk index the instant RSS crossed the high-water
+/// mark — the pressure-path twin of the idle-evict path's thrash-eviction
+/// bug this slice already fixed. 30s is deliberately much shorter than the
+/// idle-evict base window (300s): a pressure sweep is a genuine "running low
+/// on memory" emergency, so the bar for "this index is busy enough to spare"
+/// is lower than idle-eviction's "has anyone touched this in the last five
+/// minutes" bar.
+const DEFAULT_MEMORY_PRESSURE_EXEMPT_IDLE_SECS: u64 = 30;
+
+/// Resolve the memory-pressure exemption idle floor (seconds) from
+/// `TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS`, falling back to
+/// [`DEFAULT_MEMORY_PRESSURE_EXEMPT_IDLE_SECS`] when unset or unparseable.
+fn memory_pressure_exempt_idle_secs() -> u64 {
+    std::env::var("TRUSTY_MEMORY_PRESSURE_EXEMPT_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MEMORY_PRESSURE_EXEMPT_IDLE_SECS)
+}
+
+/// Coarse, deliberately conservative estimate (bytes) of resident heap freed
+/// per reclaimed chunk/BM25-doc entry, used ONLY to decide when a pressure
+/// sweep pass has freed "enough" (issue #3683 slice 2 — critic review's
+/// "per-index freed estimates between evictions" option).
+///
+/// Why: freed heap is not returned to the OS — and so is not reflected in a
+/// fresh RSS sample — until `malloc_trim` runs, and `malloc_trim` itself
+/// costs tens to hundreds of milliseconds on a multi-GB heap (see
+/// `run_memory_pressure_tick`'s own trim comment below). Re-sampling REAL
+/// RSS between every reclaimed index during a sweep of potentially hundreds
+/// of indexes would mean paying that cost hundreds of times per tick. This
+/// estimate lets the sweep decide "stop early" using only cheap arithmetic,
+/// with exactly ONE trim + re-sample at the very end of the tick (unchanged
+/// from before this fix).
+///
+/// **Uncalibrated (round-2 critic review note):** `2048` is a documented
+/// guess, not measured against a real heap profile. It can OVER-estimate
+/// real freed bytes just as easily as under-estimate — average chunk/BM25
+/// entry size varies enormously by corpus (language, chunk granularity,
+/// comment density). An over-estimate makes [`run_pressure_sweep`] stop
+/// "early" while real RSS is still over the high-water mark. That used to be
+/// safe by construction (a completed sweep always meant "cleared every
+/// evictable index"), but a stop-early budget breaks that assumption — see
+/// [`SweepCompletion`] and `run_memory_pressure_tick`'s handling of it for
+/// the fix (issue #3683 slice 2, round-2 critic review HIGH). The tick's
+/// "reclaim sweep complete" log line reports both this estimate and the
+/// REAL post-trim RSS delta side by side specifically so a future pass can
+/// calibrate this constant against production data instead of guessing again.
+const ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY: u64 = 2_048;
+
+/// Estimate MB freed for `reclaimed_entries` reclaimed entries — see
+/// [`ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY`].
+fn estimate_freed_mb(reclaimed_entries: usize) -> u64 {
+    (reclaimed_entries as u64).saturating_mul(ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY)
+        / (1024 * 1024)
+}
+
+/// Whether a [`run_pressure_sweep`] call stopped because every reachable
+/// candidate was actually visited, or because it stopped EARLY on the
+/// (possibly wrong) [`estimate_freed_mb`] budget while candidates remained
+/// untouched (issue #3683 slice 2, round-2 critic review HIGH).
+///
+/// Why: [`ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY`] is an uncalibrated
+/// guess and can OVER-estimate real freed bytes, in which case a sweep that
+/// "stopped early" left real RSS still over the high-water mark with
+/// reachable candidates never visited. Before the stop-early budget existed,
+/// a completed sweep always meant "every evictable index was actually
+/// cleared" — `run_memory_pressure_tick` trusted the post-trim RSS as the
+/// next tick's hysteresis baseline (`state.last_reclaim_rss_mb`) precisely
+/// because of that guarantee. A stop-early sweep does NOT carry that
+/// guarantee, so the caller must react differently — see
+/// `run_memory_pressure_tick`'s match on this enum.
+/// Test: `pressure_sweep_stops_early_once_target_reached_sparing_least_idle`,
+/// `pressure_sweep_exempts_hot_indexes_under_mild_pressure`,
+/// `pressure_sweep_desperation_pass_clears_hot_indexes_under_extreme_pressure`,
+/// `hysteresis_survives_early_stop_sweep_even_when_rss_is_flat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepCompletion {
+    /// The running freed-estimate met `target_freed_mb` while at least one
+    /// candidate (cold or hot) remained unvisited. Those candidates were
+    /// spared ON PURPOSE by the budget, but the budget itself might be
+    /// wrong — the caller must not treat this like "nothing more to
+    /// reclaim".
+    EarlyStop,
+    /// Every candidate that could possibly be visited (all of `cold`, plus
+    /// all of `hot` if the desperation pass ran) actually WAS visited —
+    /// whether or not the target was ever reached. There is nothing left to
+    /// reclaim from any registered index regardless of the estimate's
+    /// accuracy, so this is safe to treat exactly like the pre-stop-early-
+    /// budget "swept everything" semantics.
+    Exhausted,
+}
+
+/// Budgeted, oldest-idle-first, recency-exempt memory-pressure sweep (issue
+/// #3683 slice 2 — critic review HIGH). Replaces the former unconditional
+/// "clear every registered index" behaviour that used to live inline in
+/// [`run_memory_pressure_tick`].
+///
+/// Why: an undifferentiated full-fleet clear cleared a HOT, actively-queried
+/// 315K-chunk index the instant RSS crossed the high-water mark — the
+/// pressure-path twin of the idle-evict thrash-eviction bug this slice
+/// already fixed on the idle-evict ticker. Three changes fix it here:
+///
+/// 1. **Oldest-idle-first order** (reusing [`oldest_idle_first`] — THIS is
+///    where that ordering becomes load-bearing: with a stop-early budget
+///    (point 2), which indexes get cleared before the budget is met now
+///    depends on this order, unlike [`run_idle_eviction_tick`]'s per-index
+///    independent threshold, where the sweep order never changes which
+///    indexes ultimately get evicted, only what order they're visited in).
+/// 2. **Stop once the target is (estimated to be) met**: `target_freed_mb`
+///    is how far current RSS sits above the high-water mark
+///    (`rss - high_water_target_mb`, computed by the caller). The sweep
+///    accumulates [`estimate_freed_mb`] as it clears indexes and stops as
+///    soon as the running estimate meets or exceeds the target, instead of
+///    unconditionally clearing every registered index (which could be
+///    hundreds) — see [`SweepCompletion`] for how the caller is told whether
+///    that happened.
+/// 3. **Two-phase: exempt-first, then desperation.** Pass 1 sweeps only
+///    indexes idle at least [`memory_pressure_exempt_idle_secs`] (a hot
+///    index is never the first thing cleared), oldest-idle-first among
+///    them. If pass 1 exhausts every non-exempt index WITHOUT reaching the
+///    target — genuine memory pressure, not just cold caches — pass 2
+///    (desperation) sweeps the previously-exempt (hot) indexes too,
+///    oldest-idle-first among THEM: avoiding an OOM kill outweighs a hot
+///    index's warm cache.
+///
+/// What: returns `(total reclaimed entries, indexes actually cleared,
+/// completion)` for the tick's log line and hysteresis decision (see
+/// [`SweepCompletion`]). `target_freed_mb == 0` sweeps nothing and returns
+/// `(0, 0, Exhausted)` — trivially "nothing needed reclaiming" — the current
+/// caller only invokes this after confirming over-high-water (so
+/// `target_freed_mb` is always `> 0` in production, modulo the exact-
+/// boundary case where `rss == high_water_target_mb`), but the guard is kept
+/// so a future/test caller can pass `0` safely. `completion` is computed by
+/// comparing how many candidates were actually visited against the total
+/// snapshotted (`cold.len() + hot.len()`) — `Exhausted` iff every one was
+/// visited, `EarlyStop` otherwise (a `break` fired with candidates left).
+/// Test: `pressure_sweep_stops_early_once_target_reached_sparing_least_idle`,
+/// `pressure_sweep_exempts_hot_indexes_under_mild_pressure`,
+/// `pressure_sweep_desperation_pass_clears_hot_indexes_under_extreme_pressure`
+/// in `memory_pressure_tests`.
+async fn run_pressure_sweep(
+    state: &Arc<SearchAppState>,
+    target_freed_mb: u64,
+) -> (usize, usize, SweepCompletion) {
+    if target_freed_mb == 0 {
+        return (0, 0, SweepCompletion::Exhausted);
+    }
+    let exempt_secs = memory_pressure_exempt_idle_secs();
+    let exempt_floor = Duration::from_secs(exempt_secs);
+
+    // Snapshot idle duration for every registered index in ONE read-lock
+    // pass (mirrors `run_idle_eviction_tick`), splitting into "cold enough
+    // for pass 1" vs "hot — exempt unless desperation", each sorted
+    // oldest-idle-first.
+    let mut cold: Vec<(IndexId, Duration)> = Vec::new();
+    let mut hot: Vec<(IndexId, Duration)> = Vec::new();
+    for id in state.registry.list() {
+        let Some(handle) = state.registry.get(&id) else {
+            continue;
+        };
+        let idle = handle.indexer.read().await.idle_duration();
+        if exempt_secs > 0 && idle < exempt_floor {
+            hot.push((id, idle));
+        } else {
+            cold.push((id, idle));
+        }
+    }
+    oldest_idle_first(&mut cold);
+    oldest_idle_first(&mut hot);
+    // Snapshotted BEFORE either pass drains its `Vec` — see the `visited`
+    // comparison at the end, which is how `SweepCompletion` is decided.
+    let total_candidates = cold.len() + hot.len();
+
+    let mut reclaimed = 0usize;
+    let mut cleared = 0usize;
+    let mut freed_mb = 0u64;
+    let mut visited = 0usize;
+
+    // Pass 1: non-exempt (cold) indexes only, oldest-idle-first.
+    for (id, _idle) in cold {
+        if freed_mb >= target_freed_mb {
+            break;
+        }
+        visited += 1;
+        let Some(handle) = state.registry.get(&id) else {
+            continue;
+        };
+        let n = handle.indexer.read().await.reclaim_memory_now().await;
+        if n > 0 {
+            reclaimed += n;
+            cleared += 1;
+            freed_mb += estimate_freed_mb(n);
+        }
+    }
+
+    // Pass 2 (desperation): only reached if pass 1 exhausted every
+    // non-exempt index without hitting the target AND there are exempt (hot)
+    // indexes left. Avoiding an OOM kill outweighs a hot index's warm cache.
+    if freed_mb < target_freed_mb && !hot.is_empty() {
+        tracing::warn!(
+            target_freed_mb,
+            freed_so_far_mb = freed_mb,
+            hot_candidates = hot.len(),
+            "memory-pressure: exemption-respecting pass did not reach target — desperation pass \
+             will clear recently-queried (hot) indexes too"
+        );
+        for (id, _idle) in hot {
+            if freed_mb >= target_freed_mb {
+                break;
+            }
+            visited += 1;
+            let Some(handle) = state.registry.get(&id) else {
+                continue;
+            };
+            let n = handle.indexer.read().await.reclaim_memory_now().await;
+            if n > 0 {
+                reclaimed += n;
+                cleared += 1;
+                freed_mb += estimate_freed_mb(n);
+            }
+        }
+    }
+
+    let completion = if visited >= total_candidates {
+        SweepCompletion::Exhausted
+    } else {
+        SweepCompletion::EarlyStop
+    };
+    (reclaimed, cleared, completion)
 }
 
 async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
@@ -529,20 +918,20 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
         return;
     }
 
+    // Issue #3683 slice 2 (critic review HIGH): budget the sweep to how far
+    // over the high-water mark we actually are, instead of clearing every
+    // registered index unconditionally — see `run_pressure_sweep`.
+    let high_water_mb = memguard::high_water_target_mb(limit, pct);
+    let target_freed_mb = rss.saturating_sub(high_water_mb);
     tracing::warn!(
         rss_mb = rss,
         limit_mb = limit,
         high_water_pct = pct,
+        target_freed_mb,
         "memory-pressure: RSS at/over soft high-water mark — reclaiming evictable caches"
     );
 
-    let mut reclaimed = 0usize;
-    for id in state.registry.list() {
-        let Some(handle) = state.registry.get(&id) else {
-            continue;
-        };
-        reclaimed += handle.indexer.read().await.reclaim_memory_now().await;
-    }
+    let (reclaimed, indexes_cleared, completion) = run_pressure_sweep(state, target_freed_mb).await;
 
     // Issue #3657: `reclaim_memory_now` empties the in-memory maps (a genuine
     // Rust-level free — no lingering `Arc` holder), but the Linux release
@@ -573,12 +962,28 @@ async fn run_memory_pressure_tick(state: &Arc<SearchAppState>) {
     // self-restart gate below decide on current reality, not the
     // pre-reclaim RSS.
     state.last_rss_mb.store(after, Ordering::Relaxed);
-    // Record the hysteresis baseline for the NEXT tick, regardless of whether
-    // `after` is still over the high-water mark — a sweep that didn't fully
-    // clear the pressure still shouldn't re-fire until RSS rises further.
-    state.last_reclaim_rss_mb.store(after, Ordering::Relaxed);
+    // Record the hysteresis baseline for the NEXT tick (issue #3683 slice 2,
+    // round-2 critic review HIGH): an `Exhausted` sweep trusts `after` as
+    // before (nothing more to reclaim short of real repopulation); an
+    // `EarlyStop` sweep resets to the `0` sentinel instead, so the next tick
+    // reclaims unconditionally rather than being wedged by
+    // `should_reclaim_now`'s strict rise check on an estimate that might
+    // have been wrong — see `hysteresis_baseline_after_sweep`.
+    state.last_reclaim_rss_mb.store(
+        hysteresis_baseline_after_sweep(completion, after),
+        Ordering::Relaxed,
+    );
+    // Issue #3683 slice 2 (critic review OPTIONAL note): log the ESTIMATED
+    // freed MB (from the uncalibrated per-entry constant) alongside the REAL
+    // rss_before/rss_after delta, so a future pass can calibrate
+    // `ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY` against production data
+    // instead of guessing again.
     tracing::warn!(
         reclaimed_entries = reclaimed,
+        indexes_cleared,
+        sweep_completion = ?completion,
+        estimated_freed_mb = estimate_freed_mb(reclaimed),
+        actual_freed_mb = rss.saturating_sub(after),
         rss_before_mb = rss,
         rss_after_mb = after,
         limit_mb = limit,
@@ -704,3 +1109,7 @@ mod residency_sweep_tests;
 #[cfg(test)]
 #[path = "memory_pressure_tests.rs"]
 mod memory_pressure_tests;
+
+#[cfg(test)]
+#[path = "idle_eviction_tests.rs"]
+mod idle_eviction_tests;

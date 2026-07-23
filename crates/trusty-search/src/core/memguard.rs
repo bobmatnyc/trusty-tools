@@ -470,6 +470,21 @@ pub fn restart_on_limit_enabled() -> bool {
     )
 }
 
+/// The high-water RSS threshold (MB) derived from `limit_mb` and `pct`:
+/// `floor(limit_mb * pct / 100)`.
+///
+/// Why: extracted so [`over_high_water`] and the memory-pressure sweep's
+/// stop-early budget (issue #3683 slice 2 —
+/// `service::server::tickers::run_pressure_sweep`'s `target_freed_mb`, "how
+/// far current RSS sits above this threshold") share the exact same
+/// arithmetic instead of two independently-maintained copies of it.
+/// What: saturating multiply/divide — never panics on a huge `limit_mb`.
+/// Test: `tests::test_over_high_water` (via [`over_high_water`]),
+/// `tests::test_high_water_target_mb`.
+pub fn high_water_target_mb(limit_mb: u64, pct: u8) -> u64 {
+    limit_mb.saturating_mul(pct as u64) / 100
+}
+
 /// Pure threshold decision: is `rss_mb` at or above the reclaim high-water
 /// mark derived from `limit_mb` and `pct`?
 ///
@@ -479,15 +494,15 @@ pub fn restart_on_limit_enabled() -> bool {
 /// risking the very OOM this guards against). The ticker stays a thin sampler
 /// that calls this and acts on the boolean.
 /// What: returns `false` when `limit_mb == 0` (no ceiling configured);
-/// otherwise `rss_mb >= floor(limit_mb * pct / 100)`. Pass `pct = 100` to test
-/// the hard-limit boundary (the post-reclaim self-restart gate uses this).
+/// otherwise `rss_mb >= `[`high_water_target_mb`]`(limit_mb, pct)`. Pass
+/// `pct = 100` to test the hard-limit boundary (the post-reclaim self-restart
+/// gate uses this).
 /// Test: `tests::test_over_high_water`.
 pub fn over_high_water(rss_mb: u64, limit_mb: u64, pct: u8) -> bool {
     if limit_mb == 0 {
         return false;
     }
-    let high_water = limit_mb.saturating_mul(pct as u64) / 100;
-    rss_mb >= high_water
+    rss_mb >= high_water_target_mb(limit_mb, pct)
 }
 
 #[cfg(test)]
@@ -786,6 +801,14 @@ mod tests {
         assert!(over_high_water(10_000, 10_000, 100));
         // saturating_mul must not panic on a huge limit.
         assert!(over_high_water(u64::MAX, u64::MAX, 100));
+    }
+
+    #[test]
+    fn test_high_water_target_mb() {
+        assert_eq!(high_water_target_mb(10_000, 90), 9_000);
+        assert_eq!(high_water_target_mb(0, 90), 0);
+        // saturating_mul must not panic on a huge limit.
+        assert_eq!(high_water_target_mb(u64::MAX, 100), u64::MAX / 100);
     }
 
     #[test]
