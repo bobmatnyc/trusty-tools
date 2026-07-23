@@ -246,9 +246,16 @@
     {/if}
 
     {#if $isRunning}
-      <div class="flex items-center justify-start gap-2 text-xs text-foundry-teal">
-        <Loader2 class="h-3 w-3 animate-spin" />
-        <span>Running…</span>
+      <!-- Spinner only — no "Running…" text label (the animation is the sole
+           waiting indicator). `role="status"` + `aria-label` keep an accessible
+           name for the busy state now that the visible label is gone; the icon
+           is decorative. -->
+      <div
+        class="flex items-center justify-start text-foundry-teal"
+        role="status"
+        aria-label="Assistant is responding"
+      >
+        <Loader2 class="h-3 w-3 animate-spin" aria-hidden="true" />
       </div>
     {/if}
   </div>
