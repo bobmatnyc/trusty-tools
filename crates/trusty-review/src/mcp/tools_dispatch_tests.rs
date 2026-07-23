@@ -78,6 +78,7 @@ impl SearchClient for FakeSearchDispatch {
         Ok(SearchHealth {
             status: "ok".into(),
             embedder: EmbedderState::Bool(true),
+            warmboot_summary: None,
         })
     }
 

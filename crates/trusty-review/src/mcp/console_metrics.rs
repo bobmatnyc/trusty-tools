@@ -207,6 +207,7 @@ mod tests {
             Ok(SearchHealth {
                 status: "ok".into(),
                 embedder: EmbedderState::Bool(true),
+                warmboot_summary: None,
             })
         }
         async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
@@ -256,6 +257,44 @@ mod tests {
             ReviewConfig::load(None),
             Arc::new(OkLlm),
             Arc::new(DownSearch),
+            None,
+        )
+    }
+
+    /// A search stub whose `health()` reports `status: "degraded"` purely
+    /// from a benign, intentional watcher-disable on a network mount
+    /// (`warm_boot_degraded: false`) — the issue #3693 scenario.
+    struct DegradedButServingSearch;
+
+    #[async_trait]
+    impl SearchClient for DegradedButServingSearch {
+        async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+            Ok(SearchHealth {
+                status: "degraded".into(),
+                embedder: EmbedderState::Bool(true),
+                warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
+                    warm_boot_degraded: false,
+                }),
+            })
+        }
+        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+            Ok(vec![])
+        }
+        async fn search(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<u32>,
+        ) -> Result<Vec<SearchResult>, SearchClientError> {
+            Ok(vec![])
+        }
+    }
+
+    fn degraded_but_serving_state() -> AppState {
+        AppState::new(
+            ReviewConfig::load(None),
+            Arc::new(OkLlm),
+            Arc::new(DegradedButServingSearch),
             None,
         )
     }
@@ -396,6 +435,40 @@ mod tests {
         let report = parse_report(&wrapped).expect("parse must succeed");
         assert_eq!(report.status, ServiceHealth::Degraded);
         assert_eq!(report.metrics["search_reachable"], false);
+    }
+
+    /// Why: the console poller feeds `search_reachable` straight to the web
+    /// dashboard — a trusty-search reporting `status: "degraded"` solely due
+    /// to a benign, intentional watcher-disable on a network mount
+    /// (`warm_boot_degraded: false`) must NOT show up as a service outage
+    /// (issue #3693). Shares `probe_deps` with `handle_health` and
+    /// `call_review_health`, so this exercises the same `is_serving()` gate
+    /// end-to-end through the console-metrics path specifically.
+    /// What: Build degraded_but_serving_state, call handle_console_metrics,
+    /// decode, assert status stays Ok and search_reachable is true.
+    /// Test: This test.
+    #[tokio::test]
+    async fn console_metrics_degraded_but_serving_search_stays_ok() {
+        let state = degraded_but_serving_state();
+        let raw = handle_console_metrics(&state).await;
+
+        let wrapped = serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string_pretty(&raw).expect("to_string_pretty"),
+            }],
+            "isError": false,
+        });
+        let report = parse_report(&wrapped).expect("parse must succeed");
+        assert_eq!(
+            report.status,
+            ServiceHealth::Ok,
+            "degraded-but-serving trusty-search (benign watcher-disable) must not degrade status (#3693)"
+        );
+        assert_eq!(
+            report.metrics["search_reachable"], true,
+            "search_reachable must be true when only degraded due to benign watcher-disable (#3693)"
+        );
     }
 
     /// Why: When inference fails (auth error), status must be "degraded" and
