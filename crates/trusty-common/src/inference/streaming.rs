@@ -295,7 +295,11 @@ impl SseDecoder {
     /// (newline-joined for multi-line data). On flush, `[DONE]` produces the
     /// terminal event and an in-band `error` chunk produces a terminal `Err`.
     /// Test: `decode_tolerates_keepalives`, `decode_surfaces_error_chunk`.
-    fn dispatch_line(&mut self, line: &str, out: &mut Vec<Result<ChatStreamEvent, InferenceError>>) {
+    fn dispatch_line(
+        &mut self,
+        line: &str,
+        out: &mut Vec<Result<ChatStreamEvent, InferenceError>>,
+    ) {
         if line.is_empty() {
             self.flush_event(out);
             return;

@@ -9,6 +9,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`InferenceAdapter::chat_stream` + OpenAI-compat token streaming** (epic
+  #3696, Gap B — OpenAI-compat lane): real incremental token streaming for
+  every OpenAI-dialect provider (OpenRouter foremost) through the unified
+  inference adapter. Adds the `chat_stream` trait method (with a buffering
+  default impl that replays a completed `chat()` response, so every adapter is
+  stream-callable), the provider-neutral event model (`ChatStreamEvent`,
+  `ToolCallDelta`, `StreamCompletion`, `ChatStream`), and the
+  partial-UTF-8-safe `SseDecoder` + `decode_event_stream` / `buffered_stream`
+  adapters in the new `inference::streaming` module. `OpenAiCompatAdapter`
+  overrides `chat_stream` with a real SSE transport (`stream:true` +
+  `stream_options.include_usage`), yielding ordered text/tool deltas followed
+  by one terminal event carrying the finish reason + usage. Handles
+  keep-alives, split-mid-token / mid-codepoint chunks, in-band error chunks,
+  `[DONE]`, and cancellation (dropping the stream aborts the request); a
+  non-2xx `stream=true` handshake surfaces as an `Err` the caller can retry
+  non-streaming rather than degrading silently. The non-streaming `chat()`
+  path is unchanged, and `ChatRequest` gains no new field (the `stream` flag is
+  injected only on the streaming wire body).
 - **`TmuxCommand::StartServer` / `TmuxCommand::ShowGlobalOption`** (trusty-mpm
   issue #3386): two new shared `tmux` command variants — `start-server`
   (idempotent server-existence guarantee) and `show-options -g -v <name>`

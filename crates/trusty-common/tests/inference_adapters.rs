@@ -684,3 +684,160 @@ fn default_factories_register_anthropic_direct() {
         serde_json::json!({"type": "any"})
     );
 }
+
+// ── Streaming: real chat_stream over a hermetic SSE server (no live network) ──────
+
+/// A canonical OpenRouter SSE completion: two content frames, a finish frame, a
+/// usage-only frame (from `stream_options.include_usage`), then `[DONE]`.
+const SSE_STREAM: &str = "\
+data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n\
+data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n\
+data: [DONE]\n\n";
+
+/// A throwaway axum server that answers any POST with a fixed SSE body, streamed
+/// as small byte chunks to mimic real socket framing (splitting frames — and
+/// codepoints — across chunk boundaries). Shuts down when dropped.
+struct SseServer {
+    url: String,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for SseServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        self.handle.abort();
+    }
+}
+
+/// Spawn an [`SseServer`] serving `sse` as `text/event-stream`, chunked to 8-byte
+/// pieces so the adapter's decoder is exercised across arbitrary splits.
+async fn spawn_sse_server(sse: &'static str) -> SseServer {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::response::Response;
+
+    async fn handler(axum::extract::State(sse): axum::extract::State<&'static str>) -> Response {
+        let chunks: Vec<Result<Vec<u8>, std::convert::Infallible>> =
+            sse.as_bytes().chunks(8).map(|c| Ok(c.to_vec())).collect();
+        Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(Body::from_stream(futures_util::stream::iter(chunks)))
+            .unwrap()
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{addr}");
+    let app = Router::new().fallback(handler).with_state(sse);
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx.await;
+            })
+            .await;
+    });
+    SseServer {
+        url,
+        shutdown: Some(tx),
+        handle,
+    }
+}
+
+/// Why: the real OpenAI-compat `chat_stream` transport must POST `stream:true`
+/// and decode the provider's SSE frames into ordered text deltas plus a terminal
+/// event carrying the finish reason + usage — end-to-end over a real socket
+/// (reqwest `bytes_stream()` → `SseDecoder`), not just the parser in isolation.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn openrouter_chat_stream_yields_incremental_deltas() {
+    use futures_util::StreamExt;
+    use trusty_common::inference::{ChatStreamEvent, StopReason};
+
+    clear_provider_env();
+    let server = spawn_sse_server(SSE_STREAM).await;
+    let base = server.url.clone();
+
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenRouter,
+        Box::new(move |r: &ResolvedProvider| openrouter::build(r, &base)),
+    );
+    let adapter = cfg.build("openai/gpt-4o-mini", &store).expect("build");
+
+    let req = ChatRequest::new("openai/gpt-4o-mini", vec![ChatMessage::user("ping")]);
+    let stream = adapter
+        .chat_stream(&req)
+        .await
+        .expect("stream handshake ok");
+    let events: Vec<ChatStreamEvent> = stream.map(|r| r.expect("event ok")).collect().await;
+
+    // Deltas concatenate in order to the full text.
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatStreamEvent::Delta(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "Hello");
+
+    // Exactly one terminal event, last, carrying usage + finish reason.
+    match events.last().expect("terminal event") {
+        ChatStreamEvent::Done(done) => {
+            assert_eq!(done.usage.total_tokens(), 9);
+            assert_eq!(done.finish_reason, Some(StopReason::Stop));
+        }
+        other => panic!("expected terminal Done, got {other:?}"),
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, ChatStreamEvent::Done(_)))
+            .count(),
+        1,
+        "exactly one terminal event"
+    );
+}
+
+/// Why: a provider that rejects `stream=true` (non-2xx) must surface as the outer
+/// `Err` from `chat_stream` — BEFORE any stream is returned — so the caller can
+/// choose to retry non-streaming; the adapter must never silently degrade. Also
+/// confirms the outbound body carried `stream:true`.
+#[tokio::test]
+#[serial(dotenv_credential_env)]
+async fn chat_stream_surfaces_http_error_for_caller_retry() {
+    clear_provider_env();
+    let server = MockInferenceServer::spawn(400, json!({"error": {"message": "no stream"}}))
+        .await
+        .expect("spawn");
+    let base = server.url().to_string();
+
+    let store = MemoryKeyStore::new();
+    store.set("openrouter", "sk-or-fake").unwrap(); // pragma: allowlist secret
+    let mut cfg = Configurator::new();
+    cfg.register(
+        ProviderId::OpenRouter,
+        Box::new(move |r: &ResolvedProvider| openrouter::build(r, &base)),
+    );
+    let adapter = cfg.build("openai/gpt-4o-mini", &store).expect("build");
+
+    let req = ChatRequest::new("openai/gpt-4o-mini", vec![ChatMessage::user("ping")]);
+    // `Ok(ChatStream)` is not `Debug`, so match rather than `expect_err`.
+    match adapter.chat_stream(&req).await {
+        Err(InferenceError::Api { status: 400, .. }) => {}
+        Err(other) => panic!("expected retryable Api 400, got {other:?}"),
+        Ok(_) => panic!("must surface an error, not a degraded stream"),
+    }
+
+    // The transport requested streaming on the wire.
+    let sent = server.last_request().expect("captured request");
+    assert_eq!(sent.body.expect("json body")["stream"], json!(true));
+}

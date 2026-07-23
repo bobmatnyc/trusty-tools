@@ -151,9 +151,7 @@ data: [DONE]\n\n";
 #[test]
 fn decode_surfaces_error_chunk() {
     let mut dec = SseDecoder::new();
-    let results = dec.feed(
-        b"data: {\"error\":{\"message\":\"rate limited\",\"code\":429}}\n\n",
-    );
+    let results = dec.feed(b"data: {\"error\":{\"message\":\"rate limited\",\"code\":429}}\n\n");
     assert_eq!(results.len(), 1);
     match &results[0] {
         Err(InferenceError::Api { status, body }) => {
@@ -294,7 +292,10 @@ async fn decode_event_stream_surfaces_transport_error() {
     let results: Vec<Result<ChatStreamEvent, InferenceError>> =
         decode_event_stream(byte_stream).collect().await;
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0], Ok(ChatStreamEvent::Delta("hi".into())));
+    assert_eq!(
+        results[0].as_ref().expect("first event ok"),
+        &ChatStreamEvent::Delta("hi".into())
+    );
     assert!(matches!(results[1], Err(InferenceError::Transport(_))));
 }
 
