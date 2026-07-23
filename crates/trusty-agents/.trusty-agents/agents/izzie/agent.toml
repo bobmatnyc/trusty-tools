@@ -76,6 +76,10 @@ allow = [
   "granola_*",
   # web search
   "web_search",
+  # weather + Metro-North (epic #3052; skills izzie-weather / izzie-metro-north)
+  "get_weather",
+  "get_train_schedule",
+  "get_train_alerts",
   # gworkspace — Gmail
   "compose_email",
   "download_gmail_attachment",

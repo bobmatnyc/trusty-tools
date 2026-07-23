@@ -20,6 +20,7 @@ pub mod finish_task;
 pub mod format_translator;
 pub mod fs_reader;
 pub mod git_tools;
+pub mod izzie;
 pub mod mcp_live;
 pub mod mcp_service_tools;
 pub mod mcp_tools;

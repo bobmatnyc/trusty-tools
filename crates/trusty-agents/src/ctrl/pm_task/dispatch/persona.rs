@@ -294,6 +294,16 @@ pub async fn run_pm_task_with_persona(
                 ),
             ));
 
+            // #3052: izzie weather/Metro-North tools. Registered
+            // unconditionally into the platform-hosted superset (like git /
+            // ticketing / system_status above); whether a persona can call
+            // `get_weather`/`get_train_schedule`/`get_train_alerts` is still
+            // decided by `filter_persona_tool_names` against its
+            // `[tools].allow` globs — izzie opts in, other personas don't.
+            for tool in crate::tools::izzie::izzie_tools() {
+                registry.register(tool);
+            }
+
             for plugin in crate::tools::agent_plugin::plugins_for_persona(persona_name) {
                 for tool in &plugin.tools {
                     registry.register(std::sync::Arc::clone(tool));
