@@ -327,6 +327,34 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
                     break;
                 }
             }
+            // #3734: parent-death watchdog. When the desktop GUI spawns this
+            // binary as its API sidecar it passes `--parent-pid <gui_pid>`.
+            // Arm a watchdog that self-exits when that parent dies, so NO GUI
+            // failure mode (Cmd+Q's synchronous teardown, a crash, an external
+            // SIGTERM/SIGKILL) can orphan the sidecar holding its fixed port.
+            // Absent the flag (e.g. a hand-run `tagent --api` in a shell) the
+            // watchdog is simply not armed.
+            let mut parent_pid: Option<u32> = None;
+            let mut iter = raw_args.iter();
+            while let Some(a) = iter.next() {
+                if a == "--parent-pid"
+                    && let Some(v) = iter.next()
+                    && let Ok(n) = v.parse::<u32>()
+                {
+                    parent_pid = Some(n);
+                    break;
+                }
+                if let Some(rest) = a.strip_prefix("--parent-pid=")
+                    && let Ok(n) = rest.parse::<u32>()
+                {
+                    parent_pid = Some(n);
+                    break;
+                }
+            }
+            if let Some(pp) = parent_pid {
+                api::watchdog::arm_parent_death_watchdog(pp);
+            }
+
             api::server::serve_with_config(api::server::ApiConfig { bind, port, token }).await?;
             return Ok(false);
         }

@@ -142,6 +142,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`tagent --api` self-exits when its parent GUI dies (#3734):** the sidecar
+  now accepts `--parent-pid <pid>` and, when given one, arms a parent-death
+  watchdog that self-exits the process once that parent is gone (detected by
+  reparenting away from it — on macOS to launchd, pid 1 — or the pid vanishing
+  outright). This closes the orphan class the Tauri-side quit reap cannot cover:
+  a GUI killed by macOS's synchronous Cmd+Q teardown, a crash, or an external
+  SIGTERM/SIGKILL previously left `tagent --api` running and holding its fixed
+  port, so a later GUI launch could fail to bind or attach to a stale backend.
+  Absent the flag (e.g. a hand-run `tagent --api` in a shell) the watchdog is
+  simply not armed. Unix-only; a no-op on other targets. `GET /api/health` now
+  also reports the sidecar's `pid` and `ppid` so a GUI can verify it is talking
+  to the sidecar it spawned rather than a reparented orphan on the same port.
+
 - **A parallel phase could not fail when its merge failed (#3671):**
   `executor::dispatch` folded `ConflictResolver::merge`'s `Err` into a
   `"merge failed: ..."` string appended to the phase's content and returned
