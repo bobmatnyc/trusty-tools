@@ -27,6 +27,14 @@
 //! is gone. The normal first-write case — root present, `.trusty-mpm/`
 //! subdir absent — is unaffected and still upgrades to `info!` so directory
 //! creation stops being invisible.
+//!
+//! **TOCTOU note (code-critic finding on the initial PR):** `capture_into`'s
+//! check and `write_scrollback`'s `create_dir_all` are separated by
+//! `driver.capture()` — a real, potentially-blocking `tmux capture-pane`
+//! subprocess call, not an instant. `write_scrollback` independently
+//! re-checks the root immediately before `create_dir_all` to keep that
+//! window as tight as tokio's portable filesystem API allows (see its own
+//! doc for the accepted residual instant-scale race).
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -76,8 +84,13 @@ static REDACT_RE: OnceLock<regex::Regex> = OnceLock::new();
 /// absent (no place to write the file) OR if the workspace root no longer
 /// exists on disk (#3715 — see [`workspace_root_exists`]; refusing to recreate
 /// a vanished workspace root takes priority over capturing the pane, so the
-/// `driver.capture` call is never even made in that case). All errors are
-/// logged and swallowed.
+/// `driver.capture` call is never even made in that case). Because
+/// `driver.capture` is a real (potentially blocking-process-spawn) call
+/// between this check and the write, [`write_scrollback`] independently
+/// RE-CHECKS the root immediately before it creates anything (code-critic
+/// TOCTOU finding on the initial PR — see that function's doc for the tight
+/// re-check and its own residual-window caveat). All errors are logged and
+/// swallowed.
 /// Test: `capture_into_no_workspace_skips_write`,
 /// `capture_into_driver_failure_is_nonfatal`,
 /// `capture_into_missing_workspace_root_refuses_to_recreate`,
@@ -98,8 +111,8 @@ pub async fn capture_into(record: &mut SessionRecord, driver: &dyn ManagedTmuxDr
             match driver.capture(name, SCROLLBACK_LINES) {
                 Ok(text) => {
                     let dest = ws.join(SCROLLBACK_SUBPATH);
-                    match write_scrollback(&dest, &text).await {
-                        Ok(created_dir) => {
+                    match write_scrollback(ws, &dest, &text).await {
+                        Ok(ScrollbackWriteOutcome::Written { created_dir }) => {
                             if created_dir {
                                 info!(
                                     name = %name,
@@ -111,6 +124,15 @@ pub async fn capture_into(record: &mut SessionRecord, driver: &dyn ManagedTmuxDr
                                 debug!(name = %name, path = %dest.display(), "snapshot: scrollback written ({} bytes)", text.len());
                             }
                             record.scrollback_path = Some(dest);
+                        }
+                        Ok(ScrollbackWriteOutcome::RootVanished) => {
+                            warn!(
+                                name = %name,
+                                path = %ws.display(),
+                                "snapshot: workspace root vanished between the pre-capture \
+                                 check and the scrollback write — refusing to recreate; \
+                                 skipping (#3715)"
+                            );
                         }
                         Err(e) => {
                             warn!(name = %name, path = %dest.display(), "snapshot: scrollback write failed: {e}");
@@ -153,31 +175,73 @@ async fn workspace_root_exists(root: &Path) -> bool {
     tokio::fs::metadata(root).await.is_ok()
 }
 
+/// Outcome of [`write_scrollback`]'s attempt.
+///
+/// Why: `capture_into`'s own root check and the actual `create_dir_all` in
+/// `write_scrollback` are separated by `driver.capture()` — a real,
+/// potentially-blocking `tmux capture-pane` subprocess spawn/wait, not an
+/// instant call (code-critic TOCTOU finding on the initial PR). This type
+/// lets `write_scrollback` report that the root vanished in that window
+/// WITHOUT creating anything, so the caller can log it distinctly from a
+/// genuine write failure.
+enum ScrollbackWriteOutcome {
+    /// The file was written. `created_dir` is `true` only if the
+    /// `.trusty-mpm/` subdirectory did not already exist (the normal
+    /// first-write case — #3715 item 2's `info!` upgrade).
+    Written { created_dir: bool },
+    /// The workspace root no longer existed at the tight re-check
+    /// immediately before `create_dir_all` — nothing was created.
+    RootVanished,
+}
+
 /// Write `content` to `dest` with secret redaction and restrictive permissions.
 ///
 /// Why: pane scrollback is a classic secret-leak vector (API keys, Bearer
 /// tokens, env echoes). Redacting before write and restricting the file to
 /// 0600 / parent dir to 0700 provides defence-in-depth for other processes
-/// running as the same uid. Callers are responsible for verifying the
-/// workspace ROOT exists before calling this (#3715 —
-/// [`workspace_root_exists`]); this function only decides whether the
-/// `.trusty-mpm/` SUBDIRECTORY needs creating, which is the normal, expected
-/// first-write case and safe to create unconditionally.
-/// What: creates parent dirs (returning `true` if `parent` did not already
-/// exist, so the caller can log directory creation at `info!` instead of
-/// `debug!` — #3715 item 2), sets the parent dir to 0700 (best-effort),
-/// redacts the content via [`redact_secrets`], and writes the file with mode
-/// 0600 on Unix (falling back to a plain async write on non-Unix).
+/// running as the same uid. `capture_into` already checks `root` exists
+/// before calling this, but that check and this call are separated by a
+/// real, potentially-blocking `driver.capture()` subprocess spawn/wait — a
+/// genuine window in which the workspace root could vanish
+/// (code-critic TOCTOU finding on the initial PR). This function closes that
+/// window as tightly as tokio's portable filesystem API allows: it RE-CHECKS
+/// `root` immediately before `create_dir_all` and bails with
+/// [`ScrollbackWriteOutcome::RootVanished`] (creating nothing) if it no
+/// longer exists. A residual, effectively-instant-scale race remains between
+/// that re-check and `create_dir_all` itself (this is a TOCTOU by
+/// construction — no portable async check-then-act pair is atomic); closing
+/// it completely would need an `openat`-style directory-handle-based create,
+/// which tokio's fs API does not expose portably. Accepted as a residual risk:
+/// the window this narrows to is the gap between two back-to-back syscalls,
+/// not the gap around an external subprocess call.
+/// What: re-checks `root` (bailing early on `RootVanished` if it fails),
+/// creates parent dirs (reporting whether `parent` did not already exist, so
+/// the caller can log directory creation at `info!` instead of `debug!` —
+/// #3715 item 2), sets the parent dir to 0700 (best-effort), redacts the
+/// content via [`redact_secrets`], and writes the file with mode 0600 on
+/// Unix (falling back to a plain async write on non-Unix).
 /// Test: `scrollback_file_has_restrictive_permissions`,
 /// `redaction_scrubs_secrets_before_write`,
 /// `capture_into_creates_trusty_mpm_subdir_when_root_exists`.
-async fn write_scrollback(dest: &Path, content: &str) -> std::io::Result<bool> {
+async fn write_scrollback(
+    root: &Path,
+    dest: &Path,
+    content: &str,
+) -> std::io::Result<ScrollbackWriteOutcome> {
     let parent = dest.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "scrollback path has no parent directory",
         )
     })?;
+
+    // Tight re-check (#3715 — see the Why above): narrows the TOCTOU window
+    // from "duration of driver.capture()'s subprocess" to "one syscall away
+    // from create_dir_all".
+    if !workspace_root_exists(root).await {
+        return Ok(ScrollbackWriteOutcome::RootVanished);
+    }
+
     let parent_existed = tokio::fs::try_exists(parent).await.unwrap_or(false);
     tokio::fs::create_dir_all(parent).await?;
 
@@ -204,7 +268,9 @@ async fn write_scrollback(dest: &Path, content: &str) -> std::io::Result<bool> {
     #[cfg(not(unix))]
     tokio::fs::write(dest, redacted.as_bytes()).await?;
 
-    Ok(!parent_existed)
+    Ok(ScrollbackWriteOutcome::Written {
+        created_dir: !parent_existed,
+    })
 }
 
 /// Create (or truncate) `path` and write `data` with mode 0600 on Unix.

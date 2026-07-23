@@ -630,3 +630,42 @@ fn canonicalize_streak_resets_on_success() {
         "an unrelated path's streak must be untouched by another path's reset"
     );
 }
+
+/// A path whose session leaves the active set (decommissioned, deleted, or
+/// `workspace_path` changed) must have its streak evicted, not linger forever
+/// — otherwise `CanonicalizeFailureStreaks` grows unbounded across the
+/// daemon's lifetime (#3715 finding 2).
+///
+/// What: builds up failure streaks for two paths, then calls `retain_active`
+/// with an active set containing only ONE of them; asserts the evicted
+/// path's streak restarts at 1 on its next failure (proving the old count
+/// was actually removed, not just no longer escalating) while the retained
+/// path's streak is untouched.
+#[test]
+fn canonicalize_streak_evicts_paths_no_longer_active() {
+    let mut streaks = CanonicalizeFailureStreaks::default();
+    let still_active = std::path::PathBuf::from("/workspace/still-active");
+    let left_active = std::path::PathBuf::from("/workspace/decommissioned");
+
+    streaks.record_failure(&still_active);
+    streaks.record_failure(&still_active);
+    streaks.record_failure(&left_active);
+    streaks.record_failure(&left_active);
+    streaks.record_failure(&left_active);
+
+    let active: std::collections::HashSet<std::path::PathBuf> =
+        [still_active.clone()].into_iter().collect();
+    streaks.retain_active(&active);
+
+    assert_eq!(
+        streaks.record_failure(&left_active),
+        1,
+        "a path evicted by retain_active must restart its streak at 1, proving \
+         the old count was removed rather than merely capped"
+    );
+    assert_eq!(
+        streaks.record_failure(&still_active),
+        3,
+        "a path still present in the active set must be untouched by eviction"
+    );
+}
