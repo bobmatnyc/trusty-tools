@@ -11,8 +11,9 @@
 //! tarball is downloaded, SHA-256 verified, and atomically placed into the install
 //! directory (`~/.local/bin` by default). On non-Tier-1 platforms (or when the
 //! prebuilt download fails) the code falls back to
-//! `trusty_common::update::perform_upgrade` (= `cargo install <crate> --locked`),
-//! verifying cargo is present first. Each freshly-installed binary is
+//! `trusty_common::update::perform_upgrade_captured` (= `cargo install <crate>
+//! --locked`, stdio captured rather than inherited — #3830), verifying cargo is
+//! present first. Each freshly-installed binary is
 //! health-gated with `verify_installed_binary`. Progress rows are rendered via
 //! `trusty-progress`. Honours `--yes` (non-interactive) and `--json` (machine
 //! output). Returns a process exit code: 0 all installed, 2 one or more failed.
@@ -616,9 +617,16 @@ fn cargo_fallback_bin_path(binary: &str, install_dir: &Path) -> PathBuf {
 /// the cargo path is the universal fallback for unsupported platforms and failures.
 ///
 /// What: Resolves the install directory (prefers `~/.local/bin` to avoid cdhash
-/// issues on macOS; falls back to cargo path via `perform_upgrade` when prebuilt
-/// fails). Calls `crate::download::try_install_prebuilt`; on `Outcome::Fallback`
-/// emits a narration line and delegates to `perform_upgrade`. In BOTH cases,
+/// issues on macOS; falls back to cargo path via `perform_upgrade_captured` when
+/// prebuilt fails). Calls `crate::download::try_install_prebuilt`; on
+/// `Outcome::Fallback` — which fires on ANY prebuilt-download failure (network
+/// blip, 404, rate-limit, SHA mismatch), not just an unsupported platform, so
+/// this path is reachable even on a Tier-1 machine — emits a narration line
+/// and delegates to `perform_upgrade_captured` (#3830: this call runs inside
+/// `install_all`'s per-component loop, which may still have an interactive
+/// `LiveChecklist` actively animating OTHER rows; the `_captured` variant
+/// never lets `cargo install`'s own output touch the terminal directly, the
+/// same class of fix as `service_bootstrap::run_captured`). In BOTH cases,
 /// health-gates the CONCRETE just-installed path (#3554) via
 /// `trusty_common::update::verify_installed_binary_at_path` — never a
 /// name-based lookup a stale earlier-PATH/earlier-priority-directory binary
@@ -703,7 +711,13 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
                     m.crate_name
                 )
             })?;
-            trusty_common::update::perform_upgrade(&m.crate_name).await?;
+            // #3830: `_captured` (never `perform_upgrade`) — this call runs
+            // inside `install_all`'s per-component loop, which may still have
+            // an interactive `LiveChecklist` actively animating other rows;
+            // `Outcome::Fallback` fires on ANY prebuilt-download failure, not
+            // just an unsupported platform, so this is reachable on a Tier-1
+            // machine too (traced by code-critic on PR #3834).
+            trusty_common::update::perform_upgrade_captured(&m.crate_name).await?;
             // #3554: `cargo install` always lands in the cargo bin dir
             // (`$CARGO_HOME/bin`, falling back to `~/.cargo/bin`) — resolve
             // that CONCRETE destination directly rather than a name lookup.

@@ -6,6 +6,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.8] — 2026-07-24
+
+### Fixed
+
+- `tctl install`'s live per-component progress checklist (#3804) no longer
+  spams duplicate/interleaved lines on a real terminal (#3830, demo-critical).
+  Root cause: `RealServiceEnv::run_service_install` shelled out to
+  `<binary> service install` via `Command::status()`, which INHERITS the
+  parent's stdout/stderr — so that child's output wrote directly into the
+  terminal region `LiveChecklist`'s `indicatif::MultiProgress` was actively
+  redrawing (other components' rows keep steady-ticking in the background
+  for the whole install loop), desyncing indicatif's own "how many lines did
+  I just draw" tracking and producing exactly the observed duplicate,
+  interleaved output. Fixed by switching that call to `Command::output()`,
+  which captures the child's stdout/stderr instead of inheriting them; any
+  failure's stderr is now folded into the returned error message rather than
+  silently dropped. Reproduced and verified via a PTY capture replayed
+  through a VT100 terminal emulator (before: dozens of duplicated
+  `installed` lines; after: a clean, stable N-row block).
+- Second occurrence of the same #3830 bug class, found by code-critic on
+  PR #3834: the `cargo install` fallback path (`install_one`, hit whenever
+  `download::try_install_prebuilt` returns `Outcome::Fallback` — which fires
+  on ANY prebuilt-download failure, network blip, 404, rate-limit, or SHA
+  mismatch, not just an unsupported platform, so it is reachable even on a
+  Tier-1 machine) called `trusty_common::update::perform_upgrade`, which also
+  inherits its subprocess's stdout/stderr. Switched that call to the new
+  `perform_upgrade_captured` (trusty-common 0.26.x) so it can never corrupt
+  an active `LiveChecklist` either.
+
 ## [0.4.7] — 2026-07-23
 
 ### Added

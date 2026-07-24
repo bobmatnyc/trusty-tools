@@ -5,12 +5,116 @@
 //! share identical battle-tested logic.
 //!
 //! What: Three building blocks plus one orchestrating function:
-//! - [`perform_upgrade`] — shell out to `cargo install <name> --locked`.
+//! - [`perform_upgrade`] — shell out to `cargo install <name> --locked`,
+//!   inheriting stdio (for the standalone `upgrade` commands); the
+//!   [`perform_upgrade_captured`] sibling captures stdio instead, for a
+//!   caller (trusty-installer) that may be driving its own live terminal
+//!   display concurrently (#3830).
 //! - [`verify_installed_binary`] — health-gate via `<bin> --version`.
 //! - [`is_launchd_supervised`] — detect launchd supervision heuristically.
 //! - [`upgrade_and_restart`] — compose the three above into the full workflow.
 //!
 //! Test: `cargo test -p trusty-common --features update-check`
+
+/// How a shelled-out upgrade command's stdout/stderr should be handled.
+///
+/// Why (#3830): `perform_upgrade` is shared — trusty-memory's and
+/// trusty-search's own `upgrade` commands intentionally want cargo's live
+/// build output inherited straight through to the operator's terminal. But
+/// trusty-installer's `install_all` calls into this same primitive from
+/// INSIDE its per-component loop while an interactive `LiveChecklist`
+/// (`indicatif::MultiProgress`) may still be actively steady-ticking OTHER
+/// not-yet-terminal rows on a background thread — an inherited child writing
+/// straight to that same terminal fd races indicatif's redraw and desyncs its
+/// line-count tracking, producing the exact duplicate/interleaved-line
+/// corruption #3830 reported (traced: `download::try_install_prebuilt`
+/// returns `Outcome::Fallback` on ANY failure — network blip, 404,
+/// rate-limit, SHA mismatch, not just an unsupported platform — so this path
+/// is reachable on a Tier-1 machine too). A typed mode keeps that difference
+/// explicit at each call site instead of a bare boolean.
+/// What: [`Inherit`] passes the child's stdout/stderr straight through
+/// (existing behaviour, unchanged for the standalone upgrade commands);
+/// [`Capture`] captures both instead, folding stderr into the returned error
+/// on failure so a captured diagnosis is never silently dropped.
+/// Test: `run_with_mode_inherit_leaks_to_parent_stdio` (proves `Inherit`
+/// really does inherit — the pre-fix behaviour, still correct for its
+/// callers), `run_with_mode_capture_never_leaks_to_parent_stdio` (the #3830
+/// regression proof for `Capture`).
+///
+/// [`Inherit`]: UpgradeOutput::Inherit
+/// [`Capture`]: UpgradeOutput::Capture
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UpgradeOutput {
+    /// Inherit the parent's stdout/stderr (cargo's live build output is
+    /// visible to the operator). Used by [`perform_upgrade`].
+    Inherit,
+    /// Capture stdout/stderr instead of inheriting. Used by
+    /// [`perform_upgrade_captured`].
+    Capture,
+}
+
+/// Run `cmd` to completion per `mode`, returning `Ok(())` on a zero exit.
+///
+/// Why: extracted as a free function over an already-configured `Command`
+/// (rather than inlined in `perform_upgrade`) so the inherit-vs-capture
+/// distinction is directly unit-testable against ANY command — not just
+/// `cargo install`, which needs the network and is `#[ignore]`-tagged in CI.
+/// What: [`UpgradeOutput::Inherit`] uses `.status()` (inherits stdio, the
+/// pre-#3830 behaviour); [`UpgradeOutput::Capture`] uses `.output()`
+/// (captures stdio) and folds trimmed stderr into the error on a non-zero
+/// exit. `label` is the human-readable command description used in error
+/// text (e.g. `` `cargo install foo --locked` ``).
+/// Test: `run_with_mode_inherit_leaks_to_parent_stdio`,
+/// `run_with_mode_capture_never_leaks_to_parent_stdio`,
+/// `run_with_mode_capture_folds_stderr_into_error`.
+pub(crate) async fn run_with_mode(
+    mut cmd: tokio::process::Command,
+    mode: UpgradeOutput,
+    label: &str,
+) -> anyhow::Result<()> {
+    match mode {
+        UpgradeOutput::Inherit => {
+            let status = cmd
+                .status()
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to spawn {label}: {e}"))?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("{label} exited with status {status}"))
+            }
+        }
+        UpgradeOutput::Capture => {
+            let output = cmd
+                .output()
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to spawn {label}: {e}"))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = stderr.trim();
+                if stderr.is_empty() {
+                    Err(anyhow::anyhow!(
+                        "{label} exited with status {}",
+                        output.status
+                    ))
+                } else {
+                    Err(anyhow::anyhow!(
+                        "{label} exited with status {}: {stderr}",
+                        output.status
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn cargo_install_cmd(crate_name: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("cargo");
+    cmd.args(["install", crate_name, "--locked"]);
+    cmd
+}
 
 /// Run `cargo install <crate_name> --locked` to upgrade the named crate.
 ///
@@ -22,29 +126,71 @@
 ///
 /// What: Spawns `cargo install <crate_name> --locked`, inheriting the current
 /// environment so `CARGO_HOME`, `RUSTUP_TOOLCHAIN`, and PATH resolve normally.
-/// Cargo's stdout/stderr are inherited so the operator can follow progress.
-/// Returns `Ok(())` on exit 0; returns `Err` with a descriptive message on
-/// non-zero exit.
+/// Cargo's stdout/stderr are inherited ([`UpgradeOutput::Inherit`]) so the
+/// operator can follow progress. Returns `Ok(())` on exit 0; returns `Err`
+/// with a descriptive message on non-zero exit.
+///
+/// For a caller that may be driving its own live terminal display
+/// concurrently (trusty-installer's `LiveChecklist`), see
+/// [`perform_upgrade_captured`] instead — inheriting here would corrupt that
+/// display (#3830).
 ///
 /// Test: `perform_upgrade_fails_cleanly_on_nonexistent_crate` (ignore-tagged —
 /// no real cargo-install in CI); manual validation via `trusty-memory upgrade --yes`.
 pub async fn perform_upgrade(crate_name: &str) -> anyhow::Result<()> {
     tracing::info!(crate_name, "running: cargo install {} --locked", crate_name);
-
-    let status = tokio::process::Command::new("cargo")
-        .args(["install", crate_name, "--locked"])
-        .status()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn `cargo install`: {e}"))?;
-
-    if status.success() {
+    let label = format!("`cargo install {crate_name} --locked`");
+    let result = run_with_mode(
+        cargo_install_cmd(crate_name),
+        UpgradeOutput::Inherit,
+        &label,
+    )
+    .await;
+    if result.is_ok() {
         tracing::info!(crate_name, "cargo install succeeded");
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "`cargo install {crate_name} --locked` exited with status {status}"
-        ))
     }
+    result
+}
+
+/// Run `cargo install <crate_name> --locked`, CAPTURING stdout/stderr instead
+/// of inheriting them (#3830).
+///
+/// Why: trusty-installer's `install_all` calls into the cargo-fallback path
+/// (`download::try_install_prebuilt` returning `Outcome::Fallback`, which
+/// fires on ANY prebuilt-download failure — not just an unsupported
+/// platform) from inside its per-component loop, while an interactive
+/// `LiveChecklist` may still be actively animating OTHER rows in the
+/// background. [`perform_upgrade`]'s inherited stdio would write straight
+/// into indicatif's owned terminal region and reproduce the #3830
+/// duplicate/interleaved-line corruption; this variant never touches the
+/// terminal directly.
+///
+/// What: Identical to [`perform_upgrade`] except it uses
+/// [`UpgradeOutput::Capture`] — the child's stdout/stderr are captured, and a
+/// non-zero exit's stderr is folded into the returned error (never silently
+/// dropped, never leaked to the live terminal).
+///
+/// Test: `run_with_mode_capture_never_leaks_to_parent_stdio`,
+/// `run_with_mode_capture_folds_stderr_into_error`; the `cargo install`
+/// wiring itself mirrors `perform_upgrade`'s (untested beyond that — no real
+/// network install in CI).
+pub async fn perform_upgrade_captured(crate_name: &str) -> anyhow::Result<()> {
+    tracing::info!(
+        crate_name,
+        "running (captured): cargo install {} --locked",
+        crate_name
+    );
+    let label = format!("`cargo install {crate_name} --locked`");
+    let result = run_with_mode(
+        cargo_install_cmd(crate_name),
+        UpgradeOutput::Capture,
+        &label,
+    )
+    .await;
+    if result.is_ok() {
+        tracing::info!(crate_name, "cargo install succeeded");
+    }
+    result
 }
 
 /// Resolve the ordered list of directories a binary might have been
