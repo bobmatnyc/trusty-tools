@@ -272,3 +272,19 @@ fn switch_command_blocked_for_restricted_persona() {
         "unrestricted user may switch to any persona"
     );
 }
+
+/// Kartik Yellepeddi (U09J5EFTSA3) must be present in the default RBAC table
+/// with `ALL` tier and a `cto-assistant`-restricted persona allow-list —
+/// parity with the retiring custom `cto_bot`'s `BOT_ALLOWED_USERS` default
+/// table (#3852).
+#[test]
+fn default_rbac_users_includes_kartik_parity() {
+    let users = default_rbac_users();
+    let kartik = users.get("U09J5EFTSA3").expect("kartik entry present");
+    assert_eq!(kartik.name, "Kartik");
+    assert_eq!(kartik.tier, crate::rbac::ServiceTier::All);
+    assert_eq!(
+        kartik.allowed_personas.as_deref(),
+        Some(&["cto-assistant".to_string()][..])
+    );
+}
