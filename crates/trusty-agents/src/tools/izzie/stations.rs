@@ -51,9 +51,19 @@ pub const STATIONS: &[Station] = &[
         aliases: &["greystone"],
     },
     Station {
+        name: "Hastings-on-Hudson",
+        stop_id: "22",
+        aliases: &["hastings-on-hudson", "hastings on hudson", "hastings"],
+    },
+    Station {
         name: "Dobbs Ferry",
         stop_id: "23",
         aliases: &["dobbs ferry", "dobbs"],
+    },
+    Station {
+        name: "Ardsley-on-Hudson",
+        stop_id: "24",
+        aliases: &["ardsley-on-hudson", "ardsley on hudson", "ardsley"],
     },
     Station {
         name: "Irvington",
@@ -259,6 +269,14 @@ mod tests {
         assert_eq!(match_station("haven").unwrap().stop_id, "149");
         assert!(match_station("Nonexistent Town").is_none());
         assert!(match_station("   ").is_none());
+    }
+
+    #[test]
+    fn match_station_hastings_and_ardsley() {
+        assert_eq!(match_station("hastings").unwrap().stop_id, "22");
+        assert_eq!(match_station("Hastings-on-Hudson").unwrap().stop_id, "22");
+        assert_eq!(match_station("ardsley").unwrap().stop_id, "24");
+        assert_eq!(match_station("Ardsley-on-Hudson").unwrap().stop_id, "24");
     }
 
     #[test]
