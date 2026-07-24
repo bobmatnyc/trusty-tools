@@ -34,6 +34,85 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   inherits its subprocess's stdout/stderr. Switched that call to the new
   `perform_upgrade_captured` (trusty-common 0.26.x) so it can never corrupt
   an active `LiveChecklist` either.
+- **Post-install verify raced daemon startup instead of waiting for it**
+  (#3833, demo-critical): `run_verify_tail`'s `launchctl kickstart -k` retry
+  re-probed health exactly once, immediately — trusty-search notably
+  downloads embedding models on first boot and can take tens of seconds, so a
+  perfectly healthy machine reported `verify: NOT VERIFIED` / exit code 2
+  moments before every daemon actually came up. `verify_one` now polls (new
+  `poll_until_not_down`) on a bounded ~55-60s per-member schedule (up to 12
+  attempts, 5s apart) instead of a single instant re-probe, printing a
+  "waiting for services to start..." indication while it does. A member
+  still `down` after the wait is now classified into one of three distinct
+  end states (`DownState::NotLoaded` / `Crashed { exit_code }` /
+  `StillStarting`, via `launchctl list <label>`) instead of a uniform,
+  undiagnosable `down` — the per-row human summary now says e.g.
+  `trusty-memory  down (not loaded)` or `trusty-search  down (crashed, exit
+  78)`. The exit code / `verified` verdict already derived from the (now
+  post-wait) `members` health, so both now reflect the FINAL state.
+  - **Code-critic fix round**: the per-member poll folds SEQUENTIALLY over up
+    to five launchd members, so five simultaneously-stuck daemons could stall
+    `tctl install` for ~4-5 minutes — exactly the scenario an operator most
+    needs a fast signal for. A new `AGGREGATE_POLL_BUDGET` (~120s total,
+    checked fresh before every member) now bounds the WHOLE poll-wait phase,
+    not just each member individually (`bounded_attempts` shrinks a late
+    member's own attempt ceiling to fit what's left); once exhausted, the
+    remaining members skip their poll (an instant probe only, flagged
+    `budget_exhausted` in the JSON row) and `tctl install` prints one summary
+    note — "poll budget exhausted — giving up on remaining members; re-run
+    `tctl install` to check them again" — instead of repeating it per row.
+- **`trusty-memory` was the only daemon member whose `service install` never
+  bootstrapped the plist** (#3832, demo-critical — root cause lived in
+  `trusty-memory`, see its CHANGELOG): `tctl install` shells out uniformly to
+  `<binary> service install` for every launchd-managed member expecting it to
+  write AND load the agent (matching `service_bootstrap`'s documented
+  contract); trusty-memory alone only wrote the plist, so a fresh-machine
+  install silently reported "trusty-memory: launchd service installed and
+  bootstrapped" while `com.trusty.memory` never appeared in `launchctl list`.
+  The verify tail's `down_state` classification above (`NotLoaded`) also
+  makes this failure mode immediately diagnosable if it recurs for any
+  member.
+  - **Code-critic fix round (HIGH)**: `tctl install` downloads a component's
+    LATEST PUBLISHED release binary, so the trusty-memory source fix above
+    only protects a demo once a new trusty-memory release ships — an
+    already-published (older) binary on a freshly-imaged machine would still
+    hit the bug. `bootstrap_one` (`service_bootstrap.rs`) no longer trusts a
+    clean `service install` exit code as proof of "loaded": it now
+    independently checks `launchctl list <label>` (`ServiceEnv::is_loaded`,
+    reusing the verify tail's own `launchctl list` primitive via the new
+    `verify_tail::is_label_loaded`) and, if the label is NOT loaded despite a
+    clean exit, force-bootstraps the already-written plist directly
+    (`ServiceEnv::bootstrap_fallback`, mirroring `lifecycle.rs`'s minimal-
+    `LaunchdConfig` pattern) — reported as the new
+    `BootstrapAction::InstalledByFallback` ("bootstrapped by installer
+    (component binary did not load its service)") rather than a silently
+    inaccurate `Installed`. This wraps the NEW captured `run_service_install`
+    (the `run_captured`-based call above, #3830) — the postcondition check
+    runs after that captured call returns `Ok`, regardless of which
+    implementation produced it. This makes the fix effective the moment
+    installer 0.4.8 ships, independent of any component binary's release
+    age, and guards the whole class of bug for every current and future
+    service member — not just trusty-memory. Both the fallback-success and
+    fallback-also-fails paths are unit-tested against `FakeServiceEnv`
+    (`bootstrap_one_falls_back_when_not_loaded`,
+    `bootstrap_one_reports_failure_when_fallback_also_fails`,
+    `bootstrap_one_installed_directly_when_loaded`).
+
+### Follow-up (tracked for a future release)
+
+- `trusty-memory`'s `service_install()` bootstrap call (the binary-side half
+  of #3832) has manual/integration verification only — there is no seam in
+  `trusty_common::launchd::LaunchdConfig` equivalent to `service_bootstrap`'s
+  `ServiceEnv` trait, so `install()` + `bootstrap()` sequencing across the
+  four daemon crates' `service.rs` files cannot be unit-tested in isolation
+  yet. (An earlier draft of this entry incorrectly claimed
+  `tests/path_shadow_e2e.rs` covered it — that test file exercises the
+  trusty-mpm supervisor bootstrap and PATH-shadow detection only, never
+  `trusty-memory service install`.) A `LaunchdOps`-style trait seam mirroring
+  `ServiceEnv`/`StubLaunchctl` would let this be unit-tested directly; left
+  as a follow-up since it touches all four daemon crates. The NEW
+  installer-side defensive fallback above IS fully unit-tested and is now the
+  demo-critical safety net regardless of this follow-up's timing.
 
 ## [0.4.7] — 2026-07-23
 
