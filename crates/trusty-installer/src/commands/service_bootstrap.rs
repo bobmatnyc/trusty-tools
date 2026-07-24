@@ -37,6 +37,21 @@
 //! reported as [`BootstrapAction::InstalledByFallback`] rather than a silent
 //! `Installed`, so the narration is honest about what actually happened.
 //!
+//! 🔴 (#3841 root-cause fix, demo-critical) 0.4.8 shipped the #3836 check
+//! ONLY on the fresh-install branch (no plist yet). A machine already
+//! carrying a plist-present-but-unloaded state — e.g. left behind by an
+//! EARLIER pre-0.4.8 run that hit #3832 — hits `bootstrap_one`'s
+//! ALREADY-INSTALLED skip branch instead, which used to return `Skipped`
+//! unconditionally without EVER checking `is_loaded`, so the defensive
+//! postcondition never ran for exactly the machines it exists to repair.
+//! [`bootstrap_one`] now runs the same `is_loaded` → `bootstrap_fallback`
+//! postcondition on THAT branch too (reported as
+//! [`BootstrapAction::LoadedByFallback`]), still without ever re-running
+//! `service install` over an existing plist (non-clobbering, unchanged). The
+//! post-install verify tail (`verify_tail`) additionally attempts the same
+//! fallback at its own layer for a `NotLoaded` member — belt-and-braces, so a
+//! future skip-path regression still self-heals at verify time.
+//!
 //! Testability: every side effect is behind the [`ServiceEnv`] seam so the
 //! decision logic is unit-tested against an in-memory fake — the tests NEVER
 //! touch `~/Library/LaunchAgents` or invoke `launchctl` against the live
@@ -44,8 +59,8 @@
 //!
 //! Test: `tests` covers the member predicate, the opt-out truth table, every
 //! [`bootstrap_one`] branch — including the #3836 defensive-fallback branches
-//! — (via `FakeServiceEnv`), and the [`start_plan`] relaxation used by
-//! `lifecycle.rs`.
+//! and the #3841 already-installed-path branches — (via `FakeServiceEnv`),
+//! and the [`start_plan`] relaxation used by `lifecycle.rs`.
 
 /// Environment-variable opt-out for the post-install service bootstrap.
 ///
@@ -65,11 +80,16 @@ pub const NO_SERVICE_ENV: &str = "TCTL_NO_SERVICE_BOOTSTRAP";
 /// install` ran clean AND launchd confirmed the label loaded;
 /// `InstalledByFallback` (#3836) means `service install` exited clean but
 /// launchd did NOT have the label loaded, so the installer force-bootstrapped
-/// the plist directly; `Failed` carries the (non-fatal) error text.
+/// the plist directly; `LoadedByFallback` (#3841 — the already-installed
+/// skip-path gap) means a plist ALREADY EXISTED on disk (so `service install`
+/// was never re-run at all) but launchd did not have the label loaded, so the
+/// installer force-bootstrapped the existing plist directly; `Failed` carries
+/// the (non-fatal) error text.
 /// Test: `bootstrap_one_*` tests assert each variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BootstrapAction {
-    /// Not attempted — opt-out, not a service member, or plist already present.
+    /// Not attempted — opt-out, not a service member, or plist already
+    /// present AND already loaded.
     Skipped(String),
     /// `<binary> service install` ran successfully AND launchd loaded it.
     Installed,
@@ -79,6 +99,12 @@ pub enum BootstrapAction {
     /// component binary whose own `service install` doesn't actually load
     /// the agent, e.g. an older already-published release).
     InstalledByFallback,
+    /// The plist already existed on disk (so `service install` was NOT
+    /// re-run — non-clobbering) but launchd did not have the label loaded;
+    /// the installer force-bootstrapped the existing plist directly (#3841 —
+    /// the same #3832 defense, extended to the already-installed/re-run
+    /// path, which previously skipped the postcondition check entirely).
+    LoadedByFallback,
     /// Shell-out failed; install continues (fail-soft) but this is surfaced.
     Failed(String),
 }
@@ -98,6 +124,10 @@ impl BootstrapAction {
             BootstrapAction::InstalledByFallback => format!(
                 "{binary}: launchd service installed; bootstrapped by installer \
                  (component binary did not load its service)"
+            ),
+            BootstrapAction::LoadedByFallback => format!(
+                "{binary}: launchd plist already present but was not loaded; \
+                 bootstrapped by installer"
             ),
             BootstrapAction::Skipped(reason) => {
                 format!("{binary}: service bootstrap skipped ({reason})")
@@ -172,15 +202,37 @@ pub trait ServiceEnv {
 /// Decide and (via the seam) execute the service bootstrap for one member.
 ///
 /// Why: this is the whole per-member policy — filter non-service members, honour
-/// idempotency / non-clobber by skipping when a plist already exists, delegate
-/// to `service install`, and (#3836) independently VERIFY the postcondition
-/// `service install` is supposed to establish (the label is loaded) rather
-/// than trusting its exit code alone — #3832 was exactly a component binary
-/// whose `service install` exited 0 without ever loading the agent.
+/// idempotency / non-clobber by never re-running `service install` over an
+/// existing plist, and (#3836, extended by #3841) independently VERIFY the
+/// postcondition `service install` is supposed to establish (the label is
+/// loaded) rather than trusting its exit code alone — #3832 was exactly a
+/// component binary whose `service install` exited 0 without ever loading the
+/// agent.
+///
+/// 🔴 (#3841 root-cause fix) The #3836 postcondition check originally lived
+/// ONLY on the fresh-install branch below (`plist_present == false`). On a
+/// machine already carrying a plist-present-but-never-loaded state — e.g. an
+/// EARLIER `tctl install` run that hit exactly the #3832 bug before 0.4.8
+/// shipped — a re-run's `plist_present(binary)` is `true`, so the OLD code
+/// returned `Skipped` immediately and the postcondition never ran at all.
+/// That is precisely the demo-critical reproduction: 0.4.8's defensive
+/// fallback existed, but the exact machines it was meant to repair (damaged
+/// by an older run) took the one code path that never reached it. The
+/// already-present branch now runs the SAME `is_loaded` check the fresh
+/// branch does, and force-bootstraps via [`ServiceEnv::bootstrap_fallback`]
+/// (never re-running `service install` — the non-clobber guarantee is
+/// unchanged) when the label is not loaded.
+///
 /// What: returns [`BootstrapAction::Skipped`] when the member has no `service
-/// install` subcommand or a plist is already present. Otherwise runs
-/// `run_service_install`; on success, checks [`ServiceEnv::is_loaded`] — if
-/// loaded, returns [`BootstrapAction::Installed`]; if NOT loaded, calls
+/// install` subcommand. When a plist is already present: if
+/// [`ServiceEnv::is_loaded`], returns `Skipped` (unchanged, non-clobbering
+/// behaviour); otherwise force-bootstraps the existing plist via
+/// [`ServiceEnv::bootstrap_fallback`] and returns
+/// [`BootstrapAction::LoadedByFallback`] (or `Failed` if the fallback itself
+/// fails) WITHOUT ever calling `run_service_install`. Otherwise (no plist
+/// yet) runs `run_service_install`; on success, checks
+/// [`ServiceEnv::is_loaded`] — if loaded, returns
+/// [`BootstrapAction::Installed`]; if NOT loaded, calls
 /// [`ServiceEnv::bootstrap_fallback`] and returns
 /// [`BootstrapAction::InstalledByFallback`] on success or
 /// [`BootstrapAction::Failed`] (with BOTH failure reasons folded in) if the
@@ -188,19 +240,38 @@ pub trait ServiceEnv {
 /// [`BootstrapAction::Failed`] directly (the fallback is only for a
 /// misleadingly-successful exit code, not a genuine failure).
 /// Test: `bootstrap_one_skips_non_service_member`,
-/// `bootstrap_one_skips_when_plist_present`, `bootstrap_one_installs_when_absent`,
-/// `bootstrap_one_reports_failure`, `bootstrap_one_falls_back_when_not_loaded`,
+/// `bootstrap_one_skips_when_plist_present_and_loaded`,
+/// `bootstrap_one_installs_when_absent`, `bootstrap_one_reports_failure`,
+/// `bootstrap_one_falls_back_when_not_loaded`,
 /// `bootstrap_one_installed_directly_when_loaded`,
-/// `bootstrap_one_reports_failure_when_fallback_also_fails`.
+/// `bootstrap_one_reports_failure_when_fallback_also_fails`,
+/// `bootstrap_one_loads_via_fallback_when_plist_present_but_not_loaded`
+/// (THE #3841 miss, pinned against current main),
+/// `bootstrap_one_reports_failure_when_present_but_fallback_fails`.
 pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
     if !member_has_service_install(binary) {
         return BootstrapAction::Skipped(format!("{binary} has no `service install` subcommand"));
     }
     if env.plist_present(binary) {
-        return BootstrapAction::Skipped(
-            "launchd plist already present — left untouched (re-run `service install` to refresh)"
-                .to_string(),
-        );
+        // #3841: a plist already existing on disk is NOT proof launchd has
+        // it loaded — this is the exact gap the skip path left open. Never
+        // re-run `service install` over an existing plist (non-clobbering,
+        // unchanged), but DO independently verify the load postcondition and
+        // repair it in place when it doesn't hold.
+        if env.is_loaded(binary) {
+            return BootstrapAction::Skipped(
+                "launchd plist already present and loaded — left untouched (re-run \
+                 `service install` to refresh)"
+                    .to_string(),
+            );
+        }
+        return match env.bootstrap_fallback(binary) {
+            Ok(()) => BootstrapAction::LoadedByFallback,
+            Err(e) => BootstrapAction::Failed(format!(
+                "launchd plist already present for {binary} but not loaded, and the \
+                 installer's fallback `launchctl bootstrap` failed: {e}"
+            )),
+        };
     }
     if let Err(e) = env.run_service_install(binary) {
         return BootstrapAction::Failed(e.to_string());
@@ -534,12 +605,14 @@ mod tests {
         assert!(env.installed.borrow().is_empty());
     }
 
-    /// Why: idempotency + non-clobber — an existing plist must be left untouched
-    /// with NO `service install` call (no needless restart, no overwrite).
-    /// What: with `present = true`, asserts `Skipped` and no recorded install.
+    /// Why: idempotency + non-clobber — an existing, ALREADY LOADED plist
+    /// must be left untouched with NO `service install` call and NO fallback
+    /// bootstrap (no needless restart, no overwrite).
+    /// What: with `present = true` and `loaded` at its default (`true`),
+    /// asserts `Skipped`, no recorded install, and no recorded fallback call.
     /// Test: this is the test.
     #[test]
-    fn bootstrap_one_skips_when_plist_present() {
+    fn bootstrap_one_skips_when_plist_present_and_loaded() {
         let env = FakeServiceEnv::new(true, false);
         let action = bootstrap_one(&env, "trusty-search");
         assert!(matches!(action, BootstrapAction::Skipped(_)));
@@ -547,6 +620,57 @@ mod tests {
             env.installed.borrow().is_empty(),
             "must not re-install over an existing plist"
         );
+        assert!(
+            env.fallback_calls.borrow().is_empty(),
+            "must not force-bootstrap an already-loaded label"
+        );
+    }
+
+    /// Why: THE #3841 root-cause fix — a plist already present on disk is NOT
+    /// proof launchd has it loaded (a prior run can leave exactly this state,
+    /// #3832's failure signature). Before the fix, `bootstrap_one` returned
+    /// `Skipped` here WITHOUT ever checking `is_loaded`, so the #3836
+    /// defensive postcondition never ran for exactly the damaged machines it
+    /// exists to repair. This test fails against the pre-fix code (it always
+    /// short-circuited to `Skipped` the instant `plist_present` was `true`).
+    /// What: with `present = true` AND `loaded = false` (via `.not_loaded()`),
+    /// asserts `LoadedByFallback`, exactly one recorded `bootstrap_fallback`
+    /// call, and NO `service install` call (non-clobbering — the plist itself
+    /// is never rewritten, only loaded).
+    /// Test: this is the test.
+    #[test]
+    fn bootstrap_one_loads_via_fallback_when_plist_present_but_not_loaded() {
+        let env = FakeServiceEnv::new(true, false).not_loaded();
+        let action = bootstrap_one(&env, "trusty-memory");
+        assert_eq!(action, BootstrapAction::LoadedByFallback);
+        assert_eq!(env.fallback_calls.borrow().as_slice(), ["trusty-memory"]);
+        assert!(
+            env.installed.borrow().is_empty(),
+            "an already-present plist must never be re-installed, only loaded"
+        );
+    }
+
+    /// Why: even on the already-installed path, a fallback failure must be
+    /// surfaced loudly (`Failed`) with a message naming BOTH the plist-not-
+    /// loaded state and the fallback's own failure reason — mirrors
+    /// `bootstrap_one_reports_failure_when_fallback_also_fails` for the
+    /// fresh-install branch.
+    /// What: with `present = true`, `loaded = false`, and the fallback set to
+    /// fail, asserts `Failed` whose message names both facts.
+    /// Test: this is the test.
+    #[test]
+    fn bootstrap_one_reports_failure_when_present_but_fallback_fails() {
+        let env = FakeServiceEnv::new(true, false)
+            .not_loaded()
+            .failing_fallback();
+        let action = bootstrap_one(&env, "trusty-review");
+        match action {
+            BootstrapAction::Failed(e) => {
+                assert!(e.contains("not loaded"), "message: {e}");
+                assert!(e.contains("simulated fallback failure"), "message: {e}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     /// Why: the core happy path — a service member with no plist yet gets
@@ -646,6 +770,9 @@ mod tests {
             .note("trusty-search")
             .contains("trusty-search"));
         assert!(BootstrapAction::InstalledByFallback
+            .note("trusty-memory")
+            .contains("trusty-memory"));
+        assert!(BootstrapAction::LoadedByFallback
             .note("trusty-memory")
             .contains("trusty-memory"));
         assert!(BootstrapAction::Skipped("x".into())
