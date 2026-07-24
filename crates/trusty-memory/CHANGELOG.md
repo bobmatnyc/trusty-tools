@@ -27,7 +27,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   plist, exactly like its siblings; a bootstrap failure now propagates as an
   `Err` (never swallowed) instead of being silently skipped. `service start`
   is kept as an idempotent alias of `service install` for backward
-  compatibility with existing scripts/docs.
+  compatibility with existing scripts/docs. Verified manually (`cargo run -p
+  trusty-memory -- service install` + `launchctl list`); there is no trait
+  seam in `trusty_common::launchd::LaunchdConfig` yet for unit-testing
+  install-then-bootstrap sequencing in isolation — tracked as a follow-up in
+  `trusty-installer`'s CHANGELOG. `trusty-installer` 0.4.8 adds an
+  independent installer-side defensive fallback (verifies `launchctl list`
+  itself and force-bootstraps if needed) so this fix is not the only thing
+  standing between a demo and #3832 recurring.
 - **`serve --stdio --palace <default>` never reached real MCP tool calls**: `inject_default_palace` (`commands::serve_stdio_bridge`) only wrote the default into top-level `params.palace`, but a real MCP client (Claude Code) sends the standard `tools/call` envelope (`method: "tools/call"`, `params: {name, arguments}`) and tool handlers read `arguments.palace` — so every real `tools/call` request reached the handler with no palace at all, surfacing as `-32603: memory_recall: missing 'palace' (no --palace default configured)` even with `--palace` supplied on the CLI. `inject_default_palace` now mirrors the sibling `inject_caller_context`'s dispatch-shape branching: it injects into `params.arguments` for `tools/call` requests, and keeps the pre-existing top-level `params.palace` injection for legacy direct method-per-tool requests. Caller-supplied palace values are never clobbered either way.
 
 ## [0.21.0] — 2026-07-23

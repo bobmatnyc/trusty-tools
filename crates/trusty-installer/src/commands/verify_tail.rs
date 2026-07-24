@@ -30,6 +30,17 @@
 //!    [`DownState::Crashed`], or [`DownState::StillStarting`] — instead of a
 //!    uniform, underspecified `down` (#3833).
 //!
+//! Because `run_verify_tail` folds [`verify_one`] SEQUENTIALLY over every
+//! selected daemon member, and each member's poll wait can run up to
+//! [`POLL_MAX_ATTEMPTS`] * [`POLL_INTERVAL`] (~55s), an aggregate
+//! [`AGGREGATE_POLL_BUDGET`] (#3836 MEDIUM fix) caps the TOTAL time spent
+//! polling across ALL members (~120s) — without it, five simultaneously-stuck
+//! daemons would stall `tctl install` for ~4-5 minutes, exactly when a fast,
+//! actionable signal matters most. Once the aggregate budget is exhausted,
+//! remaining members skip their poll wait entirely (an instant probe only)
+//! and their row is flagged `budget_exhausted` — surfaced as one summary note
+//! in [`print_human`], not repeated per row.
+//!
 //! [`print_human`] renders the final green/red pass/fail summary — the last
 //! thing the installer prints. Because the health used to build the report is
 //! already the POST-wait value, the exit code CI/automation gates on
@@ -37,31 +48,45 @@
 //! final state, not the instant-after-kickstart snapshot.
 //!
 //! Test: the pure decision pieces (`needs_kickstart`, `poll_until_not_down`,
-//! `classify_down_state_from_entry`, the report's `verified` derivation) are
-//! unit-tested; the `ensure` phase and the `launchctl` subprocess calls are
-//! side-effecting and validated manually.
+//! `bounded_attempts`, `classify_down_state_from_entry`, the report's
+//! `verified` derivation) are unit-tested; the `ensure` phase and the
+//! `launchctl` subprocess calls are side-effecting and validated manually.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use super::probe::{health_str, probe_member_health};
 use super::stable_set::{ManageStrategy, StableMember};
 
-/// Total wall-clock budget [`poll_until_not_down`] spends waiting for a
-/// kickstarted daemon to report healthy (#3833).
+/// Per-member poll interval — how long [`poll_until_not_down`] sleeps between
+/// re-probes (#3833).
 ///
 /// Why: trusty-search downloads embedding models on first boot and can take
 /// tens of seconds; a single instant re-probe (the pre-#3833 behaviour) raced
-/// that window. ~60s covers a cold-start model download on a normal
-/// connection without holding up `tctl install` indefinitely on a genuinely
-/// dead daemon.
+/// that window.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Number of probe attempts [`poll_until_not_down`] makes (one immediately,
-/// then one every [`POLL_INTERVAL`]) — `12` attempts spread over 11 intervals
-/// is ~55s of total wait, within the ~30-60s budget.
+/// Per-member cap on probe attempts (one immediately, then one every
+/// [`POLL_INTERVAL`]) when the AGGREGATE budget allows it in full — `12`
+/// attempts spread over 11 intervals is ~55s, within the ~30-60s per-member
+/// budget this crate's issue/CHANGELOG describe. [`bounded_attempts`] may
+/// return fewer when the aggregate budget is running low (#3836).
 const POLL_MAX_ATTEMPTS: u32 = 12;
+
+/// Aggregate wall-clock budget for the ENTIRE poll-wait phase across ALL
+/// members in one `run_verify_tail` call (#3836 MEDIUM fix).
+///
+/// Why: `verify_one`'s per-member poll (up to [`POLL_MAX_ATTEMPTS`] *
+/// [`POLL_INTERVAL`] ≈ 55s) folds SEQUENTIALLY over up to five launchd
+/// members in `run_verify_tail` — with every member simultaneously stuck,
+/// that is a ~4-5 minute worst-case stall, exactly when multiple daemons
+/// failing to start is the scenario an operator most needs a fast,
+/// actionable signal for. Capping the AGGREGATE budget (not just the
+/// per-member one) bounds the worst case while still giving a single
+/// genuinely slow-but-healthy daemon its full per-member window when it's
+/// the only one stuck.
+const AGGREGATE_POLL_BUDGET: Duration = Duration::from_secs(120);
 
 /// One member's verify-tail outcome.
 ///
@@ -72,7 +97,10 @@ const POLL_MAX_ATTEMPTS: u32 = 12;
 /// fix) mirrors `StableMember::required` and gates whether a down/not-installed
 /// verdict for this member may fail the overall `verified` verdict;
 /// `down_state` (#3833) is `Some` iff `health` is still `down` for a LAUNCHD
-/// member after the wait, classifying WHY.
+/// member after the wait, classifying WHY; `budget_exhausted` (#3836) is
+/// `true` iff this member needed a poll wait but the AGGREGATE poll budget
+/// had already run out, so NO poll was attempted for it (only the instant
+/// probe).
 /// Test: `tests::report_serialises`.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerifyRow {
@@ -84,6 +112,10 @@ pub struct VerifyRow {
     pub kickstarted: bool,
     /// Whether this member is REQUIRED for the overall `verified` verdict.
     pub required: bool,
+    /// Whether the AGGREGATE poll budget ([`AGGREGATE_POLL_BUDGET`]) was
+    /// already exhausted by the time this member needed a poll wait, so it
+    /// was skipped (#3836).
+    pub budget_exhausted: bool,
     /// Why a LAUNCHD member is still `down` after the poll wait, when it is
     /// (#3833). `None` for a healthy/stale/unknown/not_installed member, or a
     /// non-LAUNCHD member.
@@ -360,6 +392,25 @@ fn launchd_list_raw(_label: &str) -> Option<String> {
     None
 }
 
+/// Whether launchd currently has `label` loaded at all (#3836).
+///
+/// Why: `service_bootstrap::bootstrap_one`'s #3836 defensive fallback needs
+/// to know whether a component binary's own `service install` actually
+/// loaded the agent, not just that the subprocess exited 0 (#3832's root
+/// cause — trusty-memory's `service install` used to write the plist without
+/// loading it). Reuses the exact same `launchctl list <label>` primitive
+/// [`classify_down_state`] is built on ([`launchd_list_raw`]), so the two
+/// call sites can never disagree about what "loaded" means.
+/// What: `true` iff `launchctl list <label>` finds the label at all —
+/// regardless of whether a PID is currently running; a loaded-but-not-yet-
+/// running job is still "loaded" (launchd owns it and will start it).
+/// Test: side-effecting; not invoked in the test suite (mirrors
+/// `classify_down_state`) — the underlying `Option`-based decision is the
+/// SAME one `classify_down_state_from_entry`'s `None` branch already covers.
+pub(super) fn is_label_loaded(label: &str) -> bool {
+    launchd_list_raw(label).is_some()
+}
+
 /// Classify why a LAUNCHD member is still `down` after the poll wait (#3833).
 ///
 /// Why: the single entry point [`verify_one`] calls once it has a final
@@ -375,32 +426,71 @@ fn classify_down_state(binary: &str) -> DownState {
     classify_down_state_from_entry(entry)
 }
 
+/// Clamp the per-member poll attempt count to fit within a `remaining`
+/// AGGREGATE budget (#3836 MEDIUM fix), never exceeding [`POLL_MAX_ATTEMPTS`].
+///
+/// Why: without this, one member's poll always runs its full
+/// [`POLL_MAX_ATTEMPTS`] schedule regardless of how much of the
+/// [`AGGREGATE_POLL_BUDGET`] earlier members already consumed — the LAST
+/// member in a fold of several simultaneously-stuck daemons could still
+/// overrun the aggregate budget by a full ~55s. Sizing this member's OWN
+/// attempt count to what's actually left keeps the aggregate fold close to
+/// its budget without needing a fully async/interruptible poll loop.
+///
+/// # Preconditions
+/// `remaining` is nonzero — callers must special-case an already-exhausted
+/// budget separately (skip the poll entirely; see [`verify_one`]).
+/// # Postconditions
+/// Returns a value in `1..=POLL_MAX_ATTEMPTS`.
+/// Test: `tests::bounded_attempts_*`.
+fn bounded_attempts(remaining: Duration) -> u32 {
+    debug_assert!(!remaining.is_zero(), "remaining budget must be nonzero");
+    let interval_secs = POLL_INTERVAL.as_secs().max(1);
+    let by_budget = 1 + (remaining.as_secs() / interval_secs) as u32;
+    by_budget.clamp(1, POLL_MAX_ATTEMPTS)
+}
+
 /// Verify one daemon member, applying the #2498 kickstart retry + #3833 poll
-/// wait when needed.
+/// wait when needed, bounded by the #3836 aggregate poll budget.
 ///
 /// Why: isolates the per-member side effect (probe, maybe kickstart, poll,
 /// classify) so [`run_verify_tail`] stays a plain fold over `selected`.
-/// What: probes health; if [`needs_kickstart`], attempts one kickstart,
-/// prints a one-line "waiting for services to start..." indication, then
-/// polls via [`poll_until_not_down`] on the [`POLL_INTERVAL`] /
-/// [`POLL_MAX_ATTEMPTS`] schedule (~60s total) instead of a single instant
-/// re-probe. If the member is STILL `down` after that wait, classifies WHY
-/// via [`classify_down_state`].
+/// What: probes health; if [`needs_kickstart`]:
+/// - and `remaining_budget` is already exhausted (#3836), skips the poll
+///   entirely (only the instant probe already taken) and flags
+///   `budget_exhausted: true` — no kickstart, no wait, no `launchctl` calls
+///   for this member;
+/// - otherwise, attempts one kickstart, prints a one-line "waiting for
+///   services to start..." indication, then polls via [`poll_until_not_down`]
+///   for [`bounded_attempts`]`(remaining_budget)` attempts (never more than
+///   [`POLL_MAX_ATTEMPTS`], and fewer when the aggregate budget is running
+///   low) instead of a single instant re-probe.
+///
+/// If the member is STILL `down` after all that, classifies WHY via
+/// [`classify_down_state`] regardless of whether the budget was exhausted —
+/// that check is a single cheap `launchctl list`, not a poll, so it's never
+/// budget-gated.
 /// Test: side-effecting (subprocess + sleep); the decision halves are
-/// `needs_kickstart`, `poll_until_not_down`, `classify_down_state_from_entry`.
-fn verify_one(m: &StableMember) -> VerifyRow {
+/// `needs_kickstart`, `poll_until_not_down`, `bounded_attempts`,
+/// `classify_down_state_from_entry`.
+fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
     let mut health = probe_member_health(&m.binary, m.manage);
     let mut kickstarted = false;
+    let mut budget_exhausted = false;
     if needs_kickstart(&health, m.manage) {
-        kickstarted = true;
-        let _ = kickstart(&m.binary);
-        eprintln!("  waiting for {} to start...", m.binary);
-        let (polled_health, _attempts) = poll_until_not_down(
-            || probe_member_health(&m.binary, m.manage),
-            || std::thread::sleep(POLL_INTERVAL),
-            POLL_MAX_ATTEMPTS,
-        );
-        health = polled_health;
+        if remaining_budget.is_zero() {
+            budget_exhausted = true;
+        } else {
+            kickstarted = true;
+            let _ = kickstart(&m.binary);
+            eprintln!("  waiting for {} to start...", m.binary);
+            let (polled_health, _attempts) = poll_until_not_down(
+                || probe_member_health(&m.binary, m.manage),
+                || std::thread::sleep(POLL_INTERVAL),
+                bounded_attempts(remaining_budget),
+            );
+            health = polled_health;
+        }
     }
     let down_state = if health == health_str::DOWN && m.manage == ManageStrategy::Launchd {
         Some(classify_down_state(&m.binary))
@@ -412,6 +502,7 @@ fn verify_one(m: &StableMember) -> VerifyRow {
         health,
         kickstarted,
         required: m.required,
+        budget_exhausted,
         down_state,
     }
 }
@@ -439,10 +530,20 @@ pub fn run_verify_tail(selected: &[StableMember]) -> VerifyTailReport {
     let ensure_report = EnsureReport::build(mcp_members, stages, false, false);
     let ensure_ok = ensure_report.all_ok;
 
+    // #3836 MEDIUM fix: `verify_one` folds sequentially over every daemon
+    // member, and each one's poll wait can run up to ~55s — an AGGREGATE
+    // budget (recomputed fresh from `budget_clock` before every member, so it
+    // shrinks in real time as earlier members consume it) caps the total
+    // time this loop can spend polling, so several simultaneously-stuck
+    // daemons stall the installer by ~2 minutes at worst, not ~4-5.
+    let budget_clock = Instant::now();
     let members: Vec<VerifyRow> = selected
         .iter()
         .filter(|m| m.daemon)
-        .map(verify_one)
+        .map(|m| {
+            let remaining = AGGREGATE_POLL_BUDGET.saturating_sub(budget_clock.elapsed());
+            verify_one(m, remaining)
+        })
         .collect();
 
     VerifyTailReport::build(ensure_ok, members)
@@ -508,16 +609,31 @@ fn optional_annotation(m: &VerifyRow) -> String {
     }
 }
 
+/// Whether any member in `members` had its poll wait skipped because the
+/// #3836 aggregate poll budget was already exhausted.
+///
+/// Why: extracted as a pure, unit-testable predicate so [`print_human`]'s
+/// "budget exhausted" summary note is driven by a tested decision, not
+/// inline logic only exercisable via stdout capture.
+/// What: `true` iff any row has `budget_exhausted: true`.
+/// Test: `tests::any_budget_exhausted_*`.
+fn any_budget_exhausted(members: &[VerifyRow]) -> bool {
+    members.iter().any(|m| m.budget_exhausted)
+}
+
 /// Print the final human-readable verify-tail summary — green/red pass/fail.
 ///
 /// Why: the last thing the `curl | sh` one-liner (via `install.sh` ->
 /// `tctl install`) prints must be an unambiguous verified/not-verified signal.
 /// What: prints the ensure verdict, one line per daemon member (noting a
-/// kickstart retry or an optional-and-tolerated bad health via
-/// [`optional_annotation`]), and a final colour-coded `VERIFIED`/`NOT
-/// VERIFIED` line.
+/// kickstart retry, a #3833 `down_state` diagnosis, or an optional-and-
+/// tolerated bad health via [`optional_annotation`]); when
+/// [`any_budget_exhausted`] (#3836), one summary note (not repeated per row)
+/// pointing the operator at re-running `tctl install`; and a final
+/// colour-coded `VERIFIED`/`NOT VERIFIED` line.
 /// Test: side-effect-only (stdout); the annotation text is unit-tested via
-/// `optional_annotation` and the data it reads via `VerifyTailReport::build`.
+/// `optional_annotation`/`any_budget_exhausted` and the data they read via
+/// `VerifyTailReport::build`.
 pub fn print_human(report: &VerifyTailReport) {
     println!("tctl install — verify");
     println!(
@@ -526,6 +642,12 @@ pub fn print_human(report: &VerifyTailReport) {
     );
     for m in &report.members {
         println!("  {:<20} {}{}", m.member, m.health, optional_annotation(m));
+    }
+    if any_budget_exhausted(&report.members) {
+        println!(
+            "  note: poll budget exhausted — giving up on remaining members; \
+             re-run `tctl install` to check them again"
+        );
     }
     let verdict = if report.verified {
         colour("VERIFIED", "32")
@@ -545,6 +667,7 @@ mod tests {
             health: health.to_owned(),
             kickstarted: false,
             required: true,
+            budget_exhausted: false,
             down_state: None,
         }
     }
@@ -842,6 +965,70 @@ mod tests {
         assert_eq!(health, health_str::HEALTHY);
         assert_eq!(attempts, 1);
         assert_eq!(*waits.borrow(), 0);
+    }
+
+    /// Why: #3836 MEDIUM fix — with a generous remaining budget, a member
+    /// must still get its full [`POLL_MAX_ATTEMPTS`] ceiling, never MORE.
+    /// What: a large `remaining` (e.g. the full aggregate budget) clamps to
+    /// exactly `POLL_MAX_ATTEMPTS`.
+    /// Test: This is the test.
+    #[test]
+    fn bounded_attempts_clamped_to_max() {
+        assert_eq!(bounded_attempts(AGGREGATE_POLL_BUDGET), POLL_MAX_ATTEMPTS);
+        assert_eq!(
+            bounded_attempts(Duration::from_secs(3600)),
+            POLL_MAX_ATTEMPTS
+        );
+    }
+
+    /// Why: THE #3836 core safety property — a member turn late in the fold,
+    /// with little aggregate budget left, must get proportionally FEWER
+    /// attempts, not the full schedule (which is what let a single member
+    /// blow through the aggregate cap).
+    /// What: a small remaining budget yields fewer than `POLL_MAX_ATTEMPTS`
+    /// attempts, and a larger remaining budget yields a value in between.
+    /// Test: This is the test.
+    #[test]
+    fn bounded_attempts_shrinks_with_small_budget() {
+        // 12s remaining / 5s interval -> 1 + 2 = 3 attempts.
+        assert_eq!(bounded_attempts(Duration::from_secs(12)), 3);
+        // 30s remaining -> 1 + 6 = 7 attempts, strictly between 1 and the max.
+        let mid = bounded_attempts(Duration::from_secs(30));
+        assert!(
+            mid > 1 && mid < POLL_MAX_ATTEMPTS,
+            "expected a value strictly between 1 and {POLL_MAX_ATTEMPTS}, got {mid}"
+        );
+    }
+
+    /// Why: even a sliver of remaining budget must still attempt AT LEAST
+    /// one probe — never zero (a zero-attempt poll makes no sense; an
+    /// entirely exhausted budget is handled as its own separate case by
+    /// `verify_one`, not by this function receiving a zero `remaining`).
+    /// What: a 1-second remaining budget still yields `1`.
+    /// Test: This is the test.
+    #[test]
+    fn bounded_attempts_at_least_one() {
+        assert_eq!(bounded_attempts(Duration::from_secs(1)), 1);
+    }
+
+    /// Why: #3836 — the "budget exhausted" summary note must fire iff ANY
+    /// member's poll was skipped for that reason, and must NOT fire on an
+    /// all-clear report (avoids alarming an operator over nothing).
+    /// What: exercises both the empty/all-false case and a mixed case.
+    /// Test: This is the test.
+    #[test]
+    fn any_budget_exhausted_detects_any_row() {
+        assert!(!any_budget_exhausted(&[]));
+        assert!(!any_budget_exhausted(&[row("trusty-search", "healthy")]));
+
+        let exhausted = VerifyRow {
+            budget_exhausted: true,
+            ..row("trusty-memory", health_str::DOWN)
+        };
+        assert!(any_budget_exhausted(&[
+            row("trusty-search", "healthy"),
+            exhausted
+        ]));
     }
 
     /// Why: the running-PID branch must win regardless of last exit status —

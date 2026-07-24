@@ -21,14 +21,31 @@
 //! healthy daemon. An opt-out ([`NO_SERVICE_ENV`] / the `--no-service` flag)
 //! disables the whole step.
 //!
+//! 🔴 (#3836 HIGH fix) [`bootstrap_one`] does NOT trust a clean
+//! `service install` exit code as proof the agent is actually loaded. #3832
+//! found that trusty-memory's `service install` used to write the plist
+//! WITHOUT loading it — a fresh install reported "installed and bootstrapped"
+//! while `launchctl list` never showed the label at all. Because `tctl
+//! install` downloads a component's LATEST PUBLISHED release binary
+//! (`download::release`), a source-level fix to one component's `service
+//! install` does not protect a demo running an OLDER already-published
+//! binary, and does not guard against the next component that ships the same
+//! bug. So after `run_service_install` returns `Ok`, [`bootstrap_one`] now
+//! independently checks whether launchd actually loaded the label
+//! ([`ServiceEnv::is_loaded`]) and, if not, force-bootstraps the
+//! already-written plist directly ([`ServiceEnv::bootstrap_fallback`]) —
+//! reported as [`BootstrapAction::InstalledByFallback`] rather than a silent
+//! `Installed`, so the narration is honest about what actually happened.
+//!
 //! Testability: every side effect is behind the [`ServiceEnv`] seam so the
 //! decision logic is unit-tested against an in-memory fake — the tests NEVER
 //! touch `~/Library/LaunchAgents` or invoke `launchctl` against the live
 //! daemons on the host (mirrors trusty-mpm's `FakeNoopTmuxDriver` pattern).
 //!
 //! Test: `tests` covers the member predicate, the opt-out truth table, every
-//! [`bootstrap_one`] branch (via `FakeServiceEnv`), and the [`start_plan`]
-//! relaxation used by `lifecycle.rs`.
+//! [`bootstrap_one`] branch — including the #3836 defensive-fallback branches
+//! — (via `FakeServiceEnv`), and the [`start_plan`] relaxation used by
+//! `lifecycle.rs`.
 
 /// Environment-variable opt-out for the post-install service bootstrap.
 ///
@@ -45,14 +62,23 @@ pub const NO_SERVICE_ENV: &str = "TCTL_NO_SERVICE_BOOTSTRAP";
 /// installed the service", "we intentionally skipped", and "it failed but we
 /// carried on" — a typed result keeps that reporting honest and testable.
 /// What: `Skipped` carries the human reason; `Installed` means `service
-/// install` ran clean; `Failed` carries the (non-fatal) error text.
+/// install` ran clean AND launchd confirmed the label loaded;
+/// `InstalledByFallback` (#3836) means `service install` exited clean but
+/// launchd did NOT have the label loaded, so the installer force-bootstrapped
+/// the plist directly; `Failed` carries the (non-fatal) error text.
 /// Test: `bootstrap_one_*` tests assert each variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BootstrapAction {
     /// Not attempted — opt-out, not a service member, or plist already present.
     Skipped(String),
-    /// `<binary> service install` ran successfully.
+    /// `<binary> service install` ran successfully AND launchd loaded it.
     Installed,
+    /// `<binary> service install` exited 0 but launchd never loaded the
+    /// label; the installer force-bootstrapped the plist directly instead
+    /// (#3836 — the #3832 defense-in-depth: protects the demo even against a
+    /// component binary whose own `service install` doesn't actually load
+    /// the agent, e.g. an older already-published release).
+    InstalledByFallback,
     /// Shell-out failed; install continues (fail-soft) but this is surfaced.
     Failed(String),
 }
@@ -69,6 +95,10 @@ impl BootstrapAction {
             BootstrapAction::Installed => {
                 format!("{binary}: launchd service installed and bootstrapped")
             }
+            BootstrapAction::InstalledByFallback => format!(
+                "{binary}: launchd service installed; bootstrapped by installer \
+                 (component binary did not load its service)"
+            ),
             BootstrapAction::Skipped(reason) => {
                 format!("{binary}: service bootstrap skipped ({reason})")
             }
@@ -108,35 +138,60 @@ pub fn bootstrap_enabled(no_service_flag: bool, env_opt_out: bool) -> bool {
 
 /// Side-effecting operations the bootstrap needs, behind a seam for testing.
 ///
-/// Why: the decision logic (skip vs install, idempotency, member filtering)
-/// must be unit-tested WITHOUT writing to `~/Library/LaunchAgents` or running
-/// `launchctl` against the host's live daemons. Abstracting the two effects —
-/// "does a plist already exist?" and "run `service install`" — lets a fake
-/// drive the logic hermetically (the `FakeNoopTmuxDriver` pattern).
-/// What: `plist_present` reports whether the member's LaunchAgent plist exists;
-/// `run_service_install` shells out to `<binary> service install`.
+/// Why: the decision logic (skip vs install, idempotency, member filtering,
+/// and the #3836 defensive-fallback check) must be unit-tested WITHOUT
+/// writing to `~/Library/LaunchAgents` or running `launchctl` against the
+/// host's live daemons. Abstracting the four effects — "does a plist already
+/// exist?", "run `service install`", "did launchd actually load it?", and
+/// "force-bootstrap the plist directly" — lets a fake drive the logic
+/// hermetically (the `FakeNoopTmuxDriver` pattern).
+/// What: `plist_present` reports whether the member's LaunchAgent plist
+/// exists; `run_service_install` shells out to `<binary> service install`;
+/// `is_loaded` (#3836) reports whether launchd currently has the label
+/// loaded at all; `bootstrap_fallback` (#3836) force-bootstraps the
+/// already-written plist directly via `launchctl`, bypassing the component
+/// binary's own (possibly broken) load step.
 /// Test: exercised via `RealServiceEnv` (production) and `FakeServiceEnv` (unit
 /// tests, `bootstrap_one_*`).
 pub trait ServiceEnv {
     /// Does a launchd plist already exist on disk for this member?
     fn plist_present(&self, binary: &str) -> bool;
-    /// Run `<binary> service install` (writes the plist and bootstraps it).
+    /// Run `<binary> service install` (expected to write the plist and
+    /// bootstrap it — but see [`bootstrap_one`]'s #3836 postcondition check,
+    /// which does not simply trust that expectation).
     fn run_service_install(&self, binary: &str) -> anyhow::Result<()>;
+    /// Does launchd currently have this member's label loaded at all
+    /// (#3836)?
+    fn is_loaded(&self, binary: &str) -> bool;
+    /// Force-bootstrap the member's already-written plist directly via
+    /// `launchctl`, independent of the component binary's own load logic
+    /// (#3836 defensive fallback).
+    fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()>;
 }
 
 /// Decide and (via the seam) execute the service bootstrap for one member.
 ///
 /// Why: this is the whole per-member policy — filter non-service members, honour
-/// idempotency / non-clobber by skipping when a plist already exists, and
-/// otherwise delegate to `service install`. Keeping it seam-driven makes every
-/// branch testable with no real launchd contact.
+/// idempotency / non-clobber by skipping when a plist already exists, delegate
+/// to `service install`, and (#3836) independently VERIFY the postcondition
+/// `service install` is supposed to establish (the label is loaded) rather
+/// than trusting its exit code alone — #3832 was exactly a component binary
+/// whose `service install` exited 0 without ever loading the agent.
 /// What: returns [`BootstrapAction::Skipped`] when the member has no `service
-/// install` subcommand or a plist is already present; otherwise runs
-/// `run_service_install` and returns [`BootstrapAction::Installed`] or
-/// [`BootstrapAction::Failed`].
+/// install` subcommand or a plist is already present. Otherwise runs
+/// `run_service_install`; on success, checks [`ServiceEnv::is_loaded`] — if
+/// loaded, returns [`BootstrapAction::Installed`]; if NOT loaded, calls
+/// [`ServiceEnv::bootstrap_fallback`] and returns
+/// [`BootstrapAction::InstalledByFallback`] on success or
+/// [`BootstrapAction::Failed`] (with BOTH failure reasons folded in) if the
+/// fallback also fails. A `run_service_install` failure is
+/// [`BootstrapAction::Failed`] directly (the fallback is only for a
+/// misleadingly-successful exit code, not a genuine failure).
 /// Test: `bootstrap_one_skips_non_service_member`,
 /// `bootstrap_one_skips_when_plist_present`, `bootstrap_one_installs_when_absent`,
-/// `bootstrap_one_reports_failure`.
+/// `bootstrap_one_reports_failure`, `bootstrap_one_falls_back_when_not_loaded`,
+/// `bootstrap_one_installed_directly_when_loaded`,
+/// `bootstrap_one_reports_failure_when_fallback_also_fails`.
 pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
     if !member_has_service_install(binary) {
         return BootstrapAction::Skipped(format!("{binary} has no `service install` subcommand"));
@@ -147,9 +202,22 @@ pub fn bootstrap_one(env: &dyn ServiceEnv, binary: &str) -> BootstrapAction {
                 .to_string(),
         );
     }
-    match env.run_service_install(binary) {
-        Ok(()) => BootstrapAction::Installed,
-        Err(e) => BootstrapAction::Failed(e.to_string()),
+    if let Err(e) = env.run_service_install(binary) {
+        return BootstrapAction::Failed(e.to_string());
+    }
+    // #3836 HIGH fix: a clean exit is not proof launchd actually loaded the
+    // label (#3832's exact failure mode) — verify independently, and
+    // force-bootstrap directly if the component binary's own load step
+    // didn't take.
+    if env.is_loaded(binary) {
+        return BootstrapAction::Installed;
+    }
+    match env.bootstrap_fallback(binary) {
+        Ok(()) => BootstrapAction::InstalledByFallback,
+        Err(e) => BootstrapAction::Failed(format!(
+            "`{binary} service install` exited 0 but launchd never loaded the service, \
+             and the installer's fallback `launchctl bootstrap` also failed: {e}"
+        )),
     }
 }
 
@@ -212,7 +280,13 @@ pub fn start_plan(plist_present: bool) -> StartPlan {
 /// What: `plist_present` checks
 /// `~/Library/LaunchAgents/<plist_label_for(binary)>.plist`;
 /// `run_service_install` spawns `<binary> service install` and maps a non-zero
-/// exit to an error.
+/// exit to an error; `is_loaded` (#3836) checks `launchctl list <label>` via
+/// [`super::verify_tail::is_label_loaded`] — the same `launchctl list`
+/// primitive `verify_tail`'s down-state classification is built on;
+/// `bootstrap_fallback` (#3836) force-bootstraps the already-written plist
+/// directly, reusing the same minimal-`LaunchdConfig` (label only — the other
+/// fields are inert for `bootstrap`/`bootout`) pattern `lifecycle.rs`'s
+/// `launchd_control` uses.
 /// Test: side-effecting; never constructed in the test suite (the fake is used).
 pub struct RealServiceEnv;
 
@@ -230,6 +304,32 @@ impl ServiceEnv for RealServiceEnv {
         let mut cmd = std::process::Command::new(binary);
         cmd.args(["service", "install"]);
         run_captured(cmd, &format!("`{binary} service install`"))
+    }
+
+    fn is_loaded(&self, binary: &str) -> bool {
+        let label = super::plist_label::plist_label_for(binary);
+        super::verify_tail::is_label_loaded(&label)
+    }
+
+    fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()> {
+        use trusty_common::launchd::{KeepAlive, LaunchdConfig};
+
+        // Only `label` matters for `bootstrap` (it derives the plist path
+        // from it and the plist must already exist on disk — written by the
+        // `service install` that just ran); the rest are inert because we
+        // never render/write a plist here, mirroring `lifecycle.rs`'s
+        // `launchd_control`.
+        let cfg = LaunchdConfig {
+            label: super::plist_label::plist_label_for(binary),
+            exe_path: std::path::PathBuf::from(binary),
+            args: Vec::new(),
+            log_dir: std::path::PathBuf::from("/tmp"),
+            keep_alive: KeepAlive::Always,
+            throttle_interval: 0,
+            env_vars: Vec::new(),
+            fd_limit: None,
+        };
+        cfg.bootstrap()
     }
 }
 
@@ -284,13 +384,24 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    /// In-memory [`ServiceEnv`] fake — records `service install` calls and
-    /// simulates plist presence, so tests never touch launchd or the real
+    /// In-memory [`ServiceEnv`] fake — records `service install` /
+    /// `bootstrap_fallback` calls and simulates plist presence + launchd load
+    /// state, so tests never touch launchd or the real
     /// `~/Library/LaunchAgents`.
+    ///
+    /// Why the `loaded: true` default (#3836): the pre-existing
+    /// `bootstrap_one_*` tests below construct this via `new(present, fail)`
+    /// and assert the OLD `Installed` outcome — defaulting `loaded` to `true`
+    /// (the honest, common case: `service install` DID load the agent) keeps
+    /// those tests passing unchanged and expresses the #3832 failure mode
+    /// (loaded: false) as an opt-in builder instead.
     struct FakeServiceEnv {
         present: bool,
         fail: bool,
+        loaded: bool,
+        fail_fallback: bool,
         installed: RefCell<Vec<String>>,
+        fallback_calls: RefCell<Vec<String>>,
     }
 
     impl FakeServiceEnv {
@@ -298,8 +409,25 @@ mod tests {
             Self {
                 present,
                 fail,
+                loaded: true,
+                fail_fallback: false,
                 installed: RefCell::new(Vec::new()),
+                fallback_calls: RefCell::new(Vec::new()),
             }
+        }
+
+        /// Builder (#3836): simulate `service install` exiting 0 WITHOUT
+        /// launchd ever loading the label — #3832's exact failure mode.
+        fn not_loaded(mut self) -> Self {
+            self.loaded = false;
+            self
+        }
+
+        /// Builder (#3836): simulate the installer's own fallback
+        /// `launchctl bootstrap` also failing.
+        fn failing_fallback(mut self) -> Self {
+            self.fail_fallback = true;
+            self
         }
     }
 
@@ -311,6 +439,16 @@ mod tests {
             self.installed.borrow_mut().push(binary.to_string());
             if self.fail {
                 anyhow::bail!("simulated failure");
+            }
+            Ok(())
+        }
+        fn is_loaded(&self, _binary: &str) -> bool {
+            self.loaded
+        }
+        fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()> {
+            self.fallback_calls.borrow_mut().push(binary.to_string());
+            if self.fail_fallback {
+                anyhow::bail!("simulated fallback failure");
             }
             Ok(())
         }
@@ -418,6 +556,68 @@ mod tests {
             BootstrapAction::Failed(e) => assert!(e.contains("simulated failure")),
             other => panic!("expected Failed, got {other:?}"),
         }
+        assert!(
+            env.fallback_calls.borrow().is_empty(),
+            "a genuine service-install failure must never trigger the fallback \
+             bootstrap — that's only for a misleadingly-successful exit code"
+        );
+    }
+
+    /// Why: #3836 HIGH fix — the common, honest case: `service install`
+    /// exited 0 AND launchd actually loaded the label. Must NOT invoke the
+    /// fallback bootstrap (it would be a needless extra `launchctl` call /
+    /// redundant restart).
+    /// What: with `loaded: true` (the default), asserts plain `Installed` and
+    /// zero fallback calls.
+    /// Test: this is the test.
+    #[test]
+    fn bootstrap_one_installed_directly_when_loaded() {
+        let env = FakeServiceEnv::new(false, false);
+        let action = bootstrap_one(&env, "trusty-search");
+        assert_eq!(action, BootstrapAction::Installed);
+        assert!(
+            env.fallback_calls.borrow().is_empty(),
+            "must not force-bootstrap when launchd already loaded the label"
+        );
+    }
+
+    /// Why: THE #3836 HIGH fix's core safety property — #3832's exact
+    /// failure signature (`service install` exits 0 but launchd never loads
+    /// the label) must be caught and repaired, not silently reported as a
+    /// clean `Installed`.
+    /// What: with `loaded: false`, asserts `InstalledByFallback` and exactly
+    /// one recorded `bootstrap_fallback` call for the right binary.
+    /// Test: this is the test.
+    #[test]
+    fn bootstrap_one_falls_back_when_not_loaded() {
+        let env = FakeServiceEnv::new(false, false).not_loaded();
+        let action = bootstrap_one(&env, "trusty-memory");
+        assert_eq!(action, BootstrapAction::InstalledByFallback);
+        assert_eq!(env.fallback_calls.borrow().as_slice(), ["trusty-memory"]);
+    }
+
+    /// Why: if EVEN the installer's own direct `launchctl bootstrap` fallback
+    /// fails, that must be surfaced loudly (`Failed`) — never silently
+    /// swallowed — and the error text must explain BOTH what happened (a
+    /// misleading exit code) and why the recovery attempt itself failed, so
+    /// an operator isn't left staring at a bare "Failed" for a
+    /// non-obvious reason.
+    /// What: with `loaded: false` AND the fallback set to fail, asserts
+    /// `Failed` whose message names the fallback failure.
+    /// Test: this is the test.
+    #[test]
+    fn bootstrap_one_reports_failure_when_fallback_also_fails() {
+        let env = FakeServiceEnv::new(false, false)
+            .not_loaded()
+            .failing_fallback();
+        let action = bootstrap_one(&env, "trusty-review");
+        match action {
+            BootstrapAction::Failed(e) => {
+                assert!(e.contains("never loaded"), "message: {e}");
+                assert!(e.contains("simulated fallback failure"), "message: {e}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     /// Why: the narration note must name the member for a scannable install log.
@@ -428,6 +628,9 @@ mod tests {
         assert!(BootstrapAction::Installed
             .note("trusty-search")
             .contains("trusty-search"));
+        assert!(BootstrapAction::InstalledByFallback
+            .note("trusty-memory")
+            .contains("trusty-memory"));
         assert!(BootstrapAction::Skipped("x".into())
             .note("trusty-memory")
             .contains("trusty-memory"));
