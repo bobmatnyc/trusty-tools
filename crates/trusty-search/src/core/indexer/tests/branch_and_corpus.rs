@@ -812,6 +812,94 @@ async fn embed_deferred_chunks_skips_already_embedded_chunks() {
     );
 }
 
+/// Issue #3748 slice A review finding 2: `pending_embed_count` must return
+/// the un-embedded DELTA, not the total corpus size — the same distinction
+/// `embed_deferred_chunks_skips_already_embedded_chunks` pins for the embed
+/// pass itself, but for the queue's priority-key helper.
+///
+/// Why: `service::reindex::finish_reindex` used to key the size-ordered
+/// deferred-embed queue on `chunk_count()` (the TOTAL corpus size) captured
+/// after EVERY reindex, including incremental ones. `embed_deferred_chunks`
+/// only ever embeds chunks the vector store doesn't already have, so an
+/// incremental reindex of a 94k-chunk repo with one changed chunk sorted as
+/// huge in the queue even though its real embed cost is one chunk.
+/// What: commits two chunks, pre-seeds the vector store for ONE (simulating
+/// "already embedded from a prior pass"), then asserts
+/// `pending_embed_count() == 1` while the corpus itself still has 2 chunks —
+/// proving the count reflects only the un-embedded delta.
+/// Test: this IS the test.
+#[tokio::test]
+async fn pending_embed_count_matches_delta_not_total_chunk_count() {
+    let idx = make_indexer();
+    let parsed = ParsedBatch {
+        chunks: vec![
+            raw("already-embedded", "src/a.rs", "fn a() {}"),
+            raw("needs-embedding", "src/b.rs", "fn b() {}"),
+        ],
+        embeddings: vec![None, None],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit");
+
+    idx.store
+        .as_ref()
+        .expect("store wired by make_indexer")
+        .upsert("already-embedded", vec![0.0; 32])
+        .await
+        .expect("pre-seed vector");
+
+    assert_eq!(
+        idx.chunk_count(),
+        2,
+        "precondition: the corpus itself has both chunks"
+    );
+    assert_eq!(
+        idx.pending_embed_count().await,
+        1,
+        "pending_embed_count must report only the un-embedded delta (1), \
+         not the total corpus size (2) — that delta is the queue's accurate \
+         priority key (issue #3748 slice A review finding 2)"
+    );
+}
+
+/// Issue #3748 slice A review finding 2: on a COLD index (nothing embedded
+/// yet), `pending_embed_count` must equal the full chunk count — matching
+/// the pre-fix `chunk_count()`-keyed behaviour for the common warm-boot
+/// case, where a fresh reindex has embedded nothing yet.
+/// Test: this IS the test.
+#[tokio::test]
+async fn pending_embed_count_equals_total_on_a_cold_index() {
+    let idx = make_indexer();
+    let parsed = ParsedBatch {
+        chunks: vec![
+            raw("cold-a", "src/a.rs", "fn a() {}"),
+            raw("cold-b", "src/b.rs", "fn b() {}"),
+            raw("cold-c", "src/c.rs", "fn c() {}"),
+        ],
+        embeddings: vec![None, None, None],
+        entities_by_file: vec![],
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit");
+
+    assert_eq!(
+        idx.pending_embed_count().await,
+        3,
+        "with nothing embedded yet, pending_embed_count must equal the full \
+         corpus size — identical to the old chunk_count()-keyed behaviour \
+         for the common cold-index case"
+    );
+}
+
 /// Issue #2984 Phase 1 delta-review HIGH finding (stale-embedding-on-
 /// re-enable): `commit_vectors_batch` must evict a chunk's existing
 /// vector-store entry the moment that chunk is (re-)committed WITHOUT a fresh

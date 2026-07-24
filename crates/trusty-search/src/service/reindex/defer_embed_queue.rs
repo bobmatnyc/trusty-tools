@@ -17,13 +17,14 @@
 //! sizes). Each index's `enqueue` call spawns ITS OWN task (mirroring the old
 //! one-task-per-index shape — see "Design note" below) that cooperatively
 //! polls the shared heap: on each tick it asks "am I currently the best
-//! pending job (smallest, or aged past [`MAX_WAIT`])?" — if yes, it removes
-//! itself and proceeds to acquire `background_reindex_semaphore` + the
-//! per-index semaphore exactly as `run_embed_catch_up`'s callers always have;
-//! if no, it sleeps [`POLL_INTERVAL`] and asks again. This changes
-//! SUBMISSION ORDER only — concurrency is unchanged (still one background
-//! embed pass in flight at a time; no dedicated worker, no
-//! embedder-concurrency change — that is issue #3748 slice B).
+//! pending job (smallest, or overtaken by a later wave — see "Anti-
+//! starvation" below)?" — if yes, it removes itself and proceeds to acquire
+//! `background_reindex_semaphore` + the per-index semaphore exactly as
+//! `run_embed_catch_up`'s callers always have; if no, it sleeps
+//! [`POLL_INTERVAL`] and asks again. This changes SUBMISSION ORDER only —
+//! concurrency is unchanged (still one background embed pass in flight at a
+//! time; no dedicated worker, no embedder-concurrency change — that is issue
+//! #3748 slice B).
 //!
 //! Design note — why per-job tasks, not one shared dispatcher: an earlier
 //! version of this module used a single global dispatcher task, spawned by
@@ -39,22 +40,46 @@
 //! SAME calling context that produced it (matching the pre-#3748 shape), so
 //! one test's early return can never strand another test's job.
 //!
-//! Anti-starvation: a pure size-priority queue has an unbounded-wait failure
-//! mode — a large job can be pushed behind an endless stream of newly
-//! arriving smaller ones forever. At warm-boot this is unlikely (the catch-up
-//! cohort is essentially fixed once boot's fast passes finish), but it is a
-//! real risk for a long-lived daemon taking a steady trickle of new small
-//! `POST /indexes` registrations. [`MAX_WAIT`] bounds it: on every poll tick,
-//! if the OLDEST pending job has been waiting at least that long, IT is
-//! treated as "the best" regardless of size — a WALL-CLOCK bound (not a
-//! dispatch-count bound), so the guarantee holds however fast or slow other
-//! jobs happen to be draining.
+//! Anti-starvation (issue #3748 slice A review finding 1): a pure
+//! size-priority queue has an unbounded-wait failure mode — a large job can
+//! be pushed behind an endless stream of newly arriving smaller ones
+//! forever, most plausibly on a long-lived daemon taking a steady trickle of
+//! new small `POST /indexes` registrations.
+//!
+//! A first version of this gate promoted the OLDEST pending job once it had
+//! simply been WAITING for [`MAX_WAIT`], full stop. That is wrong: the
+//! warm-boot boot-burst this slice exists to fix enqueues its entire cohort
+//! (dozens of repos) within milliseconds of each other, and — now that
+//! finding 2 keys the queue on real embed-pass cost rather than raw corpus
+//! size — a burst that includes several genuinely large jobs can legitimately
+//! take LONGER than a short `MAX_WAIT` to fully drain by size. A pure
+//! "have I waited long enough" trigger would fire mid-burst and collapse
+//! straight back to arrival (directory-walk) order — reintroducing the exact
+//! bug this slice fixes, just delayed by `MAX_WAIT`.
+//!
+//! The gate instead asks a different question: "am I still waiting because
+//! genuinely NEW arrivals keep queue-jumping me, or merely because this
+//! burst has a lot of real work in it?" [`best_pending_seq`] only promotes
+//! the oldest pending job when some OTHER pending job's `enqueued_at` is at
+//! least [`MAX_WAIT`] LATER than the oldest job's own `enqueued_at` — i.e. a
+//! job that arrived in a distinctly later wave, not merely a job that's been
+//! sitting in the SAME wave a while. Every job in a single burst shares
+//! (near-)identical `enqueued_at` timestamps, so no burst member's arrival
+//! can ever satisfy "at least `MAX_WAIT` after the oldest arrival" relative
+//! to another burst member — the whole burst always drains by size,
+//! regardless of how long that takes. Only a genuinely later wave (a new
+//! `POST /indexes` arriving `MAX_WAIT` after the oldest still-pending job)
+//! can trigger a promotion, which is exactly the steady-trickle scenario the
+//! gate exists to bound.
 //!
 //! Test: `queued_jobs_pop_in_ascending_chunk_count_order`,
 //! `equal_chunk_counts_tiebreak_fifo_by_enqueue_order`,
-//! `pop_next_force_promotes_a_job_once_it_exceeds_max_wait`,
+//! `pop_next_force_promotes_a_job_once_a_later_wave_arrives`,
 //! `pop_next_still_prefers_smallest_when_nothing_has_aged_out`,
-//! `enqueue_drains_smallest_first_end_to_end` in this module's tests.
+//! `same_burst_never_reverts_to_arrival_order_even_once_max_wait_has_elapsed`,
+//! `enqueue_drains_smallest_first_end_to_end`,
+//! `burst_of_many_jobs_still_dispatches_the_giant_last_end_to_end` in this
+//! module's tests.
 
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
@@ -120,13 +145,23 @@ fn queue_heap() -> &'static Mutex<BinaryHeap<QueuedEmbedJob>> {
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A pending job waiting at least this long is treated as "the best"
-/// regardless of size on the next poll tick — see the module docs'
-/// "Anti-starvation" section. Long enough that it never meaningfully
-/// undercuts the "small drains before giant" goal (warm-boot catch-up passes
-/// are the common case and finish well under this), short enough to bound
-/// worst-case wait to something an operator would never notice.
-const MAX_WAIT: Duration = Duration::from_millis(750);
+/// The minimum gap, between the OLDEST pending job's arrival and any OTHER
+/// pending job's arrival, that counts as "a distinctly later wave" rather
+/// than "the same burst" — see the module docs' "Anti-starvation" section.
+///
+/// Sized in MINUTES, not milliseconds: a warm-boot catch-up burst can
+/// legitimately take minutes to fully enqueue (each repo's C1 fast pass is
+/// itself serialised through the SAME 1-permit `background_reindex_semaphore`
+/// this queue's jobs share, so on a large fleet — hundreds of colocated
+/// indexes — successive C2 arrivals are naturally staggered well past any
+/// sub-second threshold even with zero contention). A short threshold would
+/// misclassify that normal staggering as "a later wave" and collapse the
+/// queue back toward arrival order — the exact bug this slice fixes. Five
+/// minutes comfortably exceeds normal per-repo fast-pass latency while still
+/// bounding a genuinely pathological indefinite trickle of new small
+/// `POST /indexes` registrations to a wait an operator would notice, not one
+/// that runs for hours.
+const MAX_WAIT: Duration = Duration::from_secs(300);
 
 /// How often an index's own waiting task re-checks whether it's now the best
 /// pending job. Cheap (one mutex lock over a heap of at most a few hundred
@@ -229,29 +264,34 @@ fn format_ordered_plan(heap: &BinaryHeap<QueuedEmbedJob>) -> (usize, String) {
     (total, shown.join(", "))
 }
 
-/// Identify (without removing) the best currently-pending job: the oldest if
-/// it has waited at least [`MAX_WAIT`], otherwise the smallest — see the
-/// module docs' "Anti-starvation" section.
+/// Identify (without removing) the best currently-pending job: the OLDEST
+/// pending job if some OTHER pending job arrived at least [`MAX_WAIT`] LATER
+/// than it did (a genuinely later wave overtaking it), otherwise the
+/// SMALLEST — see the module docs' "Anti-starvation" section for why this is
+/// deliberately NOT "has the oldest job simply been waiting a while".
 ///
 /// Why a separate function: keeps the fairness decision testable in
-/// isolation (`pop_next_force_promotes_a_job_once_it_exceeds_max_wait`,
-/// `pop_next_still_prefers_smallest_when_nothing_has_aged_out` exercise this
-/// directly on a plain `BinaryHeap`, no tokio required) and shared between
-/// `wait_for_turn`'s "is it my turn" poll and (indirectly) the logging path.
+/// isolation (`pop_next_force_promotes_a_job_once_a_later_wave_arrives`,
+/// `pop_next_still_prefers_smallest_when_nothing_has_aged_out`,
+/// `same_burst_never_reverts_to_arrival_order_even_once_max_wait_has_elapsed`
+/// exercise this directly on a plain `BinaryHeap`, no tokio required) and
+/// shared between `wait_for_turn`'s "is it my turn" poll and (indirectly)
+/// the logging path.
 /// What: returns the `seq` of the best candidate without mutating the heap.
-/// `O(n)` (`enqueued_at.elapsed()` must be checked fresh on every call, so
-/// even the "no one is starving" path scans once) — `n` is bounded by the
-/// number of indexes still awaiting catch-up, hundreds at most.
+/// `O(n)` twice in the worst case (find the oldest arrival, then scan for a
+/// later-wave arrival relative to it) — `n` is bounded by the number of
+/// indexes still awaiting catch-up, hundreds at most.
 fn best_pending_seq(heap: &BinaryHeap<QueuedEmbedJob>) -> Option<u64> {
     if heap.is_empty() {
         return None;
     }
-    let starving = heap
-        .iter()
-        .filter(|j| j.enqueued_at.elapsed() >= MAX_WAIT)
-        .min_by_key(|j| j.seq);
-    if let Some(job) = starving {
-        return Some(job.seq);
+    if let Some(oldest) = heap.iter().min_by_key(|j| j.enqueued_at) {
+        let later_wave_exists = heap
+            .iter()
+            .any(|j| j.enqueued_at >= oldest.enqueued_at + MAX_WAIT);
+        if later_wave_exists {
+            return Some(oldest.seq);
+        }
     }
     heap.iter().max().map(|j| j.seq)
 }
@@ -340,292 +380,5 @@ fn note_if_drained(remaining: usize) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::{indexer::CodeIndexer, registry::IndexId};
-    use std::sync::Arc as StdArc;
-
-    fn bare_handle(id: &str) -> StdArc<IndexHandle> {
-        let indexer = CodeIndexer::new(id, format!("/tmp/{id}"));
-        StdArc::new(IndexHandle::bare(
-            IndexId::new(id),
-            StdArc::new(tokio::sync::RwLock::new(indexer)),
-            format!("/tmp/{id}").into(),
-        ))
-    }
-
-    /// Issue #3748: [`best_pending_seq`] must identify the job with the
-    /// SMALLEST `chunk_count` (not the natural max-heap order).
-    ///
-    /// Why: this is the entire point of the slice — small repos must drain
-    /// before a giant one, regardless of push order.
-    /// What: pushes jobs with out-of-order sizes, asserts `best_pending_seq`
-    /// picks the smallest one.
-    /// Test: this IS the test.
-    #[test]
-    fn queued_jobs_pop_in_ascending_chunk_count_order() {
-        let mut heap = BinaryHeap::new();
-        let mut tiny_seq = 0;
-        for (size, id) in [(500usize, "mid"), (94_000, "giant"), (12, "tiny")] {
-            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-            if size == 12 {
-                tiny_seq = seq;
-            }
-            heap.push(QueuedEmbedJob {
-                chunk_count: size,
-                seq,
-                enqueued_at: Instant::now(),
-                handle: bare_handle(id),
-                progress: Arc::new(ReindexProgress::new()),
-            });
-        }
-        assert_eq!(
-            best_pending_seq(&heap),
-            Some(tiny_seq),
-            "the smallest chunk_count job must be identified as best"
-        );
-    }
-
-    /// Issue #3748: two jobs with the SAME `chunk_count` must resolve to the
-    /// one enqueued FIRST (FIFO tiebreak), not an arbitrary one.
-    ///
-    /// Why: the spec explicitly requires "keep FIFO as tiebreak for equal
-    /// sizes" — without a `seq` tiebreak, `BinaryHeap`'s max is unspecified
-    /// among equal-priority elements.
-    /// What: pushes three same-size jobs in a known order, asserts
-    /// `best_pending_seq` picks the first.
-    /// Test: this IS the test.
-    #[test]
-    fn equal_chunk_counts_tiebreak_fifo_by_enqueue_order() {
-        let mut heap = BinaryHeap::new();
-        let ids = ["first", "second", "third"];
-        let mut first_seq = 0;
-        for (i, id) in ids.iter().enumerate() {
-            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-            if i == 0 {
-                first_seq = seq;
-            }
-            heap.push(QueuedEmbedJob {
-                chunk_count: 1_000,
-                seq,
-                enqueued_at: Instant::now(),
-                handle: bare_handle(id),
-                progress: Arc::new(ReindexProgress::new()),
-            });
-        }
-        assert_eq!(
-            best_pending_seq(&heap),
-            Some(first_seq),
-            "equal-size jobs must resolve to the FIFO-first one"
-        );
-    }
-
-    /// Issue #3748 anti-starvation: an old, large job that has waited at
-    /// least [`MAX_WAIT`] must be identified as best NEXT, even with a
-    /// strictly smaller, strictly newer job also pending (which pure size
-    /// ordering would otherwise always prefer).
-    ///
-    /// Why: a pure size-priority queue has no fairness bound — this pins the
-    /// wall-clock guarantee that breaks it.
-    /// What: pushes a "giant" job with `enqueued_at` backdated past
-    /// `MAX_WAIT` (no real `sleep` needed — `Instant` arithmetic), then
-    /// pushes a fresh, much smaller "tiny" job, and asserts
-    /// `best_pending_seq` returns the giant.
-    /// Test: this IS the test.
-    #[test]
-    fn pop_next_force_promotes_a_job_once_it_exceeds_max_wait() {
-        let mut heap = BinaryHeap::new();
-        let giant_seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        heap.push(QueuedEmbedJob {
-            chunk_count: 94_000,
-            seq: giant_seq,
-            enqueued_at: Instant::now()
-                .checked_sub(MAX_WAIT + Duration::from_millis(1))
-                .expect("test process has been running longer than MAX_WAIT"),
-            handle: bare_handle("giant-old"),
-            progress: Arc::new(ReindexProgress::new()),
-        });
-        heap.push(QueuedEmbedJob {
-            chunk_count: 1,
-            seq: SEQ.fetch_add(1, Ordering::Relaxed),
-            enqueued_at: Instant::now(),
-            handle: bare_handle("tiny-newcomer"),
-            progress: Arc::new(ReindexProgress::new()),
-        });
-
-        assert_eq!(
-            best_pending_seq(&heap),
-            Some(giant_seq),
-            "a job waiting past MAX_WAIT must be force-promoted even though a \
-             strictly smaller, strictly newer job is available and would otherwise \
-             win on pure size ordering"
-        );
-    }
-
-    /// Issue #3748: below `MAX_WAIT`, ordering is unaffected — the smallest
-    /// job still wins even when an older, larger job is also pending. Pins
-    /// the "no wait, no promotion" side of the same gate the previous test
-    /// exercises, so the two together cover both branches of
-    /// `best_pending_seq`.
-    /// Test: this IS the test.
-    #[test]
-    fn pop_next_still_prefers_smallest_when_nothing_has_aged_out() {
-        let mut heap = BinaryHeap::new();
-        heap.push(QueuedEmbedJob {
-            chunk_count: 94_000,
-            seq: SEQ.fetch_add(1, Ordering::Relaxed),
-            enqueued_at: Instant::now(),
-            handle: bare_handle("giant-fresh"),
-            progress: Arc::new(ReindexProgress::new()),
-        });
-        let tiny_seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        heap.push(QueuedEmbedJob {
-            chunk_count: 1,
-            seq: tiny_seq,
-            enqueued_at: Instant::now(),
-            handle: bare_handle("tiny-fresh"),
-            progress: Arc::new(ReindexProgress::new()),
-        });
-
-        assert_eq!(
-            best_pending_seq(&heap),
-            Some(tiny_seq),
-            "with nothing aged past MAX_WAIT, the smallest job must still win"
-        );
-    }
-
-    /// Issue #3748 end-to-end: `enqueue`-ing a giant job FIRST and a tiny job
-    /// SECOND must still run the tiny job's embed pass first (proving the
-    /// per-index tasks — not just `best_pending_seq` in isolation — respect
-    /// size order).
-    ///
-    /// Why: the unit tests above only prove the selection logic; this proves
-    /// the full `enqueue` -> `wait_for_turn` -> `run_embed_catch_up` pipeline
-    /// actually uses it.
-    /// What: both handles carry ONE real committed chunk and a shared
-    /// `OrderRecordingEmbedder` that appends its index id to a common
-    /// `Arc<Mutex<Vec<String>>>` the INSTANT `embed_batch` is called —
-    /// recording order directly at the moment of dispatch, not via a
-    /// wall-clock poll (a poll-based "did it finish yet" race is
-    /// indistinguishable from a real ordering bug once both jobs' embed
-    /// passes are cheap enough to complete within the same poll tick).
-    /// Enqueues big (9000 "chunks", the priority key — the real committed
-    /// chunk count is 1) then small (3), waits for both to reach a terminal
-    /// stage, and asserts the RECORDED order is `[small, big]`.
-    /// Test: this IS the test.
-    #[tokio::test]
-    async fn enqueue_drains_smallest_first_end_to_end() {
-        use crate::core::chunker::{ChunkType, RawChunk};
-        use crate::core::embed::Embedder;
-        use crate::core::indexer::ParsedBatch;
-        use crate::core::store::{UsearchStore, VectorStore};
-        use std::sync::Mutex as StdMutex;
-
-        struct OrderRecordingEmbedder {
-            id: String,
-            order: Arc<StdMutex<Vec<String>>>,
-        }
-        #[async_trait::async_trait]
-        impl Embedder for OrderRecordingEmbedder {
-            async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
-                self.order.lock().expect("lock").push(self.id.clone());
-                Ok(vec![0.1; 8])
-            }
-            async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-                self.order.lock().expect("lock").push(self.id.clone());
-                Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
-            }
-            fn dimension(&self) -> usize {
-                8
-            }
-        }
-
-        fn raw_chunk(id: &str) -> RawChunk {
-            RawChunk {
-                id: format!("{id}:1:1"),
-                file: "test.rs".into(),
-                start_line: 1,
-                end_line: 1,
-                content: "fn f() {}".into(),
-                function_name: None,
-                language: Some("rust".into()),
-                chunk_type: ChunkType::Code,
-                calls: vec![],
-                inherits_from: vec![],
-                chunk_depth: 0,
-                parent_chunk_id: None,
-                child_chunk_ids: vec![],
-                nlp_keywords: vec![],
-                nlp_code_refs: vec![],
-                virtual_terms: vec![],
-            }
-        }
-
-        fn committed_handle(id: &str, order: &Arc<StdMutex<Vec<String>>>) -> StdArc<IndexHandle> {
-            let embedder: Arc<dyn Embedder> = Arc::new(OrderRecordingEmbedder {
-                id: id.to_string(),
-                order: Arc::clone(order),
-            });
-            let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(8).expect("usearch new"));
-            let indexer =
-                CodeIndexer::new(id, format!("/tmp/{id}")).with_components(embedder, store);
-            StdArc::new(IndexHandle::bare(
-                IndexId::new(id),
-                Arc::new(tokio::sync::RwLock::new(indexer)),
-                format!("/tmp/{id}").into(),
-            ))
-        }
-
-        let order: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-        let big = committed_handle("e2e-big-3748", &order);
-        let small = committed_handle("e2e-small-3748", &order);
-
-        // Commit one synthetic chunk into each indexer so `has_embedder() &&
-        // chunk_count > 0`, otherwise `embed_deferred_chunks` short-circuits
-        // without ever calling the embedder and there is nothing to order.
-        for handle in [&big, &small] {
-            let parsed = ParsedBatch {
-                chunks: vec![raw_chunk(&handle.id.0)],
-                embeddings: vec![None],
-                entities_by_file: vec![],
-                parse_ms: 0,
-                embed_ms: 0,
-                vector_count: 0,
-            };
-            handle
-                .indexer
-                .read()
-                .await
-                .commit_parsed_batch(parsed, false)
-                .await
-                .ok();
-        }
-
-        // Enqueue big FIRST (arrival order) but with the LARGER priority
-        // key, then small SECOND with the smaller key — reversed vs. size
-        // order, so a passing test proves size (not arrival) wins.
-        enqueue(StdArc::clone(&big), Arc::new(ReindexProgress::new()), 9_000);
-        enqueue(StdArc::clone(&small), Arc::new(ReindexProgress::new()), 3);
-
-        for handle in [&big, &small] {
-            for _ in 0..200 {
-                let status = handle.stages.read().await.semantic.status;
-                if status != crate::core::registry::StageStatus::Pending
-                    && status != crate::core::registry::StageStatus::InProgress
-                {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-
-        let recorded = order.lock().expect("lock").clone();
-        assert_eq!(
-            recorded,
-            vec!["e2e-small-3748".to_string(), "e2e-big-3748".to_string()],
-            "the smaller job (enqueued SECOND, smaller priority key) must still run its \
-             embed call BEFORE the bigger job (enqueued FIRST) — proves dispatch \
-             honours size order, not arrival order"
-        );
-    }
-}
+#[path = "defer_embed_queue_tests.rs"]
+mod tests;

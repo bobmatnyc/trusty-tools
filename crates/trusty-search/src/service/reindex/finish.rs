@@ -431,16 +431,24 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
     // Issue #923: spawn the background embedding job if deferred.
     // Issue #2984 Phase 1: never spawn it for a skip_vector index — the
     // embedder must never run, not just be deferred.
-    // Issue #3748 slice A: read chunk_count in the SAME read-lock acquisition
-    // as has_embedder — it's the size-ordering key the deferred-embed catch-up
-    // queue uses to drain small repos before a giant one, and costs nothing
-    // extra since the lock is already held here.
-    let (has_embedder, total_chunks) = {
-        let indexer = handle.indexer.read().await;
-        (indexer.has_embedder(), indexer.chunk_count())
-    };
+    let has_embedder = handle.indexer.read().await.has_embedder();
     if defer_embed && !aborted_memory && has_embedder && !handle.skip_vector {
-        spawn_deferred_embed_pass(handle, progress.clone(), total_chunks);
+        // Issue #3748 slice A review finding 2: key the size-ordered
+        // deferred-embed queue on the PENDING (un-embedded) chunk delta, not
+        // `chunk_count()`'s total corpus size. `finish_reindex` runs after
+        // EVERY reindex, including incremental ones — an incremental pass
+        // over a 94k-chunk repo with one changed chunk has near-instant real
+        // embed cost (`embed_deferred_chunks` only embeds what
+        // `VectorStore::contains_many` says is missing), so sorting it by
+        // the TOTAL corpus size would wrongly queue it behind small repos it
+        // could have beaten. Only computed on the branch that actually
+        // spawns — the `contains_many` bulk check costs nothing on the
+        // common cold-index path (nothing embedded yet, so it returns the
+        // full count) but is still real I/O-shaped work not worth paying
+        // when defer_embed/skip_vector/aborted_memory already ruled out
+        // spawning.
+        let pending_chunks = handle.indexer.read().await.pending_embed_count().await;
+        spawn_deferred_embed_pass(handle, progress.clone(), pending_chunks);
     }
 
     // Issue #75: GC the progress entry after a short delay.
