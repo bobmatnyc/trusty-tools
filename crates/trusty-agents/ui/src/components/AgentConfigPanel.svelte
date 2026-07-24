@@ -198,10 +198,9 @@
         {:else}
           <textarea
             bind:value={personaContent}
-            rows="12"
-            class="w-full flex-1 resize-none rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 font-mono text-xs text-foundry-light-text dark:text-foundry-text focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
+            class="w-full flex-1 min-h-[55vh] max-h-[70vh] resize-y overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 font-mono text-xs text-foundry-light-text dark:text-foundry-text focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
           ></textarea>
-          <div class="flex items-center gap-2 pt-1">
+          <div class="sticky bottom-0 flex items-center gap-2 bg-foundry-light-surface dark:bg-foundry-surface pt-1 pb-1">
             <button
               type="button"
               class="inline-flex items-center gap-1.5 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
@@ -257,9 +256,8 @@
         </p>
         <textarea
           bind:value={toolsText}
-          rows="10"
           placeholder="gworkspace_*&#10;memory_*"
-          class="w-full flex-1 resize-none rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 font-mono text-xs text-foundry-light-text dark:text-foundry-text focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
+          class="w-full flex-1 min-h-[55vh] max-h-[70vh] resize-y overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 font-mono text-xs text-foundry-light-text dark:text-foundry-text focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
         ></textarea>
         <div class="flex items-center gap-2 pt-1">
           <button
