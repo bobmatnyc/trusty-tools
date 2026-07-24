@@ -442,11 +442,24 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         // `VectorStore::contains_many` says is missing), so sorting it by
         // the TOTAL corpus size would wrongly queue it behind small repos it
         // could have beaten. Only computed on the branch that actually
-        // spawns — the `contains_many` bulk check costs nothing on the
-        // common cold-index path (nothing embedded yet, so it returns the
-        // full count) but is still real I/O-shaped work not worth paying
-        // when defer_embed/skip_vector/aborted_memory already ruled out
-        // spawning.
+        // spawns — `pending_embed_count` itself skips the chunk-id
+        // collection and `contains_many` call entirely on the no-embedder/
+        // no-store path (see its docs), so the common cold-index path pays
+        // only a cheap `chunk_count()`.
+        //
+        // Lock-span note (review round 2): `handle.indexer.read().await`'s
+        // guard is a temporary that lives for the full
+        // `pending_embed_count().await` call, including its internal
+        // `VectorStore::contains_many` lookup — `pending_embed_count` takes
+        // `&self`, so Rust keeps the caller's borrow alive for the entire
+        // async call regardless of what runs inside it; narrowing further
+        // would mean splitting id-collection (needs `&self`) from the store
+        // lookup (doesn't) across two indexer accessor methods purely for
+        // this one caller. Not done: `contains_many` is an in-process
+        // vector-store membership check (hash/id lookups against an
+        // already-resident index, not network or disk I/O), so the extra
+        // hold time on `handle.indexer`'s read lock is small and bounded by
+        // corpus size, not worth the added public-API surface.
         let pending_chunks = handle.indexer.read().await.pending_embed_count().await;
         spawn_deferred_embed_pass(handle, progress.clone(), pending_chunks);
     }

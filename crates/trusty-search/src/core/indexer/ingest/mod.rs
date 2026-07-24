@@ -570,31 +570,34 @@ impl CodeIndexer {
     /// index (nothing embedded yet, so this returns the full corpus size,
     /// identical to the old `chunk_count()` behaviour) and an incremental
     /// one (a handful of changed chunks).
-    /// What: snapshots chunk ids (reusing `ensure_chunks_loaded`, a no-op
-    /// when chunks are already resident — always true immediately after a
-    /// reindex, the only caller of this today), runs the SAME single bulk
-    /// `VectorStore::contains_many` check `embed_deferred_chunks` runs, and
-    /// counts the `false` (not-yet-embedded) entries. Falls back to the
-    /// unfiltered chunk count when there's no embedder/store configured —
-    /// `embed_deferred_chunks` would short-circuit to `Ok((0, total))`
-    /// immediately in that case too, so the queue key is moot there; no
-    /// point paying for a membership check that can't apply.
+    /// What: checks the store/embedder presence FIRST — `chunk_count()`-style,
+    /// no chunk access at all — before touching the chunk map, so the moot
+    /// (no-embedder/no-store) path never pays for it. On the path that
+    /// actually has both, reuses `ensure_chunks_loaded` (a no-op when chunks
+    /// are already resident — always true immediately after a reindex, the
+    /// only caller of this today) and reads only the chunk IDs (`HashMap`
+    /// keys — no `RawChunk` content/Vec fields cloned, unlike
+    /// `embed_deferred_chunks`, which legitimately needs the full chunks to
+    /// embed them), runs the SAME single bulk `VectorStore::contains_many`
+    /// check `embed_deferred_chunks` runs, and counts the `false`
+    /// (not-yet-embedded) entries.
     /// Test: `pending_embed_count_matches_delta_not_total_chunk_count`,
     /// `pending_embed_count_falls_back_to_full_count_without_embedder`.
     pub async fn pending_embed_count(&self) -> usize {
-        self.ensure_chunks_loaded().await;
-        let chunks: Vec<RawChunk> = {
-            let map = self.chunks.read().await;
-            map.values().cloned().collect()
-        };
-        let total = chunks.len();
-        let Some(store) = self.store.as_ref() else {
-            return total;
-        };
-        if self.embedder.is_none() {
-            return total;
+        if self.store.is_none() || self.embedder.is_none() {
+            // `embed_deferred_chunks` would short-circuit to `Ok((0, total))`
+            // immediately in this case too, so the queue key is moot here —
+            // fall back to the plain (non-blocking) chunk count rather than
+            // loading/locking the chunk map for a membership check that
+            // can't apply.
+            return self.chunk_count();
         }
-        let ids: Vec<String> = chunks.iter().map(|c| c.id.clone()).collect();
+        self.ensure_chunks_loaded().await;
+        let ids: Vec<String> = {
+            let map = self.chunks.read().await;
+            map.keys().cloned().collect()
+        };
+        let store = self.store.as_ref().expect("checked above");
         let already_embedded = store.contains_many(&ids).await;
         already_embedded.into_iter().filter(|&e| !e).count()
     }
