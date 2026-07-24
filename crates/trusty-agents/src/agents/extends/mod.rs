@@ -294,6 +294,11 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
         union_opt_vec(merged.system_prompt.skills, child.system_prompt.skills);
     merged.agent.capabilities =
         merge_capabilities(merged.agent.capabilities, child.agent.capabilities);
+    // `listeners` (#3820): base-first union keyed by binding `name`; a child
+    // that re-declares the same listener name overrides the base's filter
+    // for it (matches the child-wins-on-override intent of the scalar rules
+    // above), rather than appending a shadowing duplicate.
+    merged.listeners = union_listener_bindings(merged.listeners, child.listeners);
 
     // --- Prose: base-first concatenation ---
     merged.system_prompt.content =
@@ -348,6 +353,35 @@ fn union_opt_vec(base: Option<Vec<String>>, child: Option<Vec<String>>) -> Optio
             Some(b)
         }
     }
+}
+
+/// Union two `[[listeners]]` binding lists, base-first, keyed by `name` —
+/// a child binding with the same `name` as a base binding REPLACES it
+/// in-place (rather than appending a second, shadowing entry); a child
+/// binding with a new `name` is appended.
+///
+/// Why: `AgentListenerBinding` doesn't implement `PartialEq`-driven
+/// `contains` semantics the way `union_opt_vec`'s `String` union does — two
+/// bindings are "the same listener" iff their `name` matches, even if the
+/// child changed the `filter`. Mirrors DOC-54's binding semantics: an
+/// overlay agent may want to re-filter (not merely add to) an inherited
+/// listener binding.
+/// Test: `extends_unions_listener_bindings_by_name`,
+/// `extends_listener_binding_child_override_replaces_base_filter`
+/// (`extends/tests.rs`).
+fn union_listener_bindings(
+    base: Vec<crate::listeners::config::AgentListenerBinding>,
+    child: Vec<crate::listeners::config::AgentListenerBinding>,
+) -> Vec<crate::listeners::config::AgentListenerBinding> {
+    let mut merged = base;
+    for child_binding in child {
+        if let Some(existing) = merged.iter_mut().find(|b| b.name == child_binding.name) {
+            *existing = child_binding;
+        } else {
+            merged.push(child_binding);
+        }
+    }
+    merged
 }
 
 /// Union the four capability sub-lists of two optional [`AgentCapabilities`].

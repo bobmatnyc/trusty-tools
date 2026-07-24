@@ -20,6 +20,8 @@
 //!   - `ctrl_sessions`→ CTRL session CRUD (`om session …`)
 //!   - `tm`           → tmux session management (`/api/tm/*`)
 //!   - `events_sse`   → SSE telemetry stream
+//!   - `listener_events` → durable eventstream-listener event list + filter
+//!     toggle (`/api/listener-events*`, #3820)
 //!   - `task_runner`  → subprocess workflow execution + recap dispatch
 //!   - `ui`           → embedded Vite bundle serving
 //!   - `workstreams`  → `GET /api/workstreams[/:name/history]` — resumable
@@ -34,6 +36,7 @@ mod cancel;
 mod ctrl_sessions;
 mod events_sse;
 mod handlers;
+mod listener_events;
 mod models;
 mod project_registration;
 mod projects;

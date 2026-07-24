@@ -15,9 +15,11 @@
 // What: `eventRowFromEvent` maps one `AppEvent` to an `EventRow`;
 // `pushEvent` folds it into the bounded `eventLog` store. `EVENT_SOURCES`
 // classifies a row's `type` into a coarse source bucket for the source
-// filter (`task`, `slack`, `system`) — the seam a future #3798 connector
-// would extend with real per-connector sources (`gmail`, `google-calendar`,
-// …) without changing `EventRow`'s shape.
+// filter (`task`, `slack`, `system`, `gmail`) — `gmail` is the first real
+// per-connector source, landing with #3820's Gmail listener
+// (`Event::ListenerEventReceived`, wire type `listener_event_received`,
+// published by `crate::listeners::poll` onto the SAME bus this file
+// already taps — no new plumbing needed on this side).
 // Test: `events.test.ts`.
 
 import { writable } from 'svelte/store';
@@ -28,7 +30,7 @@ export interface EventRow {
   /** The raw `AppEvent.type` (`session_started`, `slack_message_received`, …). */
   type: string;
   /** Coarse bucket for the source filter — see `sourceOf`. */
-  source: 'task' | 'slack' | 'system';
+  source: 'task' | 'slack' | 'system' | 'gmail';
   /** A short, human-glanceable summary line — never empty. */
   summary: string;
   /** Client receive time (ms) — used for ordering + the time filter. */
@@ -39,12 +41,15 @@ export interface EventRow {
 export const EVENT_LOG_MAX = 300;
 
 /**
- * Why: classifies an event's `type` into the source filter's three buckets.
- * `slack` and `ping`/`lag` (diagnostic) are their own honest categories;
- * everything else — task/agent/workflow lifecycle events — is `task`, the
- * bucket that will most naturally split into per-connector sources once
- * #3798 lands.
- * What: Pure string-prefix classification.
+ * Why: classifies an event's `type` into the source filter's buckets.
+ * `slack`, `gmail`, and `ping`/`lag` (diagnostic) are their own honest
+ * categories; everything else — task/agent/workflow lifecycle events — is
+ * `task`, the bucket that will keep splitting into per-connector sources as
+ * more of #3798's listener family lands (Calendar next).
+ * What: Pure string-prefix classification. `listener_event_received` is
+ * NOT prefix-classified by type alone (the wire type is the same for every
+ * connector) — `eventRowFromEvent` reads the event's own `provider` field
+ * for that one case; see its `case` arm below.
  * Test: `sourceOf_classifies_*`.
  */
 export function sourceOf(type: string): EventRow['source'] {
@@ -65,6 +70,20 @@ export function sourceOf(type: string): EventRow['source'] {
  */
 export function eventRowFromEvent(ev: AppEvent): EventRow {
   const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  // `listener_event_received` (#3820) carries its own source bucket via
+  // `provider` (`"gmail"` today) rather than a `type`-prefix rule, since the
+  // wire `type` is the same string for every connector. Handled before the
+  // switch below so it can `return` its own `source` instead of always
+  // falling through to `sourceOf`.
+  if (ev.type === 'listener_event_received') {
+    const provider = str(ev.provider);
+    return {
+      type: ev.type,
+      source: provider === 'gmail' ? 'gmail' : 'task',
+      summary: str(ev.summary) || ev.type,
+      received_at: Date.now(),
+    };
+  }
   let summary = '';
   switch (ev.type) {
     case 'pm_thinking':

@@ -437,6 +437,94 @@ scopes = ["memory.read", "search.read"]
 }
 
 #[test]
+fn extends_unions_listener_bindings_by_name() {
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+[[listeners]]
+name = "calendar-personal"
+event_types = ["event.created"]
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+[[listeners]]
+name = "gmail-personal"
+event_types = ["message.received"]
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(merged.listeners.len(), 2, "distinct names both retained");
+    assert!(
+        merged
+            .listeners
+            .iter()
+            .any(|b| b.name == "calendar-personal")
+    );
+    assert!(merged.listeners.iter().any(|b| b.name == "gmail-personal"));
+}
+
+#[test]
+fn extends_listener_binding_child_override_replaces_base_filter() {
+    let base = cfg(r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+[[listeners]]
+name = "gmail-personal"
+event_types = ["message.received"]
+filter = { from = ["*@duetto.com"] }
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+[[listeners]]
+name = "gmail-personal"
+event_types = ["message.received"]
+filter = { from = ["*@family.com"] }
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(
+        merged.listeners.len(),
+        1,
+        "same-name binding replaces, not appends"
+    );
+    assert_eq!(merged.listeners[0].filter.from, vec!["*@family.com"]);
+}
+
+#[test]
 fn extends_union_none_cases() {
     let base_no_tools = cfg(r#"
 [agent]

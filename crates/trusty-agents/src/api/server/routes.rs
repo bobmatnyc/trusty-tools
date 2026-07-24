@@ -34,6 +34,7 @@ use super::handlers::{
     clear_context, clear_recent_tasks, docs_search, get_session_recap, get_task, health,
     list_tasks, submit_task,
 };
+use super::listener_events::{list_listener_events, set_listener_event_filter};
 use super::models::get_models;
 use super::project_registration::{connect_project, get_project_config};
 use super::projects::{list_agents_route, list_projects, list_sessions_route};
@@ -195,6 +196,16 @@ pub fn build_router_with_origins(
         .route("/api/tm/tell", post(tm_tell))
         // #192 Phase B: SSE event stream — replaces 2s stderr polling.
         .route("/api/events", get(events_handler))
+        // #3820: durable, persisted eventstream-listener event list + the
+        // per-event-type include/exclude toggle (Events pane, #3818). Named
+        // `/api/listener-events` — NOT `/api/events` — because that path is
+        // already the SSE telemetry stream above; see `listener_events.rs`'s
+        // module doc for the full naming rationale.
+        .route("/api/listener-events", get(list_listener_events))
+        .route(
+            "/api/listener-events/filter",
+            post(set_listener_event_filter),
+        )
         // #3752: internal loopback relay — the separate `tagent --slack`
         // process POSTs its Slack-mirror events here so they reach this
         // process's bus (and the GUI's `/api/events` stream). Guarded by the
@@ -314,6 +325,18 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
             }
         }
     });
+    // #3820: start any enabled eventstream listeners (Gmail history-poll
+    // today) as background tasks in this long-lived server process. Reads
+    // `~/.trusty-agents/config.toml`'s `[[listeners]]` — every entry defaults
+    // `enabled = false`, so an install with no listeners configured (the
+    // common case today) spawns nothing. Never fails server startup: a
+    // listener config problem is logged and that listener alone is skipped
+    // (see `listeners::poll::spawn_listeners`).
+    let listener_project_path =
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let global_config = crate::mcp::config::GlobalConfig::load().await;
+    crate::listeners::poll::spawn_listeners(global_config.listeners, listener_project_path);
+
     // #212: Load persisted task snapshot so restarts don't lose history.
     let state = AppState::with_persistence(None).await;
     let addr = std::net::SocketAddr::from((cfg.bind, cfg.port));

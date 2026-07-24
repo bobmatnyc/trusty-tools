@@ -107,6 +107,22 @@ pub struct AgentConfig {
     /// Test: `agent_config_load_populates_adapter`.
     #[serde(skip, default = "default_adapter")]
     pub adapter: Arc<dyn ModelAdapter>,
+
+    /// Per-agent listener bindings (#3820, DOC-54 SPEC-AGENTS-04/06)  — the
+    /// third leg of the stores/tools/listeners config triple.
+    ///
+    /// Why: An agent REACTS to inbound events (Gmail, Calendar, …) via
+    /// listeners, distinct from how it ACTS via `[tools].allow`. Each entry
+    /// names a harness-level listener (defined in `~/.trusty-agents/config.toml`'s
+    /// `[[listeners]]`) and further narrows (stage-two filter) which of that
+    /// listener's events wake THIS agent. Absent = the agent never wakes for
+    /// any event (deny-by-default, matching `[tools].allow`'s posture).
+    /// What: `Vec<AgentListenerBinding>` parsed from repeated `[[listeners]]`
+    /// tables.
+    /// Test: `crate::listeners::config` unit tests cover the binding shape;
+    /// `crate::listeners::wake` tests cover matching semantics.
+    #[serde(default)]
+    pub listeners: Vec<crate::listeners::config::AgentListenerBinding>,
 }
 
 fn default_adapter() -> Arc<dyn ModelAdapter> {

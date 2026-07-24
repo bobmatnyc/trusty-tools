@@ -10,6 +10,7 @@ mod agent_patch;
 mod cancel;
 mod ctrl_sessions;
 mod guard;
+mod listener_events;
 mod listing;
 mod models;
 mod relay;

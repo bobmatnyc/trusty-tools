@@ -99,7 +99,11 @@ pub fn format_event(event: &Event) -> Option<String> {
         | Event::AstOperation { .. } => None,
         // #3752: Slack-mirror events are a GUI-only concern (injected onto the
         // `--api` bus via the relay endpoint); the REPL never surfaces them.
-        Event::SlackMessageReceived { .. } | Event::SlackReplySent { .. } => None,
+        // #3820: listener events are likewise a GUI-only (Events pane)
+        // concern — the REPL has no eventstream-listener view yet.
+        Event::SlackMessageReceived { .. }
+        | Event::SlackReplySent { .. }
+        | Event::ListenerEventReceived { .. } => None,
         // #371: render a one-line recap banner when a session recap is generated.
         Event::RecapGenerated { summary, .. } => {
             Some(dim.paint(format!("  ※ recap: {summary}")).to_string())
