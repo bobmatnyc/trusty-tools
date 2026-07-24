@@ -361,11 +361,35 @@ mod tests {
 
     /// On Linux, sampling this test process's own `/proc/self/status` (via
     /// `pid = std::process::id()`) must return a sane, nonzero anon-RSS
-    /// reading that never exceeds the process's TOTAL RSS — anonymous pages
-    /// are a subset of total resident pages by definition.
+    /// reading that never exceeds the process's TOTAL RSS by more than a
+    /// generous sampling-skew headroom — anonymous pages are a subset of
+    /// total resident pages by definition, but the two figures come from two
+    /// genuinely independent `/proc` reads taken microseconds apart
+    /// ([`anon_rss_mb_for_pid`] parses `/proc/<pid>/status`'s `RssAnon`
+    /// directly; [`current_rss_mb_for_pid`] re-reads process state via
+    /// `sysinfo`), so they are not one atomic snapshot.
+    ///
+    /// Why the headroom instead of a strict `anon <= total` bound (issue
+    /// #3762, recurrence of #3716's flake class): this test panicked in CI
+    /// under `cargo test --workspace` load with "anon RSS (185 MB) must never
+    /// exceed total RSS (116 MB)" (run 30040058243 on PR #3750) and passed on
+    /// rerun — concurrent sibling-test allocation between the two
+    /// non-atomic reads pushed `anon`'s snapshot above `total`'s
+    /// already-stale one. This is the same structural class #3716 fixed for
+    /// `enforcement_rss_mb_for_pid_matches_chosen_measure`: comparing two live
+    /// samples of a real process is inherently racy, so the fix is a
+    /// one-directional structural bound with sampling-skew headroom, not a
+    /// two-sided closeness bound and not a tighter/looser exact-inequality
+    /// retry.
     #[test]
     #[cfg(target_os = "linux")]
     fn test_anon_rss_for_self_pid_on_linux() {
+        // Mirrors memguard_enforce's own
+        // `enforcement_rss_mb_for_pid_matches_chosen_measure` (#3716): absorbs
+        // the two readings being taken microseconds apart under concurrent
+        // `cargo test --workspace` churn, not a same-measure agreement bound.
+        const SAMPLING_SKEW_HEADROOM_MB: u64 = 512;
+
         let pid = std::process::id();
         let Some(anon) = anon_rss_mb_for_pid(pid) else {
             // Only plausible if /proc is hidden (unusual container profile);
@@ -378,9 +402,11 @@ mod tests {
         );
         if let Some(total) = current_rss_mb_for_pid(pid) {
             assert!(
-                anon <= total,
-                "anon RSS ({anon} MB) must never exceed total RSS ({total} MB) — anon is a \
-                 subset of total resident pages"
+                anon <= total + SAMPLING_SKEW_HEADROOM_MB,
+                "anon RSS ({anon} MB) exceeded total RSS ({total} MB) by more than the \
+                 {SAMPLING_SKEW_HEADROOM_MB}MB sampling-skew headroom — RssAnon is a subset of \
+                 VmRSS by kernel definition, so a larger gap suggests a real regression rather \
+                 than the two non-atomic /proc reads racing under concurrent test-binary churn"
             );
         }
     }

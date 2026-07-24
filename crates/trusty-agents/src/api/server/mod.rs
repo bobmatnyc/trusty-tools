@@ -48,8 +48,12 @@ mod tests;
 // `serve_with_config` + `ApiConfig`; the rest are kept `pub` for tests and
 // future embedders, mirroring the original module's exports.
 pub use auth::ApiConfig;
+// #3633 core: the `list_agents` MCP tool (`crate::runtime::mcp_serve`) reuses
+// the same roster computation the `GET /api/agents` route serves, so the two
+// surfaces can never drift.
 #[allow(unused_imports)]
 pub use handlers::TaskRequest;
+pub(crate) use projects::agent_roster;
 #[allow(unused_imports)]
 pub use routes::{build_router, build_router_with_config, serve, serve_with_config};
 #[allow(unused_imports)]

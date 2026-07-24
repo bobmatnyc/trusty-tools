@@ -7,8 +7,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`tagent mcp-serve` — stdio MCP server exposing trusty-agents to external MCP
+  clients (Claude Code, etc.) (#3633 core):** a line-delimited JSON-RPC / MCP
+  server over stdio, built on the shared `trusty_common::mcp` framework
+  (`run_stdio_loop` + `initialize_response`, protocol `2024-11-05`) with zero new
+  dependencies. Ships two tools — `list_agents` (read-only; returns the same
+  roster the `GET /api/agents` route serves, via a newly-extracted shared
+  `agent_roster` fn) and `dispatch_task` (wraps the existing opaque, RBAC-gated
+  `PmBridgeTool` rooted at the server's cwd). Dispatched before `run_startup_init`
+  so the JSON-RPC stdout stream is never polluted by startup output. Deferred to
+  epic #3633: HTTP/SSE transport, `rpc.discover`, tool namespacing, auth, and
+  RBAC tier-mapping of external callers.
+
 ### Changed
 
+- **No interim status text in the chat response bubble — the spinner is the
+  sole waiting indicator:** the assistant bubble no longer fills with
+  "Running…"/"submitted…"-style `task-progress` status strings. It stays empty
+  (with a bare animated spinner shown beneath the thread — no "Running…" text
+  label; `role="status"` + `aria-label` preserve the accessible busy-state
+  name) until the first streamed `task-delta` or, for non-streaming providers,
+  the final `task-complete` narrative arrives. Removed the two progress-text
+  writes into message content (`ChatView`'s `task-progress` listener, dropped
+  entirely; `InputArea`'s poll-reconcile write) and the spinner-row text label;
+  the pending→real id reconcile itself is retained (it's load-bearing for
+  streamed-delta attribution).
 - **Base `assistant` persona defaults to Sonnet instead of Opus (#3688):**
   `claude-opus-4-6` → `claude-sonnet-4-6` on `assistant/agent.toml`, trading a
   small quality margin for materially lower per-turn latency (a trivial turn
@@ -17,6 +42,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Chat stream renders inside ONE stable assistant bubble — no mid-stream
+  flicker:** as `task-delta` tokens arrived the reply bubble visibly flashed
+  because each delta fired two separate `messages` store writes (content, then
+  speaker), doubling the keyed-`{#each}` re-render + forced scroll reflow per
+  token. Now a single `streamDeltaIntoTask` write funnels content + speaker
+  into the ONE bubble whose `taskId` matches the delta's globally-unique
+  backend id, rewriting only `content`/`speaker` so the message `id` is
+  preserved (the keyed `{#each}` patches, never re-mounts). Attribution is by
+  exact backend id, searched across every conversation — never by list position
+  and never scoped to the currently-viewed project — so a background stream
+  reaches its own bubble after a project switch and one turn's tokens can never
+  land in another turn's or project's bubble; an unattributable frame (e.g.
+  arriving before the poll loop reconciles the `pending-<ts>` id) is dropped,
+  and its text — held by the shared `streamAccumulator` — appears on the first
+  matching write. No-op frames skip the store `set` entirely, so they notify no
+  subscribers. `InputArea`'s reconcile and `ChatView`'s progress handler both
+  gate on the shared `streamAccumulator` so neither overwrites live streamed
+  text.
 - **Izzie's own tools now reach the `--direct`/`--agent` dispatch path (#3745
   item C):** `tagent --direct izzie` loaded a tool registry of only
   `[git_log, git_status, web_search, delegate_to_agent]` and the model answered

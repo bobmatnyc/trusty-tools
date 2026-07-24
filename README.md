@@ -118,11 +118,7 @@ documentation.
 | Crate | Description |
 |---|---|
 | `trusty-common` | Tracing, daemon helpers, OpenRouter chat client, shared utilities |
-| `trusty-embedder` | fastembed wrapper — all-MiniLM-L6-v2 INT8 quantised, 384-dim output |
-| `trusty-mcp-core` | MCP primitives, JSON-RPC 2.0 types, stdio/HTTP transport |
-| `trusty-symgraph` | Symbol graph engine — tree-sitter AST parser + knowledge graph |
-| `trusty-rpc` | RPC helpers and service descriptors |
-| `trusty-tickets` | GitHub Issues integration |
+| `trusty-embedderd` | fastembed wrapper — all-MiniLM-L6-v2 INT8 quantised, 384-dim output |
 | `trusty-gworkspace` | Google Workspace client (Calendar, Tasks, Drive) |
 | `trusty-cto-db` | SQLite schema + rusqlite bindings for ops data |
 | `tc-services` | Service adapters (CTO DB, Granola, GWorkspace) |

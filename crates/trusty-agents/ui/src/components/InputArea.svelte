@@ -159,14 +159,19 @@
     // the reconciliation point for a queued cancel (see `queueCancel` above).
     let reconciled = false;
     let unlistenReconcile: (() => void) | null = null;
-    const unlistenP = await listenEvent<{ task_id: string; message: string }>(
+    const unlistenP = await listenEvent<{ task_id: string }>(
       'task-progress',
       (p) => {
         if (reconciled || !p.task_id || mySeq !== submissionSeq) return;
         reconciled = true;
+        // Reconcile the placeholder id to the real backend id — load-bearing:
+        // it's what lets subsequent `task-delta`/`task-complete` events (keyed
+        // by the real id) find and fill this bubble. We deliberately do NOT
+        // write the progress message's status text into the bubble: interim
+        // "Running…"/"submitted…" strings are not shown in the response bubble
+        // (the spinner is the sole waiting indicator); the bubble stays empty
+        // until the first streamed delta or the final narrative arrives.
         replaceMessageTaskId(projectId, placeholderTaskId, p.task_id);
-        // Apply the message that triggered the swap so it isn't lost.
-        updateMessageByTask(projectId, p.task_id, p.message);
         activeTaskId.set(p.task_id);
         if (cancelQueued) {
           cancelQueued = false;
