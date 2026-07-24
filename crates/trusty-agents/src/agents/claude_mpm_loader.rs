@@ -103,6 +103,7 @@ impl ClaudeMpmAgent {
                 model_override: None,
                 enable_prompt_caching: true,
                 max_turns: 20,
+                persona_max_turns: None,
                 tool_choice: ToolChoice::Auto,
                 use_finish_task: false,
                 use_anthropic_direct: false,
