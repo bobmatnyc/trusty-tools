@@ -75,6 +75,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
             model_override: None,
             enable_prompt_caching: true,
             max_turns: 5,
+            persona_max_turns: None,
             tool_choice: ToolChoice::Auto,
             use_finish_task: false,
             use_anthropic_direct: false,

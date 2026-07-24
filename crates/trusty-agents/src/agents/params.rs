@@ -235,6 +235,29 @@ pub struct LlmParams {
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
 
+    /// Max-turns override for the persona REPL chat loop specifically
+    /// (demo-day fix, 2026-07-24).
+    ///
+    /// Why: `run_pm_task_with_persona` (the `/agent <persona>` REPL turn) is a
+    /// separate call site from the subagent tool loop `max_turns` above — it
+    /// has hardcoded its own ceiling (2 turns with no tools, 4 with tools)
+    /// since #254 and never consulted this section at all. A persona doing a
+    /// couple of sequential tool calls (e.g. grep twice, then summarize)
+    /// routinely exhausted the 4-turn budget and failed with
+    /// `chat_with_tools exceeded max_turns`. This field lets an operator raise
+    /// the tool-using-persona ceiling per agent without a rebuild.
+    /// What: Only consulted by `dispatch::persona::persona_max_turns` for the
+    /// tool-using branch; the no-tools branch is unaffected (stays 2). When
+    /// `None` (default), that branch uses 8 turns — raised from the prior
+    /// hardcoded 4.
+    /// Test: `llm_params_persona_max_turns_defaults_to_none`,
+    /// `llm_params_persona_max_turns_parses_override` (`tests.rs`);
+    /// `persona_max_turns_with_tools_defaults_to_eight`,
+    /// `persona_max_turns_with_tools_honors_config_override`
+    /// (`ctrl::pm_task::dispatch::persona_tests`).
+    #[serde(default)]
+    pub persona_max_turns: Option<u32>,
+
     /// How to set the `tool_choice` field on chat requests (#57).
     ///
     /// Why: Some agents (plan, research, code) do their work entirely through
