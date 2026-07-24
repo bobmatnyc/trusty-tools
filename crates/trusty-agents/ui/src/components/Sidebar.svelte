@@ -1,16 +1,24 @@
 <script lang="ts">
   /**
    * Why (#3819, epic #3052): Bob's directive replaces the `PROJECTS` section
-   * (one static `CTRL` entry) with user-facing `TASKS` — internally still
-   * "workstreams" (API/tagging/spec vocabulary unchanged; "Tasks" is a
-   * presentation-layer rename only) — sourced from trusty-memory's
-   * `ws:<name>` tag convention (DOC-53, the same one the `tm` harness uses)
-   * and grouped/collapsible by owning agent. CTRL's prior "select the ctrl
-   * conversation" capability is preserved as a pinned `Concierge` button
-   * above the list — see `ChatHeader.svelte`'s doc comment for how
-   * "Concierge" maps onto the pre-existing `activeAgentId = null` dispatch
-   * path. Also drops the standalone "Clear Context" footer button per Bob
-   * (superseded by "+ New Task").
+   * (one static `CTRL` entry) with a single user-facing `TASKS` section —
+   * internally still "workstreams" (API/tagging/spec vocabulary unchanged;
+   * "Tasks" is a presentation-layer rename only) — sourced from trusty-
+   * memory's `ws:<name>` tag convention (DOC-53, the same one the `tm`
+   * harness uses) and grouped/collapsible by owning agent. Per Bob's
+   * follow-up review of the running build: the sidebar carries NO agent
+   * shortcut at all — agent selection happens ONLY via `ChatHeader`'s
+   * selector, so the Concierge pin that used to live here (mirroring the
+   * old Projects/CTRL slot) is REMOVED, not relabeled. The separate "Recent
+   * tasks" section (`TaskHistory.svelte`, backend `GET /api/tasks` workflow-
+   * run history) is also removed — Bob: one "Tasks" section, no duplication.
+   * `TaskHistory.svelte` is left in the tree, unrouted (same treatment as
+   * `ProjectsView`/`PersonalityPanel`) rather than deleted, since it's real,
+   * tested, backend-integrated functionality (live status/cost/score per
+   * run) with no current call site — folding its unique info into the
+   * memory-tagged Tasks rows is a follow-up, not done ad hoc under time
+   * pressure. Also drops the standalone "Clear Context" footer button per
+   * Bob (superseded by "+ New Task").
    *
    * IMPORTANT model note (Bob's continuous-per-agent-chat refinement): there
    * is ONE ongoing chat per agent, no per-task context isolation — the
@@ -29,7 +37,7 @@
    * banner" remains valid under this model.
    */
   import { onMount } from 'svelte';
-  import { Terminal, Loader2, Plus, ChevronRight, ChevronDown } from 'lucide-svelte';
+  import { Loader2, Plus, ChevronRight, ChevronDown } from 'lucide-svelte';
   import {
     activeAgentId,
     agentRoster,
@@ -37,7 +45,6 @@
     fetchAgentCatalog,
   } from '../stores/app';
   import { fetchWorkstreams, fetchWorkstreamHistory, groupByAgent, type AgentGroup } from '../lib/workstreams';
-  import TaskHistory from './TaskHistory.svelte';
   import LogoMark from '../lib/icons/LogoMark.svelte';
 
   export let apiReady = false;
@@ -47,10 +54,6 @@
   let loadingWorkstreams = true;
   let collapsed = new Set<string>();
   let resumingName: string | null = null;
-
-  function selectConcierge() {
-    activeAgentId.set(null);
-  }
 
   function toggleGroup(agentId: string) {
     const next = new Set(collapsed);
@@ -170,26 +173,14 @@
     </button>
   </div>
 
-  <nav class="flex flex-col gap-1 px-2 py-3">
-    <!-- #3819: Concierge (ctrl) pinned above the TASKS list — not itself a
-         task, the fixed coordination-layer thread. -->
-    <button
-      type="button"
-      class="flex items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors {$activeAgentId === null
-        ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-text dark:text-foundry-text border-l-2 border-foundry-light-primary dark:border-foundry-primary'
-        : 'text-foundry-light-text/80 dark:text-foundry-text/80 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
-      on:click={selectConcierge}
-    >
-      <Terminal class="h-4 w-4" />
-      <span class="flex-1 truncate">Concierge</span>
-    </button>
-  </nav>
-
   <!-- #3819: "TASKS" is the user-facing label for workstreams (Bob:
        "less technical" — the API/tagging/spec vocabulary stays
        'workstream'; this is presentation-layer only). Grouped/collapsible
-       by owning agent; each row resumable. -->
-  <div class="flex flex-col gap-1 border-t border-foundry-light-border dark:border-foundry-border px-2 py-3">
+       by owning agent; each row resumable. The ONLY tasks section (no
+       separate "Recent tasks" / TaskHistory below it — Bob: one list, no
+       duplication) and the sidebar carries NO agent shortcut (agent
+       selection lives solely in ChatHeader). -->
+  <div class="flex flex-1 flex-col gap-1 overflow-y-auto border-t border-foundry-light-border dark:border-foundry-border px-2 py-3">
     <h2 class="mb-1 px-2 text-xs font-semibold uppercase tracking-wide text-foundry-teal">
       Tasks
     </h2>
@@ -244,9 +235,6 @@
     {/if}
   </div>
 
-  <div class="flex-1 overflow-y-auto border-t border-foundry-light-border dark:border-foundry-border px-2 py-3">
-    <TaskHistory />
-  </div>
   <!-- #3819: the standalone "Clear Context" footer button is removed per
        Bob — "+ New Task" (above) covers it and doubles as "start a new
        task" (fresh context). -->

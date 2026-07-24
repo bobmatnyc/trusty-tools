@@ -32,6 +32,14 @@
    * border). Semantic state (active tab, ready/connecting, desktop/web)
    * is now carried entirely by background/text/dot color, never by
    * a differently-weighted border.
+   * HEIGHT TOKEN (Bob, header-row visual polish): every one of those same
+   * five controls (tabs group, `ModelSwitcher`, Desktop/Web pill, API
+   * Ready/Connecting pill, `ThemeToggle`) is a fixed `h-8`, content
+   * vertically centered via `flex items-center` — previously each control
+   * sized itself from its own vertical padding (`py-1` on some, `py-0.5` on
+   * others, doubled-up padding on the two nested-button controls), which
+   * produced visibly different heights in the same row. Vertical padding is
+   * dropped in favor of the fixed height everywhere this token applies.
    * Test: Mount `<Header activeView="chat" apiReady={true} />`, verify the
    * CHAT tab is highlighted, the API READY badge shows green, and clicking
    * EVENTS dispatches `switch-view` with `{ view: 'events' }`. Manual:
@@ -74,7 +82,7 @@
 
   <div class="flex items-center gap-2.5">
     <div
-      class="flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-1 py-1"
+      class="flex h-8 items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-1"
       role="tablist"
       aria-label="View"
     >
@@ -83,7 +91,7 @@
           type="button"
           role="tab"
           aria-selected={activeView === tab.id}
-          class="rounded px-3 py-1 font-mono text-xs font-semibold uppercase tracking-wide transition-colors {activeView ===
+          class="flex h-6 items-center rounded px-3 font-mono text-xs font-semibold uppercase tracking-wide transition-colors {activeView ===
           tab.id
             ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
             : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
@@ -97,7 +105,7 @@
     <ModelSwitcher />
 
     <span
-      class="rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide {desktop
+      class="flex h-8 items-center rounded-md border border-foundry-light-border dark:border-foundry-border px-2 font-mono text-[10px] font-semibold uppercase tracking-wide {desktop
         ? 'bg-foundry-light-primary/15 dark:bg-foundry-primary/15 text-foundry-light-primary dark:text-foundry-primary'
         : 'bg-foundry-amber/15 text-foundry-amber'}"
       title={desktop ? 'Running inside Tauri (IPC)' : 'Running in browser (HTTP /api)'}
@@ -106,7 +114,7 @@
     </span>
 
     <span
-      class="inline-flex items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide {apiReady
+      class="inline-flex h-8 items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 font-mono text-[10px] font-semibold uppercase tracking-wide {apiReady
         ? 'bg-green-500/15 text-green-600 dark:text-green-400'
         : 'bg-foundry-light-surface dark:bg-foundry-surface text-foundry-light-muted dark:text-foundry-text/50'}"
     >

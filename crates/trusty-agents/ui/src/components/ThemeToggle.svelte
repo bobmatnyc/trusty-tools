@@ -25,14 +25,14 @@
 </script>
 
 <div
-  class="flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface p-1"
+  class="flex h-8 items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-1"
   role="group"
   aria-label="Theme"
 >
   {#each options as opt}
     <button
       type="button"
-      class="flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors
+      class="flex h-6 items-center gap-1 px-2 rounded text-xs transition-colors
              {$theme === opt.value
                ? 'bg-foundry-light-primary dark:bg-foundry-primary text-white'
                : 'text-foundry-light-muted dark:text-foundry-muted hover:text-foundry-light-text dark:hover:text-foundry-text'}"
