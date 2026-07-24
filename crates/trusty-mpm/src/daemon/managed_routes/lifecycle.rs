@@ -58,7 +58,10 @@ use crate::session_manager::ManagedError;
 /// `resume_managed_*` tests in `tests/session_manager_mvp.rs` (empty-registry
 /// case — no regression); the registry-matching logic itself is unit-tested
 /// in `core::gh_account_spawn_env_tests`.
-async fn resolve_gh_env(state: &Arc<DaemonState>, cwd: &std::path::Path) -> Vec<(String, String)> {
+pub(super) async fn resolve_gh_env(
+    state: &Arc<DaemonState>,
+    cwd: &std::path::Path,
+) -> Vec<(String, String)> {
     let registry = state.project_registry().await;
     crate::core::gh_account::resolve_gh_account_env_for_registry(&registry, cwd).await
 }
@@ -359,6 +362,59 @@ async fn spawn_managed_routed(
         // with a GitHub remote (no `.git`, no remote origin, non-GitHub URL), fall
         // through to the existing local-path spawn.
         let local_path = std::path::Path::new(&params.repo_url);
+
+        // #3455 "launch on main" opt-out: checked BEFORE `try_inproject_spawn`
+        // (which would otherwise establish a base clone as a side effect even
+        // when it's never going to be used) so a project with worktree
+        // isolation disabled never gets a base clone OR a worktree at all —
+        // the exact wasted-disk-space complaint the issue raises. Only a
+        // GitHub-remote-having local checkout can match a registered project
+        // (mirrors `try_inproject_spawn`'s own detection).
+        if let Some(origin_url) = super::inproject::get_origin_url(local_path)
+            && let Some(gh) = trusty_common::github_path::parse_github_path(&origin_url)
+        {
+            let registry = state.project_registry().await;
+            if !super::launch_on_main::worktree_enabled_for_origin(&registry, &origin_url).await {
+                info!(
+                    id = %session_id,
+                    path = %local_path.display(),
+                    "spawn_managed: project has worktree isolation disabled (#3455); \
+                     launching directly in the main checkout"
+                );
+                // Same reconnect pre-flight the worktree branch runs below
+                // (#1707 + `force_new` opt-out, #2450): a live session for
+                // this repo reconnects instead of spawning a duplicate.
+                {
+                    let mgr = state.session_manager().await;
+                    let existing = mgr.list().await;
+                    let source_id = format!("{}/{}", gh.owner, gh.repo);
+                    if let Some(live) = reconnect_candidate(
+                        params.force_new,
+                        &existing,
+                        &source_id,
+                        &*mgr.tmux_driver(),
+                    ) {
+                        info!(
+                            id = %live.id,
+                            source_id = %source_id,
+                            "spawn_managed (launch-on-main): reconnecting to existing live session"
+                        );
+                        return Ok(live);
+                    }
+                }
+                return super::launch_on_main::spawn_managed_on_main(
+                    state,
+                    &session_id,
+                    &params,
+                    runtime,
+                    local_path,
+                    &gh.owner,
+                    &gh.repo,
+                )
+                .await;
+            }
+        }
+
         match try_inproject_spawn(local_path) {
             Ok(Some((base, owner, repo))) => {
                 // Reconnect pre-flight (#1707), HOISTED AHEAD of worktree
@@ -1022,7 +1078,7 @@ async fn spawn_managed_inproject(
 /// call, so a prep failure never blocks the session from spawning.
 /// Test: `prepare_inproject_session_writes_statusline` in this module's `tests`
 /// submodule.
-fn prepare_inproject_session(
+pub(super) fn prepare_inproject_session(
     fw: &crate::core::paths::FrameworkPaths,
     session_id: &ManagedSessionId,
     worktree: &std::path::Path,
@@ -1339,7 +1395,7 @@ pub async fn spawn_runtime_for(
 /// Test: `front_gate_escalation_sets_pending_decision` /
 /// `front_gate_clean_match_spawns` in tests/session_manager_mvp.rs, plus the unit
 /// matrix in `managed_routes::front_gate::tests`.
-async fn front_gate_or_escalate(
+pub(super) async fn front_gate_or_escalate(
     mgr: &Arc<crate::session_manager::SessionManager>,
     record: &SessionRecord,
     repo_url: &str,

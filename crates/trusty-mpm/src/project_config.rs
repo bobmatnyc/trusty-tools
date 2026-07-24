@@ -55,6 +55,10 @@ pub enum ConfigField {
     /// `gh_user` — double-Option field, clearable (#2081; deep `gh auth
     /// status` validation deferred to #2121, out of scope here).
     GhUser,
+    /// `worktree` — plain `bool`, no clear story (#3455; mirrors
+    /// `DefaultBranch`'s precedent — see [`ClearableField`]'s doc). Value is
+    /// carried as the string `"true"`/`"false"`; [`apply_edit`] parses it.
+    Worktree,
 }
 
 /// A field that can be UNSET (cleared) via `tm projects config <name> unset
@@ -123,6 +127,13 @@ fn apply_edit(args: &mut PatchProjectArgs, edit: &ConfigEdit) {
         ConfigEdit::Set(ConfigField::Description, v) => args.description = Some(Some(v.clone())),
         ConfigEdit::Set(ConfigField::StackHint, v) => args.stack_hint = Some(Some(v.clone())),
         ConfigEdit::Set(ConfigField::GhUser, v) => args.gh_user = Some(Some(v.clone())),
+        // #3455: the CLI (`registry::config`) and the TUI form both
+        // guarantee `v` is exactly "true"/"false" before ever building this
+        // edit (see their own validation), so a case-insensitive compare
+        // against "true" is a safe, total conversion here.
+        ConfigEdit::Set(ConfigField::Worktree, v) => {
+            args.worktree = Some(v.eq_ignore_ascii_case("true"))
+        }
         ConfigEdit::Unset(ClearableField::Description) => args.description = Some(None),
         ConfigEdit::Unset(ClearableField::StackHint) => args.stack_hint = Some(None),
         ConfigEdit::Unset(ClearableField::GhUser) => args.gh_user = Some(None),
@@ -370,6 +381,17 @@ mod tests {
         assert_eq!(args.stack_hint, Some(Some("rust".to_string())));
         assert_eq!(args.description, Some(None));
         assert!(args.default_branch.is_none());
+    }
+
+    /// #3455: `Set(Worktree, "false"/"true")` builds a plain `Some(bool)` —
+    /// never the double-`Option` shape the string fields use.
+    #[test]
+    fn build_patch_args_worktree_set_true_false() {
+        let off = build_patch_args(&ConfigEdit::Set(ConfigField::Worktree, "false".to_string()));
+        assert_eq!(off.worktree, Some(false));
+
+        let on = build_patch_args(&ConfigEdit::Set(ConfigField::Worktree, "true".to_string()));
+        assert_eq!(on.worktree, Some(true));
     }
 
     #[test]

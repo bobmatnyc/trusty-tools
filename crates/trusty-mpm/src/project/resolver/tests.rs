@@ -27,6 +27,7 @@ fn proj(name: &str, repo_url: &str) -> Project {
         github: None,
         commit_name: None,
         commit_email: None,
+        worktree: None,
     }
 }
 
@@ -43,6 +44,7 @@ fn proj_tagged(name: &str, repo_url: &str, tags: &[&str], desc: &str) -> Project
         github: None,
         commit_name: None,
         commit_email: None,
+        worktree: None,
     }
 }
 

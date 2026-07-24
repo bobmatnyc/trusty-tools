@@ -33,6 +33,7 @@ fn project(name: &str) -> Project {
         github: None,
         commit_name: None,
         commit_email: None,
+        worktree: None,
     }
 }
 

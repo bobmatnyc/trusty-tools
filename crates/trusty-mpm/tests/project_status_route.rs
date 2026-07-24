@@ -52,6 +52,7 @@ async fn register_project(
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         })
         .await
         .expect("register project");

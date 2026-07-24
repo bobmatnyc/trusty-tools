@@ -112,6 +112,7 @@ fn project(name: &str, repo_url: &str, gh_account: Option<&str>) -> Project {
         github: None,
         commit_name: None,
         commit_email: None,
+        worktree: None,
     }
 }
 

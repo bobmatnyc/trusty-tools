@@ -17,6 +17,7 @@ fn project(name: &str, repo_url: &str) -> Project {
         github: None,
         commit_name: None,
         commit_email: None,
+        worktree: None,
     }
 }
 

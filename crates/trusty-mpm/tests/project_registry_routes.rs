@@ -78,6 +78,7 @@ async fn register_get_list_status_round_trip() {
         stack_hint: Some("rust".into()),
         gh_user: Some("acme-bot".into()),
         gh_account: None,
+        worktree: None,
     };
     let registered = client.registry_register_project(&args).await.unwrap();
     assert_eq!(registered.name, "widget");
@@ -131,6 +132,7 @@ async fn register_is_idempotent_upsert() {
         stack_hint: None,
         gh_user: None,
         gh_account: None,
+        worktree: None,
     };
     client.registry_register_project(&base).await.unwrap();
     // Re-register with a different branch — upsert on name, not a duplicate.
@@ -160,6 +162,7 @@ async fn register_preserves_unspecified_optional_fields_on_existing_project() {
             stack_hint: Some("rust".into()),
             gh_user: Some("bobmatnyc".into()),
             gh_account: None,
+            worktree: None,
         })
         .await
         .expect("initial register");
@@ -176,6 +179,7 @@ async fn register_preserves_unspecified_optional_fields_on_existing_project() {
             stack_hint: None,
             gh_user: None,
             gh_account: Some("bob-work".into()),
+            worktree: None,
         })
         .await
         .expect("gh_account-only re-register");
@@ -219,6 +223,7 @@ async fn register_explicit_fields_still_override_existing() {
             stack_hint: Some("rust".into()),
             gh_user: Some("bobmatnyc".into()),
             gh_account: Some("bobmatnyc".into()),
+            worktree: None,
         })
         .await
         .expect("initial register");
@@ -233,6 +238,7 @@ async fn register_explicit_fields_still_override_existing() {
             stack_hint: Some("python".into()),
             gh_user: Some("bob-work".into()),
             gh_account: Some("bob-work".into()),
+            worktree: None,
         })
         .await
         .expect("overriding re-register");
@@ -279,6 +285,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             }),
             commit_name: Some("Bob".into()),
             commit_email: Some("bob@example.com".into()),
+            worktree: None,
         })
         .await
         .expect("seed project with identity binding");
@@ -295,6 +302,7 @@ async fn register_preserves_identity_binding_not_expressible_in_body() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -357,6 +365,7 @@ async fn patch_round_trip_updates_fields() {
             stack_hint: Some("rust".into()),
             gh_user: Some("acme-bot".into()),
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -406,6 +415,7 @@ async fn patch_absent_fields_untouched() {
             stack_hint: Some("rust".into()),
             gh_user: Some("acme-bot".into()),
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -477,6 +487,7 @@ async fn patch_rejects_blank_repo_url_surfaces_server_message() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -511,6 +522,7 @@ async fn patch_rejects_name_change() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -547,6 +559,7 @@ async fn patch_is_idempotent() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -591,6 +604,7 @@ async fn patch_rejects_blank_tags_add() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -622,6 +636,7 @@ async fn patch_rejects_blank_tags_remove() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -654,6 +669,7 @@ async fn patch_trims_tags_add_whitespace() {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            worktree: None,
         })
         .await
         .unwrap();
@@ -669,6 +685,103 @@ async fn patch_trims_tags_add_whitespace() {
         .await
         .unwrap();
     assert_eq!(patched.tags, vec!["rust".to_string()]);
+}
+
+/// register → patch worktree:false → get round-trips the #3455 "launch on
+/// main" opt-out, and a follow-up patch back to `true` reflects the reversal
+/// too — the plain (single) `Option<bool>` field, unlike the double-Option
+/// string fields, has no separate "unset" wire form.
+#[tokio::test]
+async fn patch_round_trips_worktree_opt_out() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "writing".into(),
+            repo_url: "https://github.com/bobmatnyc/writing".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+            gh_account: None,
+            worktree: None,
+        })
+        .await
+        .unwrap();
+
+    // Default (never set): worktree isolation is ON.
+    let fetched = client.registry_get_project("writing").await.unwrap();
+    assert!(fetched.worktree_enabled());
+
+    // PATCH to false — the "launch on main" opt-out.
+    let patched = client
+        .registry_patch_project(
+            "writing",
+            &PatchProjectArgs {
+                worktree: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!patched.worktree_enabled());
+    let refetched = client.registry_get_project("writing").await.unwrap();
+    assert!(!refetched.worktree_enabled());
+
+    // PATCH back to true — reversible, not a one-way door.
+    let reverted = client
+        .registry_patch_project(
+            "writing",
+            &PatchProjectArgs {
+                worktree: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(reverted.worktree_enabled());
+}
+
+/// A `POST /api/v1/projects` re-register with no `worktree` field must
+/// PRESERVE an existing opt-out rather than silently resetting it (#3455,
+/// mirrors the #3025 review's identical fix for `gh_account`/etc.).
+#[tokio::test]
+async fn register_preserves_worktree_opt_out_when_absent() {
+    let client = serve().await;
+    client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "writing".into(),
+            repo_url: "https://github.com/bobmatnyc/writing".into(),
+            default_branch: None,
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+            gh_account: None,
+            worktree: Some(false),
+        })
+        .await
+        .unwrap();
+
+    // Re-register WITHOUT worktree set — must not reset it back to ON.
+    let reregistered = client
+        .registry_register_project(&RegisterProjectArgs {
+            name: "writing".into(),
+            repo_url: "https://github.com/bobmatnyc/writing".into(),
+            default_branch: Some("develop".into()),
+            description: None,
+            tags: None,
+            stack_hint: None,
+            gh_user: None,
+            gh_account: None,
+            worktree: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !reregistered.worktree_enabled(),
+        "an absent `worktree` field on re-register must preserve the existing opt-out"
+    );
 }
 
 /// Deliverable create → list → set-status legal → illegal-409 round-trips, and

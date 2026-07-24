@@ -253,6 +253,7 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         }
     }
 
@@ -373,6 +374,7 @@ mod tests {
             }),
             commit_name: Some("Full Bot".into()),
             commit_email: Some("full-bot@example.com".into()),
+            worktree: None,
         };
         store.upsert(full.clone()).await.expect("upsert full");
 
