@@ -6,10 +6,12 @@
 //!
 //! What: `run_prereq_phase` iterates the prereq table for the selected crate
 //! names, prints ✓ for present tools (with version), and for missing tools either
-//! prompts the user to install (TTY, not `--yes`, not `--json`) or prints manual
-//! instructions and continues. After a consented install it re-probes and reports
-//! success or failure. Returns the set of prereqs that remain missing so the
-//! caller can decide whether to abort.
+//! auto-installs (`--yes`/`TRUSTY_YES` — no TTY required, since `-y` IS the
+//! consent; this is the piped `curl | sh -s -- -y` demo path), prompts the user
+//! to install (TTY, not `--yes`, not `--json`), or prints manual instructions
+//! and continues (non-interactive without `--yes`, or `--json`). After a
+//! consented install it re-probes and reports success or failure. Returns the
+//! set of prereqs that remain missing so the caller can decide whether to abort.
 //!
 //! Test: `tests::phase_*` inject fake detect/version/exec closures to exercise
 //! every branch of the decision table without spawning real OS processes.
@@ -143,12 +145,23 @@ pub fn run_prereq_phase_with(
                     ));
                 }
                 let hint = install_hint_for(prereq.binary, platform);
+                let has_auto_cmd = hint.auto_cmd.is_some();
 
-                // Offer interactive install only on a real TTY.
-                let can_offer = !config.json && !config.yes && tty_fn();
-                let should_offer = can_offer && hint.auto_cmd.is_some();
+                // `-y`/`TRUSTY_YES` is unattended CONSENT: run the auto-install
+                // command directly, with no TTY and no prompt required — the
+                // entire point of `--yes` is to authorize exactly this. This is
+                // the path a piped `curl | sh -s -- -y` install takes, where
+                // stdin is never a TTY (issue: prereq auto-install silently
+                // degrading to a manual hint under `-y`).
+                let auto_yes = !config.json && config.yes && has_auto_cmd;
+                // Interactive path: offer + prompt only on a real TTY, when not
+                // already auto-consented above.
+                let offer_interactive = !auto_yes && !config.json && !config.yes && tty_fn();
+                let should_offer = offer_interactive && has_auto_cmd;
 
-                let consented = if should_offer {
+                let consented = if auto_yes {
+                    true
+                } else if should_offer {
                     let cmd = hint.auto_cmd.as_deref().unwrap_or_default();
                     let prompt = format!("  Install {} now? (will run: `{}`)", prereq.binary, cmd);
                     prompt_fn(&prompt)
@@ -159,7 +172,12 @@ pub fn run_prereq_phase_with(
                 if consented {
                     let cmd = hint.auto_cmd.as_deref().unwrap_or_default();
                     if !config.json {
-                        let _ = narr.info(&format!("  running: {cmd}"));
+                        let verb = if auto_yes {
+                            "installing (--yes)"
+                        } else {
+                            "running"
+                        };
+                        let _ = narr.info(&format!("  {verb}: {cmd}"));
                     }
                     match exec_fn(cmd) {
                         Ok(()) => {
@@ -524,5 +542,127 @@ mod tests {
             "hint should reference apt or package manager, got: {}",
             tmux.hint
         );
+    }
+
+    /// Why: THE demo-critical fix — a piped `curl | sh -s -- -y` install has no
+    /// TTY on stdin, but `--yes` IS the operator's consent to auto-install.
+    /// Before this fix `can_offer` required `tty_fn()` even under `--yes`, so
+    /// missing prereqs silently degraded to a manual hint and never installed.
+    /// What: `yes: true`, `json: false`, `tty_fn: || false` (no TTY, exactly
+    /// the piped-script condition); check_fn absent-then-found (post-exec);
+    /// exec_fn Ok. Asserts the binary lands in `installed`, NOT
+    /// `still_missing`, and `prompt_fn` is never consulted (would panic/return
+    /// false but must not gate the decision).
+    /// Test: This is the test.
+    #[test]
+    fn phase_yes_auto_installs_without_tty() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let first_call = Arc::new(AtomicBool::new(true));
+        let fc = first_call.clone();
+        let check_fn = move |_bin: &str| !fc.swap(false, Ordering::SeqCst);
+        let config = PrereqPhaseConfig {
+            selected: &selected_mpm(),
+            yes: true,
+            json: false,
+        };
+        let result = run_prereq_phase_with(
+            &config,
+            &linux_apt(),
+            &[],
+            &check_fn,
+            &|_| Some("1.0".to_owned()),
+            &|_| Ok(()),
+            &|| false, // no TTY — the piped `curl | sh` condition
+            &|_| panic!("must not prompt under --yes"),
+        );
+        assert!(
+            !result.installed.is_empty(),
+            "at least one binary must auto-install under --yes with no TTY, got: {:?}",
+            result.installed
+        );
+        assert!(
+            result.still_missing.is_empty(),
+            "still_missing must be empty, got: {:?}",
+            result.still_missing
+        );
+    }
+
+    /// Why: `--json` must remain fully non-interactive/no-auto-install even
+    /// when `--yes` is also set — machine output must stay deterministic and
+    /// side-effect-free (unaffected by this fix).
+    /// What: `yes: true, json: true`; asserts nothing is installed and missing
+    /// binaries land in `still_missing`.
+    /// Test: This is the test.
+    #[test]
+    fn phase_json_yes_does_not_auto_install() {
+        let config = PrereqPhaseConfig {
+            selected: &selected_mpm(),
+            yes: true,
+            json: true,
+        };
+        let result = run_prereq_phase_with(
+            &config,
+            &linux_apt(),
+            &[],
+            &|_| false,
+            &|_| None,
+            &|_| panic!("must not exec under --json"),
+            &|| false,
+            &|_| panic!("must not prompt under --json"),
+        );
+        assert!(result.installed.is_empty());
+        assert!(result.still_missing.iter().any(|m| m.binary == "tmux"));
+    }
+
+    /// Why: under `--yes`, a binary with no known `auto_cmd` (e.g. `git`) must
+    /// still fall through to the manual-note path rather than panicking or
+    /// attempting a bogus exec.
+    /// What: selects tga (only `git` relevant); `yes: true`; asserts `git`
+    /// lands in `still_missing` and `exec_fn` is never called.
+    /// Test: This is the test.
+    #[test]
+    fn phase_yes_no_auto_cmd_falls_back_to_manual() {
+        let config = PrereqPhaseConfig {
+            selected: &selected_tga(),
+            yes: true,
+            json: false,
+        };
+        let result = run_prereq_phase_with(
+            &config,
+            &unknown_platform(),
+            &[],
+            &|_| false,
+            &|_| None,
+            &|_| panic!("must not exec when no auto_cmd exists"),
+            &|| false,
+            &|_| false,
+        );
+        assert!(result.still_missing.iter().any(|m| m.binary == "git"));
+    }
+
+    /// Why: under `--yes`, exec failure must still land the binary in
+    /// `still_missing` (not silently `installed`).
+    /// What: `yes: true, json: false`; exec_fn returns Err; asserts tmux ends
+    /// up in `still_missing`.
+    /// Test: This is the test.
+    #[test]
+    fn phase_yes_exec_failure_adds_to_still_missing() {
+        let config = PrereqPhaseConfig {
+            selected: &selected_mpm(),
+            yes: true,
+            json: false,
+        };
+        let result = run_prereq_phase_with(
+            &config,
+            &linux_apt(),
+            &[],
+            &|_| false,
+            &|_| None,
+            &|_| Err(anyhow::anyhow!("fake failure")),
+            &|| false,
+            &|_| false,
+        );
+        assert!(result.still_missing.iter().any(|m| m.binary == "tmux"));
     }
 }

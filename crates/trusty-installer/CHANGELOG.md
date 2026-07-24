@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.6] — 2026-07-23
+
+### Fixed
+
+- The `-y`/`--yes` non-interactive prereq install path (`tctl install -y`, and the `curl | sh -s -- -y` one-liner it powers) now actually runs the auto-install command for a missing prereq (`tmux`, `claude`) instead of degrading to a manual-only hint — the auto-install offer previously required a real TTY (`tty_fn()`) even under `--yes`, so a piped install (stdin never a TTY) silently skipped installing tmux/Claude Code despite the operator's explicit unattended consent. `--json` mode is unaffected: it remains fully non-interactive/no-auto-install.
+- `tctl install tga` (and any transitive install that includes it) now resolves the correct release asset. `tga`'s release tag is `tga-v<version>`, but its release workflow names the tarball after the crate directory, `trusty-git-analytics-<version>-<target>.tar.gz` — the installer was building `tga-<version>-<target>.tar.gz` from the crate name alone, which 404s. Asset-filename construction now resolves through a small crate-name → asset-name alias table (tag resolution is unaffected).
+- A from-scratch `tctl install` (the single-URL installer's default path) on a host with no Rust toolchain no longer fails the whole run with `installed 4/7 … exit 2 … NOT VERIFIED` when an OPTIONAL stable-set member (`trusty-analyze`, `trusty-console`, `tga`) has no prebuilt for the platform and cannot fall back to `cargo install`. Stable-set members are now classified REQUIRED (trusty-mpm + trusty-search + trusty-memory + trusty-review) vs OPTIONAL; an OPTIONAL member's install/health failure is reported as "skipped (no prebuilt for this platform)" and never flips the overall `all_ok`/`verified` verdict or the process exit code — only a REQUIRED member's failure does.
+
 ## [0.4.5] — 2026-07-21
 
 ### Fixed

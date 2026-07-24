@@ -30,6 +30,16 @@ fn outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
         service_detail: String::new(),
         shadow_ok: true,
         shadow_detail: String::new(),
+        required: true,
+    }
+}
+
+/// Like `outcome`, but marks the member OPTIONAL (graceful-degrade,
+/// demo-critical fix) so tests can build a failed-but-non-fatal outcome.
+fn optional_outcome(member: &str, ok: bool, detail: &str) -> InstallOutcome {
+    InstallOutcome {
+        required: false,
+        ..outcome(member, ok, detail)
     }
 }
 
@@ -55,6 +65,51 @@ fn report_all_ok() {
     assert!(!report.all_ok);
 }
 
+/// Why: THE demo-critical fix — an OPTIONAL member (e.g. `trusty-analyze` on
+/// a platform with no prebuilt and no Rust toolchain) failing to install must
+/// NOT fail the overall run; only a REQUIRED member's failure may.
+/// What: a required-ok + optional-failed report is still `all_ok`/exit 0; a
+/// required-failed + optional-ok report is not.
+/// Test: This is the test.
+#[test]
+fn report_all_ok_ignores_optional_failure() {
+    let degraded = InstallReport::build(vec![
+        outcome("trusty-search", true, "installed"),
+        optional_outcome(
+            "trusty-analyze",
+            false,
+            "no prebuilt for aarch64-apple-darwin",
+        ),
+    ]);
+    assert!(
+        degraded.all_ok,
+        "an optional member's failure must not fail the overall run"
+    );
+    assert_eq!(degraded.exit_code(), 0);
+
+    let genuinely_failed = InstallReport::build(vec![
+        outcome("trusty-search", false, "network error"),
+        optional_outcome("trusty-analyze", true, "installed"),
+    ]);
+    assert!(
+        !genuinely_failed.all_ok,
+        "a required member's failure must still fail the overall run"
+    );
+    assert_eq!(genuinely_failed.exit_code(), 2);
+}
+
+/// Why: an install selecting ONLY optional members (e.g. `tctl install tga`)
+/// must still be able to report success when that member installs fine —
+/// `all_ok` over an empty required-subset must not vacuously fail.
+/// What: a single optional, successful outcome yields `all_ok: true`.
+/// Test: This is the test.
+#[test]
+fn report_all_ok_true_for_optional_only_success() {
+    let report = InstallReport::build(vec![optional_outcome("tga", true, "installed")]);
+    assert!(report.all_ok);
+    assert_eq!(report.exit_code(), 0);
+}
+
 /// Why: #2566 review — a binary can install cleanly (`ok: true`) while its
 /// SERVICE bootstrap genuinely fails; the report must not claim
 /// `all_ok: true` in that case (the exact failure class #2557 existed
@@ -75,6 +130,7 @@ fn report_all_ok_reflects_service_failure() {
         service_detail: "service bootstrap failed (non-fatal): boom".to_owned(),
         shadow_ok: true,
         shadow_detail: String::new(),
+        required: true,
     }]);
     assert!(
         !failed.all_ok,
@@ -90,6 +146,7 @@ fn report_all_ok_reflects_service_failure() {
         service_detail: "launchd plist already present — left untouched".to_owned(),
         shadow_ok: true,
         shadow_detail: String::new(),
+        required: true,
     }]);
     assert!(
         skipped.all_ok,
@@ -117,6 +174,7 @@ fn report_all_ok_reflects_shadow_failure() {
         shadow_detail: "PATH SHADOWED: installed trusty-mpm 0.19.29 to /x/.local/bin/tm, but \
                          the shell resolves `tm` to /x/.cargo/bin/tm (0.19.26)"
             .to_owned(),
+        required: true,
     }]);
     assert!(
         !shadowed.all_ok,
@@ -423,5 +481,6 @@ fn stable_member_for_test(crate_name: &str, binary: &str, manage: ManageStrategy
         binary: binary.to_owned(),
         daemon: manage == ManageStrategy::Launchd,
         manage,
+        required: true,
     }
 }

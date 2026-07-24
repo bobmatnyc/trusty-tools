@@ -68,9 +68,12 @@ use crate::output::render_json;
 /// just-installed binary is provably shadowed by a DIFFERENT, earlier-PATH
 /// copy of the same name (see `super::shadow_check`) — a genuine "the new
 /// version will not take effect" condition, never silently swallowed into a
-/// reported success.
+/// reported success. `required` (graceful-degrade, demo-critical fix) mirrors
+/// `StableMember::required`: an OPTIONAL member's failure is reported here
+/// (`ok: false`) but never flips [`InstallReport::all_ok`] / the exit code.
 /// Test: `tests::report_serialises`, `tests::report_all_ok_reflects_service_failure`,
-/// `tests::report_all_ok_reflects_shadow_failure`.
+/// `tests::report_all_ok_reflects_shadow_failure`,
+/// `tests::report_all_ok_ignores_optional_failure`.
 #[derive(Clone, Debug, Serialize)]
 pub struct InstallOutcome {
     /// Crate name installed.
@@ -91,6 +94,10 @@ pub struct InstallOutcome {
     /// Human note for the shadow-detection outcome (the actionable
     /// `ShadowReport::message`, or empty when `shadow_ok`).
     pub shadow_detail: String,
+    /// Whether this member is REQUIRED for a verified overall run (mirrors
+    /// `StableMember::required`). Drives [`InstallReport::build`]'s `all_ok`
+    /// derivation and the human summary's skip-vs-fail wording.
+    pub required: bool,
 }
 
 impl InstallOutcome {
@@ -122,9 +129,11 @@ pub struct InstallReport {
     pub command: &'static str,
     /// Per-member install outcomes in install order.
     pub members: Vec<InstallOutcome>,
-    /// Whether every member installed AND every attempted service bootstrap
-    /// succeeded (see [`InstallOutcome`]'s field docs for what counts as a
-    /// service failure) AND, when the verify tail ran, it reported verified.
+    /// Whether every REQUIRED member installed AND every attempted service
+    /// bootstrap on a REQUIRED member succeeded (see [`InstallOutcome`]'s
+    /// field docs for what counts as a service failure) AND, when the verify
+    /// tail ran, it reported verified. An OPTIONAL member's failure never
+    /// flips this (graceful-degrade, demo-critical fix).
     pub all_ok: bool,
     /// The post-install verify-tail result (#2560): `ensure` + health (with
     /// the #2498 kickstart retry). `None` when `--no-verify` skipped it.
@@ -142,12 +151,18 @@ impl InstallReport {
     /// plain shell invocation — both are "looks installed, actually not
     /// live" failures the report must never paper over.
     /// What: Sets `command = "install"`, `verify = None`, and
-    /// `all_ok = every outcome has ok == true AND service_ok == true AND
-    /// shadow_ok == true`.
+    /// `all_ok = every REQUIRED outcome has ok == true AND service_ok == true
+    /// AND shadow_ok == true` (graceful-degrade, demo-critical fix: an
+    /// OPTIONAL member is excluded from this check entirely — its failure is
+    /// visible in `members` but never fails the run).
     /// Test: `tests::report_all_ok`, `tests::report_all_ok_reflects_service_failure`,
-    /// `tests::report_all_ok_reflects_shadow_failure`.
+    /// `tests::report_all_ok_reflects_shadow_failure`,
+    /// `tests::report_all_ok_ignores_optional_failure`.
     fn build(members: Vec<InstallOutcome>) -> Self {
-        let all_ok = members.iter().all(|m| m.ok && m.service_ok && m.shadow_ok);
+        let all_ok = members
+            .iter()
+            .filter(|m| m.required)
+            .all(|m| m.ok && m.service_ok && m.shadow_ok);
         Self {
             command: "install",
             members,
@@ -707,10 +722,24 @@ async fn install_all(
                     service_detail,
                     shadow_ok,
                     shadow_detail,
+                    required: m.required,
                 });
             }
             Err(e) => {
-                let _ = narr.error(&format!("{}: {e}", m.crate_name));
+                // Graceful degrade (demo-critical fix): an OPTIONAL member's
+                // install failure (e.g. no prebuilt for this platform, no
+                // Rust toolchain to fall back to `cargo install`) is reported
+                // softly — never `narr.error` — so a from-scratch install
+                // never prints a scary FAILED line for a component the run
+                // does not need to succeed.
+                if m.required {
+                    let _ = narr.error(&format!("{}: {e}", m.crate_name));
+                } else {
+                    let _ = narr.info(&format!(
+                        "{}: skipped (optional, no prebuilt for this platform): {e}",
+                        m.crate_name
+                    ));
+                }
                 let (service_ok, service_detail) = InstallOutcome::service_not_attempted();
                 outcomes.push(InstallOutcome {
                     member: m.crate_name.clone(),
@@ -720,6 +749,7 @@ async fn install_all(
                     service_detail,
                     shadow_ok: true,
                     shadow_detail: String::new(),
+                    required: m.required,
                 });
             }
         }
@@ -933,21 +963,44 @@ fn cargo_bin_dir_from_env(cargo_home: Option<&str>) -> Option<std::path::PathBuf
 /// Print the human-readable install summary footer.
 ///
 /// Why: After the component table, a one-line verdict tells the operator whether
-/// everything landed.
-/// What: Prints `installed N/M` and lists any failures to stderr.
+/// everything landed. Graceful-degrade (demo-critical fix): the headline count
+/// covers REQUIRED members only, so an optional component with no prebuilt for
+/// this platform never reads as a scary partial failure (e.g. the old
+/// `installed 4/7`); optional gaps are listed separately as skipped.
+/// What: Prints `installed N/M required component(s)`, lists REQUIRED failures
+/// as errors, and OPTIONAL failures as an informational "skipped" note.
 /// Test: Side-effect-only; the data it reads is tested via `InstallReport`.
 fn print_human_summary(report: &InstallReport) {
-    let ok = report.members.iter().filter(|m| m.ok).count();
     let narr = narrator(false);
-    let _ = narr.info(&format!("installed {}/{}", ok, report.members.len()));
-    for m in report.members.iter().filter(|m| !m.ok) {
+    let required: Vec<&InstallOutcome> = report.members.iter().filter(|m| m.required).collect();
+    let required_ok = required.iter().filter(|m| m.ok).count();
+    let _ = narr.info(&format!(
+        "installed {}/{} required component(s)",
+        required_ok,
+        required.len()
+    ));
+    for m in required.iter().filter(|m| !m.ok) {
         let _ = narr.error(&format!("{}: {}", m.member, m.detail));
     }
     // #2566 review: a binary can install cleanly (`ok: true`) while its
     // service bootstrap genuinely failed — surface that on the human path too,
-    // not just fold it silently into the exit code.
-    for m in report.members.iter().filter(|m| m.ok && !m.service_ok) {
+    // not just fold it silently into the exit code. Only meaningful for
+    // required members: all_ok already ignores optional service failures.
+    for m in required.iter().filter(|m| m.ok && !m.service_ok) {
         let _ = narr.error(&format!("{}: {}", m.member, m.service_detail));
+    }
+    let optional_failed: Vec<&InstallOutcome> = report
+        .members
+        .iter()
+        .filter(|m| !m.required && !m.ok)
+        .collect();
+    if !optional_failed.is_empty() {
+        for m in &optional_failed {
+            let _ = narr.info(&format!(
+                "{}: skipped (no prebuilt for this platform)",
+                m.member
+            ));
+        }
     }
 }
 

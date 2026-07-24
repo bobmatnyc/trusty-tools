@@ -39,7 +39,9 @@ use super::stable_set::{ManageStrategy, StableMember};
 /// Why: a typed row keeps the `--json` output stable + testable.
 /// What: `member` crate name; `health` the (possibly kickstart-retried) health
 /// verdict string; `kickstarted` whether a #2498 kickstart retry was attempted
-/// for this member.
+/// for this member; `required` (graceful-degrade, demo-critical fix) mirrors
+/// `StableMember::required` and gates whether a down/not-installed verdict for
+/// this member may fail the overall `verified` verdict.
 /// Test: `tests::report_serialises`.
 #[derive(Clone, Debug, Serialize)]
 pub struct VerifyRow {
@@ -49,6 +51,8 @@ pub struct VerifyRow {
     pub health: String,
     /// Whether a `launchctl kickstart -k` retry was attempted (#2498).
     pub kickstarted: bool,
+    /// Whether this member is REQUIRED for the overall `verified` verdict.
+    pub required: bool,
 }
 
 /// The aggregate verify-tail report (#2560).
@@ -67,8 +71,9 @@ pub struct VerifyTailReport {
     pub ensure_ok: bool,
     /// Per-daemon-member verify rows.
     pub members: Vec<VerifyRow>,
-    /// Overall verdict: `ensure_ok` AND every member healthy/stale/unknown
-    /// (never `down`/`not_installed`).
+    /// Overall verdict: `ensure_ok` AND every REQUIRED member
+    /// healthy/stale/unknown (never `down`/`not_installed`). An OPTIONAL
+    /// member never fails this (graceful-degrade, demo-critical fix).
     pub verified: bool,
 }
 
@@ -77,16 +82,19 @@ impl VerifyTailReport {
     ///
     /// Why: one place derives the verdict so the JSON and the folded
     /// `InstallReport.all_ok` can never disagree.
-    /// What: `verified = ensure_ok AND no member is `down`/`not_installed``. A
-    /// `stale` or `unknown` member does NOT fail verification — mirrors
-    /// `stack::health::HealthReport`'s degrade policy exactly (an
-    /// under-the-version-floor daemon is still up; an unprobeable
-    /// process-managed member is not a verified gap).
+    /// What: `verified = ensure_ok AND no REQUIRED member is
+    /// `down`/`not_installed`` (an OPTIONAL member's health never fails this
+    /// — demo-critical fix). A `stale` or `unknown` member does NOT fail
+    /// verification — mirrors `stack::health::HealthReport`'s degrade policy
+    /// exactly (an under-the-version-floor daemon is still up; an
+    /// unprobeable process-managed member is not a verified gap).
     /// Test: `tests::verified_requires_ensure_and_health`,
-    /// `tests::verified_tolerates_stale_and_unknown`.
+    /// `tests::verified_tolerates_stale_and_unknown`,
+    /// `tests::verified_ignores_optional_down_member`.
     fn build(ensure_ok: bool, members: Vec<VerifyRow>) -> Self {
         let health_ok = members
             .iter()
+            .filter(|m| m.required)
             .all(|m| m.health != health_str::DOWN && m.health != health_str::NOT_INSTALLED);
         Self {
             command: "install.verify",
@@ -153,6 +161,7 @@ fn verify_one(m: &StableMember) -> VerifyRow {
         member: m.crate_name.clone(),
         health,
         kickstarted,
+        required: m.required,
     }
 }
 
@@ -222,7 +231,13 @@ pub fn print_human(report: &VerifyTailReport) {
         if report.ensure_ok { "ok" } else { "FAILED" }
     );
     for m in &report.members {
-        let note = if m.kickstarted { " (kickstarted)" } else { "" };
+        let note = if m.kickstarted {
+            " (kickstarted)"
+        } else if !m.required && m.health == health_str::NOT_INSTALLED {
+            " (optional, skipped)"
+        } else {
+            ""
+        };
         println!("  {:<20} {}{}", m.member, m.health, note);
     }
     let verdict = if report.verified {
@@ -242,6 +257,16 @@ mod tests {
             member: member.to_owned(),
             health: health.to_owned(),
             kickstarted: false,
+            required: true,
+        }
+    }
+
+    /// Like `row`, but marks the member OPTIONAL (graceful-degrade,
+    /// demo-critical fix).
+    fn optional_row(member: &str, health: &str) -> VerifyRow {
+        VerifyRow {
+            required: false,
+            ..row(member, health)
         }
     }
 
@@ -312,6 +337,42 @@ mod tests {
             ],
         );
         assert!(report.verified);
+    }
+
+    /// Why: THE demo-critical fix — an OPTIONAL daemon member (e.g.
+    /// `trusty-console` never installed because it has no prebuilt for this
+    /// platform) being `down`/`not_installed` must NOT fail `verified`; only
+    /// a REQUIRED member's bad health may.
+    /// What: a report mixing a healthy REQUIRED member with a `down` and a
+    /// `not_installed` OPTIONAL member still verifies; a `down` REQUIRED
+    /// member alongside a healthy OPTIONAL one does not.
+    /// Test: This is the test.
+    #[test]
+    fn verified_ignores_optional_down_member() {
+        let degraded = VerifyTailReport::build(
+            true,
+            vec![
+                row("trusty-search", health_str::HEALTHY),
+                optional_row("trusty-console", health_str::DOWN),
+                optional_row("tga", health_str::NOT_INSTALLED),
+            ],
+        );
+        assert!(
+            degraded.verified,
+            "an optional member's bad health must not fail verification"
+        );
+
+        let genuinely_failed = VerifyTailReport::build(
+            true,
+            vec![
+                row("trusty-search", health_str::DOWN),
+                optional_row("trusty-console", health_str::HEALTHY),
+            ],
+        );
+        assert!(
+            !genuinely_failed.verified,
+            "a required member's bad health must still fail verification"
+        );
     }
 
     /// Why: `print_human`'s colour path must never panic regardless of the

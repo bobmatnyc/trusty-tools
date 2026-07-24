@@ -400,6 +400,7 @@ mod tests {
             binary: binary.to_owned(),
             daemon: manage != ManageStrategy::None,
             manage,
+            required: true,
         }
     }
 
