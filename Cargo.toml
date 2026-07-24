@@ -123,7 +123,7 @@ trusty-review = { path = "crates/trusty-review", version = "0.10.0" }
 trusty-console = { path = "crates/trusty-console", version = "0.5.0" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
-trusty-progress = { path = "crates/trusty-progress", version = "0.1.1" }
+trusty-progress = { path = "crates/trusty-progress", version = "0.2.0" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"

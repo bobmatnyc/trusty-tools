@@ -216,14 +216,44 @@ fn colour(label: &str, ansi: &str) -> String {
     }
 }
 
+/// The per-row annotation `print_human` appends after the health string.
+///
+/// Why: Extracted as a pure function (rather than inline in `print_human`) so
+/// the demo-relevant wording can be unit-tested without capturing stdout —
+/// mirrors the pattern used throughout this crate (e.g. `install.rs`'s
+/// `select_prebuilt_bin_path`) for exactly this reason. #3797 critic finding
+/// (MEDIUM, demo-relevant): an OPTIONAL daemon that installed but whose
+/// launchd bootstrap failed reports health `down`, which previously got NO
+/// qualifier here — a bare `trusty-console  down` printed immediately above
+/// the green `VERIFIED` line reads as alarming to a demo viewer even though
+/// [`VerifyTailReport::build`] already correctly excludes it from the
+/// verdict/exit code. Widening the condition to cover `down` (not just
+/// `not_installed`) makes the annotation match the verdict's own tolerance.
+/// What: `" (kickstarted)"` when a retry fired; `" (optional, skipped)"` when
+/// the member is OPTIONAL and its health is `not_installed` OR `down`;
+/// otherwise empty.
+/// Test: `tests::optional_annotation_covers_not_installed_and_down`.
+fn optional_annotation(m: &VerifyRow) -> &'static str {
+    if m.kickstarted {
+        " (kickstarted)"
+    } else if !m.required && (m.health == health_str::NOT_INSTALLED || m.health == health_str::DOWN)
+    {
+        " (optional, skipped)"
+    } else {
+        ""
+    }
+}
+
 /// Print the final human-readable verify-tail summary — green/red pass/fail.
 ///
 /// Why: the last thing the `curl | sh` one-liner (via `install.sh` ->
 /// `tctl install`) prints must be an unambiguous verified/not-verified signal.
 /// What: prints the ensure verdict, one line per daemon member (noting a
-/// kickstart retry), and a final colour-coded `VERIFIED`/`NOT VERIFIED` line.
-/// Test: side-effect-only (stdout); the data it reads is unit-tested via
-/// `VerifyTailReport::build`.
+/// kickstart retry or an optional-and-tolerated bad health via
+/// [`optional_annotation`]), and a final colour-coded `VERIFIED`/`NOT
+/// VERIFIED` line.
+/// Test: side-effect-only (stdout); the annotation text is unit-tested via
+/// `optional_annotation` and the data it reads via `VerifyTailReport::build`.
 pub fn print_human(report: &VerifyTailReport) {
     println!("tctl install — verify");
     println!(
@@ -231,14 +261,7 @@ pub fn print_human(report: &VerifyTailReport) {
         if report.ensure_ok { "ok" } else { "FAILED" }
     );
     for m in &report.members {
-        let note = if m.kickstarted {
-            " (kickstarted)"
-        } else if !m.required && m.health == health_str::NOT_INSTALLED {
-            " (optional, skipped)"
-        } else {
-            ""
-        };
-        println!("  {:<20} {}{}", m.member, m.health, note);
+        println!("  {:<20} {}{}", m.member, m.health, optional_annotation(m));
     }
     let verdict = if report.verified {
         colour("VERIFIED", "32")
@@ -382,5 +405,49 @@ mod tests {
     #[test]
     fn use_color_returns_bool() {
         let _v: bool = use_color();
+    }
+
+    /// Why: #3797 critic finding (MEDIUM, demo-relevant) — an OPTIONAL daemon
+    /// that installed but whose service bootstrap failed reports health
+    /// `down`; that must read as "(optional, skipped)" just like
+    /// `not_installed` does, not as a bare, alarming `down` right above the
+    /// green `VERIFIED` line. A REQUIRED member's `down`/`not_installed` must
+    /// get NO such softening annotation, and `kickstarted` must win over both.
+    /// What: exercises the full truth table.
+    /// Test: This is the test.
+    #[test]
+    fn optional_annotation_covers_not_installed_and_down() {
+        assert_eq!(
+            optional_annotation(&optional_row("trusty-console", health_str::NOT_INSTALLED)),
+            " (optional, skipped)"
+        );
+        assert_eq!(
+            optional_annotation(&optional_row("trusty-console", health_str::DOWN)),
+            " (optional, skipped)"
+        );
+        assert_eq!(
+            optional_annotation(&optional_row("trusty-console", health_str::HEALTHY)),
+            "",
+            "a healthy optional member needs no annotation"
+        );
+        assert_eq!(
+            optional_annotation(&row("trusty-search", health_str::DOWN)),
+            "",
+            "a REQUIRED member's down health must not be softened"
+        );
+        assert_eq!(
+            optional_annotation(&row("trusty-search", health_str::NOT_INSTALLED)),
+            "",
+            "a REQUIRED member's not_installed health must not be softened"
+        );
+        let kickstarted = VerifyRow {
+            kickstarted: true,
+            ..optional_row("trusty-console", health_str::DOWN)
+        };
+        assert_eq!(
+            optional_annotation(&kickstarted),
+            " (kickstarted)",
+            "a kickstart retry note takes priority over the optional softening"
+        );
     }
 }

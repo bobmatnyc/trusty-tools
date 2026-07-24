@@ -675,21 +675,28 @@ pub fn app_data_guidance(binary_path: &str) -> String {
 /// identifier migration ([`warn_on_identifier_change`]), then signs + verifies
 /// every present binary in `set` — with Hardened Runtime gated per
 /// [`use_hardened_runtime`] (`explicit = false`: on for [`MPM_SET`], off for
-/// [`SEARCH_SET`]) — and prints a success note; on cert-probe failure, prints
-/// the set-appropriate guidance (FDA for search, App Data TCC for mpm) using
-/// the set's first binary's path. Never aborts the caller.
+/// [`SEARCH_SET`]) — and returns a success note; on cert-probe failure,
+/// returns the set-appropriate guidance (FDA for search, App Data TCC for mpm)
+/// using the set's first binary's path. Never aborts the caller. Returns
+/// `None` under `json` (never any output in machine-readable mode) or when
+/// there is nothing to report; callers own WHEN the returned text is printed
+/// (demo-critical fix: this used to `eprintln!` directly, interleaving noisy
+/// multi-line guidance into the middle of the live per-component checklist —
+/// it is now data the caller can defer to a post-install summary instead).
 #[cfg(target_os = "macos")]
-fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool) {
+fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool) -> Option<String> {
+    if json {
+        return None;
+    }
     let binaries = binaries_for_set(set);
-    let Some(&primary) = binaries.first() else {
-        return;
-    };
+    let &primary = binaries.first()?;
     let primary_path = install_dir.join(primary);
     let hardened = use_hardened_runtime(set, false);
 
     match has_developer_id_cert() {
         Some(identity) => {
             let mut signed_ok = true;
+            let mut warnings = Vec::new();
             for &name in &binaries {
                 let path = install_dir.join(name);
                 if !path.exists() {
@@ -698,32 +705,30 @@ fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool)
                 }
                 warn_on_identifier_change(&path, name);
                 if let Err(e) = sign_binary(&path, &identity, hardened) {
-                    if !json {
-                        eprintln!(
-                            "trusty-installer: warning: codesign failed for {}: {e}",
-                            path.display()
-                        );
-                    }
+                    warnings.push(format!(
+                        "trusty-installer: warning: codesign failed for {}: {e}",
+                        path.display()
+                    ));
                     signed_ok = false;
                 }
             }
-            if signed_ok && !json {
-                eprintln!(
+            if signed_ok {
+                Some(format!(
                     "{set}: signed with Developer ID. The macOS grant will persist across \
                      all future reinstalls."
-                );
+                ))
+            } else {
+                Some(warnings.join("\n"))
             }
         }
         None => {
             let path_str = primary_path.to_string_lossy();
-            if !json {
-                let guidance = if set == MPM_SET {
-                    app_data_guidance(&path_str)
-                } else {
-                    fda_guidance(&path_str)
-                };
-                eprintln!("{guidance}");
-            }
+            let guidance = if set == MPM_SET {
+                app_data_guidance(&path_str)
+            } else {
+                fda_guidance(&path_str)
+            };
+            Some(guidance)
         }
     }
 }
@@ -731,20 +736,25 @@ fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool)
 /// Run post-install codesign and FDA guidance for trusty-search.
 ///
 /// Why: After trusty-search (and trusty-embedderd) are installed the installer
-/// should immediately sign them (if a cert is available) or print the FDA
+/// should immediately sign them (if a cert is available) or report the FDA
 /// re-grant guidance so the operator knows what to do next.
 ///
-/// What: On macOS delegates to [`post_install_signed_set`] for [`SEARCH_SET`].
-/// On non-macOS: no-op.
+/// What: On macOS delegates to [`post_install_signed_set`] for [`SEARCH_SET`],
+/// returning its note/guidance text instead of printing directly (see that
+/// function's doc). On non-macOS: `None`.
 ///
 /// Test: `tests::fda_guidance_contains_steps` (pure); signing itself is not
 /// invoked in tests (side-effecting).
-pub fn post_install_search(install_dir: &std::path::Path, json: bool) {
+#[must_use]
+pub fn post_install_search(install_dir: &std::path::Path, json: bool) -> Option<String> {
     #[cfg(target_os = "macos")]
-    post_install_signed_set(install_dir, SEARCH_SET, json);
+    {
+        post_install_signed_set(install_dir, SEARCH_SET, json)
+    }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (install_dir, json); // suppress unused warnings on non-macOS
+        None
     }
 }
 
@@ -754,17 +764,22 @@ pub fn post_install_search(install_dir: &std::path::Path, json: bool) {
 /// same stable-identity signing as trusty-search so the App Data TCC prompt
 /// does not re-fire on every `cargo install` rebuild.
 ///
-/// What: On macOS delegates to [`post_install_signed_set`] for [`MPM_SET`]. On
-/// non-macOS: no-op.
+/// What: On macOS delegates to [`post_install_signed_set`] for [`MPM_SET`],
+/// returning its note/guidance text instead of printing directly (see that
+/// function's doc). On non-macOS: `None`.
 ///
 /// Test: `tests::app_data_guidance_mentions_prompt` (pure); signing itself is
 /// not invoked in tests (side-effecting).
-pub fn post_install_mpm(install_dir: &std::path::Path, json: bool) {
+#[must_use]
+pub fn post_install_mpm(install_dir: &std::path::Path, json: bool) -> Option<String> {
     #[cfg(target_os = "macos")]
-    post_install_signed_set(install_dir, MPM_SET, json);
+    {
+        post_install_signed_set(install_dir, MPM_SET, json)
+    }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (install_dir, json); // suppress unused warnings on non-macOS
+        None
     }
 }
 

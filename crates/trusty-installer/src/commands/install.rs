@@ -39,7 +39,7 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_progress::{Component, ComponentTracker};
+use trusty_progress::{Component, ComponentState, ComponentTracker, LiveChecklist, Mode};
 
 use super::dependency_graph::describe_added;
 use super::install_gate::{decide_install_gate, GateInputs, InstallGate};
@@ -302,6 +302,22 @@ struct InstalledBinary {
 /// whether the just-installed binary is PATH-shadowed by a stale copy
 /// (#3554) and surfaces that loudly, folding a genuine shadow into
 /// `all_ok`/the exit code rather than a silent success.
+///
+/// Demo-critical fix: on an interactive terminal (`narr.output().mode() ==
+/// Mode::Interactive`), a [`LiveChecklist`] renders one in-place row per
+/// component — `pending -> downloading -> verifying -> installed / skipped /
+/// failed` — instead of the old scrolling `info:` line per member. In every
+/// OTHER mode (`--json`, piped/CI, `Mode::Plain`) [`LiveChecklist`] is a
+/// zero-byte no-op (see its doc), so the exact narrator-line sequence this
+/// function has always emitted is UNCHANGED there — the interactive checklist
+/// is additive, never a substitute for the plain narration contract
+/// automation depends on. Mid-loop notices that would otherwise interleave
+/// with the live rows' redraw region (mpm supervisor bootstrap, service
+/// bootstrap, PATH-shadow) go through [`LiveChecklist::note`] instead of the
+/// narrator ONLY when interactive; codesign/FDA/App-Data-TCC guidance
+/// (`macos_signing`) is collected in ALL modes and printed once, after every
+/// row has reached a terminal state, so a multi-line advisory block can never
+/// interrupt the per-component checklist (see `post_install_notes` below).
 /// Test: Side-effecting; the report shaping is tested via `InstallReport` and the
 /// per-member service policy is tested in `super::service_bootstrap::tests`.
 async fn install_all(
@@ -312,6 +328,14 @@ async fn install_all(
 ) -> InstallReport {
     let narr = narrator(json);
     let _ = narr.info(&format!("installing {} component(s)", selected.len()));
+
+    // Demo-critical fix: `live` gates every call site below between the
+    // pre-existing plain narrator behaviour (unchanged, byte-for-byte, in
+    // every non-interactive mode) and the new live-checklist behaviour (only
+    // when stderr is an interactive terminal).
+    let live = narr.output().mode() == Mode::Interactive;
+    let names: Vec<String> = selected.iter().map(|m| m.crate_name.clone()).collect();
+    let checklist = LiveChecklist::new(&narr.output(), &names);
 
     // Resolve the install directory once for post-install hooks (Phase 7 & 8).
     let install_dir = crate::download::default_install_dir().unwrap_or_else(|| {
@@ -326,11 +350,19 @@ async fn install_all(
 
     let mut outcomes = Vec::with_capacity(selected.len());
     let mut tracker = ComponentTracker::new(narr.output());
+    // Demo-critical fix: codesign/FDA/App-Data-TCC guidance, deferred out of
+    // the per-component loop (see this function's doc) so it never interrupts
+    // the live checklist; printed once, after every row has settled.
+    let mut post_install_notes: Vec<String> = Vec::new();
 
     for m in selected {
-        let _ = narr.info(&format!("installing {}", m.crate_name));
+        checklist.set(&m.crate_name, ComponentState::Downloading);
+        if !live {
+            let _ = narr.info(&format!("installing {}", m.crate_name));
+        }
         match install_one(m).await {
             Ok(installed) => {
+                checklist.set(&m.crate_name, ComponentState::Verifying);
                 tracker.add(Component::new(m.binary.clone(), binary_size(&m.binary)));
                 // Phase 7: bootstrap trusty-mpm supervisor plist (fail-soft).
                 // #3527: gated behind the SAME `--no-service` /
@@ -348,15 +380,23 @@ async fn install_all(
                         if let Err(e) =
                             super::plist_bootstrap::install_mpm_supervisor(force, &installed.path)
                         {
-                            let _ = narr.info(&format!(
+                            let msg = format!(
                                 "warning: trusty-mpm supervisor bootstrap failed (non-fatal): {e}"
-                            ));
+                            );
+                            if live {
+                                checklist.note(&format!("info: {msg}"));
+                            } else {
+                                let _ = narr.info(&msg);
+                            }
                         }
                     } else {
-                        let _ = narr.info(
-                            "trusty-mpm supervisor bootstrap skipped (--no-service / \
-                             TCTL_NO_SERVICE_BOOTSTRAP)",
-                        );
+                        let msg = "trusty-mpm supervisor bootstrap skipped (--no-service / \
+                                    TCTL_NO_SERVICE_BOOTSTRAP)";
+                        if live {
+                            checklist.note(&format!("info: {msg}"));
+                        } else {
+                            let _ = narr.info(msg);
+                        }
                     }
                 }
                 // Phase 8: codesign + FDA guidance for trusty-search (single
@@ -368,9 +408,15 @@ async fn install_all(
                 // is not yet empirically verified — see
                 // `macos_signing::use_hardened_runtime`. `tctl sign trusty-search`
                 // / the wrapper script (explicit operator action) DO sign with
-                // Hardened Runtime, also matching pre-PR behavior.
+                // Hardened Runtime, also matching pre-PR behavior. Demo-critical
+                // fix: the guidance text is now collected, not printed inline —
+                // see `post_install_notes` above.
                 if m.crate_name == "trusty-search" {
-                    super::macos_signing::post_install_search(&install_dir, json);
+                    if let Some(note) =
+                        super::macos_signing::post_install_search(&install_dir, json)
+                    {
+                        post_install_notes.push(note);
+                    }
                 }
                 // Phase 8b: codesign + App-Data-TCC guidance for trusty-mpm.
                 // Owner-authorized scope extension (#2558, 2026-07-14): `tm`
@@ -380,8 +426,11 @@ async fn install_all(
                 // the same stable-identity Developer-ID signing fixes it. Unlike
                 // trusty-search, trusty-mpm loads no dylibs, so this automatic
                 // hook DOES sign with Hardened Runtime (low risk either way).
+                // Demo-critical fix: deferred, same as trusty-search above.
                 if m.crate_name == "trusty-mpm" {
-                    super::macos_signing::post_install_mpm(&install_dir, json);
+                    if let Some(note) = super::macos_signing::post_install_mpm(&install_dir, json) {
+                        post_install_notes.push(note);
+                    }
                 }
                 // Phase 7b (#2556): bootstrap the launchd plist for each shared
                 // daemon (search/memory/analyze/review/console) via its own
@@ -390,22 +439,23 @@ async fn install_all(
                 // are excluded. Fail-soft for the BINARY install phase (the
                 // member is still reported `ok: true` — the binary is on PATH
                 // and healthy) but the REPORT must not lie: a genuine bootstrap
-                // failure is routed through `narr.error()` (not `info()`) and
-                // folds into `service_ok` / `all_ok` / the exit code (#2566
-                // review — `--json` previously reported `all_ok: true` even
-                // when every daemon's service bootstrap had failed).
+                // failure is routed through the error register (not the info
+                // one) and folds into `service_ok` / `all_ok` / the exit code
+                // (#2566 review — `--json` previously reported `all_ok: true`
+                // even when every daemon's service bootstrap had failed).
                 let (service_ok, service_detail) = if plans_service_bootstrap(m, service_enabled) {
                     let action = bootstrap_member_service(&m.binary);
                     let note = action.note(&m.binary);
-                    match &action {
-                        BootstrapAction::Failed(_) => {
-                            let _ = narr.error(&note);
-                        }
-                        BootstrapAction::Skipped(_) | BootstrapAction::Installed => {
-                            let _ = narr.info(&note);
-                        }
+                    let is_failure = matches!(action, BootstrapAction::Failed(_));
+                    if live {
+                        let prefix = if is_failure { "error" } else { "info" };
+                        checklist.note(&format!("{prefix}: {note}"));
+                    } else if is_failure {
+                        let _ = narr.error(&note);
+                    } else {
+                        let _ = narr.info(&note);
                     }
-                    (!matches!(action, BootstrapAction::Failed(_)), note)
+                    (!is_failure, note)
                 } else {
                     InstallOutcome::service_not_attempted()
                 };
@@ -413,11 +463,10 @@ async fn install_all(
                 // check whether a plain shell invocation of `m.binary` would
                 // actually run the binary we just installed, or a stale copy
                 // shadowing it earlier on $PATH. A genuine shadow is reported
-                // LOUDLY (`narr.error`, not `info`) and folds into
-                // `shadow_ok`/`all_ok`/the exit code — the install succeeded
-                // on disk, but the operator's shell would not see it, which
-                // is exactly the #3554 "looks installed, actually isn't
-                // live" failure class.
+                // LOUDLY and folds into `shadow_ok`/`all_ok`/the exit code —
+                // the install succeeded on disk, but the operator's shell
+                // would not see it, which is exactly the #3554 "looks
+                // installed, actually isn't live" failure class.
                 let (shadow_ok, shadow_detail) = match shadow_check::detect(
                     &m.binary,
                     &installed.path,
@@ -428,11 +477,17 @@ async fn install_all(
                 {
                     Some(report) => {
                         let msg = report.message();
-                        let _ = narr.error(&format!("{}: {msg}", m.crate_name));
+                        let full = format!("{}: {msg}", m.crate_name);
+                        if live {
+                            checklist.note(&format!("error: {full}"));
+                        } else {
+                            let _ = narr.error(&full);
+                        }
                         (false, msg)
                     }
                     None => (true, String::new()),
                 };
+                checklist.set(&m.crate_name, ComponentState::Installed);
                 outcomes.push(InstallOutcome {
                     member: m.crate_name.clone(),
                     ok: true,
@@ -448,16 +503,27 @@ async fn install_all(
                 // Graceful degrade (demo-critical fix): an OPTIONAL member's
                 // install failure (e.g. no prebuilt for this platform, no
                 // Rust toolchain to fall back to `cargo install`) is reported
-                // softly — never `narr.error` — so a from-scratch install
+                // softly — never as an error — so a from-scratch install
                 // never prints a scary FAILED line for a component the run
-                // does not need to succeed.
+                // does not need to succeed. The checklist row itself (glyph +
+                // label) already carries this distinction in live mode, so no
+                // separate `note` is needed there.
                 if m.required {
-                    let _ = narr.error(&format!("{}: {e}", m.crate_name));
+                    checklist.set(&m.crate_name, ComponentState::Failed(short_reason(&e)));
+                    if !live {
+                        let _ = narr.error(&format!("{}: {e}", m.crate_name));
+                    }
                 } else {
-                    let _ = narr.info(&format!(
-                        "{}: skipped (optional, no prebuilt for this platform): {e}",
-                        m.crate_name
-                    ));
+                    checklist.set(
+                        &m.crate_name,
+                        ComponentState::Skipped("no prebuilt for this platform".to_owned()),
+                    );
+                    if !live {
+                        let _ = narr.info(&format!(
+                            "{}: skipped (optional, no prebuilt for this platform): {e}",
+                            m.crate_name
+                        ));
+                    }
                 }
                 let (service_ok, service_detail) = InstallOutcome::service_not_attempted();
                 outcomes.push(InstallOutcome {
@@ -478,7 +544,33 @@ async fn install_all(
     if !json {
         let _ = tracker.print();
     }
+    // Demo-critical fix: print any deferred codesign/FDA/App-Data-TCC
+    // guidance now that every checklist row has reached a terminal state —
+    // see this function's doc for why this is deferred rather than inline.
+    for note in &post_install_notes {
+        eprintln!("{note}");
+    }
     InstallReport::build(outcomes)
+}
+
+/// Shorten an install error to a single-line reason for the live checklist row.
+///
+/// Why: `install_one`'s `anyhow::Error` chains can be long / multi-line (a
+/// health-gate mismatch message embeds a raw `--version` output); a checklist
+/// row must stay one line so the block keeps reading cleanly.
+/// What: Takes the first line of `e`'s `Display` output, truncated to 80
+/// chars (with a `…` marker) if still too long.
+/// Test: `tests::short_reason_truncates_long_and_multiline_errors`.
+fn short_reason(e: &anyhow::Error) -> String {
+    const MAX: usize = 80;
+    let first_line = e.to_string();
+    let first_line = first_line.lines().next().unwrap_or_default();
+    if first_line.chars().count() > MAX {
+        let truncated: String = first_line.chars().take(MAX).collect();
+        format!("{truncated}…")
+    } else {
+        first_line.to_owned()
+    }
 }
 
 /// Select the concrete path for `binary` from a prebuilt placement's

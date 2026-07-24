@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.7] — 2026-07-23
+
+### Added
+
+- `tctl install` renders a live, in-place per-component progress checklist on
+  an interactive terminal — one row per stable-set member, ticking `pending
+  -> downloading -> verifying -> installed / skipped / failed` in place
+  (`trusty-progress`'s new `LiveChecklist`) instead of scrolling `info:`
+  lines. `--json` and any non-TTY/piped invocation (the `curl | sh` one-liner)
+  are unaffected — the checklist is a zero-byte no-op there and the plain
+  narrator-line sequence is unchanged.
+
+### Changed
+
+- Codesign / FDA (trusty-search) and App-Data-TCC (trusty-mpm) post-install
+  guidance is now collected during the per-component install loop and printed
+  ONCE, after every component has reached a terminal state, instead of
+  interleaved mid-loop — keeps the live checklist (and the plain narration
+  sequence) reading cleanly top-to-bottom instead of a multi-line advisory
+  block interrupting it partway through.
+- `tctl install`'s final verify-tail summary now tags an OPTIONAL daemon
+  member as `(optional, skipped)` when its health is `down` OR
+  `not_installed` (previously only `not_installed`) — an optional member
+  that installed but whose service bootstrap failed no longer prints a bare,
+  alarming `down` immediately above the green `VERIFIED` line; the
+  verdict/exit code already tolerated this, this is annotation-only (#3797
+  critic follow-up).
+
 ## [0.4.6] — 2026-07-23
 
 ### Fixed

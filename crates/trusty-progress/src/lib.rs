@@ -66,6 +66,7 @@
 
 mod components;
 mod error;
+mod live;
 mod narrator;
 mod output;
 mod progress;
@@ -73,6 +74,7 @@ mod size;
 
 pub use components::{Component, ComponentTracker};
 pub use error::{ProgressError, Result};
+pub use live::{ComponentState, LiveChecklist};
 pub use narrator::Narrator;
 pub use output::{Capture, Mode, Output};
 pub use progress::ProgressHandle;
