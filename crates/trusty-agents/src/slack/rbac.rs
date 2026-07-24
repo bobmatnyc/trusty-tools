@@ -145,12 +145,18 @@ pub(super) fn parse_rbac_users(raw: &str) -> HashMap<String, SlackUserConfig> {
 /// Hardcoded default team RBAC table used when `SLACK_RBAC_USERS` is unset.
 ///
 /// Why: The bot should be usable without ops first setting an env var.
-/// Test: `rbac_config_parses_env_string` (indirectly via from_env fallback).
+/// `Kartik` is carried over from the custom `cto_bot`'s `BOT_ALLOWED_USERS`
+/// default table (#3852 parity — same Slack id, same ALL tier) so the native
+/// connector doesn't regress access for anyone the retiring bot already let
+/// in.
+/// Test: `rbac_config_parses_env_string` (indirectly via from_env fallback),
+/// `default_rbac_users_includes_kartik_parity`.
 pub(super) fn default_rbac_users() -> HashMap<String, SlackUserConfig> {
     parse_rbac_users(
         "U0A6V2W1M2R:Masa:ALL:*,\
          U0ALDQLBU79:Andrea:ALL:cto-assistant,\
-         U09331EP3MX:Alex:ANALYTICS:cto-assistant",
+         U09331EP3MX:Alex:ANALYTICS:cto-assistant,\
+         U09J5EFTSA3:Kartik:ALL:cto-assistant",
     )
 }
 
