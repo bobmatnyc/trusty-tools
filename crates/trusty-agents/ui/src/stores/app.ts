@@ -73,6 +73,16 @@ export interface TaskHistoryEntry {
   id: string;
   task: string;
   status: string;
+  /**
+   * The server `PmResponse`'s response-envelope kind, on the wire as the
+   * `type` key (`workflow_result` | `agent_response` | `task_submitted` |
+   * `error`). `agent_response` marks a plain chat reply (a Conversational or
+   * Research turn) rather than a workflow run; the Recent Tasks panel uses
+   * this to exclude chat turns from the workflow-oriented list (see
+   * `lib/taskHistory.ts`). Optional so older persisted snapshots and the
+   * frontend's own placeholders still typecheck.
+   */
+  type?: string;
   score?: number;
   score_max?: number;
   cost_usd?: number;

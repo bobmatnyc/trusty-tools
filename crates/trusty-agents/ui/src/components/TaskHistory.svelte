@@ -3,6 +3,7 @@
   import { taskHistory } from '../stores/app';
   import type { TaskHistoryEntry } from '../stores/app';
   import { invoke, listenEvent, type UnlistenFn } from '../lib/transport';
+  import { visibleTaskHistory } from '../lib/taskHistory';
   import type { PmResponseLike } from '../stores/workflow';
 
   let unlistenComplete: UnlistenFn | null = null;
@@ -157,6 +158,13 @@
     if (c < 0.01) return `$${c.toFixed(4)}`;
     return `$${c.toFixed(2)}`;
   }
+
+  // The subset actually rendered — chat replies (`agent_response`) and the
+  // contentless running placeholder are excluded (see `lib/taskHistory.ts`).
+  // The Clear affordance and the "No tasks yet." empty state key off this so a
+  // panel that holds only hidden chat rows reads as empty rather than showing a
+  // Clear button over a blank list.
+  $: visibleTasks = visibleTaskHistory($taskHistory);
 </script>
 
 <section>
@@ -164,7 +172,7 @@
     <h2 class="text-xs font-semibold uppercase tracking-wide text-foundry-teal">
       Recent tasks
     </h2>
-    {#if $taskHistory.length > 0}
+    {#if visibleTasks.length > 0}
       <!-- #3737: two-step Clear affordance for the recent-tasks list. Styled
            to sit quietly beside the section heading (teal, matching the panel)
            until armed, then red to signal the confirm step — reusing the
@@ -187,12 +195,14 @@
 
   {#if errorMessage}
     <p class="px-2 text-xs text-red-500 dark:text-red-400">{errorMessage}</p>
-  {:else if $taskHistory.length === 0}
+  {:else if visibleTasks.length === 0}
     <p class="px-2 text-xs text-foundry-light-muted dark:text-foundry-text/40">No tasks yet.</p>
   {/if}
 
   <ul class="flex flex-col gap-1">
-    {#each $taskHistory.filter(t => (t.task?.trim() || t.narrative?.trim()) || t.status !== 'running') as entry (entry.id)}
+    <!-- Chat replies (`agent_response`) are not workflow runs and are excluded
+         here; see `lib/taskHistory.ts` (owner report 2026-07-23). -->
+    {#each visibleTasks as entry (entry.id)}
       <li class="flex flex-col rounded-md px-2 py-1 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10">
         <span class="truncate text-xs font-medium text-foundry-light-text dark:text-foundry-text" title={entry.task}>
           {shortTask(entry.task)}

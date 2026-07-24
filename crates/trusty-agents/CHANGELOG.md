@@ -42,6 +42,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Agent picker no longer loses Izzie / CTO Bot on a cold start:** the
+  `AgentSwitcher` (and `ModelSwitcher`) fetched their catalog exactly once in
+  `onMount`, but `<Header>` — and therefore both pickers — renders before
+  `apiReady`. On a packaged-app cold start the sidecar isn't listening yet, so
+  that first `GET /api/agents` fetch failed, `catalogAgents` stayed empty with
+  no retry, and the roster showed only the built-in "Assistant" for the whole
+  session (Izzie / CTO Bot never selectable). `App.svelte` now re-drives the
+  agent + model catalog loads (and the overlay refresh) whenever `apiReady`
+  flips true, backfilling the already-mounted pickers via their reactive stores
+  (and refetching on any later sidecar reconnect). The `GET /api/agents` roster
+  itself was already correct — it returns all bundled personas including the
+  `izzie`/`cto-assistant` directory packages.
+- **Recent Tasks no longer lists chat replies as junk "(empty)" rows:** every
+  chat turn (a Conversational/Research message) is finalized as a
+  `type: "agent_response"` `PmResponse` with an empty request field, so
+  `GET /api/tasks` returned them and the workflow-oriented Recent Tasks panel
+  rendered them as "(empty)" success rows. The panel now filters on a shared
+  pure predicate (`lib/taskHistory.ts::isDisplayableTask`) that excludes
+  `agent_response` (chat) envelopes — chat is not a workflow run — while keeping
+  the pre-existing rule that hides the contentless running placeholder; the
+  empty-state and Clear affordance now key off the visible count.
 - **MCP tool results no longer collapse the live conversation to the system
   prompt:** an MCP tool result (e.g. `grep` via trusty-search) is shrunk by no
   `compress_tool_output` filter and can be multiple megabytes; the send-time
