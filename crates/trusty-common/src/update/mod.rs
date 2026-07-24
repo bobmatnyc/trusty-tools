@@ -402,8 +402,8 @@ pub async fn check_throttled(crate_name: &str, current_version: &str) -> Option<
 pub mod upgrade;
 
 pub use upgrade::{
-    is_launchd_supervised, perform_upgrade, upgrade_and_restart, verify_installed_binary,
-    verify_installed_binary_at_path,
+    is_launchd_supervised, perform_upgrade, perform_upgrade_captured, upgrade_and_restart,
+    verify_installed_binary, verify_installed_binary_at_path,
 };
 
 // --- Tests ---

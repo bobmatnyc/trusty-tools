@@ -253,11 +253,15 @@ impl ServiceEnv for RealServiceEnv {
 /// diagnostic is never silently lost — it just never reaches the live
 /// terminal directly. `label` is the human-readable command description used
 /// in the error text (e.g. `` `trusty-search service install` ``).
-/// Test: `run_captured_ok_on_success` (a noisy-stdout success is silently
-/// discarded, never surfaced), `run_captured_folds_stderr_into_error` (the
-/// #3830 regression proof — an error's message contains the child's exact
-/// stderr text, which is only possible if that stderr was CAPTURED via
-/// `.output()`; `.status()`, the pre-fix call, gives no access to it at all).
+/// Test: `run_captured_never_leaks_to_parent_stdio` (the #3830 regression
+/// proof — redirects the REAL stdout fd and asserts a noisy successful
+/// child's bytes never land there; code-critic on PR #3834 caught that an
+/// earlier version of this test asserted only `is_ok()`, which still passed
+/// against a reverted `.status()`-based implementation), and
+/// `run_captured_folds_stderr_into_error` (an error's message contains the
+/// child's exact stderr text, which is only possible if that stderr was
+/// CAPTURED via `.output()`; `.status()`, the pre-fix call, gives no access
+/// to it at all).
 fn run_captured(mut cmd: std::process::Command, label: &str) -> anyhow::Result<()> {
     let output = cmd
         .output()
@@ -441,27 +445,135 @@ mod tests {
         assert_eq!(start_plan(false), StartPlan::ServiceInstall);
     }
 
-    /// Why (#3830 regression): the pre-fix code used `.status()`, which
-    /// INHERITS the child's stdout/stderr — exactly the bug that corrupted
-    /// an active `LiveChecklist`'s terminal redraw (reproduced via a PTY
-    /// capture replayed through a VT100 emulator; see the PR description).
-    /// `run_captured` must use `.output()` instead, which captures rather
-    /// than inherits, regardless of how much the child writes.
-    /// What: runs a command that prints a large amount of noisy stdout AND
-    /// stderr and exits 0; asserts the call still returns `Ok(())` — proving
-    /// the (successful) child's chatter is silently discarded rather than
-    /// affecting the result, which is only possible if it was captured, not
-    /// inherited straight through to our terminal.
-    /// Test: this is the test.
+    /// Redirect the REAL (OS-level) stdout file descriptor to `tmp` for the
+    /// duration of `f`, then restore it — regardless of whether `f` panics.
+    ///
+    /// Why (#3830 regression proof): `Command::status()` "inheriting" stdio
+    /// means a child writes to whatever fd 1 currently points to; the only
+    /// way to OBSERVE that from a test is to control what fd 1 points to
+    /// before spawning, run the command, then read it back. Asserting only
+    /// `result.is_ok()` (a prior version of this test) proves nothing about
+    /// where the child's bytes went — it still passed when code-critic
+    /// reverted `run_captured` to `.status()` on PR #3834.
+    ///
+    /// CRITICAL: fd 1 is process-global, so this must never run as an
+    /// ordinary parallel `#[test]` — the default test harness's OWN per-test
+    /// "test x ... ok" status line is printed by the harness-controller
+    /// thread through the REAL stdout (not the per-test captured sink), and
+    /// can land in `tmp` mid-redirect whenever ANY sibling test finishes on
+    /// another thread (confirmed empirically; mirrors the identical fix in
+    /// `trusty-common::update::tests`). The `#[test]` wrapper below never
+    /// calls this on the main invocation — it re-execs the test binary,
+    /// selecting ONLY the `_inner` test (`--test-threads=1`), so it is the
+    /// sole test running in a dedicated process.
+    ///
+    /// What: `dup`s the real stdout fd aside, `dup2`s `tmp`'s fd onto it,
+    /// runs `f`, restores the saved fd (via a guard so a panic in `f` still
+    /// restores it), and returns `f`'s result.
+    /// Test: used by `run_captured_never_leaks_to_parent_stdio_inner` below.
+    fn with_real_stdout_redirected_to<T>(tmp: &std::fs::File, f: impl FnOnce() -> T) -> T {
+        use std::os::unix::io::AsRawFd;
+
+        /// RAII guard: restores the saved real-stdout fd on drop, so a panic
+        /// in `f` can never leave the process's stdout permanently redirected.
+        struct RestoreStdout(std::os::raw::c_int);
+        impl Drop for RestoreStdout {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::dup2(self.0, libc::STDOUT_FILENO);
+                    libc::close(self.0);
+                }
+            }
+        }
+
+        let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        assert!(saved >= 0, "dup(STDOUT_FILENO) failed");
+        let _restore = RestoreStdout(saved);
+
+        let rc = unsafe { libc::dup2(tmp.as_raw_fd(), libc::STDOUT_FILENO) };
+        assert!(rc >= 0, "dup2(tmp, STDOUT_FILENO) failed");
+
+        f()
+    }
+
+    /// Re-exec this test binary, running ONLY `inner_test_name` (an
+    /// `#[ignore]`d test) alone with `--test-threads=1`, and assert it
+    /// exits 0.
+    ///
+    /// Why: see [`with_real_stdout_redirected_to`]'s doc — a test that
+    /// hijacks the process's real stdout fd must run with zero sibling test
+    /// threads.
+    /// What: `Command::new(current_exe())` with
+    /// `[name, "--exact", "--ignored", "--test-threads=1"]`; panics with the
+    /// child's captured stdout/stderr on a non-zero exit.
+    /// Test: exercised by `run_captured_never_leaks_to_parent_stdio` below.
+    fn run_isolated_inner_test(inner_test_name: &str) {
+        let exe = std::env::current_exe().expect("resolve current test binary");
+        let output = std::process::Command::new(&exe)
+            .args([inner_test_name, "--exact", "--ignored", "--test-threads=1"])
+            .output()
+            .expect("re-exec test binary for isolated fd test");
+        assert!(
+            output.status.success(),
+            "isolated test `{inner_test_name}` failed ({}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// The #3830 regression proof: `run_captured` must NEVER let a child's
+    /// output reach the parent's real (inherited) stdout, no matter how
+    /// noisy the child is or whether it succeeds.
+    ///
+    /// Why: see [`with_real_stdout_redirected_to`]'s doc — this replaces a
+    /// weaker predecessor that only asserted `is_ok()` (code-critic finding
+    /// on PR #3834). `#[ignore]`d + only ever invoked, alone, via
+    /// [`run_isolated_inner_test`] from the `#[test]` wrapper immediately
+    /// below.
+    /// What: redirects the real stdout fd to a tempfile, runs a noisy,
+    /// successful `sh -c` command through `run_captured`, restores stdout,
+    /// then asserts the tempfile received ZERO bytes.
+    /// Test: this is the test (invoked via
+    /// `run_captured_never_leaks_to_parent_stdio`).
     #[test]
-    fn run_captured_ok_on_success() {
+    #[ignore]
+    fn run_captured_never_leaks_to_parent_stdio_inner() {
+        use std::io::Read;
+
+        let tmp = tempfile::NamedTempFile::new().expect("create tempfile");
         let mut cmd = std::process::Command::new("sh");
         cmd.args([
             "-c",
-            "for i in $(seq 1 50); do echo \"noisy stdout line $i\"; echo \"noisy stderr line $i\" >&2; done; exit 0",
+            "for i in $(seq 1 20); do echo \"LEAK_MARKER_3830 stdout $i\"; \
+             echo \"LEAK_MARKER_3830 stderr $i\" >&2; done; exit 0",
         ]);
-        let result = run_captured(cmd, "`noisy-success`");
+
+        let result =
+            with_real_stdout_redirected_to(tmp.as_file(), || run_captured(cmd, "`noisy-capture`"));
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let mut contents = String::new();
+        tmp.reopen()
+            .expect("reopen tempfile")
+            .read_to_string(&mut contents)
+            .expect("read tempfile");
+        assert!(
+            contents.is_empty(),
+            "run_captured leaked to the parent's real stdout fd: {contents:?}"
+        );
+    }
+
+    /// `#[test]` entry point for the isolated inner test above — see
+    /// [`run_isolated_inner_test`]'s doc for why this indirection exists.
+    /// This is the test `cargo test` actually runs; it re-execs the binary
+    /// so the real fd-1 hijack happens with zero sibling test threads.
+    /// Test: this wraps `run_captured_never_leaks_to_parent_stdio_inner`.
+    #[test]
+    fn run_captured_never_leaks_to_parent_stdio() {
+        run_isolated_inner_test(
+            "commands::service_bootstrap::tests::run_captured_never_leaks_to_parent_stdio_inner",
+        );
     }
 
     /// Why (#3830 regression — the core proof): `run_captured`'s error path

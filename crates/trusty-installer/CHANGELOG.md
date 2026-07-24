@@ -25,6 +25,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   silently dropped. Reproduced and verified via a PTY capture replayed
   through a VT100 terminal emulator (before: dozens of duplicated
   `installed` lines; after: a clean, stable N-row block).
+- Second occurrence of the same #3830 bug class, found by code-critic on
+  PR #3834: the `cargo install` fallback path (`install_one`, hit whenever
+  `download::try_install_prebuilt` returns `Outcome::Fallback` — which fires
+  on ANY prebuilt-download failure, network blip, 404, rate-limit, or SHA
+  mismatch, not just an unsupported platform, so it is reachable even on a
+  Tier-1 machine) called `trusty_common::update::perform_upgrade`, which also
+  inherits its subprocess's stdout/stderr. Switched that call to the new
+  `perform_upgrade_captured` (trusty-common 0.26.x) so it can never corrupt
+  an active `LiveChecklist` either.
 
 ## [0.4.7] — 2026-07-23
 

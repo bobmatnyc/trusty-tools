@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- `update::perform_upgrade_captured` (#3830): a sibling of `perform_upgrade`
+  that CAPTURES the `cargo install` subprocess's stdout/stderr instead of
+  inheriting them, for a caller that may be driving its own live terminal
+  display concurrently (trusty-installer's `LiveChecklist`) — an inherited
+  child writing straight to that terminal corrupts an active
+  `indicatif::MultiProgress` redraw. `perform_upgrade` itself is unchanged
+  (still inherits, for trusty-memory's/trusty-search's own `upgrade`
+  commands, which intentionally want cargo's live build output visible).
+
 ### Fixed
 
 - **`room_filter` silent no-op in `retrieve_l2`** (#3274): a caller-supplied
