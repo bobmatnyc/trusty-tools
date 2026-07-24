@@ -72,6 +72,7 @@ impl TrustyAgentsRepl {
                 // #284: Session overrides are per-session — clear them too.
                 self.model_override = None;
                 self.provider_override = None;
+                self.focused_workstream = None;
                 let _ = writeln!(out, "Conversation history cleared.");
                 Ok(true)
             }
@@ -89,6 +90,10 @@ impl TrustyAgentsRepl {
             }
             "/agent" => {
                 self.handle_agent_command_into(arg, &mut out);
+                Ok(true)
+            }
+            "/focus" => {
+                self.handle_focus_command_into(arg, &mut out).await;
                 Ok(true)
             }
             "/switch" => {

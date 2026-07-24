@@ -119,6 +119,12 @@ pub struct TrustyAgentsRepl {
     /// `resolve_overridden_credentials` at dispatch, bypassing the env probe.
     /// Cleared by `/clear`, `/connect`, and `/provider reset`.
     pub(crate) provider_override: Option<String>,
+    /// Active workstream (set via `/focus <label>`, DOC-54 §9.6.3, demo-day
+    /// 2026-07-24). Threaded into `SessionOverrides::focused_workstream` on
+    /// every dispatch so the persona-chat path assembles focused-mode
+    /// context. `None` (unfocused, the default) preserves pre-#3826
+    /// behavior exactly. Cleared by `/clear`, `/connect`, and `/focus off`.
+    pub(crate) focused_workstream: Option<String>,
     /// Cached ollama model list from the last `/provider local` probe.
     ///
     /// Why: The model picker (opened via `/model` with no arg) consults this
@@ -230,6 +236,7 @@ impl TrustyAgentsRepl {
             slack_pairing: crate::slack::new_pending_pairs(),
             model_override: None,
             provider_override: None,
+            focused_workstream: None,
             ollama_models: Vec::new(),
             tm_manager,
             tm_monitor,

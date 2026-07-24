@@ -37,7 +37,7 @@ pub use config::{
 };
 pub use params::{
     AgentCompressConfig, AgentPluginsConfig, LlmParams, RbacConfig, RunnerConfig,
-    SessionCompressionConfig, ToolChoice,
+    SessionCompressionConfig, ToolChoice, WorkstreamContextConfig,
 };
 
 // Model resolution: `resolve_model` and `ModelSource` are part of the public

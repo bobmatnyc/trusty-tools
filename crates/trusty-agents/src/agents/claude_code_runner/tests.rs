@@ -100,6 +100,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
         session: crate::agents::SessionCompressionConfig::default(),
         plugins: crate::agents::AgentPluginsConfig::default(),
         rbac: crate::agents::RbacConfig::default(),
+        workstreams: crate::agents::WorkstreamContextConfig::default(),
         adapter: Arc::new(crate::llm::adapter::GenericAdapter),
         listeners: Vec::new(),
     }

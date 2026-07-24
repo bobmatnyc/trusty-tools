@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use super::params::{
     AgentCompressConfig, AgentPluginsConfig, LlmParams, RbacConfig, RunnerConfig,
-    SessionCompressionConfig,
+    SessionCompressionConfig, WorkstreamContextConfig,
 };
 use crate::llm::adapter::ModelAdapter;
 
@@ -92,6 +92,21 @@ pub struct AgentConfig {
     /// Test: `rbac_config_defaults_unrestricted`, `rbac_config_parses_block`.
     #[serde(default)]
     pub rbac: RbacConfig,
+
+    /// Optional `[workstreams]` block (DOC-54 §9.6, demo-day 2026-07-24) —
+    /// filterable-context classification tuning.
+    ///
+    /// Why: The persona-chat dispatch path (`ctrl::pm_task::dispatch::persona`)
+    /// in-band classifies every turn into a workstream and, in focused mode,
+    /// assembles a per-workstream summary + recent-turn window. Operators
+    /// need to tune the summary cadence and focused-window size per agent.
+    /// What: `WorkstreamContextConfig` with `enabled`/`summarize_every`/
+    /// `recent_window`. Absent section = enabled with the documented
+    /// defaults (5-turn cadence, 12-turn window).
+    /// Test: `workstream_context_config_defaults`,
+    /// `workstream_context_config_parses_block`.
+    #[serde(default)]
+    pub workstreams: WorkstreamContextConfig,
 
     /// Provider-specific behavior adapter derived from `agent.model` (#57).
     ///

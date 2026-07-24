@@ -172,6 +172,54 @@ fn default_session_keep_recent() -> usize {
     10
 }
 
+/// Configuration for the filterable-context workstream classification model
+/// (DOC-54 §9.6 / SPEC-AGENTS-08, demo-day 2026-07-24).
+///
+/// Why: `run_pm_task_with_persona` (`ctrl::pm_task::dispatch::persona`)
+/// classifies every turn in-band and, in focused mode, assembles a
+/// per-workstream summary + recent-turn window into context. Two knobs need
+/// to be tunable per agent without a rebuild: how often the per-workstream
+/// summary regenerates, and how many raw turns focused mode injects after
+/// it.
+/// What: `enabled` is the master switch (default `true` — classification is
+/// part of the baseline persona-chat behavior, not an opt-in experiment).
+/// `summarize_every` is the N-turn cadence for per-workstream summary
+/// regeneration (spec §9.6.2); `recent_window` is the number of raw turns
+/// sent in focused mode after the summaries (spec §9.6.3).
+/// Test: `workstream_context_config_defaults`,
+/// `workstream_context_config_parses_block` (`tests.rs`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkstreamContextConfig {
+    #[serde(default = "default_workstreams_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_summarize_every")]
+    pub summarize_every: u32,
+    #[serde(default = "default_recent_window")]
+    pub recent_window: usize,
+}
+
+impl Default for WorkstreamContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_workstreams_enabled(),
+            summarize_every: default_summarize_every(),
+            recent_window: default_recent_window(),
+        }
+    }
+}
+
+fn default_workstreams_enabled() -> bool {
+    true
+}
+
+fn default_summarize_every() -> u32 {
+    5
+}
+
+fn default_recent_window() -> usize {
+    12
+}
+
 /// LLM sampling parameters.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmParams {

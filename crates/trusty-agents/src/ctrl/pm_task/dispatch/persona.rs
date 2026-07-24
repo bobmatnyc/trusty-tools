@@ -29,6 +29,7 @@ use super::super::super::handlers::{
 };
 use super::super::super::state::ConversationTurn;
 use super::super::helpers::match_any_glob;
+use super::classification;
 
 /// Narrow a persona's full candidate tool-name list down to what it may
 /// actually reach on this turn (#3285).
@@ -222,12 +223,33 @@ pub async fn run_pm_task_with_persona(
         "run_pm_task_with_persona: credentials resolved"
     );
     if claude_cli_short_circuit {
+        // DOC-54 §9.6 note: the claude-cli subprocess path runs an entirely
+        // separate execution model and is out of scope for the filterable-
+        // context slice — deferred, documented in the PR body.
         return run_pm_task_via_claude_cli(project_path, &persona_cfg, user_input, history, "")
             .await;
     }
     let persona_llm_t0 = std::time::Instant::now();
 
     let client = llm::create_client()?;
+
+    // DOC-54 §9.6.1/§9.6.3 (filterable context, demo-day 2026-07-24):
+    // fetch the closed label vocabulary + (when focused) assemble the
+    // focused-mode context block BEFORE the system prompt is built below,
+    // so both land in the same prompt-cache-stable position every turn.
+    // Computed once and threaded explicitly (not re-derived via a hidden
+    // global inside `classification`) so both `build_turn_context` and
+    // `finish_turn` below share one value and remain independently testable
+    // against a mock daemon.
+    let workstreams_base_url = crate::memory::trusty_client::default_trusty_url();
+    let turn_ctx = classification::build_turn_context(
+        project_path,
+        overrides.focused_workstream.as_deref(),
+        persona_cfg.workstreams.recent_window,
+        persona_cfg.workstreams.enabled,
+        &workstreams_base_url,
+    )
+    .await;
 
     let (persona_registry, persona_tool_names): (ToolRegistry, Vec<String>) =
         if let Some(patterns) = persona_cfg.tools.allow.clone() {
@@ -444,6 +466,24 @@ pub async fn run_pm_task_with_persona(
         let base = crate::agents::prompt_builder::SystemPromptBuilder::new(base)
             .with_agent_context(persona_cfg.agent.model.as_str(), runner_label)
             .build();
+        // DOC-54 §9.6.3 stable assembly order: focused-mode context block
+        // (when focused) lands BEFORE the classification instruction so the
+        // prefix stays cache-stable across turns within the same focus/
+        // vocabulary state (the classification block itself only changes
+        // when a new label appears).
+        let base = match &turn_ctx.focused_context_block {
+            Some(focused_block) => format!("{base}\n\n{focused_block}"),
+            None => base,
+        };
+        // #3840 critic HIGH-2: `classification_block` is empty when
+        // `[workstreams].enabled = false` (real master switch — see
+        // `build_turn_context`); appending it unconditionally would still
+        // inject a blank `\n\n` into the prompt.
+        let base = if turn_ctx.classification_block.is_empty() {
+            base
+        } else {
+            format!("{base}\n\n{}", turn_ctx.classification_block)
+        };
         if !persona_tool_names.is_empty() {
             format!(
                 "{}\n\n## Available tools\nYou have access to the following tools: {}.\nUse them when the user asks questions that require live data.",
@@ -485,7 +525,17 @@ pub async fn run_pm_task_with_persona(
                     response_chars = assembly.content.len(),
                     "run_pm_task_with_persona: streamed LLM call complete"
                 );
-                return Ok(assembly.content);
+                return classification::finish_turn(
+                    project_path,
+                    persona_name,
+                    &client,
+                    &persona_cfg,
+                    user_input,
+                    assembly.content,
+                    &turn_ctx,
+                    &workstreams_base_url,
+                )
+                .await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -561,7 +611,17 @@ pub async fn run_pm_task_with_persona(
         "run_pm_task_with_persona: LLM call complete"
     );
 
-    Ok(content)
+    classification::finish_turn(
+        project_path,
+        persona_name,
+        &client,
+        &persona_cfg,
+        user_input,
+        content,
+        &turn_ctx,
+        &workstreams_base_url,
+    )
+    .await
 }
 
 #[cfg(test)]

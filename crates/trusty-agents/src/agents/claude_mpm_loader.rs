@@ -132,6 +132,7 @@ impl ClaudeMpmAgent {
             session: crate::agents::SessionCompressionConfig::default(),
             plugins: crate::agents::AgentPluginsConfig::default(),
             rbac: crate::agents::RbacConfig::default(),
+            workstreams: crate::agents::WorkstreamContextConfig::default(),
             adapter,
             listeners: Vec::new(),
         }

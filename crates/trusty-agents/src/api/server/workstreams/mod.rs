@@ -1,42 +1,48 @@
 //! `GET /api/workstreams` + `GET /api/workstreams/:name/history` — resumable
 //! workstreams sourced from trusty-memory's `ws:<name>` tag convention
-//! (#3819, epic #3052).
+//! (#3819, epic #3052), plus the shared read/write primitives the
+//! filterable-context classification path (DOC-54 §9.6,
+//! `ctrl::pm_task::dispatch::classification`) reuses to persist and read
+//! back workstream-tagged chat turns.
 //!
 //! Why: Bob's directive replaces the sidebar's static `PROJECTS` (today: one
 //! entry, `CTRL`) with `WORKSTREAMS` — workstreams the user can resume,
-//! backed by TAGGED MEMORY HISTORY, the same convention the `tm` harness
-//! already uses (PR #3731 / commit `f29f7332`,
-//! `docs/specs/DOC-53-workstream-claim-drawer-convention.md`). DOC-53 §4.1
-//! stamps every drawer written by a workstream-identified session with a bare
-//! `ws:<name>` tag (alongside hand-written `WS-CLAIM` drawers, which carry the
-//! same tag by convention, §3.1) into "the project's own palace" — the same
-//! trusty-memory palace PM sessions write to, cwd-resolved via
-//! `trusty_memory::project_root::project_slug_at_readonly` (the read-only,
-//! no-side-effect variant — this is a GET handler, it must never lazily
-//! write a `.trusty-tools/trusty-memory.yaml` pin file as a side effect of
-//! being polled).
-//! What: [`list_workstreams_at`] fetches the palace's drawers (a single
-//! request, no `tag` filter — trusty-memory's `ListDrawersQuery.tag` is an
-//! EXACT match, so filtering by any tag *starting with* `ws:` has to happen
-//! client-side; see the module-level design note in the PR body for why this
-//! is the simplest robust source of truth for "list workstreams + their
-//! recent history" without inventing a new trusty-memory query capability),
-//! then [`group_by_workstream`] (pure, unit-tested) buckets them by their
-//! `ws:<name>` tag and keeps the most-recent-first summary per name.
-//! [`workstream_history_at`] does the same fetch narrowed to one workstream's
-//! `ws:<name>` tag (an exact match — trusty-memory supports this natively)
-//! for the "resume" flow's context-injection payload.
-//! Fails gracefully, not with an error, when the daemon is unreachable or the
-//! project has no palace yet (empty list) — this is a sidebar convenience
-//! panel, not a critical path; a down trusty-memory daemon must not break the
-//! rest of the GUI (safe-defaults convention, `BASE-ENGINEER`).
-//! Test: `group_by_workstream_*` (pure grouping logic), `list_workstreams_at_*`
-//! / `workstream_history_at_*` (mock-daemon round trip, mirroring
-//! `memory::trusty_client::tests`' `TcpListener` + `axum::serve` pattern).
+//! backed by TAGGED MEMORY HISTORY, the convention `tm` already uses (PR
+//! #3731, `docs/specs/DOC-53-workstream-claim-drawer-convention.md`). DOC-53
+//! §4.1 stamps every drawer written by a workstream-identified session with
+//! a bare `ws:<name>` tag into the project's own trusty-memory palace,
+//! cwd-resolved via the READ-ONLY `project_slug_at_readonly` for every GET
+//! handler here (never lazily writes the project's pin file on a poll).
+//! DOC-54 §9.6 reuses the SAME tag convention for classified chat turns —
+//! a persona turn classified as `<label>` is persisted as a drawer tagged
+//! `ws:<label>`, so it appears in this same sidebar listing for free. A
+//! sibling namespace (`ws-summary:<label>`, [`WORKSTREAM_SUMMARY_TAG_PREFIX`])
+//! holds the cached per-workstream summary DOC-54 §9.6.2 describes;
+//! [`drawers_by_tag_at`] is the one generic exact-tag read primitive both
+//! the turn-history and summary-cache lookups share. [`create_tagged_drawer_at`]
+//! is the write-path counterpart the classification path uses to persist
+//! both — unlike every GET handler it resolves via the WRITING
+//! `project_slug_at` (may lazily create the pin file), since it only runs
+//! on a genuine chat turn, never a poll.
+//! What: [`list_workstreams_at`] fetches the palace's drawers (no `tag`
+//! filter — trusty-memory's tag filter is an EXACT match, so a `ws:` PREFIX
+//! scan happens client-side), then [`group_by_workstream`] (pure,
+//! unit-tested) buckets them by `ws:<name>`, most-recent-first.
+//! [`workstream_history_at`] narrows to one workstream's exact tag for the
+//! resume flow's context-injection payload.
+//! Fails gracefully (empty list, not an error) when the daemon is
+//! unreachable or the project has no palace yet — a down trusty-memory
+//! daemon must never break the GUI (safe-defaults, `BASE-ENGINEER`). The
+//! write path is the one exception: a failed write returns `Err` so the
+//! caller can log it rather than silently losing a classified turn.
+//! Test: `group_by_workstream_*`, `list_workstreams_at_*` /
+//! `workstream_history_at_*`, `create_tagged_drawer_at_*` /
+//! `drawers_by_tag_at_*` — see `tests.rs`.
 
 use std::path::Path;
 use std::time::Duration;
 
+use anyhow::{Context, Result, bail};
 use axum::{
     Json,
     extract::{Path as AxumPath, Query, State},
@@ -71,11 +77,29 @@ const DEFAULT_HISTORY_LIMIT: usize = 20;
 /// on; keeping the string in both places is cheap and the convention is a
 /// stable, documented wire contract (DOC-53), not an implementation detail
 /// likely to drift silently.
-const WORKSTREAM_TAG_PREFIX: &str = "ws:";
+pub(crate) const WORKSTREAM_TAG_PREFIX: &str = "ws:";
 /// DOC-53 §3.1's fixed claim-drawer marker tag.
 const CLAIM_TAG: &str = "ws-claim";
 /// DOC-53 §3.1's per-claim area tag prefix.
 const AREA_TAG_PREFIX: &str = "area:";
+/// DOC-54 §9.6.2's cached per-workstream summary tag prefix — sibling
+/// namespace to [`WORKSTREAM_TAG_PREFIX`], so a summary drawer never gets
+/// mistaken for a raw turn by [`group_by_workstream`] (a `ws-summary:`
+/// prefix does not match `ws:`'s `strip_prefix`, so summary drawers are
+/// invisible to the sidebar listing by construction — they are cache
+/// entries, not user-visible activity).
+pub(crate) const WORKSTREAM_SUMMARY_TAG_PREFIX: &str = "ws-summary:";
+
+/// Render the `ws:<name>` tag for a workstream's per-turn drawers.
+pub(crate) fn workstream_tag(name: &str) -> String {
+    format!("{WORKSTREAM_TAG_PREFIX}{name}")
+}
+
+/// Render the `ws-summary:<name>` tag for a workstream's cached summary
+/// drawer (DOC-54 §9.6.2).
+pub(crate) fn workstream_summary_tag(name: &str) -> String {
+    format!("{WORKSTREAM_SUMMARY_TAG_PREFIX}{name}")
+}
 
 /// One row as returned by trusty-memory's `GET /api/v1/palaces/{id}/drawers`
 /// — a subset of `trusty_common::memory_core::palace::Drawer`'s fields (only
@@ -90,28 +114,30 @@ struct DrawerRow {
 
 /// One workstream summary row — the `GET /api/workstreams` response shape.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub(super) struct WorkstreamSummary {
-    pub(super) name: String,
-    pub(super) last_activity: DateTime<Utc>,
+pub(crate) struct WorkstreamSummary {
+    pub(crate) name: String,
+    pub(crate) last_activity: DateTime<Utc>,
     /// The most recent drawer's content for this workstream, truncated to a
     /// glanceable length — mirrors trusty-memory's own `snippet` convention
     /// (`service::core::drawer_snippet`) rather than reinventing truncation.
-    pub(super) summary: String,
+    pub(crate) summary: String,
     /// True when at least one of this workstream's drawers also carries the
     /// `ws-claim` marker tag (DOC-53 §3.1) — i.e. an explicit "I'm working
     /// here" claim exists, not just incidental attributed activity.
-    pub(super) has_open_claim: bool,
-    pub(super) areas: Vec<String>,
-    pub(super) item_count: usize,
+    pub(crate) has_open_claim: bool,
+    pub(crate) areas: Vec<String>,
+    pub(crate) item_count: usize,
 }
 
 /// One item in a workstream's resume history — the `GET
-/// /api/workstreams/:name/history` response shape.
+/// /api/workstreams/:name/history` response shape. Also the shape
+/// [`drawers_by_tag_at`] returns for the classification path's turn-history
+/// and summary-cache reads (DOC-54 §9.6).
 #[derive(Debug, Clone, Serialize, PartialEq)]
-pub(super) struct HistoryItem {
-    pub(super) content: String,
-    pub(super) created_at: DateTime<Utc>,
-    pub(super) tags: Vec<String>,
+pub(crate) struct HistoryItem {
+    pub(crate) content: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) tags: Vec<String>,
 }
 
 /// Bound content to a glanceable length for the summary card — full content
@@ -289,7 +315,7 @@ async fn fetch_drawers_by_tag(
 /// never has the side effect of lazily writing a pin file (that side effect
 /// is reserved for interactive `trusty-memory` commands, not a GUI GET
 /// handler polled on an interval).
-fn palace_id_for(cwd: &Path) -> Option<String> {
+pub(crate) fn palace_id_for(cwd: &Path) -> Option<String> {
     trusty_memory::project_root::project_slug_at_readonly(cwd)
 }
 
@@ -304,7 +330,7 @@ fn palace_id_for(cwd: &Path) -> Option<String> {
 /// recent drawers and groups them.
 /// Test: `list_workstreams_at_no_project_root_is_empty`,
 /// `list_workstreams_at_unreachable_daemon_is_empty_not_error`.
-pub(super) async fn list_workstreams_at(cwd: &Path, base_url: &str) -> Vec<WorkstreamSummary> {
+pub(crate) async fn list_workstreams_at(cwd: &Path, base_url: &str) -> Vec<WorkstreamSummary> {
     let Some(palace_id) = palace_id_for(cwd) else {
         return Vec::new();
     };
@@ -314,17 +340,47 @@ pub(super) async fn list_workstreams_at(cwd: &Path, base_url: &str) -> Vec<Works
 
 /// Core per-workstream history logic — see [`list_workstreams_at`]'s doc for
 /// the testable-core rationale.
-pub(super) async fn workstream_history_at(
+pub(crate) async fn workstream_history_at(
     cwd: &Path,
     base_url: &str,
     name: &str,
     limit: usize,
 ) -> Vec<HistoryItem> {
+    drawers_by_tag_at(cwd, base_url, &workstream_tag(name), limit).await
+}
+
+/// Just the distinct workstream label set, most-recently-active first — the
+/// closed vocabulary the in-band classification block (DOC-54 §9.6.1,
+/// `ctrl::pm_task::dispatch::classification::classification_block`) presents
+/// to the model.
+/// Test: `list_workstream_labels_at_against_mock_daemon`.
+pub(crate) async fn list_workstream_labels_at(cwd: &Path, base_url: &str) -> Vec<String> {
+    list_workstreams_at(cwd, base_url)
+        .await
+        .into_iter()
+        .map(|w| w.name)
+        .collect()
+}
+
+/// Fetch drawers matching an EXACT tag, newest first, mapped to
+/// [`HistoryItem`] — the one generic read primitive the classification path
+/// shares between turn-history lookups (`tag = "ws:<label>"`) and
+/// summary-cache lookups (`tag = "ws-summary:<label>"`).
+/// What: Resolves the palace id from `cwd` (read-only — never writes a pin
+/// file); returns `[]` when no project root is found or the daemon is
+/// unreachable, mirroring [`list_workstreams_at`]'s safe-default posture.
+/// Test: `drawers_by_tag_at_no_project_root_is_empty`,
+/// `drawers_by_tag_at_against_mock_daemon`.
+pub(crate) async fn drawers_by_tag_at(
+    cwd: &Path,
+    base_url: &str,
+    tag: &str,
+    limit: usize,
+) -> Vec<HistoryItem> {
     let Some(palace_id) = palace_id_for(cwd) else {
         return Vec::new();
     };
-    let tag = format!("{WORKSTREAM_TAG_PREFIX}{name}");
-    fetch_drawers_by_tag(base_url, &palace_id, &tag, limit)
+    fetch_drawers_by_tag(base_url, &palace_id, tag, limit)
         .await
         .into_iter()
         .map(|row| HistoryItem {
@@ -333,6 +389,80 @@ pub(super) async fn workstream_history_at(
             tags: row.tags,
         })
         .collect()
+}
+
+/// Build a short-timeout `reqwest::Client` matching the rest of this
+/// module's read paths — shared by the write path below so palace-create +
+/// drawer-create use the same connect/call timeouts as every read.
+fn build_http_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(HEALTH_TIMEOUT)
+        .timeout(CALL_TIMEOUT)
+        .build()
+        .ok()
+}
+
+/// Write a `content` drawer carrying `tags` into the current project's
+/// palace — the write-path counterpart of [`drawers_by_tag_at`], used by the
+/// classification path (DOC-54 §9.6) to persist a classified turn
+/// (`tags = ["ws:<label>"]`) or a refreshed per-workstream summary
+/// (`tags = ["ws-summary:<label>"]`).
+///
+/// Why: resolves the palace id via the WRITING `project_slug_at` (may
+/// lazily create the pin file), unlike every read helper above, since this
+/// only runs on a genuine chat turn, never a poll. Returns `Err` on failure
+/// instead of silently dropping the turn — callers log it and carry on.
+/// What: idempotently ensures the palace exists (`force: true`, matching
+/// `TrustyMemoryClient::ensure_palace`), then posts the drawer with
+/// `force: true` (bypasses trusty-memory's signal/noise gate for
+/// short/structured content, same rationale as `CreateDrawerReq::force`).
+/// Test: `create_tagged_drawer_at_and_drawers_by_tag_at_round_trip`,
+/// `create_tagged_drawer_at_no_project_root_errs`.
+pub(crate) async fn create_tagged_drawer_at(
+    cwd: &Path,
+    base_url: &str,
+    content: &str,
+    tags: Vec<String>,
+) -> Result<()> {
+    let Some(palace_id) = trusty_memory::project_root::project_slug_at(cwd) else {
+        bail!("no project root found at {}", cwd.display());
+    };
+    let client = build_http_client().context("building trusty-memory HTTP client")?;
+
+    let create_url = format!("{}/api/v1/palaces", base_url.trim_end_matches('/'));
+    client
+        .post(&create_url)
+        .json(&serde_json::json!({
+            "name": palace_id,
+            "description": "Auto-created by trusty-agents workstream classification",
+            "force": true,
+        }))
+        .send()
+        .await
+        .with_context(|| format!("POST {create_url}"))?;
+
+    let drawer_url = format!(
+        "{}/api/v1/palaces/{palace_id}/drawers",
+        base_url.trim_end_matches('/')
+    );
+    let resp = client
+        .post(&drawer_url)
+        .json(&serde_json::json!({
+            "content": content,
+            "tags": tags,
+            "force": true,
+        }))
+        .send()
+        .await
+        .with_context(|| format!("POST {drawer_url}"))?;
+    if !resp.status().is_success() {
+        bail!(
+            "trusty-memory create_drawer failed: HTTP {} ({})",
+            resp.status(),
+            drawer_url
+        );
+    }
+    Ok(())
 }
 
 /// `GET /api/workstreams` — HTTP entry point.
@@ -360,114 +490,4 @@ pub(super) async fn workstream_history_route(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(content: &str, tags: &[&str], created_at: DateTime<Utc>) -> DrawerRow {
-        DrawerRow {
-            content: content.to_string(),
-            tags: tags.iter().map(|s| s.to_string()).collect(),
-            created_at,
-        }
-    }
-
-    fn ts(secs: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_700_000_000 + secs, 0).expect("valid timestamp")
-    }
-
-    #[test]
-    fn group_by_workstream_empty() {
-        assert_eq!(group_by_workstream(&[]), Vec::new());
-    }
-
-    #[test]
-    fn group_by_workstream_ignores_untagged_drawers() {
-        let rows = vec![row("plain note", &["misc"], ts(0))];
-        assert_eq!(group_by_workstream(&rows), Vec::new());
-    }
-
-    #[test]
-    fn group_by_workstream_single_claim() {
-        let rows = vec![row(
-            "WS-CLAIM feat-x: does a thing",
-            &["ws-claim", "ws:feat-x", "area:health-endpoint"],
-            ts(0),
-        )];
-        let out = group_by_workstream(&rows);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].name, "feat-x");
-        assert!(out[0].has_open_claim);
-        assert_eq!(out[0].areas, vec!["health-endpoint".to_string()]);
-        assert_eq!(out[0].item_count, 1);
-    }
-
-    #[test]
-    fn group_by_workstream_groups_multiple_drawers_same_name() {
-        let rows = vec![
-            row("newest", &["ws:feat-x"], ts(20)),
-            row("older", &["ws:feat-x"], ts(10)),
-        ];
-        let out = group_by_workstream(&rows);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].item_count, 2);
-        assert_eq!(out[0].summary, "newest");
-        assert_eq!(out[0].last_activity, ts(20));
-    }
-
-    #[test]
-    fn group_by_workstream_sorts_by_last_activity_desc() {
-        let rows = vec![
-            row("a", &["ws:older-stream"], ts(5)),
-            row("b", &["ws:newer-stream"], ts(50)),
-        ];
-        let out = group_by_workstream(&rows);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].name, "newer-stream");
-        assert_eq!(out[1].name, "older-stream");
-    }
-
-    #[test]
-    fn group_by_workstream_collects_areas() {
-        let rows = vec![
-            row("a", &["ws-claim", "ws:feat-x", "area:one"], ts(0)),
-            row("b", &["ws:feat-x", "area:two"], ts(1)),
-        ];
-        let out = group_by_workstream(&rows);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].areas.len(), 2);
-        assert!(out[0].areas.contains(&"one".to_string()));
-        assert!(out[0].areas.contains(&"two".to_string()));
-    }
-
-    #[test]
-    fn snippet_short_content_passes_through() {
-        assert_eq!(snippet("hello world", 140), "hello world");
-    }
-
-    #[test]
-    fn snippet_truncates_long_content() {
-        let long = "x".repeat(200);
-        let out = snippet(&long, 10);
-        assert_eq!(out.chars().count(), 11); // 10 chars + the ellipsis char
-        assert!(out.ends_with('…'));
-    }
-
-    #[tokio::test]
-    async fn list_workstreams_at_no_project_root_is_empty() {
-        // A tempdir with no git/project marker resolves no palace id, so the
-        // function returns empty without ever making a network call.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let out = list_workstreams_at(tmp.path(), "http://127.0.0.1:1").await;
-        assert_eq!(out, Vec::new());
-    }
-
-    #[tokio::test]
-    async fn list_workstreams_at_unreachable_daemon_is_empty_not_error() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
-        // Port 1 is a reserved, never-listening port — the health probe
-        // fails fast and the function degrades to an empty list.
-        let out = list_workstreams_at(tmp.path(), "http://127.0.0.1:1").await;
-        assert_eq!(out, Vec::new());
-    }
-}
+mod tests;

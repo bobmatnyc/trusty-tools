@@ -77,6 +77,100 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   view, not a context wall" model (this slice still clears context on "+ New
   Task", matching the pre-existing architecture).
 
+- **Filterable-chat context assembly: in-band task classification, focused
+  mode, and per-workstream summaries (DOC-54 §9.6 / SPEC-AGENTS-08,
+  demo-day 2026-07-24):** `run_pm_task_with_persona` now appends a compact
+  classification block to every turn's system prompt (the agent's closed
+  label vocabulary + a `[[task: <label>]]` / `[[task: new: <label>]]`
+  trailing-marker instruction), parses that marker out of the response
+  before display, and persists the turn as a `ws:<label>`-tagged
+  trusty-memory drawer — the same convention `GET /api/workstreams`
+  already reads, so classified chat turns show up in the Tasks sidebar for
+  free. New `/focus [<label>|off]` REPL command and `TaskRequest.focused_workstream`
+  API field (chat-side parameter, in place of a separate focus-session
+  endpoint) set the active workstream; when set, context assembly follows
+  the spec's stable order — global summary (stub) → cached per-workstream
+  summary → last `recent_window` raw turns — and the persisted response
+  notes which task it's focused on. A cached per-workstream summary
+  regenerates every `summarize_every` turns (one extra LLM call on the
+  agent's own model/credentials). New per-agent `[workstreams]` TOML
+  section (`enabled`, `summarize_every` default 5, `recent_window` default
+  12). Task-bleed handling never restricts tools/memory or forces a
+  mismatched classification — a turn that classifies outside the focused
+  workstream is tagged honestly, logged, and gets a gentle inline nudge.
+  New module `ctrl::pm_task::dispatch::classification`; shared read/write
+  drawer primitives (`list_workstream_labels_at`, `drawers_by_tag_at`,
+  `create_tagged_drawer_at`) added to `api::server::workstreams` (now
+  `pub(crate)`, split into `workstreams/{mod,tests}.rs` to stay under the
+  500-SLOC cap). Deferred: lazy summary invalidation on manual re-tag, a
+  real global prompt-history summary source, periodic near-duplicate label
+  consolidation, a persistent `POST /api/workstreams/:name/focus`
+  session-state endpoint, and classification for the claude-cli subprocess
+  persona path (separate execution model, out of scope for this slice).
+  Verified end-to-end live against a real trusty-memory daemon (REPL +
+  `/api/task`), routed through OpenRouter/Sonnet per the current provider
+  policy: closed-vocab classification (new labels + correct reuse),
+  `ws:`-tagged persistence, `/api/workstreams` rollup, focused-mode
+  assembly in spec order, the task-bleed nudge, and the `summarize_every`
+  cadence — including a real generated `ws-summary:<label>` drawer at the
+  turn-5 boundary — all confirmed working. Minor noted gap (not fixed
+  here, moot under the current no-Ollama operating policy): the
+  summary-refresh one-shot call (`llm::chat_adapter_aware`) doesn't route
+  an `ollama/`-prefixed persona model correctly (only Bedrock is
+  special-cased) — caught and logged, the turn's own response/persistence
+  is unaffected.
+
+- **Filterable-context: critic-review fixes — marker hardening, a real
+  `enabled` gate, and off-response-path persistence (PR #3840 review
+  round, demo-day 2026-07-24):** three fixes to the classification slice
+  above, pre-merge.
+  1. `parse_marker` is now anchored to the response's own LAST LINE (not a
+     bare "last occurrence anywhere" scan) and validates the parsed label
+     against a `[a-z0-9-]{1,64}` charset allow-list before ever treating it
+     as real. Closes two holes: a persona emitting the marker twice no
+     longer leaves the first occurrence visible in the displayed text (both
+     trailing marker lines are stripped; the last one is authoritative —
+     documented in `parse_marker`'s doc comment), and a persona echoing the
+     marker SYNTAX itself (e.g. explaining the convention, literally ending
+     with `[[task: <label>]]`) can no longer have that placeholder text
+     persisted as a real `ws:<label>` tag — charset validation rejects it
+     (logged, turn left unclassified).
+  2. `[workstreams].enabled` is now a REAL master switch: `false` skips the
+     vocabulary fetch and classification-block rendering in
+     `build_turn_context` entirely (focused-mode context assembly is
+     skipped too — a stale user focus setting is inert on a disabled
+     agent), AND gates `finish_turn`'s persistence — previously only the
+     summarizer checked it.
+  3. Turn persistence (`create_tagged_drawer_at`) and the cadence summary
+     LLM call now run in a detached `tokio::spawn`ed task AFTER the
+     response is parsed/nudged — the user sees their answer immediately
+     instead of waiting through a second full LLM round trip on a cadence
+     turn. Errors from the background task are logged exactly like the
+     previous inline failures.
+  New tests: `parse_marker_double_marker_strips_both_last_wins`,
+  `parse_marker_trailing_syntax_echo_is_stripped_but_unclassified`,
+  `parse_marker_ignores_trailing_syntax_echo_mid_sentence`,
+  `is_valid_label_*`, `build_turn_context_disabled_is_a_real_no_op`,
+  `finish_turn_disabled_does_not_persist`,
+  `finish_turn_persists_via_detached_task` (the last two against a new
+  mock-daemon harness proving both the `enabled` gate and the detached
+  write land correctly).
+  Folded in from the same review round (filed as issue #3843, not fixed
+  here — both are pre-existing design gaps, not regressions, and don't
+  affect the demo's short-lived workstreams): the in-band classification
+  vocabulary has no label-count/character cap (unbounded up to trusty-memory's
+  own 500-drawer scan limit); and `should_refresh_summary`'s turn count
+  derives from a 200-capped fetch, so a workstream past 200 turns sticks at
+  that count and re-fires the summary refresh EVERY turn instead of on
+  cadence (needs a real stored turn counter, not a capped re-scan).
+  Integration note for #3838 (Gmail eventstream listener + agent-wake):
+  classification applies uniformly to every `run_pm_task_with_persona`
+  turn, including event-reaction/wake turns — this is per-design (DOC-54
+  §9.2: event reactions get classified into the continuous conversation
+  like any other turn), not an oversight. Flagging for #3838's own
+  integration smoke test to confirm one real wake turn parses/classifies
+  cleanly (no marker leakage into the surfaced event-reaction text).
+
 - **`tagent mcp-serve` — stdio MCP server exposing trusty-agents to external MCP
   clients (Claude Code, etc.) (#3633 core):** a line-delimited JSON-RPC / MCP
   server over stdio, built on the shared `trusty_common::mcp` framework

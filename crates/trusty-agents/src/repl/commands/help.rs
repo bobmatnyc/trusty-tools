@@ -61,6 +61,7 @@ pub(crate) fn write_help(out: &mut String) {
     /provider [<name>]   Show or set credential routing (openrouter|claude-code|bedrock|local|reset)
                          `local` probes a running ollama (OLLAMA_HOST or http://localhost:11434)
     /model [<id>]        Show or set model id for this session (or reset)
+    /focus [<label>|off] Show/set the focused task (filters context assembly)
     /local [on|off|test] Local Ollama fast-path status / control (#319)
 
 Type any other text to send it as a task to the PM controller."
