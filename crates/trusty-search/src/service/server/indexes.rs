@@ -347,6 +347,10 @@ pub(super) async fn create_index_handler(
                     .into_response();
             }
         };
+    // Issue #3748 slice B PR 1: wire the priority-lane pool so this newly
+    // created index's query + catch-up embeds route through
+    // Interactive/Background lanes instead of the raw embedder.
+    indexer.set_embed_pool(state.current_embed_pool().await);
 
     // Issue #2336 defense-in-depth: the `find_root_path_collision` check
     // above is BEST-EFFORT ONLY — it is a check-then-act race (issue #2519

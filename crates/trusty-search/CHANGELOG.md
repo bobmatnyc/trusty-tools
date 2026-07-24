@@ -9,6 +9,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Interactive search queries now preempt background catch-up embeds at
+  wave granularity via the previously-dormant `EmbedPool` priority lanes
+  (issue #3748 slice B PR 1).** The two-lane `EmbedPool` (Interactive/
+  Background, biased select, built for issue #41) was constructed and
+  installed at boot but had zero callers — both the query path
+  (`core::indexer::search::lanes::{embed_text, embed_query}`) and the
+  catch-up path (`core::indexer::ingest::embed::embed_chunks_in_batches`)
+  called the raw shared embedder directly, so a large catch-up pass could
+  still starve interactive `/search` for its full duration. `CodeIndexer`
+  now carries an optional `Arc<EmbedPool>` (wired at every production
+  construction site — `restore_one_index`, `restore_index_on_demand`,
+  `create_index_handler`, and the relocate handler — once the daemon's pool
+  finishes warming up); queries route through the Interactive lane and
+  catch-up sub-batches route through the Background lane, one pool request
+  per wave, so a queued interactive request now waits at most one in-flight
+  wave rather than the whole reindex. No pool installed (tests, CLI paths)
+  falls back to the pre-#3748 direct-embedder call unchanged. Second
+  dedicated catch-up sidecar (PR 2) deferred pending measurement.
 - **Deferred-embed catch-up queue is now size-ordered; `warm_boot_degraded`
   recomputes instead of staying sticky until restart (issue #3748 slice A).**
   The warm-boot deferred-embed (C2) catch-up queue was strictly serial and

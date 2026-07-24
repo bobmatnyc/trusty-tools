@@ -126,6 +126,16 @@ pub struct CodeIndexer {
     pub(super) embedder: Option<Arc<dyn Embedder>>,
     pub(super) store: Option<Arc<dyn VectorStore>>,
 
+    /// Priority-lane embed worker pool (issue #3748 slice B). `None` when no
+    /// pool has been installed (tests, CLI paths, or a daemon still warming
+    /// up) — the interactive query path (`search::lanes`) and the catch-up
+    /// ingest path (`ingest::embed`) both fall back to calling `embedder`
+    /// directly in that case, preserving pre-#3748 behaviour exactly.
+    /// `Some` once a production construction site (`restore_one_index`,
+    /// `restore_index_on_demand`, `create_index_handler`, the relocate
+    /// handler) attaches the daemon-wide pool via [`Self::set_embed_pool`].
+    pub(super) embed_pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
+
     /// In-memory chunk corpus. Write-through cache of the redb `CHUNKS_TABLE`.
     pub(super) chunks: Arc<RwLock<HashMap<String, RawChunk>>>,
 
@@ -379,6 +389,7 @@ impl CodeIndexer {
             root_path: root_path.into(),
             embedder: None,
             store: None,
+            embed_pool: None,
             corpus: None,
             chunks: Arc::new(RwLock::new(HashMap::new())),
             entities: Arc::new(RwLock::new(HashMap::new())),
@@ -687,5 +698,20 @@ impl CodeIndexer {
     /// Test: `validate::reindex_outcome` unit tests model both branches.
     pub fn has_embedder(&self) -> bool {
         self.embedder.is_some()
+    }
+
+    /// Attach (or clear) the daemon-wide priority-lane embed pool (issue
+    /// #3748 slice B PR 1).
+    ///
+    /// Why: the pool is built once, after the shared embedder finishes
+    /// warming up (`commands/start/daemon.rs`), and is therefore always
+    /// wired onto an already-constructed `CodeIndexer` rather than through
+    /// [`Self::with_components`] — mirrors [`Self::set_corpus_store`].
+    /// What: stores the `Option<Arc<EmbedPool>>` verbatim; `None` restores
+    /// the direct-embedder fallback used by every call site in
+    /// `search::lanes` and `ingest::embed`.
+    /// Test: `embed_pool_routing::*` in `core::indexer::tests`.
+    pub fn set_embed_pool(&mut self, pool: Option<Arc<crate::service::embed_pool::EmbedPool>>) {
+        self.embed_pool = pool;
     }
 }

@@ -234,7 +234,7 @@ pub(super) async fn relocate_index_handler(
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
     // the new root are opened (or created if missing — the directory existed
     // per validate_root_path above).
-    let new_indexer = match crate::service::persistence_loader::build_indexer_from_entry(
+    let mut new_indexer = match crate::service::persistence_loader::build_indexer_from_entry(
         &existing_entry,
         &embedder,
     )
@@ -253,6 +253,10 @@ pub(super) async fn relocate_index_handler(
                 .into_response();
         }
     };
+    // Issue #3748 slice B PR 1: wire the priority-lane pool so the relocated
+    // index's query + catch-up embeds route through Interactive/Background
+    // lanes instead of the raw embedder.
+    new_indexer.set_embed_pool(state.current_embed_pool().await);
 
     // Issue #2336 defense-in-depth: `corpus_open_failed` is the ground truth
     // for a broken redb open (a raced collision, or an unrelated open

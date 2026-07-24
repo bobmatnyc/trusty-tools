@@ -11,11 +11,14 @@
 //! in `indexer::tests`.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
 use crate::core::classifier::QueryIntent;
+use crate::core::embed::Embedder;
 use crate::core::entity::EdgeKind;
+use crate::service::embed_pool::RequestPriority;
 
 use super::super::{hash_query, CodeIndexer, SearchQuery};
 use super::path_filter;
@@ -139,19 +142,60 @@ impl CodeIndexer {
             .and_then(|g| g.peek(chunk_id).cloned())
     }
 
+    /// Embed one text via the pool's Interactive lane when a pool is
+    /// installed, falling back to a direct `embedder.embed()` call otherwise
+    /// (issue #3748 slice B PR 1).
+    ///
+    /// Why: `embed_text` and `embed_query` are the two query-side embed call
+    /// sites (design research: `search/lanes.rs:154,182` on pre-#3748 main)
+    /// and need identical pool-vs-direct routing; factoring it out gives the
+    /// fallback branch (`self.embed_pool.is_none()`, exercised by every
+    /// existing test that doesn't call `set_embed_pool`) a single
+    /// implementation and keeps each call site a one-liner.
+    /// What: when `self.embed_pool` is `Some`, submits a single-text batch to
+    /// [`crate::service::embed_pool::EmbedPool::embed`] with
+    /// `RequestPriority::Interactive` and unwraps the one resulting vector;
+    /// otherwise calls `embedder.embed(text)` directly. Errors surface as the
+    /// same `anyhow::Error` shape either path already used the underlying
+    /// `EmbedderError`.
+    /// Test: `embed_pool_routing::query_embeds_route_through_interactive_lane_when_pool_installed`,
+    /// `embed_pool_routing::query_embeds_fall_back_to_direct_embedder_without_pool`
+    /// in `core::indexer::tests`.
+    async fn embed_interactive(
+        &self,
+        embedder: &Arc<dyn Embedder>,
+        text: &str,
+    ) -> Result<Vec<f32>> {
+        if let Some(pool) = &self.embed_pool {
+            let mut out = pool
+                .embed(vec![text.to_string()], RequestPriority::Interactive)
+                .await?;
+            return out
+                .pop()
+                .context("embed pool returned no vector for interactive request");
+        }
+        embedder.embed(text).await
+    }
+
     /// Embed an arbitrary text using the wired embedder, bypassing the
     /// query-LRU cache.
     ///
     /// Why: callers outside the search hot path (e.g. context-embedding
     /// generation in `service::context_inference`) need embeddings without
     /// polluting the query cache. Returns `None` when no embedder is wired.
-    /// What: thin wrapper around `embedder.embed(text)`.
-    /// Test: covered indirectly via the context-embedding integration test.
+    /// What: thin wrapper around [`Self::embed_interactive`] (Interactive
+    /// lane when a pool is installed; direct `embedder.embed()` otherwise).
+    /// Test: covered indirectly via the context-embedding integration test;
+    /// pool routing covered by `embed_pool_routing` (see
+    /// [`Self::embed_interactive`]).
     pub async fn embed_text(&self, text: &str) -> Result<Option<Vec<f32>>> {
         let Some(embedder) = self.embedder.clone() else {
             return Ok(None);
         };
-        let vec = embedder.embed(text).await.context("embed text")?;
+        let vec = self
+            .embed_interactive(&embedder, text)
+            .await
+            .context("embed text")?;
         Ok(Some(vec))
     }
 
@@ -160,8 +204,11 @@ impl CodeIndexer {
     /// Why: search queries repeat across sessions; caching avoids repeated
     /// ONNX calls for the same text.
     /// What: hash the query, check the LRU, return cached vector if hit; else
-    /// embed and store. Returns `None` when no embedder is wired.
-    /// Test: covered indirectly by every search integration test.
+    /// embed via [`Self::embed_interactive`] (Interactive lane when a pool is
+    /// installed; direct `embedder.embed()` otherwise) and store. Returns
+    /// `None` when no embedder is wired.
+    /// Test: covered indirectly by every search integration test; pool
+    /// routing covered by `embed_pool_routing` (see [`Self::embed_interactive`]).
     // pub(crate): also called from tests.rs (a sibling of `search/` in `indexer`).
     pub(crate) async fn embed_query(&self, query: &str) -> Result<Option<Vec<f32>>> {
         let Some(embedder) = self.embedder.clone() else {
@@ -179,7 +226,10 @@ impl CodeIndexer {
             return Ok(Some(v.clone()));
         }
 
-        let vec = embedder.embed(query).await.context("embed query")?;
+        let vec = self
+            .embed_interactive(&embedder, query)
+            .await
+            .context("embed query")?;
 
         self.query_cache
             .lock()

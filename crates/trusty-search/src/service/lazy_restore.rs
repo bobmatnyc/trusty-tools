@@ -82,6 +82,10 @@ pub(crate) async fn restore_index_on_demand(
             return;
         }
     };
+    // Issue #3748 slice B PR 1: mirror `restore_one_index` — wire the
+    // priority-lane pool so this cold-loaded index's query + catch-up
+    // embeds route through Interactive/Background lanes.
+    indexer.set_embed_pool(state.current_embed_pool().await);
 
     // Build include_paths / extensions, same logic as start_restore.
     let include_paths: Vec<std::path::PathBuf> = entry

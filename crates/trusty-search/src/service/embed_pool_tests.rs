@@ -159,6 +159,143 @@ async fn dropping_pool_after_send_returns_error() {
     );
 }
 
+/// Prove interactive requests dispatch ahead of ALREADY-QUEUED background
+/// work under genuine contention — the wave-granularity preemption slice B
+/// PR 1 (issue #3748) relies on: the catch-up path submits one pool request
+/// per sub-batch "wave" rather than one request for the whole reindex, so an
+/// interactive query queued mid-pass only ever waits behind the wave
+/// currently in flight, never the whole background job.
+///
+/// Why: `priority_ordering_interactive_drains_first` above only proves each
+/// lane individually completes; its own comment admits it cannot reliably
+/// force both lanes to have queued work simultaneously. This test forces
+/// that condition deterministically with a single-worker pool and a gated
+/// embedder: the first call blocks on a `Notify` (simulating an in-flight
+/// wave), giving the test time to queue several background requests AND one
+/// interactive request behind it before releasing the gate. `biased;` in
+/// `worker_loop`'s `select!` must then pick the interactive request next,
+/// even though three background requests arrived first.
+/// What: submits `bg-0..bg-2` (queued, not yet running), then `interactive`,
+/// then releases the gate; asserts `interactive` appears in the completion
+/// order before any of `bg-0..bg-2`.
+/// Test: this test (`SKIP_UI_BUILD=1 cargo test -p trusty-search -- \
+/// interactive_preempts_queued_background_wave`).
+#[tokio::test]
+async fn interactive_preempts_queued_background_wave() {
+    use tokio::sync::Notify;
+
+    /// Blocks its FIRST call on `gate` (simulating a wave already in
+    /// flight); every later call returns immediately and appends its input
+    /// text to `order` so the test can assert completion sequencing.
+    struct GateEmbedder {
+        gate: Arc<Notify>,
+        gated_once: std::sync::atomic::AtomicBool,
+        order: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::core::embed::Embedder for GateEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            unimplemented!("pool always calls embed_batch")
+        }
+
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            if !self.gated_once.swap(true, Ordering::SeqCst) {
+                self.gate.notified().await;
+            }
+            self.order
+                .lock()
+                .expect("order mutex poisoned")
+                .push(texts[0].to_string());
+            Ok(texts.iter().map(|_| vec![0.0f32]).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            1
+        }
+    }
+
+    let gate = Arc::new(Notify::new());
+    let embedder = Arc::new(GateEmbedder {
+        gate: Arc::clone(&gate),
+        gated_once: std::sync::atomic::AtomicBool::new(false),
+        order: std::sync::Mutex::new(Vec::new()),
+    });
+    // Single worker: the ONLY way `interactive` can run before `bg-1`/`bg-2`
+    // is via the biased-select priority lane, not incidental scheduling.
+    let embedder_dyn: Arc<dyn Embedder> = embedder.clone();
+    let pool: Arc<EmbedPool> = Arc::new(EmbedPool::new(1, embedder_dyn));
+
+    // Kick off the in-flight "wave" — the worker picks this up immediately
+    // and blocks inside `embed_batch` on `gate.notified()`.
+    let inflight = {
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            pool.embed(vec!["wave-0".into()], RequestPriority::Background)
+                .await
+        })
+    };
+    // Give the worker a moment to actually pick up "wave-0" and start
+    // blocking on the gate, so the requests below are genuinely QUEUED
+    // (not racing to be picked up first).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Queue three background requests behind the in-flight wave.
+    let mut bg_handles = Vec::new();
+    for i in 0..3 {
+        let pool = Arc::clone(&pool);
+        bg_handles.push(tokio::spawn(async move {
+            pool.embed(vec![format!("bg-{i}")], RequestPriority::Background)
+                .await
+        }));
+    }
+    // Give the background sends a moment to land in the channel before the
+    // interactive request arrives, so it is provably queued LAST but must
+    // still drain FIRST once the gate opens.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let interactive_handle = {
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            pool.embed(vec!["interactive".into()], RequestPriority::Interactive)
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Release the gate — "wave-0" completes, then the worker's biased select
+    // must pick "interactive" next despite bg-0..bg-2 having queued first.
+    gate.notify_one();
+
+    inflight
+        .await
+        .expect("wave-0 task panicked")
+        .expect("wave-0 embed failed");
+    interactive_handle
+        .await
+        .expect("interactive task panicked")
+        .expect("interactive embed failed");
+    for h in bg_handles {
+        h.await.expect("bg task panicked").expect("bg embed failed");
+    }
+
+    let recorded = embedder.order.lock().expect("order mutex poisoned").clone();
+    let interactive_pos = recorded
+        .iter()
+        .position(|t| t == "interactive")
+        .expect("interactive must have run");
+    for bg in ["bg-0", "bg-1", "bg-2"] {
+        let bg_pos = recorded
+            .iter()
+            .position(|t| t == bg)
+            .unwrap_or_else(|| panic!("{bg} must have run"));
+        assert!(
+            interactive_pos < bg_pos,
+            "interactive (pos {interactive_pos}) must drain before {bg} (pos {bg_pos}) — \
+             recorded order: {recorded:?}"
+        );
+    }
+}
+
 /// Prove executor isolation: a slow embed does NOT prevent concurrent async
 /// work on the caller's runtime from making progress (issue #1017 root-cause fix).
 ///

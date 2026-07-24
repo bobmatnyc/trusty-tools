@@ -270,6 +270,11 @@ pub(crate) async fn restore_one_index(
             return;
         }
     };
+    // Issue #3748 slice B PR 1: wire the priority-lane pool (if the daemon
+    // has finished warming it up) so this index's query + catch-up embeds
+    // route through Interactive/Background lanes instead of the raw
+    // embedder. `None` (still warming up) leaves the pre-#3748 direct path.
+    indexer.set_embed_pool(state.current_embed_pool().await);
     // Restore per-index filters and domain vocabulary from indexes.toml.
     // Resolve `include_paths` to absolute under `root_path` so the reindex
     // walker can prune without per-call path arithmetic. `.` and empty

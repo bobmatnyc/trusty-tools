@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::core::chunker::RawChunk;
+use crate::service::embed_pool::RequestPriority;
 
 use super::super::{embed_batch_size, CodeIndexer};
 use super::PROGRESS_CHUNK_INTERVAL;
@@ -132,6 +133,13 @@ impl CodeIndexer {
         };
         let mut tripwire_fired = false;
         let inflight = resolve_embed_inflight();
+        // Issue #3748 slice B PR 1: route each sub-batch through the
+        // Background lane of the priority pool when one is installed, so a
+        // queued interactive query preempts at wave (sub-batch) granularity
+        // instead of blocking behind the whole catch-up pass. `None` when no
+        // pool is installed (tests, CLI paths) — falls back to the direct
+        // `embedder.embed_batch()` call this loop always used before.
+        let embed_pool = self.embed_pool.clone();
         tracing::debug!(chunk_total, batch_size, inflight, "embed_chunks_in_batches");
         let mut batch_start = 0usize;
         while batch_start < chunk_total {
@@ -154,10 +162,16 @@ impl CodeIndexer {
             let wave_results: Vec<WaveResult> = {
                 let iter = wave_sub_batches.into_iter().map(|(start_pos, texts)| {
                     let emb = Arc::clone(embedder);
+                    let pool = embed_pool.clone();
                     let n = texts.len();
                     async move {
-                        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                        (start_pos, n, emb.embed_batch(&refs).await)
+                        let result = if let Some(pool) = pool {
+                            pool.embed(texts, RequestPriority::Background).await
+                        } else {
+                            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                            emb.embed_batch(&refs).await
+                        };
+                        (start_pos, n, result)
                     }
                 });
                 futures::stream::iter(iter)
