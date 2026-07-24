@@ -1,0 +1,48 @@
+[package]
+name = "trusty-kb"
+version = "0.1.0"
+edition = "2024"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic personal-knowledge-base markdown-tree maintainer, exposed as a native MCP stdio server. Organizes a per-assistant KB tree with READMEs + YAML frontmatter and converts arbitrary doc trees into the collection model in place."
+keywords = ["mcp", "knowledge-base", "markdown", "frontmatter", "deterministic"]
+categories = ["command-line-utilities", "development-tools"]
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+
+# Library half: the pure, unit-testable store + schema + converter engine.
+# The MCP dispatch seam (`dispatch_with`) is public so tests can drive every
+# tool end-to-end against temp-dir roots without spawning the binary.
+[lib]
+name = "trusty_kb"
+path = "src/lib.rs"
+
+# Binary half: the thin clap CLI wrapping `serve --stdio`.
+[[bin]]
+name = "trusty-kb"
+path = "src/main.rs"
+
+[dependencies]
+# Shared JSON-RPC 2.0 / MCP stdio framework (run_stdio_loop + initialize_response
+# + Request/Response). The `mcp` feature pulls no deps beyond serde/tokio, which
+# this crate already needs — so the whole MCP surface stays in one place.
+trusty-common = { workspace = true, features = ["mcp"] }
+anyhow = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# YAML frontmatter (de)serialisation — workspace-standard 0.9 line (see the
+# workspace Cargo.toml note on the serde_yaml pin). Frontmatter split is
+# hand-rolled (split on `---`); serde_yaml only parses/renders the block.
+serde_yaml = { workspace = true }
+# Recursive markdown-tree walking for kb_validate / kb_convert_tree.
+walkdir = { workspace = true }
+# ISO-8601 timestamps for created/updated stamping and dated merge sections.
+chrono = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

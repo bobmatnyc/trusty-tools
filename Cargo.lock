@@ -11608,6 +11608,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-kb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+ "walkdir",
+]
+
+[[package]]
 name = "trusty-memory"
 version = "0.21.0"
 dependencies = [
