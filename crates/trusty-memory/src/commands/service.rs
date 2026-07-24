@@ -8,9 +8,25 @@
 //! [`trusty_common::launchd`] implementation so the two tools cannot drift.
 //! What: macOS routes to `service_install` / `service_start` / `service_stop`
 //! / `service_logs`. Non-macOS prints a "not supported" error and exits 1.
+//!
+//! 🔴 (issue #3832) `service install` MUST write AND load (bootstrap) the
+//! agent, exactly like `trusty-search`/`trusty-analyze`/`trusty-review
+//! service install` do. `trusty-installer`'s post-install service-bootstrap
+//! step (`service_bootstrap::bootstrap_member_service`) shells out uniformly
+//! to `<binary> service install` for every launchd-managed member and
+//! documents that contract explicitly ("writes the plist and bootstraps
+//! it"). trusty-memory used to be the ONE member that only wrote the plist
+//! here (loading was split out into the separate `start` action), silently
+//! violating that contract: `tctl install` reported "trusty-memory: launchd
+//! service installed and bootstrapped" (a lie — nothing was ever loaded), the
+//! plist sat on disk unbootstrapped, and the verify tail's `launchctl
+//! kickstart -k` retry then failed outright (kickstart cannot force-start a
+//! label that was never bootstrapped), surfacing as a bare, undiagnosed
+//! `down` instead of `down (kickstarted)`.
 //! Test: on Linux, every action returns Err with the platform message; on
-//! macOS, `service install` writes the plist without loading it, `start`
-//! bootstraps it, `stop` boots it out, and `logs` tails the log files.
+//! macOS, `service install` writes the plist AND bootstraps it (`start` is
+//! kept as an idempotent alias for the same operation), `stop` boots it out,
+//! and `logs` tails the log files.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -27,9 +43,11 @@ use colored::Colorize;
 /// `cargo run -p trusty-memory -- service --help`.
 #[derive(Debug, Clone, Subcommand)]
 pub enum ServiceAction {
-    /// Install the LaunchAgent plist (does not load it).
+    /// Install the LaunchAgent plist AND load it (issue #3832 — matches
+    /// `trusty-search`/`trusty-analyze`/`trusty-review service install`).
     Install,
-    /// Install and load the LaunchAgent (start the daemon).
+    /// Install and load the LaunchAgent (kept as an idempotent alias of
+    /// `install` — see issue #3832).
     Start,
     /// Unload the LaunchAgent (stop the daemon).
     Stop,
@@ -193,14 +211,22 @@ fn current_exe() -> Result<std::path::PathBuf> {
     std::env::current_exe().map_err(|e| anyhow::anyhow!("could not resolve current exe: {e}"))
 }
 
-/// `service install` — write the plist without loading it.
+/// `service install` — write the plist AND load (bootstrap) the agent.
 ///
-/// Why: operators sometimes want to inspect or hand-edit the plist before
-/// launchd takes ownership. Splitting "install" from "start" gives them that
-/// window without forcing a stop-start dance.
-/// What: resolves the binary path and log directory, then calls
-/// `LaunchdConfig::install()` which writes `~/Library/LaunchAgents/<label>.plist`
-/// and creates the log directory. Does not call `bootstrap`.
+/// Why (issue #3832): this MUST write and load in one step, matching every
+/// other launchd-managed member's `service install` — `trusty-installer`'s
+/// post-install bootstrap step depends on that uniform contract (it shells
+/// out to `<binary> service install` for every member and treats a clean
+/// exit as "installed and bootstrapped"). Previously this only wrote the
+/// plist, so `tctl install` reported success while trusty-memory's daemon
+/// was never actually loaded into launchd — a fresh-machine install left
+/// `com.trusty.memory` silently absent from `launchctl list`.
+/// What: resolves the binary path and log directory, writes
+/// `~/Library/LaunchAgents/<label>.plist` via `LaunchdConfig::install()`,
+/// then loads it into the `gui/<uid>` domain via `LaunchdConfig::bootstrap()`
+/// (idempotent — bootout-then-bootstrap). A bootstrap failure propagates as
+/// `Err` (never swallowed) so both the CLI exit code and
+/// `trusty-installer`'s `BootstrapAction::Failed` narration see it.
 /// Test: integration via `cargo run -p trusty-memory -- service install`.
 #[cfg(target_os = "macos")]
 fn service_install() -> Result<()> {
@@ -215,10 +241,19 @@ fn service_install() -> Result<()> {
         plist_path.display()
     );
     ensure_fastembed_cache_dir();
+
+    cfg.bootstrap()?;
+    let domain = format!("gui/{}", trusty_common::launchd::current_uid());
     println!(
-        "  Logs:    {}\n  Start:   {}",
+        "{} Loaded {} into {} — daemon will start automatically.",
+        "✓".green(),
+        LAUNCHD_LABEL,
+        domain
+    );
+    println!(
+        "  Logs:    {}\n  Stop:    {}",
         log_dir.display().to_string().dimmed(),
-        "trusty-memory service start".cyan(),
+        "trusty-memory service stop".cyan(),
     );
     Ok(())
 }
@@ -256,42 +291,18 @@ fn ensure_fastembed_cache_dir() {
     }
 }
 
-/// `service start` — install the plist (if needed) and bootstrap the agent.
+/// `service start` — alias of `service install` (issue #3832).
 ///
-/// Why: the common "I want it running" path should be one command, not two.
-/// `install` + `bootstrap` is idempotent under the shared launchd module
-/// (bootstrap calls bootout first), so calling start repeatedly is safe.
-/// What: writes the plist via `install()`, then loads it into the user's
-/// `gui/<uid>` domain via `bootstrap()`. The agent will start immediately
-/// and restart on non-zero exits per `KeepAlive::OnSuccess`.
+/// Why: `install` now writes AND bootstraps in one step (see
+/// [`service_install`]), so the two actions became identical; kept as a
+/// separate `ServiceAction` variant only so existing scripts/docs invoking
+/// `trusty-memory service start` keep working. `install` + `bootstrap` is
+/// idempotent under the shared launchd module (bootstrap calls bootout
+/// first), so calling either repeatedly is safe.
 /// Test: integration via `cargo run -p trusty-memory -- service start`.
 #[cfg(target_os = "macos")]
 fn service_start() -> Result<()> {
-    let exe = current_exe()?;
-    let log_dir = launchd_log_dir()?;
-    let cfg = build_launchd_config(exe, log_dir.clone());
-    let plist_path = cfg.plist_path()?;
-    cfg.install()?;
-    println!(
-        "{} Wrote LaunchAgent plist: {}",
-        "✓".green(),
-        plist_path.display()
-    );
-
-    cfg.bootstrap()?;
-    let domain = format!("gui/{}", trusty_common::launchd::current_uid());
-    println!(
-        "{} Loaded {} into {} — daemon will start automatically.",
-        "✓".green(),
-        LAUNCHD_LABEL,
-        domain
-    );
-    println!(
-        "  Logs:    {}\n  Stop:    {}",
-        log_dir.display().to_string().dimmed(),
-        "trusty-memory service stop".cyan(),
-    );
-    Ok(())
+    service_install()
 }
 
 /// `service stop` — boot out the agent (stop and unload).
