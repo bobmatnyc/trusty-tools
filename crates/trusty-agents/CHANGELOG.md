@@ -25,11 +25,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   leaving only the protected system message — so the follow-up completion
   answered with zero context (`input_tokens` flatlined at the system-prompt
   size and the model ignored the tool output). `ContextManager::trim_to_budget`
-  now detects a single dominant oversized message and TRUNCATES it in place
-  (preserving every turn and every assistant/tool pairing) instead of evicting
-  the surrounding conversation; whole-message oldest-first eviction remains the
-  fallback for genuinely long multi-turn histories. Truncation is logged
-  distinctly from eviction so it never masquerades as the catastrophic path.
+  now splits the history into three regions — the protected system header, an
+  OLD history region, and a RECENCY window (the "live turn": from the last user
+  message to the end) — and applies strategies in increasing order of damage:
+  (1) water-fill-truncate only the OLD region, keeping the header AND the newest
+  turn at FULL fidelity; (2) evict oldest OLD messages (never the header, never
+  the recency window); (3) as a last resort — when the oversized message is
+  itself inside the live turn (the MCP shape) — truncate within the recency
+  window so the question and every assistant/tool pairing survive rather than
+  being evicted. This preserves TWO guarantees at once: the live conversation
+  never collapses, and — restoring what oldest-first eviction implicitly gave —
+  the **newest turn keeps full fidelity** whenever the budget allows (a
+  uniformly-sized long conversation no longer shrinks its most recent message).
+  Truncation is logged distinctly from eviction so it never masquerades as the
+  catastrophic path.
 - **Chat stream renders inside ONE stable assistant bubble — no mid-stream
   flicker:** as `task-delta` tokens arrived the reply bubble visibly flashed
   because each delta fired two separate `messages` store writes (content, then

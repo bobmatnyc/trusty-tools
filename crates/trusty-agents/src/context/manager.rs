@@ -36,6 +36,12 @@ pub fn context_window(model: &str) -> u32 {
 /// truncated tool result still carries usable signal (≈1 KB of text).
 const MIN_TRUNCATED_TOKENS: u32 = 256;
 
+/// Number of trailing messages to protect as the "live turn" when no `user`
+/// message is found in the evictable region (a tools-only continuation). The
+/// normal case protects from the last user message onward; this is only the
+/// fallback so the newest activity keeps full fidelity regardless.
+const RECENCY_FALLBACK: usize = 2;
+
 /// Outcome of a `trim_to_budget` pass.
 ///
 /// Why: The trimmer now has TWO ways to shed tokens — evicting whole messages
@@ -87,105 +93,160 @@ impl ContextManager {
     }
 
     /// Trim a message history to fit within `soft_threshold` of the model's
-    /// context window.
+    /// context window, protecting BOTH the system/goals header and the live turn.
     ///
-    /// Why: Protects the system/goals header (first `protected_count` entries)
-    /// from eviction. A single oversized message — in practice an uncompressed
-    /// MCP tool result, which no `compress_tool_output` filter shrinks and which
-    /// can be multiple megabytes — must NOT collapse the live conversation. With
-    /// pure oldest-first whole-message eviction it did: the giant result forced
-    /// eviction of the user's question AND the assistant's tool-call turn (both
-    /// older and small), and then itself, leaving only the protected system
-    /// message — so the follow-up completion was sent with no question and no
-    /// tool output and the model answered blind (issue: MCP-result context
-    /// eviction).
-    /// What: Two strategies, in order:
-    ///   1. **Truncate oversized messages (water-fill).** Compute a per-message
-    ///      token cap `C` — the largest cap such that capping every evictable
-    ///      message at `C` fits the budget — and truncate each evictable message
-    ///      whose content exceeds `C` down to `C` in place. This handles ONE or
-    ///      MANY oversized messages (e.g. the model calling `grep` several times,
-    ///      each returning multiple megabytes) equitably, preserving every turn
-    ///      and every assistant/tool-call pairing so the model keeps its question
-    ///      and a bounded slice of each tool result. Only string `content` is
-    ///      truncatable; the cap is floored at `MIN_TRUNCATED_TOKENS` so a
-    ///      truncated result still carries quotable signal.
-    ///   2. **Oldest-first eviction (fallback).** If truncation alone can't fit
-    ///      the budget (e.g. a genuinely long multi-turn history of small turns,
-    ///      or non-truncatable content still over budget), drop evictable entries
-    ///      from the front until the remaining total fits — the original #69
-    ///      behavior. The returned `TrimOutcome` reports both counts.
+    /// Why: Two guarantees must hold at once.
+    ///   - **The live conversation must never collapse.** An uncompressed MCP
+    ///     tool result (no `compress_tool_output` filter shrinks it) can be many
+    ///     megabytes. Pure oldest-first whole-message eviction evicted the user's
+    ///     question AND the assistant tool-call turn AND the result itself,
+    ///     leaving only the protected system message — the model answered blind
+    ///     (issue #3776).
+    ///   - **The newest turn must keep full fidelity when possible.** Oldest-first
+    ///     eviction used to implicitly preserve the newest turn intact; naive
+    ///     water-fill truncation lost that for uniformly-sized long conversations
+    ///     (it shrank the newest message too). We restore it with an explicit
+    ///     recency window.
+    /// What: Three regions — the protected header (`0..protected_count`), an OLD
+    /// history region, and a RECENCY window (the "live turn": from the last user
+    /// message to the end, so it spans the current question + all trailing
+    /// assistant/tool activity). Strategies apply in increasing order of damage:
+    ///   1. **Water-fill truncate the OLD region only.** Compute the largest
+    ///      per-message token cap that fits the budget with the header AND the
+    ///      recency window kept at FULL fidelity, and truncate over-cap OLD
+    ///      messages down to it. The newest turn is untouched.
+    ///   2. **Evict oldest OLD messages.** If truncation alone can't fit (cap
+    ///      below `MIN_TRUNCATED_TOKENS`, or non-truncatable content), drop OLD
+    ///      messages from the front — never the header, never the recency window
+    ///      (the original #69 behavior, now recency-safe).
+    ///   3. **Water-fill truncate the RECENCY window (last resort).** Only when
+    ///      the live turn itself exceeds the budget — the original oversized-MCP-
+    ///      result shape, where the huge message IS in the live turn — truncate
+    ///      within the recency window so the question and every assistant/tool
+    ///      pairing survive rather than being evicted.
     /// Returns `(trimmed_messages, TrimOutcome)`.
     /// Test: `trim_truncates_single_oversized_message`,
-    /// `trim_truncates_multiple_oversized_messages`, `trim_drops_oldest_evictable`,
+    /// `trim_truncates_multiple_oversized_messages`,
+    /// `trim_preserves_newest_turn_in_uniform_history`, `trim_drops_oldest_evictable`,
     /// `trim_respects_protected_count`.
     pub fn trim_to_budget(
         &self,
-        mut messages: Vec<serde_json::Value>,
+        messages: Vec<serde_json::Value>,
         model: &str,
         protected_count: usize,
     ) -> (Vec<serde_json::Value>, TrimOutcome) {
         let budget = (context_window(model) as f32 * self.soft_threshold) as u32;
-        let estimates: Vec<u32> = messages.iter().map(estimate_tokens).collect();
-        let total: u32 = estimates.iter().sum();
-
+        let total: u32 = messages.iter().map(estimate_tokens).sum();
         if total <= budget {
             return (messages, TrimOutcome::default());
         }
 
         let protected_count = protected_count.min(messages.len());
+        let recency_start = recency_window_start(&messages, protected_count);
 
-        // Strategy 1: water-fill truncation of oversized messages. Reduce every
-        // over-cap evictable message to a shared per-message token cap so one OR
-        // several megabyte tool results can't force eviction of the surrounding
-        // conversation.
-        let protected_tokens: u32 = estimates[..protected_count].iter().sum();
-        let cap = water_fill_cap(&estimates[protected_count..], budget.saturating_sub(protected_tokens));
+        // Split into header | old | recent. The header is never touched; the
+        // recency window is truncated only as a last resort (Strategy 3).
+        let mut iter = messages.into_iter();
+        let header: Vec<serde_json::Value> = iter.by_ref().take(protected_count).collect();
+        let mut old: Vec<serde_json::Value> = iter
+            .by_ref()
+            .take(recency_start - protected_count)
+            .collect();
+        let mut recent: Vec<serde_json::Value> = iter.collect();
+
+        let sum = |v: &[serde_json::Value]| -> u32 { v.iter().map(estimate_tokens).sum() };
+        let header_tokens = sum(&header);
+        let recent_tokens_full = sum(&recent);
+        let mut evicted = 0usize;
         let mut truncated = 0usize;
+
+        // Strategy 1: water-fill truncate the OLD region, keeping the header AND
+        // the recency window at full fidelity.
+        let avail_old = budget.saturating_sub(header_tokens + recent_tokens_full);
+        let old_est: Vec<u32> = old.iter().map(estimate_tokens).collect();
+        let cap = water_fill_cap(&old_est, avail_old);
         if cap >= MIN_TRUNCATED_TOKENS {
-            for idx in protected_count..messages.len() {
-                if estimates[idx] > cap && truncate_message_content(&mut messages[idx], cap) {
+            for (i, m) in old.iter_mut().enumerate() {
+                if old_est[i] > cap && truncate_message_content(m, cap) {
                     truncated += 1;
                 }
             }
-            // If truncation alone brought us under budget, we're done — no turn
-            // was evicted, so every question/tool-call/result pairing survives.
-            let total_after: u32 = messages.iter().map(estimate_tokens).sum();
-            if total_after <= budget {
+            if header_tokens + sum(&old) + recent_tokens_full <= budget {
                 return (
-                    messages,
-                    TrimOutcome {
-                        evicted: 0,
-                        truncated,
-                    },
+                    reassemble(header, old, recent),
+                    TrimOutcome { evicted, truncated },
                 );
             }
         }
 
-        // Strategy 2 (fallback): oldest-first whole-message eviction (#69).
-        // Runs on the (possibly already-truncated) messages when truncation
-        // couldn't fit the budget on its own.
-        let mut iter = messages.into_iter();
-        let protected: Vec<serde_json::Value> = iter.by_ref().take(protected_count).collect();
-        let mut evictable: Vec<serde_json::Value> = iter.collect();
-
-        let protected_tokens: u32 = protected.iter().map(estimate_tokens).sum();
-
-        // MIN-6 (#103): Maintain a running sum of evictable tokens instead of
-        // re-summing every iteration. This turns the eviction loop from O(n²)
-        // into O(n) — important when a long history needs many evictions.
-        let mut remaining: u32 = evictable.iter().map(estimate_tokens).sum();
-        let mut evicted = 0usize;
-        while protected_tokens + remaining > budget && !evictable.is_empty() {
-            remaining = remaining.saturating_sub(estimate_tokens(&evictable[0]));
-            evictable.remove(0);
+        // Strategy 2: evict oldest OLD messages (never header, never recency).
+        while header_tokens + sum(&old) + recent_tokens_full > budget && !old.is_empty() {
+            old.remove(0);
             evicted += 1;
         }
+        if header_tokens + sum(&old) + recent_tokens_full <= budget {
+            return (
+                reassemble(header, old, recent),
+                TrimOutcome { evicted, truncated },
+            );
+        }
 
-        let mut result = protected;
-        result.extend(evictable);
-        (result, TrimOutcome { evicted, truncated })
+        // Strategy 3 (last resort): the recency window itself exceeds the budget
+        // (the oversized message is IN the live turn — the #3776 MCP shape).
+        // Truncate within the recency window so the question/tool pairings
+        // survive rather than being evicted. `old` is empty here (Strategy 2 ran
+        // it to exhaustion). Floor the cap at `MIN_TRUNCATED_TOKENS` so each
+        // retained message still carries quotable signal even if that nudges the
+        // total slightly over the SOFT budget (still far within the hard window).
+        let avail_recent = budget.saturating_sub(header_tokens + sum(&old));
+        let recent_est: Vec<u32> = recent.iter().map(estimate_tokens).collect();
+        let cap = water_fill_cap(&recent_est, avail_recent).max(MIN_TRUNCATED_TOKENS);
+        for (i, m) in recent.iter_mut().enumerate() {
+            if recent_est[i] > cap && truncate_message_content(m, cap) {
+                truncated += 1;
+            }
+        }
+        (
+            reassemble(header, old, recent),
+            TrimOutcome { evicted, truncated },
+        )
     }
+}
+
+/// Reassemble the header, old, and recency regions back into one message vector.
+fn reassemble(
+    header: Vec<serde_json::Value>,
+    old: Vec<serde_json::Value>,
+    recent: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut out = header;
+    out.reserve(old.len() + recent.len());
+    out.extend(old);
+    out.extend(recent);
+    out
+}
+
+/// Index at which the live-turn "recency window" begins — the last `user`
+/// message at or after `protected_count`.
+///
+/// Why: The current turn (the question the model must answer, plus every
+/// assistant/tool message produced since) begins at the most recent user
+/// message. Protecting `[recency_start, len)` from truncation/eviction keeps the
+/// newest turn at full fidelity and — critically — keeps the question alive even
+/// when the oversized message is a tool result later in the same turn (#3776).
+/// What: Scans backward for the last `role == "user"` message; falls back to the
+/// last `RECENCY_FALLBACK` messages when none is present (e.g. a tools-only
+/// continuation). Always `>= protected_count` and `<= len`.
+/// Test: Exercised via `trim_truncates_single_oversized_message` (question is the
+/// recency start) and `trim_preserves_newest_turn_in_uniform_history`.
+fn recency_window_start(messages: &[serde_json::Value], protected_count: usize) -> usize {
+    let len = messages.len();
+    for i in (protected_count..len).rev() {
+        if messages[i].get("role").and_then(|r| r.as_str()) == Some("user") {
+            return i;
+        }
+    }
+    len.saturating_sub(RECENCY_FALLBACK).max(protected_count)
 }
 
 /// Largest per-message token cap `C` such that capping every entry of
@@ -364,7 +425,10 @@ mod tests {
         assert_eq!(outcome.truncated, 3, "all three huge results truncated");
         assert_eq!(out.len(), original_len, "every turn must survive");
         // The question and all three tool pairings are intact.
-        assert_eq!(out[1]["content"], "Find estimate_tokens, water_fill_cap, and trim_to_budget.");
+        assert_eq!(
+            out[1]["content"],
+            "Find estimate_tokens, water_fill_cap, and trim_to_budget."
+        );
         for id in ["call_1", "call_2", "call_3"] {
             assert!(
                 out.iter().any(|m| m["tool_call_id"] == id),
@@ -384,7 +448,10 @@ mod tests {
         }
         let total: u32 = out.iter().map(estimate_tokens).sum();
         let budget = (context_window("anthropic/claude-sonnet-4-6") as f32 * 0.5) as u32;
-        assert!(total <= budget, "trimmed total {total} must fit budget {budget}");
+        assert!(
+            total <= budget,
+            "trimmed total {total} must fit budget {budget}"
+        );
     }
 
     #[test]
@@ -456,7 +523,86 @@ mod tests {
         // And the whole set now fits the budget.
         let total: u32 = out.iter().map(estimate_tokens).sum();
         let budget = (context_window("anthropic/claude-sonnet-4-6") as f32 * 0.5) as u32;
-        assert!(total <= budget, "trimmed total {total} must fit budget {budget}");
+        assert!(
+            total <= budget,
+            "trimmed total {total} must fit budget {budget}"
+        );
+    }
+
+    /// Why: Recency guarantee (code-critic MEDIUM). In a uniformly-sized long
+    /// conversation — no megabyte outlier — the NEWEST turn must keep full
+    /// fidelity, exactly as the old oldest-first eviction implicitly guaranteed.
+    /// Naive water-fill shrank the newest message too; the recency window fixes
+    /// that. This is the critic's empirical repro: 1 system + 10 × 12 KB
+    /// messages under gpt-4's ~12.8k-token (10%) budget.
+    /// What: The last user message and everything after it (the live turn) are
+    /// returned byte-for-byte unchanged; older messages are truncated or evicted.
+    /// Test: This test.
+    #[test]
+    fn trim_preserves_newest_turn_in_uniform_history() {
+        let body = "x".repeat(12_000); // ~3k tokens each; 10 of them ≫ 12.8k budget
+        let mgr = ContextManager::new(0.1); // gpt-4: budget = 12_800 tokens
+        let mut msgs = vec![json!({"role":"system","content":"sys"})];
+        for i in 0..10 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            msgs.push(json!({"role": role, "content": body.clone()}));
+        }
+        // Newest turn = last user message (index 9) + trailing assistant (10).
+        let newest_user_before = msgs[9]["content"].as_str().unwrap().to_string();
+        let newest_asst_before = msgs[10]["content"].as_str().unwrap().to_string();
+
+        let (out, outcome) = mgr.trim_to_budget(msgs, "gpt-4", 1);
+
+        assert!(outcome.changed(), "must trim something");
+        // The newest turn survived byte-for-byte — NOT shrunk.
+        assert_eq!(out[9]["content"].as_str().unwrap(), newest_user_before);
+        assert_eq!(out[10]["content"].as_str().unwrap(), newest_asst_before);
+        assert_eq!(
+            newest_asst_before.len(),
+            12_000,
+            "newest message kept at full 12k-byte fidelity"
+        );
+        // Older messages were shrunk (truncated and/or evicted).
+        assert!(
+            out.len() < 11 || outcome.truncated > 0,
+            "old history must shrink"
+        );
+        // The system header is intact and first.
+        assert_eq!(out[0]["role"], "system");
+        // And the whole set now fits the budget.
+        let total: u32 = out.iter().map(estimate_tokens).sum();
+        assert!(total <= 12_800, "trimmed total {total} must fit budget");
+    }
+
+    /// Why: The recency window must NOT save the live turn at the cost of
+    /// re-breaking #3776 — when the oversized message IS in the live turn (the
+    /// MCP tool result immediately after the question), Strategy 3 must truncate
+    /// it in place, and the question must survive.
+    /// What: system + user question + assistant tool-call + huge tool result
+    /// (all within the live turn); assert the result is truncated, nothing
+    /// evicted, and the question is byte-for-byte intact.
+    /// Test: This test.
+    #[test]
+    fn trim_truncates_oversized_result_inside_live_turn() {
+        let mgr = ContextManager::new(0.5);
+        let huge = "grep hit path/to/file.rs:42 code\n".repeat(300_000); // ~9 MB
+        let msgs = vec![
+            json!({"role":"system","content":"You are izzie."}),
+            json!({"role":"user","content":"Where is trim_to_budget defined?"}),
+            json!({
+                "role":"assistant","content":null,
+                "tool_calls":[{"id":"c1","type":"function",
+                    "function":{"name":"grep","arguments":"{}"}}]
+            }),
+            json!({"role":"tool","tool_call_id":"c1","content": huge}),
+        ];
+        let (out, outcome) = mgr.trim_to_budget(msgs, "anthropic/claude-sonnet-4-6", 1);
+        assert_eq!(outcome.evicted, 0, "must not evict the question");
+        assert_eq!(outcome.truncated, 1, "must truncate the in-turn result");
+        assert_eq!(out.len(), 4);
+        assert_eq!(out[1]["content"], "Where is trim_to_budget defined?");
+        assert!(out[3]["content"].as_str().unwrap().contains("grep hit"));
+        assert!(out[3]["content"].as_str().unwrap().contains("truncated"));
     }
 
     /// Why: The water-fill cap is the core of the truncation strategy — it must
@@ -472,7 +618,10 @@ mod tests {
         // [5, 1_000_000], avail 500 -> 5 fits, cap = 495.
         assert_eq!(water_fill_cap(&[5, 1_000_000], 500), 495);
         // Three equal huge messages split the budget: 90_000 / 3 = 30_000.
-        assert_eq!(water_fill_cap(&[1_000_000, 1_000_000, 1_000_000], 90_000), 30_000);
+        assert_eq!(
+            water_fill_cap(&[1_000_000, 1_000_000, 1_000_000], 90_000),
+            30_000
+        );
         // Mixed: small fits fully, rest split. [10, 10, 10_000], avail 1000
         // -> 10 + 10 consumed, cap = 980 over the last one.
         assert_eq!(water_fill_cap(&[10, 10, 10_000], 1000), 980);
