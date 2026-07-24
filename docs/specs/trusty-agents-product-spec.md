@@ -238,9 +238,23 @@ Both polling engine and Pub/Sub-pull call `trusty-gworkspace`'s `api::services::
 
 These are new alongside existing tool-facing methods, not a fork of the client/auth layer.
 
-### 7.4 Config shape (sketch)
+### 7.4 Two-stage filtering (deterministic ingestion → user-driven agent wakes)
 
-**`config.toml` (harness-level listener definitions):**
+**Stage one (listener-level, deterministic ingestion):**
+- Listener-level filters in `config.toml` bound what is ingested from the provider at all (quota/noise control).
+- Ingestion is deterministic: every event matching a listener's stage-one filter is fetched, deduplicated, and placed on the harness event bus.
+- Events past stage one are **visible in the Events pane** (tagged by listener name) regardless of whether any agent is bound to them or whether agent-specific filters would apply.
+
+**Stage two (per-agent-binding, agent wake trigger):**
+- Per-agent-binding filters in `agent.toml` `[[listeners]]` entries decide which events WAKE each agent.
+- Only events passing both stage-one (ingestion) AND stage-two (agent filter) result in an agent reaction.
+- When an event passes stage two, the agent receives a reaction trigger; the agent responds in its own chat pane (see §8.3–8.4).
+
+**Inference spent only on wakes:** Ingestion and filtering (stages one and two) are fully deterministic; inference is spent only on agent reactions and on guiding filter configuration (e.g., suggesting filters based on past reactions and learned preferences).
+
+### 7.5 Config shape (sketch)
+
+**`config.toml` (harness-level listener definitions, stage-one filters):**
 
 ```toml
 [[listeners]]
@@ -262,7 +276,7 @@ calendar_id = "primary"
 poll_interval_secs = 300
 ```
 
-**`agent.toml` (per-agent listener bindings):**
+**`agent.toml` (per-agent listener bindings, stage-two filters):**
 
 ```toml
 [stores]
@@ -334,13 +348,27 @@ Users see "Tasks" in the sidebar as a **filter/view over the single continuous a
   2. System creates `agents/<name>/` with template files (agent.toml, persona.md, events/ directory).
   3. User can customize agent immediately (set persona, bind listeners, etc.).
 
-### 8.6 Events pane (implementation sketch)
+### 8.6 Events pane: Ingestion view + user-driven agent wakes
 
-- **Display:** Incoming events tagged by listener (Gmail, Calendar, Slack, etc.).
-- **Filtering controls:** User can include/exclude event types.
-- **Guidance:** Cost-of-events indicator (e.g., "High: X events/day" if many events are enabled).
-- **Visibility:** Excluded events remain visible so they can be re-enabled; the page shows the full palette.
-- **Caveat:** Exact UI details (list vs. cards, sorting, pagination) are implementation scope; the checklist governs the information architecture only.
+**Display and data source:**
+- Shows events ingested by listeners (stage-one filtering, §7.4) — everything past the listener-level filter is visible here, tagged by listener name (Gmail, Calendar, Slack, etc.).
+- Events are displayed regardless of whether any agent is bound or whether an agent's stage-two filter would apply; the pane shows the full ingestion palette.
+
+**Filtering controls (stage-two, agent wake trigger):**
+- User can include/exclude event types per agent (e.g., "wake Izzie on `gmail.message.received` from family").
+- User can set cost guidance (e.g., "High: X events/day" warning if too many event types are enabled).
+- Excluded events remain visible so users can re-enable them; the pane shows all ingested events, not just enabled ones.
+
+**Event→Chat pane connection:**
+- When an event passes both stage-one (ingestion) AND stage-two (user include filter for a specific agent), that agent is **awakened** and produces a **reaction in its own chat pane**.
+- The agent's reaction is surfaced as a proposal/question (ask-first autonomy default) unless the pattern has previously earned autonomy.
+- The reaction is automatically classified into an inferred task/workstream (§9.2) within the agent's continuous conversation (§9.1).
+
+**Inference scope:**
+- Ingestion (stage one) and filtering (both stages) are fully deterministic; no inference is spent here.
+- Inference is spent only on agent reactions to passed-events and on suggesting filter configurations based on learned preferences.
+
+**UI details:** Exact display format (list vs. cards, sorting, pagination) is implementation scope; the information architecture above governs the spec.
 
 ---
 
