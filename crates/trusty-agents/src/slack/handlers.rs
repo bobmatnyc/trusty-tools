@@ -5,7 +5,12 @@
 //! behavior; isolating them from the socket lifecycle, RBAC, pairing, and
 //! formatting keeps each file focused and under the 500-line cap.
 //! What: `handle_command`, `handle_message`, and the `post_message` /
-//! `send_long_message` HTTP senders.
+//! `send_long_message` HTTP senders. Also `record_listener_event` (#3852
+//! hybrid architecture): mirrors every inbound plain message onto the
+//! harness-wide eventstream (`crate::listeners::store::EventStore` +
+//! `Event::ListenerEventReceived`) IN ADDITION TO the direct
+//! dispatch/reply path below, which is unchanged — see that function's doc
+//! comment and the #3852 ADR (`docs/adr/`) for the fork rationale.
 //! Test: Exercised indirectly; the pure helpers they call are unit-tested in
 //! `slack::tests`.
 
@@ -24,6 +29,18 @@ use super::pairing::{
 use super::rbac::{SlackRbacConfig, VIRTUAL_CTO_MESSAGE, identity_from_slack_user};
 use super::{ChannelId, ChatSession, PairedChannels, SessionMap};
 use crate::ctrl::{self, ConversationTurn};
+use crate::listeners::store::{EventStore, StoredEvent};
+
+/// Fixed listener id used for every Slack-gateway event mirrored onto the
+/// eventstream (#3852). Unlike Gmail (one `ListenerConfig` per configured
+/// mailbox), the Socket-Mode gateway is a single process-wide connection —
+/// there is no per-workspace listener config to derive an id from.
+const SLACK_LISTENER_ID: &str = "slack";
+
+/// Max chars of message text folded into a `ListenerEventReceived` summary
+/// line (#3852) — mirrors the "one glanceable line" contract
+/// `listeners::poll::listener_event_summary` documents for Gmail.
+const SLACK_SNIPPET_MAX_CHARS: usize = 140;
 
 /// Slash command dispatch.
 #[allow(clippy::too_many_arguments)]
@@ -255,6 +272,8 @@ pub(super) async fn handle_message(
     user_id: String,
     text: String,
     thread_ts: Option<String>,
+    msg_ts: Option<String>,
+    channel_type: String,
     sessions: SessionMap,
     project_path: Arc<PathBuf>,
     paired: PairedChannels,
@@ -269,6 +288,25 @@ pub(super) async fn handle_message(
             thread_ts.as_deref(),
         )
         .await;
+    }
+
+    // #3852 hybrid architecture: mirror this inbound message onto the
+    // harness-wide eventstream BEFORE any RBAC/dispatch branching below, so
+    // the Events pane sees every message in a paired channel — known RBAC
+    // user or not — exactly like a Gmail poll event. The dispatch/reply path
+    // beneath this is completely unchanged; see `record_listener_event`'s
+    // doc comment for the append-then-filter contract it mirrors.
+    match msg_ts.as_deref() {
+        Some(ts) => {
+            let from_display = rbac
+                .user(&user_id)
+                .map(|u| u.name.clone())
+                .unwrap_or_else(|| user_id.clone());
+            record_listener_event(&channel, ts, &channel_type, &from_display, &text).await;
+        }
+        None => {
+            warn!(channel = %channel, "slack: message event missing ts; skipping eventstream mirror");
+        }
     }
 
     // #481: RBAC identity gate. Unknown Slack users get the static Virtual
@@ -374,6 +412,77 @@ pub(super) async fn handle_message(
     }
 
     send_result
+}
+
+/// Mirror one inbound Slack message onto the harness-wide listener
+/// eventstream (#3852 hybrid architecture).
+///
+/// Why: The Socket-Mode gateway already answers Slack DMs directly —
+/// `handle_message` above dispatches to `ctrl::run_pm_task_with_persona` and
+/// replies via `chat.postMessage`, unchanged by this function. This
+/// ADDITIONALLY makes the message visible to the Events pane / filterable
+/// eventstream (`GET /api/listener-events`), mirroring EXACTLY the
+/// append-then-filter order `listeners::poll::poll_once` uses for Gmail:
+/// append the event unconditionally (durable regardless of filter state),
+/// THEN consult `EventStore::is_event_type_included` for the CURRENT filter
+/// state, THEN publish `Event::ListenerEventReceived` carrying that
+/// `included` flag. Deliberately does NOT call `listeners::wake` — direct
+/// dispatch already answers the message; waking a bound agent here too would
+/// make it reply twice (see the #3852 ADR for the fork rationale).
+/// What: `listener_id` is the fixed `SLACK_LISTENER_ID` (no per-workspace
+/// `ListenerConfig` exists for the Socket-Mode gateway the way Gmail has one
+/// per mailbox); `event_type` is `"message.{channel_type}"` (e.g.
+/// `message.im`, `message.mpim`); `id` is `"slack:{channel}:{ts}"` — stable
+/// and idempotent per Slack message, mirroring Gmail's
+/// `"{listener_id}:{message_id}"`. A store-append failure is logged and
+/// swallowed (best-effort telemetry, same posture as `super::relay`) —
+/// it must never affect the conversational reply path.
+/// Test: `slack_listener_event_appends_and_respects_filter`,
+/// `slack_listener_event_excluded_type_still_appended`.
+pub(super) async fn record_listener_event(
+    channel: &str,
+    ts: &str,
+    channel_type: &str,
+    from_display: &str,
+    text: &str,
+) {
+    let event_type = format!("message.{channel_type}");
+    let event = StoredEvent {
+        id: format!("slack:{channel}:{ts}"),
+        listener_id: SLACK_LISTENER_ID.to_string(),
+        provider: "slack".to_string(),
+        event_type: event_type.clone(),
+        ts: chrono::Utc::now().to_rfc3339(),
+        from: Some(from_display.to_string()),
+        subject: None,
+        snippet: Some(truncated_snippet(text)),
+        included: true,
+    };
+    if let Err(e) = EventStore::append(&event).await {
+        warn!(channel = %channel, error = %e, "slack: failed to persist listener event (non-fatal)");
+        return;
+    }
+    let included = EventStore::is_event_type_included(&event_type).await;
+    crate::events::publish(crate::events::Event::ListenerEventReceived {
+        listener_id: event.listener_id.clone(),
+        provider: event.provider.clone(),
+        event_type: event.event_type.clone(),
+        summary: format!("{channel}: {}", truncated_snippet(text)),
+        included,
+    });
+}
+
+/// Char-boundary-safe truncation of Slack message text to
+/// `SLACK_SNIPPET_MAX_CHARS`, for the `StoredEvent::snippet` and
+/// `ListenerEventReceived::summary` fields (#3852).
+fn truncated_snippet(text: &str) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(SLACK_SNIPPET_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 /// Post a single message via `chat.postMessage`.

@@ -288,3 +288,88 @@ fn default_rbac_users_includes_kartik_parity() {
         Some(&["cto-assistant".to_string()][..])
     );
 }
+
+// ---------------------------------------------------------------------------
+// #3852 hybrid architecture: `handlers::record_listener_event` mirrors
+// inbound Slack messages onto the harness eventstream. These tests exercise
+// it directly against a temp `$HOME` (same `HOME_LOCK` pattern as
+// `listeners::store::tests` / `listeners::poll::tests`), asserting the
+// SAME append-then-filter contract `listeners::poll::poll_once` pins for
+// Gmail: the event is always durably appended, and the `included` flag
+// mirrored onto `Event::ListenerEventReceived` reflects the CURRENT
+// `filters.json` state at publish time, not a stale snapshot.
+// ---------------------------------------------------------------------------
+#[allow(clippy::await_holding_lock)]
+mod eventstream_tests {
+    use crate::listeners::store::EventStore;
+    use crate::slack::handlers::record_listener_event;
+    use crate::test_env::HOME_LOCK;
+
+    fn set_test_home(dir: &std::path::Path) {
+        // SAFETY: caller holds `HOME_LOCK` for the duration of the test (see
+        // `crate::test_env`'s module doc) so no other thread observes `HOME`
+        // mid-mutation.
+        unsafe {
+            std::env::set_var("HOME", dir);
+        }
+    }
+
+    /// A message reaching `record_listener_event` is durably appended to
+    /// the store with the expected `slack`/`message.<channel_type>` shape,
+    /// and — with no filter ever set — is reported `included` (default
+    /// `true`, matching `EventStore::is_event_type_included`'s documented
+    /// default).
+    #[tokio::test]
+    async fn slack_listener_event_appends_and_respects_filter() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        set_test_home(tmp.path());
+
+        record_listener_event("C123", "170000.001", "im", "Masa", "hello world").await;
+
+        let events = EventStore::read_events(None).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "slack:C123:170000.001");
+        assert_eq!(events[0].listener_id, "slack");
+        assert_eq!(events[0].provider, "slack");
+        assert_eq!(events[0].event_type, "message.im");
+        assert_eq!(events[0].from.as_deref(), Some("Masa"));
+        assert!(events[0].included, "no filter set yet ⇒ default included");
+    }
+
+    /// Once an operator excludes `message.im` via `EventStore::set_filter`
+    /// (the same mechanism `POST /api/listener-events/filter` uses), a
+    /// SUBSEQUENT Slack message of that type is still durably appended
+    /// (never silently dropped) but is reported `included: false` — proving
+    /// `record_listener_event` consults the filter AFTER appending, exactly
+    /// like `listeners::poll::poll_once` does for Gmail, rather than gating
+    /// the append itself on the filter.
+    #[tokio::test]
+    async fn slack_listener_event_excluded_type_still_appended() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        set_test_home(tmp.path());
+
+        EventStore::set_filter("message.im", false).await.unwrap();
+        record_listener_event("C456", "170000.002", "im", "Andrea", "second message").await;
+
+        let events = EventStore::read_events(None).await.unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "excluded types are still appended, not dropped"
+        );
+        assert_eq!(events[0].id, "slack:C456:170000.002");
+        assert!(!events[0].included, "excluded filter must be reflected");
+
+        // A different, never-toggled event type on the same store stays
+        // included — the filter is keyed per event_type, not global.
+        record_listener_event("C456", "170000.003", "mpim", "Andrea", "group message").await;
+        let events = EventStore::read_events(None).await.unwrap();
+        let mpim_event = events
+            .iter()
+            .find(|e| e.event_type == "message.mpim")
+            .expect("mpim event present");
+        assert!(mpim_event.included, "message.mpim was never excluded");
+    }
+}
