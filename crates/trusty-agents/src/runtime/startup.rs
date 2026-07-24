@@ -97,7 +97,7 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
             .join(".trusty-agents")
             .join("state");
         tokio::fs::create_dir_all(&state_dir).await?;
-        let info = BuildInfo::load_and_increment().await?;
+        let info = BuildInfo::load_and_increment_in(&state_dir).await?;
         println!("{}", info.display_string());
         return Ok(false);
     }
@@ -383,7 +383,7 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
         .join(".trusty-agents")
         .join("state");
     tokio::fs::create_dir_all(&state_dir).await?;
-    let build_info = BuildInfo::load_and_increment().await?;
+    let build_info = BuildInfo::load_and_increment_in(&state_dir).await?;
     tracing::info!("{}", build_info.display_string());
 
     // Feature B3: Initialise the chat logger. The log directory lives under

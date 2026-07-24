@@ -8,12 +8,13 @@
 //! many distinct "builds" across repeated `cargo run` invocations during
 //! development — which is exactly when we need the disambiguation.
 //!
-//! What: Reads `.trusty-agents/state/build.json` relative to the current working
-//! directory, increments the `build` counter (defaulting to 0 if the file
-//! is missing or malformed), and writes the result back atomically via
-//! `rename(2)` from a sibling `.tmp` file.
+//! What: Reads `<dir>/build.json` for a caller-resolved `dir` (always
+//! `<project>/.trusty-agents/state`, never a bare cwd — see
+//! `BuildInfo::load_and_increment_in`), increments the `build` counter
+//! (defaulting to 0 if the file is missing or malformed), and writes the
+//! result back atomically via `rename(2)` from a sibling `.tmp` file.
 //!
-//! Test: `BuildInfo::load_and_increment` in an empty temp dir returns
+//! Test: `BuildInfo::load_and_increment_in` in an empty temp dir returns
 //! `build == 1`; calling it again returns `build == 2`; a corrupt
 //! `build.json` is treated as "build = 0" and replaced on the next call.
 
@@ -82,25 +83,18 @@ pub struct BuildInfo {
 }
 
 impl BuildInfo {
-    /// Load the persistent counter, increment it, and persist back.
+    /// Load the persistent counter, increment it, and persist back, against
+    /// an explicit, already-resolved base directory.
     ///
-    /// Why: Single entry point ensures every process start gets a fresh
-    /// build number even if the caller forgets to save.
-    /// What: Uses `$CWD/.trusty-agents/state/build.json`. See
-    /// `load_and_increment_in` for the testable, directory-parameterized
-    /// version.
-    /// Test: See `load_and_increment_in` tests.
-    pub async fn load_and_increment() -> Result<Self> {
-        let cwd = std::env::current_dir().context("failed to read cwd")?;
-        let dir = cwd.join(".trusty-agents").join("state");
-        tokio::fs::create_dir_all(&dir).await?;
-        Self::load_and_increment_in(&dir).await
-    }
-
-    /// Same as `load_and_increment` but with an explicit base directory.
-    ///
-    /// Why: Tests need to drive the counter against a temp dir without
-    /// mutating the real `.trusty-agents/` in the repo root.
+    /// Why: Every caller must resolve the project/state directory itself
+    /// (typically via `ctrl::detect_self_project()`) rather than trusting
+    /// `std::env::current_dir()`. A packaged desktop app can spawn this
+    /// binary with cwd == `/` (a sealed read-only APFS volume) — a raw-cwd
+    /// variant of this function used to exist and silently recomputed the
+    /// state dir from cwd, crashing with EROFS on `/.trusty-agents/state`
+    /// even when the caller had already resolved a perfectly good, writable
+    /// state dir. That variant was removed; do not reintroduce a
+    /// `std::env::current_dir()`-based counterpart here.
     /// What: Creates `<dir>` if missing, reads/parses `<dir>/build.json`
     /// (treating missing or malformed as build=0), increments, writes back
     /// atomically.
@@ -156,16 +150,36 @@ async fn read_previous(file: &Path) -> u64 {
     }
 }
 
-/// Atomic write: serialize to `<file>.tmp`, fsync implicit via rename.
+/// Atomic write: serialize to a per-writer-unique `<file>.<pid>.<uuid>.tmp`,
+/// fsync implicit via rename.
 ///
 /// Why: A crash during write must never leave `build.json` half-written —
 /// `rename(2)` on the same filesystem is atomic, so readers always see a
-/// complete file.
-/// What: Writes to `<dir>/build.json.tmp`, renames over the target path.
-/// Test: Covered by `load_and_increment_in` tests; verifying bytes land
-/// in `build.json` after the call.
+/// complete file. The tmp filename must be unique PER CALL, not just per
+/// file: multiple `tagent` processes resolving the same project's
+/// `.trusty-agents/state` dir concurrently (e.g. several sub-agent
+/// invocations spawned back-to-back by the same PM/GUI session) used to all
+/// race on one shared `build.json.tmp` — one process's `rename` could win
+/// after a second process had already overwritten (or itself renamed away)
+/// that same path, so the loser's `rename` failed with a hard `ENOENT`
+/// (`ErrorKind::NotFound`) and startup crashed entirely, even though every
+/// individual write was well-formed. Scoping the tmp name to this process's
+/// pid + a random uuid means concurrent writers never share a path, so no
+/// writer can ever observe another's tmp file disappear out from under it —
+/// each `rename` always targets a file only ITS OWN call created.
+/// What: Writes to `<dir>/build.json.<pid>.<uuid>.tmp`, renames over the
+/// target path. The final `build.json` write is still last-writer-wins
+/// under concurrency (acceptable for a best-effort disambiguation counter),
+/// but the operation itself can no longer crash the caller.
+/// Test: `load_and_increment_in` tests cover the single-writer path;
+/// `concurrent_calls_never_fail_on_rename` drives many concurrent writers
+/// against one dir and asserts every call succeeds.
 async fn write_atomic(dir: &Path, file: &Path, payload: &PersistedBuild) -> Result<()> {
-    let tmp: PathBuf = dir.join("build.json.tmp");
+    let tmp: PathBuf = dir.join(format!(
+        "build.json.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
     let bytes = serde_json::to_vec_pretty(payload).context("serialize build.json")?;
     tokio::fs::write(&tmp, &bytes)
         .await
@@ -205,6 +219,55 @@ mod tests {
         assert_eq!(a.build, 1);
         assert_eq!(b.build, 2);
         assert_eq!(c.build, 3);
+    }
+
+    /// Regression test for a concurrent-writer crash exposed while fixing
+    /// the packaged-app EROFS bug: once every caller resolves the SAME
+    /// real project state dir (instead of each accidentally landing in its
+    /// own raw-cwd tempdir), several `tagent` processes/tasks incrementing
+    /// the counter at once used to race on a single shared
+    /// `build.json.tmp` — one writer's `rename` would fail with `ENOENT`
+    /// because a second writer had already renamed the shared tmp path
+    /// away. `write_atomic` now scopes the tmp filename per-call (pid +
+    /// uuid), so this must never fail regardless of concurrency.
+    ///
+    /// Why: proves the fix — old code reliably reproduces this as a hang or
+    /// an `Err` on `rename` under concurrent load (in-process concurrent
+    /// tasks in one pid replicate the failure just as well as separate
+    /// processes did in the real integration-test flakiness this was found
+    /// from).
+    /// What: Spawns many concurrent `load_and_increment_in` calls against
+    /// one shared dir and asserts every single one returns `Ok`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn concurrent_calls_never_fail_on_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = std::sync::Arc::new(dir.path().to_path_buf());
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let dir_path = dir_path.clone();
+            handles.push(tokio::spawn(async move {
+                BuildInfo::load_and_increment_in(&dir_path).await
+            }));
+        }
+
+        let mut ok_count = 0;
+        for h in handles {
+            let result = h.await.expect("task panicked");
+            assert!(
+                result.is_ok(),
+                "concurrent write must never fail: {result:?}"
+            );
+            ok_count += 1;
+        }
+        assert_eq!(ok_count, 32);
+
+        // The counter file must still be well-formed after the concurrent
+        // storm (last-writer-wins is fine; corruption is not).
+        let bytes = tokio::fs::read(dir_path.join("build.json")).await.unwrap();
+        let p: PersistedBuild = serde_json::from_slice(&bytes).unwrap();
+        assert!(p.build >= 1 && p.build <= 32);
     }
 
     #[tokio::test]
@@ -247,5 +310,69 @@ mod tests {
         let info = BuildInfo::load_and_increment_in(&nested).await.unwrap();
         assert_eq!(info.build, 1);
         assert!(nested.join("build.json").exists());
+    }
+
+    /// Regression test for the packaged-app EROFS crash (Tauri sidecar
+    /// launches with cwd == `/`, a sealed read-only APFS volume).
+    ///
+    /// Why: The old `BuildInfo::load_and_increment()` (removed) recomputed
+    /// its target directory from `std::env::current_dir()` internally,
+    /// ignoring any resolved state dir the caller already had. On the
+    /// packaged app this meant `startup.rs`'s correctly-resolved
+    /// `ctrl::detect_self_project()` state dir was discarded in favor of
+    /// `/.trusty-agents/state`, which crashed on `create_dir_all` with
+    /// `EROFS`. This test does not mutate the process-wide CWD (see
+    /// `lib.rs::default_bundled_config_dir_checking` for why that's
+    /// hazardous under `cargo test`'s shared-process threading model);
+    /// instead it proves the load-bearing invariant directly: a read-only
+    /// directory standing in for `/` is passed nowhere near this call, and
+    /// `load_and_increment_in` only ever touches the explicit `dir` argument
+    /// — so a caller that resolves a real, writable project directory (as
+    /// `startup.rs` and `repl/commands/dispatch.rs` now both do) can never
+    /// be dragged back into a cwd-based path that revisits an unwritable
+    /// root.
+    /// What: Builds a chmod-555 (read-only, `cfg(unix)`) directory as the
+    /// "unwritable cwd" stand-in and a separate writable tempdir as the
+    /// resolved state dir; asserts `load_and_increment_in(&state_dir)`
+    /// succeeds, writes `build.json` under the writable dir, and leaves the
+    /// read-only stand-in completely untouched (no entries created in it).
+    /// Test: this test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn survives_unwritable_cwd_stand_in() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unwritable_root = tempfile::tempdir().unwrap();
+        // 0o555: readable + executable (traversable) but not writable —
+        // mirrors the sealed read-only APFS volume mounted at `/`.
+        std::fs::set_permissions(
+            unwritable_root.path(),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+
+        let state_root = tempfile::tempdir().unwrap();
+        let state_dir = state_root.path().join(".trusty-agents").join("state");
+
+        let info = BuildInfo::load_and_increment_in(&state_dir)
+            .await
+            .expect("must succeed even though an unrelated read-only dir exists on disk");
+        assert_eq!(info.build, 1);
+        assert!(state_dir.join("build.json").exists());
+
+        // The read-only stand-in was never touched: no create_dir_all /
+        // write ever targeted it.
+        let entries: Vec<_> = std::fs::read_dir(unwritable_root.path()).unwrap().collect();
+        assert!(
+            entries.is_empty(),
+            "unwritable cwd stand-in must remain untouched, found: {entries:?}"
+        );
+
+        // Restore write perms so tempfile's Drop can clean up on all hosts.
+        std::fs::set_permissions(
+            unwritable_root.path(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 }
