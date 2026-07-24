@@ -33,6 +33,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   still counts as degraded) instead of remaining frozen at its boot-time
   value forever. No embedder-concurrency or worker-pool changes (tracked
   separately as slice B).
+- **`doctor_data_dir_returns_non_empty_path` deflaked at the source (issue
+  #3697).** An audit confirmed every `TRUSTY_DATA_DIR` mutation site in the
+  `--bin trusty-search` test binary already carried the crate's `#[serial]`
+  convention (from #3673/#3686), so the flake persisted for a different
+  reason: the test itself still read/wrote the shared process env var.
+  Split `doctor_data_dir()` into a pure, parameter-injectable
+  `doctor_data_dir_from(Option<String>)` core (mirrors the
+  `SearchAppState::with_registry_path` fix for the same flake class, issue
+  #2717) and pointed the test at it directly — it no longer touches process
+  env at all, so it can't race any sibling test regardless of tagging.
 - **`core::memguard_enforce::tests::test_anon_rss_for_self_pid_on_linux` deflaked
   (issue #3762, recurrence of #3716's flake class).** The test compared two
   genuinely independent, non-atomic `/proc` reads taken microseconds apart
