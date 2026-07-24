@@ -51,16 +51,43 @@ struct GhRelease {
     prerelease: bool,
 }
 
+/// Resolve the release-asset filename prefix for a crate, handling
+/// crate-name ⇄ asset-name aliases.
+///
+/// Why: A crate's Git tag prefix (used for release/tag resolution) does not
+/// always match the filename prefix baked into its release-workflow tarball
+/// name. `tga`'s package is named `tga` (and its tags are `tga-v*`), but its
+/// release workflow names the asset after the crate's directory,
+/// `trusty-git-analytics-<version>-<target>.tar.gz` — so a filename built
+/// from the crate name alone 404s even though the correct tag resolved fine.
+///
+/// What: A small table of known aliases; falls through to `crate_name`
+/// unchanged for every crate whose asset prefix matches its crate name (the
+/// common case). Add a new entry here if another crate's release workflow
+/// ever diverges the same way.
+///
+/// Test: `tests::asset_name_for_tag_resolves_tga_alias`,
+/// `tests::asset_name_for_tag_defaults_to_crate_name`.
+fn asset_name_for_tag(crate_name: &str) -> &str {
+    match crate_name {
+        "tga" => "trusty-git-analytics",
+        other => other,
+    }
+}
+
 /// Build the download URL for a prebuilt asset tarball.
 ///
-/// Why: The URL pattern is `<base>/<tag>/<crate>-<version>-<target>.tar.gz`;
+/// Why: The URL pattern is `<base>/<tag>/<asset-name>-<version>-<target>.tar.gz`;
 /// centralising construction avoids scatter and makes it trivially testable.
 ///
-/// What: Returns the HTTPS URL for the `.tar.gz` asset.
+/// What: Returns the HTTPS URL for the `.tar.gz` asset. `crate_name` selects
+/// the tag path (unaffected); the filename itself resolves through
+/// [`asset_name_for_tag`] so aliased crates (e.g. `tga`) build the correct
+/// asset filename.
 ///
-/// Test: `tests::asset_url_shape`.
+/// Test: `tests::asset_url_shape`, `tests::asset_url_shape_tga_alias`.
 pub fn asset_url(tag: &str, crate_name: &str, version: &str, target: &str) -> String {
-    let filename = asset_filename(crate_name, version, target);
+    let filename = asset_filename(asset_name_for_tag(crate_name), version, target);
     format!("{RELEASE_DL_BASE}/{tag}/{filename}")
 }
 
@@ -323,6 +350,45 @@ mod tests {
     fn asset_filename_shape() {
         let f = asset_filename("tga", "1.2.3", "x86_64-unknown-linux-gnu");
         assert_eq!(f, "tga-1.2.3-x86_64-unknown-linux-gnu.tar.gz");
+    }
+
+    /// Why: `tga`'s release workflow names its asset after the crate
+    /// directory (`trusty-git-analytics`), not the package name (`tga`); the
+    /// alias table must resolve this so `try_install_prebuilt("tga", ..)`
+    /// hits a real asset instead of 404ing.
+    /// What: Asserts `asset_name_for_tag("tga") == "trusty-git-analytics"`.
+    /// Test: This is the test.
+    #[test]
+    fn asset_name_for_tag_resolves_tga_alias() {
+        assert_eq!(asset_name_for_tag("tga"), "trusty-git-analytics");
+    }
+
+    /// Why: Every crate WITHOUT a known alias must build its asset name from
+    /// its own crate name unchanged — the common case must never regress.
+    /// What: Asserts a handful of unaliased crate names pass through as-is.
+    /// Test: This is the test.
+    #[test]
+    fn asset_name_for_tag_defaults_to_crate_name() {
+        for c in ["trusty-search", "trusty-memory", "trusty-installer"] {
+            assert_eq!(asset_name_for_tag(c), c);
+        }
+    }
+
+    /// Why: The end-to-end URL for `tga` must use the ALIASED asset filename
+    /// while keeping the crate's own tag in the URL path — this is the exact
+    /// #<tga-asset-mismatch> bug: tag resolution and filename resolution use
+    /// different names for this one crate.
+    /// What: Builds a `tga` asset URL; asserts it contains
+    /// `trusty-git-analytics-2.9.4-...` under the `tga-v2.9.4` tag path.
+    /// Test: This is the test.
+    #[test]
+    fn asset_url_shape_tga_alias() {
+        let url = asset_url("tga-v2.9.4", "tga", "2.9.4", "aarch64-apple-darwin");
+        assert_eq!(
+            url,
+            "https://github.com/bobmatnyc/trusty-tools/releases/download/\
+             tga-v2.9.4/trusty-git-analytics-2.9.4-aarch64-apple-darwin.tar.gz"
+        );
     }
 
     /// Why: Live integration proof that the GitHub API is reachable and returns a

@@ -52,19 +52,26 @@ pub enum ManageStrategy {
 
 /// One member of the stable trusty tool set.
 ///
-/// Why: `tctl` keys four things off a member — the crates.io package name (for
+/// Why: `tctl` keys five things off a member — the crates.io package name (for
 /// `cargo install` / `check_crates_io`), the installed binary name (for presence
 /// and health probes), whether it is a supervised daemon (so upgrade can restart
-/// it cleanly), and HOW it is managed (launchd vs its own start/stop verb).
-/// Bundling them keeps every handler consistent.
+/// it cleanly), HOW it is managed (launchd vs its own start/stop verb), and
+/// whether the overall install run may fail/exit-nonzero when THIS member is
+/// missing on the host platform. Bundling them keeps every handler consistent.
 ///
 /// What: `crate_name` is the cargo package; `binary` is the installed binary
 /// (often equal, but `tga` differs); `daemon` marks members that run as a
 /// long-lived HTTP daemon and therefore need a connection-safe restart after an
 /// upgrade (`upgrade_and_restart`); `manage` is the lifecycle strategy
-/// (derived from `daemon` + binary by [`StableMember::new`]).
+/// (derived from `daemon` + binary by [`StableMember::new`]); `required` gates
+/// the graceful-degrade policy (demo-critical fix): a REQUIRED member failing
+/// to install fails the whole run (`exit 2`, `NOT VERIFIED`); an OPTIONAL
+/// member failing (e.g. no prebuilt for this platform, on a host with no Rust
+/// toolchain to fall back to `cargo install`) is reported as skipped and never
+/// flips the overall verdict.
 ///
-/// Test: `tests::stable_set_is_pinned`, `tests::mpm_uses_own_verb`.
+/// Test: `tests::stable_set_is_pinned`, `tests::mpm_uses_own_verb`,
+/// `tests::required_vs_optional_classification`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct StableMember {
     /// The crates.io package name (`cargo install <crate_name> --locked`).
@@ -75,6 +82,10 @@ pub struct StableMember {
     pub daemon: bool,
     /// How `tctl start|stop|restart` controls this member's lifecycle.
     pub manage: ManageStrategy,
+    /// Whether this member is REQUIRED for a verified install (see the field
+    /// group doc above). `false` means OPTIONAL: install/verify failures for
+    /// this member degrade gracefully instead of failing the overall run.
+    pub required: bool,
 }
 
 impl StableMember {
@@ -86,9 +97,10 @@ impl StableMember {
     /// What: Builds a [`StableMember`]; a non-daemon gets
     /// [`ManageStrategy::None`]; trusty-mpm gets [`ManageStrategy::OwnVerb`]
     /// (it is process-managed, not launchd); every other daemon gets
-    /// [`ManageStrategy::Launchd`].
+    /// [`ManageStrategy::Launchd`]. `required` is passed straight through —
+    /// see [`stable_set`] for the current REQUIRED/OPTIONAL assignment.
     /// Test: Exercised by [`stable_set`] and `tests::mpm_uses_own_verb`.
-    fn new(crate_name: &str, binary: &str, daemon: bool) -> Self {
+    fn new(crate_name: &str, binary: &str, daemon: bool, required: bool) -> Self {
         let manage = if !daemon {
             ManageStrategy::None
         } else if binary == "trusty-mpm" {
@@ -101,6 +113,7 @@ impl StableMember {
             binary: binary.to_owned(),
             daemon,
             manage,
+            required,
         }
     }
 }
@@ -119,17 +132,31 @@ impl StableMember {
 /// brought up last, process-managed via its own `start`/`stop` verbs). Library
 /// crates resolve as cargo dependencies and are not listed.
 ///
+/// REQUIRED vs OPTIONAL (graceful-degrade policy, demo-critical fix): REQUIRED
+/// = trusty-mpm + its runtime deps trusty-search + trusty-memory +
+/// trusty-review — a from-scratch install on a Tier-1 platform must always be
+/// able to bring these up. OPTIONAL = trusty-analyze, trusty-console, tga —
+/// members that may lack a prebuilt for a given platform on a host with no
+/// Rust toolchain to fall back to; their absence must not fail the run or
+/// print a scary FAILED/exit-2 verdict.
+///
+/// NOTE for future editors: a separate lane may add `trusty-agents` to this
+/// set as REQUIRED — insert it with `required: true` in topological position;
+/// no other code needs to change (`install`/`verify_tail`'s all_ok/verified
+/// derivations already key off the `required` field, not a hardcoded list).
+///
 /// Test: `tests::stable_set_is_pinned`, `tests::tga_crate_and_binary_names`,
-/// `tests::daemon_flags_match_spec`, `tests::mpm_uses_own_verb`.
+/// `tests::daemon_flags_match_spec`, `tests::mpm_uses_own_verb`,
+/// `tests::required_vs_optional_classification`.
 pub fn stable_set() -> Vec<StableMember> {
     vec![
-        StableMember::new("trusty-search", "trusty-search", true),
-        StableMember::new("trusty-memory", "trusty-memory", true),
-        StableMember::new("trusty-analyze", "trusty-analyze", true),
-        StableMember::new("trusty-review", "trusty-review", true),
-        StableMember::new("tga", "tga", false),
-        StableMember::new("trusty-console", "trusty-console", true),
-        StableMember::new("trusty-mpm", "trusty-mpm", true),
+        StableMember::new("trusty-search", "trusty-search", true, true),
+        StableMember::new("trusty-memory", "trusty-memory", true, true),
+        StableMember::new("trusty-analyze", "trusty-analyze", true, false),
+        StableMember::new("trusty-review", "trusty-review", true, true),
+        StableMember::new("tga", "tga", false, false),
+        StableMember::new("trusty-console", "trusty-console", true, false),
+        StableMember::new("trusty-mpm", "trusty-mpm", true, true),
     ]
 }
 
@@ -348,6 +375,35 @@ mod tests {
             .expect("tga in set");
         assert_eq!(tga.binary, "tga");
         assert!(!tga.daemon);
+    }
+
+    /// Why: The graceful-degrade policy (demo-critical fix) reads `required`
+    /// off each member; pin the exact REQUIRED/OPTIONAL split so a future
+    /// edit here is a deliberate, reviewed decision, not an accidental drift.
+    /// What: Asserts trusty-mpm/trusty-search/trusty-memory/trusty-review are
+    /// `required: true` and trusty-analyze/trusty-console/tga are
+    /// `required: false`.
+    /// Test: This is the test.
+    #[test]
+    fn required_vs_optional_classification() {
+        let set = stable_set();
+        let required = |c: &str| {
+            set.iter()
+                .find(|m| m.crate_name == c)
+                .expect("present")
+                .required
+        };
+        for c in [
+            "trusty-mpm",
+            "trusty-search",
+            "trusty-memory",
+            "trusty-review",
+        ] {
+            assert!(required(c), "{c} must be REQUIRED");
+        }
+        for c in ["trusty-analyze", "trusty-console", "tga"] {
+            assert!(!required(c), "{c} must be OPTIONAL");
+        }
     }
 
     /// Why: Upgrade restarts only daemons; the daemon flags drive that.
