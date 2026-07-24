@@ -378,11 +378,30 @@ async fn dispatch_envelope(
             if text.is_empty() {
                 return Ok(());
             }
+            // The message's own `ts` — distinct from `thread_ts` (the
+            // THREAD PARENT's ts, which the reply-threading fallback below
+            // reuses when this message isn't itself threaded). #3852 needs
+            // the per-message value as a stable/idempotent eventstream id
+            // component (`record_listener_event`) — reusing `thread_ts`
+            // there would collide every reply in the same thread onto one
+            // id.
+            let msg_ts = event.get("ts").and_then(|v| v.as_str()).map(str::to_string);
             let thread_ts = event
                 .get("thread_ts")
                 .and_then(|v| v.as_str())
-                .or_else(|| event.get("ts").and_then(|v| v.as_str()))
-                .map(|s| s.to_string());
+                .map(str::to_string)
+                .or_else(|| msg_ts.clone());
+            // #3852: Slack's `channel_type` on a message event is one of
+            // `im` (DM), `mpim` (group DM), `channel`, or `group` — folded
+            // into the eventstream `event_type` as `message.<channel_type>`.
+            // Defaults to `im` (the only type the bot's current event
+            // subscriptions — message.im/message.mpim — actually deliver)
+            // if the field is ever absent.
+            let channel_type = event
+                .get("channel_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("im")
+                .to_string();
             let user_id = event
                 .get("user")
                 .and_then(|v| v.as_str())
@@ -394,6 +413,8 @@ async fn dispatch_envelope(
                 user_id,
                 text,
                 thread_ts,
+                msg_ts,
+                channel_type,
                 sessions,
                 project_path,
                 paired,

@@ -288,3 +288,193 @@ fn default_rbac_users_includes_kartik_parity() {
         Some(&["cto-assistant".to_string()][..])
     );
 }
+
+// ---------------------------------------------------------------------------
+// #3852 hybrid architecture: `handlers::record_listener_event` mirrors
+// inbound Slack messages onto the harness eventstream. These tests exercise
+// it directly against a temp `$HOME` (same `HOME_LOCK` pattern as
+// `listeners::store::tests` / `listeners::poll::tests`), asserting the
+// SAME append-then-filter contract `listeners::poll::poll_once` pins for
+// Gmail: the event is always durably appended, and the `included` flag
+// mirrored onto `Event::ListenerEventReceived` reflects the CURRENT
+// `filters.json` state at publish time, not a stale snapshot.
+// ---------------------------------------------------------------------------
+#[allow(clippy::await_holding_lock)]
+mod eventstream_tests {
+    use crate::listeners::store::EventStore;
+    use crate::slack::handlers::record_listener_event;
+    use crate::test_env::HOME_LOCK;
+
+    fn set_test_home(dir: &std::path::Path) {
+        // SAFETY: caller holds `HOME_LOCK` for the duration of the test (see
+        // `crate::test_env`'s module doc) so no other thread observes `HOME`
+        // mid-mutation.
+        unsafe {
+            std::env::set_var("HOME", dir);
+        }
+    }
+
+    /// A message reaching `record_listener_event` is durably appended to
+    /// the store with the expected `slack`/`message.<channel_type>` shape,
+    /// and — with no filter ever set — is reported `included` (default
+    /// `true`, matching `EventStore::is_event_type_included`'s documented
+    /// default).
+    #[tokio::test]
+    async fn slack_listener_event_appends_and_respects_filter() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        set_test_home(tmp.path());
+
+        record_listener_event(
+            "C123".to_string(),
+            "170000.001".to_string(),
+            "im".to_string(),
+            "Masa".to_string(),
+            "hello world".to_string(),
+        )
+        .await;
+
+        let events = EventStore::read_events(None).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, "slack:C123:170000.001");
+        assert_eq!(events[0].listener_id, "slack");
+        assert_eq!(events[0].provider, "slack");
+        assert_eq!(events[0].event_type, "message.im");
+        assert_eq!(events[0].from.as_deref(), Some("Masa"));
+        assert!(events[0].included, "no filter set yet ⇒ default included");
+    }
+
+    /// Once an operator excludes `message.im` via `EventStore::set_filter`
+    /// (the same mechanism `POST /api/listener-events/filter` uses), a
+    /// SUBSEQUENT Slack message of that type is still durably appended
+    /// (never silently dropped) but is reported `included: false` — proving
+    /// `record_listener_event` consults the filter AFTER appending, exactly
+    /// like `listeners::poll::poll_once` does for Gmail, rather than gating
+    /// the append itself on the filter.
+    #[tokio::test]
+    async fn slack_listener_event_excluded_type_still_appended() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        set_test_home(tmp.path());
+
+        EventStore::set_filter("message.im", false).await.unwrap();
+        record_listener_event(
+            "C456".to_string(),
+            "170000.002".to_string(),
+            "im".to_string(),
+            "Andrea".to_string(),
+            "second message".to_string(),
+        )
+        .await;
+
+        let events = EventStore::read_events(None).await.unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "excluded types are still appended, not dropped"
+        );
+        assert_eq!(events[0].id, "slack:C456:170000.002");
+        assert!(!events[0].included, "excluded filter must be reflected");
+
+        // A different, never-toggled event type on the same store stays
+        // included — the filter is keyed per event_type, not global.
+        record_listener_event(
+            "C456".to_string(),
+            "170000.003".to_string(),
+            "mpim".to_string(),
+            "Andrea".to_string(),
+            "group message".to_string(),
+        )
+        .await;
+        let events = EventStore::read_events(None).await.unwrap();
+        let mpim_event = events
+            .iter()
+            .find(|e| e.event_type == "message.mpim")
+            .expect("mpim event present");
+        assert!(mpim_event.included, "message.mpim was never excluded");
+    }
+
+    /// #3852 code-critic MEDIUM finding: a `EventStore::append` failure must
+    /// NOT also suppress the live SSE mirror — `record_listener_event` logs
+    /// the append error and falls through to publish `ListenerEventReceived`
+    /// regardless (matching `listeners::poll::poll_once`'s log-and-continue
+    /// posture on the identical failure, `listeners/poll.rs:326-331`), so
+    /// the Events pane still sees the event in real time even when
+    /// persistence to `events.jsonl` fails. Forces the append to fail by
+    /// pointing `$HOME` at a path that is a FILE, not a directory — the
+    /// store's `events_dir()` resolves to `<HOME>/.trusty-agents/events`,
+    /// and `create_dir_all` under a non-directory `HOME` component errors.
+    #[tokio::test]
+    async fn slack_listener_event_publishes_even_when_append_fails() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let home_as_file = tmp.path().join("home_is_actually_a_file");
+        std::fs::write(&home_as_file, b"not a directory").unwrap();
+        set_test_home(&home_as_file);
+
+        let mut rx = crate::events::subscribe();
+        record_listener_event(
+            "C999".to_string(),
+            "170000.999".to_string(),
+            "im".to_string(),
+            "Masa".to_string(),
+            "should still publish despite append failure".to_string(),
+        )
+        .await;
+
+        // Drain the bus until our specific event shows up (tolerating
+        // unrelated events other concurrently-running tests may publish on
+        // the same process-global bus), with an overall deadline so a
+        // genuine regression (publish never firing) fails the test instead
+        // of hanging.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut found = None;
+        while tokio::time::Instant::now() < deadline {
+            let Ok(Ok(event)) =
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+            else {
+                break;
+            };
+            if let crate::events::Event::ListenerEventReceived {
+                listener_id,
+                provider,
+                event_type,
+                summary,
+                included,
+            } = event
+                && listener_id == "slack"
+                && summary.starts_with("C999:")
+            {
+                found = Some((provider, event_type, included));
+                break;
+            }
+        }
+
+        let (provider, event_type, included) =
+            found.expect("ListenerEventReceived for C999 must publish even when append fails");
+        assert_eq!(provider, "slack");
+        assert_eq!(event_type, "message.im");
+        assert!(included, "message.im was never excluded ⇒ default included");
+
+        // Confirm the append genuinely failed under this setup (not a
+        // false-positive test that would pass even without the fix) — a
+        // direct append attempt against the same broken `$HOME` errors,
+        // since `events_dir()` cannot create `<HOME>/.trusty-agents/events`
+        // when `HOME` itself is a file, not a directory.
+        let probe = crate::listeners::store::StoredEvent {
+            id: "probe".to_string(),
+            listener_id: "probe".to_string(),
+            provider: "probe".to_string(),
+            event_type: "probe".to_string(),
+            ts: chrono::Utc::now().to_rfc3339(),
+            from: None,
+            subject: None,
+            snippet: None,
+            included: true,
+        };
+        assert!(
+            EventStore::append(&probe).await.is_err(),
+            "append should fail when $HOME is a file, not a directory"
+        );
+    }
+}
