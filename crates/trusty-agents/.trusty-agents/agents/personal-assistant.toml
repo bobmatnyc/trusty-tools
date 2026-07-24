@@ -15,6 +15,11 @@
 [agent]
 name = "personal-assistant"
 role = "assistant"
+# #3819 (Bob directive): hidden from GUI/REPL picker listings — this legacy
+# template's display_name ("Izzie") duplicated the real `izzie` package
+# agent's roster row. Dispatch/tools/role UNCHANGED — see AgentInfo::hidden's
+# doc comment.
+hidden = true
 # #3358: no `runner` — falls back to the default (Subprocess), routing off
 # the claude-code CLI onto the direct-API credential path (AnthropicDirect
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`

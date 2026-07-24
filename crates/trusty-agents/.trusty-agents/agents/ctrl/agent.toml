@@ -1,6 +1,10 @@
 [agent]
 name = "ctrl"
-role = "controller"
+# Bob directive (2026-07-24): role "controller" -> "assistant" so Concierge
+# appears in the role-filtered pickers (REPL `/agent` no-arg AND the GUI/MCP
+# roster, both gate on role == "assistant" with no other lever — #3812).
+# `role == "controller"` was never compared anywhere else in the codebase.
+role = "assistant"
 # #3819 (Bob's roster-typing directive): picker GROUPING label — Concierge
 # shows under a "System Tool" section, distinct from role (dispatch/tool
 # security) and hidden (visibility). See AgentInfo::kind's doc comment.

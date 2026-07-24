@@ -1,6 +1,8 @@
 [agent]
 name = "ctrl"
-role = "controller"
+# Bob directive (2026-07-24): kept in sync with ctrl/agent.toml (the
+# load-bearing directory package) — role "controller" -> "assistant".
+role = "assistant"
 # #3819 (Bob's roster-typing directive): picker GROUPING label — Concierge
 # shows under a "System Tool" section, distinct from role (dispatch/tool
 # security) and hidden (visibility). See AgentInfo::kind's doc comment.

@@ -31,7 +31,7 @@ model = "claude-sonnet-4-6"
 description = "CTO Assistant — private assistant for Robert Matsuoka (CTO, Duetto)"
 # #3738 (owner decision 2026-07-23): user-facing display name is "CTO Bot"
 # (was "CTO Assistant"). Selectable named persona, never the default.
-display_name = "CTO Bot"
+display_name = "CTO Assistant"
 prompt_label = "cto"
 
 [llm]

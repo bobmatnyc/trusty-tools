@@ -24,6 +24,11 @@
 [agent]
 name = "assistant"
 role = "assistant"
+# #3819 (Bob directive): hidden from GUI/REPL picker listings — the base
+# template is only ever instantiated via Concierge or the add-agent
+# template flow, never picked directly. Dispatch/tools/role UNCHANGED —
+# see AgentInfo::hidden's doc comment.
+hidden = true
 # #3358: no `runner` — falls back to the default (Subprocess), routing off
 # the claude-code CLI onto the direct-API credential path (AnthropicDirect
 # when ANTHROPIC_API_KEY is set, else OpenRouter). See `pick_credentials()`

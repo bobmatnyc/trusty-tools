@@ -157,9 +157,21 @@
               on:click={() => selectRosterEntry(entry.id)}
             >
               <span class="font-medium">{entry.label}</span>
-              <span class="font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
-                {entry.source === 'base' ? 'base' : entry.source === 'overlay' ? 'your overlay' : 'catalog'}
-              </span>
+              <!-- #3819 (Bob review): the tier label ("catalog") was noise
+                   for local directory-package agents — a real, meaningful
+                   subtitle (the agent's own description) or nothing, never
+                   an internal storage-tier name. "your overlay" stays for
+                   overlay entries since it IS meaningful there (distinguishes
+                   a personal customization from a bundled persona). -->
+              {#if entry.source === 'overlay'}
+                <span class="font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
+                  your overlay
+                </span>
+              {:else if entry.description}
+                <span class="text-[10px] text-foundry-light-muted dark:text-foundry-text/40">
+                  {entry.description}
+                </span>
+              {/if}
             </button>
           </li>
         {/each}
