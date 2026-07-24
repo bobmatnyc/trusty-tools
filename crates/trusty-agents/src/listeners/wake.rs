@@ -13,16 +13,24 @@
 //! What: `wake_bound_agents` scans the agents directories for packages
 //! declaring a `[[listeners]]` binding to the firing listener, applies each
 //! binding's stage-two filter (`event_types` + `from`/`exclude_labels`), and
-//! for the first match (rate-limited to one wake per poll cycle per DEADLINE
-//! BUILD scope) builds a prompt combining the event summary with the
+//! for the first match builds a prompt combining the event summary with the
 //! agent's `events/<connector>.md` instructions (#3817) and dispatches it
-//! ask-first. Every wake DECISION (matched-and-woke, matched-but-rate-
-//! limited, no-binding-matched) is logged at info/debug level per the
-//! DEADLINE BUILD's "log every wake decision" requirement.
+//! ask-first. The one-wake-per-poll-cycle limit (DEADLINE BUILD scope) is
+//! enforced via `already_woke_this_cycle`, a flag the caller (`poll.rs`)
+//! threads through and sets once a dispatch actually succeeds within the
+//! current cycle — `gate_wake` is the pure decision function this enforces
+//! (code-critic #3820 CRITICAL fix: an earlier revision declared
+//! `WakeOutcome::RateLimited` but never constructed it, so every qualifying
+//! event in a cycle dispatched unconditionally). Every wake DECISION
+//! (matched-and-woke, matched-but-rate-limited, no-binding-matched,
+//! dispatch-failed) is logged at info/debug level per the DEADLINE BUILD's
+//! "log every wake decision" requirement.
 //! Test: `sender_glob_matches_leading_and_trailing_wildcard`,
 //! `binding_matches_event_type_and_sender`,
 //! `binding_rejects_excluded_label`,
-//! `event_type_filter_empty_matches_any`.
+//! `event_type_filter_empty_matches_any`,
+//! `gate_wake_caps_to_one_dispatch_per_cycle`,
+//! `gate_wake_no_match_is_never_rate_limited`.
 
 use std::path::Path;
 
@@ -117,88 +125,158 @@ pub enum WakeOutcome {
     DispatchFailed { agent: String, error: String },
 }
 
-/// Scan the agents directories for a `[[listeners]]` binding matching
-/// `event`, and wake AT MOST ONE agent (DEADLINE BUILD scope: "max 1 wake
-/// per poll cycle").
+/// Pure cycle-gate decision (#3820 code-critic CRITICAL fix): given whether
+/// this poll cycle has ALREADY dispatched a wake, and which agent (if any)
+/// matches the current event, decide what `wake_bound_agents` should do
+/// next.
 ///
-/// Why: Centralising the roster scan here (rather than in `poll.rs`) keeps
-/// the polling loop's per-event work to "does anything care" without it
-/// needing to know how personas are dispatched.
+/// Why: Split out from `wake_bound_agents` specifically so the
+/// one-wake-per-poll-cycle rule is pinned by a fast, deterministic unit
+/// test — the enumeration + dispatch machinery around it needs a live
+/// agent directory (and, for a real `Woke` outcome, live LLM credentials),
+/// neither of which this decision itself depends on.
+/// What: `None` matched agent -> `NoMatch` (never rate-limited — a
+/// non-matching event doesn't consume the cycle's one wake). `Some(name)`
+/// with the cycle already used -> `RateLimited(name)`. `Some(name)`
+/// otherwise -> `ShouldDispatch(name)`.
+/// Test: `gate_wake_caps_to_one_dispatch_per_cycle`,
+/// `gate_wake_no_match_is_never_rate_limited`.
+fn gate_wake(matched_agent: Option<String>, already_woke_this_cycle: bool) -> WakeGate {
+    match matched_agent {
+        None => WakeGate::NoMatch,
+        Some(name) if already_woke_this_cycle => WakeGate::RateLimited(name),
+        Some(name) => WakeGate::ShouldDispatch(name),
+    }
+}
+
+/// Result of [`gate_wake`] — an internal decision type, not the final
+/// [`WakeOutcome`] (dispatch can still fail after `ShouldDispatch`).
+#[derive(Debug, PartialEq, Eq)]
+enum WakeGate {
+    NoMatch,
+    RateLimited(String),
+    ShouldDispatch(String),
+}
+
+/// Scan the agents directories for the first `[[listeners]]` binding
+/// matching `event`, without dispatching anything.
+///
+/// Why: Split out from `wake_bound_agents` so the "does anything match"
+/// scan is a separate, awaitable step from the gate decision + dispatch —
+/// mirrors `gate_wake`'s separation-of-concerns rationale.
 /// What: Enumerates directory-package agents across
 /// `agents_dir_candidates()` (mirrors the tiered resolution every other
 /// by-name lookup in this crate uses), loads each via
 /// `AgentConfig::by_name_async` (so `extends` chains resolve identically to
-/// every other dispatch path), and checks its `listeners` bindings against
-/// `event` via `binding_matches_event`. On the FIRST match it loads
-/// `agents/<name>/events/<connector>.md` (best-effort — missing file just
-/// means no extra instructions) and dispatches through
-/// `run_pm_task_with_persona`. Every branch is logged at info/debug so a
-/// demo run's wake decisions are auditable in the process log.
-/// Test: exercised end-to-end only via a live agent directory (manual demo
-/// script); the pure matching logic is covered by `binding_matches_event`'s
-/// tests.
-pub async fn wake_bound_agents(project_path: &Path, event: &StoredEvent) -> WakeOutcome {
+/// every other dispatch path), and returns the first name whose `listeners`
+/// bindings match `event` via `binding_matches_event`.
+async fn find_matching_agent(event: &StoredEvent) -> Option<String> {
     let candidate_names = match candidate_agent_names().await {
         Ok(names) => names,
         Err(e) => {
-            tracing::warn!(error = %e, "wake_bound_agents: failed to enumerate agent directories");
-            return WakeOutcome::NoBindingMatched;
+            tracing::warn!(error = %e, "find_matching_agent: failed to enumerate agent directories");
+            return None;
         }
     };
-
     for name in candidate_names {
-        let cfg = match AgentConfig::by_name_async(&name).await {
-            Ok(c) => c,
-            Err(_) => continue,
+        let Ok(cfg) = AgentConfig::by_name_async(&name).await else {
+            continue;
         };
-        if !cfg
+        if cfg
             .listeners
             .iter()
             .any(|b| binding_matches_event(b, event))
         {
-            continue;
+            return Some(name);
         }
-        tracing::info!(
-            agent = %name,
-            listener = %event.listener_id,
-            event_id = %event.id,
-            event_type = %event.event_type,
-            "wake decision: binding matched"
-        );
-
-        let connector_instructions = load_connector_instructions(&name, &event.provider).await;
-        let user_input = build_wake_prompt(event, connector_instructions.as_deref());
-
-        return match run_pm_task_with_persona(
-            project_path,
-            &name,
-            &user_input,
-            &[],
-            None,
-            SessionOverrides::default(),
-        )
-        .await
-        {
-            Ok(_reply) => {
-                tracing::info!(agent = %name, event_id = %event.id, "wake decision: dispatched");
-                WakeOutcome::Woke { agent: name }
-            }
-            Err(e) => {
-                tracing::warn!(agent = %name, event_id = %event.id, error = %e, "wake decision: dispatch failed");
-                WakeOutcome::DispatchFailed {
-                    agent: name,
-                    error: e.to_string(),
-                }
-            }
-        };
     }
+    None
+}
 
-    tracing::debug!(
+/// Scan the agents directories for a `[[listeners]]` binding matching
+/// `event`, and wake AT MOST ONE agent per poll cycle (DEADLINE BUILD
+/// scope: "max 1 wake per poll cycle").
+///
+/// Why: Centralising the roster scan here (rather than in `poll.rs`) keeps
+/// the polling loop's per-event work to "does anything care" without it
+/// needing to know how personas are dispatched. The cycle cap itself lives
+/// in `gate_wake` (see its doc comment); `already_woke_this_cycle` is
+/// threaded in by the caller, which owns the per-`poll_once`-call state.
+/// What: Finds the first matching agent via `find_matching_agent`, then
+/// applies `gate_wake`. On `ShouldDispatch`, loads
+/// `agents/<name>/events/<connector>.md` (best-effort — missing file just
+/// means no extra instructions) and dispatches through
+/// `run_pm_task_with_persona`. On `RateLimited`, logs and returns WITHOUT
+/// dispatching — the event was already durably appended to the store by
+/// the caller before this function runs, so rate-limiting a wake never
+/// drops the event from the Events pane, only skips the LLM reaction.
+/// Every branch is logged at info/debug so a demo run's wake decisions are
+/// auditable in the process log.
+/// Test: `gate_wake_caps_to_one_dispatch_per_cycle` pins the cap logic this
+/// function delegates to; the full scan+dispatch path is exercised only via
+/// a live agent directory (manual demo script) since it needs live LLM
+/// credentials for a real `Woke` outcome.
+pub async fn wake_bound_agents(
+    project_path: &Path,
+    event: &StoredEvent,
+    already_woke_this_cycle: bool,
+) -> WakeOutcome {
+    let matched_agent = find_matching_agent(event).await;
+
+    let name = match gate_wake(matched_agent, already_woke_this_cycle) {
+        WakeGate::NoMatch => {
+            tracing::debug!(
+                listener = %event.listener_id,
+                event_id = %event.id,
+                "wake decision: no agent binding matched"
+            );
+            return WakeOutcome::NoBindingMatched;
+        }
+        WakeGate::RateLimited(name) => {
+            tracing::info!(
+                agent = %name,
+                listener = %event.listener_id,
+                event_id = %event.id,
+                "wake decision: rate-limited (one wake per poll cycle already used)"
+            );
+            return WakeOutcome::RateLimited { agent: name };
+        }
+        WakeGate::ShouldDispatch(name) => name,
+    };
+
+    tracing::info!(
+        agent = %name,
         listener = %event.listener_id,
         event_id = %event.id,
-        "wake decision: no agent binding matched"
+        event_type = %event.event_type,
+        "wake decision: binding matched"
     );
-    WakeOutcome::NoBindingMatched
+
+    let connector_instructions = load_connector_instructions(&name, &event.provider).await;
+    let user_input = build_wake_prompt(event, connector_instructions.as_deref());
+
+    match run_pm_task_with_persona(
+        project_path,
+        &name,
+        &user_input,
+        &[],
+        None,
+        SessionOverrides::default(),
+    )
+    .await
+    {
+        Ok(_reply) => {
+            tracing::info!(agent = %name, event_id = %event.id, "wake decision: dispatched");
+            WakeOutcome::Woke { agent: name }
+        }
+        Err(e) => {
+            tracing::warn!(agent = %name, event_id = %event.id, error = %e, "wake decision: dispatch failed");
+            WakeOutcome::DispatchFailed {
+                agent: name,
+                error: e.to_string(),
+            }
+        }
+    }
 }
 
 /// Enumerate directory-package agent names across the standard candidate
@@ -369,5 +447,41 @@ mod tests {
             filter: AgentBindingFilter::default(),
         };
         assert!(binding_matches_event(&binding, &sample_event()));
+    }
+
+    /// #3820 code-critic CRITICAL fix: pins the one-wake-per-poll-cycle cap.
+    /// Simulates `poll_once`'s loop over two qualifying events in the SAME
+    /// cycle by calling `gate_wake` twice with the cycle-state flag threaded
+    /// through exactly as `poll.rs` threads it (first call `false`, second
+    /// call `true` because the first produced a dispatch) — the first
+    /// qualifying event must dispatch, the second must rate-limit, never the
+    /// reverse and never both dispatching.
+    #[test]
+    fn gate_wake_caps_to_one_dispatch_per_cycle() {
+        let first = gate_wake(Some("izzie".to_string()), false);
+        assert_eq!(first, WakeGate::ShouldDispatch("izzie".to_string()));
+
+        // poll.rs only flips its cycle flag to `true` when the outcome of
+        // dispatching `first` was `Woke` — modeled here directly since this
+        // test targets the gate, not the dispatch call.
+        let woke_this_cycle = true;
+        let second = gate_wake(Some("izzie".to_string()), woke_this_cycle);
+        assert_eq!(second, WakeGate::RateLimited("izzie".to_string()));
+    }
+
+    #[test]
+    fn gate_wake_no_match_is_never_rate_limited() {
+        // A non-matching event must never consume (or be blocked by) the
+        // cycle's one-wake budget — `NoMatch` regardless of cycle state.
+        assert_eq!(gate_wake(None, false), WakeGate::NoMatch);
+        assert_eq!(gate_wake(None, true), WakeGate::NoMatch);
+    }
+
+    #[test]
+    fn gate_wake_first_match_dispatches_when_cycle_fresh() {
+        assert_eq!(
+            gate_wake(Some("cto-assistant".to_string()), false),
+            WakeGate::ShouldDispatch("cto-assistant".to_string())
+        );
     }
 }

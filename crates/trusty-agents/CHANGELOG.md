@@ -22,8 +22,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   include/exclude filter, and the stage-two wake dispatcher that reuses
   `run_pm_task_with_persona` (the same entry point `/agent` uses) so a wake
   reaction lands in the agent's chat history like an ordinary turn —
-  ask-first framing, rate-limited to one wake per poll cycle, every decision
-  logged. New API: `GET /api/listener-events`, `POST
+  ask-first framing, rate-limited to one wake per poll cycle (enforced by a
+  pure cycle-gate, `listeners::wake::gate_wake`, threaded through
+  `poll_once`'s per-event loop — every event is still durably stored
+  regardless of whether its wake was rate-limited), every decision logged.
+  `poll_interval_secs` is floored at 15s on config load (values below the
+  floor are clamped up with a warning, not silently accepted) since this
+  polls a real personal Gmail account. Cursor persistence
+  (`~/.trusty-agents/events/cursor-<listener>.json`) writes atomically
+  (temp-then-rename) and logs a warning on a malformed cursor read instead
+  of silently re-baselining. New API: `GET /api/listener-events`, `POST
   /api/listener-events/filter` (named apart from the pre-existing SSE
   `/api/events` telemetry stream). Listener events also publish onto the
   existing harness event bus (`Event::ListenerEventReceived`) so the Events

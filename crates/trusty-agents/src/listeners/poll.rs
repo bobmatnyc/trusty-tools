@@ -12,13 +12,23 @@
 //! -> bootstrap from `users.getProfile` (baseline to "now", no replay);
 //! cursor present -> `history.list(startHistoryId=cursor)`, dedup new
 //! message ids against an in-memory set seeded from the durable event log,
-//! fetch each new message's summary fields, append a `StoredEvent`, advance
-//! the cursor, and hand the event to `wake::wake_bound_agents` when it's
-//! event-type-included. `run_gmail_poll_loop` wraps that in exponential
-//! backoff-with-jitter on transient errors and an immediate cursor reset on
-//! `410 GONE`, per DOC-54 §7.3.4.
+//! fetch each new message's summary fields, append a `StoredEvent`
+//! (unconditionally — every event is durably stored regardless of wake
+//! outcome), and hand the event to `wake::wake_bound_agents` when it's
+//! event-type-included. A cycle-local `woke_this_cycle` flag threads through
+//! the per-event loop so at most ONE wake actually dispatches per
+//! `poll_once` call — every qualifying event after the first is rate-limited
+//! (`wake::WakeOutcome::RateLimited`), never dispatched. `run_gmail_poll_loop`
+//! wraps that in exponential backoff-with-jitter on transient errors and an
+//! immediate cursor reset on `410 GONE`, per DOC-54 §7.3.4. The cursor file
+//! itself is written atomically (temp-then-rename) and a parse failure on
+//! read is logged, not silently swallowed.
 //! Test: `next_backoff_doubles_and_caps`, `is_410_gone_detects_status_text`,
-//! `stored_event_from_message_extracts_summary_fields`. The network-calling
+//! `stored_event_from_message_extracts_summary_fields`,
+//! `load_cursor_warns_and_defaults_on_malformed_json`,
+//! `save_cursor_then_load_cursor_round_trips`. The wake-cycle cap itself is
+//! pinned in `wake::tests::gate_wake_caps_to_one_dispatch_per_cycle` (the
+//! pure decision `wake_bound_agents` delegates to). The network-calling
 //! path is exercised manually against a live `bob-personal` mailbox (see the
 //! PR body's proof plan) — no mock Gmail server exists in this crate.
 
@@ -51,25 +61,68 @@ fn cursor_path(listener_name: &str) -> Result<PathBuf> {
     Ok(events_dir()?.join(format!("cursor-{listener_name}.json")))
 }
 
+/// Load the persisted cursor for `listener_name`.
+///
+/// Why (#3820 code-critic MEDIUM-3): a missing cursor file is the expected,
+/// silent "first run" case (`Cursor::default()`, no log) — but a PRESENT
+/// file that fails to parse (truncated write, disk corruption, a manual
+/// edit gone wrong) is an anomaly the operator should see in the log rather
+/// than have silently swallowed into "treat as absent," which quietly
+/// re-baselines the cursor (and, on a Gmail listener, skips whatever
+/// history the corrupt file's cursor would have covered).
+/// What: `Cursor::default()` on both a missing file and a read error;
+/// `tracing::warn!` + `Cursor::default()` on a parse failure specifically.
 async fn load_cursor(listener_name: &str) -> Cursor {
     let Ok(path) = cursor_path(listener_name) else {
         return Cursor::default();
     };
     match tokio::fs::read_to_string(&path).await {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(cursor) => cursor,
+            Err(e) => {
+                tracing::warn!(
+                    listener = %listener_name,
+                    path = %path.display(),
+                    error = %e,
+                    "cursor file failed to parse; re-baselining (treating as absent)"
+                );
+                Cursor::default()
+            }
+        },
         Err(_) => Cursor::default(),
     }
 }
 
+/// Persist the cursor for `listener_name`, atomically.
+///
+/// Why (#3820 code-critic MEDIUM-3): a direct `tokio::fs::write` to the
+/// live cursor path can be interrupted mid-write (process kill, power
+/// loss) leaving a truncated/malformed file — exactly the corruption case
+/// `load_cursor`'s parse-failure branch above now has to warn about
+/// instead of silently absorbing. Writing to a sibling `.tmp` path then
+/// renaming over the target makes the update atomic on POSIX filesystems:
+/// a crash mid-write leaves either the OLD cursor file intact or the fully-
+/// written NEW one, never a torn one.
+/// What: Write-then-rename; the temp file's name reuses the target's file
+/// name with a `.tmp` suffix appended (not a `with_extension` swap, so a
+/// `cursor-gmail-personal.json` target's temp file is
+/// `cursor-gmail-personal.json.tmp`, unambiguous even if a listener name
+/// itself contained a dot).
 async fn save_cursor(listener_name: &str, cursor: &Cursor) -> Result<()> {
     let path = cursor_path(listener_name)?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
     let content = serde_json::to_string_pretty(cursor).context("serialize cursor")?;
-    tokio::fs::write(&path, content)
+    let mut tmp_name = path.clone().into_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_name);
+    tokio::fs::write(&tmp_path, &content)
         .await
-        .with_context(|| format!("write cursor {}", path.display()))?;
+        .with_context(|| format!("write temp cursor {}", tmp_path.display()))?;
+    tokio::fs::rename(&tmp_path, &path)
+        .await
+        .with_context(|| format!("rename temp cursor into place {}", path.display()))?;
     Ok(())
 }
 
@@ -233,6 +286,12 @@ async fn poll_once(
         .map(str::to_string);
 
     let mut new_count = 0usize;
+    // #3820 code-critic CRITICAL fix: cycle-local gate enforcing "max one
+    // wake per poll cycle" — every qualifying event in THIS `poll_once` call
+    // after the first is rate-limited (see `wake::gate_wake`), never
+    // dispatched. Every event is still appended to the store above
+    // regardless of this flag — only the LLM dispatch is gated.
+    let mut woke_this_cycle = false;
     if let Some(history) = resp.get("history").and_then(|v| v.as_array()) {
         for record in history {
             let Some(added) = record.get("messagesAdded").and_then(|v| v.as_array()) else {
@@ -283,7 +342,11 @@ async fn poll_once(
                 });
 
                 if included {
-                    let outcome = wake::wake_bound_agents(project_path, &event).await;
+                    let outcome =
+                        wake::wake_bound_agents(project_path, &event, woke_this_cycle).await;
+                    if matches!(outcome, wake::WakeOutcome::Woke { .. }) {
+                        woke_this_cycle = true;
+                    }
                     tracing::info!(listener = %cfg.name, event_id = %event.id, outcome = ?outcome, "wake decision recorded");
                 } else {
                     tracing::debug!(listener = %cfg.name, event_id = %event.id, "event type excluded; no wake attempted");
@@ -373,6 +436,12 @@ fn stored_event_from_message(listener_id: &str, event_id: &str, msg: &Value) -> 
 }
 
 #[cfg(test)]
+// The cursor tests below deliberately hold `HOME_LOCK` across `.await`
+// points (the whole point of the lock — see `crate::test_env`'s module
+// doc); matches the existing `#[allow(clippy::await_holding_lock)]` used
+// for the identical pattern elsewhere in this crate
+// (`mcp::config::tests::mod`, `listeners::store::tests`).
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 
@@ -431,5 +500,76 @@ mod tests {
         assert_eq!(event.from.as_deref(), Some("dad@family.com"));
         assert_eq!(event.subject.as_deref(), Some("Dinner Sunday?"));
         assert_eq!(event.snippet.as_deref(), Some("Want to come over Sunday?"));
+    }
+
+    use crate::test_env::HOME_LOCK;
+
+    fn set_test_home(dir: &std::path::Path) {
+        // SAFETY: caller holds `HOME_LOCK` for the duration of the test (see
+        // `crate::test_env`'s module doc) so no other thread observes `HOME`
+        // mid-mutation.
+        unsafe {
+            std::env::set_var("HOME", dir);
+        }
+    }
+
+    /// #3820 code-critic MEDIUM-3: `save_cursor` writes atomically
+    /// (temp-then-rename) and `load_cursor` reads back exactly what was
+    /// written.
+    #[tokio::test]
+    async fn save_cursor_then_load_cursor_round_trips() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        set_test_home(tmp.path());
+
+        let cursor = Cursor {
+            history_id: Some("12345".to_string()),
+        };
+        save_cursor("gmail-personal", &cursor).await.unwrap();
+
+        let loaded = load_cursor("gmail-personal").await;
+        assert_eq!(loaded.history_id.as_deref(), Some("12345"));
+
+        // The temp file must not be left behind after a successful rename.
+        let tmp_path = events_dir().unwrap().join("cursor-gmail-personal.json.tmp");
+        assert!(
+            !tmp_path.exists(),
+            "temp cursor file should be renamed away"
+        );
+    }
+
+    /// #3820 code-critic MEDIUM-3: a present-but-malformed cursor file must
+    /// NOT be silently treated identically to "no cursor" without a trace —
+    /// this pins the fallback BEHAVIOR (defaults to no cursor, so the next
+    /// poll re-baselines); the `tracing::warn!` emission itself isn't
+    /// asserted here (no `tracing-test` dependency in this crate), but the
+    /// distinct code path is exercised.
+    #[tokio::test]
+    async fn load_cursor_warns_and_defaults_on_malformed_json() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        set_test_home(tmp.path());
+
+        let path = cursor_path("gmail-personal").unwrap();
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&path, b"{not valid json").await.unwrap();
+
+        let loaded = load_cursor("gmail-personal").await;
+        assert!(
+            loaded.history_id.is_none(),
+            "malformed cursor file must fall back to no-cursor, not panic or propagate"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_cursor_defaults_when_file_absent() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        set_test_home(tmp.path());
+
+        let loaded = load_cursor("never-seen-listener").await;
+        assert!(loaded.history_id.is_none());
     }
 }

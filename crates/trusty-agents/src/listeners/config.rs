@@ -15,14 +15,56 @@
 //! why this matters for a config file this code never writes itself).
 //! Test: `listener_config_parses_gmail_example`,
 //! `listener_config_defaults_disabled_and_poll_interval`,
-//! `agent_listener_binding_parses_filter`.
+//! `agent_listener_binding_parses_filter`,
+//! `listener_config_clamps_poll_interval_below_floor`,
+//! `listener_config_leaves_poll_interval_above_floor_untouched`.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 fn default_poll_interval_secs() -> u64 {
     // DOC-54 §7.3.1: history-poll fallback default (2-5 min band); 180s
     // sits in the middle, quota-conscious without being sluggish for a demo.
     180
+}
+
+/// Floor for `poll_interval_secs` (#3820 code-critic MEDIUM-2).
+///
+/// Why: This listener runs against Bob's REAL personal Gmail account. A
+/// hand-edited (or copy-pasted-wrong) `config.toml` with e.g.
+/// `poll_interval_secs = 1` would hammer the Gmail API at up to 1 req/sec
+/// indefinitely — quota exhaustion at best, an account-level abuse flag at
+/// worst. 15s is well under even the aggressive Pub/Sub-pull band (DOC-54
+/// §7.3.1's "~20-30s") while still guarding against a pathological
+/// near-zero value; it is NOT a recommendation (the documented defaults —
+/// 60-180s for history-poll — remain the sane operating range).
+pub const MIN_POLL_INTERVAL_SECS: u64 = 15;
+
+/// Deserialize `poll_interval_secs`, clamping any value below
+/// [`MIN_POLL_INTERVAL_SECS`] up to the floor and logging a warning so the
+/// clamp is visible rather than a silent surprise.
+///
+/// Why: Clamping (rather than rejecting the whole config with a hard parse
+/// error) keeps a typo'd interval from taking down config loading entirely
+/// — `GlobalConfig::load()` already degrades to defaults on any outright
+/// parse error, which would be a worse failure mode here than "run a bit
+/// more conservatively than the operator typed."
+/// Test: `listener_config_clamps_poll_interval_below_floor`,
+/// `listener_config_leaves_poll_interval_above_floor_untouched`.
+fn deserialize_clamped_poll_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if value < MIN_POLL_INTERVAL_SECS {
+        tracing::warn!(
+            configured = value,
+            floor = MIN_POLL_INTERVAL_SECS,
+            "listener poll_interval_secs below floor; clamping up"
+        );
+        Ok(MIN_POLL_INTERVAL_SECS)
+    } else {
+        Ok(value)
+    }
 }
 
 fn default_transport() -> String {
@@ -55,7 +97,13 @@ pub struct ListenerConfig {
     pub transport: String,
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_poll_interval_secs")]
+    /// Poll interval, floored at [`MIN_POLL_INTERVAL_SECS`] on parse (see
+    /// `deserialize_clamped_poll_interval`) — a value below the floor is
+    /// clamped up, not rejected.
+    #[serde(
+        default = "default_poll_interval_secs",
+        deserialize_with = "deserialize_clamped_poll_interval"
+    )]
     pub poll_interval_secs: u64,
     #[serde(default)]
     pub filter: ListenerFilter,
@@ -164,6 +212,40 @@ connector = "gmail"
         assert_eq!(cfg.poll_interval_secs, 180);
         assert_eq!(cfg.transport, "history-poll");
         assert!(cfg.identity.is_none());
+    }
+
+    #[test]
+    fn listener_config_clamps_poll_interval_below_floor() {
+        let toml_str = r#"
+name = "gmail-personal"
+connector = "gmail"
+poll_interval_secs = 1
+"#;
+        let cfg: ListenerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.poll_interval_secs, MIN_POLL_INTERVAL_SECS,
+            "a below-floor value must be clamped up to the floor, not passed through"
+        );
+    }
+
+    #[test]
+    fn listener_config_leaves_poll_interval_above_floor_untouched() {
+        let toml_str = r#"
+name = "gmail-personal"
+connector = "gmail"
+poll_interval_secs = 20
+"#;
+        let cfg: ListenerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.poll_interval_secs, 20);
+    }
+
+    #[test]
+    fn listener_config_poll_interval_exactly_at_floor_is_unchanged() {
+        let toml_str = format!(
+            "name = \"gmail-personal\"\nconnector = \"gmail\"\npoll_interval_secs = {MIN_POLL_INTERVAL_SECS}\n"
+        );
+        let cfg: ListenerConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(cfg.poll_interval_secs, MIN_POLL_INTERVAL_SECS);
     }
 
     #[test]
