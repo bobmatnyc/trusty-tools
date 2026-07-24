@@ -260,30 +260,93 @@ pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<se
     Json(agent_roster().await)
 }
 
+/// True when a parsed catalog entry's `role` field is exactly `"assistant"`.
+///
+/// Why (Bob directive, agent-picker role filter): the picker/roster surface
+/// must show ONLY assistant-type personas (Assistant, Izzie, CTO Bot,
+/// custom ones like `researcher`) — never the 16 bundled coding/engineer/
+/// support agents. `parse_agent_toml`/`md_agent_to_catalog_json` already
+/// default a missing/unparseable `role` to `""` (never `None`), so a plain
+/// equality check against the literal `"assistant"` — with no special-casing
+/// for absence — naturally treats any unparseable or missing role as
+/// NOT-assistant. That is a deliberate fail-closed default: it is the only
+/// way a bundled coding agent can never leak back into the picker through a
+/// malformed or role-less manifest.
+/// What: Reads `v["role"]` as a string and compares against `"assistant"`.
+/// Test: `agent_roster_filters_to_assistant_role_only`.
+pub(super) fn is_assistant_role(v: &serde_json::Value) -> bool {
+    v.get("role").and_then(|r| r.as_str()) == Some("assistant")
+}
+
+/// True when a parsed catalog entry's `hidden` field is exactly `true`.
+/// Absent/non-bool defaults to `false` (visible) — see `AgentInfo::hidden`'s
+/// doc comment.
+fn is_hidden(v: &serde_json::Value) -> bool {
+    v.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
+}
+
+/// Composes BOTH picker-listing filters that gate `agent_roster()`'s output:
+/// `is_assistant_role` (#3812 — only `role == "assistant"` personas are
+/// picker-eligible AT ALL) AND `!is_hidden` (#3819 — an operator can
+/// additionally hide a specific assistant-role agent from the picker without
+/// touching its role/tools). An entry must pass BOTH to appear.
+///
+/// Why extracted as its own pure fn: the two filters were merged from
+/// parallel PRs (#3812's role filter, #3819's `hidden` flag) and taking
+/// either one alone — "ours" or "theirs" — silently reintroduces the gap the
+/// OTHER PR fixed (either the 16 bundled coding/engineer/support agents leak
+/// back into the picker, or a hidden agent stays visible). A pure, directly
+/// testable composition function makes that regression mechanically checked
+/// rather than re-derived by hand at every future merge.
+/// Test: `apply_roster_filters_requires_both_assistant_role_and_not_hidden`
+/// (the composition regression case — role != "assistant" AND hidden = false
+/// must still be EXCLUDED), `apply_roster_filters_excludes_hidden_assistant`,
+/// `apply_roster_filters_includes_visible_assistant`.
+pub(super) fn apply_roster_filters(agents: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    agents
+        .into_iter()
+        .filter(is_assistant_role)
+        .filter(|v| !is_hidden(v))
+        .collect()
+}
+
 /// Shared agent-roster computation — the `{"agents": [...]}` envelope returned
 /// by both `GET /api/agents` ([`list_agents_route`]) and the `list_agents`
 /// MCP tool ([`crate::runtime::mcp_serve`], #3633 core).
 ///
 /// Why: the MCP `list_agents` tool must surface the EXACT same roster the HTTP
 /// route (and therefore the GUI picker) shows — Assistant, Izzie, CTO Bot, and
-/// the specialist personas resolved from [`crate::agents::agents_dir_candidates`].
-/// Extracting the computation out of the axum handler into one plain async fn
-/// keeps the two surfaces from drifting, exactly as [`parse_agent_toml`] keeps
-/// the GET and PATCH shapes aligned.
+/// custom assistant-role personas resolved from
+/// [`crate::agents::agents_dir_candidates`]. Extracting the computation out of
+/// the axum handler into one plain async fn keeps the two surfaces from
+/// drifting, exactly as [`parse_agent_toml`] keeps the GET and PATCH shapes
+/// aligned. Per Bob's directive this is a PICKER surface, so it is filtered to
+/// `role == "assistant"` — the 16 bundled coding/engineer/support agents must
+/// never appear here. This does NOT affect delegation: `delegate_to_agent`
+/// (`crate::tools::delegate`) resolves its target directly via
+/// `AgentConfig::by_name_in` against the candidate directories, never through
+/// this roster, so hidden-but-functional agents (ctrl, pm, coding agents)
+/// remain fully dispatchable by name even though they no longer list here.
+/// [`scan_agent_catalog`] itself stays UNFILTERED (and is exercised directly
+/// by its own raw-scan tests) — the role filter is applied only at this
+/// picker-facing envelope boundary, so a future consumer that legitimately
+/// needs the full catalog can call `scan_agent_catalog` directly instead of
+/// this fn.
 /// What: scans every candidate agents directory via [`scan_agent_catalog`]
-/// (package + flat resolution, deduped, name-sorted) and wraps the result in
-/// the `{"agents": [...]}` envelope. Read-only; no side effects.
+/// (package + flat resolution, deduped, name-sorted), filters to
+/// [`is_assistant_role`], and wraps the result in the `{"agents": [...]}`
+/// envelope. Read-only; no side effects.
 /// Test: covered indirectly by `scan_agent_catalog_dedupes_across_dirs` (the
-/// scan) and the `mcp_serve` dispatcher's `tools/call` unit test (the envelope).
+/// scan) and the `mcp_serve` dispatcher's `tools/call` unit test (the
+/// envelope); role filter itself by
+/// `agent_roster_filters_to_assistant_role_only`.
 pub(crate) async fn agent_roster() -> serde_json::Value {
     let dirs = crate::agents::agents_dir_candidates();
-    let mut agents = scan_agent_catalog(&dirs).await;
-    // #3819: `hidden = true` (`AgentInfo::hidden`) removes an agent from
-    // LISTING surfaces only — never from `GET/PATCH /api/agents/:name`,
-    // which resolve by name directly and don't go through this fn. See
-    // `AgentInfo::hidden`'s doc comment for why this is a dedicated flag
-    // rather than a `role` repurpose.
-    agents.retain(|v| !v.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false));
+    // Both listing-surface filters apply (neither affects dispatch or
+    // `GET|PATCH /api/agents/:name`, which resolve by name directly and
+    // never go through this fn) — see `apply_roster_filters`'s doc comment
+    // for why they're composed in one place rather than chained ad hoc here.
+    let agents = apply_roster_filters(scan_agent_catalog(&dirs).await);
     serde_json::json!({ "agents": agents })
 }
 

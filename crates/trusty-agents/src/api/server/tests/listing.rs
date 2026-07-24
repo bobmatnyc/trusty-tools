@@ -9,7 +9,10 @@
 //! session history loaders.
 //! Test: This module IS the test.
 
-use crate::api::server::projects::{load_sessions_from, scan_agent_catalog, scan_agents_dir};
+use crate::api::server::projects::{
+    apply_roster_filters, is_assistant_role, load_sessions_from, scan_agent_catalog,
+    scan_agents_dir,
+};
 
 /// Why: Confirms `/api/agents` returns the `{"agents": [...]}` envelope
 /// with the spec-required fields (name, role, model, runner) parsed from
@@ -310,6 +313,129 @@ async fn scan_agent_catalog_dedupes_across_dirs() {
         .find(|a| a["name"] == "cto-assistant")
         .unwrap();
     assert_eq!(cto["display_name"], "CTO Bot");
+}
+
+/// Why (Bob directive, agent-picker role filter): [`is_assistant_role`] is
+/// the sole gate deciding what the GUI/MCP picker surface shows. It must
+/// treat a missing/unparseable role as NOT-assistant (fail-closed) so a
+/// malformed manifest can never leak a bundled coding agent back into the
+/// picker — pins that default alongside the ordinary positive/negative
+/// cases.
+/// What: Table of role values through [`is_assistant_role`] directly.
+#[test]
+fn is_assistant_role_treats_missing_or_non_assistant_as_excluded() {
+    assert!(is_assistant_role(&serde_json::json!({"role": "assistant"})));
+    assert!(!is_assistant_role(&serde_json::json!({"role": "engineer"})));
+    assert!(!is_assistant_role(
+        &serde_json::json!({"role": "orchestrator"})
+    ));
+    assert!(
+        !is_assistant_role(&serde_json::json!({"role": ""})),
+        "an unparseable manifest's default empty role must be excluded"
+    );
+    assert!(
+        !is_assistant_role(&serde_json::json!({})),
+        "a role-less entry must be excluded"
+    );
+}
+
+/// Why (Bob directive, agent-picker role filter): the picker surface
+/// (`GET /api/agents` / MCP `list_agents`, both backed by [`agent_roster`])
+/// must show ONLY assistant-role agents — never the 16 bundled
+/// coding/engineer/support agents — while a custom assistant-role package
+/// (e.g. the new `researcher`) still surfaces. `agent_roster` itself reads
+/// the global candidate dirs, so this drives the same
+/// scan-then-filter pipeline it uses (`scan_agent_catalog` +
+/// `is_assistant_role`) against a tempdir fixture, matching this file's
+/// existing `scan_agent_catalog_dedupes_across_dirs` style.
+/// What: A coding agent (`role = "engineer"`), a bundled-style assistant
+/// (`role = "assistant"`), and a custom directory-package assistant
+/// (`researcher`, `role = "assistant"`) all in one dir; asserts the filtered
+/// roster keeps exactly the two assistants and drops the coding agent.
+#[tokio::test]
+async fn agent_roster_filters_to_assistant_role_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    std::fs::write(
+        root.join("engineer.toml"),
+        "[agent]\nname = \"engineer\"\nrole = \"engineer\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("assistant.toml"),
+        "[agent]\nname = \"assistant\"\nrole = \"assistant\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.join("researcher")).unwrap();
+    std::fs::write(
+        root.join("researcher").join("agent.toml"),
+        "[agent]\nname = \"researcher\"\nrole = \"assistant\"\ndisplay_name = \"Researcher\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("researcher").join("persona.md"),
+        "You are the researcher.",
+    )
+    .unwrap();
+
+    let dirs = vec![root.to_path_buf()];
+    let agents: Vec<serde_json::Value> = scan_agent_catalog(&dirs)
+        .await
+        .into_iter()
+        .filter(is_assistant_role)
+        .collect();
+    let names: Vec<&str> = agents.iter().filter_map(|a| a["name"].as_str()).collect();
+
+    assert_eq!(
+        names,
+        vec!["assistant", "researcher"],
+        "coding agent excluded; both assistant-role agents (bundled + custom \
+         directory package) kept: {agents:?}"
+    );
+}
+
+/// Composition regression guard (#3812 x #3819 merge, code-critic BLOCK):
+/// a coding/engineer-role agent that is NOT hidden must still be EXCLUDED —
+/// proves the role filter survived composing with the `hidden` filter (a
+/// resolution that dropped `is_assistant_role` in favor of only checking
+/// `hidden` would incorrectly let this entry through).
+#[test]
+fn apply_roster_filters_requires_both_assistant_role_and_not_hidden() {
+    let engineer_visible =
+        serde_json::json!({"name": "engineer", "role": "engineer", "hidden": false});
+    let out = apply_roster_filters(vec![engineer_visible]);
+    assert!(
+        out.is_empty(),
+        "a non-assistant-role agent must be excluded even when hidden=false: {out:?}"
+    );
+}
+
+/// Composition regression guard, the other direction: an assistant-role
+/// agent explicitly hidden must still be EXCLUDED — proves the `hidden`
+/// filter survived composing with the role filter (a resolution that
+/// dropped the `hidden` check in favor of only `is_assistant_role` would
+/// incorrectly let this entry through — exactly the pre-fix "izzie tools
+/// list flattened" class of regression, applied to roster visibility).
+#[test]
+fn apply_roster_filters_excludes_hidden_assistant() {
+    let hidden_assistant =
+        serde_json::json!({"name": "personal-assistant", "role": "assistant", "hidden": true});
+    let out = apply_roster_filters(vec![hidden_assistant]);
+    assert!(
+        out.is_empty(),
+        "a hidden assistant-role agent must be excluded: {out:?}"
+    );
+}
+
+/// The positive case both filters must agree on: assistant-role AND not
+/// hidden passes through untouched.
+#[test]
+fn apply_roster_filters_includes_visible_assistant() {
+    let izzie = serde_json::json!({"name": "izzie", "role": "assistant", "hidden": false});
+    let out = apply_roster_filters(vec![izzie]);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0]["name"], "izzie");
 }
 
 /// Why: When the agents directory is missing, the route must still
