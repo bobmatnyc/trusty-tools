@@ -81,6 +81,7 @@ use crate::{perf, skills};
 mod cli_def;
 mod direct_mode;
 mod indexer;
+mod mcp_serve;
 mod mode_dispatch;
 mod pm_mode;
 mod postmortem;
@@ -131,6 +132,16 @@ pub async fn run() -> Result<()> {
             return subcommands::run_config_profile_subcommand(&args[3..]).await;
         }
         return subcommands::run_config_subcommand(&args[1..]).await;
+    }
+
+    // #3633 core: `tagent mcp-serve` — a stdio MCP server exposing trusty-agents
+    // to external MCP clients (Claude Code, etc.). Dispatched HERE, before
+    // `run_startup_init`, for the same reason as `config`: an MCP stdio server
+    // speaks line-delimited JSON-RPC on stdout, so any startup banner or
+    // message-bus side effect on that stream would corrupt the protocol. It is
+    // also daemon-less by nature — it must not spin up the agent runtime.
+    if args.len() > 1 && args[1] == "mcp-serve" {
+        return mcp_serve::run_mcp_serve().await;
     }
 
     // All pre-parse bootstrapping (env loading, tracing, the early-exit
