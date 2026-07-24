@@ -145,6 +145,7 @@ mod tests {
             commit_name: None,
             commit_email: None,
             untracked_sync: None,
+            worktree: None,
         }
     }
 

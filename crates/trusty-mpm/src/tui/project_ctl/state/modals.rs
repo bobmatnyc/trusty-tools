@@ -455,6 +455,7 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         }
     }
 
@@ -609,6 +610,7 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         }
     }
 
@@ -643,6 +645,11 @@ mod tests {
             ConfigEdit::Set(ConfigField::Description, v) => form.description.value = v.clone(),
             ConfigEdit::Set(ConfigField::StackHint, v) => form.stack_hint.value = v.clone(),
             ConfigEdit::Set(ConfigField::GhUser, v) => form.gh_user.value = v.clone(),
+            // #3455: `worktree` has no TUI form row (CLI-only per the issue's
+            // scope) and `config_edit_cases()` carries no Worktree case, so
+            // this arm is unreachable from `config_form_shared_cases_match_tui_diff`
+            // today — present only so the match stays exhaustive.
+            ConfigEdit::Set(ConfigField::Worktree, _) => {}
             ConfigEdit::Unset(ClearableField::Description) => form.description.value.clear(),
             ConfigEdit::Unset(ClearableField::StackHint) => form.stack_hint.value.clear(),
             ConfigEdit::Unset(ClearableField::GhUser) => form.gh_user.value.clear(),

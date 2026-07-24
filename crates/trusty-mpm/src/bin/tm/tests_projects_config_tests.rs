@@ -67,6 +67,31 @@ fn cli_parses_projects_config_set() {
     }
 }
 
+/// `tm projects config <name> set worktree false` round-trips to
+/// `SettableConfigField::Worktree` with the raw (not-yet-normalized) value —
+/// normalization happens in `commands::projects::registry::config`, not
+/// clap parsing (#3455).
+#[test]
+fn cli_parses_projects_config_set_worktree() {
+    let (name, _json, action) = config_action(&[
+        "trusty-mpm",
+        "projects",
+        "config",
+        "widget",
+        "set",
+        "worktree",
+        "false",
+    ]);
+    assert_eq!(name, "widget");
+    match action.expect("action") {
+        ConfigAction::Set { field, value } => {
+            assert_eq!(field, SettableConfigField::Worktree);
+            assert_eq!(value, "false");
+        }
+        other => panic!("expected set, got {other:?}"),
+    }
+}
+
 #[test]
 fn cli_parses_projects_config_unset() {
     let (name, _json, action) = config_action(&[
@@ -101,6 +126,25 @@ fn cli_rejects_unset_default_branch_at_parse_time() {
         "default-branch",
     ])
     .expect_err("unset default-branch must fail to parse");
+    assert_eq!(err.exit_code(), 2);
+    assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+}
+
+/// #3455: `unset worktree` is rejected AT PARSE TIME, mirroring
+/// `default_branch`'s precedent — `worktree`'s "clear" state (worktree-ON)
+/// is reachable via `set worktree true`, so `ClearableConfigField` has no
+/// `Worktree` variant.
+#[test]
+fn cli_rejects_unset_worktree_at_parse_time() {
+    let err = Cli::try_parse_from([
+        "trusty-mpm",
+        "projects",
+        "config",
+        "widget",
+        "unset",
+        "worktree",
+    ])
+    .expect_err("unset worktree must fail to parse");
     assert_eq!(err.exit_code(), 2);
     assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
 }
@@ -177,6 +221,7 @@ fn argv_for_case(edit: &trusty_mpm::project_config::ConfigEdit) -> Vec<String> {
                 ConfigField::Description => "description",
                 ConfigField::StackHint => "stack-hint",
                 ConfigField::GhUser => "gh-user",
+                ConfigField::Worktree => "worktree",
             };
             argv.push("set".to_string());
             argv.push(name.to_string());

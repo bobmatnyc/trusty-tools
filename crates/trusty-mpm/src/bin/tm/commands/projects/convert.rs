@@ -63,6 +63,7 @@ impl From<SettableConfigField> for ConfigField {
             SettableConfigField::Description => ConfigField::Description,
             SettableConfigField::StackHint => ConfigField::StackHint,
             SettableConfigField::GhUser => ConfigField::GhUser,
+            SettableConfigField::Worktree => ConfigField::Worktree,
         }
     }
 }

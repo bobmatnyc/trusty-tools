@@ -162,6 +162,11 @@ pub(crate) enum SettableConfigField {
     StackHint,
     /// `gh_user` — preferred `gh` login (#2081), clearable.
     GhUser,
+    /// `worktree` — "launch on main" opt-out (#3455). Value must be
+    /// `true`/`false` (case-insensitive); any other value is rejected
+    /// client-side before it ever reaches the daemon (see
+    /// `commands::projects::registry::config`).
+    Worktree,
 }
 
 /// CLI value for a clearable config field (§6) — DELIBERATELY NARROWER than

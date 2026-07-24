@@ -38,6 +38,7 @@ fn untracked_sync_config_yaml_round_trip() {
                 patterns: Some(vec![".env.widget".into()]),
                 enabled: Some(false),
             }),
+            worktree: None,
         }],
         ..Default::default()
     };
@@ -113,6 +114,7 @@ fn resolve_untracked_sync_project_overrides_global() {
                 patterns: Some(vec![".env.widget-only".into()]),
                 enabled: None,
             }),
+            worktree: None,
         }],
         ..Default::default()
     };
@@ -148,6 +150,7 @@ fn resolve_untracked_sync_disabled_by_project() {
                 patterns: None,
                 enabled: Some(false),
             }),
+            worktree: None,
         }],
         ..Default::default()
     };

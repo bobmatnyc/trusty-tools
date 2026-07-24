@@ -56,6 +56,7 @@ fn config_to_json_includes_github_and_projects() {
             commit_name: Some("Bot".into()),
             commit_email: None,
             untracked_sync: None,
+            worktree: None,
         }],
         ..Default::default()
     };
@@ -81,6 +82,7 @@ fn project(name: &str) -> trusty_tools_config::ProjectConfig {
         commit_name: None,
         commit_email: None,
         untracked_sync: None,
+        worktree: None,
     }
 }
 

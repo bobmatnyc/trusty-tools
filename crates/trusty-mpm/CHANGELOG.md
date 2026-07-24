@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **Per-project "launch on main" worktree opt-out** (closes [#3455](https://github.com/bobmatnyc/trusty-tools/issues/3455)): a registered project's `worktree` field (`Project::worktree: Option<bool>`, default unset = `true`) can now disable per-session git worktree provisioning for that project — set it via `tm projects config <name> set worktree false` (round-trips through the existing `PATCH /api/v1/projects/{name}` configurator, `tm projects config <name>` shows the resolved state) or via `config.yaml`'s `projects[].worktree` (mirrored into the registry at seed time). When disabled, `daemon::managed_routes::lifecycle::spawn_managed_routed` skips the base-clone-plus-worktree path entirely — no `.base`/`.worktrees` directory, no `session/<name>` branch — and spawns the managed session directly in the project's resolved local checkout via the new `spawn_managed_on_main`, which is otherwise a normal managed session (agents/skills deployed, hooks written, tracked/reconnectable, front-gated) with `workspace_owned = false` so decommission never touches the operator's own directory. Running two sessions against the SAME main checkout is not isolated the way two worktrees are; a `warn!` (never a refusal) fires when a second `Active` session targets the identical path, which only a `--force-new` launch can produce (the normal reconnect pre-flight already prevents it otherwise).
+
 ---
 ## [0.21.0] — 2026-07-23
 

@@ -491,6 +491,22 @@ pub struct ProjectConfig {
     /// Test: `untracked_sync_config_yaml_round_trip`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub untracked_sync: Option<UntrackedSyncConfig>,
+
+    /// Per-project "launch on main" opt-out (#3455), mirrored onto
+    /// [`crate::project::record::Project::worktree`] by `seed_from_config`.
+    ///
+    /// `None`/`Some(true)` → default, no regression: this project's managed
+    /// sessions each get their own `.worktrees/<session>` git worktree.
+    /// `Some(false)` → sessions run directly in the resolved local checkout
+    /// instead — no clone, no worktree, no dedicated branch. See
+    /// [`crate::project::record::Project::worktree_enabled`] for the
+    /// resolved default and `tm projects config <name> set worktree
+    /// true|false` for the runtime-registry equivalent (the registry, not
+    /// this static config, is what `spawn_managed_routed` actually consults
+    /// at spawn time — this field only seeds it).
+    /// Test: covered by `registry::seed_from_config` round-trip coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
 }
 
 impl TrustyToolsConfig {
@@ -792,6 +808,7 @@ mod tests {
                 commit_name: None,
                 commit_email: None,
                 untracked_sync: None,
+                worktree: None,
             }],
             ..Default::default()
         };
@@ -816,6 +833,7 @@ mod tests {
                 commit_name: None,
                 commit_email: None,
                 untracked_sync: None,
+                worktree: None,
             }],
             ..Default::default()
         };
@@ -850,6 +868,7 @@ mod tests {
                 commit_name: Some("Bob (work bot)".into()),
                 commit_email: Some("bob@acme.example.com".into()),
                 untracked_sync: None,
+                worktree: None,
             }],
             ..Default::default()
         };
@@ -875,6 +894,7 @@ mod tests {
                 commit_name: None,
                 commit_email: None,
                 untracked_sync: None,
+                worktree: None,
             }],
             ..Default::default()
         };

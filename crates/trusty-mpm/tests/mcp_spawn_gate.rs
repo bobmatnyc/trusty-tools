@@ -193,6 +193,7 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         })
         .await
         .expect("register legitimate project");
@@ -256,6 +257,7 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         })
         .await
         .expect("register project");

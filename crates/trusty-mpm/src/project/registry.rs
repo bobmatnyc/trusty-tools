@@ -164,6 +164,11 @@ impl ProjectRegistry {
                 github: entry.github.clone(),
                 commit_name: entry.commit_name.clone(),
                 commit_email: entry.commit_email.clone(),
+                // #3455: mirror the static "launch on main" opt-out so a
+                // project declared with `worktree: false` in config.yaml is
+                // seeded with the setting already in effect, no separate
+                // `tm projects config` call required.
+                worktree: entry.worktree,
             };
             let name = project.name.clone();
             if let Err(e) = self.register(project).await {
@@ -227,6 +232,8 @@ impl ProjectRegistry {
                 github: None,
                 commit_name: None,
                 commit_email: None,
+                // #3455: no declared preference; defaults to worktree-ON.
+                worktree: None,
             };
             if let Err(e) = self.register(project).await {
                 warn!(name = %name, "auto_register: failed to register: {e}");
@@ -320,6 +327,7 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         };
         registry.register(p.clone()).await.expect("register once");
         registry
@@ -348,6 +356,7 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         };
         registry.register(p.clone()).await.expect("register");
 
@@ -374,6 +383,7 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         }
     }
 
@@ -524,6 +534,7 @@ mod tests {
                 github: None,
                 commit_name: None,
                 commit_email: None,
+                worktree: None,
             };
             registry.register(p).await.expect("register");
         }
@@ -556,6 +567,7 @@ mod tests {
                 commit_name: Some("ML Bot".into()),
                 commit_email: Some("ml-bot@example.com".into()),
                 untracked_sync: None,
+                worktree: None,
             },
             ProjectConfig {
                 name: "from-config-b".into(),
@@ -570,6 +582,7 @@ mod tests {
                 commit_name: None,
                 commit_email: None,
                 untracked_sync: None,
+                worktree: None,
             },
         ];
 
@@ -656,6 +669,7 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         };
         registry.register(existing).await.expect("pre-register");
 

@@ -59,6 +59,11 @@ pub struct RegisterProjectArgs {
     /// GitHub account login pinned for this project's spawned sessions (#3025).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gh_account: Option<String>,
+    /// "Launch on main" opt-out (#3455): `None`/`Some(true)` → default
+    /// worktree isolation; `Some(false)` → sessions run directly in the
+    /// resolved local checkout, no worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
 }
 
 /// Serializable body for `PATCH /api/v1/projects/{name}` (registry-B partial
@@ -103,6 +108,12 @@ pub struct PatchProjectArgs {
     /// `gh` account (#3025).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gh_account: Option<Option<String>>,
+    /// "Launch on main" opt-out (#3455): `None` = unchanged; `Some(bool)` =
+    /// set. Plain (single) `Option`, unlike the double-`Option` string
+    /// fields above — see the daemon's `PatchProjectBody::worktree` doc for
+    /// why this field has no separate "clear" story.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
     /// Tags to add, deduplicated server-side against the current set. A
     /// blank/whitespace-only entry rejects the whole PATCH with 400.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -357,6 +368,7 @@ mod tests {
             stack_hint: None,
             gh_user: None,
             gh_account: None,
+            worktree: None,
         };
         let v = serde_json::to_value(&args).unwrap();
         assert_eq!(v["name"], "widget");
@@ -419,6 +431,26 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&set).unwrap()["gh_account"],
             "bobmatnyc"
+        );
+    }
+
+    /// `worktree` is a plain (single) `Option<bool>` — `Some(false)` must
+    /// serialize as the literal JSON `false`, not `null` (#3455).
+    #[test]
+    fn patch_args_serializes_worktree_plain_option() {
+        let args = PatchProjectArgs {
+            worktree: Some(false),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&args).unwrap();
+        assert_eq!(v["worktree"], false);
+
+        let unchanged = PatchProjectArgs::default();
+        assert!(
+            serde_json::to_value(&unchanged)
+                .unwrap()
+                .get("worktree")
+                .is_none()
         );
     }
 

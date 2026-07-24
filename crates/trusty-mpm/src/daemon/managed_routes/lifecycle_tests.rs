@@ -627,3 +627,142 @@ fn ensure_deployment_complete_does_not_abort_when_no_carrier_reachable() {
          (unrelated to the new carrier self-check); got {result:?}"
     );
 }
+
+// ── #3455 "launch on main" opt-out ──────────────────────────────────────────
+
+/// A project with no registry entry (or no `worktree` field set) defaults to
+/// worktree isolation ON — the no-regression default #3455 requires.
+/// Test: itself.
+#[tokio::test]
+async fn worktree_enabled_for_origin_defaults_true_when_unregistered() {
+    let data_root = tempfile::TempDir::new().expect("tmp data root");
+    let state = crate::daemon::state::DaemonState::with_root_isolated_managed(
+        data_root.path().to_path_buf(),
+    )
+    .await;
+    let registry = state.project_registry().await;
+
+    assert!(
+        worktree_enabled_for_origin(&registry, "https://github.com/acme/unregistered").await,
+        "an unregistered repo must default to worktree isolation ON"
+    );
+}
+
+/// A registered project with `worktree: Some(false)` disables isolation for
+/// its own `repo_url` only — a DIFFERENT repo is unaffected (#3455).
+/// Test: itself.
+#[tokio::test]
+async fn worktree_enabled_for_origin_honors_registered_false() {
+    let data_root = tempfile::TempDir::new().expect("tmp data root");
+    let state = crate::daemon::state::DaemonState::with_root_isolated_managed(
+        data_root.path().to_path_buf(),
+    )
+    .await;
+    let registry = state.project_registry().await;
+
+    registry
+        .register(crate::project::Project {
+            name: "writing".into(),
+            repo_url: "https://github.com/bobmatnyc/writing".into(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: Some(false),
+        })
+        .await
+        .expect("register writing project");
+
+    assert!(
+        !worktree_enabled_for_origin(&registry, "https://github.com/bobmatnyc/writing.git").await,
+        "the registered project's opt-out must be honored (repo_url matching tolerates .git suffix)"
+    );
+    assert!(
+        worktree_enabled_for_origin(&registry, "https://github.com/bobmatnyc/trusty-tools").await,
+        "a DIFFERENT repo must be unaffected by another project's opt-out"
+    );
+}
+
+/// `spawn_managed_on_main` creates a normal `Active` session record rooted
+/// DIRECTLY at `local_path` — no worktree, no clone, `workspace_owned =
+/// false` so decommission never auto-deletes the operator's own checkout
+/// (#3455).
+/// Test: itself.
+#[tokio::test]
+async fn spawn_managed_on_main_creates_record_without_worktree() {
+    let data_root = tempfile::TempDir::new().expect("tmp data root");
+    let state = std::sync::Arc::new(
+        crate::daemon::state::DaemonState::with_root_isolated_managed(
+            data_root.path().to_path_buf(),
+        )
+        .await,
+    );
+
+    // The operator's own checkout — a real git repo, used directly, not cloned.
+    let checkout = tempfile::TempDir::new().expect("tmp checkout dir");
+    let local_path = checkout.path();
+    assert!(
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(local_path)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        "git init must succeed in this test fixture"
+    );
+
+    let session_id = ManagedSessionId::new();
+    let params = SpawnParams {
+        repo_url: local_path.to_string_lossy().into_owned(),
+        git_ref: "main".into(),
+        task: "".into(),
+        name_hint: None,
+        runtime: None,
+        ephemeral: Some(true),
+        mcp_initiated: false,
+        inject_task: None,
+        deliverable_id: None,
+        force_new: false,
+    };
+
+    let record = spawn_managed_on_main(
+        &state,
+        &session_id,
+        &params,
+        crate::runtime::RuntimeKind::ClaudeCode,
+        local_path,
+        "acme",
+        "writing",
+    )
+    .await
+    .expect("spawn_managed_on_main must succeed against a real git repo");
+
+    assert_eq!(
+        record.cwd, local_path,
+        "the session cwd must be the main checkout itself, not a worktree"
+    );
+    assert_eq!(
+        record.workspace_path.as_deref(),
+        Some(local_path),
+        "workspace_path must point at the main checkout"
+    );
+    assert!(
+        !record.workspace_owned,
+        "workspace_owned must be false — decommission must never auto-delete \
+         the operator's own checkout"
+    );
+    assert!(
+        !local_path.join(".worktrees").exists(),
+        "no .worktrees/ directory must ever be created for a launch-on-main session"
+    );
+    assert_eq!(
+        record.source_id.as_deref(),
+        Some("acme/writing"),
+        "source_id must still be set so reconnect works normally"
+    );
+}

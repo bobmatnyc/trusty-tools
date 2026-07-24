@@ -43,6 +43,7 @@ fn full_project(name: &str) -> crate::project::Project {
         github: None,
         commit_name: None,
         commit_email: None,
+        worktree: None,
     }
 }
 

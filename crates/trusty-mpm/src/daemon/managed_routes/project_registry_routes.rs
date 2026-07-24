@@ -73,6 +73,11 @@ pub struct RegisterProjectBody {
     /// resolved into `GH_TOKEN`/`GH_USER` at spawn time (#3025).
     #[serde(default)]
     pub gh_account: Option<String>,
+    /// "Launch on main" opt-out (#3455): `None`/`Some(true)` → default
+    /// worktree isolation; `Some(false)` → sessions run directly in the
+    /// resolved local checkout, no worktree.
+    #[serde(default)]
+    pub worktree: Option<bool>,
 }
 
 /// Response body for `GET /api/v1/projects`.
@@ -187,6 +192,12 @@ pub async fn register_project_registry_route(
         github: existing.as_ref().and_then(|p| p.github.clone()),
         commit_name: existing.as_ref().and_then(|p| p.commit_name.clone()),
         commit_email: existing.as_ref().and_then(|p| p.commit_email.clone()),
+        // #3455: mirrors the other optional fields' preserve-on-re-register
+        // fix (#3025 review item 4) — an absent body field never resets an
+        // existing worktree opt-out back to the default.
+        worktree: body
+            .worktree
+            .or_else(|| existing.as_ref().and_then(|p| p.worktree)),
     };
     if let Err(e) = registry.register(project.clone()).await {
         warn!(error = %e, project = %project.name, "register_project_registry_route: register failed");
@@ -310,6 +321,15 @@ pub struct PatchProjectBody {
     /// session spawn/relaunch — see [`crate::core::gh_account::resolve_gh_account_env`].
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub gh_account: Option<Option<String>>,
+    /// "Launch on main" opt-out (#3455): absent=unchanged, `true`/`false`=set.
+    /// Unlike the three `Option<String>` fields above this is a PLAIN
+    /// `Option<bool>` (single, not double) — there is no separate "clear"
+    /// story to express: the default state (`true`, worktree isolation ON)
+    /// is reachable by simply setting the value back to `true`, mirroring
+    /// `default_branch`'s "no clear story" precedent rather than adding an
+    /// `Unset` variant for a field with only two meaningful states.
+    #[serde(default)]
+    pub worktree: Option<bool>,
     /// Tags to add, deduplicated against the current set. Each entry is
     /// trimmed; a blank/whitespace-only entry rejects the WHOLE request with
     /// 400 (see [`trim_and_reject_blank_tags`]).
@@ -399,6 +419,7 @@ pub async fn patch_project_registry_route(
     let stack_hint = body.stack_hint;
     let gh_user = body.gh_user;
     let gh_account = body.gh_account;
+    let worktree = body.worktree;
 
     let registry = state.project_registry().await;
     let result = registry
@@ -420,6 +441,9 @@ pub async fn patch_project_registry_route(
             }
             if let Some(gh_account) = gh_account {
                 project.gh_account = gh_account;
+            }
+            if let Some(worktree) = worktree {
+                project.worktree = Some(worktree);
             }
             if let Some(add) = tags_add {
                 for tag in add {

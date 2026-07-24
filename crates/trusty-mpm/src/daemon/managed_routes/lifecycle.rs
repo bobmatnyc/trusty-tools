@@ -63,6 +63,35 @@ async fn resolve_gh_env(state: &Arc<DaemonState>, cwd: &std::path::Path) -> Vec<
     crate::core::gh_account::resolve_gh_account_env_for_registry(&registry, cwd).await
 }
 
+/// Resolve whether per-session worktree isolation is enabled for the
+/// registered project whose `repo_url` matches `origin` (#3455).
+///
+/// Why: mirrors `core::gh_account::find_pinned_gh_account` — the registry
+/// (not the static `config.yaml`, which only ever SEEDS the registry via
+/// `seed_from_config`) is the source of truth consulted at spawn time, keyed
+/// by `repo_url` identity so lookup works regardless of the registry's
+/// `name` key or how the project got registered (explicit `tm projects
+/// register`, config-seeded, or auto-registered from session history).
+/// What: `true` (worktree isolation ON, the default — no regression) when no
+/// registered project matches `origin`, the registry is unreachable, or the
+/// matched project's `worktree` field is unset/`Some(true)`; `false` only
+/// when a matched project has `worktree == Some(false)`.
+/// Test: `worktree_enabled_for_origin_defaults_true_when_unregistered`,
+/// `worktree_enabled_for_origin_honors_registered_false`.
+async fn worktree_enabled_for_origin(
+    registry: &crate::project::ProjectRegistry,
+    origin: &str,
+) -> bool {
+    let Ok(projects) = registry.list().await else {
+        return true;
+    };
+    projects
+        .iter()
+        .find(|p| crate::project::record::repo_url_matches(&p.repo_url, origin))
+        .map(|p| p.worktree_enabled())
+        .unwrap_or(true)
+}
+
 /// Transport-agnostic inputs for spawning a managed session.
 ///
 /// Why: both the HTTP `POST /…/managed` handler and the MCP `session_new` tool
@@ -359,6 +388,59 @@ async fn spawn_managed_routed(
         // with a GitHub remote (no `.git`, no remote origin, non-GitHub URL), fall
         // through to the existing local-path spawn.
         let local_path = std::path::Path::new(&params.repo_url);
+
+        // #3455 "launch on main" opt-out: checked BEFORE `try_inproject_spawn`
+        // (which would otherwise establish a base clone as a side effect even
+        // when it's never going to be used) so a project with worktree
+        // isolation disabled never gets a base clone OR a worktree at all —
+        // the exact wasted-disk-space complaint the issue raises. Only a
+        // GitHub-remote-having local checkout can match a registered project
+        // (mirrors `try_inproject_spawn`'s own detection).
+        if let Some(origin_url) = super::inproject::get_origin_url(local_path)
+            && let Some(gh) = trusty_common::github_path::parse_github_path(&origin_url)
+        {
+            let registry = state.project_registry().await;
+            if !worktree_enabled_for_origin(&registry, &origin_url).await {
+                info!(
+                    id = %session_id,
+                    path = %local_path.display(),
+                    "spawn_managed: project has worktree isolation disabled (#3455); \
+                     launching directly in the main checkout"
+                );
+                // Same reconnect pre-flight the worktree branch runs below
+                // (#1707 + `force_new` opt-out, #2450): a live session for
+                // this repo reconnects instead of spawning a duplicate.
+                {
+                    let mgr = state.session_manager().await;
+                    let existing = mgr.list().await;
+                    let source_id = format!("{}/{}", gh.owner, gh.repo);
+                    if let Some(live) = reconnect_candidate(
+                        params.force_new,
+                        &existing,
+                        &source_id,
+                        &*mgr.tmux_driver(),
+                    ) {
+                        info!(
+                            id = %live.id,
+                            source_id = %source_id,
+                            "spawn_managed (launch-on-main): reconnecting to existing live session"
+                        );
+                        return Ok(live);
+                    }
+                }
+                return spawn_managed_on_main(
+                    state,
+                    &session_id,
+                    &params,
+                    runtime,
+                    local_path,
+                    &gh.owner,
+                    &gh.repo,
+                )
+                .await;
+            }
+        }
+
         match try_inproject_spawn(local_path) {
             Ok(Some((base, owner, repo))) => {
                 // Reconnect pre-flight (#1707), HOISTED AHEAD of worktree
@@ -1057,6 +1139,178 @@ fn prepare_inproject_session(
             );
         }
     }
+}
+
+/// Spawn a managed session directly in the project's main checkout, with NO
+/// per-session git worktree (#3455 "launch on main" opt-out).
+///
+/// Why: some projects have a direct-main workflow (no PR flow, no isolation
+/// requirement) where the standard per-session worktree is pure friction — a
+/// worktree sitting unused at a stale commit, a cwd the agent must `cd` out
+/// of on every command, and a stale-state misdiagnosis risk (issue #3455).
+/// `spawn_managed_routed` calls this INSTEAD of the worktree-provisioning
+/// branch when the matched registered project has `worktree ==
+/// Some(false)`. Otherwise this is a normal managed session in every other
+/// respect — agents/skills deployed, project hooks written, tracked in the
+/// session manager, front-gated, reconnectable — it just never clones a base
+/// checkout or adds a worktree; the session's cwd/workspace IS `local_path`.
+/// What: (1) logs (never refuses) when a second Active session already
+/// targets this EXACT `local_path` — the caller only reaches this function
+/// after its own reconnect check found no live session for the repo, so this
+/// can only fire when `force_new` deliberately bypassed that check; running
+/// two sessions against ONE main checkout is not isolated the way two
+/// worktrees are (uncommitted-change races, concurrent git operations), so
+/// this is the collision caveat #3455 asks to surface; (2) resolves the
+/// semantic tmux name via `SessionManager::resolve_session_name` with no
+/// worktree-collision predicate (there is no worktree to collide with); (3)
+/// writes `TASK.md`; (4) runs `prepare_inproject_session` directly against
+/// `local_path` (mirrors `spawn_managed_inproject`'s #1913 fix — no clone
+/// step wraps this path either); (5) creates the session record with
+/// `workspace_owned = false` — the operator's own checkout must NEVER be
+/// auto-deleted by decommission (verified safe: `decommission_with_root`
+/// only ever removes a `workspace_owned = false` path when
+/// `is_session_worktree` recognises it as living under `.worktrees/`, which
+/// `local_path` never does); (6) sets `source_id`; (7) front gates; (8)
+/// marks `Active`; (9) spawns the runtime.
+/// Test: `spawn_managed_on_main_creates_record_without_worktree`,
+/// `spawn_managed_on_main_warns_on_concurrent_main_checkout_session` in this
+/// module's `tests` submodule.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_managed_on_main(
+    state: &Arc<DaemonState>,
+    session_id: &ManagedSessionId,
+    params: &SpawnParams,
+    runtime: RuntimeKind,
+    local_path: &std::path::Path,
+    owner: &str,
+    repo: &str,
+) -> Result<SessionRecord, String> {
+    use crate::core::provisioning_stage::{ProvisioningStage, emit};
+    use crate::session_manager::ManagedSessionState;
+
+    let mgr = state.session_manager().await;
+
+    // #3455 collision caveat: warn (never refuse) when a second Active
+    // session is already running against this EXACT main checkout — the
+    // caller's reconnect check already ruled out "same repo, some live
+    // session"; reaching here with a collision means `force_new` explicitly
+    // asked for a second session on the identical directory.
+    {
+        let existing = mgr.list().await;
+        if existing
+            .iter()
+            .any(|r| r.state == ManagedSessionState::Active && r.cwd == local_path)
+        {
+            warn!(
+                path = %local_path.display(),
+                "spawn_managed (launch-on-main): a second Active session is launching in \
+                 the SAME main checkout (#3455) — there is no worktree isolating them; \
+                 concurrent git operations or uncommitted-change races are possible"
+            );
+        }
+    }
+
+    let reserved_name = mgr
+        .resolve_session_name(params.name_hint.as_deref(), Some(repo), local_path, |_| {
+            false
+        })
+        .await
+        .map_err(|e| format!("name resolution failed for session {session_id}: {e}"))?;
+
+    write_task_md(local_path, &params.task, session_id);
+
+    let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(local_path);
+    prepare_inproject_session(&fw, session_id, local_path, &synthetic_repo_url);
+
+    emit(ProvisioningStage::CreatingTmuxSession);
+    let record = mgr
+        .create_with_reserved_name(
+            *session_id,
+            reserved_name,
+            params.task.clone(),
+            Some(local_path.to_path_buf()),
+            Some(local_path.to_path_buf()),
+            Some(synthetic_repo_url),
+            None,
+            runtime,
+            params.ephemeral.unwrap_or(false),
+            false, // workspace_owned: the operator's own main checkout, never auto-deletable
+        )
+        .await
+        .map_err(|e| {
+            warn!(id = %session_id, "spawn_managed (launch-on-main): create failed: {e}");
+            e.to_string()
+        })?;
+
+    let source_id = format!("{owner}/{repo}");
+    if let Err(e) = mgr.set_source_id(session_id, &source_id).await {
+        warn!(id = %session_id, "spawn_managed (launch-on-main): set_source_id failed: {e}");
+    }
+
+    if let Some(record) =
+        front_gate_or_escalate(&mgr, &record, &params.repo_url, &params.task).await?
+    {
+        return Ok(record);
+    }
+
+    if let Err(e) = mgr
+        .set_workspace(
+            session_id,
+            local_path.to_path_buf(),
+            ManagedSessionState::Active,
+        )
+        .await
+    {
+        warn!(id = %session_id, "spawn_managed (launch-on-main): set_workspace failed: {e}");
+    }
+
+    if let Err(reason) =
+        ensure_deployment_complete(&fw, local_path, record.repo_url.as_deref(), session_id)
+    {
+        warn!(
+            id = %session_id,
+            "spawn_managed (launch-on-main): deployment incomplete after auto-repair \
+             (non-blocking, launch proceeds): {reason}"
+        );
+    }
+
+    crate::core::session_launch::spawn_workstream_label_ensure(
+        record.repo_url.clone(),
+        local_path.to_path_buf(),
+        record.tmux_name.clone(),
+    );
+
+    emit(ProvisioningStage::LaunchingRuntime);
+    let tmux_arc = mgr.tmux_driver();
+    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc);
+    let gh_env = resolve_gh_env(state, local_path).await;
+    if let Err(e) = adapter.spawn(
+        &record.tmux_name,
+        local_path,
+        &params.task,
+        &record.id.to_string(),
+        &gh_env,
+    ) {
+        warn!(
+            id = %record.id,
+            name = %record.tmux_name,
+            "spawn_managed (launch-on-main): runtime adapter spawn failed: {e}"
+        );
+        let _ = mgr
+            .mark_errored(&record.id, &format!("spawn failed: {e}"))
+            .await;
+    } else {
+        info!(
+            id = %record.id,
+            name = %record.tmux_name,
+            path = %local_path.display(),
+            "managed session spawned successfully (launch-on-main, no worktree)"
+        );
+    }
+
+    emit(ProvisioningStage::Complete);
+    Ok(mgr.get(&record.id).await.unwrap_or(record))
 }
 
 /// Spawn a managed session rooted at a local directory, redirecting to a managed

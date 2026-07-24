@@ -83,6 +83,10 @@ pub(crate) async fn register(
         stack_hint: input.stack_hint,
         gh_user: input.gh_user,
         gh_account: input.gh_account,
+        // #3455: not a `register`-time flag — set via `tm projects config
+        // <name> set worktree true|false` instead (mirrors how the other
+        // configurator-only fields have no `register` flag either).
+        worktree: None,
     };
     let project = daemon(client, url).registry_register_project(&args).await?;
     println!(
@@ -222,6 +226,22 @@ pub(crate) async fn config(
 ) -> anyhow::Result<()> {
     match action {
         None => config_view(client, url, name, json).await,
+        Some(ConfigAction::Set {
+            field: crate::cli::SettableConfigField::Worktree,
+            value,
+        }) => {
+            // #3455: `worktree` is the one settable field with a non-string
+            // (bool) wire type; validate client-side so the daemon always
+            // receives exactly "true"/"false" — never free text.
+            let normalized = normalize_bool_flag(&value)?;
+            config_apply(
+                client,
+                url,
+                name,
+                ConfigEdit::Set(project_config::ConfigField::Worktree, normalized),
+            )
+            .await
+        }
         Some(ConfigAction::Set { field, value }) => {
             config_apply(client, url, name, ConfigEdit::Set(field.into(), value)).await
         }
@@ -308,8 +328,36 @@ fn render_config_view(p: &Project) -> String {
             "  gh_account: {}",
             p.gh_account.as_deref().unwrap_or("(unset)")
         ),
+        format!(
+            "  worktree: {}",
+            if p.worktree_enabled() {
+                "true (isolated per-session worktree)"
+            } else {
+                "false (launch on main — #3455)"
+            }
+        ),
     ];
     lines.join("\n")
+}
+
+/// Validate a `tm projects config <name> set worktree <value>` value (#3455).
+///
+/// Why: `worktree` is the one settable field with a `bool` wire type, not a
+/// `String` — reject anything but `true`/`false` HERE, client-side, so the
+/// daemon's `ConfigEdit::Set(ConfigField::Worktree, _)` handling can safely
+/// assume the string is always one of the two literals rather than doing its
+/// own silent best-effort parse.
+/// What: case-insensitively accepts `"true"`/`"false"`, returning the
+/// canonical lowercase form; any other input is an `anyhow::Error` naming the
+/// rejected value.
+/// Test: `normalize_bool_flag_accepts_true_false_case_insensitive`,
+/// `normalize_bool_flag_rejects_other_values`.
+fn normalize_bool_flag(value: &str) -> anyhow::Result<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok("true".to_string()),
+        "false" => Ok("false".to_string()),
+        other => anyhow::bail!("worktree: expected 'true' or 'false', got {other:?}"),
+    }
 }
 
 /// Render one project as a compact `name  repo_url  (branch)` line.
@@ -378,6 +426,7 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         }
     }
 
@@ -387,6 +436,34 @@ mod tests {
         assert!(line.contains("widget"));
         assert!(line.contains("https://github.com/acme/widget"));
         assert!(line.contains("main"));
+    }
+
+    #[test]
+    fn normalize_bool_flag_accepts_true_false_case_insensitive() {
+        assert_eq!(normalize_bool_flag("true").unwrap(), "true");
+        assert_eq!(normalize_bool_flag("FALSE").unwrap(), "false");
+        assert_eq!(normalize_bool_flag("  True  ").unwrap(), "true");
+    }
+
+    #[test]
+    fn normalize_bool_flag_rejects_other_values() {
+        assert!(normalize_bool_flag("yes").is_err());
+        assert!(normalize_bool_flag("1").is_err());
+        assert!(normalize_bool_flag("").is_err());
+    }
+
+    #[test]
+    fn render_config_view_shows_worktree_status() {
+        let mut p = project();
+        assert!(
+            render_config_view(&p).contains("worktree: true"),
+            "default (unset) worktree must render as the true/isolated default"
+        );
+        p.worktree = Some(false);
+        assert!(
+            render_config_view(&p).contains("worktree: false"),
+            "an explicit opt-out must render as false"
+        );
     }
 
     #[test]

@@ -138,6 +138,44 @@ pub struct Project {
     /// Test: `project_serde_round_trip`, `project_without_optionals`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_email: Option<String>,
+
+    /// Whether managed sessions for this project provision an isolated
+    /// per-session git worktree (#3455 — "launch on main" opt-out).
+    ///
+    /// Why: `tm` unconditionally provisions a `.worktrees/<session>` git
+    /// worktree on a `session/<name>` branch for every managed session,
+    /// which is exactly wrong for a project with a direct-main workflow (no
+    /// PR flow, no isolation requirement) — the worktree sits unused at a
+    /// stale commit, the session's cwd points away from the real checkout,
+    /// and agents must `cd` out of it on every command.
+    /// What: `None`/`Some(true)` → default, no regression: every session
+    /// gets its own worktree exactly as before. `Some(false)` → the matched
+    /// project's managed sessions run directly in the resolved local
+    /// checkout instead — no clone, no worktree, no dedicated branch. See
+    /// [`Self::worktree_enabled`] for the resolved-default accessor and
+    /// `daemon::managed_routes::lifecycle::spawn_managed_on_main` for the
+    /// runtime effect. **Caveat**: unlike a worktree, the live checkout is
+    /// NOT isolated — running more than one session against it concurrently
+    /// is a real hazard (uncommitted-change races, concurrent git
+    /// operations); the spawn path warns (never refuses) when a second
+    /// Active session targets the same checkout.
+    /// Test: `project_serde_round_trip`, `project_without_optionals`,
+    /// `worktree_enabled_defaults_true`, `worktree_enabled_honors_false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
+}
+
+impl Project {
+    /// Resolve this project's effective worktree-isolation setting (#3455).
+    ///
+    /// Why: the single place callers ask "should THIS project's sessions get
+    /// a per-session worktree?" so the `None` → `true` default (no
+    /// regression) is asserted in exactly one spot.
+    /// What: `self.worktree.unwrap_or(true)`.
+    /// Test: `worktree_enabled_defaults_true`, `worktree_enabled_honors_false`.
+    pub fn worktree_enabled(&self) -> bool {
+        self.worktree.unwrap_or(true)
+    }
 }
 
 /// Compare two repository URLs for identity, tolerating scheme/`.git`/
@@ -239,6 +277,7 @@ mod tests {
             }),
             commit_name: Some("Bob".into()),
             commit_email: Some("bob@example.com".into()),
+            worktree: Some(false),
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(json.contains("gh_user"), "json: {json}");
@@ -246,6 +285,7 @@ mod tests {
         assert!(json.contains("github"), "json: {json}");
         assert!(json.contains("commit_name"), "json: {json}");
         assert!(json.contains("commit_email"), "json: {json}");
+        assert!(json.contains("worktree"), "json: {json}");
         let back: Project = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(p, back);
     }
@@ -265,11 +305,16 @@ mod tests {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(
             !json.contains("stack_hint"),
             "absent optional must not serialise: {json}"
+        );
+        assert!(
+            !json.contains("worktree"),
+            "absent worktree must not serialise: {json}"
         );
         assert!(
             !json.contains("gh_user"),
@@ -391,5 +436,37 @@ mod tests {
     fn derive_name_from_url_no_path() {
         // A bare host with no path segment has no valid name.
         assert_eq!(derive_name_from_url("https://github.com/"), None);
+    }
+
+    fn minimal_project() -> Project {
+        Project {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+        }
+    }
+
+    /// Why (#3455): a project that has never set `worktree` must keep the
+    /// pre-#3455 behaviour — every session gets its own worktree.
+    #[test]
+    fn worktree_enabled_defaults_true() {
+        assert!(minimal_project().worktree_enabled());
+    }
+
+    /// Why (#3455): `worktree: Some(false)` is the "launch on main" opt-out.
+    #[test]
+    fn worktree_enabled_honors_false() {
+        let mut p = minimal_project();
+        p.worktree = Some(false);
+        assert!(!p.worktree_enabled());
     }
 }

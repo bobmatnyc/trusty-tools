@@ -107,6 +107,10 @@ pub async fn project_register(
         github: existing.as_ref().and_then(|p| p.github.clone()),
         commit_name: existing.as_ref().and_then(|p| p.commit_name.clone()),
         commit_email: existing.as_ref().and_then(|p| p.commit_email.clone()),
+        // #3455: no param for this tool (set via `tm projects config` /
+        // `config_write` instead) — preserve any existing value rather than
+        // silently resetting it back to worktree-ON.
+        worktree: existing.as_ref().and_then(|p| p.worktree),
     };
     registry
         .register(project.clone())

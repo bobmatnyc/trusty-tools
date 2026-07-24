@@ -2041,6 +2041,7 @@ async fn fleet_route_marks_dead_session_unresumable() {
             github: None,
             commit_name: None,
             commit_email: None,
+            worktree: None,
         })
         .await
         .expect("register project");
