@@ -180,9 +180,24 @@ impl ContextManager {
         }
 
         // Strategy 2: evict oldest OLD messages (never header, never recency).
+        // Pairing-aware: when the front message is an assistant `tool_calls`
+        // message, evict its paired `tool` results in the SAME step so we never
+        // leave an orphaned `tool_call_id` (which providers reject). Groups are
+        // whole within the OLD region because the recency boundary is
+        // pairing-atomic (see `clamp_recency_to_pairings`).
         while header_tokens + sum(&old) + recent_tokens_full > budget && !old.is_empty() {
-            old.remove(0);
+            let front = old.remove(0);
             evicted += 1;
+            if let Some(ids) = assistant_tool_call_ids(&front) {
+                while old
+                    .first()
+                    .and_then(tool_result_call_id)
+                    .is_some_and(|id| ids.iter().any(|d| d == id))
+                {
+                    old.remove(0);
+                    evicted += 1;
+                }
+            }
         }
         if header_tokens + sum(&old) + recent_tokens_full <= budget {
             return (
@@ -226,8 +241,7 @@ fn reassemble(
     out
 }
 
-/// Index at which the live-turn "recency window" begins — the last `user`
-/// message at or after `protected_count`.
+/// Index at which the live-turn "recency window" begins.
 ///
 /// Why: The current turn (the question the model must answer, plus every
 /// assistant/tool message produced since) begins at the most recent user
@@ -236,17 +250,90 @@ fn reassemble(
 /// when the oversized message is a tool result later in the same turn (#3776).
 /// What: Scans backward for the last `role == "user"` message; falls back to the
 /// last `RECENCY_FALLBACK` messages when none is present (e.g. a tools-only
-/// continuation). Always `>= protected_count` and `<= len`.
-/// Test: Exercised via `trim_truncates_single_oversized_message` (question is the
-/// recency start) and `trim_preserves_newest_turn_in_uniform_history`.
+/// continuation). The raw boundary is then made **pairing-atomic** via
+/// [`clamp_recency_to_pairings`] so it never splits an assistant `tool_calls`
+/// group from its `tool` results — otherwise Strategy 2 could evict the
+/// assistant while a paired result survives in the window, producing an orphaned
+/// `tool_call_id` that OpenAI/OpenRouter reject outright (code-critic HIGH).
+/// Always `>= protected_count` and `<= len`.
+/// Test: `trim_truncates_single_oversized_message`,
+/// `trim_preserves_newest_turn_in_uniform_history`,
+/// `trim_keeps_tool_call_pairing_atomic_without_user_message`.
 fn recency_window_start(messages: &[serde_json::Value], protected_count: usize) -> usize {
     let len = messages.len();
-    for i in (protected_count..len).rev() {
-        if messages[i].get("role").and_then(|r| r.as_str()) == Some("user") {
-            return i;
+    let base = (protected_count..len)
+        .rev()
+        .find(|&i| messages[i].get("role").and_then(|r| r.as_str()) == Some("user"))
+        .unwrap_or_else(|| len.saturating_sub(RECENCY_FALLBACK).max(protected_count));
+    clamp_recency_to_pairings(messages, base, protected_count)
+}
+
+/// Extract the `tool_call_id`s an assistant message declares (its `tool_calls`
+/// array), or `None` when the message is not an assistant tool-call message.
+fn assistant_tool_call_ids(message: &serde_json::Value) -> Option<Vec<String>> {
+    if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+        return None;
+    }
+    let calls = message.get("tool_calls").and_then(|v| v.as_array())?;
+    let ids: Vec<String> = calls
+        .iter()
+        .filter_map(|c| c.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// The `tool_call_id` a `tool` message answers, or `None` for other roles.
+fn tool_result_call_id(message: &serde_json::Value) -> Option<&str> {
+    if message.get("role").and_then(|r| r.as_str()) != Some("tool") {
+        return None;
+    }
+    message.get("tool_call_id").and_then(|v| v.as_str())
+}
+
+/// Move `start` earlier until the window `[start, len)` never contains a `tool`
+/// result whose declaring assistant message sits *before* `start`.
+///
+/// Why: A `tool` message is only valid alongside the assistant `tool_calls`
+/// message that declared its id. If the recency boundary split such a group, the
+/// eviction fallback (Strategy 2) would drop the assistant from the OLD region
+/// while the result stayed in the window — an orphaned `tool_call_id` the
+/// provider rejects. Pulling the boundary back to the earliest referenced
+/// assistant keeps every group whole inside one region.
+/// What: Builds a `tool_call_id → declaring-assistant-index` map (one forward
+/// scan), then expands the window leftward to a fixed point. Applied to BOTH the
+/// user-anchored and fallback boundaries — cheap and future-proof.
+/// Test: `trim_keeps_tool_call_pairing_atomic_without_user_message`.
+fn clamp_recency_to_pairings(
+    messages: &[serde_json::Value],
+    mut start: usize,
+    protected_count: usize,
+) -> usize {
+    let mut declarer: HashMap<String, usize> = HashMap::new();
+    for (i, m) in messages.iter().enumerate() {
+        if let Some(ids) = assistant_tool_call_ids(m) {
+            for id in ids {
+                declarer.entry(id).or_insert(i);
+            }
         }
     }
-    len.saturating_sub(RECENCY_FALLBACK).max(protected_count)
+    if declarer.is_empty() {
+        return start;
+    }
+    loop {
+        let mut earliest = start;
+        for m in &messages[start..] {
+            if let Some(id) = tool_result_call_id(m)
+                && let Some(&d) = declarer.get(id)
+                && d < earliest
+            {
+                earliest = d;
+            }
+        }
+        if earliest >= start {
+            return start;
+        }
+        start = earliest.max(protected_count);
+    }
 }
 
 /// Largest per-message token cap `C` such that capping every entry of
@@ -391,6 +478,130 @@ mod tests {
         // Protected system message must survive at the front.
         assert_eq!(out[0]["role"], "system");
         assert!(out.len() < 121, "history must shrink");
+    }
+
+    /// Assert every `tool` message is paired with an assistant `tool_calls`
+    /// entry that declares its id — i.e. no orphaned `tool_call_id` that a
+    /// provider would reject.
+    fn assert_no_orphans(msgs: &[serde_json::Value]) {
+        use std::collections::HashSet;
+        let declared: HashSet<&str> = msgs
+            .iter()
+            .filter_map(|m| m.get("tool_calls").and_then(|v| v.as_array()))
+            .flatten()
+            .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
+            .collect();
+        for m in msgs {
+            if m.get("role").and_then(|r| r.as_str()) == Some("tool") {
+                let id = m.get("tool_call_id").and_then(|v| v.as_str()).unwrap();
+                assert!(
+                    declared.contains(id),
+                    "orphaned tool result {id}: no surviving assistant tool_calls declares it"
+                );
+            }
+        }
+    }
+
+    /// Why: THE code-critic HIGH. A tools-only continuation (NO user message)
+    /// with a multi-tool-call turn: `assistant(tool_calls=[c1,c2,c3])` +
+    /// `tool(c1)` + `tool(c2)`(huge) + `tool(c3)`(huge). The `RECENCY_FALLBACK`
+    /// window would split the group (2 old / 2 recent); evicting the OLD region
+    /// then drops the assistant while `tool(c2)`/`tool(c3)` survive — orphaned
+    /// `tool_call_id`s the provider rejects. The pairing-atomic boundary must
+    /// pull the whole group into the recency window so it truncates rather than
+    /// evicts.
+    /// What: Assert no message is evicted, the huge results are truncated, and
+    /// no tool result is orphaned.
+    /// Test: This test.
+    #[test]
+    fn trim_keeps_tool_call_pairing_atomic_without_user_message() {
+        let mgr = ContextManager::new(0.5); // sonnet: budget = 100k tokens
+        let huge = "grep hit path/to/file.rs:42\n".repeat(300_000); // ~8 MB each
+        let msgs = vec![
+            json!({"role":"system","content":"You are izzie."}),
+            json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":"c1","type":"function","function":{"name":"grep","arguments":"{}"}},
+                {"id":"c2","type":"function","function":{"name":"grep","arguments":"{}"}},
+                {"id":"c3","type":"function","function":{"name":"grep","arguments":"{}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"c1","content":"small first result"}),
+            json!({"role":"tool","tool_call_id":"c2","content": huge.clone()}),
+            json!({"role":"tool","tool_call_id":"c3","content": huge}),
+        ];
+        let (out, outcome) = mgr.trim_to_budget(msgs, "anthropic/claude-sonnet-4-6", 1);
+
+        assert_eq!(
+            outcome.evicted, 0,
+            "must not evict — would orphan tool results"
+        );
+        assert!(outcome.truncated >= 2, "the two huge results must truncate");
+        assert_no_orphans(&out);
+        // The declaring assistant and all three results survive.
+        assert!(
+            out.iter().any(|m| m.get("tool_calls").is_some()),
+            "assistant tool_calls group must survive"
+        );
+        for id in ["c1", "c2", "c3"] {
+            assert!(
+                out.iter().any(|m| m["tool_call_id"] == id),
+                "result {id} must survive"
+            );
+        }
+        let total: u32 = out.iter().map(estimate_tokens).sum();
+        let budget = (context_window("anthropic/claude-sonnet-4-6") as f32 * 0.5) as u32;
+        assert!(
+            total <= budget,
+            "trimmed total {total} must fit budget {budget}"
+        );
+    }
+
+    /// Why: Strategy 2 eviction must itself be pairing-atomic. An OLD assistant
+    /// tool-call with a huge NON-STRING content-block array is large (so
+    /// evicting it alone fits the budget) yet non-truncatable (truncation only
+    /// shortens string content); evicting it without its (small) result would
+    /// orphan that result. The atomic-group eviction must take the result with
+    /// it — otherwise a naive oldest-first loop stops after the big assistant
+    /// and strands `tool(old1)`.
+    /// What: system + huge-content-array assistant(old1) + tiny tool(old1) [OLD]
+    /// + user + assistant(c1) + tiny tool(c1) [live]. Assert the whole old group
+    /// is evicted together, the live turn survives, and nothing is orphaned.
+    /// Test: This test.
+    #[test]
+    fn trim_evicts_tool_call_group_atomically_no_orphan() {
+        let mgr = ContextManager::new(0.5); // sonnet: budget = 100k tokens
+        // ~150k-token, non-truncatable (array content, not a plain string).
+        let huge_text = "a".repeat(600_000);
+        let msgs = vec![
+            json!({"role":"system","content":"sys"}),
+            json!({"role":"assistant","content":[{"type":"text","text": huge_text}],"tool_calls":[
+                {"id":"old1","type":"function","function":{"name":"grep","arguments":"{}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"old1","content":"tiny old result"}),
+            json!({"role":"user","content":"the live question"}),
+            json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":"c1","type":"function","function":{"name":"grep","arguments":"{}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"c1","content":"tiny live result"}),
+        ];
+        let (out, outcome) = mgr.trim_to_budget(msgs, "anthropic/claude-sonnet-4-6", 1);
+
+        assert!(outcome.evicted >= 2, "the whole old group must be evicted");
+        assert_no_orphans(&out);
+        // Old group (assistant + result) both gone — no half-evicted pairing.
+        assert!(
+            !out.iter().any(|m| m["tool_call_id"] == "old1"),
+            "old result must be evicted with its assistant"
+        );
+        assert!(
+            !out.iter().any(|m| m
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| a.iter().any(|c| c["id"] == "old1"))),
+            "old assistant tool-call must be evicted"
+        );
+        // The live turn survives intact.
+        assert!(out.iter().any(|m| m["content"] == "the live question"));
+        assert_eq!(out[out.len() - 1]["tool_call_id"], "c1");
     }
 
     /// Why: The real demo path — the model calls an MCP tool (`grep`) SEVERAL

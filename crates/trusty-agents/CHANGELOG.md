@@ -33,10 +33,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the recency window); (3) as a last resort — when the oversized message is
   itself inside the live turn (the MCP shape) — truncate within the recency
   window so the question and every assistant/tool pairing survive rather than
-  being evicted. This preserves TWO guarantees at once: the live conversation
-  never collapses, and — restoring what oldest-first eviction implicitly gave —
-  the **newest turn keeps full fidelity** whenever the budget allows (a
-  uniformly-sized long conversation no longer shrinks its most recent message).
+  being evicted. This preserves THREE guarantees at once: the live conversation
+  never collapses; the **newest turn keeps full fidelity** whenever the budget
+  allows (restoring what oldest-first eviction implicitly gave — a
+  uniformly-sized long conversation no longer shrinks its most recent message);
+  and **no assistant `tool_calls` message is ever separated from its `tool`
+  results** — the recency boundary is pairing-atomic (it can't split a
+  multi-tool-call group even in a tools-only continuation with no user message)
+  and Strategy 2 evicts tool-call groups atomically, so the request never
+  carries an orphaned `tool_call_id` that OpenAI/OpenRouter would reject.
   Truncation is logged distinctly from eviction so it never masquerades as the
   catastrophic path.
 - **Chat stream renders inside ONE stable assistant bubble — no mid-stream
