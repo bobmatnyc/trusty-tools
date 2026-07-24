@@ -295,14 +295,23 @@ pub(super) async fn handle_message(
     // the Events pane sees every message in a paired channel — known RBAC
     // user or not — exactly like a Gmail poll event. The dispatch/reply path
     // beneath this is completely unchanged; see `record_listener_event`'s
-    // doc comment for the append-then-filter contract it mirrors.
-    match msg_ts.as_deref() {
+    // doc comment for the append-then-filter contract it mirrors. Detached
+    // via `tokio::spawn` — exactly like the `relay_event` mirror below —
+    // with owned args, so a slow disk (the store append) never delays the
+    // Slack reply itself.
+    match msg_ts {
         Some(ts) => {
             let from_display = rbac
                 .user(&user_id)
                 .map(|u| u.name.clone())
                 .unwrap_or_else(|| user_id.clone());
-            record_listener_event(&channel, ts, &channel_type, &from_display, &text).await;
+            tokio::spawn(record_listener_event(
+                channel.clone(),
+                ts,
+                channel_type.clone(),
+                from_display,
+                text.clone(),
+            ));
         }
         None => {
             warn!(channel = %channel, "slack: message event missing ts; skipping eventstream mirror");
@@ -423,28 +432,35 @@ pub(super) async fn handle_message(
 /// ADDITIONALLY makes the message visible to the Events pane / filterable
 /// eventstream (`GET /api/listener-events`), mirroring EXACTLY the
 /// append-then-filter order `listeners::poll::poll_once` uses for Gmail:
-/// append the event unconditionally (durable regardless of filter state),
+/// append the event (best-effort — a failure is logged, NOT fatal to the
+/// rest of this function, matching `poll_once`'s own log-and-continue
+/// posture at `listeners/poll.rs:326-331` rather than early-returning),
 /// THEN consult `EventStore::is_event_type_included` for the CURRENT filter
 /// state, THEN publish `Event::ListenerEventReceived` carrying that
-/// `included` flag. Deliberately does NOT call `listeners::wake` — direct
-/// dispatch already answers the message; waking a bound agent here too would
-/// make it reply twice (see the #3852 ADR for the fork rationale).
-/// What: `listener_id` is the fixed `SLACK_LISTENER_ID` (no per-workspace
-/// `ListenerConfig` exists for the Socket-Mode gateway the way Gmail has one
-/// per mailbox); `event_type` is `"message.{channel_type}"` (e.g.
-/// `message.im`, `message.mpim`); `id` is `"slack:{channel}:{ts}"` — stable
-/// and idempotent per Slack message, mirroring Gmail's
-/// `"{listener_id}:{message_id}"`. A store-append failure is logged and
-/// swallowed (best-effort telemetry, same posture as `super::relay`) —
-/// it must never affect the conversational reply path.
+/// `included` flag REGARDLESS of whether the append succeeded — a
+/// persistence hiccup must not also blind the LIVE Events pane, which reads
+/// the SSE mirror, not the on-disk log. Deliberately does NOT call
+/// `listeners::wake` — direct dispatch already answers the message; waking a
+/// bound agent here too would make it reply twice (see the #3852 ADR for the
+/// fork rationale).
+/// What: Takes owned `String`s (not `&str`) so callers can `tokio::spawn`
+/// this directly — see the call site in `handle_message`, which detaches it
+/// exactly like the sibling `relay_event` spawn so a slow disk append never
+/// delays the Slack reply. `listener_id` is the fixed `SLACK_LISTENER_ID`
+/// (no per-workspace `ListenerConfig` exists for the Socket-Mode gateway the
+/// way Gmail has one per mailbox); `event_type` is `"message.{channel_type}"`
+/// (e.g. `message.im`, `message.mpim`); `id` is `"slack:{channel}:{ts}"` —
+/// stable and idempotent per Slack message, mirroring Gmail's
+/// `"{listener_id}:{message_id}"`.
 /// Test: `slack_listener_event_appends_and_respects_filter`,
-/// `slack_listener_event_excluded_type_still_appended`.
+/// `slack_listener_event_excluded_type_still_appended`,
+/// `slack_listener_event_publishes_even_when_append_fails`.
 pub(super) async fn record_listener_event(
-    channel: &str,
-    ts: &str,
-    channel_type: &str,
-    from_display: &str,
-    text: &str,
+    channel: String,
+    ts: String,
+    channel_type: String,
+    from_display: String,
+    text: String,
 ) {
     let event_type = format!("message.{channel_type}");
     let event = StoredEvent {
@@ -453,21 +469,28 @@ pub(super) async fn record_listener_event(
         provider: "slack".to_string(),
         event_type: event_type.clone(),
         ts: chrono::Utc::now().to_rfc3339(),
-        from: Some(from_display.to_string()),
+        from: Some(from_display),
         subject: None,
-        snippet: Some(truncated_snippet(text)),
+        snippet: Some(truncated_snippet(&text)),
         included: true,
     };
     if let Err(e) = EventStore::append(&event).await {
-        warn!(channel = %channel, error = %e, "slack: failed to persist listener event (non-fatal)");
-        return;
+        warn!(
+            channel = %channel,
+            error = %e,
+            "slack: failed to persist listener event (non-fatal); still publishing SSE mirror"
+        );
+        // Fall through, deliberately — see the doc comment above and
+        // `listeners::poll::poll_once`, which does the same on an append
+        // error: a persistence failure must not also suppress the live SSE
+        // mirror the Events pane reads from.
     }
     let included = EventStore::is_event_type_included(&event_type).await;
     crate::events::publish(crate::events::Event::ListenerEventReceived {
         listener_id: event.listener_id.clone(),
         provider: event.provider.clone(),
         event_type: event.event_type.clone(),
-        summary: format!("{channel}: {}", truncated_snippet(text)),
+        summary: format!("{channel}: {}", truncated_snippet(&text)),
         included,
     });
 }
