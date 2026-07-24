@@ -101,6 +101,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
         plugins: crate::agents::AgentPluginsConfig::default(),
         rbac: crate::agents::RbacConfig::default(),
         adapter: Arc::new(crate::llm::adapter::GenericAdapter),
+        listeners: Vec::new(),
     }
 }
 

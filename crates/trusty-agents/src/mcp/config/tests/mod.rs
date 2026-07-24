@@ -305,3 +305,52 @@ async fn enable_disable_toggles_flag() {
     assert!(!cfg.enable_service("missing").await.unwrap());
     assert!(!cfg.disable_service("missing").await.unwrap());
 }
+
+// --- [[listeners]] section (#3820, DOC-54 SPEC-AGENTS-06) ---------------
+
+#[tokio::test]
+async fn listeners_section_defaults_empty() {
+    // A `config.toml` with no `[[listeners]]` entries (every file that
+    // predates this field) must still parse, with an empty list.
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = GlobalConfig::from_toml_str("").expect("empty config parses");
+    assert!(cfg.listeners.is_empty());
+}
+
+#[tokio::test]
+async fn listeners_section_round_trips() {
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir();
+    unsafe {
+        std::env::set_var("HOME", &home);
+    }
+    let mut cfg = GlobalConfig::default();
+    cfg.listeners
+        .push(crate::listeners::config::ListenerConfig {
+            name: "gmail-personal".to_string(),
+            connector: "gmail".to_string(),
+            identity: Some("bob-personal".to_string()),
+            transport: "history-poll".to_string(),
+            enabled: false,
+            poll_interval_secs: 180,
+            filter: crate::listeners::config::ListenerFilter {
+                label_ids: vec!["INBOX".to_string()],
+            },
+        });
+    cfg.save().await.expect("save should succeed");
+    let reloaded = GlobalConfig::load().await;
+    assert_eq!(reloaded.listeners.len(), 1);
+    assert_eq!(reloaded.listeners[0].name, "gmail-personal");
+    assert_eq!(
+        reloaded.listeners[0].identity.as_deref(),
+        Some("bob-personal")
+    );
+    assert!(
+        !reloaded.listeners[0].enabled,
+        "round-trips disabled-by-default"
+    );
+    assert_eq!(
+        reloaded.listeners[0].filter.label_ids,
+        vec!["INBOX".to_string()]
+    );
+}

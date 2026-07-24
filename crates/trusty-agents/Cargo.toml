@@ -62,6 +62,15 @@ trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memor
 #      zero-sized service descriptor.
 trusty-memory = { path = "../trusty-memory", version = "0.21.0", default-features = false }
 trusty-search = { path = "../trusty-search", version = "0.39.0" }
+# Gmail/Calendar eventstream listeners (#3820, DOC-54 SPEC-AGENTS-06) call
+# trusty-gworkspace's connector layer (`api::client::BaseClient` +
+# `api::services::gmail::*`) DIRECTLY as library functions — the same code
+# `trusty-gworkspace-mcp`'s tool handlers call, reused here instead of routed
+# through MCP JSON-RPC. Not one of the `publish = false` "agent crate" deps
+# `install_plugins` exists to keep out of this Cargo.toml (see the
+# `trusty-agents-common` comment below) — trusty-gworkspace is a plain
+# connector library, no cargo-cycle concern.
+trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.2.2" }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
 serde = { version = "1", features = ["derive"] }

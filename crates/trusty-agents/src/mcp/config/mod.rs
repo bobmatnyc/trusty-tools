@@ -107,6 +107,20 @@ pub struct GlobalConfig {
     /// `crate::tools::registry::tests::builder_with_no_endpoints_returns_empty`.
     #[serde(default)]
     pub tool_registry: Option<crate::tools::registry::config::ToolRegistryConfig>,
+
+    /// `[[listeners]]` — harness-level eventstream listener definitions
+    /// (#3820, DOC-54 SPEC-AGENTS-06 §7.5), stage-one (ingestion) filter.
+    ///
+    /// Why: Listeners are opt-in, account-specific, and never written by
+    /// this codebase — a listener declared here with `enabled = false`
+    /// (the field's default) is inert until an operator flips it on by hand.
+    /// Defaults to empty so every existing `config.toml` (which predates
+    /// this field) keeps parsing unchanged.
+    /// What: See `crate::listeners::config::ListenerConfig`.
+    /// Test: `listeners_section_defaults_empty`,
+    /// `listeners_section_round_trips`.
+    #[serde(default)]
+    pub listeners: Vec<crate::listeners::config::ListenerConfig>,
 }
 
 impl GlobalConfig {

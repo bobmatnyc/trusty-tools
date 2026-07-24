@@ -87,6 +87,7 @@ pub mod inspection;
 pub mod intent;
 pub mod interaction_log;
 pub mod ipc;
+pub mod listeners;
 pub mod llm;
 pub mod local_inference;
 pub mod logging;

@@ -133,6 +133,7 @@ impl ClaudeMpmAgent {
             plugins: crate::agents::AgentPluginsConfig::default(),
             rbac: crate::agents::RbacConfig::default(),
             adapter,
+            listeners: Vec::new(),
         }
     }
 }

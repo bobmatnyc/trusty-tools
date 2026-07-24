@@ -50,6 +50,28 @@ describe('eventRowFromEvent', () => {
     const row = eventRowFromEvent({ type: 'pm_thinking' } as AppEvent);
     expect(row.summary).toBe('pm_thinking');
   });
+
+  it('classifies a gmail listener_event_received row as source "gmail" (#3820)', () => {
+    const row = eventRowFromEvent({
+      type: 'listener_event_received',
+      listener_id: 'gmail-personal',
+      provider: 'gmail',
+      event_type: 'message.received',
+      summary: 'dad@family.com: Dinner Sunday?',
+      included: true,
+    } as unknown as AppEvent);
+    expect(row.source).toBe('gmail');
+    expect(row.summary).toBe('dad@family.com: Dinner Sunday?');
+  });
+
+  it('falls back to "task" for a listener_event_received row from an unrecognized provider', () => {
+    const row = eventRowFromEvent({
+      type: 'listener_event_received',
+      provider: 'google-calendar',
+      summary: 'Standup at 9am',
+    } as unknown as AppEvent);
+    expect(row.source).toBe('task');
+  });
 });
 
 describe('eventLog store via pushEvent', () => {

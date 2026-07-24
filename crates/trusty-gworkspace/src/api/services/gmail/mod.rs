@@ -7,6 +7,7 @@
 //! Test: Each sub-module has its own tests where applicable.
 
 pub mod compose;
+pub mod history;
 pub mod labels;
 pub mod messages;
 pub mod organize;

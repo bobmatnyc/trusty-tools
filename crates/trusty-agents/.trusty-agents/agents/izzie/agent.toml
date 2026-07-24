@@ -167,3 +167,18 @@ skills = [
     "izzie-metro-north",
     "cto-bob-voice",
 ]
+
+# --- Listeners (#3820, DOC-54 SPEC-AGENTS-04/06) — the third config-triple
+# leg: what Izzie REACTS to, distinct from `[tools]` (how she ACTS). This
+# binding is INERT until a matching `[[listeners]]` entry named
+# "gmail-personal" exists in `~/.trusty-agents/config.toml` AND that
+# listener is `enabled = true` — see the PR body / #3820 for the exact
+# stanza to paste into config.toml to turn this on live. `event_types`
+# narrows to new-mail-only (no other Gmail event types are emitted by this
+# slice yet); `filter.from` is intentionally broad (`*`) for the demo so any
+# inbound mail can wake her — tighten this once real usage patterns emerge
+# (DOC-54's own example narrows to `*@family.com`).
+[[listeners]]
+name = "gmail-personal"
+event_types = ["message.received"]
+filter = { from = ["*"] }

@@ -9,6 +9,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **First real eventstream listener: Gmail history-poll + agent wake (#3820,
+  DOC-54 SPEC-AGENTS-04/06):** the third leg of the agent-config triple
+  (stores / tools / **listeners**) lands with a working Gmail connector.
+  Declarative config: harness-level `[[listeners]]` in `~/.trusty-agents/
+  config.toml` (stage-one ingestion filter, `enabled = false` by default)
+  and per-agent `[[listeners]]` bindings in `agent.toml` (stage-two wake
+  filter — event types, sender globs). New `crate::listeners` module: a
+  Gmail `history.list` polling engine (cursor persistence, dedup, exponential
+  backoff, 410-GONE re-baseline — Pub/Sub-pull is deferred), an append-only
+  JSONL event store under `~/.trusty-agents/events/` with a per-event-type
+  include/exclude filter, and the stage-two wake dispatcher that reuses
+  `run_pm_task_with_persona` (the same entry point `/agent` uses) so a wake
+  reaction lands in the agent's chat history like an ordinary turn —
+  ask-first framing, rate-limited to one wake per poll cycle (enforced by a
+  pure cycle-gate, `listeners::wake::gate_wake`, threaded through
+  `poll_once`'s per-event loop — every event is still durably stored
+  regardless of whether its wake was rate-limited), every decision logged.
+  `poll_interval_secs` is floored at 15s on config load (values below the
+  floor are clamped up with a warning, not silently accepted) since this
+  polls a real personal Gmail account. Cursor persistence
+  (`~/.trusty-agents/events/cursor-<listener>.json`) writes atomically
+  (temp-then-rename) and logs a warning on a malformed cursor read instead
+  of silently re-baselining. New API: `GET /api/listener-events`, `POST
+  /api/listener-events/filter` (named apart from the pre-existing SSE
+  `/api/events` telemetry stream). Listener events also publish onto the
+  existing harness event bus (`Event::ListenerEventReceived`) so the Events
+  pane (#3818) updates live via the same SSE/Tauri bridge; the pane's
+  `gmail` source bucket is now real data, not a concept placeholder. Per-
+  connector event instructions load from `agents/<name>/events/<connector>.md`
+  (#3817) when a listener wakes an agent. Izzie ships with a demo
+  `gmail-personal` binding + `events/gmail.md`; enabling the live listener
+  requires a `~/.trusty-agents/config.toml` stanza (never written by this
+  code) — see the PR body. Deferred: Pub/Sub-pull transport, the Calendar
+  connector, multi-agent fanout beyond the one-wake-per-cycle limit.
+
 - **GUI reshape: WORKSTREAMS-backed "Tasks" sidebar, CHAT/EVENTS nav, and an
   in-pane agent config gear panel (#3819, epic #3052):** replaces the
   `PROJECTS` sidebar section and the `Chat/Projects/Personality` top nav.

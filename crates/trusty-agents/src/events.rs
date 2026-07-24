@@ -306,6 +306,31 @@ pub enum Event {
         identity: String,
     },
 
+    // -- Eventstream listeners (#3820, DOC-54 SPEC-AGENTS-06) --
+    /// Emitted by a listener's polling engine (`crate::listeners::poll`)
+    /// when a new event passes stage-one (listener-level) filtering and is
+    /// durably appended to the event log.
+    ///
+    /// Why: The Events pane (#3818) needs LIVE updates, not just a
+    /// page-load snapshot from `GET /api/listener-events` — mirroring onto
+    /// this existing bus reuses the SSE/Tauri bridge every other real-time
+    /// GUI surface already relies on, instead of the pane needing its own
+    /// polling loop. Carries no `session_id` — like the Slack-mirror
+    /// events, a listener event is not task-scoped.
+    /// What: `listener_id`/`provider`/`event_type` identify the source;
+    /// `summary` is a single glanceable line (from/subject/snippet folded
+    /// into one string so the GUI's generic event-row renderer needs no
+    /// per-provider knowledge); `included` is the event type's current
+    /// filter state at emission time.
+    /// Test: `listener_event_received_round_trips`.
+    ListenerEventReceived {
+        listener_id: String,
+        provider: String,
+        event_type: String,
+        summary: String,
+        included: bool,
+    },
+
     // -- Keepalive --
     Ping,
 }
@@ -343,10 +368,14 @@ impl Event {
             | Event::AgentStarted { session_id, .. }
             | Event::ReportGenerated { session_id, .. }
             | Event::RecapGenerated { session_id, .. } => Some(session_id),
-            // Slack-mirror events are conversation-scoped, not task-scoped:
-            // like `Ping` they carry no `session_id`, so they always pass the
-            // SSE session filter and reach the GUI's app-lifetime EventSource.
-            Event::SlackMessageReceived { .. } | Event::SlackReplySent { .. } | Event::Ping => None,
+            // Slack-mirror and listener events are conversation/harness-scoped,
+            // not task-scoped: like `Ping` they carry no `session_id`, so they
+            // always pass the SSE session filter and reach the GUI's
+            // app-lifetime EventSource.
+            Event::SlackMessageReceived { .. }
+            | Event::SlackReplySent { .. }
+            | Event::ListenerEventReceived { .. }
+            | Event::Ping => None,
         }
     }
 }
@@ -602,6 +631,39 @@ mod tests {
                 assert_eq!(channel, "C0123ABC");
                 assert_eq!(text, "Deploy is green.");
                 assert_eq!(identity, "CTO Bot (as itself)");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn listener_event_received_round_trips() {
+        let ev = Event::ListenerEventReceived {
+            listener_id: "gmail-personal".into(),
+            provider: "gmail".into(),
+            event_type: "message.received".into(),
+            summary: "dad@family.com: Dinner Sunday?".into(),
+            included: true,
+        };
+        let s = serde_json::to_string(&ev).unwrap();
+        assert!(s.contains("\"type\":\"listener_event_received\""), "{s}");
+        assert!(s.contains("\"provider\":\"gmail\""), "{s}");
+        // Listener events must not carry a session_id (always pass the filter).
+        assert_eq!(ev.session_id(), None);
+        let back: Event = serde_json::from_str(&s).unwrap();
+        match back {
+            Event::ListenerEventReceived {
+                listener_id,
+                provider,
+                event_type,
+                summary,
+                included,
+            } => {
+                assert_eq!(listener_id, "gmail-personal");
+                assert_eq!(provider, "gmail");
+                assert_eq!(event_type, "message.received");
+                assert_eq!(summary, "dad@family.com: Dinner Sunday?");
+                assert!(included);
             }
             other => panic!("unexpected event: {other:?}"),
         }

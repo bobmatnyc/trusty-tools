@@ -15,6 +15,15 @@
    * part of the eventstream" without ripping out the plumbing that still
    * feeds it into `eventLog` — see `lib/events.ts`'s doc comment for the
    * full seam description.
+   *
+   * #3820 update: `gmail` is now a REAL listener bucket, not a placeholder —
+   * `crate::listeners::poll`'s Gmail history-poll engine publishes
+   * `listener_event_received` events onto the same bus this view already
+   * reads, so Gmail rows here are live data, not a concept mock. The
+   * "→ wakes Izzie" affordance for `gmail` is likewise real: a wake only
+   * actually fires when izzie's `agent.toml` `[[listeners]]` binding
+   * matches (stage two) — this badge is a simplified always-shown hint, not
+   * a guarantee every gmail row woke her.
    * What: `excludedSources` (not a single selected bucket) drives the
    * include/exclude toggle row; excluded rows render at reduced opacity
    * instead of disappearing. A free-text filter narrows further (applies
@@ -36,6 +45,7 @@
     task: 'Chat / Task',
     slack: 'Slack',
     system: 'System',
+    gmail: 'Gmail',
   };
 
   // #3819 concept affordance: which agent a listener source would wake, if
@@ -46,6 +56,7 @@
   // channel, and system rows are diagnostic).
   const WAKES_AGENT: Partial<Record<EventRow['source'], string>> = {
     slack: 'CTO Assistant',
+    gmail: 'Izzie',
   };
 
   // #3819: chat/task lifecycle events are excluded by default — "chat is a
@@ -76,6 +87,8 @@
     switch (source) {
       case 'slack':
         return 'bg-purple-500/15 text-purple-600 dark:text-purple-400';
+      case 'gmail':
+        return 'bg-red-500/15 text-red-600 dark:text-red-400';
       case 'system':
         return 'bg-foundry-light-border/50 dark:bg-black/30 text-foundry-light-muted dark:text-foundry-text/50';
       default:
@@ -121,9 +134,9 @@
   <div class="flex-1 overflow-y-auto px-2 py-2">
     {#if rows.length === 0}
       <p class="px-2 py-6 text-center text-sm text-foundry-light-muted dark:text-foundry-text/40">
-        No events yet — this fills in as connected listeners (Slack today; Gmail/Calendar once
-        the eventstream connector framework, #3798, lands) send activity. Chat/task turns are a
-        separate channel and are excluded by default.
+        No events yet — this fills in as connected listeners (Slack, Gmail today; Calendar once
+        the eventstream connector framework, #3798, extends to it) send activity. Chat/task turns
+        are a separate channel and are excluded by default.
       </p>
     {:else}
       <table class="w-full border-collapse text-left text-xs">
