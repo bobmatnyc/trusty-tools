@@ -375,6 +375,22 @@ pub(super) async fn health_handler(
         .current_embedderd_pid()
         .and_then(crate::core::memguard::current_rss_mb_for_pid);
     let update_available = state.update_available.lock().ok().and_then(|g| g.clone());
+    // Issue #3748 slice A: `warmboot_summary.warm_boot_degraded` used to be
+    // written once by `record_warm_boot_result` at boot completion and never
+    // touched again — sticky until a daemon restart even after the deferred-
+    // embed catch-up queue (the thing most likely to still be dragging
+    // indexes toward Ready) fully drains. Detect that drain here (edge-
+    // triggered on the queue's completion epoch, polled by whoever is
+    // already calling `/health` — no new background task) and recompute.
+    // See `recompute_warm_boot_degraded` for exactly what does/doesn't heal.
+    let current_defer_embed_epoch = crate::service::reindex::deferred_embed_completion_epoch();
+    let last_seen_defer_embed_epoch = state.last_seen_defer_embed_epoch.swap(
+        current_defer_embed_epoch,
+        std::sync::atomic::Ordering::AcqRel,
+    );
+    if current_defer_embed_epoch != last_seen_defer_embed_epoch {
+        recompute_warm_boot_degraded(&state);
+    }
     // Issue #873: surface the warm-boot summary so a post-`cargo install` FDA
     // regression (`indexes:2` instead of `~102`) is visible without tailing logs.
     // Issue #993: populate `indexes_lazy` live from the cold store so it reflects
@@ -542,6 +558,89 @@ pub(super) async fn health_handler(
         indexes_watcher_network_degraded,
         embedder_bootstrap,
     })
+}
+
+/// Recompute the persisted `warmboot_summary.warm_boot_degraded` flag when
+/// the deferred-embed catch-up queue drains (issue #3748 slice A), instead of
+/// leaving it frozen at whatever `record_warm_boot_result` computed once at
+/// boot completion.
+///
+/// Why: `record_warm_boot_result` (`commands/prior_index_count.rs`) sets
+/// `warm_boot_degraded` from three boot-time facts — `indexes_skipped_tcc`,
+/// `indexes_skipped_timeout`, and a loaded-vs-prior-count drop — then never
+/// touches it again. Two of those three (a TCC-denied volume, a scan
+/// timeout) genuinely CANNOT heal without a daemon restart (the index in
+/// question never loaded at all), so this function deliberately keeps them
+/// as permanent, never-cleared inputs — the explicit instruction is "do not
+/// weaken genuine degraded signaling". What CAN change over the daemon's
+/// lifetime, and previously had NO effect on this flag, is whether any
+/// registered index's stages currently show a `Failed` lane — most notably a
+/// deferred-embed pass that itself failed (issue #928 marks `semantic =
+/// Failed`, not `Ready`). Folding that live signal in here means a genuinely
+/// broken embed pass still counts as degraded (satisfying the same
+/// requirement from the other direction), while a boot that had NO tcc/
+/// timeout/count issue and whose catch-up queue finished cleanly correctly
+/// stops reporting degraded instead of never being reevaluated.
+///
+/// On "flipping earlier" (while the queue is merely tail-blocked by the
+/// final, largest job — every other index already `Ready`): no separate
+/// mechanism is needed. `warm_boot_degraded` was never derived from
+/// `indexes_component_catch_up_in_progress` (an index mid-embed is
+/// `InProgress`, not `Failed`) in the first place — only a genuine failure or
+/// boot-time skip sets it. So the moment the last non-tail index reaches
+/// Ready, this recompute (once it runs) already reports the honest,
+/// non-degraded value; there is no separate "still embedding" penalty to
+/// clear early. This is verified by
+/// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded`.
+///
+/// What: re-derives `warm_boot_degraded` as `degraded_by_tcc ||
+/// degraded_by_timeout || degraded_by_count || any_stage_failed`, where the
+/// first three reuse the ORIGINAL boot-time counters (`indexes_skipped_tcc`,
+/// `indexes_skipped_timeout`, and a fresh `registry.list_handles().len()`
+/// vs. `prior_index_count` comparison — live rather than the frozen
+/// boot-time `total`, since new indexes can register between boot and
+/// drain) and `any_stage_failed` is a live scan for any handle with
+/// `stages.any_failed() == true` (the identical predicate `/health` already
+/// uses for `indexes_corpus_failed`). Persists the result back into
+/// `state.warmboot_summary` (not just a per-request clone) and logs the
+/// old -> new transition.
+/// Test: `warm_boot_degraded_recomputes_to_false_once_catch_up_drains_cleanly`,
+/// `warm_boot_degraded_recompute_keeps_a_genuinely_failed_embed_degraded`,
+/// `recompute_does_not_flag_an_in_progress_tail_job_as_degraded` in
+/// `tests_health_degraded.rs`.
+pub(super) fn recompute_warm_boot_degraded(state: &SearchAppState) {
+    let (degraded_by_tcc, degraded_by_timeout, old) = match state.warmboot_summary.lock() {
+        Ok(summary) => (
+            summary.indexes_skipped_tcc > 0,
+            summary.indexes_skipped_timeout > 0,
+            summary.warm_boot_degraded,
+        ),
+        Err(_) => return,
+    };
+
+    let prior_count = state
+        .prior_index_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let handles = state.registry.list_handles();
+    let degraded_by_count = prior_count > 0 && handles.len() < prior_count * 4 / 5;
+    let any_stage_failed = handles
+        .iter()
+        .any(|h| h.stages.try_read().map(|s| s.any_failed()).unwrap_or(false));
+    let new = degraded_by_tcc || degraded_by_timeout || degraded_by_count || any_stage_failed;
+
+    if let Ok(mut summary) = state.warmboot_summary.lock() {
+        summary.warm_boot_degraded = new;
+    }
+
+    if new != old {
+        tracing::info!(
+            "warm_boot_degraded recompute (deferred-embed catch-up drained): {old} -> {new}"
+        );
+    } else {
+        tracing::debug!(
+            "warm_boot_degraded recompute (deferred-embed catch-up drained): unchanged at {new}"
+        );
+    }
 }
 
 /// Request body for `POST /upgrade` (issue #537).

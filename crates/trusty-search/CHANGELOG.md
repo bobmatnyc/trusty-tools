@@ -9,6 +9,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Deferred-embed catch-up queue is now size-ordered; `warm_boot_degraded`
+  recomputes instead of staying sticky until restart (issue #3748 slice A).**
+  The warm-boot deferred-embed (C2) catch-up queue was strictly serial and
+  size-blind: one oversized repo (e.g. 94k chunks) that finished its fast
+  pass before smaller repos would head-of-line-block every other index's
+  semantic readiness for hours, and the boot-time `warm_boot_degraded` flag
+  never re-evaluated once catch-up finished. `service::reindex::defer_embed_queue`
+  (new module) now dispatches catch-up jobs ascending by the PENDING
+  (un-embedded) chunk delta — not total corpus size, so an incremental
+  reindex with one changed chunk in a 94k-chunk repo sorts by its real,
+  near-instant embed cost — with FIFO tiebreak for equal sizes. An
+  anti-starvation gate prevents a large job from being starved indefinitely
+  by a steady trickle of newer, smaller arrivals, WITHOUT reverting an
+  entire same-burst arrival (the warm-boot shape this fix targets — dozens
+  of repos enqueuing within milliseconds of each other) back to raw arrival
+  order just because the burst takes a while to fully drain by size: only a
+  job that arrives a full `MAX_WAIT` (5 minutes) LATER than the oldest
+  still-pending job counts as a genuinely later wave and can force a
+  promotion. `GET /health`'s `warmboot_summary.warm_boot_degraded` now
+  recomputes when the catch-up queue fully drains, folding in a live scan
+  for any index with a `Failed` stage (so a genuinely failed embed pass
+  still counts as degraded) instead of remaining frozen at its boot-time
+  value forever. No embedder-concurrency or worker-pool changes (tracked
+  separately as slice B).
 - **`core::memguard_enforce::tests::test_anon_rss_for_self_pid_on_linux` deflaked
   (issue #3762, recurrence of #3716's flake class).** The test compared two
   genuinely independent, non-atomic `/proc` reads taken microseconds apart

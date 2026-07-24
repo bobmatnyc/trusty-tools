@@ -96,6 +96,9 @@ impl SearchAppState {
             // Epic #3524 slice 6: populated by `install_switchable_embedder`,
             // read wait-free by `/health` via `ArcSwapOption`.
             switchable_embedder: Arc::new(arc_swap::ArcSwapOption::empty()),
+            // Issue #3748 slice A: 0 until the first deferred-embed catch-up
+            // drain is observed by `health_handler`.
+            last_seen_defer_embed_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 

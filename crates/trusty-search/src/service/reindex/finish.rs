@@ -433,7 +433,35 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
     // embedder must never run, not just be deferred.
     let has_embedder = handle.indexer.read().await.has_embedder();
     if defer_embed && !aborted_memory && has_embedder && !handle.skip_vector {
-        spawn_deferred_embed_pass(handle, progress.clone());
+        // Issue #3748 slice A review finding 2: key the size-ordered
+        // deferred-embed queue on the PENDING (un-embedded) chunk delta, not
+        // `chunk_count()`'s total corpus size. `finish_reindex` runs after
+        // EVERY reindex, including incremental ones — an incremental pass
+        // over a 94k-chunk repo with one changed chunk has near-instant real
+        // embed cost (`embed_deferred_chunks` only embeds what
+        // `VectorStore::contains_many` says is missing), so sorting it by
+        // the TOTAL corpus size would wrongly queue it behind small repos it
+        // could have beaten. Only computed on the branch that actually
+        // spawns — `pending_embed_count` itself skips the chunk-id
+        // collection and `contains_many` call entirely on the no-embedder/
+        // no-store path (see its docs), so the common cold-index path pays
+        // only a cheap `chunk_count()`.
+        //
+        // Lock-span note (review round 2): `handle.indexer.read().await`'s
+        // guard is a temporary that lives for the full
+        // `pending_embed_count().await` call, including its internal
+        // `VectorStore::contains_many` lookup — `pending_embed_count` takes
+        // `&self`, so Rust keeps the caller's borrow alive for the entire
+        // async call regardless of what runs inside it; narrowing further
+        // would mean splitting id-collection (needs `&self`) from the store
+        // lookup (doesn't) across two indexer accessor methods purely for
+        // this one caller. Not done: `contains_many` is an in-process
+        // vector-store membership check (hash/id lookups against an
+        // already-resident index, not network or disk I/O), so the extra
+        // hold time on `handle.indexer`'s read lock is small and bounded by
+        // corpus size, not worth the added public-API surface.
+        let pending_chunks = handle.indexer.read().await.pending_embed_count().await;
+        spawn_deferred_embed_pass(handle, progress.clone(), pending_chunks);
     }
 
     // Issue #75: GC the progress entry after a short delay.

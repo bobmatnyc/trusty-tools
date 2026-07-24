@@ -128,3 +128,166 @@ async fn health_stays_ok_when_no_corpus_failed() {
     assert_eq!(summary["indexes_corpus_failed"].as_u64(), Some(0));
     assert_eq!(summary["warm_boot_degraded"].as_bool(), Some(false));
 }
+
+/// Issue #3748 slice A: `warm_boot_degraded` must stop being sticky once the
+/// deferred-embed catch-up queue drains cleanly — a boot that had no TCC
+/// skip, no scan timeout, and no count drop, and whose one in-flight index
+/// finished Ready, must recompute to `false` rather than staying frozen at
+/// whatever `record_warm_boot_result` set (here: pre-seeded `true` to prove
+/// the recompute actually changes it, not just confirms a default).
+///
+/// Why: before this fix, nothing ever re-derived the persisted
+/// `warmboot_summary.warm_boot_degraded` after boot completion — a
+/// transient/stale `true` (or one set for a since-resolved reason) would
+/// have wedged `warm_boot_degraded: true` in every `/health` response for
+/// the rest of the daemon's life, and trusty-review's context gate reads
+/// exactly that field to decide whether to skip.
+/// What: seeds `warmboot_summary` with `warm_boot_degraded = true` and
+/// `indexes_skipped_tcc = 0` / `indexes_skipped_timeout = 0` (i.e. nothing
+/// that should be permanently sticky), registers one healthy (Ready) index,
+/// calls `recompute_warm_boot_degraded` directly, and asserts the persisted
+/// flag flips to `false`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn warm_boot_degraded_recomputes_to_false_once_catch_up_drains_cleanly() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new("healthy-after-drain"),
+        Arc::new(RwLock::new(CodeIndexer::new(
+            "healthy-after-drain",
+            "/tmp/healthy-after-drain",
+        ))),
+        "/tmp/healthy-after-drain".into(),
+    ));
+    {
+        let mut stages = handle.stages.write().await;
+        stages.semantic.status = crate::core::registry::StageStatus::Ready;
+        stages.graph.status = crate::core::registry::StageStatus::Ready;
+    }
+
+    let state = Arc::new(SearchAppState::new(registry));
+    {
+        let mut summary = state.warmboot_summary.lock().expect("lock");
+        summary.warm_boot_degraded = true;
+        summary.indexes_skipped_tcc = 0;
+        summary.indexes_skipped_timeout = 0;
+    }
+
+    super::health::recompute_warm_boot_degraded(&state);
+
+    let summary = state.warmboot_summary.lock().expect("lock").clone();
+    assert!(
+        !summary.warm_boot_degraded,
+        "recompute must clear a stale warm_boot_degraded once no genuine \
+         cause (tcc/timeout/count/failed-stage) remains"
+    );
+}
+
+/// Issue #3748 slice A: a deferred-embed pass that genuinely FAILED (issue
+/// #928's `semantic = Failed`) must keep `warm_boot_degraded = true` through
+/// the recompute — the fix must never weaken a real degraded signal.
+///
+/// Why: this is the explicit non-goal call-out from the issue: "an index
+/// that failed its embed pass must still count as degraded".
+/// What: registers an index with `stages.semantic = Failed`, seeds
+/// `warmboot_summary` with `warm_boot_degraded = false` and no tcc/timeout
+/// skips (proving the Failed stage ALONE drives the result, not a
+/// pre-existing sticky value), calls `recompute_warm_boot_degraded`, and
+/// asserts the flag is `true`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn warm_boot_degraded_recompute_keeps_a_genuinely_failed_embed_degraded() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry, StageState};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new("failed-embed-3748"),
+        Arc::new(RwLock::new(CodeIndexer::new(
+            "failed-embed-3748",
+            "/tmp/failed-embed-3748",
+        ))),
+        "/tmp/failed-embed-3748".into(),
+    ));
+    {
+        let mut stages = handle.stages.write().await;
+        stages.semantic = StageState::failed("injected embed failure for test".to_string());
+    }
+
+    let state = Arc::new(SearchAppState::new(registry));
+    {
+        let mut summary = state.warmboot_summary.lock().expect("lock");
+        summary.warm_boot_degraded = false;
+        summary.indexes_skipped_tcc = 0;
+        summary.indexes_skipped_timeout = 0;
+    }
+
+    super::health::recompute_warm_boot_degraded(&state);
+
+    let summary = state.warmboot_summary.lock().expect("lock").clone();
+    assert!(
+        summary.warm_boot_degraded,
+        "a genuinely failed embed pass must still count as degraded after recompute (#3748)"
+    );
+}
+
+/// Issue #3748 slice A: an index whose semantic (or graph) stage is merely
+/// `InProgress` — i.e. still catching up, not failed and not skipped — must
+/// NOT be treated as degraded by the recompute. This is the "tail-blocked"
+/// case: once every OTHER index is Ready and only the final (largest) job is
+/// still embedding, `warm_boot_degraded` must already read `false` (assuming
+/// no genuine tcc/timeout/count/failure cause), because
+/// `indexes_component_catch_up_in_progress` was never one of the flag's
+/// inputs to begin with.
+///
+/// Why: documents/pins the "flip earlier" design decision described in
+/// `recompute_warm_boot_degraded`'s doc comment — no separate "tail-blocked"
+/// carve-out was needed because InProgress was never a degraded input.
+/// What: registers an index with `stages.semantic = InProgress`, seeds a
+/// clean `warmboot_summary` (no tcc/timeout skips, `warm_boot_degraded =
+/// false`), recomputes, and asserts the flag stays `false`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn recompute_does_not_flag_an_in_progress_tail_job_as_degraded() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new("tail-blocked-3748"),
+        Arc::new(RwLock::new(CodeIndexer::new(
+            "tail-blocked-3748",
+            "/tmp/tail-blocked-3748",
+        ))),
+        "/tmp/tail-blocked-3748".into(),
+    ));
+    {
+        let mut stages = handle.stages.write().await;
+        stages.semantic.status = crate::core::registry::StageStatus::InProgress;
+    }
+
+    let state = Arc::new(SearchAppState::new(registry));
+    {
+        let mut summary = state.warmboot_summary.lock().expect("lock");
+        summary.warm_boot_degraded = false;
+        summary.indexes_skipped_tcc = 0;
+        summary.indexes_skipped_timeout = 0;
+    }
+
+    super::health::recompute_warm_boot_degraded(&state);
+
+    let summary = state.warmboot_summary.lock().expect("lock").clone();
+    assert!(
+        !summary.warm_boot_degraded,
+        "an InProgress (still embedding) tail job must not read as degraded (#3748)"
+    );
+}

@@ -483,6 +483,24 @@ pub struct SearchAppState {
     /// `tests_state.rs`.
     pub switchable_embedder:
         Arc<ArcSwapOption<crate::service::embedder_supervisor::SwitchableEmbedder>>,
+    /// Last deferred-embed catch-up completion epoch this handler observed
+    /// (issue #3748 slice A).
+    ///
+    /// Why: `crate::service::reindex::deferred_embed_completion_epoch()` is a
+    /// process-global counter bumped every time the size-ordered catch-up
+    /// queue fully drains. `health_handler` compares the current epoch
+    /// against this per-instance value on every poll; a mismatch means at
+    /// least one drain happened since the last poll, so it re-derives
+    /// `warmboot_summary.warm_boot_degraded` instead of leaving it sticky
+    /// until a restart. Per-instance (not another global) so parallel tests
+    /// constructing their own `SearchAppState` never cross-contaminate each
+    /// other's "have I already handled this epoch" bookkeeping.
+    /// What: `AtomicU64`, `0` until the first drain is observed.
+    /// Test: `recompute_warm_boot_degraded` tests in `tests_health_degraded.rs`
+    /// call it directly (bypassing the epoch gate) to keep those tests
+    /// hermetic and unaffected by unrelated catch-up activity elsewhere in
+    /// the test binary.
+    pub last_seen_defer_embed_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.
