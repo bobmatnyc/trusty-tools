@@ -61,6 +61,7 @@ default-members = [
     "crates/trusty-git-analytics",
     "crates/trusty-gworkspace",
     "crates/trusty-installer",
+    "crates/trusty-kb",
     "crates/trusty-memory",
     "crates/trusty-mpm",
     "crates/trusty-progress",
