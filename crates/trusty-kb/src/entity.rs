@@ -139,17 +139,42 @@ pub fn deep_merge(base: &mut Value, overlay: Value) {
 }
 
 /// Merge one overlay value into an existing base slot.
+///
+/// A scalar↔sequence transition on the same key (either direction) must NEVER
+/// drop a side: a relationship field that starts life as a single quoted
+/// `"[[Acme]]"` scalar and is later merged with `["[[Globex]]"]` (or vice-versa)
+/// keeps BOTH endpoints. The scalar is coerced to a one-element sequence and the
+/// two are unioned — the same shape the reconciler uses in
+/// `reconcile.rs::add_inverse_link`. Only a genuine scalar↔scalar (or
+/// mapping↔non-mapping) transition is last-writer-wins.
 fn merge_slot(existing: &mut Value, over_val: Value) {
     match (&mut *existing, over_val) {
         (Value::Mapping(_), over @ Value::Mapping(_)) => deep_merge(existing, over),
-        (Value::Sequence(base_seq), Value::Sequence(over_seq)) => {
-            for item in over_seq {
-                if !base_seq.contains(&item) {
-                    base_seq.push(item);
-                }
-            }
+        (Value::Sequence(base_seq), Value::Sequence(over_seq)) => union_into(base_seq, over_seq),
+        // Existing sequence, incoming scalar → union the scalar in.
+        (
+            Value::Sequence(base_seq),
+            over @ (Value::String(_) | Value::Number(_) | Value::Bool(_)),
+        ) => union_into(base_seq, vec![over]),
+        // Existing scalar, incoming sequence → promote scalar to a sequence, union.
+        (
+            slot @ (Value::String(_) | Value::Number(_) | Value::Bool(_)),
+            Value::Sequence(over_seq),
+        ) => {
+            let mut seq = vec![std::mem::replace(slot, Value::Null)];
+            union_into(&mut seq, over_seq);
+            *slot = Value::Sequence(seq);
         }
         (slot, over) => *slot = over,
+    }
+}
+
+/// Append every item of `over` to `base` that is not already present by value.
+fn union_into(base: &mut Vec<Value>, over: Vec<Value>) {
+    for item in over {
+        if !base.contains(&item) {
+            base.push(item);
+        }
     }
 }
 
@@ -250,6 +275,40 @@ mod tests {
         assert!(nested.get("a").is_some() && nested.get("b").is_some());
         // New key added.
         assert_eq!(base.get("title").unwrap().as_str(), Some("Ada Lovelace"));
+    }
+
+    /// Why: a scalar↔sequence transition on the same key must never drop a
+    /// side — the exact loss code-critic reproduced (works_at scalar then a
+    /// list-valued merge silently discarded the original). Both directions must
+    /// coerce + union.
+    /// What: merges a list overlay onto a scalar base (scalar→list) and a scalar
+    /// overlay onto a list base (list→scalar); asserts both endpoints survive as
+    /// a unioned sequence with no duplication.
+    /// Test: self-contained.
+    #[test]
+    fn deep_merge_coerces_scalar_and_list_without_loss() {
+        // scalar base, list overlay → both kept.
+        let mut a: Value = serde_yaml::from_str("works_at: \"[[Acme]]\"\n").unwrap();
+        let over_list: Value =
+            serde_yaml::from_str("works_at: [\"[[Globex]]\", \"[[Acme]]\"]\n").unwrap();
+        deep_merge(&mut a, over_list);
+        let links = link_values(a.get("works_at").unwrap());
+        // Base scalar leads (promoted to the first element), then the union.
+        assert_eq!(links, vec!["Acme".to_string(), "Globex".to_string()]);
+        assert!(a.get("works_at").unwrap().is_sequence());
+
+        // list base, scalar overlay → both kept, no duplicate.
+        let mut b: Value = serde_yaml::from_str("works_at: [\"[[Acme]]\"]\n").unwrap();
+        let over_scalar: Value = serde_yaml::from_str("works_at: \"[[Initech]]\"\n").unwrap();
+        deep_merge(&mut b, over_scalar);
+        let links = link_values(b.get("works_at").unwrap());
+        assert_eq!(links, vec!["Acme".to_string(), "Initech".to_string()]);
+
+        // scalar overlay already present → no duplication.
+        let mut c: Value = serde_yaml::from_str("works_at: [\"[[Acme]]\"]\n").unwrap();
+        let dup: Value = serde_yaml::from_str("works_at: \"[[Acme]]\"\n").unwrap();
+        deep_merge(&mut c, dup);
+        assert_eq!(c.get("works_at").unwrap().as_sequence().unwrap().len(), 1);
     }
 
     /// Why: link extraction backs both the reconciler and the dangling lint.

@@ -115,7 +115,9 @@ impl KbStore {
         let mut newest = String::new();
         let mut rows = String::new();
         for (slug, path) in &files {
-            let Some(entity) = self.read_entity_at(path)? else {
+            // Fail-open: a malformed entity is omitted from the generated
+            // inventory rather than aborting README regeneration.
+            let Ok(Some(entity)) = self.read_entity_at(path) else {
                 continue;
             };
             let title = entity.get_str("title").unwrap_or(slug);

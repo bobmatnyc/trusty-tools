@@ -79,7 +79,10 @@ impl KbStore {
         let mut touched = 0;
         for coll in self.collection_dirs_on_disk()? {
             for (slug, path) in self.entity_files(&coll)? {
-                if let Some(entity) = self.read_entity_at(&path)? {
+                // Fail-open: a malformed file (unparseable frontmatter) is
+                // skipped, never aborting a bulk reconcile — it has no edges to
+                // mirror and kb_validate reports it separately.
+                if let Ok(Some(entity)) = self.read_entity_at(&path) {
                     let n = self.reconcile_entity(&coll, &slug, &entity, now)?;
                     touched += n.len();
                 }

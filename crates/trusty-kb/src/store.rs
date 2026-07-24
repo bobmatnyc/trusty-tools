@@ -275,7 +275,9 @@ impl KbStore {
         let mut out = Vec::new();
         for coll in &collections {
             for (slug, path) in self.entity_files(coll)? {
-                let Some(entity) = self.read_entity_at(&path)? else {
+                // Fail-open: skip a malformed file rather than abort the whole
+                // listing (kb_validate surfaces the parse error separately).
+                let Ok(Some(entity)) = self.read_entity_at(&path) else {
                     continue;
                 };
                 let title = entity.get_str("title").map(str::to_string);

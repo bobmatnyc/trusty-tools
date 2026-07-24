@@ -179,27 +179,47 @@ fn resolve_store(config: &ServerConfig, args: &Value) -> anyhow::Result<KbStore>
     let root = config
         .roots
         .resolve(arg_str(args, "root"), arg_str(args, "agent"));
+    let root = confine_root(config, root)?;
+    Ok(KbStore::new(root, config.profile.clone()))
+}
+
+/// Confine a resolved root under the knowledge directory (or the service default
+/// root) — the single boundary check EVERY tool root must pass.
+///
+/// Why: a tool-supplied root/source_root is attacker-controlled; without this a
+/// write tool could operate on — and rewrite — files anywhere on disk. Factored
+/// so `resolve_store` AND `convert_tool` share one implementation (code-critic
+/// CRITICAL 2: `kb_convert_tree` previously bypassed it and rewrote files
+/// outside the tree).
+/// What: accepts `root` iff it resolves under `knowledge_dir`, OR it IS the
+/// service `default_root` (which may legitimately sit outside knowledge_dir when
+/// so configured). Any other path is rejected.
+/// Test: `out_of_tree_root_is_rejected`, `convert_out_of_tree_is_rejected`.
+fn confine_root(
+    config: &ServerConfig,
+    root: std::path::PathBuf,
+) -> anyhow::Result<std::path::PathBuf> {
     assert_within(&config.roots.knowledge_dir, &root).or_else(|_| {
-        // An explicit `root` outside knowledge_dir is allowed only when it IS
-        // the default_root (service owner's tree); otherwise reject traversal.
         if root == config.roots.default_root {
             Ok(())
         } else {
             anyhow::bail!("root {} is outside the knowledge directory", root.display())
         }
     })?;
-    Ok(KbStore::new(root, config.profile.clone()))
+    Ok(root)
 }
 
-/// The `kb_convert_tree` arm (its own root arg + mode).
+/// The `kb_convert_tree` arm (its own root arg + mode). Its `source_root` is
+/// confined through the SAME [`confine_root`] gate as every other tool.
 fn convert_tool(config: &ServerConfig, args: &Value) -> anyhow::Result<ToolOutcome> {
     let Some(source) = arg_str(args, "source_root") else {
         return Ok(ToolOutcome::err("missing required 'source_root'"));
     };
+    let root = confine_root(config, std::path::PathBuf::from(source))?;
     let report_only = arg_str(args, "mode")
         .map(|m| m != "in_place")
         .unwrap_or(true);
-    let store = KbStore::new(std::path::PathBuf::from(source), config.profile.clone());
+    let store = KbStore::new(root, config.profile.clone());
     Ok(ToolOutcome::ok(
         &store.convert_tree(report_only, &now_iso())?,
     ))
@@ -234,7 +254,9 @@ fn list_trees(config: &ServerConfig) -> anyhow::Result<Vec<TreeInfo>> {
         let mut last: Option<String> = None;
         for coll in store.collection_dirs_on_disk()? {
             for (_slug, path) in store.entity_files(&coll)? {
-                if let Some(e) = store.read_entity_at(&path)? {
+                // Fail-open: a malformed entity is skipped in the count rather
+                // than aborting enumeration of every assistant's tree.
+                if let Ok(Some(e)) = store.read_entity_at(&path) {
                     count += 1;
                     if let Some(ts) = e.get_str("updated").or_else(|| e.get_str("created"))
                         && last.as_deref().map(|l| ts > l).unwrap_or(true)
@@ -390,5 +412,37 @@ mod tests {
         let result = resp.result.expect("result");
         assert_eq!(result["isError"], true);
         let _ = PathBuf::from("/etc");
+    }
+
+    /// Why: code-critic CRITICAL 2 — `kb_convert_tree` bypassed confinement and
+    /// rewrote files OUTSIDE the knowledge directory. Its `source_root` must now
+    /// pass the same gate, in BOTH modes, and in_place must not touch the file.
+    /// What: seeds a markdown file in a directory outside knowledge_dir, then
+    /// calls convert report_only and in_place against it; asserts both are soft
+    /// errors and the outside file is byte-unchanged.
+    /// Test: self-contained.
+    #[tokio::test]
+    async fn convert_out_of_tree_is_rejected() {
+        let (_t, c) = config();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("secret.md");
+        std::fs::write(&victim, "important\n").unwrap();
+        let before = std::fs::read_to_string(&victim).unwrap();
+        let src = outside.path().to_string_lossy().to_string();
+
+        for mode in [json!("report_only"), json!("in_place")] {
+            let params = json!({ "name": "kb_convert_tree", "arguments": { "source_root": src, "mode": mode } });
+            let resp = dispatch_with(c.clone(), req("tools/call", 6, Some(params))).await;
+            let result = resp.result.expect("result");
+            assert_eq!(
+                result["isError"], true,
+                "convert must reject out-of-tree source_root"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            before,
+            "outside file untouched"
+        );
     }
 }
