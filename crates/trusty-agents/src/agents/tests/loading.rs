@@ -475,7 +475,7 @@ fn bundled_agents_dir() -> PathBuf {
 /// runtime loads, so it drives the actual persona identity). Both hand-carry
 /// `[agent].display_name`/`model`; nothing keeps them in sync. This guard
 /// fails CI if a future single-file edit desyncs the GUI label from the
-/// runtime identity ("CTO Bot" in one, stale in the other).
+/// runtime identity ("CTO Assistant" in one, stale in the other).
 /// Test: This function IS the test.
 #[test]
 fn cto_assistant_flat_and_package_display_name_stay_in_sync() {
@@ -498,8 +498,8 @@ fn cto_assistant_flat_and_package_display_name_stay_in_sync() {
     let package_display = read_agent_field(package.clone(), "display_name");
     assert_eq!(
         flat_display.as_deref(),
-        Some("CTO Bot"),
-        "flat cto-assistant.toml must declare display_name 'CTO Bot'"
+        Some("CTO Assistant"),
+        "flat cto-assistant.toml must declare display_name 'CTO Assistant'"
     );
     assert_eq!(
         flat_display, package_display,
@@ -673,10 +673,11 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
 
 /// #3738 (owner decision 2026-07-23): pins the canonical display names the
 /// chat surface serves — generic "Assistant" (the default), "Izzie", and
-/// "CTO Bot" — resolved through `AgentInfo::display_label` from each bundled
-/// persona's `display_name`. This is the single-source-of-truth guard that
-/// keeps the GUI's per-message speaker attribution and the REPL `/switch`
-/// label from drifting (e.g. "CTO Assistant" vs "CTO Bot").
+/// "CTO Assistant" (#3819: renamed from "CTO Bot") — resolved through
+/// `AgentInfo::display_label` from each bundled persona's `display_name`.
+/// This is the single-source-of-truth guard that keeps the GUI's
+/// per-message speaker attribution and the REPL `/switch` label from
+/// drifting.
 /// Test: This function IS the test.
 #[test]
 fn bundled_personas_expose_expected_display_names() {
@@ -684,7 +685,7 @@ fn bundled_personas_expose_expected_display_names() {
     for (agent_name, expected) in [
         ("assistant", "Assistant"),
         ("izzie", "Izzie"),
-        ("cto-assistant", "CTO Bot"),
+        ("cto-assistant", "CTO Assistant"),
     ] {
         clear_model_env(agent_name);
         // SAFETY: guarded by ENV_LOCK.

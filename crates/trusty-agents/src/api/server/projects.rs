@@ -278,6 +278,38 @@ pub(super) fn is_assistant_role(v: &serde_json::Value) -> bool {
     v.get("role").and_then(|r| r.as_str()) == Some("assistant")
 }
 
+/// True when a parsed catalog entry's `hidden` field is exactly `true`.
+/// Absent/non-bool defaults to `false` (visible) — see `AgentInfo::hidden`'s
+/// doc comment.
+fn is_hidden(v: &serde_json::Value) -> bool {
+    v.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false)
+}
+
+/// Composes BOTH picker-listing filters that gate `agent_roster()`'s output:
+/// `is_assistant_role` (#3812 — only `role == "assistant"` personas are
+/// picker-eligible AT ALL) AND `!is_hidden` (#3819 — an operator can
+/// additionally hide a specific assistant-role agent from the picker without
+/// touching its role/tools). An entry must pass BOTH to appear.
+///
+/// Why extracted as its own pure fn: the two filters were merged from
+/// parallel PRs (#3812's role filter, #3819's `hidden` flag) and taking
+/// either one alone — "ours" or "theirs" — silently reintroduces the gap the
+/// OTHER PR fixed (either the 16 bundled coding/engineer/support agents leak
+/// back into the picker, or a hidden agent stays visible). A pure, directly
+/// testable composition function makes that regression mechanically checked
+/// rather than re-derived by hand at every future merge.
+/// Test: `apply_roster_filters_requires_both_assistant_role_and_not_hidden`
+/// (the composition regression case — role != "assistant" AND hidden = false
+/// must still be EXCLUDED), `apply_roster_filters_excludes_hidden_assistant`,
+/// `apply_roster_filters_includes_visible_assistant`.
+pub(super) fn apply_roster_filters(agents: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    agents
+        .into_iter()
+        .filter(is_assistant_role)
+        .filter(|v| !is_hidden(v))
+        .collect()
+}
+
 /// Shared agent-roster computation — the `{"agents": [...]}` envelope returned
 /// by both `GET /api/agents` ([`list_agents_route`]) and the `list_agents`
 /// MCP tool ([`crate::runtime::mcp_serve`], #3633 core).
@@ -310,11 +342,11 @@ pub(super) fn is_assistant_role(v: &serde_json::Value) -> bool {
 /// `agent_roster_filters_to_assistant_role_only`.
 pub(crate) async fn agent_roster() -> serde_json::Value {
     let dirs = crate::agents::agents_dir_candidates();
-    let agents: Vec<serde_json::Value> = scan_agent_catalog(&dirs)
-        .await
-        .into_iter()
-        .filter(is_assistant_role)
-        .collect();
+    // Both listing-surface filters apply (neither affects dispatch or
+    // `GET|PATCH /api/agents/:name`, which resolve by name directly and
+    // never go through this fn) — see `apply_roster_filters`'s doc comment
+    // for why they're composed in one place rather than chained ad hoc here.
+    let agents = apply_roster_filters(scan_agent_catalog(&dirs).await);
     serde_json::json!({ "agents": agents })
 }
 
@@ -355,6 +387,46 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
     let display_name = get_str("display_name")
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| name.clone());
+    // #3819: the gear-panel Tools tab reads `[tools].allow` (the glob-style
+    // persona tool-allowlist) and Permissions reads `[tools].scopes`
+    // (`ToolsConfig::scopes` — OpenRPC scope patterns; note this lives under
+    // `[tools]`, NOT `[agent]`, per `crates/trusty-agents/src/agents/config.rs`
+    // — confirmed against `.trusty-agents/agents/izzie/agent.toml`'s own
+    // `scopes = [...]` line, which sits inside its `[tools]` table).
+    // Read-only in this slice — no PATCH support yet, see `agent_patch`'s
+    // module doc. Both default to an empty array rather than being omitted,
+    // so a client never has to distinguish "absent key" from "empty list"
+    // for a UI that always wants to render a list.
+    let tools = parsed.get("tools");
+    let tools_allow: Vec<String> = tools
+        .and_then(|t| t.get("allow"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let scopes: Vec<String> = tools
+        .and_then(|t| t.get("scopes"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    // #3819: `hidden` — listing-surface-only visibility flag (see
+    // `AgentInfo::hidden`'s doc comment for why this is a dedicated field
+    // rather than repurposing `role`). Defaults to `false` when absent.
+    let hidden: bool = agent
+        .and_then(|a| a.get("hidden"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    // #3819 (Bob's roster-typing directive): `kind` — picker GROUPING label,
+    // deliberately independent of `role`/`hidden` (see `AgentInfo::kind`'s
+    // doc comment). Defaults to `"assistant"`.
+    let kind: String = get_str("kind").unwrap_or_else(|| "assistant".to_string());
     Some(serde_json::json!({
         "name": name,
         "role": get_str("role").unwrap_or_default(),
@@ -363,6 +435,10 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
         "provider_id": get_str("provider_id").unwrap_or_default(),
         "description": get_str("description").unwrap_or_default(),
         "display_name": display_name,
+        "tools_allow": tools_allow,
+        "scopes": scopes,
+        "hidden": hidden,
+        "kind": kind,
     }))
 }
 
@@ -435,6 +511,10 @@ fn md_agent_to_catalog_json(
         "provider_id": "",
         "description": a.description.clone(),
         "display_name": display_name,
+        "tools_allow": cfg.tools.allow.clone().unwrap_or_default(),
+        "scopes": cfg.tools.scopes.clone().unwrap_or_default(),
+        "hidden": a.hidden,
+        "kind": a.kind.clone(),
     })
 }
 

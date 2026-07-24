@@ -17,36 +17,47 @@
    * What: Renders the Trusty Agents brand lockup (`<Logo>` — mark +
    * "TRUSTY AGENTS" wordmark + "UNIT-04 · MPM ORCHESTRATION" descriptor,
    * theme-aware per `docs/design/UI/icons/README.md`) on the left. On the
-   * right: the view-switch tabs (Chat/Projects/Personality — App.svelte owns
-   * `activeView`; this component only dispatches `switch-view` so
-   * App.svelte's unsaved-Personality-buffer guard in `switchView()` stays
-   * the single gate on navigation), the `AgentSwitcher` roster dropdown
-   * (#3223), the `ModelSwitcher` model/provider picker (#3245), a
+   * right: the view-switch tabs (#3819: Chat/Events — App.svelte owns
+   * `activeView`; this component only dispatches `switch-view`), the
+   * `ModelSwitcher` model/provider picker (#3245; the agent/persona picker
+   * moved into `ChatHeader`, #3819), a
    * DESKTOP/WEB transport badge (replaces the old floating pill), an API
    * READY/CONNECTING status badge driven by `apiReady`, and `ThemeToggle`.
-   * Every one of those right-hand controls (tabs container, `AgentSwitcher`,
-   * `ModelSwitcher`, the two status badges, `ThemeToggle`) shares one border
-   * standard — `border border-foundry-light-border dark:border-foundry-border`
-   * + `rounded-md` — per owner visual feedback that the borders read as
+   * Every one of those right-hand controls (tabs container, `ModelSwitcher`,
+   * the two status badges, `ThemeToggle`) shares one border standard —
+   * `border border-foundry-light-border dark:border-foundry-border` +
+   * `rounded-md` — per owner visual feedback that the borders read as
    * inconsistent widths/radii (some controls had no border at all, one used
    * a translucent accent border, `ThemeToggle` used a larger radius with no
    * border). Semantic state (active tab, ready/connecting, desktop/web)
    * is now carried entirely by background/text/dot color, never by
    * a differently-weighted border.
+   * HEIGHT TOKEN (Bob, header-row visual polish): every one of those same
+   * five controls (tabs group, `ModelSwitcher`, Desktop/Web pill, API
+   * Ready/Connecting pill, `ThemeToggle`) is a fixed `h-8`, content
+   * vertically centered via `flex items-center` — previously each control
+   * sized itself from its own vertical padding (`py-1` on some, `py-0.5` on
+   * others, doubled-up padding on the two nested-button controls), which
+   * produced visibly different heights in the same row. Vertical padding is
+   * dropped in favor of the fixed height everywhere this token applies.
    * Test: Mount `<Header activeView="chat" apiReady={true} />`, verify the
    * CHAT tab is highlighted, the API READY badge shows green, and clicking
-   * PROJECTS dispatches `switch-view` with `{ view: 'projects' }`. Manual:
+   * EVENTS dispatches `switch-view` with `{ view: 'events' }`. Manual:
    * toggle `apiReady` false→true, confirm the badge flips
    * CONNECTING→API READY.
    */
   import { createEventDispatcher } from 'svelte';
   import Logo from '../lib/icons/Logo.svelte';
   import ThemeToggle from './ThemeToggle.svelte';
-  import AgentSwitcher from './AgentSwitcher.svelte';
   import ModelSwitcher from './ModelSwitcher.svelte';
   import { isDesktop } from '../lib/transport';
 
-  export let activeView: 'chat' | 'projects' | 'personality' = 'chat';
+  // #3819: Chat/Projects/Personality → Chat/Events (Bob's nav reshape).
+  // `AgentSwitcher` moved out of this header into `ChatHeader` (the chat
+  // pane's own header — title + selector + gear all live together there
+  // now); `ModelSwitcher` stays here since model/provider is a separate,
+  // unrelated axis Bob's directive didn't touch.
+  export let activeView: 'chat' | 'events' = 'chat';
   export let apiReady = false;
 
   const desktop = isDesktop();
@@ -54,8 +65,7 @@
 
   const tabs: { id: typeof activeView; label: string }[] = [
     { id: 'chat', label: 'Chat' },
-    { id: 'projects', label: 'Projects' },
-    { id: 'personality', label: 'Personality' },
+    { id: 'events', label: 'Events' },
   ];
 
   function switchView(view: typeof activeView) {
@@ -72,7 +82,7 @@
 
   <div class="flex items-center gap-2.5">
     <div
-      class="flex items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-1 py-1"
+      class="flex h-8 items-center gap-1 rounded-md border border-foundry-light-border dark:border-foundry-border px-1"
       role="tablist"
       aria-label="View"
     >
@@ -81,7 +91,7 @@
           type="button"
           role="tab"
           aria-selected={activeView === tab.id}
-          class="rounded px-3 py-1 font-mono text-xs font-semibold uppercase tracking-wide transition-colors {activeView ===
+          class="flex h-6 items-center rounded px-3 font-mono text-xs font-semibold uppercase tracking-wide transition-colors {activeView ===
           tab.id
             ? 'bg-foundry-light-primary/20 dark:bg-foundry-primary/20 text-foundry-light-primary dark:text-foundry-primary'
             : 'text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10'}"
@@ -92,11 +102,10 @@
       {/each}
     </div>
 
-    <AgentSwitcher />
     <ModelSwitcher />
 
     <span
-      class="rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide {desktop
+      class="flex h-8 items-center rounded-md border border-foundry-light-border dark:border-foundry-border px-2 font-mono text-[10px] font-semibold uppercase tracking-wide {desktop
         ? 'bg-foundry-light-primary/15 dark:bg-foundry-primary/15 text-foundry-light-primary dark:text-foundry-primary'
         : 'bg-foundry-amber/15 text-foundry-amber'}"
       title={desktop ? 'Running inside Tauri (IPC)' : 'Running in browser (HTTP /api)'}
@@ -105,7 +114,7 @@
     </span>
 
     <span
-      class="inline-flex items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide {apiReady
+      class="inline-flex h-8 items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border px-2 font-mono text-[10px] font-semibold uppercase tracking-wide {apiReady
         ? 'bg-green-500/15 text-green-600 dark:text-green-400'
         : 'bg-foundry-light-surface dark:bg-foundry-surface text-foundry-light-muted dark:text-foundry-text/50'}"
     >

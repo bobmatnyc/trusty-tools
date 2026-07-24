@@ -4,14 +4,26 @@
   import Sidebar from './components/Sidebar.svelte';
   import ChatView from './components/ChatView.svelte';
   import InputArea from './components/InputArea.svelte';
-  import ProjectsView from './components/ProjectsView.svelte';
   import RecapPanel from './components/RecapPanel.svelte';
   import Header from './components/Header.svelte';
-  import PersonalityPanel from './components/PersonalityPanel.svelte';
+  import ChatHeader from './components/ChatHeader.svelte';
+  import EventsView from './components/EventsView.svelte';
   import SlackMirror from './components/SlackMirror.svelte';
+  // #3819: `ProjectsView`/`PersonalityPanel` are no longer routed — Bob's
+  // nav reshape drops the Projects/Personality top tabs entirely. Left
+  // unimported/unrouted rather than deleted pending a decision on their
+  // dropped capability (project-registration-by-path + session attach/
+  // resume/pause/kill; the "+ New agent from overlay" flow) — see issue
+  // #3819 and the PR body for what's lost vs. relocated (Personality's
+  // "edit this agent's prose" half moves to `AgentConfigPanel`, reachable
+  // via `ChatHeader`'s gear icon).
   // #3752: live Slack conversation mirror — the SSE bridge feeds these two
   // event kinds into the store the SlackMirror pane renders.
   import { pushSlackEvent, slackMirror } from './lib/slack-mirror';
+  // #3819: the Events tab's rolling log — fed from the same bridge as
+  // `pushSlackEvent`, additive, never a replacement for the existing
+  // task-progress/webBus routing below.
+  import { pushEvent } from './lib/events';
   import { invoke, isDesktop, connectEventSource, listenEvent, emitWebEvent, type AppEvent } from './lib/transport';
   import { bridgeDelta } from './lib/chatStream';
   import { shouldRefetchCatalogs } from './lib/catalogRefetch';
@@ -37,37 +49,15 @@
 
   let apiReady = false;
   let apiError = '';
-  // Why: Top-level view selector. Chat is the default; Projects shows the
-  // /api/projects panel. Kept as a simple tab toggle to avoid pulling in a
-  // router for two views. (#341) 'personality' (#3061) shows the
-  // personalization-overlay editor.
-  let activeView: 'chat' | 'projects' | 'personality' = 'chat';
-  // Why (#3198 code-critic HIGH): the {#if}/{:else if} tab router below
-  // unmounts PersonalityPanel on navigation away from it, which would
-  // silently discard an unsaved edit buffer. Bound from PersonalityPanel's
-  // exported `unsavedChanges` prop so `switchView` can guard the transition
-  // BEFORE it happens (confirm() runs while the component is still mounted).
-  let personalityUnsaved = false;
+  // Why (#3819): Chat/Projects/Personality collapses to Chat/Events per
+  // Bob's nav reshape. The unsaved-Personality-buffer guard this used to
+  // gate is gone with the Personality tab itself — `AgentConfigPanel`
+  // (reached via `ChatHeader`'s gear icon) saves each section independently
+  // on its own explicit Save button, so there is no cross-tab discard risk
+  // to guard against here anymore.
+  let activeView: 'chat' | 'events' = 'chat';
 
-  /**
-   * Why: Centralizes tab navigation so the one place that can discard
-   * PersonalityPanel's unsaved buffer (by unmounting it) is also the one
-   * place that asks first. Simplest correct guard: a native `confirm()`
-   * when leaving 'personality' with unsaved changes.
-   * What: No-ops (asks for confirmation) when navigating AWAY from
-   * 'personality' while `personalityUnsaved` is true; otherwise switches
-   * `activeView` immediately.
-   * Test: Manual — type in the Personality editor without saving, click
-   * another tab, confirm a browser confirm() dialog blocks the switch;
-   * Cancel keeps the tab and the buffer; OK switches and discards.
-   */
-  function switchView(view: 'chat' | 'projects' | 'personality') {
-    if (activeView === 'personality' && view !== 'personality' && personalityUnsaved) {
-      const discard = confirm(
-        'You have unsaved changes in Personality. Discard them and switch tabs?',
-      );
-      if (!discard) return;
-    }
+  function switchView(view: 'chat' | 'events') {
     activeView = view;
   }
   let tokenInput = '';
@@ -252,6 +242,9 @@
   }
 
   function bridgeEventToWebBus(ev: AppEvent) {
+    // #3819: feed the Events tab's rolling log for EVERY event, including
+    // ping/lag — additive, never short-circuits anything below.
+    pushEvent(ev);
     // #3217: feed the structured workflow store first — additive, never
     // short-circuits the flattened-text switch below.
     handleWorkflowEvent(ev);
@@ -563,11 +556,12 @@
   {:else}
     <Sidebar {apiReady} {apiError} />
     <main class="flex flex-1 flex-col bg-foundry-light-bg dark:bg-foundry-bg">
-      <!-- #3220: the Chat/Projects/Personality tab nav that used to live
-           here has been consolidated into <Header/>, which now owns tab
-           rendering and dispatches `switch-view` back up to `switchView()`
-           above (still the single gate on the Personality unsaved-changes
-           guard). -->
+      <!-- #3220: the top-level Chat/Events tab nav lives in <Header/>, which
+           dispatches `switch-view` back up to `switchView()` above. #3819:
+           the chat pane additionally gets its OWN header (`ChatHeader`) —
+           active-agent title + inline selector + gear config panel — since
+           that state (which agent) is scoped to the chat view, not the
+           whole app. -->
       {#if activeView === 'chat'}
         <!-- #3219: RecapPanel is now a persistent right rail (own scroll,
              AGENTS ACTIVE / FILES TOUCHED / TOKENS + folded recap summary),
@@ -575,6 +569,7 @@
              between them. -->
         <div class="flex flex-1 min-h-0">
           <div class="flex flex-1 flex-col min-w-0">
+            <ChatHeader />
             <ChatView />
             <InputArea />
           </div>
@@ -585,10 +580,8 @@
             <SlackMirror />
           {/if}
         </div>
-      {:else if activeView === 'projects'}
-        <ProjectsView on:navigate={(e) => switchView(e.detail.view)} />
       {:else}
-        <PersonalityPanel bind:unsavedChanges={personalityUnsaved} />
+        <EventsView />
       {/if}
     </main>
   {/if}

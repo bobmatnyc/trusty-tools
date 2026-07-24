@@ -94,6 +94,8 @@ impl ClaudeMpmAgent {
                 runner: RunnerKind::Subprocess,
                 capabilities: None,
                 display_name: None,
+                hidden: false,
+                kind: "assistant".to_string(),
                 prompt_label: None,
                 extends: None,
             },

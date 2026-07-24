@@ -1,6 +1,12 @@
 [agent]
 name = "ctrl"
-role = "controller"
+# Bob directive (2026-07-24): kept in sync with ctrl/agent.toml (the
+# load-bearing directory package) — role "controller" -> "assistant".
+role = "assistant"
+# #3819 (Bob's roster-typing directive): picker GROUPING label — Concierge
+# shows under a "System Tool" section, distinct from role (dispatch/tool
+# security) and hidden (visibility). See AgentInfo::kind's doc comment.
+kind = "system-tool"
 # "Qwopus" = qwen3:30b — community nickname for the Opus-class local model.
 # Already installed locally; routes through OllamaAdapter at http://localhost:11434.
 model = "ollama/qwen3:30b"

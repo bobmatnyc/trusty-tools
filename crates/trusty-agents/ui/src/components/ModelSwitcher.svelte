@@ -62,7 +62,7 @@
 <div class="relative inline-block" data-model-switcher>
   <button
     type="button"
-    class="flex items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-2.5 py-1 font-mono text-[11px] font-semibold uppercase tracking-wide text-foundry-light-text dark:text-foundry-text hover:border-foundry-light-primary dark:hover:border-foundry-primary"
+    class="flex h-8 items-center gap-1.5 rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface px-2.5 font-mono text-[11px] font-semibold uppercase tracking-wide text-foundry-light-text dark:text-foundry-text hover:border-foundry-light-primary dark:hover:border-foundry-primary"
     on:click={toggle}
     aria-haspopup="listbox"
     aria-expanded={open}

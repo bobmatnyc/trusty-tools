@@ -66,6 +66,8 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
             runner: RunnerKind::ClaudeCode,
             capabilities: None,
             display_name: None,
+            hidden: false,
+            kind: "assistant".to_string(),
             prompt_label: None,
             extends: None,
         },

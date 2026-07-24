@@ -75,11 +75,12 @@ async fn patch_agent_persists_model_and_round_trips() {
     write_fixture(tmp.path(), "engineer", SUBPROCESS_FIXTURE);
 
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "engineer",
         PatchAgentRequest {
             model_id: Some("anthropic/claude-opus-4-6".to_string()),
             provider_id: None,
+            ..Default::default()
         },
     )
     .await;
@@ -120,11 +121,12 @@ async fn patch_agent_persists_model_and_round_trips() {
 async fn patch_agent_unknown_agent_returns_404() {
     let tmp = tempfile::tempdir().unwrap();
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "does-not-exist",
         PatchAgentRequest {
             model_id: Some("gpt-4o-mini".to_string()),
             provider_id: None,
+            ..Default::default()
         },
     )
     .await;
@@ -136,7 +138,12 @@ async fn patch_agent_empty_body_returns_400() {
     let tmp = tempfile::tempdir().unwrap();
     write_fixture(tmp.path(), "engineer", SUBPROCESS_FIXTURE);
 
-    let resp = patch_agent_at(tmp.path(), "engineer", PatchAgentRequest::default()).await;
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "engineer",
+        PatchAgentRequest::default(),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -146,11 +153,12 @@ async fn patch_agent_unknown_provider_id_returns_400() {
     write_fixture(tmp.path(), "engineer", SUBPROCESS_FIXTURE);
 
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "engineer",
         PatchAgentRequest {
             model_id: None,
             provider_id: Some("not-a-real-provider".to_string()),
+            ..Default::default()
         },
     )
     .await;
@@ -179,11 +187,12 @@ async fn patch_agent_claude_code_rejects_non_anthropic_model() {
     write_fixture(tmp.path(), "pm", CLAUDE_CODE_FIXTURE);
 
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "pm",
         PatchAgentRequest {
             model_id: Some("openai/gpt-4.1".to_string()),
             provider_id: None,
+            ..Default::default()
         },
     )
     .await;
@@ -218,11 +227,12 @@ async fn patch_agent_claude_code_rejects_bare_non_anthropic_model() {
     write_fixture(tmp.path(), "pm", CLAUDE_CODE_FIXTURE);
 
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "pm",
         PatchAgentRequest {
             model_id: Some("gpt-4o-mini".to_string()),
             provider_id: None,
+            ..Default::default()
         },
     )
     .await;
@@ -266,11 +276,12 @@ async fn patch_agent_claude_code_model_only_inherits_ondisk_anthropic_provider()
     write_fixture(tmp.path(), "pm", CLAUDE_CODE_WITH_PROVIDER_FIXTURE);
 
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "pm",
         PatchAgentRequest {
             model_id: Some("claude-opus-4-6".to_string()),
             provider_id: None,
+            ..Default::default()
         },
     )
     .await;
@@ -306,11 +317,12 @@ async fn patch_agent_malformed_toml_returns_500() {
     write_fixture(tmp.path(), "broken", MALFORMED_TOML_FIXTURE);
 
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "broken",
         PatchAgentRequest {
             model_id: Some("gpt-4o-mini".to_string()),
             provider_id: None,
+            ..Default::default()
         },
     )
     .await;
@@ -338,11 +350,12 @@ async fn patch_agent_claude_code_accepts_anthropic_provider() {
     write_fixture(tmp.path(), "pm", CLAUDE_CODE_FIXTURE);
 
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "pm",
         PatchAgentRequest {
             model_id: Some("claude-opus-4-6".to_string()),
             provider_id: Some("anthropic".to_string()),
+            ..Default::default()
         },
     )
     .await;
@@ -363,11 +376,12 @@ async fn patch_agent_provider_only_uses_default_model() {
     write_fixture(tmp.path(), "engineer", SUBPROCESS_FIXTURE);
 
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "engineer",
         PatchAgentRequest {
             model_id: None,
             provider_id: Some("openai".to_string()),
+            ..Default::default()
         },
     )
     .await;
@@ -409,11 +423,12 @@ async fn patch_agent_route_is_wired_into_router() {
 async fn patch_agent_invalid_name_returns_400() {
     let tmp = tempfile::tempdir().unwrap();
     let resp = patch_agent_at(
-        tmp.path(),
+        &[tmp.path().to_path_buf()],
         "../escape",
         PatchAgentRequest {
             model_id: Some("gpt-4o-mini".to_string()),
             provider_id: None,
+            ..Default::default()
         },
     )
     .await;
@@ -443,4 +458,328 @@ role = "engineer"
 "#;
     let parsed = parse_agent_toml(without_display, "engineer").expect("valid TOML");
     assert_eq!(parsed["display_name"], "engineer");
+}
+
+// ---------------------------------------------------------------------------
+// #3819: package-vs-flat path resolution, tools_allow, personality, and the
+// new GET /api/agents/:name and GET /api/agents/:name/persona reads.
+// ---------------------------------------------------------------------------
+
+use crate::api::server::agent_patch::{get_agent_at, persona_at};
+
+fn write_package(dir: &std::path::Path, name: &str, agent_toml: &str, persona_md: &str) {
+    let pkg = dir.join(name);
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("agent.toml"), agent_toml).unwrap();
+    std::fs::write(pkg.join("persona.md"), persona_md).unwrap();
+}
+
+const PACKAGE_AGENT_TOML: &str = r#"[agent]
+name = "izzie"
+role = "assistant"
+runner = "subprocess"
+model = "anthropic/claude-sonnet-4-6"
+description = "Personal assistant"
+"#;
+
+/// A package (`izzie/agent.toml`) takes precedence over a same-named flat
+/// shadow (`izzie.toml`) — matching `scan_agents_dir_tiered`'s dispatch
+/// resolution order. Pre-#3819 this endpoint wrote the flat shadow
+/// unconditionally, silently missing the file that actually dispatches.
+#[tokio::test]
+async fn patch_agent_prefers_package_over_flat_shadow() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(
+        tmp.path(),
+        "izzie",
+        PACKAGE_AGENT_TOML,
+        "Original persona.\n",
+    );
+    // A flat shadow with a DIFFERENT model — if the endpoint wrote here
+    // instead, the assertion below on the package file would fail.
+    write_fixture(
+        tmp.path(),
+        "izzie",
+        "[agent]\nname = \"izzie\"\nmodel = \"stale-shadow\"\n",
+    );
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            model_id: Some("anthropic/claude-opus-4-6".to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let package_toml = std::fs::read_to_string(tmp.path().join("izzie/agent.toml")).unwrap();
+    assert!(package_toml.contains("claude-opus-4-6"));
+    let shadow_toml = std::fs::read_to_string(tmp.path().join("izzie.toml")).unwrap();
+    assert!(
+        shadow_toml.contains("stale-shadow"),
+        "flat shadow must be left untouched"
+    );
+}
+
+#[tokio::test]
+async fn patch_agent_tools_allow_round_trips() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(
+        tmp.path(),
+        "izzie",
+        PACKAGE_AGENT_TOML,
+        "Original persona.\n",
+    );
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            tools_allow: Some(vec!["gworkspace_*".to_string(), "memory_*".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["tools_allow"],
+        serde_json::json!(["gworkspace_*", "memory_*"])
+    );
+
+    // And a fresh GET reflects the same persisted value.
+    let get_resp = get_agent_at(&[tmp.path().to_path_buf()], "izzie").await;
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(get_resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        body["tools_allow"],
+        serde_json::json!(["gworkspace_*", "memory_*"])
+    );
+}
+
+#[tokio::test]
+async fn patch_agent_personality_writes_persona_md_for_package_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(
+        tmp.path(),
+        "izzie",
+        PACKAGE_AGENT_TOML,
+        "Original persona.\n",
+    );
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "izzie",
+        PatchAgentRequest {
+            personality: Some("Warm and witty, Masa-bound persona.".to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let persona = std::fs::read_to_string(tmp.path().join("izzie/persona.md")).unwrap();
+    assert_eq!(persona, "Warm and witty, Masa-bound persona.");
+}
+
+#[tokio::test]
+async fn patch_agent_personality_rejected_for_flat_only_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture(tmp.path(), "engineer", SUBPROCESS_FIXTURE);
+
+    let resp = patch_agent_at(
+        &[tmp.path().to_path_buf()],
+        "engineer",
+        PatchAgentRequest {
+            personality: Some("New prose".to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Nothing should have been written for a rejected request.
+    assert!(!tmp.path().join("engineer/persona.md").exists());
+}
+
+#[tokio::test]
+async fn get_agent_persona_reads_package_persona() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(
+        tmp.path(),
+        "izzie",
+        PACKAGE_AGENT_TOML,
+        "Hello, I'm Izzie.\n",
+    );
+
+    let resp = persona_at(&[tmp.path().to_path_buf()], "izzie").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["content"], "Hello, I'm Izzie.\n");
+    assert_eq!(body["editable"], true);
+}
+
+#[tokio::test]
+async fn get_agent_persona_not_editable_for_flat_agent() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fixture(tmp.path(), "engineer", SUBPROCESS_FIXTURE);
+
+    let resp = persona_at(&[tmp.path().to_path_buf()], "engineer").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["content"], serde_json::Value::Null);
+    assert_eq!(body["editable"], false);
+}
+
+#[tokio::test]
+async fn get_agent_persona_unknown_agent_404() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resp = persona_at(&[tmp.path().to_path_buf()], "nope").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_agent_route_returns_full_config_for_ctrl_style_agent() {
+    // Regression guard for the #3812-role-filter scenario: GET /api/agents/:name
+    // must work for a `role = "controller"` package agent even though the
+    // LIST route may filter it out of the picker.
+    let tmp = tempfile::tempdir().unwrap();
+    write_package(
+        tmp.path(),
+        "ctrl",
+        "[agent]\nname = \"ctrl\"\nrole = \"controller\"\nmodel = \"ollama/qwen3:30b\"\n",
+        "ctrl persona\n",
+    );
+    let resp = get_agent_at(&[tmp.path().to_path_buf()], "ctrl").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["name"], "ctrl");
+    assert_eq!(body["role"], "controller");
+}
+
+#[tokio::test]
+async fn get_agent_route_unknown_agent_404() {
+    let tmp = tempfile::tempdir().unwrap();
+    let resp = get_agent_at(&[tmp.path().to_path_buf()], "nope").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// Regression guard: `tools_allow`/`scopes` must be read from `[tools]`, NOT
+/// `[agent]` — confirmed against `.trusty-agents/agents/izzie/agent.toml`'s
+/// real layout (`scopes = [...]` sits inside its `[tools]` table).
+#[test]
+fn parse_agent_toml_reads_tools_allow_and_scopes_from_tools_table() {
+    let toml = r#"
+[agent]
+name = "izzie"
+role = "assistant"
+
+[tools]
+allow = ["gworkspace_*", "memory_*"]
+scopes = ["memory.read", "google.*"]
+"#;
+    let parsed = parse_agent_toml(toml, "izzie").expect("valid TOML");
+    assert_eq!(
+        parsed["tools_allow"],
+        serde_json::json!(["gworkspace_*", "memory_*"])
+    );
+    assert_eq!(
+        parsed["scopes"],
+        serde_json::json!(["memory.read", "google.*"])
+    );
+}
+
+#[test]
+fn parse_agent_toml_hidden_defaults_false_and_parses_true() {
+    let visible = "[agent]\nname = \"a\"\n";
+    assert_eq!(parse_agent_toml(visible, "a").unwrap()["hidden"], false);
+
+    let hidden = "[agent]\nname = \"a\"\nhidden = true\n";
+    assert_eq!(parse_agent_toml(hidden, "a").unwrap()["hidden"], true);
+}
+
+/// Bob's roster-typing directive (#3819): `kind` defaults to `"assistant"`
+/// when absent (every pre-existing agent TOML keeps working unchanged) and
+/// parses an explicit `"system-tool"` (set on Concierge/`ctrl`).
+#[test]
+fn parse_agent_toml_kind_defaults_assistant_and_parses_system_tool() {
+    let default_kind = "[agent]\nname = \"izzie\"\n";
+    assert_eq!(
+        parse_agent_toml(default_kind, "izzie").unwrap()["kind"],
+        "assistant"
+    );
+
+    let system_tool = "[agent]\nname = \"ctrl\"\nkind = \"system-tool\"\n";
+    assert_eq!(
+        parse_agent_toml(system_tool, "ctrl").unwrap()["kind"],
+        "system-tool"
+    );
+}
+
+/// Regression guard for the demo-build fix (#3819): `GET/PATCH
+/// /api/agents/:name` must search MULTIPLE candidate directories (project-
+/// local tier, then `$HOME/.trusty-agents/agents`), not a single cwd-
+/// relative directory — critical for the packaged desktop app, where the
+/// Tauri sidecar's cwd is `/` and every bundled agent lives in the `$HOME`
+/// tier. A single-tier lookup would 404 on every bundled agent there.
+#[tokio::test]
+async fn get_agent_searches_second_tier_when_first_misses() {
+    let primary = tempfile::tempdir().unwrap(); // empty — simulates cwd `/`
+    let home = tempfile::tempdir().unwrap();
+    write_package(home.path(), "izzie", PACKAGE_AGENT_TOML, "Hi, I'm Izzie.\n");
+
+    let dirs = vec![primary.path().to_path_buf(), home.path().to_path_buf()];
+    let resp = get_agent_at(&dirs, "izzie").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["name"], "izzie");
+}
+
+/// Project-local tier wins over `$HOME` when both define the same name —
+/// same precedence `crate::agents::agents_dir_candidates()` documents.
+#[tokio::test]
+async fn patch_agent_prefers_first_tier_over_second() {
+    let primary = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    write_package(primary.path(), "izzie", PACKAGE_AGENT_TOML, "Primary.\n");
+    write_package(home.path(), "izzie", PACKAGE_AGENT_TOML, "Home.\n");
+
+    let dirs = vec![primary.path().to_path_buf(), home.path().to_path_buf()];
+    let resp = patch_agent_at(
+        &dirs,
+        "izzie",
+        PatchAgentRequest {
+            model_id: Some("anthropic/claude-opus-4-6".to_string()),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let primary_toml = std::fs::read_to_string(primary.path().join("izzie/agent.toml")).unwrap();
+    assert!(primary_toml.contains("claude-opus-4-6"));
+    let home_toml = std::fs::read_to_string(home.path().join("izzie/agent.toml")).unwrap();
+    assert!(
+        !home_toml.contains("claude-opus-4-6"),
+        "the $HOME tier's copy must be untouched when the project-local tier already resolves"
+    );
 }

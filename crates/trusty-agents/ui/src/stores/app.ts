@@ -43,7 +43,12 @@ export interface Project {
 
 export interface Message {
   id: string;
-  role: 'user' | 'assistant' | 'system' | 'pm' | 'recap';
+  // #3819: 'topic-boundary' is a non-destructive divider row inserted by
+  // "+ New Task" — per Bob's continuous-per-agent-chat model there is no
+  // hard context wall between tasks, so "New Task" marks a topic boundary
+  // in the ONE ongoing stream rather than wiping it. Rendered as a divider
+  // in `ChatView.svelte`.
+  role: 'user' | 'assistant' | 'system' | 'pm' | 'recap' | 'topic-boundary';
   content: string;
   timestamp: number;
   /** Task id returned by the backend; used to route progress events. */
@@ -91,16 +96,23 @@ export interface TaskHistoryEntry {
 }
 
 /**
- * Why: "CTRL" is always present so the user lands on a usable chat even
- * before adding any project. Additional entries are appended via
- * `addProject()`.
+ * Why: The `ctrl` conversation thread is always present so the user lands
+ * on a usable chat even before adding any project. Additional entries are
+ * appended via `addProject()`. #3819: the static seed label is "Concierge"
+ * — the `ctrl` agent's display name per local config (Bob) — not the raw
+ * id "CTRL", since `InputArea.svelte` renders `$activeProject.name`
+ * user-visibly ("Message Concierge…"). This is still a static default, not
+ * a live read of `ctrl/agent.toml`'s `display_name` — wiring a fetch here
+ * would need this eagerly-initialized module-level store to become
+ * async-updatable; left as a follow-up rather than done ad hoc under time
+ * pressure (see PR body).
  * What: Store holds the ordered list; `activeProjectId` selects which one the
  * chat view and input area operate on.
  * Test: Call `addProject({...})`, assert `$projects.length === 2` and the
  * second entry matches the input.
  */
 export const projects = writable<Project[]>([
-  { id: 'ctrl', name: 'CTRL', path: null, status: 'idle' },
+  { id: 'ctrl', name: 'Concierge', path: null, status: 'idle' },
 ]);
 
 export const activeProjectId = writable<string>('ctrl');

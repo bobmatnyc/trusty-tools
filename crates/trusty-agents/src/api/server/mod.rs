@@ -22,8 +22,12 @@
 //!   - `events_sse`   → SSE telemetry stream
 //!   - `task_runner`  → subprocess workflow execution + recap dispatch
 //!   - `ui`           → embedded Vite bundle serving
+//!   - `workstreams`  → `GET /api/workstreams[/:name/history]` — resumable
+//!     workstreams sourced from trusty-memory's `ws:<name>` tag convention
+//!     (#3819, DOC-53)
 //! Test: `tests` submodule + each submodule's documented coverage.
 
+mod agent_create;
 mod agent_patch;
 mod auth;
 mod cancel;
@@ -39,6 +43,7 @@ mod state;
 mod task_runner;
 mod tm;
 mod ui;
+mod workstreams;
 
 #[cfg(test)]
 mod tests;

@@ -238,6 +238,11 @@ fn default_true() -> bool {
     true
 }
 
+/// Default value for `AgentInfo::kind` — see that field's doc comment.
+fn default_agent_kind() -> String {
+    "assistant".to_string()
+}
+
 /// `[ticketing]` — provider + credentials for native ticketing tools (#132).
 ///
 /// Why: Lets agents with `native.native_ticketing = true` be handed a
@@ -343,6 +348,47 @@ pub struct AgentInfo {
     /// Test: Loaded via TOML round-trip in persona configs.
     #[serde(default)]
     pub display_name: Option<String>,
+
+    /// Whether this agent is hidden from PICKER/roster listings (#3819).
+    ///
+    /// Why: `role` is dual-purpose — beyond labeling an agent, it also gates
+    /// the tool-registry security posture (`runtime::tool_registry::build_registry_for_agent`).
+    /// Hiding an agent from the GUI/REPL picker by repurposing `role` would
+    /// therefore silently change its tool permissions too — not a safe
+    /// mechanism. `hidden` is a dedicated, orthogonal flag: it affects ONLY
+    /// listing surfaces (the REPL's `list_assistant_agents_into`, the GUI's
+    /// `GET /api/agents` roster), never dispatch, tool gating, or direct
+    /// by-name access (`GET/PATCH /api/agents/:name` still work for a hidden
+    /// agent — mirrors the existing precedent that a role-based listing
+    /// filter narrows the picker's SELECTABLE set, not what's reachable by
+    /// name, established for `ctrl`/Concierge).
+    /// What: Defaults to `false` (visible) so existing agent TOMLs are
+    /// unaffected. An operator sets `hidden = true` in `[agent]` to keep an
+    /// agent dispatchable but out of picker UIs (e.g. trimming the demo
+    /// roster to Izzie/CTO Assistant/Concierge without touching
+    /// `assistant`/`personal-assistant`/`research-agent`'s role or tools).
+    /// Test: `parse_agent_toml_hidden_defaults_false_and_parses_true`.
+    #[serde(default)]
+    pub hidden: bool,
+
+    /// Picker TYPE grouping label (#3819 — Bob's roster-typing directive).
+    ///
+    /// Why: The GUI agent picker groups entries into labeled sections
+    /// ("System Tool", "Assistants") — presentation/typing metadata, kept
+    /// deliberately SEPARATE from `role` (which gates the tool-registry
+    /// security posture, `runtime::tool_registry::build_registry_for_agent`)
+    /// and from `hidden` (which gates picker VISIBILITY, not grouping).
+    /// Conflating any of the three would silently change dispatch/security
+    /// behavior as a side effect of a display change.
+    /// What: A free-form string, default `"assistant"` (so every existing
+    /// agent TOML — including ones that will never opt into a group split —
+    /// keeps working unchanged). This slice's only other declared value is
+    /// `"system-tool"` (set on `ctrl`/Concierge). Not an enum: new picker
+    /// sections are meant to be addable by dropping a new `kind` string into
+    /// an agent TOML, not by a Rust code change every time.
+    /// Test: `parse_agent_toml_kind_defaults_assistant_and_parses_system_tool`.
+    #[serde(default = "default_agent_kind")]
+    pub kind: String,
 
     /// Optional short label used as the REPL prompt indicator when this
     /// agent is the active conversation persona (#254).
