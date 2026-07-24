@@ -188,34 +188,44 @@ fn read_daemon_port_returns_some_u16() {
     let _ = p;
 }
 
-/// #3673: `doctor_data_dir()` reads the process-global `TRUSTY_DATA_DIR` env
-/// var, which 40+ other tests across this test binary also mutate (e.g.
-/// `service/data_dir.rs`, `commands/start/tests.rs`). Without `#[serial]`
-/// this test can observe a sibling test's tempdir value mid-flight and fail
-/// an assertion that has nothing to do with this test's own behaviour.
+/// Issue #3697: this test previously cleared the process-global
+/// `TRUSTY_DATA_DIR` env var under `#[serial]` and called `doctor_data_dir()`
+/// directly (the #3673/#3686 fix). An audit for #3697 confirmed every other
+/// `TRUSTY_DATA_DIR`-mutating test in this ~314-test binary already carries
+/// the same bare `#[serial]` tag (`commands/migrate_storage/*`,
+/// `commands/start/tests.rs`, `commands/daemon_utils.rs`,
+/// `service/data_dir.rs`, `service/daemon_tests.rs`,
+/// `service/server/*_tests.rs`, `service/reindex/root_hijack_tests.rs`,
+/// `service/warm_boot/warm_boot_tests.rs`) — so that logical race was
+/// already closed, yet PR #3690's gate still saw a rare failure. Rather than
+/// re-serialize around an already-fully-serialized set of call sites, this
+/// test now calls the parameter-injectable `doctor_data_dir_from(None)` core
+/// directly (mirrors the `SearchAppState::with_registry_path` fix for the
+/// same flake class in `service/server/list_repo_identity_tests.rs`, issue
+/// #2717): it never touches process env, so it cannot race any other test
+/// regardless of that test's own `#[serial]` coverage. `#[serial]` is kept
+/// for defense-in-depth in case a future edit reintroduces env access here.
 ///
-/// Why: `#[serial]` (bare — the crate-wide default lock, matching the
-/// convention in `service/data_dir.rs`'s `data_dir_override_yields_absolute_path`
-/// and `commands/daemon_utils.rs`) serializes this test against every other
-/// `TRUSTY_DATA_DIR`-mutating test in the crate. We additionally clear
-/// `TRUSTY_DATA_DIR` ourselves (rather than merely hoping no sibling left it
-/// set) so the assertion always exercises the platform-default fallback path
-/// — the one that actually contains `"trusty-search"` — deterministically,
-/// and restore whatever was there beforehand so we don't pollute later tests.
-/// What: clear `TRUSTY_DATA_DIR` under the lock, call `doctor_data_dir()`,
-/// assert the default fallback path contains `"trusty-search"`, restore.
+/// Why: eliminate the flake class at its source instead of serializing
+/// around it.
+/// What: call `doctor_data_dir_from(None)` (the unset branch), assert the
+/// platform-default fallback path contains `"trusty-search"`.
 /// Test: `doctor_data_dir_returns_non_empty_path`.
 #[test]
 #[serial]
 fn doctor_data_dir_returns_non_empty_path() {
-    let prev = std::env::var("TRUSTY_DATA_DIR").ok();
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-    let p = doctor_data_dir();
-    match prev {
-        Some(v) => unsafe { std::env::set_var("TRUSTY_DATA_DIR", v) },
-        None => unsafe { std::env::remove_var("TRUSTY_DATA_DIR") },
-    }
+    let p = doctor_data_dir_from(None);
     assert!(p.to_string_lossy().contains("trusty-search"));
+}
+
+/// Companion to `doctor_data_dir_returns_non_empty_path`: the `Some` branch
+/// of `doctor_data_dir_from` (mirrors `doctor_data_dir()`'s
+/// `TRUSTY_DATA_DIR`-set path) returns the override verbatim, with no env
+/// access at all.
+#[test]
+fn doctor_data_dir_from_honors_explicit_override() {
+    let p = doctor_data_dir_from(Some("/tmp/ts-x".to_string()));
+    assert_eq!(p, std::path::PathBuf::from("/tmp/ts-x"));
 }
 
 #[test]

@@ -149,7 +149,35 @@ pub fn check_model_cache() -> CheckResult {
 /// Test: set `TRUSTY_DATA_DIR=/tmp/ts-x`; assert `doctor_data_dir()` returns
 /// `PathBuf::from("/tmp/ts-x")`.
 pub fn doctor_data_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("TRUSTY_DATA_DIR") {
+    doctor_data_dir_from(std::env::var("TRUSTY_DATA_DIR").ok())
+}
+
+/// Pure core of [`doctor_data_dir`] — takes the `TRUSTY_DATA_DIR` value as a
+/// parameter instead of reading the process-global env var directly.
+///
+/// Why (issue #3697): `doctor_data_dir()`'s own test previously had to
+/// `remove_var`/`set_var` the shared `TRUSTY_DATA_DIR` process env var and
+/// rely on `#[serial]` for mutual exclusion against the 40+ other tests in
+/// this test binary that also mutate it. Every such call site already
+/// carries the crate's bare `#[serial]` tag (audited across
+/// `commands/migrate_storage/*`, `commands/start/tests.rs`,
+/// `commands/daemon_utils.rs`, `service/data_dir.rs`,
+/// `service/daemon_tests.rs`, `service/server/*_tests.rs`,
+/// `service/reindex/root_hijack_tests.rs`, and
+/// `service/warm_boot/warm_boot_tests.rs`), so the logical race the
+/// `#3673`/`#3686` fix targeted is already closed — yet PR #3690's gate still
+/// observed a rare failure. Splitting out this parameter-injectable core
+/// (mirroring the `SearchAppState::with_registry_path` fix for the same
+/// class of flake in `service/server/list_repo_identity_tests.rs`, issue
+/// #2717) removes the test's dependency on process env entirely, so it can
+/// no longer race ANY other test regardless of `#[serial]` coverage.
+/// What: mirrors the `TRUSTY_DATA_DIR`-set / unset branches of
+/// `doctor_data_dir()` exactly, but reads the value from `data_dir_env`
+/// rather than `std::env::var`.
+/// Test: `doctor_data_dir_returns_non_empty_path` (passes `None` to
+/// deterministically exercise the platform-default fallback branch).
+fn doctor_data_dir_from(data_dir_env: Option<String>) -> std::path::PathBuf {
+    if let Some(dir) = data_dir_env {
         return std::path::PathBuf::from(dir);
     }
     dirs::data_local_dir()
