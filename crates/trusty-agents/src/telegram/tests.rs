@@ -506,3 +506,92 @@ fn tempdir_for_test() -> PathBuf {
         .expect("create unique tempdir for telegram pid-guard test")
         .keep()
 }
+
+// ── `/switch` persona pre-check resolution (directory-package fix) ──────────
+//
+// Why: the Telegram `/switch <name>` pre-check must accept the SAME persona
+// forms the real dispatch resolver `AgentConfig::by_name_async` does — a
+// directory package (`<name>/agent.toml`) as well as a flat `<name>.toml`.
+// The canonical `assistant` persona ships package-only, so a flat-only
+// pre-check regressed `/switch assistant` to "Unknown persona".
+
+/// Create `<agents_dir>/<name>/agent.toml` (+ a minimal `persona.md`), the
+/// directory-package layout `load_agent_package` resolves.
+fn write_package_persona(agents_dir: &std::path::Path, name: &str) {
+    let pkg = agents_dir.join(name);
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("agent.toml"), "[agent]\nname = \"x\"\n").unwrap();
+    std::fs::write(pkg.join("persona.md"), "persona").unwrap();
+}
+
+/// Why: the shared core of BOTH `/switch` pre-check tiers (project + `$HOME`)
+/// must accept a directory package, not just a flat `.toml` — the exact gap
+/// that broke `/switch assistant`.
+/// What: a package-only persona and a flat persona each resolve `true`.
+#[test]
+fn persona_exists_in_accepts_directory_package() {
+    let agents_dir = tempdir_for_test();
+    write_package_persona(&agents_dir, "assistant");
+    std::fs::write(agents_dir.join("izzie.toml"), "[agent]\nname = \"izzie\"\n").unwrap();
+
+    assert!(
+        super::persona_exists_in(&agents_dir, "assistant"),
+        "directory-package persona (assistant/agent.toml) must resolve"
+    );
+    assert!(
+        super::persona_exists_in(&agents_dir, "izzie"),
+        "flat persona (izzie.toml) must still resolve"
+    );
+}
+
+/// Why: a genuinely unknown name must still be rejected so `/switch` reports
+/// "Unknown persona" rather than storing an unresolvable persona.
+/// What: neither a flat file nor a package dir exists → `false`.
+#[test]
+fn persona_exists_in_rejects_unknown_name() {
+    let agents_dir = tempdir_for_test();
+    assert!(!super::persona_exists_in(&agents_dir, "does-not-exist"));
+}
+
+/// Why: `load_agent_package` reads `persona.md` unconditionally, so a package
+/// with `agent.toml` but no `persona.md` would pass a naive pre-check and then
+/// hard-fail on the next turn's load — the exact failure the pre-check guards
+/// against. It must be rejected here.
+/// What: an `agent.toml`-only package (no `persona.md`) resolves `false`.
+#[test]
+fn persona_exists_in_rejects_package_missing_persona_md() {
+    let agents_dir = tempdir_for_test();
+    let pkg = agents_dir.join("assistant");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("agent.toml"), "[agent]\nname = \"x\"\n").unwrap();
+    // No persona.md written.
+    assert!(
+        !super::persona_exists_in(&agents_dir, "assistant"),
+        "an incomplete package (agent.toml without persona.md) must NOT validate"
+    );
+}
+
+/// Why: the project-local tier of the `/switch` pre-check (checked before the
+/// `$HOME` fallback) is the one that resolves a repo's canonical `assistant`
+/// package — the demo path.
+/// What: a project whose `.trusty-agents/agents/assistant/` is a package
+/// resolves `true`.
+#[test]
+fn project_persona_exists_accepts_directory_package() {
+    let project = tempdir_for_test();
+    let agents_dir = project.join(".trusty-agents").join("agents");
+    write_package_persona(&agents_dir, "assistant");
+
+    assert!(
+        super::project_persona_exists(&project, "assistant"),
+        "package-only assistant persona must validate for /switch"
+    );
+}
+
+/// Why: negative guard for the project tier — an unknown name is rejected.
+/// What: an empty project resolves `false`.
+#[test]
+fn project_persona_exists_rejects_unknown_name() {
+    let project = tempdir_for_test();
+    assert!(!super::project_persona_exists(&project, "nope"));
+}

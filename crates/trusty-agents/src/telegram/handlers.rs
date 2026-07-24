@@ -24,7 +24,7 @@ use super::pairing::{
     PAIRING_CODE_TTL, PairOutcome, PairedChats, PendingPairs, SENTINEL_PAIRING_CHAT_ID,
     save_paired_chats, verify_pair_attempt,
 };
-use super::{ChatSession, SessionMap, home_persona_exists};
+use super::{ChatSession, SessionMap, home_persona_exists, project_persona_exists};
 use crate::ctrl::{self, ConversationTurn};
 
 /// Slash commands exposed to Telegram users.
@@ -444,11 +444,10 @@ async fn handle_switch(
             .map(|s| s.project_path.clone())
             .unwrap_or_else(|| (**project_path).clone())
     };
-    let persona_path = session_project_path
-        .join(".trusty-agents")
-        .join("agents")
-        .join(format!("{stem}.toml"));
-    if persona_path.exists() || home_persona_exists(&stem) {
+    // Accept both the flat `<stem>.toml` and the directory-package
+    // `<stem>/agent.toml` forms, mirroring `AgentConfig::by_name_async`, so a
+    // package-only persona (e.g. the canonical `assistant`) resolves here.
+    if project_persona_exists(&session_project_path, &stem) || home_persona_exists(&stem) {
         let mut map = sessions.lock().await;
         let entry = map
             .entry(chat_id)
