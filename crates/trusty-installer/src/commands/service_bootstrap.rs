@@ -281,8 +281,8 @@ pub fn start_plan(plist_present: bool) -> StartPlan {
 /// `~/Library/LaunchAgents/<plist_label_for(binary)>.plist`;
 /// `run_service_install` spawns `<binary> service install` and maps a non-zero
 /// exit to an error; `is_loaded` (#3836) checks `launchctl list <label>` via
-/// [`super::verify_tail::is_label_loaded`] — the same `launchctl list`
-/// primitive `verify_tail`'s down-state classification is built on;
+/// [`super::verify_launchd_state::is_label_loaded`] — the same `launchctl
+/// list` primitive `verify_tail`'s down-state classification is built on;
 /// `bootstrap_fallback` (#3836) force-bootstraps the already-written plist
 /// directly, reusing the same minimal-`LaunchdConfig` (label only — the other
 /// fields are inert for `bootstrap`/`bootout`) pattern `lifecycle.rs`'s
@@ -308,7 +308,7 @@ impl ServiceEnv for RealServiceEnv {
 
     fn is_loaded(&self, binary: &str) -> bool {
         let label = super::plist_label::plist_label_for(binary);
-        super::verify_tail::is_label_loaded(&label)
+        super::verify_launchd_state::is_label_loaded(&label)
     }
 
     fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()> {
