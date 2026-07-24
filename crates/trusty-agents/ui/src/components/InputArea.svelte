@@ -12,11 +12,12 @@
     replaceMessageTaskId,
     setProjectStatus,
     updateMessageByTask,
+    type Message,
     type Project,
   } from '../stores/app';
   import { get } from 'svelte/store';
   import { cancelTask, invoke, listenEvent, type CancelTaskResult } from '../lib/transport';
-  import { buildRetaskPayload, isPendingTaskId } from '../lib/retask';
+  import { buildRetaskPayload, isPendingTaskId, type HistoryTurn } from '../lib/retask';
   import { resolveOverride } from '../lib/models';
   import { agentRoster } from '../stores/app';
   import { rosterDisplayName } from '../lib/roster';
@@ -295,7 +296,16 @@
           console.error('[InputArea] retask: cancelTask failed, continuing anyway:', e);
         }
       }
-      const payload = buildRetaskPayload($activeMessages, content);
+      // #3819: `topic-boundary` rows are UI-only dividers ("+ New Task"),
+      // not real conversation turns — excluded from the history payload
+      // sent to the backend, same as they'd never have been included
+      // before this role existed. Mapped (not just filtered) so the result
+      // is a real `HistoryTurn[]`, not a `Message[]` the type checker still
+      // sees as possibly carrying `'topic-boundary'`.
+      const historyForRetask: HistoryTurn[] = $activeMessages
+        .filter((m): m is Message & { role: HistoryTurn['role'] } => m.role !== 'topic-boundary')
+        .map((m) => ({ role: m.role, content: m.content }));
+      const payload = buildRetaskPayload(historyForRetask, content);
       await submitTask(project, content, payload);
       return;
     }

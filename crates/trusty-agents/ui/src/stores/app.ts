@@ -43,7 +43,12 @@ export interface Project {
 
 export interface Message {
   id: string;
-  role: 'user' | 'assistant' | 'system' | 'pm' | 'recap';
+  // #3819: 'topic-boundary' is a non-destructive divider row inserted by
+  // "+ New Task" — per Bob's continuous-per-agent-chat model there is no
+  // hard context wall between tasks, so "New Task" marks a topic boundary
+  // in the ONE ongoing stream rather than wiping it. Rendered as a divider
+  // in `ChatView.svelte`.
+  role: 'user' | 'assistant' | 'system' | 'pm' | 'recap' | 'topic-boundary';
   content: string;
   timestamp: number;
   /** Task id returned by the backend; used to route progress events. */

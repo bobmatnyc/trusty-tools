@@ -12,30 +12,27 @@
    * path. Also drops the standalone "Clear Context" footer button per Bob
    * (superseded by "+ New Task").
    *
-   * IMPORTANT model note (Bob's later refinement, received after this
-   * component's first pass — flagged in the PR body as NOT fully
-   * implemented in this slice): the intended end-state is ONE continuous
-   * per-agent chat with no per-task context isolation — the agent infers
-   * and classifies tasks from the conversation/events, and the sidebar
-   * Tasks list is meant to be a FILTER/VIEW over that one stream, not a
-   * separate context. "+ New Task" is meant to be a classification hint,
-   * NOT a context wipe. What ships in THIS slice still matches the
-   * pre-existing app architecture: `handleClearContext` (bound to "+ New
-   * Task" below) still calls `POST /api/clear-context`, which really does
-   * clear the task/chat store — reconciling that to "hint, not wipe"
-   * requires touching the backend clear-context endpoint and the
-   * project-keyed message-store model, out of scope for this pass. Task
-   * resume (`resumeWorkstream` below) still works as "inject recent tagged
-   * history as a context banner," which remains valid under either model.
+   * IMPORTANT model note (Bob's continuous-per-agent-chat refinement): there
+   * is ONE ongoing chat per agent, no per-task context isolation — the
+   * agent infers/classifies tasks from the conversation, and this Tasks
+   * list is a FILTER/VIEW over that one stream, not a separate context.
+   * "+ New Task" (below, `startNewTask`) reflects this NOW: it inserts a
+   * topic-boundary divider into the stream rather than calling the old
+   * `POST /api/clear-context` hard-reset — no network call, nothing
+   * aborted. NOTE: this removes the prior escape hatch for unsticking a
+   * genuinely stuck/errored session via this button; a page reload remains
+   * available. The sidebar Tasks list itself is still a separate
+   * server-sourced list (`GET /api/workstreams`), not yet literally a view
+   * over the live message stream — reconciling that fully is a larger
+   * follow-up flagged in the PR body. Task *resume* (`resumeWorkstream`
+   * below) is unaffected — "inject recent tagged history as a context
+   * banner" remains valid under this model.
    */
   import { onMount } from 'svelte';
   import { Terminal, Loader2, Plus, ChevronRight, ChevronDown } from 'lucide-svelte';
-  import { apiBase } from '../lib/api-config';
   import {
     activeAgentId,
     agentRoster,
-    isRunning,
-    getCurrentApiToken,
     addMessage,
     fetchAgentCatalog,
   } from '../stores/app';
@@ -46,7 +43,6 @@
   export let apiReady = false;
   export let apiError = '';
 
-  let clearing = false;
   let workstreamGroups: AgentGroup[] = [];
   let loadingWorkstreams = true;
   let collapsed = new Set<string>();
@@ -75,12 +71,12 @@
 
   /**
    * Why: "Resume" for this first slice (#3819 issue body) means injecting
-   * the workstream's recent tagged history as a context banner into the
-   * active chat, and switching the active persona to the workstream's
-   * owning agent (when it's a real roster match, not the "Other" bucket) —
-   * NOT tagging new outgoing turns with the workstream (that needs a
-   * workstream-attribution concept trusty-agents' own conversation memory
-   * doesn't have yet; documented as a follow-up).
+   * the task's recent tagged history as a context banner into the active
+   * chat, and switching the active persona to the task's owning agent (when
+   * it's a real roster match, not the "Other" bucket) — NOT tagging new
+   * outgoing turns with the workstream (that needs a workstream-attribution
+   * concept trusty-agents' own conversation memory doesn't have yet;
+   * documented as a follow-up).
    * What: Fetches history, formats a compact digest, appends it as a
    * `system`-role banner message to the `ctrl` thread (the only thread this
    * app has), and sets `activeAgentId` when the group is a known agent.
@@ -97,7 +93,7 @@
       addMessage('ctrl', {
         id: `workstream-resume-${name}-${Date.now()}`,
         role: 'system',
-        content: `Resumed workstream "${name}" — recent tagged memory:\n${digest}`,
+        content: `Resumed task "${name}" — recent tagged memory:\n${digest}`,
         timestamp: Date.now(),
       });
       if (group.agentId !== 'other') {
@@ -109,44 +105,29 @@
   }
 
   /**
-   * Why: `POST /api/clear-context` now aborts any in-flight task as of
-   * #3196. "+ NEW TASK" is the only entry point for it now (#3819 dropped
-   * the separate "Clear Context" footer button) and doubles as "start a new
-   * workstream" — fresh context, no separate create ceremony.
-   * What: Returns true immediately when nothing is running; otherwise shows
-   * a native `confirm()` and returns the user's choice.
-   * Test: Manual — start a task, click "+ New Task", confirm the dialog
-   * appears and Cancel leaves the task running.
+   * Why (Bob's continuous-per-agent-chat model, received after this
+   * sidebar's first pass — see the module doc's "IMPORTANT model note"):
+   * there is ONE ongoing chat per agent, no hard context wall between
+   * tasks. "+ New Task" therefore must NOT clear/abort anything — it marks
+   * a topic boundary in the stream (a divider row, `ChatView.svelte`'s
+   * `topic-boundary` role) that the agent can use to classify/segment
+   * turns, nothing more.
+   * What: Appends a `topic-boundary` message to the `ctrl` thread. No
+   * network call, no page reload, no task abort. NOTE: this deliberately
+   * removes the prior hard-reset escape hatch for a stuck/errored session
+   * (previously `POST /api/clear-context` via this same button) — flagged
+   * as an accepted demo-scope gap in the PR body; a page reload still resets
+   * client-side state if needed.
+   * Test: Manual — click "+ New Task", confirm a divider appears in the
+   * chat stream and no network request fires.
    */
-  function confirmIfRunning(): boolean {
-    if (!$isRunning) return true;
-    return confirm('A task is currently running. This will stop it and clear the chat. Continue?');
-  }
-
-  /**
-   * Why: Lets users wipe accumulated task history and in-flight sessions
-   * without restarting the server — a common need during iterative
-   * development, and (#3222) the target of the "+ NEW TASK" button, which
-   * per #3819 is now this app's ONLY "start fresh" affordance (implicitly:
-   * start a new workstream).
-   * What: POSTs to `/api/clear-context` then reloads the page so the UI
-   * reflects the empty task store. Uses `apiBase()` (not a bare relative
-   * path) so this also works under Tauri, where the webview's own origin is
-   * NOT the `trusty-agents --api` sidecar's `127.0.0.1:8765` — a relative
-   * fetch would silently 404/fail to reach the server there.
-   * Test: Click button, confirm network request returns {cleared:true}, confirm
-   * page reloads and task list is empty.
-   */
-  async function handleClearContext() {
-    if (!confirmIfRunning()) return;
-    clearing = true;
-    try {
-      const token = getCurrentApiToken();
-      const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
-      await fetch(`${apiBase()}/api/clear-context`, { method: 'POST', headers });
-    } finally {
-      window.location.reload();
-    }
+  function startNewTask() {
+    addMessage('ctrl', {
+      id: `topic-boundary-${Date.now()}`,
+      role: 'topic-boundary',
+      content: 'New task',
+      timestamp: Date.now(),
+    });
   }
 
   onMount(() => {
@@ -173,17 +154,16 @@
     </div>
   </header>
 
-  <!-- #3222: "+ NEW TASK" — Foundry mockup (docs/design/gui/Foundry
+  <!-- #3222/#3819: "+ NEW TASK" — Foundry mockup (docs/design/gui/Foundry
        Ecosystem.dc.html:167), full-width rectangular button above TASK
-       HISTORY. Reuses the same clear-context flow as the footer's "Clear
-       Context" button (both now confirm first when a task is running, since
-       #3196 made clear-context abort in-flight work). -->
+       HISTORY. Non-destructive: inserts a topic-boundary divider
+       (`startNewTask`) rather than clearing context — see the module doc's
+       "IMPORTANT model note". -->
   <div class="px-3 pt-3 pb-1">
     <button
       type="button"
-      class="flex w-full items-center justify-center gap-1.5 rounded-md border border-foundry-light-primary dark:border-foundry-primary bg-foundry-light-primary dark:bg-foundry-primary px-3 py-2 text-xs font-semibold uppercase tracking-wide text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
-      disabled={clearing}
-      on:click={handleClearContext}
+      class="flex w-full items-center justify-center gap-1.5 rounded-md border border-foundry-light-primary dark:border-foundry-primary bg-foundry-light-primary dark:bg-foundry-primary px-3 py-2 text-xs font-semibold uppercase tracking-wide text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80"
+      on:click={startNewTask}
     >
       <Plus class="h-3.5 w-3.5" />
       New Task

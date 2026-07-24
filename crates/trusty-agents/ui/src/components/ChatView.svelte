@@ -228,6 +228,17 @@
             <p class="mt-1 text-[10px] text-foundry-light-primary/80 dark:text-foundry-primary/80">{fmtTime(msg.timestamp)}</p>
           </div>
         </div>
+      {:else if msg.role === 'topic-boundary'}
+        <!-- #3819: "+ New Task" inserts this divider instead of clearing
+             context — one continuous chat per agent, topic boundaries are a
+             marker in the stream, not a wall. -->
+        <div class="my-2 flex items-center gap-3" role="separator">
+          <span class="h-px flex-1 bg-foundry-light-border dark:bg-foundry-border"></span>
+          <span class="font-mono text-[10px] font-semibold uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
+            {msg.content || 'New task'} · {fmtTime(msg.timestamp)}
+          </span>
+          <span class="h-px flex-1 bg-foundry-light-border dark:bg-foundry-border"></span>
+        </div>
       {:else}
         <div class="flex justify-center">
           <p class="max-w-[75%] text-center text-xs italic text-foundry-light-muted dark:text-foundry-text/50">{msg.content}</p>
