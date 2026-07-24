@@ -19,7 +19,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   demo view on a real terminal with no risk to piped/CI/`--json` output.
   `LiveChecklist::note` prints a line above the active rows
   (`MultiProgress::println`) for the rare message that must interleave
-  without corrupting the redraw region.
+  without corrupting the redraw region. `enable_steady_tick` (a per-row
+  ticker thread) is skipped entirely outside `Mode::Interactive` (code-critic
+  review) so a piped/`--json`/CI invocation spawns zero ticker threads, not
+  just zero visible bytes.
 
 ## [0.1.1] — 2026-07-09
 

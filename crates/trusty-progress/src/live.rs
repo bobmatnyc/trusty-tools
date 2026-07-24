@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-use crate::output::Output;
+use crate::output::{Mode, Output};
 
 /// How often an in-progress (non-terminal) row's spinner ticks.
 const TICK: Duration = Duration::from_millis(80);
@@ -131,8 +131,15 @@ impl LiveChecklist {
     /// (as `pending`) rather than rows popping in one at a time.
     /// What: Builds one spinner row per entry in `names`, in order, sharing
     /// `output`'s draw target (hidden automatically in `Plain`/`Silent` mode).
-    /// Test: `tests::rows_hidden_in_plain_mode`.
+    /// `enable_steady_tick` (which spawns a per-bar ticker thread) is skipped
+    /// entirely outside [`Mode::Interactive`] (code-critic MEDIUM finding on
+    /// #3804): the rows are already invisible there, but the ticker thread
+    /// itself is real OS cost on every non-interactive invocation — piped
+    /// `curl | sh`, `--json`, CI — that a hidden bar gains nothing from.
+    /// Test: `tests::rows_hidden_in_plain_mode`,
+    /// `tests::plain_mode_writes_zero_bytes`.
     pub fn new(output: &Output, names: &[String]) -> Self {
+        let interactive = output.mode() == Mode::Interactive;
         let multi = MultiProgress::with_draw_target(output.draw_target());
         let name_width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
         let mut bars = HashMap::with_capacity(names.len());
@@ -143,7 +150,9 @@ impl LiveChecklist {
             let style = ProgressStyle::with_template(TEMPLATE).expect("const template valid");
             bar.set_style(style);
             bar.set_message(Self::row_text(name, &ComponentState::Pending, name_width));
-            bar.enable_steady_tick(TICK);
+            if interactive {
+                bar.enable_steady_tick(TICK);
+            }
             bars.insert(name.clone(), bar);
         }
         Self {
@@ -286,5 +295,43 @@ mod tests {
         let (out, _cap) = Output::for_capture(Mode::Plain);
         let checklist = LiveChecklist::new(&out, &names(&["trusty-search"]));
         checklist.note("above the bars");
+    }
+
+    /// Why: code-critic finding on #3804 (P0-adjacent) — `rows_hidden_in_plain_mode`
+    /// only asserted `bar.is_hidden()`, which is source-traced (it confirms
+    /// indicatif's OWN opinion, not that nothing actually reached a sink). This
+    /// mirrors `output::tests::silent_writes_nothing`'s pattern instead: drive a
+    /// full pending -> downloading -> verifying -> terminal cycle across every
+    /// row, plus several `note()` calls, over a captured `Output`, and assert
+    /// the shared capture buffer stays completely empty throughout — proving
+    /// the non-TTY/`--json` zero-byte guarantee is test-observed, not merely
+    /// traced back to indicatif's internal hidden-target logic.
+    /// What: Builds a multi-row checklist over `Output::for_capture(Mode::Plain)`,
+    /// drives every state transition (including both terminal-state variants
+    /// with reasons) and multiple `note()` calls, then asserts `cap.contents()`
+    /// is still `""`.
+    /// Test: This is the test.
+    #[test]
+    fn plain_mode_writes_zero_bytes() {
+        let (out, cap) = Output::for_capture(Mode::Plain);
+        let checklist = LiveChecklist::new(&out, &names(&["trusty-mpm", "trusty-console"]));
+
+        checklist.set("trusty-mpm", ComponentState::Downloading);
+        checklist.set("trusty-mpm", ComponentState::Verifying);
+        checklist.note("info: mid-loop notice");
+        checklist.set("trusty-mpm", ComponentState::Installed);
+
+        checklist.set("trusty-console", ComponentState::Downloading);
+        checklist.note("error: something went sideways");
+        checklist.set(
+            "trusty-console",
+            ComponentState::Skipped("no prebuilt for this platform".to_owned()),
+        );
+
+        assert_eq!(
+            cap.contents(),
+            "",
+            "a hidden LiveChecklist must never write a byte through the shared Output sink"
+        );
     }
 }
