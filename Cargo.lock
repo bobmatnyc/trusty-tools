@@ -11584,7 +11584,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "clap",

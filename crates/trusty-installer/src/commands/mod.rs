@@ -42,6 +42,7 @@ pub mod up;
 pub mod update_engine;
 pub mod updates;
 pub mod upgrade;
+pub mod verify_launchd_state;
 pub mod verify_tail;
 pub mod version;
 

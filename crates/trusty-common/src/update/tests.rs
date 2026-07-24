@@ -280,6 +280,251 @@ async fn perform_upgrade_fails_cleanly_on_nonexistent_crate() {
     );
 }
 
+/// Redirect the REAL (OS-level) stdout file descriptor to `tmp` for the
+/// duration of `f`, then restore it — regardless of whether `f` panics.
+///
+/// Why (#3830 regression proof): `Command::status()` "inheriting" stdio
+/// means a child writes to whatever fd 1 currently points to; the only way
+/// to OBSERVE that from a test is to control what fd 1 points to before
+/// spawning, run the command, then read it back — asserting on the
+/// captured `Output.stdout`/`stderr` bytes proves nothing about the
+/// INHERIT path, because `.status()` never populates those fields at all.
+/// A prior version of this test suite made exactly that mistake (asserted
+/// only `is_ok()`), which still passed even when `run_with_mode` was
+/// reverted to `.status()` — reviewed and caught by code-critic on PR #3834.
+///
+/// CRITICAL: fd 1 is process-global. If this ran as an ordinary parallel
+/// `#[test]`, the default test harness's OWN per-test "test x ... ok" status
+/// line — printed by the harness-controller thread through the REAL stdout,
+/// not through the per-test captured sink — can land in `tmp` mid-redirect
+/// whenever ANY sibling test (not just ones touching this file) finishes on
+/// another thread. `#[serial]` only excludes other `#[serial]`-tagged tests,
+/// not the harness's own status printing, so this was observed to flake
+/// (`cargo test` `--test-threads` > 1, confirmed empirically). The `#[test]`
+/// wrappers below never call this directly on the main test-binary
+/// invocation — they re-exec the test binary, selecting ONLY the `_inner`
+/// test (`--test-threads=1`), so it runs as the sole test in a dedicated
+/// process with no sibling thread able to write through the hijacked fd.
+///
+/// What: `dup`s the real stdout fd aside, `dup2`s `tmp`'s fd onto it, runs
+/// `f`, restores the saved fd (via a guard so a panic inside `f` still
+/// restores it), and returns `f`'s result.
+/// Test: used by `run_with_mode_capture_never_leaks_to_parent_stdio_inner`
+/// and `run_with_mode_inherit_leaks_to_parent_stdio_inner` below.
+#[cfg(unix)]
+async fn with_real_stdout_redirected_to<Fut, T>(tmp: &std::fs::File, f: Fut) -> T
+where
+    Fut: std::future::Future<Output = T>,
+{
+    use std::os::unix::io::AsRawFd;
+
+    /// RAII guard: restores the saved real-stdout fd on drop, so a panic in
+    /// `f` can never leave the process's stdout permanently redirected.
+    struct RestoreStdout(std::os::raw::c_int);
+    impl Drop for RestoreStdout {
+        fn drop(&mut self) {
+            unsafe {
+                libc::dup2(self.0, libc::STDOUT_FILENO);
+                libc::close(self.0);
+            }
+        }
+    }
+
+    let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    assert!(saved >= 0, "dup(STDOUT_FILENO) failed");
+    let _restore = RestoreStdout(saved);
+
+    let rc = unsafe { libc::dup2(tmp.as_raw_fd(), libc::STDOUT_FILENO) };
+    assert!(rc >= 0, "dup2(tmp, STDOUT_FILENO) failed");
+
+    f.await
+}
+
+/// Re-exec this test binary, running ONLY `inner_test_name` (an `#[ignore]`d
+/// test) alone with `--test-threads=1`, and assert it exits 0.
+///
+/// Why: see [`with_real_stdout_redirected_to`]'s doc — any test that hijacks
+/// the process's real stdout fd must run with zero sibling test threads, or
+/// the harness's own status-line printing can land in the hijacked fd and
+/// corrupt the assertion. Re-execing the compiled test binary, filtered to
+/// exactly one `#[ignore]`d test name, is the standard way to get that
+/// isolation without spinning up a second crate/binary just for this.
+/// What: `Command::new(current_exe())` with
+/// `[name, "--exact", "--ignored", "--test-threads=1"]`; panics with the
+/// child's captured stdout/stderr on a non-zero exit (so a failure inside
+/// the isolated test is not silently swallowed).
+/// Test: exercised by every `_inner`-test wrapper below.
+#[cfg(unix)]
+fn run_isolated_inner_test(inner_test_name: &str) {
+    let exe = std::env::current_exe().expect("resolve current test binary");
+    let output = std::process::Command::new(&exe)
+        .args([inner_test_name, "--exact", "--ignored", "--test-threads=1"])
+        .output()
+        .expect("re-exec test binary for isolated fd test");
+    assert!(
+        output.status.success(),
+        "isolated test `{inner_test_name}` failed ({}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// The #3830 regression proof: [`UpgradeOutput::Capture`] must NEVER let a
+/// child's output reach the parent's real (inherited) stdout, no matter how
+/// noisy the child is or whether it succeeds.
+///
+/// Why: see [`with_real_stdout_redirected_to`]'s doc — this replaces a
+/// weaker predecessor that only asserted `is_ok()`, which passed even
+/// against a reverted `.status()`-based implementation (code-critic finding
+/// on PR #3834). `#[ignore]`d + only ever invoked, alone, via
+/// [`run_isolated_inner_test`] from the `#[test]` wrapper immediately below
+/// — see that function's doc for why this can't be an ordinary parallel test.
+/// What: redirects the real stdout fd to a tempfile, runs a noisy,
+/// successful `sh -c` command through `run_with_mode(.., Capture, ..)`,
+/// restores stdout, then asserts the tempfile received ZERO bytes.
+/// Test: this is the test (invoked via
+/// `run_with_mode_capture_never_leaks_to_parent_stdio`).
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn run_with_mode_capture_never_leaks_to_parent_stdio_inner() {
+    use std::io::Read;
+
+    let tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args([
+        "-c",
+        "for i in $(seq 1 20); do echo \"LEAK_MARKER_3830 stdout $i\"; \
+         echo \"LEAK_MARKER_3830 stderr $i\" >&2; done; exit 0",
+    ]);
+
+    let result = with_real_stdout_redirected_to(
+        tmp.as_file(),
+        super::upgrade::run_with_mode(
+            cmd,
+            super::upgrade::UpgradeOutput::Capture,
+            "`noisy-capture`",
+        ),
+    )
+    .await;
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+    let mut contents = String::new();
+    tmp.reopen()
+        .expect("reopen tempfile")
+        .read_to_string(&mut contents)
+        .expect("read tempfile");
+    assert!(
+        contents.is_empty(),
+        "Capture mode leaked to the parent's real stdout fd: {contents:?}"
+    );
+}
+
+/// `#[test]` entry point for the isolated inner test above — see
+/// [`run_isolated_inner_test`]'s doc for why this indirection exists. This is
+/// the test `cargo test` actually runs; it re-execs the binary so the real
+/// fd-1 hijack happens with zero sibling test threads.
+/// Test: this wraps `run_with_mode_capture_never_leaks_to_parent_stdio_inner`.
+#[cfg(unix)]
+#[test]
+fn run_with_mode_capture_never_leaks_to_parent_stdio() {
+    run_isolated_inner_test(
+        "update::tests::run_with_mode_capture_never_leaks_to_parent_stdio_inner",
+    );
+}
+
+/// Contrast/methodology-validation test: [`UpgradeOutput::Inherit`] (the
+/// mode `perform_upgrade` — unchanged, used by the standalone
+/// trusty-memory/trusty-search `upgrade` commands — still uses) DOES let a
+/// child's stdout reach the parent's real stdout fd.
+///
+/// Why: without this, the Capture test passing could mean either "Capture
+/// correctly avoids the parent's stdout" OR "the fd-redirection technique
+/// itself is broken and never observes anything" — indistinguishable from a
+/// test that trivially always passes. This proves the harness DOES detect a
+/// leak when one is expected, grounding the sibling test's negative result.
+/// `#[ignore]`d for the same process-isolation reason — see
+/// [`with_real_stdout_redirected_to`]'s doc.
+/// What: same redirect-run-restore shape, but through
+/// `UpgradeOutput::Inherit`; asserts the tempfile DOES contain the child's
+/// marker text.
+/// Test: this is the test (invoked via
+/// `run_with_mode_inherit_leaks_to_parent_stdio`).
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn run_with_mode_inherit_leaks_to_parent_stdio_inner() {
+    use std::io::Read;
+
+    let tmp = tempfile::NamedTempFile::new().expect("create tempfile");
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args(["-c", "echo 'LEAK_MARKER_3830 inherit-path'; exit 0"]);
+
+    let result = with_real_stdout_redirected_to(
+        tmp.as_file(),
+        super::upgrade::run_with_mode(
+            cmd,
+            super::upgrade::UpgradeOutput::Inherit,
+            "`noisy-inherit`",
+        ),
+    )
+    .await;
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+    let mut contents = String::new();
+    tmp.reopen()
+        .expect("reopen tempfile")
+        .read_to_string(&mut contents)
+        .expect("read tempfile");
+    assert!(
+        contents.contains("LEAK_MARKER_3830 inherit-path"),
+        "expected Inherit mode to leak to the parent's real stdout fd (the fd-redirection \
+         technique may be broken — this test found nothing, which would make the sibling \
+         Capture test's negative result meaningless): {contents:?}"
+    );
+}
+
+/// `#[test]` entry point for the isolated inner test above — see
+/// [`run_isolated_inner_test`]'s doc.
+/// Test: this wraps `run_with_mode_inherit_leaks_to_parent_stdio_inner`.
+#[cfg(unix)]
+#[test]
+fn run_with_mode_inherit_leaks_to_parent_stdio() {
+    run_isolated_inner_test("update::tests::run_with_mode_inherit_leaks_to_parent_stdio_inner");
+}
+
+/// Why (#3830): the error path's diagnostic must come from the child's
+/// CAPTURED stderr — only reachable if the command was actually run via
+/// `.output()`. `.status()` (the pre-fix `Inherit` path) has no `stderr`
+/// field to read, so this exact assertion would not compile against that
+/// code either — pinning the fix at the type level as well as behaviourally.
+/// What: runs a command that writes a distinctive marker to stderr and
+/// exits non-zero via `UpgradeOutput::Capture`; asserts the returned error's
+/// message contains that exact marker.
+/// Test: this is the test.
+#[tokio::test]
+async fn run_with_mode_capture_folds_stderr_into_error() {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args([
+        "-c",
+        "echo 'DISTINCTIVE_MARKER_3830_COMMON: cargo install failed' >&2; exit 7",
+    ]);
+    let err = super::upgrade::run_with_mode(
+        cmd,
+        super::upgrade::UpgradeOutput::Capture,
+        "`fake cargo install`",
+    )
+    .await
+    .expect_err("expected Err");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("DISTINCTIVE_MARKER_3830_COMMON: cargo install failed"),
+        "error message did not fold in captured stderr: {msg}"
+    );
+    assert!(msg.contains("fake cargo install"));
+}
+
 /// Verify that `verify_installed_binary` passes for `cargo`, which is always
 /// on PATH for any developer machine.
 ///

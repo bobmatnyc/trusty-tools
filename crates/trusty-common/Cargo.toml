@@ -236,6 +236,13 @@ optional = true
 [dev-dependencies]
 toml = "0.8"
 tempfile = { workspace = true }
+# libc: the production dependency (above) is macOS-only (launchd/getuid), but
+# the #3830 fd-redirection regression tests (`update::tests`) need dup/dup2/
+# STDOUT_FILENO on every unix CI target (this workspace's CI runs on
+# ubuntu-latest) — an unconditional dev-only dependency makes that available
+# for `#[cfg(test)]` code without adding libc to any non-macOS production
+# build.
+libc = { workspace = true }
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel test threads (e.g. supervisor_tests.rs).
 serial_test = { workspace = true }
