@@ -43,6 +43,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `SearchAppState::with_registry_path` fix for the same flake class, issue
   #2717) and pointed the test at it directly — it no longer touches process
   env at all, so it can't race any sibling test regardless of tagging.
+- **`commands::start::embedder_fallback::tests::fallback_logs_build_failure_exactly_once`
+  deflaked (issue #3689).** This test counts `tracing` events via a
+  thread-local subscriber (`tracing::subscriber::with_default`); `tracing`'s
+  per-callsite interest cache is process-global, not per-thread, so a
+  concurrently-scheduled sibling test hitting the same `tracing::error!` call
+  sites with no subscriber installed could leave a call site cached as
+  "never interested," silently dropping an event this test expects to count.
+  All 7 tests in the module share those call sites and are now `#[serial]`,
+  matching the crate's existing isolation convention (#3629/#3673/#3608).
 - **`core::memguard_enforce::tests::test_anon_rss_for_self_pid_on_linux` deflaked
   (issue #3762, recurrence of #3716's flake class).** The test compared two
   genuinely independent, non-atomic `/proc` reads taken microseconds apart

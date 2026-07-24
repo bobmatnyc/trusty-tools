@@ -16,6 +16,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `room_to_uuid(&filter)`, the same deterministic hash `list_drawers` already
   uses to filter by room (no real Room table is wired yet, but the mapping
   was already available at this call site).
+- **`update::tests::cache_fresh_returns_some_when_newer` deflaked (issue
+  #3689).** `check_throttled_skips_when_no_update_check_set` /
+  `check_throttled_skips_when_ci_set` mutate `NO_UPDATE_CHECK_ENV`/`CI_ENV`
+  for the duration of their own `check_throttled(...).await` (deliberately
+  outliving the brief `ENV_LOCK` critical sections around the set/remove
+  calls), so a concurrently-scheduled `cache_fresh_returns_some_when_newer`
+  could observe the stray var and flip an expected `Some` to `None`. All
+  three tests now share `#[serial(update_check_throttled_env)]`, matching
+  the crate's existing named-group convention (#3608/#3629).
 
 ---
 ## [0.26.0] — 2026-07-23
