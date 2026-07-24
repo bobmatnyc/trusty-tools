@@ -15,8 +15,9 @@
 //! `POST` takes `{ "event_type": "...", "included": bool }` and persists it.
 //! Both are thin wrappers over `crate::listeners::store::EventStore` — no
 //! `AppState` field needed (the store is file-backed, not in-process state).
-//! Test: `list_listener_events_returns_empty_when_no_log`,
-//! `set_listener_event_filter_persists_and_reflects_in_list` (`super::tests`).
+//! Test: `super::tests::listener_events` — `list_returns_empty_when_no_log`,
+//! `filter_post_persists_and_list_reflects_it`,
+//! `filter_post_rejects_empty_event_type`.
 
 use axum::{Json, extract::Query, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};

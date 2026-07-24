@@ -164,6 +164,10 @@ mod mock_daemon {
         drawers: StdMutex<Vec<MockDrawer>>,
     }
 
+    async fn mock_health() -> Json<serde_json::Value> {
+        Json(serde_json::json!({"status": "ok"}))
+    }
+
     async fn mock_create_palace(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
         Json(serde_json::json!({"ok": true}))
     }
@@ -224,6 +228,7 @@ mod mock_daemon {
 
     async fn spawn(state: std::sync::Arc<MockState>) -> SocketAddr {
         let app = Router::new()
+            .route("/health", get(mock_health))
             .route("/api/v1/palaces", post(mock_create_palace))
             .route(
                 "/api/v1/palaces/{id}/drawers",
@@ -276,5 +281,48 @@ mod mock_daemon {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].content, "turn two", "newest-first ordering");
         assert_eq!(out[1].content, "turn one");
+    }
+
+    /// Why: `list_workstream_labels_at` is a thin bare-name projection over
+    /// `list_workstreams_at` (itself only unit-tested against an empty/
+    /// unreachable daemon above) — the classification block (DOC-54
+    /// §9.6.1, `ctrl::pm_task::dispatch::classification`) needs the CLOSED
+    /// label vocabulary as plain strings, so this is worth its own
+    /// happy-path guard against a real mock daemon rather than trusting the
+    /// composition untested.
+    /// What: seeds one `WS-CLAIM`-tagged drawer under `ws:feat-x` and one
+    /// under `ws:feat-y`; asserts the label list contains exactly both bare
+    /// names (order not asserted — `group_by_workstream`'s recency sort is
+    /// covered separately).
+    /// Test: this test.
+    #[tokio::test]
+    async fn list_workstream_labels_at_against_mock_daemon() {
+        let state = std::sync::Arc::new(MockState::default());
+        let addr = spawn(state).await;
+        let base_url = format!("http://{addr}");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+
+        create_tagged_drawer_at(
+            tmp.path(),
+            &base_url,
+            "WS-CLAIM feat-x: does a thing",
+            vec!["ws-claim".into(), "ws:feat-x".into()],
+        )
+        .await
+        .expect("first write succeeds");
+        create_tagged_drawer_at(
+            tmp.path(),
+            &base_url,
+            "WS-CLAIM feat-y: does another thing",
+            vec!["ws-claim".into(), "ws:feat-y".into()],
+        )
+        .await
+        .expect("second write succeeds");
+
+        let labels = list_workstream_labels_at(tmp.path(), &base_url).await;
+        assert_eq!(labels.len(), 2);
+        assert!(labels.contains(&"feat-x".to_string()));
+        assert!(labels.contains(&"feat-y".to_string()));
     }
 }

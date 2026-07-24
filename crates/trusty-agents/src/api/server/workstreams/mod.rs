@@ -370,7 +370,7 @@ pub(crate) async fn list_workstream_labels_at(cwd: &Path, base_url: &str) -> Vec
 /// file); returns `[]` when no project root is found or the daemon is
 /// unreachable, mirroring [`list_workstreams_at`]'s safe-default posture.
 /// Test: `drawers_by_tag_at_no_project_root_is_empty`,
-/// `drawers_by_tag_at_against_mock_daemon`.
+/// `create_tagged_drawer_at_and_drawers_by_tag_at_round_trip`.
 pub(crate) async fn drawers_by_tag_at(
     cwd: &Path,
     base_url: &str,
