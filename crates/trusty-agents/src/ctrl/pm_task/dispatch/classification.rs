@@ -144,9 +144,9 @@ fn is_valid_label(label: &str) -> bool {
 /// `parse_marker_extracts_new_label`, `parse_marker_missing_is_none`,
 /// `parse_marker_strips_surrounding_whitespace`,
 /// `parse_marker_ignores_earlier_lookalike_text`,
-/// `parse_marker_ignores_trailing_syntax_echo`,
+/// `parse_marker_ignores_trailing_syntax_echo_mid_sentence`,
 /// `parse_marker_double_marker_strips_both_last_wins`,
-/// `parse_marker_invalid_label_stripped_but_unclassified`.
+/// `parse_marker_trailing_syntax_echo_is_stripped_but_unclassified`.
 pub(crate) fn parse_marker(raw: &str) -> (String, Option<Classification>) {
     let mut remaining = raw.trim_end();
     let mut classification: Option<Classification> = None;
