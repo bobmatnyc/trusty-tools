@@ -12,7 +12,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use super::{TrustyAgentsRepl, discover_agent_names};
+use super::TrustyAgentsRepl;
 
 impl TrustyAgentsRepl {
     /// Candidate agent directories for this REPL instance, primary first
@@ -198,6 +198,14 @@ impl TrustyAgentsRepl {
             };
             for entry in entries.flatten() {
                 let path = entry.path();
+                // Skip archived backups (`*.stale.bak`, produced by the bundled
+                // reprovision, e.g. `izzie.stale.bak/agent.toml`) so they never
+                // leak into the listing as a bogus separate agent — mirrors the
+                // GUI/API catalog's `scan_agents_dir_tiered` skip (projects.rs).
+                let entry_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if entry_name.contains(".stale.bak") || entry_name.ends_with(".bak") {
+                    continue;
+                }
                 let stem = if path.is_dir() {
                     if !path.join("agent.toml").is_file() {
                         continue;
@@ -241,16 +249,24 @@ impl TrustyAgentsRepl {
         );
     }
 
+    /// List agents for the `/agents` slash command.
+    ///
+    /// Why (Bob directive, agent-picker role filter): `/agents` used to call
+    /// [`discover_agent_names`] — a flat, non-recursive `*.toml` glob with no
+    /// role filter and no directory-package awareness — so it disagreed with
+    /// `/agent` (no arg, [`Self::list_assistant_agents_into`]) in three ways:
+    /// it printed hidden-but-functional agents (ctrl, pm) and the 16 bundled
+    /// coding/engineer/support agents, it never saw directory-package agents
+    /// (Izzie, CTO Bot, Assistant), and it did not exclude `*.stale.bak`
+    /// backups. Rather than reimplement package-aware role filtering a second
+    /// time, `/agents` now delegates to the SAME filtered listing `/agent`
+    /// uses — the two commands can never drift again — keeping only its own
+    /// header/format wrapping.
+    /// What: Delegates to [`Self::list_assistant_agents_into`] and returns its
+    /// output verbatim (that fn already handles the empty case).
+    /// Test: `print_agents_into_matches_list_assistant_agents_filtering`.
     pub(crate) fn print_agents_into(&self, out: &mut String) {
-        let names = discover_agent_names(&self.agents_dir);
-        if names.is_empty() {
-            let _ = writeln!(out, "no agents found in {}", self.agents_dir.display());
-        } else {
-            let _ = writeln!(out, "Agents ({}):", names.len());
-            for name in names {
-                let _ = writeln!(out, "  - {name}");
-            }
-        }
+        self.list_assistant_agents_into(out);
     }
 
     pub(crate) fn print_skills_into(&self, out: &mut String) {

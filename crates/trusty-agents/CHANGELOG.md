@@ -42,6 +42,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Agent pickers list only assistant-role agents, not the 16 bundled
+  coding/engineer/support agents:** the GUI/Tauri picker and MCP
+  `list_agents` tool (both backed by `agent_roster`/`scan_agent_catalog`)
+  and the REPL's `/agents` slash command (previously a flat, non-role-aware
+  `discover_agent_names` glob that disagreed with `/agent`) now filter to
+  `role == "assistant"` — a missing/unparseable role is treated as
+  NOT-assistant (fail-closed), so a malformed manifest can never leak a
+  coding agent back into a picker. `/agents` now delegates to the same
+  filtered listing `/agent` (no arg) already used, so the two can't drift
+  again. `*.stale.bak` directory-package backups (e.g. `izzie.stale.bak/`)
+  are additionally excluded from the REPL listing (the GUI/API catalog
+  already excluded them). Direct by-name resolution — `/agent <name>`,
+  `/switch`, and `delegate_to_agent` (which resolves targets directly via
+  `AgentConfig::by_name_in`, never through the roster) — is unaffected, so
+  ctrl/pm/coding agents remain fully dispatchable though no longer listed.
 - **Agent picker no longer loses Izzie / CTO Bot on a cold start:** the
   `AgentSwitcher` (and `ModelSwitcher`) fetched their catalog exactly once in
   `onMount`, but `<Header>` — and therefore both pickers — renders before

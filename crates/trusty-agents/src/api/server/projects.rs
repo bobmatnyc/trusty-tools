@@ -260,24 +260,62 @@ pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<se
     Json(agent_roster().await)
 }
 
+/// True when a parsed catalog entry's `role` field is exactly `"assistant"`.
+///
+/// Why (Bob directive, agent-picker role filter): the picker/roster surface
+/// must show ONLY assistant-type personas (Assistant, Izzie, CTO Bot,
+/// custom ones like `researcher`) — never the 16 bundled coding/engineer/
+/// support agents. `parse_agent_toml`/`md_agent_to_catalog_json` already
+/// default a missing/unparseable `role` to `""` (never `None`), so a plain
+/// equality check against the literal `"assistant"` — with no special-casing
+/// for absence — naturally treats any unparseable or missing role as
+/// NOT-assistant. That is a deliberate fail-closed default: it is the only
+/// way a bundled coding agent can never leak back into the picker through a
+/// malformed or role-less manifest.
+/// What: Reads `v["role"]` as a string and compares against `"assistant"`.
+/// Test: `agent_roster_filters_to_assistant_role_only`.
+pub(super) fn is_assistant_role(v: &serde_json::Value) -> bool {
+    v.get("role").and_then(|r| r.as_str()) == Some("assistant")
+}
+
 /// Shared agent-roster computation — the `{"agents": [...]}` envelope returned
 /// by both `GET /api/agents` ([`list_agents_route`]) and the `list_agents`
 /// MCP tool ([`crate::runtime::mcp_serve`], #3633 core).
 ///
 /// Why: the MCP `list_agents` tool must surface the EXACT same roster the HTTP
 /// route (and therefore the GUI picker) shows — Assistant, Izzie, CTO Bot, and
-/// the specialist personas resolved from [`crate::agents::agents_dir_candidates`].
-/// Extracting the computation out of the axum handler into one plain async fn
-/// keeps the two surfaces from drifting, exactly as [`parse_agent_toml`] keeps
-/// the GET and PATCH shapes aligned.
+/// custom assistant-role personas resolved from
+/// [`crate::agents::agents_dir_candidates`]. Extracting the computation out of
+/// the axum handler into one plain async fn keeps the two surfaces from
+/// drifting, exactly as [`parse_agent_toml`] keeps the GET and PATCH shapes
+/// aligned. Per Bob's directive this is a PICKER surface, so it is filtered to
+/// `role == "assistant"` — the 16 bundled coding/engineer/support agents must
+/// never appear here. This does NOT affect delegation: `delegate_to_agent`
+/// (`crate::tools::delegate`) resolves its target directly via
+/// `AgentConfig::by_name_in` against the candidate directories, never through
+/// this roster, so hidden-but-functional agents (ctrl, pm, coding agents)
+/// remain fully dispatchable by name even though they no longer list here.
+/// [`scan_agent_catalog`] itself stays UNFILTERED (and is exercised directly
+/// by its own raw-scan tests) — the role filter is applied only at this
+/// picker-facing envelope boundary, so a future consumer that legitimately
+/// needs the full catalog can call `scan_agent_catalog` directly instead of
+/// this fn.
 /// What: scans every candidate agents directory via [`scan_agent_catalog`]
-/// (package + flat resolution, deduped, name-sorted) and wraps the result in
-/// the `{"agents": [...]}` envelope. Read-only; no side effects.
+/// (package + flat resolution, deduped, name-sorted), filters to
+/// [`is_assistant_role`], and wraps the result in the `{"agents": [...]}`
+/// envelope. Read-only; no side effects.
 /// Test: covered indirectly by `scan_agent_catalog_dedupes_across_dirs` (the
-/// scan) and the `mcp_serve` dispatcher's `tools/call` unit test (the envelope).
+/// scan) and the `mcp_serve` dispatcher's `tools/call` unit test (the
+/// envelope); role filter itself by
+/// `agent_roster_filters_to_assistant_role_only`.
 pub(crate) async fn agent_roster() -> serde_json::Value {
     let dirs = crate::agents::agents_dir_candidates();
-    serde_json::json!({ "agents": scan_agent_catalog(&dirs).await })
+    let agents: Vec<serde_json::Value> = scan_agent_catalog(&dirs)
+        .await
+        .into_iter()
+        .filter(is_assistant_role)
+        .collect();
+    serde_json::json!({ "agents": agents })
 }
 
 /// Parse one agent TOML file's `[agent]` table into the JSON shape shared by

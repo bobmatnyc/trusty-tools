@@ -378,6 +378,123 @@ fn list_assistant_agents_into_surfaces_directory_package() {
     );
 }
 
+/// Why (Bob directive, agent-picker role filter): `/agent` (no arg) must
+/// exclude both a coding-role agent AND a `*.stale.bak` directory-package
+/// backup (produced by the bundled reprovision, e.g. `izzie.stale.bak/
+/// agent.toml`) — the latter previously leaked in as a bogus separate entry
+/// literally named `izzie.stale.bak` because the old scan only checked flat
+/// `<name>.toml` extensions, never a directory entry's full name, for the
+/// backup suffix.
+/// What: A tempdir with a real assistant package, a coding-role flat TOML,
+/// and a `izzie.stale.bak/agent.toml` backup package; asserts the listing
+/// keeps the assistant, and excludes both the coding agent and the
+/// `.stale.bak` entry by name.
+#[test]
+fn list_assistant_agents_into_excludes_coding_role_and_stale_bak() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package_fixture(tmp.path(), "izzie", "Izzie");
+
+    // Coding-role agent: must never surface in the assistant picker.
+    std::fs::write(
+        tmp.path().join("engineer.toml"),
+        "[agent]\nname = \"engineer\"\nrole = \"engineer\"\ndescription = \"coding\"\n",
+    )
+    .unwrap();
+
+    // Archived backup package: must never surface as a bogus separate agent.
+    let stale = tmp.path().join("izzie.stale.bak");
+    std::fs::create_dir(&stale).unwrap();
+    std::fs::write(
+        stale.join("agent.toml"),
+        "[agent]\nname = \"izzie\"\nrole = \"assistant\"\ndisplay_name = \"STALE\"\n",
+    )
+    .unwrap();
+
+    let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    repl.agents_dir = tmp.path().to_path_buf();
+    let mut out = String::new();
+    repl.list_assistant_agents_into(&mut out);
+
+    assert!(
+        out.lines().any(|l| l.trim_start().starts_with("izzie")),
+        "the real assistant package must still be listed: {out:?}"
+    );
+    assert!(
+        !out.contains("engineer"),
+        "a coding-role agent must never appear in the assistant listing: {out:?}"
+    );
+    assert!(
+        !out.contains("stale.bak"),
+        "a *.stale.bak backup must never appear as a bogus separate agent: {out:?}"
+    );
+}
+
+/// Why (Bob directive, agent-picker role filter): `/agents` used to bypass
+/// role filtering entirely ([`discover_agent_names`], flat non-recursive
+/// glob) and disagree with `/agent`. It now delegates to the same filtered
+/// listing, so the two commands can never drift again.
+/// What: Same fixture as the `/agent` test above; asserts `/agents`
+/// (`print_agents_into`) produces byte-identical output to
+/// `list_assistant_agents_into` and excludes the coding agent.
+#[test]
+fn print_agents_into_matches_list_assistant_agents_filtering() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_package_fixture(tmp.path(), "izzie", "Izzie");
+    std::fs::write(
+        tmp.path().join("engineer.toml"),
+        "[agent]\nname = \"engineer\"\nrole = \"engineer\"\n",
+    )
+    .unwrap();
+
+    let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    repl.agents_dir = tmp.path().to_path_buf();
+
+    let mut agents_out = String::new();
+    repl.list_assistant_agents_into(&mut agents_out);
+    let mut slash_agents_out = String::new();
+    repl.print_agents_into(&mut slash_agents_out);
+
+    assert_eq!(
+        agents_out, slash_agents_out,
+        "/agents must delegate to the same filtered listing as /agent"
+    );
+    assert!(!slash_agents_out.contains("engineer"));
+}
+
+/// Why (Bob directive, agent-picker role filter): filtering the PICKER/
+/// listing surface must never break direct by-name activation. A
+/// coding-role agent is invisible in `/agent` / `/agents` output but must
+/// still be reachable via `/agent <name>` for hidden-but-functional
+/// dispatch (mirrors ctrl/pm staying dispatchable though never listed).
+/// What: A coding-role flat TOML that `list_assistant_agents_into` excludes;
+/// asserts `handle_agent_command_into` still activates it by exact name.
+#[test]
+fn handle_agent_command_into_activates_non_assistant_role_by_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("engineer.toml"),
+        "[agent]\nname = \"engineer\"\nrole = \"engineer\"\ndisplay_name = \"Engineer\"\nmodel = \"anthropic/claude-haiku-4-5\"\ndescription = \"coding\"\n\n[llm]\ntemperature = 0.5\nmax_tokens = 1024\n\n[system_prompt]\ncontent = \"You are an engineer.\"\n",
+    )
+    .unwrap();
+
+    let mut repl = TrustyAgentsRepl::new(None).unwrap();
+    repl.agents_dir = tmp.path().to_path_buf();
+
+    // Confirm it's excluded from the listing first.
+    let mut listing = String::new();
+    repl.list_assistant_agents_into(&mut listing);
+    assert!(!listing.contains("engineer"));
+
+    // But by-name activation still works.
+    let mut out = String::new();
+    repl.handle_agent_command_into("engineer", &mut out);
+    assert!(
+        out.contains("Switched to: Engineer"),
+        "a filtered (non-assistant-role) agent must still activate by name: {out:?}"
+    );
+    assert_eq!(repl.active_persona, Some("engineer".to_string()));
+}
+
 #[test]
 fn discover_agent_names_reads_toml_stems() {
     let tmp = tempfile::tempdir().unwrap();
