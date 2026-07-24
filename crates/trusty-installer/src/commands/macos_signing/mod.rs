@@ -723,26 +723,37 @@ pub fn signing_persistence_tip() -> &'static str {
 /// multi-line guidance into the middle of the live per-component checklist —
 /// it is now data the caller can defer to a post-install summary instead).
 ///
-/// `existed_before` — whether a binary already sat at `set`'s primary path
-/// before THIS install call placed a fresh copy — selects the fresh-install
-/// vs. reinstall guidance variant (see [`fda_guidance`] / [`app_data_guidance`]).
-/// The `bool` half of the returned tuple is `true` only when the note is
-/// no-cert guidance (never for a signed-OK note or a codesign-warning note),
-/// so the caller can print [`signing_persistence_tip`] once, only when it is
-/// actually relevant.
+/// `existed_before` and `primary_path` (#3846 code-critic MEDIUM fix) MUST
+/// come from the caller's `install_one`/`InstalledBinary` result — the
+/// CONCRETE path/replace-state observed on the outcome branch actually
+/// taken (prebuilt `install_dir`, or the `cargo install` fallback's bin
+/// dir) — never re-derived here as `install_dir.join(primary)`. Re-deriving
+/// against a single fixed `install_dir` silently named/tested the wrong
+/// file whenever the fallback branch fired, since that branch's real
+/// destination is a different directory. `install_dir` is still used below,
+/// unchanged, for the SEPARATE signing loop that walks every binary in
+/// `set` when a cert IS found — that loop is unaffected by this fix.
+///
+/// `existed_before` selects the fresh-install vs. reinstall guidance variant
+/// (see [`fda_guidance`] / [`app_data_guidance`]). The `bool` half of the
+/// returned tuple is `true` only when the note is no-cert guidance (never
+/// for a signed-OK note or a codesign-warning note), so the caller can print
+/// [`signing_persistence_tip`] once, only when it is actually relevant.
 #[cfg(target_os = "macos")]
 fn post_install_signed_set(
     install_dir: &std::path::Path,
     set: &str,
     json: bool,
     existed_before: bool,
+    primary_path: &std::path::Path,
 ) -> Option<(String, bool)> {
     if json {
         return None;
     }
     let binaries = binaries_for_set(set);
-    let &primary = binaries.first()?;
-    let primary_path = install_dir.join(primary);
+    if binaries.is_empty() {
+        return None;
+    }
     let hardened = use_hardened_runtime(set, false);
 
     match has_developer_id_cert() {
@@ -798,7 +809,9 @@ fn post_install_signed_set(
 /// returning its note/guidance text instead of printing directly (see that
 /// function's doc), plus a `bool` telling the caller whether
 /// [`signing_persistence_tip`] should be printed. On non-macOS: `None`.
-/// `existed_before` — see [`post_install_signed_set`].
+/// `existed_before` / `primary_path` — see [`post_install_signed_set`]; both
+/// MUST come from the caller's `InstalledBinary` result for the CONCRETE
+/// outcome branch taken, never re-derived from `install_dir` alone.
 ///
 /// Test: `tests::fda_guidance_fresh_install_has_no_remove_step` /
 /// `tests::fda_guidance_reinstall_has_remove_and_readd` (pure); signing
@@ -808,14 +821,15 @@ pub fn post_install_search(
     install_dir: &std::path::Path,
     json: bool,
     existed_before: bool,
+    primary_path: &std::path::Path,
 ) -> Option<(String, bool)> {
     #[cfg(target_os = "macos")]
     {
-        post_install_signed_set(install_dir, SEARCH_SET, json, existed_before)
+        post_install_signed_set(install_dir, SEARCH_SET, json, existed_before, primary_path)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (install_dir, json, existed_before); // suppress unused warnings on non-macOS
+        let _ = (install_dir, json, existed_before, primary_path); // suppress unused warnings on non-macOS
         None
     }
 }
@@ -830,7 +844,9 @@ pub fn post_install_search(
 /// returning its note/guidance text instead of printing directly (see that
 /// function's doc), plus a `bool` telling the caller whether
 /// [`signing_persistence_tip`] should be printed. On non-macOS: `None`.
-/// `existed_before` — see [`post_install_signed_set`].
+/// `existed_before` / `primary_path` — see [`post_install_signed_set`]; both
+/// MUST come from the caller's `InstalledBinary` result for the CONCRETE
+/// outcome branch taken, never re-derived from `install_dir` alone.
 ///
 /// Test: `tests::app_data_guidance_fresh_and_reinstall_variants` (pure);
 /// signing itself is not invoked in tests (side-effecting).
@@ -839,14 +855,15 @@ pub fn post_install_mpm(
     install_dir: &std::path::Path,
     json: bool,
     existed_before: bool,
+    primary_path: &std::path::Path,
 ) -> Option<(String, bool)> {
     #[cfg(target_os = "macos")]
     {
-        post_install_signed_set(install_dir, MPM_SET, json, existed_before)
+        post_install_signed_set(install_dir, MPM_SET, json, existed_before, primary_path)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (install_dir, json, existed_before); // suppress unused warnings on non-macOS
+        let _ = (install_dir, json, existed_before, primary_path); // suppress unused warnings on non-macOS
         None
     }
 }

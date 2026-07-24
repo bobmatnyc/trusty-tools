@@ -374,6 +374,45 @@ fn cargo_fallback_bin_path_joins_binary_onto_cargo_bin_dir() {
     assert_eq!(p.file_name().and_then(|f| f.to_str()), Some("tm"));
 }
 
+/// Why (#3846 code-critic MEDIUM): the pre-fix "existed_before" check
+/// resolved a SINGLE fixed directory (`install_dir`, where the prebuilt path
+/// writes) before `install_one` knew which `Outcome` branch would fire. That
+/// silently produced the WRONG "fresh install" verdict whenever the
+/// `cargo install` fallback branch actually landed the binary in a
+/// DIFFERENT directory (the cargo bin dir) — e.g. a REINSTALL where a prior
+/// `cargo install` run already placed the binary there, but nothing ever
+/// sat at the preferred dir.
+/// What: Simulates exactly that scenario with two tempdirs standing in for
+/// the preferred dir and the cargo bin dir: a file exists ONLY at the cargo
+/// bin path. Asserts `existed_before_at_both` reports `false` for the
+/// preferred path and `true` for the cargo bin path — i.e. the fallback
+/// branch's guidance would correctly select the reinstall variant instead
+/// of wrongly reporting a fresh install.
+/// Test: This is the test.
+#[test]
+fn existed_before_at_both_distinguishes_preferred_from_cargo_bin_dir() {
+    let preferred_dir = tempfile::tempdir().expect("tempdir");
+    let cargo_dir = tempfile::tempdir().expect("tempdir");
+    let binary = "trusty-search";
+
+    // Nothing was ever placed at the preferred dir; a prior `cargo install`
+    // already placed the binary at the cargo bin dir.
+    std::fs::write(cargo_dir.path().join(binary), b"stub").expect("write stub binary");
+
+    let (existed_preferred, existed_cargo) = existed_before_at_both(
+        &preferred_dir.path().join(binary),
+        &cargo_dir.path().join(binary),
+    );
+    assert!(
+        !existed_preferred,
+        "nothing was ever placed in the preferred dir"
+    );
+    assert!(
+        existed_cargo,
+        "a binary already sat at the cargo bin dir before this run"
+    );
+}
+
 /// Why: An unknown member must be a clean error (exit 3), not a silent skip.
 /// What: Calls `run` with a bogus member in `--json` mode; asserts exit 3.
 /// Test: This is the test.

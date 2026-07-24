@@ -59,7 +59,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   guidance is now ≤3 lines and points at
   `docs/reference/release-workflow.md` for full detail, and the
   `TRUSTY_SIGN_IDENTITY`/`tctl sign` tip prints once per install run instead
-  of once per component.
+  of once per component. Code-critic follow-up (same PR): the fresh-vs-reinstall
+  detection and the guidance's interpolated binary path now come from the
+  CONCRETE path `install_one` actually placed the binary at, rather than a
+  fixed `install_dir` guess — the guess named the wrong file/directory and
+  picked the wrong guidance variant whenever the `cargo install` fallback
+  (as opposed to the prebuilt-tarball path) placed the binary.
 
 ## [0.4.8] — 2026-07-24
 
