@@ -86,6 +86,73 @@ async fn l2_returns_relevant_drawer() {
     assert_eq!(results[0].layer, 2);
 }
 
+/// Why: Issue #3274 — `room_filter` used to be a silent no-op (an empty
+/// if-body in `retrieve_l2`), so a caller asking for one room's drawers
+/// silently got every room back. Asserts the filter is now enforced.
+/// What: Upserts two semantically-similar drawers stamped into different
+/// rooms (via `room_to_uuid`, the same deterministic hash `list_drawers`
+/// uses), queries with `room_filter` set to only one of them, and asserts
+/// the non-matching drawer never appears in the results while the matching
+/// one does.
+/// Test: This test itself.
+#[tokio::test]
+async fn l2_room_filter_excludes_other_rooms() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let embedder = shared_embedder().await.unwrap();
+
+    let backend_room_id = super::layers::room_to_uuid(&RoomType::Backend);
+    let frontend_room_id = super::layers::room_to_uuid(&RoomType::Frontend);
+
+    let backend_drawer = Drawer::new(backend_room_id, "Rust is a systems programming language");
+    let backend_id = backend_drawer.id;
+    let frontend_drawer = Drawer::new(frontend_room_id, "Rust is a systems programming toolkit");
+    let frontend_id = frontend_drawer.id;
+
+    for d in [&backend_drawer, &frontend_drawer] {
+        let vecs = embedder
+            .embed_batch(std::slice::from_ref(&d.content))
+            .await
+            .unwrap();
+        handle
+            .vector_store
+            .upsert(d.id, vecs[0].clone())
+            .await
+            .unwrap();
+    }
+    handle.add_drawer(backend_drawer);
+    handle.add_drawer(frontend_drawer);
+
+    let results = retrieve_l2(
+        &handle,
+        embedder.as_ref(),
+        "systems programming Rust",
+        Some(RoomType::Backend),
+        5,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !results.is_empty(),
+        "L2 should return the matching-room drawer"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| uuid_prefix_eq(r.drawer.id, backend_id)),
+        "room_filter must exclude drawers from other rooms, got: {:?}",
+        results.iter().map(|r| r.drawer.id).collect::<Vec<_>>()
+    );
+    assert!(
+        !results
+            .iter()
+            .any(|r| uuid_prefix_eq(r.drawer.id, frontend_id)),
+        "Frontend-room drawer leaked through a Backend room_filter"
+    );
+}
+
 /// Why: End-to-end confirmation that `remember` + `recall` round-trip
 /// through the embedder and vector store correctly.
 /// What: Build a palace handle backed by a tempdir, remember three

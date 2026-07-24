@@ -7,6 +7,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **`room_filter` silent no-op in `retrieve_l2`** (#3274): a caller-supplied
+  `room_filter` was accepted but never applied — an empty if-body silently
+  dropped it, so results always included every room regardless of the
+  filter. Now enforced: `drawer.room_id` is compared against
+  `room_to_uuid(&filter)`, the same deterministic hash `list_drawers` already
+  uses to filter by room (no real Room table is wired yet, but the mapping
+  was already available at this call site).
+
 ---
 ## [0.26.0] — 2026-07-23
 
