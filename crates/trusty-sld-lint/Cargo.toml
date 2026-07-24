@@ -32,6 +32,13 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
+# Public-item symbol scan for the gap-report subcommand (issue #595 slice 1);
+# already a transitive dependency via trusty-common's `sld` feature.
+regex = { workspace = true }
+# gap-report `--json` output; the version resolved is shared with the rest of
+# the workspace, no new dependency added to the build graph.
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

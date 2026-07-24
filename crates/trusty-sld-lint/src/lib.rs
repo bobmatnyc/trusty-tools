@@ -24,6 +24,7 @@ pub mod allowlist;
 pub mod catalog;
 pub mod checks;
 pub mod discover;
+pub mod gap;
 pub mod report;
 
 #[cfg(test)]
