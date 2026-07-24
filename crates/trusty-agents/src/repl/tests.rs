@@ -346,12 +346,16 @@ fn handle_agent_command_activates_bundled_assistant_package() {
     assert_eq!(repl.active_persona, Some("assistant".to_string()));
 }
 
-/// Why (#3303): `/agent` with no argument must list the bundled `assistant`
-/// directory-package agent, not just flat `*.toml` files — otherwise a user
-/// has no way to discover the name to type.
+/// Why (#3303): `/agent` with no argument must list a bundled directory-
+/// package agent, not just flat `*.toml` files — otherwise a user has no way
+/// to discover the name to type. Checks `ctrl` (#3819: `assistant` itself
+/// is now `hidden = true` and correctly excluded from this listing — see
+/// `AgentInfo::hidden`'s doc comment — so it's no longer a valid "is a
+/// directory package surfaced" witness here; `ctrl` is the directory-package
+/// agent this scan reliably surfaces instead).
 /// What: Calls `list_assistant_agents_into` directly and asserts the
-/// SUCCESS-path header plus a padded `assistant` row are present — not just
-/// a bare `out.contains("assistant")`, which the empty/failure message
+/// SUCCESS-path header plus a padded `ctrl` row are present — not just
+/// a bare `out.contains("ctrl")`, which the empty/failure message
 /// ("No assistant-role agents found...") also happens to contain (code-critic
 /// MEDIUM finding).
 /// Test: Self-explanatory.
@@ -369,12 +373,20 @@ fn list_assistant_agents_into_surfaces_directory_package() {
         !out.contains("No assistant-role agents found"),
         "must not hit the empty-listing path: {out:?}"
     );
-    let has_assistant_row = out
+    // #3819: `assistant` itself is now `hidden = true` (the base template is
+    // only ever instantiated via Concierge or the add-agent flow, never
+    // picked directly) — `ctrl` is the directory-package, non-hidden,
+    // assistant-role agent this scan reliably surfaces instead (izzie is not
+    // found by whatever candidate-dir resolution `TrustyAgentsRepl::new(None)`
+    // uses in this test context — verified locally; not worth chasing under
+    // time pressure when `ctrl` demonstrably satisfies the same "a directory
+    // package is surfaced" assertion).
+    let has_ctrl_row = out
         .lines()
-        .any(|line| line.split_whitespace().next() == Some("assistant"));
+        .any(|line| line.split_whitespace().next() == Some("ctrl"));
     assert!(
-        has_assistant_row,
-        "expected a padded 'assistant' row in the listing: {out:?}"
+        has_ctrl_row,
+        "expected a padded 'ctrl' row in the listing: {out:?}"
     );
 }
 
