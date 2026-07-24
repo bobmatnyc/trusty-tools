@@ -254,16 +254,41 @@ impl EmbedPool {
         self
     }
 
-    /// Construct a pool using the autotuned worker count.
+    /// Construct a pool using the autotuned worker count, floored at the
+    /// configured catch-up inflight concurrency (issue #3748 PR #3784
+    /// review finding 3).
     ///
-    /// Why: One-call convenience for `start.rs` — picks the right worker count
-    /// based on host RAM unless overridden by `TRUSTY_EMBED_WORKERS`.
-    /// What: Resolves the worker count via [`autotune_workers`] and calls
-    /// [`Self::new`].
-    /// Test: `pool_autotune_respects_env_override` in embed_pool_tests.rs.
+    /// Why: One-call convenience for `start.rs` — picks the right worker
+    /// count based on host RAM unless overridden by `TRUSTY_EMBED_WORKERS`.
+    /// `ingest::embed::embed_chunks_in_batches` dispatches
+    /// `TRUSTY_EMBED_INFLIGHT` (clamped [1,4], default 2) sub-batches
+    /// CONCURRENTLY per wave — issue #753's ANE-idle fix. Once those
+    /// sub-batches route through this pool (issue #3748 slice B PR 1), a
+    /// pool with FEWER workers than `inflight` collapses that concurrency
+    /// back to serial: a lone worker (the ≤16 GB-host autotune default)
+    /// drains the background lane one request at a time regardless of how
+    /// many callers submitted concurrently. Flooring the worker count at
+    /// `resolve_embed_inflight()` guarantees the configured overlap survives
+    /// end-to-end on every host size, not just >16 GB ones where autotune
+    /// already happens to reach 2+.
+    /// What: `workers = max(autotune_workers(), resolve_embed_inflight())`.
+    /// On the common ≤16 GB dev box this raises the default from 1 to 2
+    /// (matching `TRUSTY_EMBED_INFLIGHT`'s own default) — a small, bounded
+    /// increase in OS-thread count (each worker is a thin `current_thread`
+    /// runtime sharing the same `Arc<dyn Embedder>`, not a second model
+    /// load), never exceeding `resolve_embed_inflight()`'s own [1,4] clamp
+    /// beyond what autotune already provides.
+    /// Test:
+    /// `core::indexer::tests::embed_pool_routing::catchup_wave_concurrency_survives_pool_sized_to_default_inflight`,
+    /// `catchup_wave_concurrency_collapses_with_single_worker_pool`.
     pub fn with_autotune(embedder: Arc<dyn Embedder>) -> Self {
-        let workers = autotune_workers();
-        tracing::info!("embed pool: {} workers (isolated OS threads)", workers);
+        let autotuned = autotune_workers();
+        let inflight_floor = crate::core::indexer::resolve_embed_inflight();
+        let workers = autotuned.max(inflight_floor);
+        tracing::info!(
+            "embed pool: {workers} workers (isolated OS threads; autotune={autotuned}, \
+             inflight floor={inflight_floor})"
+        );
         Self::new(workers, embedder)
     }
 

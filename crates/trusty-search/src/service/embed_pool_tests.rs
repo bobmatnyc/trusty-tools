@@ -159,6 +159,189 @@ async fn dropping_pool_after_send_returns_error() {
     );
 }
 
+/// Prove interactive requests dispatch ahead of ALREADY-QUEUED background
+/// work under genuine contention — the wave-granularity preemption slice B
+/// PR 1 (issue #3748) relies on: the catch-up path submits one pool request
+/// per sub-batch "wave" rather than one request for the whole reindex, so an
+/// interactive query queued mid-pass only ever waits behind the wave
+/// currently in flight, never the whole background job.
+///
+/// Why: `priority_ordering_interactive_drains_first` above only proves each
+/// lane individually completes; its own comment admits it cannot reliably
+/// force both lanes to have queued work simultaneously. This test forces
+/// that condition with a single-worker pool and a gated embedder: the first
+/// call blocks on a `Notify` (simulating an in-flight wave), and every
+/// subsequent enqueue is a directly-awaited channel `send()` against the
+/// pool's own `background_tx`/`interactive_tx` (PR #3784 review finding 4 —
+/// no fixed-duration sleeps anywhere in this test: a `send().await` on an
+/// unfull bounded channel only resolves once the item is genuinely in the
+/// channel, which is the actual property "queued" means here, and the
+/// `entered` `Notify` resolves the instant the worker is provably blocked on
+/// the gate — both are real rendezvous points, not timing guesses). `biased;`
+/// in `worker_loop`'s `select!` must then pick the interactive request next,
+/// even though three background requests were enqueued first. Looped 20x
+/// (PR #3784 review finding 4) so a REGRESSED `biased;` (e.g. accidentally
+/// dropped, or the branch order swapped) is caught reliably rather than
+/// passing by luck on a single scheduler-dependent run.
+/// What: per iteration — enqueue `bg-0..bg-2` then `interactive` directly via
+/// the pool's channels (bypassing `EmbedPool::embed`'s full round-trip so the
+/// test can await JUST the enqueue, not the gated reply), release the gate,
+/// and assert `interactive` appears in the completion order before all three
+/// `bg-*` entries.
+/// Test: this test (`SKIP_UI_BUILD=1 cargo test -p trusty-search -- \
+/// interactive_preempts_queued_background_wave`).
+#[tokio::test]
+async fn interactive_preempts_queued_background_wave() {
+    for trial in 0..20 {
+        run_interactive_preempts_trial(trial).await;
+    }
+}
+
+/// One iteration of [`interactive_preempts_queued_background_wave`] — see
+/// that test's doc comment for the full rationale. Factored out so the outer
+/// test can loop it deterministically without repeating setup.
+async fn run_interactive_preempts_trial(trial: usize) {
+    use tokio::sync::Notify;
+
+    /// Blocks its FIRST call on `gate` (simulating a wave already in
+    /// flight) and fires `entered` the instant it starts blocking — the
+    /// deterministic "worker is now genuinely stuck on the in-flight wave"
+    /// rendezvous this test awaits instead of sleeping. Every later call
+    /// returns immediately and appends its input text to `order` so the
+    /// test can assert completion sequencing.
+    struct GateEmbedder {
+        gate: Arc<Notify>,
+        entered: Arc<Notify>,
+        gated_once: std::sync::atomic::AtomicBool,
+        order: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::core::embed::Embedder for GateEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            unimplemented!("pool always calls embed_batch")
+        }
+
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            if !self.gated_once.swap(true, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.gate.notified().await;
+            }
+            self.order
+                .lock()
+                .expect("order mutex poisoned")
+                .push(texts[0].to_string());
+            Ok(texts.iter().map(|_| vec![0.0f32]).collect())
+        }
+
+        fn dimension(&self) -> usize {
+            1
+        }
+    }
+
+    let gate = Arc::new(Notify::new());
+    let entered = Arc::new(Notify::new());
+    let embedder = Arc::new(GateEmbedder {
+        gate: Arc::clone(&gate),
+        entered: Arc::clone(&entered),
+        gated_once: std::sync::atomic::AtomicBool::new(false),
+        order: std::sync::Mutex::new(Vec::new()),
+    });
+    // Single worker: the ONLY way `interactive` can run before `bg-1`/`bg-2`
+    // is via the biased-select priority lane, not incidental scheduling.
+    let embedder_dyn: Arc<dyn Embedder> = embedder.clone();
+    let pool: Arc<EmbedPool> = Arc::new(EmbedPool::new(1, embedder_dyn));
+
+    // Kick off the in-flight "wave" — the worker picks this up immediately
+    // and blocks inside `embed_batch` on `gate.notified()`.
+    let inflight = {
+        let pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            pool.embed(vec!["wave-0".into()], RequestPriority::Background)
+                .await
+        })
+    };
+    // Deterministic rendezvous #1: resolves the instant the worker is
+    // genuinely blocked on `gate` (Notify stores one permit even if this
+    // await starts after `notify_one()` fires — no race with the spawn
+    // above). Replaces a fixed sleep.
+    entered.notified().await;
+
+    // Deterministic rendezvous #2-4: enqueue `bg-0..bg-2` by sending directly
+    // into the pool's OWN background channel and awaiting each `send()` to
+    // completion — the channel has ample spare capacity, so this resolves
+    // the instant the item is genuinely queued, no polling or sleeping.
+    // Sent sequentially in this one task, so their arrival order in the
+    // channel is exactly bg-0, bg-1, bg-2.
+    let mut bg_replies = Vec::with_capacity(3);
+    for i in 0..3 {
+        let (reply, reply_rx) = oneshot::channel();
+        let req = EmbedRequest {
+            texts: vec![format!("bg-{i}-{trial}")],
+            reply,
+            priority: RequestPriority::Background,
+        };
+        pool.background_tx
+            .send(req)
+            .await
+            .expect("bg enqueue must succeed — pool is alive");
+        bg_replies.push((format!("bg-{i}-{trial}"), reply_rx));
+    }
+    // Deterministic rendezvous #5: enqueue `interactive` LAST — provably
+    // queued after all three `bg-*` entries — via the same direct-send
+    // pattern.
+    let interactive_text = format!("interactive-{trial}");
+    let (ireply, ireply_rx) = oneshot::channel();
+    let ireq = EmbedRequest {
+        texts: vec![interactive_text.clone()],
+        reply: ireply,
+        priority: RequestPriority::Interactive,
+    };
+    pool.interactive_tx
+        .send(ireq)
+        .await
+        .expect("interactive enqueue must succeed — pool is alive");
+
+    // Every request this trial cares about is now GENUINELY enqueued (each
+    // `send().await` above already completed) — release the gate. The
+    // worker's biased select must pick `interactive` next despite bg-0..bg-2
+    // having queued first.
+    gate.notify_one();
+
+    inflight
+        .await
+        .expect("wave-0 task panicked")
+        .expect("wave-0 embed failed");
+    ireply_rx
+        .await
+        .expect("interactive reply channel dropped")
+        .expect("interactive embed failed");
+    for (_, rx) in &mut bg_replies {
+        rx.await
+            .expect("bg reply channel dropped")
+            .expect("bg embed failed");
+    }
+
+    let recorded = embedder.order.lock().expect("order mutex poisoned").clone();
+    let interactive_pos = recorded
+        .iter()
+        .position(|t| t == &interactive_text)
+        .unwrap_or_else(|| {
+            panic!("trial {trial}: interactive must have run — order: {recorded:?}")
+        });
+    for (bg, _) in &bg_replies {
+        let bg_pos = recorded
+            .iter()
+            .position(|t| t == bg)
+            .unwrap_or_else(|| panic!("trial {trial}: {bg} must have run — order: {recorded:?}"));
+        assert!(
+            interactive_pos < bg_pos,
+            "trial {trial}: interactive (pos {interactive_pos}) must drain before {bg} \
+             (pos {bg_pos}) — recorded order: {recorded:?}"
+        );
+    }
+}
+
 /// Prove executor isolation: a slow embed does NOT prevent concurrent async
 /// work on the caller's runtime from making progress (issue #1017 root-cause fix).
 ///

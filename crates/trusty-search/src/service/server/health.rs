@@ -88,6 +88,27 @@ pub(super) struct HealthResponse {
     /// `GET /indexes/:id/status`'s `stages` block alongside
     /// `GET /indexes/:id/reindex/stream`.
     pub(super) indexes_component_catch_up_in_progress: usize,
+    /// Count of registered indexes with no embed pool currently attached
+    /// (issue #3748 slice B PR 1, boot-race fix — PR #3784 review finding
+    /// 2).
+    ///
+    /// Why: `CodeIndexer::set_embed_pool_source` self-heals a poolless index
+    /// onto the daemon's pool the moment it next calls
+    /// `resolve_embed_pool` (interactive query or catch-up embed) — but
+    /// until that first call happens (or if the index never issues one),
+    /// the index silently keeps calling the direct embedder with no
+    /// priority routing. This is the machine-readable signal for that gap,
+    /// mirroring `indexes_kg_disabled`'s "grep logs instead" motivation.
+    /// What: computed live, in the same registry scan as
+    /// `indexes_kg_disabled`, via `CodeIndexer::has_embed_pool()` — a
+    /// lock-free, non-async read. `0` on a healthy daemon whose pool
+    /// installed before any index was constructed (the steady-state warm-boot
+    /// case); transiently non-zero only during the boot-race window this
+    /// fix closes, and self-corrects to `0` as each poolless index makes
+    /// its first embed call.
+    /// Test: `health_surfaces_indexes_without_embed_pool` in
+    /// `tests_components`.
+    pub(super) indexes_embed_pool_missing: usize,
     /// Boot-time reconcile summary (issue #1672).
     ///
     /// Why: boot-reconcile catches stale indexes (git-delta path since #1670,
@@ -440,6 +461,13 @@ pub(super) async fn health_handler(
     let mut indexes_kg_disabled = 0usize;
     let mut indexes_vector_disabled = 0usize;
     let mut indexes_component_catch_up_in_progress = 0usize;
+    // Issue #3748 boot-race fix (PR #3784 review finding 2): folded into the
+    // same scan. `handle.indexer` is a SEPARATE lock from `handle.stages`, so
+    // a miss here is independent of `indexes_health_scan_skipped` above —
+    // fails open the same way (skip this handle for this poll; a
+    // persistently-poolless index self-corrects to 0 the moment it makes its
+    // first embed call, so an undercount here is never permanently lost).
+    let mut indexes_embed_pool_missing = 0usize;
     let indexes_corpus_failed = state
         .registry
         .list_handles()
@@ -450,6 +478,11 @@ pub(super) async fn health_handler(
             }
             if handle.skip_vector {
                 indexes_vector_disabled += 1;
+            }
+            if let Ok(indexer) = handle.indexer.try_read() {
+                if !indexer.has_embed_pool() {
+                    indexes_embed_pool_missing += 1;
+                }
             }
             match handle.stages.try_read() {
                 Ok(stages) => {
@@ -553,6 +586,7 @@ pub(super) async fn health_handler(
         indexes_kg_disabled,
         indexes_vector_disabled,
         indexes_component_catch_up_in_progress,
+        indexes_embed_pool_missing,
         warmboot_summary,
         boot_reconcile,
         indexes_watcher_network_degraded,

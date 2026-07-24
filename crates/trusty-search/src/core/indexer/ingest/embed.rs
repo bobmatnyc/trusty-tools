@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::core::chunker::RawChunk;
+use crate::service::embed_pool::RequestPriority;
 
 use super::super::{embed_batch_size, CodeIndexer};
 use super::PROGRESS_CHUNK_INTERVAL;
@@ -23,10 +24,17 @@ type WaveResult = (usize, usize, Result<Vec<Vec<f32>>>);
 ///
 /// Why: a single serial `embed_batch` loop left ANE ~78% idle. Overlapping
 /// `TRUSTY_EMBED_INFLIGHT` sub-batches via ordered `buffered` fills the ANE
-/// dispatch queue.
+/// dispatch queue. `pub(crate)` (re-exported as
+/// `core::indexer::resolve_embed_inflight`) rather than `pub(super)`: issue
+/// #3748 PR #3784 review finding 3 — `EmbedPool::with_autotune` floors its
+/// worker count at this value so the pool never has fewer workers than the
+/// concurrency this constant configures, which would silently collapse the
+/// overlap it buys back to serial.
 /// What: reads `TRUSTY_EMBED_INFLIGHT`, clamps to [1, 4], defaults to 2.
-/// Test: `embed_chunks_in_batches` (indirect).
-pub(super) fn resolve_embed_inflight() -> usize {
+/// Test: `embed_chunks_in_batches` (indirect);
+/// `core::indexer::tests::embed_pool_routing::catchup_wave_concurrency_survives_pool_sized_to_default_inflight`,
+/// `catchup_wave_concurrency_collapses_with_single_worker_pool`.
+pub(crate) fn resolve_embed_inflight() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
         std::env::var("TRUSTY_EMBED_INFLIGHT")
@@ -132,6 +140,18 @@ impl CodeIndexer {
         };
         let mut tripwire_fired = false;
         let inflight = resolve_embed_inflight();
+        // Issue #3748 slice B PR 1: route each sub-batch through the
+        // Background lane of the priority pool when one is installed, so a
+        // queued interactive query preempts at wave (sub-batch) granularity
+        // instead of blocking behind the whole catch-up pass. `None` when no
+        // pool is installed/resolvable (tests, CLI paths) — falls back to
+        // the direct `embedder.embed_batch()` call this loop always used
+        // before. Resolved ONCE via `resolve_embed_pool` (self-healing
+        // boot-race fix, PR #3784 review) rather than per-wave: a hit self-
+        // heals `self.embed_pool`'s lock-free cache for every later call on
+        // this index, so this `.await` only ever costs a real lock read on
+        // the rare index still waiting to self-heal.
+        let embed_pool = self.resolve_embed_pool().await;
         tracing::debug!(chunk_total, batch_size, inflight, "embed_chunks_in_batches");
         let mut batch_start = 0usize;
         while batch_start < chunk_total {
@@ -154,10 +174,16 @@ impl CodeIndexer {
             let wave_results: Vec<WaveResult> = {
                 let iter = wave_sub_batches.into_iter().map(|(start_pos, texts)| {
                     let emb = Arc::clone(embedder);
+                    let pool = embed_pool.clone();
                     let n = texts.len();
                     async move {
-                        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                        (start_pos, n, emb.embed_batch(&refs).await)
+                        let result = if let Some(pool) = pool {
+                            pool.embed(texts, RequestPriority::Background).await
+                        } else {
+                            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+                            emb.embed_batch(&refs).await
+                        };
+                        (start_pos, n, result)
                     }
                 });
                 futures::stream::iter(iter)

@@ -270,6 +270,13 @@ pub(crate) async fn restore_one_index(
             return;
         }
     };
+    // Issue #3748 slice B PR 1: wire the priority-lane pool so this index's
+    // query + catch-up embeds route through Interactive/Background lanes
+    // instead of the raw embedder. Registers the daemon's OWN pool slot
+    // (not a one-time snapshot) so a boot-race window (this index built
+    // before `install_embed_pool` completes) self-heals on the first embed
+    // call instead of staying poolless forever (PR #3784 review finding 1).
+    indexer.set_embed_pool_source(Arc::clone(&state.embed_pool));
     // Restore per-index filters and domain vocabulary from indexes.toml.
     // Resolve `include_paths` to absolute under `root_path` so the reindex
     // walker can prune without per-call path arithmetic. `.` and empty
