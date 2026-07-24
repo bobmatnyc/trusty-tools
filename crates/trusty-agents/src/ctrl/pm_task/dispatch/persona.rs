@@ -81,6 +81,40 @@ fn filter_persona_tool_names(
         .collect()
 }
 
+/// Default `max_turns` ceiling for a tool-using persona chat turn when
+/// `[llm].persona_max_turns` is not set in the agent's TOML.
+///
+/// Why: named separately from the literal so the demo-day rationale (raised
+/// from a hardcoded 4 after a persona doing two sequential tool calls plus a
+/// summary exhausted that budget) is documented once, at the definition, not
+/// re-explained at every read site.
+const DEFAULT_PERSONA_TOOL_MAX_TURNS: u32 = 8;
+
+/// Effective `max_turns` ceiling for a persona chat turn.
+///
+/// Why: `run_pm_task_with_persona` is a separate call site from the general
+/// subagent tool loop (`agents::in_process_runner` et al., which already
+/// honor `LlmParams::max_turns`) — it hardcoded its own ceiling (2 turns with
+/// no tools, 4 with tools) since #254 and never consulted config at all. A
+/// persona running a couple of sequential tool calls (e.g. grep twice, then
+/// summarize) routinely exhausted the 4-turn budget and failed with
+/// `chat_with_tools exceeded max_turns`. Pulled into its own function
+/// (mirroring `filter_persona_tool_names` above) so the default-vs-override
+/// behavior is unit-testable without a live LLM call.
+/// What: No tools -> 2 (unchanged current behavior). With tools ->
+/// `llm.persona_max_turns` when set, else [`DEFAULT_PERSONA_TOOL_MAX_TURNS`]
+/// (8, raised from the prior hardcoded 4).
+/// Test: `persona_max_turns_no_tools_is_two`,
+/// `persona_max_turns_with_tools_defaults_to_eight`,
+/// `persona_max_turns_with_tools_honors_config_override`.
+fn persona_max_turns(has_tools: bool, llm: &crate::agents::LlmParams) -> u32 {
+    if !has_tools {
+        return 2;
+    }
+    llm.persona_max_turns
+        .unwrap_or(DEFAULT_PERSONA_TOOL_MAX_TURNS)
+}
+
 /// Compute the `allowed_tools` argument passed to `chat_with_tools_gated` for
 /// a persona whose surface is gated by a declared `[tools].allow` list
 /// (#3208 regression guard).
@@ -500,7 +534,7 @@ pub async fn run_pm_task_with_persona(
     // `persona_allowed_tools` for why that would silently reopen the full
     // registered tool surface instead of denying dispatch.
     let allowed_tools = persona_allowed_tools(persona_tool_names.clone());
-    let max_turns = if persona_tool_names.is_empty() { 2 } else { 4 };
+    let max_turns = persona_max_turns(!persona_tool_names.is_empty(), &persona_cfg.llm);
     let (content, _usage) = llm::chat_with_tools_gated(
         &client,
         &persona_cfg.agent.model,

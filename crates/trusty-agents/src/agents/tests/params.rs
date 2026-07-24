@@ -71,6 +71,47 @@ content = "base"
 }
 
 #[test]
+fn llm_params_persona_max_turns_defaults_to_none() {
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert_eq!(cfg.llm.persona_max_turns, None);
+}
+
+#[test]
+fn llm_params_persona_max_turns_parses_override() {
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+persona_max_turns = 12
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert_eq!(cfg.llm.persona_max_turns, Some(12));
+}
+
+#[test]
 fn llm_params_caching_can_be_disabled() {
     let toml_str = r#"
 [agent]

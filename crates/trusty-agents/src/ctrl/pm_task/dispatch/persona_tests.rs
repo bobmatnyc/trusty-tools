@@ -414,3 +414,54 @@ async fn persona_allowed_tools_permits_dispatch_when_non_empty() {
     assert!(!result.is_error(), "permitted tool must still dispatch");
     assert_eq!(result.content(), "search results");
 }
+
+/// Builds a minimal parsed `LlmParams`, optionally declaring
+/// `persona_max_turns`, for `persona_max_turns()` unit tests below.
+fn llm_params_with_persona_max_turns(persona_max_turns: Option<u32>) -> crate::agents::LlmParams {
+    let override_line = persona_max_turns
+        .map(|v| format!("persona_max_turns = {v}"))
+        .unwrap_or_default();
+    let toml_str = format!(
+        r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+{override_line}
+
+[system_prompt]
+content = "base"
+"#
+    );
+    let cfg: AgentConfig = toml::from_str(&toml_str).expect("parses");
+    cfg.llm
+}
+
+/// The no-tools branch is unaffected by this fix — pins current behavior.
+#[test]
+fn persona_max_turns_no_tools_is_two() {
+    let llm = llm_params_with_persona_max_turns(None);
+    assert_eq!(persona_max_turns(false, &llm), 2);
+}
+
+/// Demo-day fix (2026-07-24): a tool-using persona with no explicit
+/// `persona_max_turns` now gets 8 turns, not the prior hardcoded 4 that
+/// caused `chat_with_tools exceeded max_turns` failures on multi-tool turns.
+#[test]
+fn persona_max_turns_with_tools_defaults_to_eight() {
+    let llm = llm_params_with_persona_max_turns(None);
+    assert_eq!(persona_max_turns(true, &llm), 8);
+}
+
+/// An operator can raise (or lower) the ceiling further via
+/// `[llm].persona_max_turns` without a rebuild.
+#[test]
+fn persona_max_turns_with_tools_honors_config_override() {
+    let llm = llm_params_with_persona_max_turns(Some(12));
+    assert_eq!(persona_max_turns(true, &llm), 12);
+}

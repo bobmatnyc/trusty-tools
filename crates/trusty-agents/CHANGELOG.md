@@ -120,6 +120,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   subscribers. `InputArea`'s reconcile and `ChatView`'s progress handler both
   gate on the shared `streamAccumulator` so neither overwrites live streamed
   text.
+- **Persona chat turns no longer exhaust `max_turns` after a couple of tool
+  calls:** `run_pm_task_with_persona` (the `/agent`/`--direct` persona REPL
+  turn) hardcoded its `chat_with_tools_gated` ceiling to 2 turns (no tools) or
+  4 turns (with tools) since #254 and never consulted config, unlike the
+  general subagent tool loop's `[llm].max_turns`. A persona running a couple
+  of sequential tool calls (e.g. two `grep`s plus a summary) routinely
+  exhausted the 4-turn budget and failed with `chat_with_tools exceeded
+  max_turns`. The tool-using default is now 8 (raised from 4) and is
+  overridable per agent via the new `[llm].persona_max_turns` TOML field; the
+  no-tools case is unchanged (still 2).
 - **Izzie's own tools now reach the `--direct`/`--agent` dispatch path (#3745
   item C):** `tagent --direct izzie` loaded a tool registry of only
   `[git_log, git_status, web_search, delegate_to_agent]` and the model answered
