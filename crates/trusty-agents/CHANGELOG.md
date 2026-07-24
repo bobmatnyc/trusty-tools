@@ -63,6 +63,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `agent_response` (chat) envelopes — chat is not a workflow run — while keeping
   the pre-existing rule that hides the contentless running placeholder; the
   empty-state and Clear affordance now key off the visible count.
+- **Telegram `/switch assistant` now resolves the canonical package persona:**
+  the `/switch` pre-check validated FLAT persona files only
+  (`.trusty-agents/agents/<name>.toml` and the `$HOME` equivalent), so the
+  canonical `assistant` persona — which ships ONLY as a directory package
+  (`agents/assistant/agent.toml` + `persona.md`, no flat `assistant.toml`) —
+  was rejected with "Unknown persona: assistant" even though the real dispatch
+  resolver (`AgentConfig::by_name_async`) loads directory packages fine. The
+  pre-check (both the project-local tier and the `$HOME` fallback) now also
+  accepts a directory package (`agents/<name>/agent.toml`), mirroring the
+  resolver's order. No alias-table or migration changes.
 - **MCP tool results no longer collapse the live conversation to the system
   prompt:** an MCP tool result (e.g. `grep` via trusty-search) is shrunk by no
   `compress_tool_output` filter and can be multiple megabytes; the send-time

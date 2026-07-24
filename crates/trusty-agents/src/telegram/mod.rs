@@ -102,24 +102,59 @@ impl ChatSession {
 /// Map of `ChatId` -> per-chat session, shared across handlers.
 pub(super) type SessionMap = Arc<Mutex<HashMap<ChatId, ChatSession>>>;
 
-/// Check whether a persona TOML exists under the user's home config dir.
+/// Whether a persona resolves under `<agents_dir>` — as a flat `<name>.toml`
+/// OR a directory package `<name>/agent.toml`.
+///
+/// Why: the `/switch` pre-check must mirror the real dispatch resolver
+/// `AgentConfig::by_name_async` (`agents/loader.rs`), which resolves a
+/// directory package (`load_agent_package`: `<name>/agent.toml`) BEFORE the
+/// flat `<name>.toml`. The canonical `assistant` persona ships ONLY as a
+/// directory package (`agents/assistant/agent.toml` + `persona.md`, no flat
+/// `assistant.toml`), so the old flat-only pre-check rejected `/switch
+/// assistant` with "Unknown persona" even though dispatch resolves it fine.
+/// What: returns true iff either form exists directly under `agents_dir`.
+/// Test: `persona_exists_in_accepts_directory_package`,
+/// `persona_exists_in_rejects_unknown_name`.
+fn persona_exists_in(agents_dir: &std::path::Path, name: &str) -> bool {
+    agents_dir.join(format!("{name}.toml")).exists()
+        || agents_dir.join(name).join("agent.toml").exists()
+}
+
+/// Whether a persona resolves under a project's `.trusty-agents/agents/` dir,
+/// in either the flat or directory-package form (see [`persona_exists_in`]).
+///
+/// Why (#457): the project-local tier of the `/switch` pre-check — checked
+/// before the `$HOME` fallback, mirroring ctrl's resolution order.
+/// What: delegates to [`persona_exists_in`] rooted at
+/// `<project_path>/.trusty-agents/agents/`.
+/// Test: `project_persona_exists_accepts_directory_package`,
+/// `project_persona_exists_rejects_unknown_name`.
+pub(super) fn project_persona_exists(project_path: &std::path::Path, name: &str) -> bool {
+    persona_exists_in(&project_path.join(".trusty-agents").join("agents"), name)
+}
+
+/// Check whether a persona exists under the user's home config dir.
 ///
 /// Why (#457): `/switch <name>` must validate that the persona actually
 /// resolves before storing it on the session — otherwise the next turn
 /// would fail in `run_pm_task_with_persona` with a load error. We check
-/// `~/.trusty-agents/agents/<name>.toml` as a fallback after the project-local
-/// path so user-level persona definitions also work.
-/// What: Returns `true` iff `$HOME/.trusty-agents/agents/<name>.toml` is a file.
-/// Test: Indirectly via the `/switch` handler.
+/// `~/.trusty-agents/agents/` as a fallback after the project-local path so
+/// user-level persona definitions also work.
+/// What: Returns `true` iff `$HOME/.trusty-agents/agents/<name>` resolves as a
+/// flat `<name>.toml` or a directory package `<name>/agent.toml` (see
+/// [`persona_exists_in`]).
+/// Test: the directory-package acceptance shared with the project tier is
+/// covered by `persona_exists_in_accepts_directory_package`.
 pub(super) fn home_persona_exists(name: &str) -> bool {
     std::env::var("HOME")
         .ok()
         .map(|h| {
-            std::path::PathBuf::from(h)
-                .join(".trusty-agents")
-                .join("agents")
-                .join(format!("{name}.toml"))
-                .exists()
+            persona_exists_in(
+                &std::path::PathBuf::from(h)
+                    .join(".trusty-agents")
+                    .join("agents"),
+                name,
+            )
         })
         .unwrap_or(false)
 }
