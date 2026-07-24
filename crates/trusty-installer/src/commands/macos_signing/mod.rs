@@ -611,59 +611,98 @@ pub fn cert_setup_guidance(target: &str) -> String {
     )
 }
 
-/// The 4-step FDA re-grant guidance (used when no Developer ID cert is found).
+/// Terse Full Disk Access guidance for `trusty-search` (used when no
+/// Developer ID cert is found). Selects the fresh-install or reinstall
+/// variant based on `existed_before`.
 ///
-/// Why: Extracted as a pure function so the exact guidance text can be unit-tested
-/// without any system calls.
+/// Why (#3846, Bob 2026-07-24 live `tctl` 0.4.8 run): the prior guidance
+/// was a fixed ~12-line block that always printed remove-then-re-add REINSTALL
+/// steps, even on a brand-new machine with no prior FDA entry to remove, and
+/// opened with "Every `cargo install`..." although this install path is
+/// prebuilt-tarball-based, not `cargo install`. Extracted as a pure function
+/// (no system calls) so both variants are unit-tested directly; the
+/// once-only Developer ID/`TRUSTY_SIGN_IDENTITY` tip moved out of here to
+/// [`signing_persistence_tip`] so it prints once per install run, not once
+/// per guidance block.
 ///
-/// What: Returns the formatted 4-step manual FDA re-grant instructions, with
-/// the actual binary path interpolated.
+/// What: `existed_before == false` (nothing was at this path before this
+/// install) prints the one-time initial-grant steps; `existed_before == true`
+/// (a prior binary was replaced) prints the remove/re-add + daemon-restart
+/// steps, since replacing the binary's code signature invalidated the
+/// existing grant regardless of install method. Both variants stay at 3
+/// lines and point at the full step-by-step doc for detail instead of
+/// inlining it.
 ///
-/// Test: `tests::fda_guidance_contains_steps`.
-pub fn fda_guidance(binary_path: &str) -> String {
-    format!(
-        "trusty-search FDA guidance (macOS):\n\
-         Every `cargo install` replaces the binary with a new cdhash, which invalidates\n\
-         the macOS TCC Full Disk Access grant. Re-grant it now:\n\
-         \n\
-         1. Open System Settings \u{2192} Privacy & Security \u{2192} Full Disk Access.\n\
-         2. Remove `{binary_path}` from the list (click the entry, then click -).\n\
-         3. Re-add it (click +, navigate to `{binary_path}`).\n\
-         4. Restart the daemon:\n\
-            launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist\n\
-            launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.trusty-search.plist\n\
-         \n\
-         Tip: install a Developer ID Application certificate and set TRUSTY_SIGN_IDENTITY\n\
-         to make this grant persist across all future reinstalls."
-    )
+/// Test: `tests::fda_guidance_fresh_install_has_no_remove_step`,
+/// `tests::fda_guidance_reinstall_has_remove_and_readd`.
+pub fn fda_guidance(binary_path: &str, existed_before: bool) -> String {
+    if existed_before {
+        format!(
+            "trusty-search: reinstalling replaced the binary's code signature, which \
+             invalidates its Full Disk Access grant.\n\
+             Re-grant it: remove `{binary_path}` from System Settings \u{2192} Privacy & \
+             Security \u{2192} Full Disk Access, then re-add it and restart the daemon.\n\
+             Full steps: docs/reference/release-workflow.md#one-time-fda-grant-after-first-signed-install"
+        )
+    } else {
+        format!(
+            "trusty-search: macOS Full Disk Access is required for `{binary_path}` to \
+             read other apps' files.\n\
+             Grant it once: System Settings \u{2192} Privacy & Security \u{2192} Full Disk \
+             Access \u{2192} + \u{2192} select the binary.\n\
+             Full steps: docs/reference/release-workflow.md#one-time-fda-grant-after-first-signed-install"
+        )
+    }
 }
 
-/// The App-Data TCC guidance for `trusty-mpm` (used when no Developer ID cert
-/// is found).
+/// Terse App-Data TCC guidance for `trusty-mpm` (used when no Developer ID
+/// cert is found). Selects the fresh-install or reinstall variant based on
+/// `existed_before`.
 ///
 /// Why: `tm` re-prompts "'trusty-mpm' would like to access data from other
-/// apps" after every ad-hoc-signed rebuild, for the same cdhash-identity reason
-/// FDA does for trusty-search — but it is a different TCC category (App Data,
-/// not Full Disk Access) with no `System Settings` list entry to remove/re-add,
-/// so the guidance differs from [`fda_guidance`].
+/// apps" after every ad-hoc-signed rebuild, for the same cdhash-identity
+/// reason FDA does for trusty-search — but it is a different TCC category
+/// (App Data, not Full Disk Access) with no `System Settings` list entry to
+/// remove/re-add, so the guidance differs from [`fda_guidance`]. See that
+/// function's doc for why `existed_before` exists and why the signing tip
+/// moved to [`signing_persistence_tip`].
 ///
-/// What: Returns guidance explaining that the next prompt must be approved once
-/// and that a Developer ID cert makes that approval persist.
+/// What: Returns guidance explaining that the (next, or re-triggered) prompt
+/// must be approved once; points at the full doc section for detail.
 ///
-/// Test: `tests::app_data_guidance_mentions_prompt`.
-pub fn app_data_guidance(binary_path: &str) -> String {
-    format!(
-        "trusty-mpm App Data TCC guidance (macOS):\n\
-         Every `cargo install` replaces the binary with a new cdhash, so macOS re-prompts\n\
-         \"'trusty-mpm' would like to access data from other apps\" (it reads other apps'\n\
-         $HOME containers — Claude config dirs, tmux state) after every reinstall.\n\
-         \n\
-         Approve the next prompt for `{binary_path}` when it appears — no manual\n\
-         System Settings step is required for this TCC category.\n\
-         \n\
-         Tip: install a Developer ID Application certificate and set TRUSTY_SIGN_IDENTITY\n\
-         to make that approval persist across all future reinstalls (run `tctl sign trusty-mpm`)."
-    )
+/// Test: `tests::app_data_guidance_fresh_and_reinstall_variants`.
+pub fn app_data_guidance(binary_path: &str, existed_before: bool) -> String {
+    if existed_before {
+        format!(
+            "trusty-mpm: reinstalling replaced the binary's code signature, so macOS \
+             will re-prompt for App Data access.\n\
+             Approve the \"'trusty-mpm' would like to access data from other apps\" \
+             prompt again for `{binary_path}` when it appears.\n\
+             Full steps: docs/reference/release-workflow.md#signed-install-trusty-mpm-2558-2721"
+        )
+    } else {
+        format!(
+            "trusty-mpm: macOS will prompt to let `{binary_path}` access data from \
+             other apps (it reads Claude/tmux config dirs).\n\
+             Approve that prompt when it appears — no System Settings step is needed.\n\
+             Full steps: docs/reference/release-workflow.md#signed-install-trusty-mpm-2558-2721"
+        )
+    }
+}
+
+/// The one-time signing-persistence tip — printed at most once per install
+/// run, after every per-component TCC guidance block, instead of being
+/// duplicated inside each of [`fda_guidance`] / [`app_data_guidance`].
+///
+/// Why (#3846): the pre-fix guidance repeated an identical
+/// `TRUSTY_SIGN_IDENTITY` tip inside every component's block; a two-component
+/// install (trusty-search + trusty-mpm) printed it twice back to back.
+///
+/// Test: `tests::signing_persistence_tip_mentions_sign_identity_and_tctl_sign`.
+pub fn signing_persistence_tip() -> &'static str {
+    "Tip: install a Developer ID Application certificate (or set TRUSTY_SIGN_IDENTITY) \
+     and run `tctl sign <trusty-search|trusty-mpm>` to make these grants persist across \
+     every future reinstall."
 }
 
 /// Run the fail-soft post-install signing hook for a named set.
@@ -683,8 +722,21 @@ pub fn app_data_guidance(binary_path: &str) -> String {
 /// (demo-critical fix: this used to `eprintln!` directly, interleaving noisy
 /// multi-line guidance into the middle of the live per-component checklist —
 /// it is now data the caller can defer to a post-install summary instead).
+///
+/// `existed_before` — whether a binary already sat at `set`'s primary path
+/// before THIS install call placed a fresh copy — selects the fresh-install
+/// vs. reinstall guidance variant (see [`fda_guidance`] / [`app_data_guidance`]).
+/// The `bool` half of the returned tuple is `true` only when the note is
+/// no-cert guidance (never for a signed-OK note or a codesign-warning note),
+/// so the caller can print [`signing_persistence_tip`] once, only when it is
+/// actually relevant.
 #[cfg(target_os = "macos")]
-fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool) -> Option<String> {
+fn post_install_signed_set(
+    install_dir: &std::path::Path,
+    set: &str,
+    json: bool,
+    existed_before: bool,
+) -> Option<(String, bool)> {
     if json {
         return None;
     }
@@ -713,22 +765,25 @@ fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool)
                 }
             }
             if signed_ok {
-                Some(format!(
-                    "{set}: signed with Developer ID. The macOS grant will persist across \
-                     all future reinstalls."
+                Some((
+                    format!(
+                        "{set}: signed with Developer ID. The macOS grant will persist across \
+                         all future reinstalls."
+                    ),
+                    false,
                 ))
             } else {
-                Some(warnings.join("\n"))
+                Some((warnings.join("\n"), false))
             }
         }
         None => {
             let path_str = primary_path.to_string_lossy();
             let guidance = if set == MPM_SET {
-                app_data_guidance(&path_str)
+                app_data_guidance(&path_str, existed_before)
             } else {
-                fda_guidance(&path_str)
+                fda_guidance(&path_str, existed_before)
             };
-            Some(guidance)
+            Some((guidance, true))
         }
     }
 }
@@ -741,19 +796,26 @@ fn post_install_signed_set(install_dir: &std::path::Path, set: &str, json: bool)
 ///
 /// What: On macOS delegates to [`post_install_signed_set`] for [`SEARCH_SET`],
 /// returning its note/guidance text instead of printing directly (see that
-/// function's doc). On non-macOS: `None`.
+/// function's doc), plus a `bool` telling the caller whether
+/// [`signing_persistence_tip`] should be printed. On non-macOS: `None`.
+/// `existed_before` — see [`post_install_signed_set`].
 ///
-/// Test: `tests::fda_guidance_contains_steps` (pure); signing itself is not
-/// invoked in tests (side-effecting).
+/// Test: `tests::fda_guidance_fresh_install_has_no_remove_step` /
+/// `tests::fda_guidance_reinstall_has_remove_and_readd` (pure); signing
+/// itself is not invoked in tests (side-effecting).
 #[must_use]
-pub fn post_install_search(install_dir: &std::path::Path, json: bool) -> Option<String> {
+pub fn post_install_search(
+    install_dir: &std::path::Path,
+    json: bool,
+    existed_before: bool,
+) -> Option<(String, bool)> {
     #[cfg(target_os = "macos")]
     {
-        post_install_signed_set(install_dir, SEARCH_SET, json)
+        post_install_signed_set(install_dir, SEARCH_SET, json, existed_before)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (install_dir, json); // suppress unused warnings on non-macOS
+        let _ = (install_dir, json, existed_before); // suppress unused warnings on non-macOS
         None
     }
 }
@@ -766,19 +828,25 @@ pub fn post_install_search(install_dir: &std::path::Path, json: bool) -> Option<
 ///
 /// What: On macOS delegates to [`post_install_signed_set`] for [`MPM_SET`],
 /// returning its note/guidance text instead of printing directly (see that
-/// function's doc). On non-macOS: `None`.
+/// function's doc), plus a `bool` telling the caller whether
+/// [`signing_persistence_tip`] should be printed. On non-macOS: `None`.
+/// `existed_before` — see [`post_install_signed_set`].
 ///
-/// Test: `tests::app_data_guidance_mentions_prompt` (pure); signing itself is
-/// not invoked in tests (side-effecting).
+/// Test: `tests::app_data_guidance_fresh_and_reinstall_variants` (pure);
+/// signing itself is not invoked in tests (side-effecting).
 #[must_use]
-pub fn post_install_mpm(install_dir: &std::path::Path, json: bool) -> Option<String> {
+pub fn post_install_mpm(
+    install_dir: &std::path::Path,
+    json: bool,
+    existed_before: bool,
+) -> Option<(String, bool)> {
     #[cfg(target_os = "macos")]
     {
-        post_install_signed_set(install_dir, MPM_SET, json)
+        post_install_signed_set(install_dir, MPM_SET, json, existed_before)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (install_dir, json); // suppress unused warnings on non-macOS
+        let _ = (install_dir, json, existed_before); // suppress unused warnings on non-macOS
         None
     }
 }

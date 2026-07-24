@@ -48,6 +48,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   0.4.8, no code fix applied): `launchctl bootstrap gui/$(id -u)
   ~/Library/LaunchAgents/com.trusty.memory.plist && launchctl kickstart -k
   gui/$(id -u)/com.trusty.memory`.
+- Simplified the macOS Full-Disk-Access / App-Data TCC guidance `tctl install`
+  prints after `trusty-search` / `trusty-mpm` land (#3846). Three defects
+  fixed: (1) the guidance now detects whether a binary already sat at the
+  install path before this run and prints a first-install variant (grant
+  once, nothing to remove) instead of always showing reinstall-only
+  remove-then-re-add steps; (2) the preamble no longer says "Every
+  `cargo install`..." — it is installation-method-agnostic, matching the
+  prebuilt-tarball install path `tctl` actually uses; (3) each component's
+  guidance is now ≤3 lines and points at
+  `docs/reference/release-workflow.md` for full detail, and the
+  `TRUSTY_SIGN_IDENTITY`/`tctl sign` tip prints once per install run instead
+  of once per component.
 
 ## [0.4.8] — 2026-07-24
 

@@ -355,12 +355,21 @@ async fn install_all(
     // the per-component loop (see this function's doc) so it never interrupts
     // the live checklist; printed once, after every row has settled.
     let mut post_install_notes: Vec<String> = Vec::new();
+    // #3846: whether the shared once-per-run signing tip (Developer ID /
+    // TRUSTY_SIGN_IDENTITY) should be printed — true as soon as ANY
+    // component's TCC guidance (not a signed-OK note) is collected below.
+    let mut show_signing_tip = false;
 
     for m in selected {
         checklist.set(&m.crate_name, ComponentState::Downloading);
         if !live {
             let _ = narr.info(&format!("installing {}", m.crate_name));
         }
+        // #3846: capture whether a binary already sat at this member's
+        // install path BEFORE this call places a fresh copy — the only
+        // reliable "first install vs. reinstall" signal the TCC guidance
+        // below needs. Must be read here, before `install_one` overwrites it.
+        let existed_before = install_dir.join(&m.binary).exists();
         match install_one(m).await {
             Ok(installed) => {
                 checklist.set(&m.crate_name, ComponentState::Verifying);
@@ -413,10 +422,13 @@ async fn install_all(
                 // fix: the guidance text is now collected, not printed inline —
                 // see `post_install_notes` above.
                 if m.crate_name == "trusty-search" {
-                    if let Some(note) =
-                        super::macos_signing::post_install_search(&install_dir, json)
-                    {
+                    if let Some((note, needs_tip)) = super::macos_signing::post_install_search(
+                        &install_dir,
+                        json,
+                        existed_before,
+                    ) {
                         post_install_notes.push(note);
+                        show_signing_tip |= needs_tip;
                     }
                 }
                 // Phase 8b: codesign + App-Data-TCC guidance for trusty-mpm.
@@ -429,8 +441,11 @@ async fn install_all(
                 // hook DOES sign with Hardened Runtime (low risk either way).
                 // Demo-critical fix: deferred, same as trusty-search above.
                 if m.crate_name == "trusty-mpm" {
-                    if let Some(note) = super::macos_signing::post_install_mpm(&install_dir, json) {
+                    if let Some((note, needs_tip)) =
+                        super::macos_signing::post_install_mpm(&install_dir, json, existed_before)
+                    {
                         post_install_notes.push(note);
+                        show_signing_tip |= needs_tip;
                     }
                 }
                 // Phase 7b (#2556): bootstrap the launchd plist for each shared
@@ -550,6 +565,12 @@ async fn install_all(
     // see this function's doc for why this is deferred rather than inline.
     for note in &post_install_notes {
         eprintln!("{note}");
+    }
+    // #3846: the Developer ID / TRUSTY_SIGN_IDENTITY signing tip prints
+    // ONCE per run, after every per-component guidance block, instead of once
+    // per component (a search+mpm install used to print it twice).
+    if show_signing_tip {
+        eprintln!("{}", super::macos_signing::signing_persistence_tip());
     }
     InstallReport::build(outcomes)
 }
