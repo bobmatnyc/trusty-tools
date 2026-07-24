@@ -95,7 +95,26 @@ fn notice_formats_correctly() {
 
 // ── opt-out env var ────────────────────────────────────────────────────
 
+// Issue #3689: `check_throttled_skips_when_no_update_check_set` and
+// `check_throttled_skips_when_ci_set` mutate the process-global
+// `NO_UPDATE_CHECK_ENV`/`CI_ENV` vars for the DURATION of their own
+// `check_throttled(...).await` call (the env is set, THEN awaited, THEN
+// cleared — the mutation deliberately outlives the brief `ENV_LOCK` critical
+// sections around the set/remove calls, since `check_throttled` itself must
+// observe the var). `cache_fresh_returns_some_when_newer` also calls
+// `check_throttled` (via `run_cache_freshness_test`) without expecting either
+// var to be set; without `#[serial]` these two tests can race a THIRD,
+// concurrently-scheduled `check_throttled` call and have it observe a
+// spuriously-set `CI_ENV`/`NO_UPDATE_CHECK_ENV`, turning an expected
+// `Some(..)` into `None` (flaked under parallel `cargo test`: "expected
+// Some, got None"). `#[serial(update_check_throttled_env)]` (the crate's
+// existing named-group convention — see
+// `verify_installed_binary_finds_binary_via_path`'s
+// `update_verify_installed_binary_env`, #3608/#3629) gives the three
+// `check_throttled` callers mutual exclusion for their whole async body,
+// including the `.await`, which a bare `std::sync::Mutex` guard cannot span.
 #[tokio::test]
+#[serial(update_check_throttled_env)]
 async fn check_throttled_skips_when_no_update_check_set() {
     // Set the env var while holding the lock, then drop the lock before
     // the await so clippy::await-holding-lock is satisfied.
@@ -117,6 +136,7 @@ async fn check_throttled_skips_when_no_update_check_set() {
 }
 
 #[tokio::test]
+#[serial(update_check_throttled_env)]
 async fn check_throttled_skips_when_ci_set() {
     {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -170,7 +190,14 @@ async fn run_cache_freshness_test(
     let _ = std::fs::remove_file(cache_path(&unique_crate));
 }
 
+// Issue #3689: shares `update_check_throttled_env` with the two
+// `check_throttled_skips_when_*` tests above — see the doc comment there.
+// This test's own `check_throttled` call expects a live (non-throttled)
+// result (`Some`), so a sibling test's transient `CI_ENV`/
+// `NO_UPDATE_CHECK_ENV` mutation racing this `.await` was observed flipping
+// it to `None` under parallel `cargo test`.
 #[tokio::test]
+#[serial(update_check_throttled_env)]
 async fn cache_fresh_returns_some_when_newer() {
     // Cache written 1 h ago (well within 24 h) with a newer version.
     run_cache_freshness_test(now_unix_secs() - 3600, "1.0.0", "0.19.0", true).await;

@@ -240,6 +240,7 @@ impl Embedder for FallbackEmbedderAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     /// Test embedder that fails its first `fail_count` calls, then succeeds,
@@ -323,7 +324,17 @@ mod tests {
     /// the direct behavioural pin for the fix: the OLD threshold-counting
     /// design would have tripped this after `threshold` failures regardless
     /// of what the supervisor was actually doing.
+    ///
+    /// Issue #3689: `#[serial]` — every test in this module drives
+    /// `record_failure_and_maybe_trip`'s `tracing::error!` call sites, which
+    /// `fallback_logs_build_failure_exactly_once` counts via a thread-local
+    /// `tracing` subscriber. `tracing`'s per-callsite interest cache is
+    /// process-global, so an unrelated concurrently-running test hitting the
+    /// SAME call site with no subscriber installed can get it cached as
+    /// "never interested", silently dropping events the counting test
+    /// expects — see that test's doc comment for the full mechanism.
     #[tokio::test]
+    #[serial]
     async fn fallback_does_not_trip_while_supervisor_still_retrying() {
         let given_up = Arc::new(AtomicBool::new(false));
         let primary: Arc<dyn Embedder> = Arc::new(AlwaysFailEmbedder {
@@ -347,7 +358,10 @@ mod tests {
     /// Once `supervisor_gave_up()` flips to `true`, the VERY NEXT failing
     /// call must trip the latch and be served (transparently) by the
     /// fallback rather than surfacing the primary's error.
+    // Issue #3689: `#[serial]` — see
+    // `fallback_does_not_trip_while_supervisor_still_retrying`'s doc comment.
     #[tokio::test]
+    #[serial]
     async fn fallback_trips_once_supervisor_gave_up_signal_fires() {
         let given_up = Arc::new(AtomicBool::new(false));
         let primary: Arc<dyn Embedder> = Arc::new(AlwaysFailEmbedder {
@@ -382,7 +396,10 @@ mod tests {
     /// Once tripped, EVERY subsequent call — even if the primary would have
     /// started succeeding again, or if `supervisor_gave_up()` somehow flipped
     /// back to `false` — must go to the fallback. One-way latch.
+    // Issue #3689: `#[serial]` — see
+    // `fallback_does_not_trip_while_supervisor_still_retrying`'s doc comment.
     #[tokio::test]
+    #[serial]
     async fn fallback_latches_and_never_reverts() {
         let given_up = Arc::new(AtomicBool::new(true));
         // Primary fails exactly once then would succeed forever after —
@@ -423,7 +440,10 @@ mod tests {
     /// ORIGINAL primary error (not a fallback-construction error, and not a
     /// panic) — and the trip must be retried on the next call rather than
     /// wedging into a permanently-`None` state.
+    // Issue #3689: `#[serial]` — see
+    // `fallback_does_not_trip_while_supervisor_still_retrying`'s doc comment.
     #[tokio::test]
+    #[serial]
     async fn fallback_propagates_error_when_build_ort_fails() {
         let primary: Arc<dyn Embedder> = Arc::new(AlwaysFailEmbedder {
             given_up: Arc::new(AtomicBool::new(true)),
@@ -457,8 +477,30 @@ mod tests {
     /// gave up" trip log, plus the one-time "fallback build failed" log) even
     /// though `embed_batch` is called many times and the fallback builder is
     /// invoked on every one of them.
+    ///
+    /// Issue #3689: this test installs a thread-local `tracing` subscriber
+    /// via `tracing::subscriber::with_default` and asserts an EXACT count of
+    /// events dispatched through it. `tracing`'s per-callsite interest cache
+    /// is process-global, not per-thread: EVERY other test in this module
+    /// drives `record_failure_and_maybe_trip`'s SAME `tracing::error!` call
+    /// sites (the "supervisor gave up" / "fallback build failed" logs) with
+    /// no subscriber installed, and if one of them evaluates a call site's
+    /// interest concurrently with this test's subscriber install/teardown,
+    /// the cache can end up registering "never interested" — silently
+    /// dropping an event this test expects to count (flaked under
+    /// --test-threads=16 looping: "expected exactly 2 ... got 1", and
+    /// reproduced locally even with only THIS test `#[serial]`-tagged, until
+    /// every sibling in the module was too). `#[serial]` (the crate's
+    /// existing convention for isolating tests from cross-test shared
+    /// process state — see `service::reindex::root_hijack_tests`,
+    /// `commands::doctor_checks::tests::doctor_data_dir_returns_non_empty_path`
+    /// #3673/#3686), applied to every test in this module (they all share the
+    /// same call sites), gives this test exclusive execution so its
+    /// interest-cache-affecting subscriber install cannot race a
+    /// concurrently-running sibling.
     /// Test: this test.
     #[tokio::test]
+    #[serial]
     async fn fallback_logs_build_failure_exactly_once() {
         use tracing_subscriber::layer::SubscriberExt;
 
@@ -513,7 +555,11 @@ mod tests {
 
     /// Search must keep returning results after the fallback trips — the
     /// end-to-end contract this whole module exists for.
+    ///
+    /// Issue #3689: `#[serial]` — see
+    /// `fallback_does_not_trip_while_supervisor_still_retrying`'s doc comment.
     #[tokio::test]
+    #[serial]
     async fn search_never_hard_fails_after_fallback_trip() {
         let primary: Arc<dyn Embedder> = Arc::new(AlwaysFailEmbedder {
             given_up: Arc::new(AtomicBool::new(true)),
@@ -589,8 +635,12 @@ mod tests {
     ///      supervisor has crossed its own `max_restarts` ceiling — then
     ///      asserts a subsequent call IS served by the fallback.
     /// Test: this test.
+    ///
+    /// Issue #3689: `#[serial]` — see
+    /// `fallback_does_not_trip_while_supervisor_still_retrying`'s doc comment.
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up() {
         use crate::commands::start::embedder::LazySlotEmbedderAdapter;
         use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
