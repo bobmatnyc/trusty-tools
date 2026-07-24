@@ -144,7 +144,17 @@ impl TrustyAgentsRepl {
                 Ok(true)
             }
             "/version" => {
-                match crate::build_info::BuildInfo::load_and_increment().await {
+                // #buildinfo-erofs: use the already-resolved `project_dir`
+                // (set via `detect_self_project`/`/connect`, never a bare
+                // `std::env::current_dir()`) so this never attempts to
+                // create `.trusty-agents/state` under an unwritable cwd —
+                // the REPL only reaches this path once interactive startup
+                // has already succeeded, but resolving through the same
+                // primitive as the CLI paths keeps the invariant obvious
+                // and removes the last caller of the raw-cwd
+                // `BuildInfo::load_and_increment()`.
+                let state_dir = self.project_dir.join(".trusty-agents").join("state");
+                match crate::build_info::BuildInfo::load_and_increment_in(&state_dir).await {
                     Ok(info) => {
                         let _ = writeln!(out, "{}", info.display_string());
                     }
