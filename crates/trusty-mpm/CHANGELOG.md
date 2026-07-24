@@ -5,6 +5,13 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **Linux release build no longer requires system OpenSSL** (closes [#3538](https://github.com/bobmatnyc/trusty-tools/issues/3538)): the workspace `teloxide` dependency (root `Cargo.toml`, inherited by `trusty-mpm`'s optional `telegram` feature — part of the default `cli` build) defaulted to teloxide's `native-tls` feature, which links `openssl-sys` against a system-installed OpenSSL. macOS builds were unaffected (`native-tls` uses Security.framework there), but the Linux release environment has no system OpenSSL dev headers, breaking the `tm` binary build/release. Switched to `default-features = false, features = ["rustls", "macros", "ctrlc_handler"]` — TLS now goes through `rustls` (no system OpenSSL dependency on any platform) while preserving the two other default features the code actually uses (`macros` for the `BotCommands` derive, `ctrlc_handler` for `Dispatcher::enable_ctrlc_handler()` in `telegram/mod.rs`). Verified: `cargo tree -p trusty-mpm -e normal,build -i openssl-sys` / `-i native-tls` are empty for the `trusty-mpm` release-binary dependency graph (both `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin` targets); git2's own (unrelated, pre-existing) `openssl-sys` usage is `vendored-openssl` and self-compiles rather than requiring a system install.
+
+---
 ## [1.0.0] - 2026-07-24
 
 **First stable release.** trusty-mpm (the `tm` harness/CLI/daemon) has been in
