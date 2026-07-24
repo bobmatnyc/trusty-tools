@@ -12,28 +12,42 @@
 //! (before the system prompt is built) and [`finish_turn`] (on every return
 //! path, streaming and non-streaming alike).
 //! What:
-//!   - [`build_turn_context`] fetches the closed label vocabulary
+//!   - [`build_turn_context`] — when `[workstreams].enabled` (a REAL master
+//!     switch, #3840 critic HIGH-2) — fetches the closed label vocabulary
 //!     ([`crate::api::server::workstreams::list_workstream_labels_at`]),
 //!     renders the in-band classification instruction block (§9.6.1), and —
 //!     when a workstream is focused — assembles the focused-mode context
 //!     block in the spec's stable order (§9.6.3): global summary (a stub —
 //!     no cheap global-summary source exists yet in this slice, honestly
 //!     labeled) → per-workstream summary (cached, `ws-summary:<label>` tag)
-//!     → last `recent_window` raw turns (`ws:<label>` tag).
+//!     → last `recent_window` raw turns (`ws:<label>` tag). Disabled = no
+//!     vocabulary fetch, no classification block, no focused assembly.
 //!   - [`finish_turn`] parses the trailing `[[task: <label>]]` /
-//!     `[[task: new: <label>]]` marker out of the raw response, persists
-//!     the turn as a `ws:<label>`-tagged drawer, refreshes the cached
-//!     per-workstream summary every `summarize_every` turns (one extra LLM
-//!     call on the SAME credentials/model — `llm::chat_adapter_aware`, no
-//!     new provider plumbing), and applies the task-bleed nudge (§9.6.4): a
-//!     gentle log line + response-appended note when the turn's honest
-//!     classification differs from the focused workstream — never forced,
-//!     never dropped.
+//!     `[[task: new: <label>]]` marker out of the raw response — anchored to
+//!     the response's own last line, with the inner label charset-validated
+//!     ([`is_valid_label`]) before it is ever treated as real (#3840 critic
+//!     HIGH-1) — applies the task-bleed nudge (§9.6.4: a gentle log line +
+//!     response-appended note when the turn's honest classification differs
+//!     from the focused workstream, never forced/dropped), then returns the
+//!     display text to the caller IMMEDIATELY. Persisting the turn as a
+//!     `ws:<label>`-tagged drawer and refreshing the cached per-workstream
+//!     summary every `summarize_every` turns (one extra LLM call on the SAME
+//!     credentials/model — `llm::chat_adapter_aware`, no new provider
+//!     plumbing) both happen in a detached `tokio::spawn`ed task AFTER the
+//!     response is returned (#3840 critic HIGH-4 — a cadence turn used to
+//!     make the user wait through a second full LLM round trip before
+//!     seeing their answer).
 //! Deferred (documented, not implemented in this slice): lazy summary
 //! invalidation on manual re-tag (§9.6.2 — re-tagging is a future sidebar
 //! affordance, not built here); a real global prompt-history summary source
 //! (currently an honestly-labeled stub); periodic near-duplicate label
-//! consolidation (§9.6.1).
+//! consolidation (§9.6.1); an unbounded vocabulary in the classification
+//! block (no label-count/char cap — filed as a follow-up, see PR body);
+//! `should_refresh_summary`'s turn count derives from a
+//! [`SUMMARY_SCAN_LIMIT`]-capped fetch, so a workstream past that many turns
+//! sticks at the cap and re-fires the summary EVERY turn instead of on
+//! cadence (filed as a follow-up, see PR body — needs a real stored turn
+//! counter, not a capped re-scan).
 //! Live-verified end to end on OpenRouter/Sonnet (the product-policy
 //! default, per DOC-54's provider decision log) against a real
 //! trusty-memory daemon: classification, `ws:`-tagged persistence,
@@ -47,9 +61,10 @@
 //! fails with an OpenRouter error (caught and logged; the turn's own
 //! response/persistence is unaffected, only the summary cache stays stale).
 //! Moot under the current "no Ollama" operating policy; not fixed here.
-//! Test: `parse_marker_*`, `classification_block_*`, `bleed_nudge_*`,
-//! `should_refresh_summary_*` (pure), `build_turn_context_*` /
-//! `finish_turn_*` (hermetic, `classification_tests.rs`).
+//! Test: `parse_marker_*`, `is_valid_label_*`, `classification_block_*`,
+//! `bleed_nudge_*`, `should_refresh_summary_*` (pure), `build_turn_context_*`
+//! (hermetic), `finish_turn_*` (hermetic + mock-daemon,
+//! `classification_tests.rs`).
 
 use std::path::Path;
 
@@ -59,7 +74,6 @@ use async_openai::{Client, config::OpenAIConfig};
 use crate::agents::AgentConfig;
 use crate::api::server::workstreams::{self, workstream_summary_tag, workstream_tag};
 use crate::llm;
-use crate::memory::trusty_client::default_trusty_url;
 
 /// Opening delimiter of the trailing in-band classification marker
 /// (DOC-54 §9.6.1). Chosen to be vanishingly unlikely inside normal prose so
@@ -70,6 +84,10 @@ const MARKER_CLOSE: &str = "]]";
 /// marker signals a deliberate new workstream rather than a drift-prone
 /// free-form label.
 const NEW_PREFIX: &str = "new: ";
+/// Maximum accepted label length — matches trusty-memory's own
+/// `is_valid_workstream_name` bound (DOC-53 §4.3) so a classification-minted
+/// label is never rejected downstream for being too long.
+const LABEL_MAX_LEN: usize = 64;
 
 /// A parsed classification decision for one turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,40 +96,97 @@ pub(crate) struct Classification {
     pub(crate) is_new: bool,
 }
 
-/// Parse the trailing `[[task: <label>]]` / `[[task: new: <label>]]` marker
-/// out of a raw LLM response.
+/// Validate a candidate label against the charset allow-list before it is
+/// EVER treated as a real classification (#3840 critic HIGH-1).
 ///
-/// What: Scans from the LAST occurrence of [`MARKER_OPEN`] so a label that
-/// coincidentally echoes the marker syntax earlier in the response (e.g. the
-/// model explaining the convention) doesn't get mistaken for the real
-/// decision. Returns `(display_text, None)` unchanged when no well-formed
-/// marker is found — a persona that forgets the marker still answers the
-/// user; the turn just isn't classified/persisted (logged by the caller).
+/// Why: the marker's inner text is untrusted model output — a persona
+/// echoing the marker SYNTAX back verbatim (e.g. answering "how does
+/// classification work?" with an example ending in `[[task: <label>]]`)
+/// must never have that literal placeholder persisted as a real `ws:<label>`
+/// trusty-memory tag. Gating on a strict charset allow-list, not just
+/// "non-empty", closes that hole.
+/// What: non-empty, at most [`LABEL_MAX_LEN`] bytes, matches
+/// `^[a-z0-9-]{1,64}$` — lowercase ASCII letters, digits, and hyphens only.
+/// Test: `is_valid_label_accepts_kebab_case`,
+/// `is_valid_label_rejects_placeholder_and_unsafe_text`.
+fn is_valid_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= LABEL_MAX_LEN
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Parse the trailing `[[task: <label>]]` / `[[task: new: <label>]]` marker
+/// out of a raw LLM response (#3840 critic HIGH-1 hardening).
+///
+/// Why: the marker must be ANCHORED to the end of the response — only the
+/// last line of the (trimmed) text is ever considered a classification
+/// attempt — rather than a bare `rfind` anywhere in the string. A bare
+/// `rfind` had two failure modes: (1) a persona explaining the marker syntax
+/// mid-prose (e.g. `` the format is `[[task: <label>]]` `` followed by more
+/// prose) could have that lookalike text mistaken for the real decision, and
+/// (2) when a persona emitted the marker TWICE, the first occurrence stayed
+/// visible in the displayed text (only content before the LAST occurrence
+/// was stripped). Anchoring to "last line only" plus looping backward over
+/// CONSECUTIVE trailing marker-shaped lines fixes both: every trailing
+/// marker-shaped line is stripped from the display, and the LAST one
+/// (closest to the true end of the response) is authoritative — documented
+/// choice, not the first. A trailing line that structurally matches the
+/// marker syntax but whose inner label fails [`is_valid_label`] (e.g. a
+/// literal `<label>` placeholder) is still stripped from display (the model
+/// clearly attempted a classification) but yields `None` — logged by the
+/// caller, never persisted as a tag.
+/// What: Returns `(display_text, None)` unchanged when the LAST line isn't a
+/// well-formed marker at all (not anchored — e.g. marker syntax appears only
+/// mid-sentence, not as the response's own trailing line).
 /// Test: `parse_marker_extracts_existing_label`,
 /// `parse_marker_extracts_new_label`, `parse_marker_missing_is_none`,
 /// `parse_marker_strips_surrounding_whitespace`,
-/// `parse_marker_ignores_earlier_lookalike_text`.
+/// `parse_marker_ignores_earlier_lookalike_text`,
+/// `parse_marker_ignores_trailing_syntax_echo`,
+/// `parse_marker_double_marker_strips_both_last_wins`,
+/// `parse_marker_invalid_label_stripped_but_unclassified`.
 pub(crate) fn parse_marker(raw: &str) -> (String, Option<Classification>) {
-    let Some(open_idx) = raw.rfind(MARKER_OPEN) else {
-        return (raw.trim_end().to_string(), None);
-    };
-    let after_open = &raw[open_idx + MARKER_OPEN.len()..];
-    let Some(close_rel) = after_open.find(MARKER_CLOSE) else {
-        return (raw.trim_end().to_string(), None);
-    };
-    let inner = after_open[..close_rel].trim();
-    if inner.is_empty() {
-        return (raw.trim_end().to_string(), None);
+    let mut remaining = raw.trim_end();
+    let mut classification: Option<Classification> = None;
+    let mut is_first_line = true;
+
+    loop {
+        let line_start = remaining.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line = remaining[line_start..].trim();
+
+        let Some(rest) = line
+            .strip_prefix(MARKER_OPEN)
+            .and_then(|s| s.strip_suffix(MARKER_CLOSE))
+        else {
+            break;
+        };
+        let inner = rest.trim();
+
+        if is_first_line && !inner.is_empty() {
+            let (label, is_new) = match inner.strip_prefix(NEW_PREFIX) {
+                Some(new_label) => (new_label.trim().to_string(), true),
+                None => (inner.to_string(), false),
+            };
+            if is_valid_label(&label) {
+                classification = Some(Classification { label, is_new });
+            } else {
+                tracing::warn!(
+                    label = %label.chars().take(80).collect::<String>(),
+                    "classification marker label failed charset validation ([a-z0-9-]{{1,64}}); turn left unclassified"
+                );
+            }
+        }
+        is_first_line = false;
+
+        // Strip this marker-shaped line (and its leading newline) from the
+        // displayed text regardless of label validity, then keep looking
+        // backward for another consecutive trailing marker line.
+        remaining = remaining[..line_start].trim_end();
     }
-    let display = raw[..open_idx].trim_end().to_string();
-    let (label, is_new) = match inner.strip_prefix(NEW_PREFIX) {
-        Some(new_label) => (new_label.trim().to_string(), true),
-        None => (inner.to_string(), false),
-    };
-    if label.is_empty() {
-        return (display, None);
-    }
-    (display, Some(Classification { label, is_new }))
+
+    (remaining.to_string(), classification)
 }
 
 /// Render the compact in-band classification instruction block (DOC-54
@@ -131,9 +206,13 @@ pub(crate) fn classification_block(labels: &[String]) -> String {
     };
     format!(
         "## Task classification\nExisting task labels for this agent: {vocab}.\n\
-         End your response with exactly one trailing line classifying this turn:\n\
+         End your response with exactly one trailing line — the LAST line, on \
+         its own, nothing after it — classifying this turn:\n\
          `{MARKER_OPEN}<label>{MARKER_CLOSE}` to reuse an existing label, or \
          `{MARKER_OPEN}{NEW_PREFIX}<label>{MARKER_CLOSE}` to start a new one. \
+         `<label>` must be lowercase-kebab-case: letters, digits, and hyphens \
+         only (e.g. `pr-review-tips`), at most {LABEL_MAX_LEN} characters — never \
+         the literal placeholder text. \
          Pick honestly based on what the turn is actually about — never force-fit \
          a turn into a label just because it's focused."
     )
@@ -167,26 +246,41 @@ pub(crate) struct TurnContext {
 
 /// Build [`TurnContext`] for one persona turn (DOC-54 §9.6.1/§9.6.3).
 ///
-/// What: Fetches the closed label vocabulary and renders the classification
-/// block unconditionally. When `focused` is `Some`, additionally assembles
-/// the focused-mode block in the spec's stable order: global summary (stub)
-/// → per-workstream summary (cached) → last `recent_window` raw turns.
-/// Fails open exactly like every other trusty-memory read in this crate — an
-/// unreachable daemon yields empty labels/history, never an error.
+/// Why: `enabled` (`[workstreams].enabled`, default `true`) is a REAL master
+/// switch (#3840 critic HIGH-2), not merely consulted by the summarizer —
+/// when `false`, this function does no work at all: no vocabulary fetch, no
+/// classification block, and focused-mode is treated as unfocused (assembling
+/// a focused-context block only makes sense alongside active classification).
+/// What: When `enabled`, fetches the closed label vocabulary and renders the
+/// classification block unconditionally; when `focused` is also `Some`,
+/// assembles the focused-mode block in the spec's stable order: global
+/// summary (stub) → per-workstream summary (cached) → last `recent_window`
+/// raw turns. Fails open exactly like every other trusty-memory read in this
+/// crate — an unreachable daemon yields empty labels/history, never an error.
 /// Test: `build_turn_context_unfocused_has_no_context_block`,
-/// `build_turn_context_focused_assembles_stable_order`.
+/// `build_turn_context_focused_assembles_stable_order`,
+/// `build_turn_context_disabled_is_a_real_no_op`.
 pub(crate) async fn build_turn_context(
     project_path: &Path,
     focused: Option<&str>,
     recent_window: usize,
+    enabled: bool,
+    base_url: &str,
 ) -> TurnContext {
-    let base_url = default_trusty_url();
-    let labels = workstreams::list_workstream_labels_at(project_path, &base_url).await;
+    if !enabled {
+        return TurnContext {
+            classification_block: String::new(),
+            focused_label: None,
+            focused_context_block: None,
+        };
+    }
+
+    let labels = workstreams::list_workstream_labels_at(project_path, base_url).await;
     let classification_block = classification_block(&labels);
 
     let focused_context_block = match focused {
         Some(label) => {
-            let block = assemble_focused_block(project_path, &base_url, label, recent_window).await;
+            let block = assemble_focused_block(project_path, base_url, label, recent_window).await;
             tracing::info!(
                 label = %label,
                 recent_window,
@@ -255,18 +349,40 @@ async fn assemble_focused_block(
     )
 }
 
-/// Finish a persona turn: parse the classification marker, persist the
-/// turn, maybe refresh the workstream summary, apply the task-bleed nudge,
-/// and return the text to display to the user.
+/// Finish a persona turn: parse the classification marker, apply the
+/// task-bleed nudge, and return the text to display to the user IMMEDIATELY
+/// — turn persistence and the periodic summary LLM call happen off the
+/// response path (#3840 critic HIGH-4).
 ///
+/// Why: `create_tagged_drawer_at` is two sequential HTTP writes
+/// (ensure-palace + create-drawer) and, on a cadence turn,
+/// `maybe_summarize_workstream` adds a SECOND full LLM round trip — both
+/// awaited inline used to mean the user's answer sat behind that latency
+/// even though neither result affects what they see. Detaching them into a
+/// `tokio::spawn`ed background task after parsing/nudging (but before
+/// returning) means the user sees their answer as soon as the persona's own
+/// LLM call completes; the write/summary land a beat later, logged exactly
+/// like the previous inline failures on error, with no caller left awaiting
+/// them (fire-and-forget, matching this module's existing fail-open posture
+/// for persistence).
 /// What: Called from every `run_pm_task_with_persona` return path
 /// (streaming and non-streaming) so classification/persistence happen
 /// exactly once regardless of which path produced the raw response. A
 /// response with no parseable marker is returned unchanged (logged, not
 /// persisted) — a persona that forgets the marker still answers the user.
+/// `[workstreams].enabled = false` is a real master switch (#3840 critic
+/// HIGH-2): even if a marker somehow parses, nothing is persisted.
 /// Test: `finish_turn_no_marker_returns_unchanged`,
-/// `finish_turn_persists_and_returns_display_text`,
-/// `finish_turn_bleed_nudge_appended_when_focused_mismatch`.
+/// `finish_turn_bleed_nudge_appended_when_focused_mismatch`,
+/// `finish_turn_disabled_does_not_persist`,
+/// `finish_turn_persists_via_detached_task` (mock-daemon, `classification_tests.rs`).
+// 8 params is one over clippy's default `too_many_arguments` threshold;
+// each is independently meaningful at every one of `finish_turn`'s two call
+// sites in `persona.rs` (streaming + non-streaming) and bundling them into a
+// request struct would only move the same fields one level of indirection
+// without reducing what a caller has to supply — allowed deliberately
+// rather than restructured under the demo-day time budget.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn finish_turn(
     project_path: &Path,
     persona_name: &str,
@@ -275,6 +391,7 @@ pub(crate) async fn finish_turn(
     user_input: &str,
     raw_response: String,
     ctx: &TurnContext,
+    base_url: &str,
 ) -> Result<String> {
     let (mut display, classification) = parse_marker(&raw_response);
     let Some(classification) = classification else {
@@ -303,31 +420,53 @@ pub(crate) async fn finish_turn(
         display.push_str(&nudge);
     }
 
-    let base_url = default_trusty_url();
-    let content =
-        format!("### {persona_name}\n\n**User:** {user_input}\n\n**Assistant:** {display}");
-    if let Err(e) = workstreams::create_tagged_drawer_at(
-        project_path,
-        &base_url,
-        &content,
-        vec![workstream_tag(&classification.label)],
-    )
-    .await
-    {
-        tracing::warn!(persona = %persona_name, error = %e, "failed to persist workstream-tagged turn");
+    if !persona_cfg.workstreams.enabled {
+        tracing::debug!(
+            persona = %persona_name,
+            label = %classification.label,
+            "workstream context disabled ([workstreams].enabled = false); turn not persisted"
+        );
+        return Ok(display);
     }
 
-    if let Err(e) = maybe_summarize_workstream(
-        project_path,
-        &base_url,
-        &classification.label,
-        client,
-        persona_cfg,
-    )
-    .await
-    {
-        tracing::warn!(persona = %persona_name, error = %e, "workstream summary refresh failed");
-    }
+    // Off the response path: persistence + the cadence summary call, in a
+    // detached task. Everything captured must be owned ('static) — cheap
+    // clones (`Client<OpenAIConfig>` and `AgentConfig` are both `Clone`).
+    let project_path_owned = project_path.to_path_buf();
+    let persona_name_owned = persona_name.to_string();
+    let user_input_owned = user_input.to_string();
+    let display_for_persist = display.clone();
+    let client_owned = client.clone();
+    let persona_cfg_owned = persona_cfg.clone();
+    let label = classification.label.clone();
+    let base_url = base_url.to_string();
+    tokio::spawn(async move {
+        let content = format!(
+            "### {persona_name_owned}\n\n**User:** {user_input_owned}\n\n**Assistant:** {display_for_persist}"
+        );
+        if let Err(e) = workstreams::create_tagged_drawer_at(
+            &project_path_owned,
+            &base_url,
+            &content,
+            vec![workstream_tag(&label)],
+        )
+        .await
+        {
+            tracing::warn!(persona = %persona_name_owned, error = %e, "failed to persist workstream-tagged turn");
+        }
+
+        if let Err(e) = maybe_summarize_workstream(
+            &project_path_owned,
+            &base_url,
+            &label,
+            &client_owned,
+            &persona_cfg_owned,
+        )
+        .await
+        {
+            tracing::warn!(persona = %persona_name_owned, error = %e, "workstream summary refresh failed");
+        }
+    });
 
     Ok(display)
 }

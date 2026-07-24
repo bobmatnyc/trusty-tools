@@ -237,10 +237,17 @@ pub async fn run_pm_task_with_persona(
     // fetch the closed label vocabulary + (when focused) assemble the
     // focused-mode context block BEFORE the system prompt is built below,
     // so both land in the same prompt-cache-stable position every turn.
+    // Computed once and threaded explicitly (not re-derived via a hidden
+    // global inside `classification`) so both `build_turn_context` and
+    // `finish_turn` below share one value and remain independently testable
+    // against a mock daemon.
+    let workstreams_base_url = crate::memory::trusty_client::default_trusty_url();
     let turn_ctx = classification::build_turn_context(
         project_path,
         overrides.focused_workstream.as_deref(),
         persona_cfg.workstreams.recent_window,
+        persona_cfg.workstreams.enabled,
+        &workstreams_base_url,
     )
     .await;
 
@@ -468,7 +475,15 @@ pub async fn run_pm_task_with_persona(
             Some(focused_block) => format!("{base}\n\n{focused_block}"),
             None => base,
         };
-        let base = format!("{base}\n\n{}", turn_ctx.classification_block);
+        // #3840 critic HIGH-2: `classification_block` is empty when
+        // `[workstreams].enabled = false` (real master switch — see
+        // `build_turn_context`); appending it unconditionally would still
+        // inject a blank `\n\n` into the prompt.
+        let base = if turn_ctx.classification_block.is_empty() {
+            base
+        } else {
+            format!("{base}\n\n{}", turn_ctx.classification_block)
+        };
         if !persona_tool_names.is_empty() {
             format!(
                 "{}\n\n## Available tools\nYou have access to the following tools: {}.\nUse them when the user asks questions that require live data.",
@@ -518,6 +533,7 @@ pub async fn run_pm_task_with_persona(
                     user_input,
                     assembly.content,
                     &turn_ctx,
+                    &workstreams_base_url,
                 )
                 .await;
             }
@@ -603,6 +619,7 @@ pub async fn run_pm_task_with_persona(
         user_input,
         content,
         &turn_ctx,
+        &workstreams_base_url,
     )
     .await
 }

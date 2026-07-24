@@ -1,15 +1,23 @@
 //! Tests for `classification` — split out following the `persona.rs`/
 //! `persona_tests.rs` pattern already established in this directory (keeps
 //! `classification.rs` well clear of the 500-SLOC production cap).
-//! What: pure-function tests for `parse_marker`/`classification_block`/
-//! `bleed_nudge`, plus `build_turn_context`/`finish_turn` tests against a
-//! no-project-root tempdir (hermetic — no network, no LLM credentials
-//! required, since every code path that would need them short-circuits
-//! before reaching them when there's no project root to write into).
+//! What: pure-function tests for `parse_marker`/`is_valid_label`/
+//! `classification_block`/`bleed_nudge`/`should_refresh_summary`, hermetic
+//! tests for `build_turn_context`/`finish_turn` against a no-project-root
+//! tempdir (no network, no LLM credentials required — every code path that
+//! would need them short-circuits before reaching them), plus a
+//! mock-daemon integration test proving the detached-persistence gate
+//! (#3840 critic HIGH-2/HIGH-4).
 //! Test: This module IS the test coverage.
 
 use super::*;
 use async_openai::{Client, config::OpenAIConfig};
+use std::time::Duration;
+
+/// Unreachable-but-well-formed URL for hermetic tests that must never
+/// actually touch the network (paired with a project root that resolves to
+/// `None`, so nothing in the call path attempts a connection at all).
+const DEAD_URL: &str = "http://127.0.0.1:1";
 
 fn test_client() -> Client<OpenAIConfig> {
     Client::with_config(OpenAIConfig::new())
@@ -31,6 +39,53 @@ max_tokens = 1024
 content = "base"
 "#;
     toml::from_str(toml_str).expect("parses")
+}
+
+fn test_persona_cfg_disabled() -> AgentConfig {
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+
+[workstreams]
+enabled = false
+"#;
+    toml::from_str(toml_str).expect("parses")
+}
+
+// ---------------------------------------------------------------------
+// is_valid_label
+// ---------------------------------------------------------------------
+
+#[test]
+fn is_valid_label_accepts_kebab_case() {
+    for label in ["feat-x", "a", "pr-review-tips", "abc123-def"] {
+        assert!(is_valid_label(label), "expected valid: {label}");
+    }
+}
+
+#[test]
+fn is_valid_label_rejects_placeholder_and_unsafe_text() {
+    for label in [
+        "",
+        "<label>",
+        "Feat-X",               // uppercase
+        "feat_x",               // underscore, not hyphen
+        "feat x",               // space
+        "the format is [[task", // stray syntax fragment
+        &"x".repeat(65),        // over LABEL_MAX_LEN
+    ] {
+        assert!(!is_valid_label(label), "expected invalid: {label}");
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -73,10 +128,12 @@ fn parse_marker_strips_surrounding_whitespace() {
     assert_eq!(c.expect("classification present").label, "feat-y");
 }
 
+/// #3840 critic HIGH-1: the marker is anchored to the response's own LAST
+/// LINE, not "last occurrence anywhere" — a marker-shaped fragment embedded
+/// mid-sentence (not itself the trailing line) must never be mistaken for
+/// the real decision, and must NOT be stripped from the displayed text.
 #[test]
 fn parse_marker_ignores_earlier_lookalike_text() {
-    // The marker syntax mentioned earlier in prose must not be mistaken for
-    // the real trailing decision — only the LAST occurrence counts.
     let raw = "I'll end with `[[task: <label>]]` as instructed.\n\n[[task: feat-z]]";
     let (display, c) = parse_marker(raw);
     assert_eq!(display, "I'll end with `[[task: <label>]]` as instructed.");
@@ -88,6 +145,57 @@ fn parse_marker_empty_label_is_none() {
     let raw = "Answer.\n\n[[task: ]]";
     let (_, c) = parse_marker(raw);
     assert!(c.is_none());
+}
+
+/// #3840 critic HIGH-1, case 2: a persona answering "how does classification
+/// work?" whose LAST line happens to be exactly the marker syntax echoing
+/// the literal `<label>` placeholder must NOT have `<label>` persisted as a
+/// real tag — `is_valid_label` rejects it, so `finish_turn` never calls
+/// `create_tagged_drawer_at` for this turn. The line is still stripped from
+/// display (it structurally matches the marker the model was instructed to
+/// emit — see `parse_marker`'s doc comment for the documented tradeoff).
+#[test]
+fn parse_marker_trailing_syntax_echo_is_stripped_but_unclassified() {
+    let raw = "The exact format to end with is:\n[[task: <label>]]";
+    let (display, c) = parse_marker(raw);
+    assert_eq!(display, "The exact format to end with is:");
+    assert!(
+        c.is_none(),
+        "a literal placeholder label must never classify as real"
+    );
+}
+
+/// A marker-shaped fragment that is NOT anchored to the response's own last
+/// line (mid-sentence, more prose follows on the same/later line) must be
+/// left untouched — this is `parse_marker_ignores_earlier_lookalike_text`'s
+/// single-line sibling: the whole response is one line that merely CONTAINS
+/// marker syntax without being the trailing marker.
+#[test]
+fn parse_marker_ignores_trailing_syntax_echo_mid_sentence() {
+    let raw = "You should end your response with something like [[task: <label>]] to classify it.";
+    let (display, c) = parse_marker(raw);
+    assert_eq!(display, raw);
+    assert!(c.is_none());
+}
+
+/// #3840 critic HIGH-1, case 1: a persona that emits the marker TWICE (e.g.
+/// a stray duplicate) must not leave the FIRST occurrence visible in the
+/// displayed text. Documented choice: BOTH trailing marker lines are
+/// stripped from display; the LAST one (closest to the true end of the
+/// response) is authoritative for classification — not the first.
+#[test]
+fn parse_marker_double_marker_strips_both_last_wins() {
+    let raw = "Answer text.\n\n[[task: feat-x]]\n[[task: feat-y]]";
+    let (display, c) = parse_marker(raw);
+    assert_eq!(
+        display, "Answer text.",
+        "both trailing marker lines must be stripped from the display"
+    );
+    assert_eq!(
+        c.expect("classification present").label,
+        "feat-y",
+        "the LAST marker line wins, not the first"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -138,7 +246,7 @@ fn bleed_nudge_some_when_different() {
 #[tokio::test]
 async fn build_turn_context_unfocused_has_no_context_block() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let ctx = build_turn_context(tmp.path(), None, 12).await;
+    let ctx = build_turn_context(tmp.path(), None, 12, true, DEAD_URL).await;
     assert!(ctx.focused_context_block.is_none());
     assert!(ctx.focused_label.is_none());
     assert!(ctx.classification_block.contains("(none yet)"));
@@ -147,7 +255,7 @@ async fn build_turn_context_unfocused_has_no_context_block() {
 #[tokio::test]
 async fn build_turn_context_focused_assembles_stable_order() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let ctx = build_turn_context(tmp.path(), Some("feat-x"), 12).await;
+    let ctx = build_turn_context(tmp.path(), Some("feat-x"), 12, true, DEAD_URL).await;
     assert_eq!(ctx.focused_label.as_deref(), Some("feat-x"));
     let block = ctx.focused_context_block.expect("focused block present");
     let global_pos = block
@@ -163,32 +271,75 @@ async fn build_turn_context_focused_assembles_stable_order() {
     );
 }
 
+/// #3840 critic HIGH-2: `[workstreams].enabled = false` must be a REAL
+/// master switch on `build_turn_context` — no vocabulary fetch, no
+/// classification block, and focused-mode context is skipped entirely (even
+/// though `focused = Some(...)` is passed, mirroring what a stale user
+/// focus setting would look like on a disabled agent).
+#[tokio::test]
+async fn build_turn_context_disabled_is_a_real_no_op() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ctx = build_turn_context(tmp.path(), Some("feat-x"), 12, false, DEAD_URL).await;
+    assert_eq!(
+        ctx.classification_block, "",
+        "no classification block when disabled"
+    );
+    assert!(
+        ctx.focused_label.is_none(),
+        "disabled treats every turn as unfocused"
+    );
+    assert!(
+        ctx.focused_context_block.is_none(),
+        "no focused-mode assembly when disabled, even with focused=Some"
+    );
+}
+
 #[tokio::test]
 async fn finish_turn_no_marker_returns_unchanged() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let client = test_client();
     let cfg = test_persona_cfg();
-    let ctx = build_turn_context(tmp.path(), None, 12).await;
+    let ctx = build_turn_context(tmp.path(), None, 12, true, DEAD_URL).await;
     let raw = "Plain response, no classification marker.".to_string();
-    let out = finish_turn(tmp.path(), "izzie", &client, &cfg, "hi", raw.clone(), &ctx)
-        .await
-        .expect("finish_turn must not error even without a marker");
+    let out = finish_turn(
+        tmp.path(),
+        "izzie",
+        &client,
+        &cfg,
+        "hi",
+        raw.clone(),
+        &ctx,
+        DEAD_URL,
+    )
+    .await
+    .expect("finish_turn must not error even without a marker");
     assert_eq!(out, raw);
 }
 
 #[tokio::test]
 async fn finish_turn_with_marker_and_no_project_root_still_returns_display_text() {
-    // No project root -> `create_tagged_drawer_at` fails (logged, not
-    // propagated) and `maybe_summarize_workstream` sees zero turns and
-    // never attempts an LLM call — the whole thing stays hermetic.
+    // No project root -> the detached persistence task's `create_tagged_drawer_at`
+    // fails (logged, not propagated) and `maybe_summarize_workstream` sees
+    // zero turns and never attempts an LLM call — the whole thing stays
+    // hermetic. `finish_turn` itself returns before that background task
+    // even runs (#3840 critic HIGH-4: persistence is detached).
     let tmp = tempfile::tempdir().expect("tempdir");
     let client = test_client();
     let cfg = test_persona_cfg();
-    let ctx = build_turn_context(tmp.path(), None, 12).await;
+    let ctx = build_turn_context(tmp.path(), None, 12, true, DEAD_URL).await;
     let raw = "Here you go.\n\n[[task: feat-x]]".to_string();
-    let out = finish_turn(tmp.path(), "izzie", &client, &cfg, "hi", raw, &ctx)
-        .await
-        .expect("finish_turn must fail open on a persistence error");
+    let out = finish_turn(
+        tmp.path(),
+        "izzie",
+        &client,
+        &cfg,
+        "hi",
+        raw,
+        &ctx,
+        DEAD_URL,
+    )
+    .await
+    .expect("finish_turn must fail open on a persistence error");
     assert_eq!(out, "Here you go.");
 }
 
@@ -197,14 +348,106 @@ async fn finish_turn_bleed_nudge_appended_when_focused_mismatch() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let client = test_client();
     let cfg = test_persona_cfg();
-    let ctx = build_turn_context(tmp.path(), Some("feat-a"), 12).await;
+    let ctx = build_turn_context(tmp.path(), Some("feat-a"), 12, true, DEAD_URL).await;
     let raw = "Doing something else.\n\n[[task: feat-b]]".to_string();
-    let out = finish_turn(tmp.path(), "izzie", &client, &cfg, "hi", raw, &ctx)
-        .await
-        .expect("finish_turn must not error");
+    let out = finish_turn(
+        tmp.path(),
+        "izzie",
+        &client,
+        &cfg,
+        "hi",
+        raw,
+        &ctx,
+        DEAD_URL,
+    )
+    .await
+    .expect("finish_turn must not error");
     assert!(out.starts_with("Doing something else."));
     assert!(out.contains("feat-b"));
     assert!(out.contains("feat-a"));
+}
+
+/// #3840 critic HIGH-2: `[workstreams].enabled = false` gates
+/// `finish_turn`'s persistence too, not just the summarizer — even with a
+/// syntactically valid marker AND a real project root (so persistence would
+/// otherwise be attempted), the disabled config must short-circuit before
+/// ever spawning the background write. Proven against the mock daemon
+/// below: zero drawers land, in contrast to the enabled case.
+#[tokio::test]
+async fn finish_turn_disabled_does_not_persist() {
+    let (addr, state) = mock_daemon::spawn().await;
+    let base_url = format!("http://{addr}");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+
+    let client = test_client();
+    let cfg = test_persona_cfg_disabled();
+    let ctx = build_turn_context(tmp.path(), None, 12, cfg.workstreams.enabled, &base_url).await;
+    let raw = "Here you go.\n\n[[task: feat-x]]".to_string();
+    let out = finish_turn(
+        tmp.path(),
+        "izzie",
+        &client,
+        &cfg,
+        "hi",
+        raw,
+        &ctx,
+        &base_url,
+    )
+    .await
+    .expect("finish_turn must not error");
+    assert_eq!(out, "Here you go.", "marker still stripped from display");
+
+    // Give a would-be background task every chance to run; there must be
+    // none to run since the gate returns before ever spawning it.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        state.drawer_count(),
+        0,
+        "disabled config must never persist a drawer"
+    );
+}
+
+/// #3840 critic HIGH-4: persistence (the turn drawer write) happens off the
+/// response path — `finish_turn` returns the display text without awaiting
+/// the write, and the write lands a beat later via the detached task. This
+/// proves the END STATE (the drawer eventually exists) and the GATE
+/// (enabled=true persists; the sibling `finish_turn_disabled_does_not_persist`
+/// proves enabled=false does not) — see that test's doc comment for why
+/// asserting synchronous-vs-async ORDERING directly would be flaky; the
+/// functional gating is what matters for the demo's data-integrity concern.
+#[tokio::test]
+async fn finish_turn_persists_via_detached_task() {
+    let (addr, state) = mock_daemon::spawn().await;
+    let base_url = format!("http://{addr}");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+
+    let client = test_client();
+    let cfg = test_persona_cfg();
+    let ctx = build_turn_context(tmp.path(), None, 12, true, &base_url).await;
+    let raw = "Here you go.\n\n[[task: feat-x]]".to_string();
+    let out = finish_turn(
+        tmp.path(),
+        "izzie",
+        &client,
+        &cfg,
+        "hi",
+        raw,
+        &ctx,
+        &base_url,
+    )
+    .await
+    .expect("finish_turn must not error");
+    assert_eq!(out, "Here you go.");
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        state.drawer_count(),
+        1,
+        "enabled config must persist exactly one drawer via the detached task"
+    );
+    assert!(state.drawer_tags_contain("ws:feat-x"));
 }
 
 // ---------------------------------------------------------------------
@@ -239,4 +482,74 @@ fn should_refresh_summary_true_on_cadence_boundary() {
     assert!(should_refresh_summary(true, 5, 5));
     assert!(should_refresh_summary(true, 5, 10));
     assert!(should_refresh_summary(true, 1, 3));
+}
+
+// -----------------------------------------------------------------
+// Minimal mock HTTP daemon covering only what `finish_turn`'s detached
+// persistence task exercises (`POST /api/v1/palaces`,
+// `POST /api/v1/palaces/{id}/drawers`) — mirrors
+// `api::server::workstreams::tests::mock_daemon` rather than reusing it
+// (private to that module/file), narrowed further since these tests never
+// need to read drawers back through the real HTTP surface — the captured
+// `MockState` is inspected directly instead.
+// -----------------------------------------------------------------
+mod mock_daemon {
+    use axum::extract::{Path as AxumPath, State};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    #[derive(Default)]
+    pub(super) struct MockState {
+        tags: StdMutex<Vec<Vec<String>>>,
+    }
+
+    impl MockState {
+        pub(super) fn drawer_count(&self) -> usize {
+            self.tags.lock().unwrap().len()
+        }
+
+        pub(super) fn drawer_tags_contain(&self, tag: &str) -> bool {
+            self.tags
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|tags| tags.iter().any(|t| t == tag))
+        }
+    }
+
+    async fn create_palace(Json(_body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        Json(serde_json::json!({"ok": true}))
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CreateDrawerBody {
+        #[serde(default)]
+        tags: Vec<String>,
+    }
+
+    async fn create_drawer(
+        State(state): State<Arc<MockState>>,
+        AxumPath(_palace_id): AxumPath<String>,
+        Json(body): Json<CreateDrawerBody>,
+    ) -> Json<serde_json::Value> {
+        state.tags.lock().unwrap().push(body.tags);
+        Json(serde_json::json!({"ok": true}))
+    }
+
+    pub(super) async fn spawn() -> (SocketAddr, Arc<MockState>) {
+        let state = Arc::new(MockState::default());
+        let app = Router::new()
+            .route("/api/v1/palaces", post(create_palace))
+            .route("/api/v1/palaces/{id}/drawers", post(create_drawer))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        (addr, state)
+    }
 }
