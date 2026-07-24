@@ -227,14 +227,50 @@ impl ServiceEnv for RealServiceEnv {
         if which::which(binary).is_err() {
             anyhow::bail!("{binary} is not on PATH");
         }
-        let status = std::process::Command::new(binary)
-            .args(["service", "install"])
-            .status()
-            .map_err(|e| anyhow::anyhow!("spawn `{binary} service install`: {e}"))?;
-        if status.success() {
-            Ok(())
+        let mut cmd = std::process::Command::new(binary);
+        cmd.args(["service", "install"]);
+        run_captured(cmd, &format!("`{binary} service install`"))
+    }
+}
+
+/// Run `cmd` to completion with its stdout/stderr CAPTURED, never inherited.
+///
+/// Why (#3830 demo-critical fix): this is called from inside `install_all`'s
+/// per-component loop while an interactive `LiveChecklist` may still be
+/// actively steady-ticking OTHER (not-yet-terminal) rows on a background
+/// thread. `std::process::Command::status()` inherits the parent's
+/// stdout/stderr by default — a child writing straight to that same terminal
+/// fd races `indicatif`'s redraw and desyncs its "how many lines did I just
+/// draw" bookkeeping, which is exactly what produced #3830's duplicate,
+/// interleaved-line corruption (reproduced and confirmed via a PTY capture
+/// replayed through a VT100 emulator; fixed by switching this one call from
+/// `.status()` to `.output()`). Extracted as a free function over an already-
+/// configured `Command` (rather than inlined in `run_service_install`) so the
+/// capture behavior itself — not just the plist-bootstrap policy — is directly
+/// unit-testable without touching `launchctl` or PATH.
+/// What: Runs `cmd` via `.output()`; `Ok(())` on exit 0. On a non-zero exit,
+/// folds the captured stderr (trimmed) into the returned error so the
+/// diagnostic is never silently lost — it just never reaches the live
+/// terminal directly. `label` is the human-readable command description used
+/// in the error text (e.g. `` `trusty-search service install` ``).
+/// Test: `run_captured_ok_on_success` (a noisy-stdout success is silently
+/// discarded, never surfaced), `run_captured_folds_stderr_into_error` (the
+/// #3830 regression proof — an error's message contains the child's exact
+/// stderr text, which is only possible if that stderr was CAPTURED via
+/// `.output()`; `.status()`, the pre-fix call, gives no access to it at all).
+fn run_captured(mut cmd: std::process::Command, label: &str) -> anyhow::Result<()> {
+    let output = cmd
+        .output()
+        .map_err(|e| anyhow::anyhow!("spawn {label}: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            anyhow::bail!("{label} exited with {}", output.status)
         } else {
-            anyhow::bail!("`{binary} service install` exited with {status}")
+            anyhow::bail!("{label} exited with {}: {stderr}", output.status)
         }
     }
 }
@@ -403,5 +439,54 @@ mod tests {
     fn start_plan_maps_presence() {
         assert_eq!(start_plan(true), StartPlan::Bootstrap);
         assert_eq!(start_plan(false), StartPlan::ServiceInstall);
+    }
+
+    /// Why (#3830 regression): the pre-fix code used `.status()`, which
+    /// INHERITS the child's stdout/stderr — exactly the bug that corrupted
+    /// an active `LiveChecklist`'s terminal redraw (reproduced via a PTY
+    /// capture replayed through a VT100 emulator; see the PR description).
+    /// `run_captured` must use `.output()` instead, which captures rather
+    /// than inherits, regardless of how much the child writes.
+    /// What: runs a command that prints a large amount of noisy stdout AND
+    /// stderr and exits 0; asserts the call still returns `Ok(())` — proving
+    /// the (successful) child's chatter is silently discarded rather than
+    /// affecting the result, which is only possible if it was captured, not
+    /// inherited straight through to our terminal.
+    /// Test: this is the test.
+    #[test]
+    fn run_captured_ok_on_success() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "for i in $(seq 1 50); do echo \"noisy stdout line $i\"; echo \"noisy stderr line $i\" >&2; done; exit 0",
+        ]);
+        let result = run_captured(cmd, "`noisy-success`");
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    /// Why (#3830 regression — the core proof): `run_captured`'s error path
+    /// must be built from the child's CAPTURED stderr. This is only
+    /// reachable at all if the command was run via `.output()`; the pre-fix
+    /// `.status()` call has no `stderr` field to read, so this exact
+    /// assertion would not compile against that code — pinning the fix at
+    /// the type level as well as behaviourally.
+    /// What: runs a command that writes a distinctive marker to stderr and
+    /// exits non-zero; asserts the returned error's message contains that
+    /// exact marker.
+    /// Test: this is the test.
+    #[test]
+    fn run_captured_folds_stderr_into_error() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "echo 'DISTINCTIVE_MARKER_3830: launchd bootstrap failed' >&2; exit 7",
+        ]);
+        let err = run_captured(cmd, "`fake service install`").expect_err("expected Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DISTINCTIVE_MARKER_3830: launchd bootstrap failed"),
+            "error message did not fold in captured stderr: {msg}"
+        );
+        assert!(msg.contains("fake service install"));
     }
 }
