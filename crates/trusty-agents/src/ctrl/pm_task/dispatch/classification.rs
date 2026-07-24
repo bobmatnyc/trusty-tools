@@ -34,17 +34,19 @@
 //! affordance, not built here); a real global prompt-history summary source
 //! (currently an honestly-labeled stub); periodic near-duplicate label
 //! consolidation (§9.6.1).
-//! KNOWN GAP (found during live demo-day verification, not fixed here —
-//! filed as a follow-up): [`maybe_summarize_workstream`]'s one-shot call
-//! goes through `llm::chat_adapter_aware`/`single_turn::chat`, which only
-//! special-cases Bedrock — an `ollama/`-prefixed persona model (unlike the
-//! main turn, which goes through the ollama-aware `chat_with_tools_gated`/
-//! streaming paths) fails this call with "OpenRouter chat request failed".
-//! The failure is caught and logged (`finish_turn` never propagates it —
-//! the turn's own response/persistence is unaffected), so this degrades to
-//! "summary cache stays stale" rather than breaking the turn. Works
-//! correctly for any OpenRouter/Bedrock/Anthropic-direct-routed persona
-//! (the product-policy default, per DOC-54's provider decision log).
+//! Live-verified end to end on OpenRouter/Sonnet (the product-policy
+//! default, per DOC-54's provider decision log) against a real
+//! trusty-memory daemon: classification, `ws:`-tagged persistence,
+//! `/api/workstreams` rollup, focused-mode assembly in stable order, the
+//! task-bleed nudge, and the `summarize_every` cadence (including a real
+//! generated `ws-summary:<label>` drawer at the turn-5 boundary) all
+//! confirmed working — see the PR body for full transcripts.
+//! NOTE: [`maybe_summarize_workstream`]'s one-shot summary call
+//! (`llm::chat_adapter_aware`/`single_turn::chat`) only special-cases
+//! Bedrock, not an `ollama/`-prefixed persona model — that combination
+//! fails with an OpenRouter error (caught and logged; the turn's own
+//! response/persistence is unaffected, only the summary cache stays stale).
+//! Moot under the current "no Ollama" operating policy; not fixed here.
 //! Test: `parse_marker_*`, `classification_block_*`, `bleed_nudge_*`,
 //! `should_refresh_summary_*` (pure), `build_turn_context_*` /
 //! `finish_turn_*` (hermetic, `classification_tests.rs`).

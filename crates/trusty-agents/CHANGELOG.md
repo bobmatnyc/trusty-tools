@@ -107,18 +107,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   consolidation, a persistent `POST /api/workstreams/:name/focus`
   session-state endpoint, and classification for the claude-cli subprocess
   persona path (separate execution model, out of scope for this slice).
-  Known gap found during live demo-day verification (filed as a follow-up,
-  not fixed here): the summary-refresh one-shot call
-  (`llm::chat_adapter_aware`) doesn't route `ollama/`-prefixed persona
-  models correctly (only Bedrock is special-cased) and fails with an
-  OpenRouter error for those personas specifically — caught and logged, the
-  turn's own response/persistence is unaffected, but the summary cache
-  stays stale for that cadence cycle. Verified end-to-end live against a
-  real trusty-memory daemon (REPL + `/api/task`): closed-vocab
-  classification, `ws:`-tagged persistence, `/api/workstreams` rollup,
-  focused-mode assembly in spec order, and the task-bleed nudge all
-  confirmed working; the cadence trigger itself fires correctly at the
-  configured turn count.
+  Verified end-to-end live against a real trusty-memory daemon (REPL +
+  `/api/task`), routed through OpenRouter/Sonnet per the current provider
+  policy: closed-vocab classification (new labels + correct reuse),
+  `ws:`-tagged persistence, `/api/workstreams` rollup, focused-mode
+  assembly in spec order, the task-bleed nudge, and the `summarize_every`
+  cadence — including a real generated `ws-summary:<label>` drawer at the
+  turn-5 boundary — all confirmed working. Minor noted gap (not fixed
+  here, moot under the current no-Ollama operating policy): the
+  summary-refresh one-shot call (`llm::chat_adapter_aware`) doesn't route
+  an `ollama/`-prefixed persona model correctly (only Bedrock is
+  special-cased) — caught and logged, the turn's own response/persistence
+  is unaffected.
 
 - **`tagent mcp-serve` — stdio MCP server exposing trusty-agents to external MCP
   clients (Claude Code, etc.) (#3633 core):** a line-delimited JSON-RPC / MCP
