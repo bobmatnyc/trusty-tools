@@ -312,24 +312,41 @@ impl ServiceEnv for RealServiceEnv {
     }
 
     fn bootstrap_fallback(&self, binary: &str) -> anyhow::Result<()> {
-        use trusty_common::launchd::{KeepAlive, LaunchdConfig};
+        // `trusty_common::launchd` is itself `#[cfg(target_os = "macos")]`
+        // (it shells out to the real `launchctl` binary, which only exists
+        // on macOS) — this whole `RealServiceEnv` impl block is NOT
+        // platform-gated (its other methods are plain `std::process::Command`
+        // calls that degrade gracefully cross-platform), so referencing that
+        // module unconditionally fails to compile on Linux CI (the
+        // `Clippy`/`MSRV`/`Test` jobs). Gate this one body instead of the
+        // whole impl, mirroring `bootstrap_member_service`'s existing
+        // platform split just below.
+        #[cfg(target_os = "macos")]
+        {
+            use trusty_common::launchd::{KeepAlive, LaunchdConfig};
 
-        // Only `label` matters for `bootstrap` (it derives the plist path
-        // from it and the plist must already exist on disk — written by the
-        // `service install` that just ran); the rest are inert because we
-        // never render/write a plist here, mirroring `lifecycle.rs`'s
-        // `launchd_control`.
-        let cfg = LaunchdConfig {
-            label: super::plist_label::plist_label_for(binary),
-            exe_path: std::path::PathBuf::from(binary),
-            args: Vec::new(),
-            log_dir: std::path::PathBuf::from("/tmp"),
-            keep_alive: KeepAlive::Always,
-            throttle_interval: 0,
-            env_vars: Vec::new(),
-            fd_limit: None,
-        };
-        cfg.bootstrap()
+            // Only `label` matters for `bootstrap` (it derives the plist path
+            // from it and the plist must already exist on disk — written by
+            // the `service install` that just ran); the rest are inert
+            // because we never render/write a plist here, mirroring
+            // `lifecycle.rs`'s `launchd_control`.
+            let cfg = LaunchdConfig {
+                label: super::plist_label::plist_label_for(binary),
+                exe_path: std::path::PathBuf::from(binary),
+                args: Vec::new(),
+                log_dir: std::path::PathBuf::from("/tmp"),
+                keep_alive: KeepAlive::Always,
+                throttle_interval: 0,
+                env_vars: Vec::new(),
+                fd_limit: None,
+            };
+            cfg.bootstrap()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = binary;
+            anyhow::bail!("launchd is macOS-only")
+        }
     }
 }
 
