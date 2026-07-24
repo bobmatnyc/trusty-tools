@@ -8,6 +8,7 @@
 //! `run_pm_task_with_persona` (from `persona`).
 //! Test: Exercised end-to-end via the ctrl integration tests.
 
+mod classification;
 mod history;
 mod persona;
 

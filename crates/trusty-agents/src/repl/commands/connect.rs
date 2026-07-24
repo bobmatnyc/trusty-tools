@@ -96,6 +96,10 @@ impl TrustyAgentsRepl {
                 // project's TOML defaults are honored from the first turn.
                 self.model_override = None;
                 self.provider_override = None;
+                // DOC-54 §9.6.3: a focused workstream is project-scoped —
+                // switching projects must not carry a stale focus label into
+                // a different project's palace.
+                self.focused_workstream = None;
                 let _ = writeln!(out, "switched to project: {}", path.display());
             }
         }

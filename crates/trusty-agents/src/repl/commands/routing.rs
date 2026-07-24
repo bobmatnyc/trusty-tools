@@ -230,4 +230,51 @@ impl TrustyAgentsRepl {
         self.status_bar.model = arg.to_string();
         let _ = writeln!(out, "Model set to: {}", arg);
     }
+
+    /// Handle `/focus [<label>|off]` slash command (DOC-54 §9.6.3, demo-day
+    /// 2026-07-24) — the REPL counterpart of clicking a workstream in the
+    /// Tasks sidebar.
+    ///
+    /// Why: `run_pm_task_with_persona` reads `SessionOverrides::focused_workstream`
+    /// to assemble focused-mode context (global + per-workstream summary +
+    /// recent turns, `ctrl::pm_task::dispatch::classification`); this is the
+    /// REPL affordance that sets it. Listing known labels on a bare `/focus`
+    /// reuses the same closed vocabulary the in-band classifier presents to
+    /// the model, so the user picks from labels the agent already knows.
+    /// What: `/focus` (no arg) shows current focus + known labels.
+    /// `/focus off`/`clear`/`none` unfocuses. `/focus <label>` sets it
+    /// verbatim — an unknown label is accepted (the model may classify a
+    /// genuinely new turn as `new: <label>` next), not rejected.
+    pub(crate) async fn handle_focus_command_into(&mut self, arg: &str, out: &mut String) {
+        if arg.is_empty() {
+            match self.focused_workstream.as_deref() {
+                Some(label) => {
+                    let _ = writeln!(out, "Focused on task: {label}");
+                }
+                None => {
+                    let _ = writeln!(out, "Not focused on any task (showing all history).");
+                }
+            }
+            let base_url = crate::memory::trusty_client::default_trusty_url();
+            let labels = crate::api::server::workstreams::list_workstream_labels_at(
+                &self.project_dir,
+                &base_url,
+            )
+            .await;
+            if labels.is_empty() {
+                let _ = writeln!(out, "No tasks recorded yet.");
+            } else {
+                let _ = writeln!(out, "Known tasks: {}", labels.join(", "));
+            }
+            let _ = writeln!(out, "Usage: /focus <label> | /focus off");
+            return;
+        }
+        if matches!(arg, "off" | "clear" | "none") {
+            self.focused_workstream = None;
+            let _ = writeln!(out, "Unfocused — showing all history.");
+            return;
+        }
+        self.focused_workstream = Some(arg.to_string());
+        let _ = writeln!(out, "Focused on task: {arg}");
+    }
 }

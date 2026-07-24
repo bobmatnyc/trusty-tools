@@ -48,6 +48,22 @@ pub struct SessionOverrides {
     /// back to `UserIdentity::default()` so existing CLI/REPL callers behave
     /// exactly as before.
     pub user: Option<crate::rbac::UserIdentity>,
+    /// Active workstream this turn is focused on (DOC-54 §9.6.3, demo-day
+    /// 2026-07-24) — the chat-side counterpart of clicking a workstream in
+    /// the Tasks sidebar.
+    ///
+    /// Why: `run_pm_task_with_persona` assembles focused-mode context
+    /// (global + per-workstream summary + recent turns) when set. Threading
+    /// it through `SessionOverrides` (rather than a new parameter on every
+    /// dispatch entry point) reuses the exact plumbing `/model`/`/provider`
+    /// already established, so every transport (REPL, HTTP API, Slack,
+    /// Telegram) gets focused-mode support with a one-field addition.
+    /// What: `None` (unfocused — the default) shows recent turns of all
+    /// types, matching pre-#3826 behavior exactly. `Some(label)` filters
+    /// context assembly to that workstream (see
+    /// `ctrl::pm_task::dispatch::classification::build_turn_context`).
+    /// Test: `session_overrides_for_passes_through_focused_workstream`.
+    pub focused_workstream: Option<String>,
 }
 
 /// Resolve the effective `LlmCredentials` honoring an optional session

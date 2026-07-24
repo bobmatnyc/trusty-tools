@@ -168,6 +168,55 @@ compression_model = "claude-haiku-4-5"
 }
 
 #[test]
+fn workstream_context_config_defaults() {
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert!(cfg.workstreams.enabled);
+    assert_eq!(cfg.workstreams.summarize_every, 5);
+    assert_eq!(cfg.workstreams.recent_window, 12);
+}
+
+#[test]
+fn workstream_context_config_parses_block() {
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+
+[workstreams]
+enabled = false
+summarize_every = 3
+recent_window = 20
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert!(!cfg.workstreams.enabled);
+    assert_eq!(cfg.workstreams.summarize_every, 3);
+    assert_eq!(cfg.workstreams.recent_window, 20);
+}
+
+#[test]
 fn tools_config_parses_allowed() {
     let toml_str = r#"
 [agent]

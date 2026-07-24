@@ -46,7 +46,12 @@ mod state;
 mod task_runner;
 mod tm;
 mod ui;
-mod workstreams;
+// `pub(crate)`, not private: `ctrl::pm_task::dispatch::classification`
+// (DOC-54 §9.6) reuses this module's read/write drawer primitives
+// (`list_workstream_labels_at`, `drawers_by_tag_at`,
+// `create_tagged_drawer_at`) rather than duplicating the trusty-memory HTTP
+// wiring — see that module's doc comment.
+pub(crate) mod workstreams;
 
 #[cfg(test)]
 mod tests;

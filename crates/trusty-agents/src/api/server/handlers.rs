@@ -99,6 +99,19 @@ pub struct TaskRequest {
     /// `session_overrides_for_defaults_to_none`.
     #[serde(default)]
     pub provider_id: Option<String>,
+    /// Chat-side "focused workstream" parameter (DOC-54 §9.6.3, demo-day
+    /// 2026-07-24) — the API counterpart of the REPL's `/focus <label>`.
+    ///
+    /// Why: A persistent `POST /api/workstreams/:name/focus` session-state
+    /// endpoint is deferred in this slice (documented in the PR body); this
+    /// per-request parameter is the spec's explicitly-allowed alternative
+    /// ("a chat-side parameter") and gets focused-mode context assembly
+    /// working end to end without new session-state plumbing.
+    /// What: When `Some`, threaded into `SessionOverrides::focused_workstream`.
+    /// `None` (the default) preserves unfocused behavior.
+    /// Test: `session_overrides_for_passes_through_focused_workstream`.
+    #[serde(default)]
+    pub focused_workstream: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -244,6 +257,7 @@ fn session_overrides_for(req: &TaskRequest) -> crate::ctrl::SessionOverrides {
         model: req.model_id.clone(),
         provider: req.provider_id.clone(),
         user: None,
+        focused_workstream: req.focused_workstream.clone(),
     }
 }
 
@@ -666,6 +680,7 @@ mod tests {
             project_path: None,
             model_id: None,
             provider_id: None,
+            focused_workstream: None,
         }
     }
 
@@ -789,6 +804,16 @@ mod tests {
             Some("anthropic/claude-opus-4-6")
         );
         assert_eq!(overrides.provider.as_deref(), Some("bedrock"));
+    }
+
+    /// DOC-54 §9.6.3: the chat-side "focused workstream" parameter threads
+    /// through verbatim, same contract as model/provider above.
+    #[test]
+    fn session_overrides_for_passes_through_focused_workstream() {
+        let mut req = base_request(None);
+        req.focused_workstream = Some("feat-x".to_string());
+        let overrides = session_overrides_for(&req);
+        assert_eq!(overrides.focused_workstream.as_deref(), Some("feat-x"));
     }
 
     /// `POST /api/task` must accept a body carrying `model_id`/`provider_id`

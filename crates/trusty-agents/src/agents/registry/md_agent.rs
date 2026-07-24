@@ -214,6 +214,7 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         session: crate::agents::SessionCompressionConfig::default(),
         plugins: crate::agents::AgentPluginsConfig::default(),
         rbac: crate::agents::RbacConfig::default(),
+        workstreams: crate::agents::WorkstreamContextConfig::default(),
         adapter,
         // Flat `.md` frontmatter has no `[[listeners]]` shape yet (#3820
         // ships the binding only for directory-package `agent.toml`, DOC-54

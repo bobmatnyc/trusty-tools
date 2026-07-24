@@ -138,6 +138,7 @@ impl TrustyAgentsRepl {
             // (`UserIdentity::default()` → `All` tier). Slack RBAC identities
             // are threaded only through the Slack transport.
             user: None,
+            focused_workstream: self.focused_workstream.clone(),
         };
         if let Some(persona_name) = self.active_persona.as_deref() {
             let response = crate::ctrl::run_pm_task_with_persona(

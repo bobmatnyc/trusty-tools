@@ -77,6 +77,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   view, not a context wall" model (this slice still clears context on "+ New
   Task", matching the pre-existing architecture).
 
+- **Filterable-chat context assembly: in-band task classification, focused
+  mode, and per-workstream summaries (DOC-54 §9.6 / SPEC-AGENTS-08,
+  demo-day 2026-07-24):** `run_pm_task_with_persona` now appends a compact
+  classification block to every turn's system prompt (the agent's closed
+  label vocabulary + a `[[task: <label>]]` / `[[task: new: <label>]]`
+  trailing-marker instruction), parses that marker out of the response
+  before display, and persists the turn as a `ws:<label>`-tagged
+  trusty-memory drawer — the same convention `GET /api/workstreams`
+  already reads, so classified chat turns show up in the Tasks sidebar for
+  free. New `/focus [<label>|off]` REPL command and `TaskRequest.focused_workstream`
+  API field (chat-side parameter, in place of a separate focus-session
+  endpoint) set the active workstream; when set, context assembly follows
+  the spec's stable order — global summary (stub) → cached per-workstream
+  summary → last `recent_window` raw turns — and the persisted response
+  notes which task it's focused on. A cached per-workstream summary
+  regenerates every `summarize_every` turns (one extra LLM call on the
+  agent's own model/credentials). New per-agent `[workstreams]` TOML
+  section (`enabled`, `summarize_every` default 5, `recent_window` default
+  12). Task-bleed handling never restricts tools/memory or forces a
+  mismatched classification — a turn that classifies outside the focused
+  workstream is tagged honestly, logged, and gets a gentle inline nudge.
+  New module `ctrl::pm_task::dispatch::classification`; shared read/write
+  drawer primitives (`list_workstream_labels_at`, `drawers_by_tag_at`,
+  `create_tagged_drawer_at`) added to `api::server::workstreams` (now
+  `pub(crate)`, split into `workstreams/{mod,tests}.rs` to stay under the
+  500-SLOC cap). Deferred: lazy summary invalidation on manual re-tag, a
+  real global prompt-history summary source, periodic near-duplicate label
+  consolidation, a persistent `POST /api/workstreams/:name/focus`
+  session-state endpoint, and classification for the claude-cli subprocess
+  persona path (separate execution model, out of scope for this slice).
+  Known gap found during live demo-day verification (filed as a follow-up,
+  not fixed here): the summary-refresh one-shot call
+  (`llm::chat_adapter_aware`) doesn't route `ollama/`-prefixed persona
+  models correctly (only Bedrock is special-cased) and fails with an
+  OpenRouter error for those personas specifically — caught and logged, the
+  turn's own response/persistence is unaffected, but the summary cache
+  stays stale for that cadence cycle. Verified end-to-end live against a
+  real trusty-memory daemon (REPL + `/api/task`): closed-vocab
+  classification, `ws:`-tagged persistence, `/api/workstreams` rollup,
+  focused-mode assembly in spec order, and the task-bleed nudge all
+  confirmed working; the cadence trigger itself fires correctly at the
+  configured turn count.
+
 - **`tagent mcp-serve` — stdio MCP server exposing trusty-agents to external MCP
   clients (Claude Code, etc.) (#3633 core):** a line-delimited JSON-RPC / MCP
   server over stdio, built on the shared `trusty_common::mcp` framework
