@@ -44,22 +44,25 @@ describe('slugify', () => {
 });
 
 describe('buildRoster', () => {
-  it('always includes the base assistant entry first, even with empty inputs', () => {
+  // #3819 (Bob's roster-typing directive): the base, nameless `assistant`
+  // template is NEVER a directly pickable roster row anymore — it's
+  // hidden server-side and only ever instantiated via Concierge/the
+  // add-agent template flow. Supersedes the pre-#3819
+  // "always includes the base entry first" contract.
+  it('omits the base assistant entry, even with empty inputs', () => {
     const roster = buildRoster([], []);
-    expect(roster).toHaveLength(1);
-    expect(roster[0].id).toBe(BASE_AGENT_ID);
-    expect(roster[0].source).toBe('base');
+    expect(roster).toHaveLength(0);
   });
 
-  it('appends catalog agents after the base entry', () => {
+  it('lists catalog agents with no base entry prepended', () => {
     const catalog: CatalogAgent[] = [
       { name: 'cto-assistant', description: 'CTO Assistant' },
       { name: 'python-engineer' },
     ];
     const roster = buildRoster(catalog, []);
-    expect(roster.map((r) => r.id)).toEqual([BASE_AGENT_ID, 'cto-assistant', 'python-engineer']);
-    expect(roster[1].source).toBe('catalog');
-    expect(roster[1].description).toBe('CTO Assistant');
+    expect(roster.map((r) => r.id)).toEqual(['cto-assistant', 'python-engineer']);
+    expect(roster[0].source).toBe('catalog');
+    expect(roster[0].description).toBe('CTO Assistant');
   });
 
   it('prefers a catalog entry display_name over its id for the label (#3738)', () => {
@@ -74,11 +77,11 @@ describe('buildRoster', () => {
     expect(roster.find((r) => r.id === 'engineer')?.label).toBe('engineer');
   });
 
-  it('dedupes a catalog entry literally named "assistant" against the base entry', () => {
+  it('excludes a catalog entry literally named "assistant" (defensive — should already be hidden server-side)', () => {
     const catalog: CatalogAgent[] = [{ name: 'assistant' }, { name: 'engineer' }];
     const roster = buildRoster(catalog, []);
-    expect(roster.filter((r) => r.id === BASE_AGENT_ID)).toHaveLength(1);
-    expect(roster.map((r) => r.id)).toEqual([BASE_AGENT_ID, 'engineer']);
+    expect(roster.filter((r) => r.id === BASE_AGENT_ID)).toHaveLength(0);
+    expect(roster.map((r) => r.id)).toEqual(['engineer']);
   });
 
   it('appends overlay agents, preferring display_name then name then slug as the label', () => {
@@ -105,8 +108,19 @@ describe('buildRoster', () => {
     ];
     const roster = buildRoster(catalog, overlays);
     expect(roster.filter((r) => r.id === 'cto-assistant')).toHaveLength(1);
-    expect(roster.filter((r) => r.id === BASE_AGENT_ID)).toHaveLength(1);
+    // #3819: the base id is excluded entirely now, not deduped-to-one.
+    expect(roster.filter((r) => r.id === BASE_AGENT_ID)).toHaveLength(0);
     expect(roster.map((r) => r.id)).toContain('my-cto');
+  });
+
+  it('carries kind through from the catalog, defaulting to "assistant" when absent (#3819)', () => {
+    const catalog: CatalogAgent[] = [
+      { name: 'ctrl', kind: 'system-tool' },
+      { name: 'izzie' },
+    ];
+    const roster = buildRoster(catalog, []);
+    expect(roster.find((r) => r.id === 'ctrl')?.kind).toBe('system-tool');
+    expect(roster.find((r) => r.id === 'izzie')?.kind).toBe('assistant');
   });
 
   it('sorts overlay entries by label', () => {

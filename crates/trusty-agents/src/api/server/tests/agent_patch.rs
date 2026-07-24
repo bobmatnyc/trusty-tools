@@ -714,6 +714,24 @@ fn parse_agent_toml_hidden_defaults_false_and_parses_true() {
     assert_eq!(parse_agent_toml(hidden, "a").unwrap()["hidden"], true);
 }
 
+/// Bob's roster-typing directive (#3819): `kind` defaults to `"assistant"`
+/// when absent (every pre-existing agent TOML keeps working unchanged) and
+/// parses an explicit `"system-tool"` (set on Concierge/`ctrl`).
+#[test]
+fn parse_agent_toml_kind_defaults_assistant_and_parses_system_tool() {
+    let default_kind = "[agent]\nname = \"izzie\"\n";
+    assert_eq!(
+        parse_agent_toml(default_kind, "izzie").unwrap()["kind"],
+        "assistant"
+    );
+
+    let system_tool = "[agent]\nname = \"ctrl\"\nkind = \"system-tool\"\n";
+    assert_eq!(
+        parse_agent_toml(system_tool, "ctrl").unwrap()["kind"],
+        "system-tool"
+    );
+}
+
 /// Regression guard for the demo-build fix (#3819): `GET/PATCH
 /// /api/agents/:name` must search MULTIPLE candidate directories (project-
 /// local tier, then `$HOME/.trusty-agents/agents`), not a single cwd-

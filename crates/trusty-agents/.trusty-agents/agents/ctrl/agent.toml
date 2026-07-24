@@ -1,6 +1,10 @@
 [agent]
 name = "ctrl"
 role = "controller"
+# #3819 (Bob's roster-typing directive): picker GROUPING label — Concierge
+# shows under a "System Tool" section, distinct from role (dispatch/tool
+# security) and hidden (visibility). See AgentInfo::kind's doc comment.
+kind = "system-tool"
 # "Qwopus" = qwen3:30b — community nickname for the Opus-class local model.
 # Already installed locally; routes through OllamaAdapter at http://localhost:11434.
 model = "ollama/qwen3:30b"

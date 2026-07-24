@@ -4,21 +4,34 @@
    * the top toolbar (`AgentSwitcher`, formerly in `Header.svelte`) and INTO
    * the chat pane — the selected agent's display name IS the pane title,
    * consistent with the gear-icon directive (title + selector + gear all
-   * live in one pane header). "Concierge" (the `ctrl` agent, `role =
-   * "controller"`) is a fixed, pinned first entry, not part of the roster
-   * fetch — selecting it sets `activeAgentId = null`, the pre-existing
-   * "tools-armed base PM/ctrl session" dispatch path (`stores/app.ts`'s
-   * `activeAgentId` doc comment), so this is a UI relabeling of an existing
-   * state, not a new dispatch axis.
+   * live in one pane header). "Concierge" (the `ctrl` agent) selects via
+   * `activeAgentId = null`, the pre-existing "tools-armed base PM/ctrl
+   * session" dispatch path (`stores/app.ts`'s `activeAgentId` doc comment) —
+   * load-bearing: dispatching by NAME (`agent: "ctrl"`, the normal roster
+   * path) routes through the tools-OFF persona-chat path instead
+   * (`handlers.rs::resolve_agent_for_chat` — ANY non-null `agent` value
+   * does, with no special case for `"ctrl"`), which would silently strip
+   * Concierge's delegation/tool capability. So even though `ctrl` now
+   * legitimately appears in `$agentRoster` (role=assistant, hidden=false,
+   * per #3812+#3819's composed picker filters), it is explicitly EXCLUDED
+   * from the roster-driven "Assistants" list below and represented ONLY by
+   * the dedicated `selectConcierge` row — Bob's "Concierge appears exactly
+   * once" fix (a prior pass rendered both a hardcoded pinned row AND
+   * `ctrl`'s own roster entry).
    * What: Renders the active selection's display name as an `<h1>`-style
-   * pane title, a compact dropdown to switch it (Concierge pinned first,
-   * then `$agentRoster` — "don't hardcode names, render whatever the roster
-   * returns" per Bob), a "+ Add agent" row opening `AddAgentForm`, and a
-   * gear button toggling `AgentConfigPanel` open/closed for whichever agent
-   * is currently selected.
-   * Test: Manual — open the app, confirm "Concierge" is the default title;
-   * switch to Izzie via the dropdown, confirm the title updates; click the
-   * gear, confirm `AgentConfigPanel` opens scoped to the selected agent.
+   * pane title; a dropdown grouped into TWO typed sections per Bob's
+   * roster-typing directive — "System Tool" (Concierge only, hardcoded) and
+   * "Assistants" (`$agentRoster` minus `ctrl` — currently Izzie/CTO
+   * Assistant; the base `assistant` template never appears here at all,
+   * it's `hidden` server-side and only ever instantiated via Concierge or
+   * the add-agent template flow, `AddAgentForm`); a "+ Add agent" row; and
+   * a gear button toggling `AgentConfigPanel` for whichever agent is
+   * selected.
+   * Test: Manual — open the app, confirm "Concierge" is the default title
+   * and appears exactly once in the open dropdown (System Tool section);
+   * switch to Izzie via the Assistants section, confirm the title updates;
+   * click the gear, confirm `AgentConfigPanel` opens scoped to the selected
+   * agent.
    */
   import { onMount } from 'svelte';
   import { ChevronDown, Settings2, Plus, Bot } from 'lucide-svelte';
@@ -33,6 +46,9 @@
   import AddAgentForm from './AddAgentForm.svelte';
 
   const CONCIERGE_LABEL = 'Concierge';
+  /** The one agent id Concierge's dedicated row represents — excluded from
+   * the roster-driven "Assistants" section to avoid the duplicate. */
+  const CONCIERGE_AGENT_ID = 'ctrl';
 
   let open = false;
   let configOpen = false;
@@ -40,7 +56,10 @@
 
   $: isConcierge = $activeAgentId === null;
   $: title = isConcierge ? CONCIERGE_LABEL : rosterDisplayName($agentRoster, $activeAgentId);
-  $: configAgentName = isConcierge ? 'ctrl' : ($activeAgentId ?? 'assistant');
+  $: configAgentName = isConcierge ? CONCIERGE_AGENT_ID : ($activeAgentId ?? 'assistant');
+  // #3819 roster-typing: "Assistants" section is everything the roster
+  // returns EXCEPT ctrl (Concierge has its own dedicated System Tool row).
+  $: assistantEntries = $agentRoster.filter((e) => e.id !== CONCIERGE_AGENT_ID);
 
   function toggleDropdown() {
     open = !open;
@@ -103,6 +122,9 @@
         role="listbox"
         class="absolute left-0 top-full z-30 mt-1 max-h-80 w-64 overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface py-1 shadow-lg"
       >
+        <li class="px-3 pt-1.5 pb-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
+          System Tool
+        </li>
         <li>
           <button
             type="button"
@@ -119,7 +141,10 @@
             </span>
           </button>
         </li>
-        {#each $agentRoster as entry (entry.id)}
+        <li class="mt-1 border-t border-foundry-light-border dark:border-foundry-border px-3 pt-1.5 pb-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
+          Assistants
+        </li>
+        {#each assistantEntries as entry (entry.id)}
           <li>
             <button
               type="button"

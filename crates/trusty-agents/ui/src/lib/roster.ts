@@ -32,6 +32,14 @@ export interface CatalogAgent {
    * name is never re-derived client-side.
    */
   display_name?: string;
+  /**
+   * #3819 (Bob's roster-typing directive): picker GROUPING label — deliberately
+   * separate from `role` (dispatch/security) and `hidden` (visibility).
+   * Absent/unrecognized defaults to `"assistant"` (backend already defaults
+   * this the same way — see `AgentInfo::kind`'s doc comment — so absence here
+   * is only possible for a stale/pre-#3819 cached response, not a live one).
+   */
+  kind?: string;
 }
 
 /** Shape of one entry returned by the Tauri `list_personalization_overlays` command. */
@@ -54,16 +62,25 @@ export interface RosterEntry {
   source: RosterSource;
   /** Set for overlay entries — the base agent this overlay personalizes. */
   extends?: string;
+  /** #3819: picker grouping label — see `CatalogAgent.kind`'s doc comment.
+   * Always populated (defaults to `"assistant"`) so callers never branch
+   * on undefined. */
+  kind: string;
 }
 
 /**
- * Why: The base, nameless "assistant" agent (DOC-41 §2.5.1) is always a
- * valid chat target even before the user creates any personalization
- * overlay or the project catalog lists it (it's a directory-package agent,
- * which `GET /api/agents`'s flat-`.toml`-only scan does not enumerate — see
- * `crates/trusty-agents/src/api/server/projects.rs::scan_agents_dir`). The
- * roster always shows it first so "chat with the assistant" works out of
- * the box.
+ * Why: `BASE_AGENT_ID`/`BASE_AGENT_LABEL` remain the fallback identity for
+ * "no roster selection" (`activeAgentId === null` — see `rosterDisplayName`),
+ * but per Bob's roster-typing directive (#3819) the base, nameless
+ * `assistant` template is NEVER a directly pickable roster row: it stays
+ * `hidden = true` server-side and is only ever instantiated as the add-agent
+ * flow's template (`agent_create.rs`) or dispatched through Concierge.
+ * `buildRoster` below therefore does NOT push a `BASE_ENTRY` row into its
+ * returned list (pre-#3819 behavior, when Concierge had no other selectable
+ * default, did) — Concierge (`activeAgentId = null`) is this app's actual
+ * "always available" default now. `seen` still seeds with `BASE_AGENT_ID` as
+ * a defensive dedup guard in case a catalog entry named `assistant` ever
+ * slips past the server-side `hidden` filter.
  */
 export const BASE_AGENT_ID = 'assistant';
 
@@ -75,13 +92,6 @@ export const BASE_AGENT_ID = 'assistant';
  * it produces read "Assistant".
  */
 export const BASE_AGENT_LABEL = 'Assistant';
-
-const BASE_ENTRY: RosterEntry = {
-  id: BASE_AGENT_ID,
-  label: BASE_AGENT_LABEL,
-  description: 'General-purpose productivity assistant',
-  source: 'base',
-};
 
 /**
  * Why: Overlay files are addressed by filesystem-safe slug
@@ -107,27 +117,34 @@ export function slugify(input: string): string {
 }
 
 /**
- * Why: The switcher and editor both need "catalog agents ∪ user overlays ∪
- * the always-present base assistant", deduplicated by id so an overlay that
- * happens to share a name with a catalog entry (or the base) doesn't render
- * twice. Centralizing the merge means both UIs stay in sync automatically.
- * What: Returns the base entry first, then catalog agents (skipping any
- * named `BASE_AGENT_ID`), then overlay agents (skipping any slug already
- * used by the base or a catalog entry) sorted by label. Catalog labels
- * prefer `display_name` (#3737), falling back to `name`. Overlay labels
- * prefer `display_name`, falling back to `name`, falling back to `slug`.
- * Test: `buildRoster_always_includes_base_first`,
+ * Why: The switcher and editor both need "catalog agents ∪ user overlays",
+ * deduplicated by id, so an overlay that happens to share a name with a
+ * catalog entry doesn't render twice. Centralizing the merge means both UIs
+ * stay in sync automatically. #3819 (Bob's roster-typing directive): the
+ * base, nameless `assistant` template is NO LONGER unconditionally
+ * prepended — see `BASE_AGENT_ID`'s doc comment for why; it stays
+ * `hidden = true` server-side and simply won't appear in `catalog` at all
+ * for a correctly-configured install, but `seen` still guards against it
+ * slipping through.
+ * What: Returns catalog agents (skipping any named `BASE_AGENT_ID`, defensive),
+ * then overlay agents (skipping any slug already used by a catalog entry)
+ * sorted by label. Catalog labels prefer `display_name` (#3737), falling
+ * back to `name`. Overlay labels prefer `display_name`, falling back to
+ * `name`, falling back to `slug`. Every entry carries `kind` (#3819),
+ * defaulting to `"assistant"` when the catalog entry omits it.
+ * Test: `buildRoster_omits_base_entry`,
  * `buildRoster_dedupes_catalog_entry_named_assistant`,
  * `buildRoster_dedupes_overlay_shadowing_catalog_entry`,
  * `buildRoster_sorts_overlays_by_label`,
- * `buildRoster_prefers_catalog_display_name`.
+ * `buildRoster_prefers_catalog_display_name`,
+ * `buildRoster_carries_kind_through`.
  */
 export function buildRoster(
   catalog: CatalogAgent[],
   overlays: OverlayAgent[],
 ): RosterEntry[] {
   const seen = new Set<string>([BASE_AGENT_ID]);
-  const entries: RosterEntry[] = [BASE_ENTRY];
+  const entries: RosterEntry[] = [];
 
   for (const agent of catalog) {
     if (seen.has(agent.name)) continue;
@@ -143,6 +160,7 @@ export function buildRoster(
       label: agent.display_name?.trim() || agent.name,
       description: agent.description || undefined,
       source: 'catalog',
+      kind: agent.kind?.trim() || 'assistant',
     });
   }
 
@@ -155,6 +173,7 @@ export function buildRoster(
       label: overlay.display_name || overlay.name || overlay.slug,
       source: 'overlay',
       extends: overlay.extends || undefined,
+      kind: 'assistant',
     });
   }
   overlayEntries.sort((a, b) => a.label.localeCompare(b.label));

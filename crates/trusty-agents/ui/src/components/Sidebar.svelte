@@ -65,8 +65,15 @@
   async function loadWorkstreams() {
     loadingWorkstreams = true;
     const [workstreams] = await Promise.all([fetchWorkstreams(), fetchAgentCatalog()]);
+    // #3819: exclude `ctrl` from the grouping roster the same way
+    // `ChatHeader` does — `resumeWorkstream` below sets `activeAgentId` to
+    // a matched group's id, and `activeAgentId = 'ctrl'` would dispatch
+    // through the tools-OFF persona-chat path instead of Concierge's
+    // tools-armed one (see `ChatHeader.svelte`'s doc comment for the full
+    // load-bearing explanation). A workstream that happens to match "ctrl"
+    // by name substring falls into the "Other" bucket instead.
     const knownAgents = $agentRoster
-      .filter((e) => e.source !== 'base')
+      .filter((e) => e.id !== 'ctrl')
       .map((e) => ({ id: e.id, label: e.label }));
     workstreamGroups = groupByAgent(workstreams, knownAgents);
     loadingWorkstreams = false;

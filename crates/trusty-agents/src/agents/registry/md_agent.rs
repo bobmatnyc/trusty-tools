@@ -181,6 +181,7 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             // `research-agent`), not overlays. Defaulting visible here is
             // the pre-#3819 behavior, unchanged.
             hidden: false,
+            kind: "assistant".to_string(),
             prompt_label: None,
             extends: fm.extends,
         },

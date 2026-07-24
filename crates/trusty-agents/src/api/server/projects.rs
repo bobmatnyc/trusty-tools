@@ -423,6 +423,10 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
         .and_then(|a| a.get("hidden"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // #3819 (Bob's roster-typing directive): `kind` — picker GROUPING label,
+    // deliberately independent of `role`/`hidden` (see `AgentInfo::kind`'s
+    // doc comment). Defaults to `"assistant"`.
+    let kind: String = get_str("kind").unwrap_or_else(|| "assistant".to_string());
     Some(serde_json::json!({
         "name": name,
         "role": get_str("role").unwrap_or_default(),
@@ -434,6 +438,7 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
         "tools_allow": tools_allow,
         "scopes": scopes,
         "hidden": hidden,
+        "kind": kind,
     }))
 }
 
@@ -509,6 +514,7 @@ fn md_agent_to_catalog_json(
         "tools_allow": cfg.tools.allow.clone().unwrap_or_default(),
         "scopes": cfg.tools.scopes.clone().unwrap_or_default(),
         "hidden": a.hidden,
+        "kind": a.kind.clone(),
     })
 }
 
