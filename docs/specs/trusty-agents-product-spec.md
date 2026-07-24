@@ -88,7 +88,7 @@ Agent packages live in the user's local agent directory (e.g., `~/.trusty-agents
 
 ### 4.3 Concierge — Fixed, system role (harness configurator, no derivations)
 
-- **Role:** Control-plane assistant, harness configurator. Full tool access. Runs Sonnet (exception to the Sonnet default across other agents).
+- **Role:** Control-plane assistant, harness configurator. Full tool access. Runs Opus via OpenRouter (exception to the all-Sonnet default; Bob 2026-07-24).
 - **Alias:** The ctrl agent — aliased "Concierge" for user familiarity.
 - **Special:** No derivations allowed. No user may create a second "Concierge" or extend it. This role is reserved.
 - **Configuration:** Fully configurable by prompting it (its own persona is custodian of agent configuration, tool provisioning, etc.).
@@ -388,6 +388,7 @@ The continuous conversation is persisted in trusty-memory (local database or bac
 
 | Decision | Date | Tracking Issue |
 |----------|------|-----------------|
+| Inference provider policy: Izzie + CTO Assistant = Sonnet via OpenRouter (default); Concierge = Opus via OpenRouter (exception, harness configurator role) | 2026-07-24 | Bob 2026-07-24 morning, verified from resolver logs |
 | ONE continuous conversation per agent (not separate chat contexts); workstreams are classifications/filters over that conversation | 2026-07-24 | Coordinator clarification, aligns with tcode #2026-07-19/20 |
 | User-facing term "Tasks" = internal "Workstreams"; sidebar is a filter/view, not context boundaries | 2026-07-24 | Coordinator message, 2026-07-24 |
 | "+ New Task" is a classification hint/topic boundary, not a context wipe; "Clear Context" removed (concept doesn't exist) | 2026-07-24 | Coordinator clarification |
