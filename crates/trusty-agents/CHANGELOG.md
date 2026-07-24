@@ -204,6 +204,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Agent config gear panel's Personality/Tools textareas were unusably
+  cramped:** the `persona.md` editor on the Personality tab (and the tools
+  allowlist editor on the Tools tab) rendered as a ~2-line strip regardless
+  of content length, because their `flex-1` sizing had no definite height
+  floor. Both textareas now get a `min-h-[55vh]`/`max-h-[70vh]` range with
+  vertical resize (`resize-y`) and internal scroll; the Personality Save
+  button is now sticky so it stays visible below the taller field.
 - **Agent pickers list only assistant-role agents, not the 16 bundled
   coding/engineer/support agents:** the GUI/Tauri picker and MCP
   `list_agents` tool (both backed by `agent_roster`/`scan_agent_catalog`)
