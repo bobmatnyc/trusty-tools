@@ -40,8 +40,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and **no assistant `tool_calls` message is ever separated from its `tool`
   results** — the recency boundary is pairing-atomic (it can't split a
   multi-tool-call group even in a tools-only continuation with no user message)
-  and Strategy 2 evicts tool-call groups atomically, so the request never
-  carries an orphaned `tool_call_id` that OpenAI/OpenRouter would reject.
+  and Strategy 2 evicts tool-call groups atomically by sweeping the whole
+  history regardless of message ordering/adjacency (so even adversarial or
+  replayed interleaved groups leave whole), so the request never carries an
+  orphaned `tool_call_id` that OpenAI/OpenRouter would reject.
   Truncation is logged distinctly from eviction so it never masquerades as the
   catastrophic path.
 - **Chat stream renders inside ONE stable assistant bubble — no mid-stream

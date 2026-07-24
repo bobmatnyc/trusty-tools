@@ -180,23 +180,31 @@ impl ContextManager {
         }
 
         // Strategy 2: evict oldest OLD messages (never header, never recency).
-        // Pairing-aware: when the front message is an assistant `tool_calls`
-        // message, evict its paired `tool` results in the SAME step so we never
-        // leave an orphaned `tool_call_id` (which providers reject). Groups are
-        // whole within the OLD region because the recency boundary is
-        // pairing-atomic (see `clamp_recency_to_pairings`).
+        // Pairing-aware and adjacency-independent: when the front message is an
+        // assistant `tool_calls` message, sweep the ENTIRE `old` Vec for every
+        // `tool` result referencing any of its ids (they need not be contiguous —
+        // adversarial/replayed history can interleave groups); symmetrically,
+        // when the front is a `tool` result, evict its declaring assistant and
+        // all sibling results as one group. Either way a whole group leaves
+        // together, so no orphaned `tool_call_id` (which providers reject) can
+        // ever remain.
         while header_tokens + sum(&old) + recent_tokens_full > budget && !old.is_empty() {
             let front = old.remove(0);
             evicted += 1;
-            if let Some(ids) = assistant_tool_call_ids(&front) {
-                while old
-                    .first()
-                    .and_then(tool_result_call_id)
-                    .is_some_and(|id| ids.iter().any(|d| d == id))
-                {
-                    old.remove(0);
-                    evicted += 1;
-                }
+            let group_ids = assistant_tool_call_ids(&front)
+                .or_else(|| tool_result_call_id(&front).and_then(|id| declarer_ids_for(&old, id)));
+            if let Some(ids) = group_ids {
+                let before = old.len();
+                old.retain(|m| {
+                    if let Some(a_ids) = assistant_tool_call_ids(m) {
+                        !a_ids.iter().any(|x| ids.iter().any(|g| g == x))
+                    } else if let Some(tid) = tool_result_call_id(m) {
+                        !ids.iter().any(|g| g.as_str() == tid)
+                    } else {
+                        true
+                    }
+                });
+                evicted += before - old.len();
             }
         }
         if header_tokens + sum(&old) + recent_tokens_full <= budget {
@@ -288,6 +296,16 @@ fn tool_result_call_id(message: &serde_json::Value) -> Option<&str> {
         return None;
     }
     message.get("tool_call_id").and_then(|v| v.as_str())
+}
+
+/// Find the assistant message in `messages` that declares `target_id` and return
+/// its FULL set of `tool_call_id`s (so evicting it takes every sibling result
+/// with it). `None` when no such declarer is present in the slice.
+fn declarer_ids_for(messages: &[serde_json::Value], target_id: &str) -> Option<Vec<String>> {
+    messages.iter().find_map(|m| {
+        let ids = assistant_tool_call_ids(m)?;
+        ids.iter().any(|x| x == target_id).then_some(ids)
+    })
 }
 
 /// Move `start` earlier until the window `[start, len)` never contains a `tool`
@@ -599,6 +617,52 @@ mod tests {
                 .is_some_and(|a| a.iter().any(|c| c["id"] == "old1"))),
             "old assistant tool-call must be evicted"
         );
+        // The live turn survives intact.
+        assert!(out.iter().any(|m| m["content"] == "the live question"));
+        assert_eq!(out[out.len() - 1]["tool_call_id"], "c1");
+    }
+
+    /// Why: code-critic round-4 HIGH. Strategy 2's atomic sweep must be
+    /// adjacency-independent. Adversarial/replayed history can interleave groups
+    /// inside OLD — `assistant(a1)`, `assistant(a2)`, `tool(a1)`, `tool(a2)` —
+    /// where the results are NOT immediately consecutive after their declarer.
+    /// A consecutive-only sweep evicted `assistant(a1)` and left `tool(a1)`
+    /// orphaned (no declarer). Both groups sit in OLD, so the recency boundary
+    /// clamp never engages; the whole-Vec sweep must catch them.
+    /// What: Non-truncatable array-content declarers force Strategy 2 eviction;
+    /// assert both interleaved groups leave whole, the live turn survives, and no
+    /// tool result is orphaned.
+    /// Test: This test.
+    #[test]
+    fn trim_evicts_interleaved_tool_call_groups_atomically() {
+        let mgr = ContextManager::new(0.5); // sonnet: budget = 100k tokens
+        let huge = "a".repeat(600_000); // non-truncatable array content
+        let big_array = || json!([{"type":"text","text": huge.clone()}]);
+        let msgs = vec![
+            json!({"role":"system","content":"sys"}),
+            // Two declarers first, THEN their results — interleaved, both in OLD.
+            json!({"role":"assistant","content": big_array(),"tool_calls":[
+                {"id":"a1","type":"function","function":{"name":"grep","arguments":"{}"}}
+            ]}),
+            json!({"role":"assistant","content": big_array(),"tool_calls":[
+                {"id":"a2","type":"function","function":{"name":"grep","arguments":"{}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"a1","content":"tiny a1"}),
+            json!({"role":"tool","tool_call_id":"a2","content":"tiny a2"}),
+            // Live turn.
+            json!({"role":"user","content":"the live question"}),
+            json!({"role":"assistant","content":null,"tool_calls":[
+                {"id":"c1","type":"function","function":{"name":"grep","arguments":"{}"}}
+            ]}),
+            json!({"role":"tool","tool_call_id":"c1","content":"tiny live"}),
+        ];
+        let (out, outcome) = mgr.trim_to_budget(msgs, "anthropic/claude-sonnet-4-6", 1);
+
+        assert!(outcome.evicted >= 2, "interleaved groups must be evicted");
+        assert_no_orphans(&out);
+        // Each declarer is non-truncatable and evicted, so its result goes too.
+        assert!(!out.iter().any(|m| m["tool_call_id"] == "a1"));
+        assert!(!out.iter().any(|m| m["tool_call_id"] == "a2"));
         // The live turn survives intact.
         assert!(out.iter().any(|m| m["content"] == "the live question"));
         assert_eq!(out[out.len() - 1]["tool_call_id"], "c1");
