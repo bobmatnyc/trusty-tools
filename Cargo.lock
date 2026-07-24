@@ -11584,7 +11584,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -11739,7 +11739,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-progress"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "indicatif 0.17.11",
  "thiserror 1.0.69",

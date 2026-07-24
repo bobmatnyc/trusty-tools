@@ -488,3 +488,23 @@ fn stable_member_for_test(crate_name: &str, binary: &str, manage: ManageStrategy
         required: true,
     }
 }
+
+/// Why: The live checklist row must stay a single line; a long or multi-line
+/// `anyhow` error chain (e.g. the #3554 health-gate mismatch message, which
+/// embeds a raw `--version` output) must never wrap the block.
+/// What: Asserts a multi-line error keeps only its first line, and a long
+/// first line is truncated to 80 chars with a trailing `…`.
+/// Test: This is the test.
+#[test]
+fn short_reason_truncates_long_and_multiline_errors() {
+    let multiline = anyhow::anyhow!("first line\nsecond line\nthird line");
+    assert_eq!(short_reason(&multiline), "first line");
+
+    let long = anyhow::anyhow!("x".repeat(120));
+    let got = short_reason(&long);
+    assert_eq!(got.chars().count(), 81); // 80 chars + the `…` marker
+    assert!(got.ends_with('…'));
+
+    let short = anyhow::anyhow!("network timeout");
+    assert_eq!(short_reason(&short), "network timeout");
+}
