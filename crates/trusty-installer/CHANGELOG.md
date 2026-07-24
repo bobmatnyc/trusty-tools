@@ -6,6 +6,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **The 0.4.8 defensive service-bootstrap postcondition never ran on the
+  already-installed / re-run path — exactly the machines it exists to repair**
+  (#3841, demo-critical; reproduced on a real demo MacBook minutes after
+  0.4.8 shipped). Root cause: `service_bootstrap::bootstrap_one` checked
+  `plist_present(binary)` FIRST and returned `Skipped` immediately whenever a
+  plist already existed on disk — before ever reaching the #3836 `is_loaded`
+  → `bootstrap_fallback` postcondition below it. A plist left behind by an
+  EARLIER, pre-0.4.8 run that hit #3832 (trusty-memory's `service install`
+  wrote the plist without loading it) is exactly "already present"; a 0.4.8
+  re-run over that state took the skip branch and the defensive fallback
+  never fired, leaving `com.trusty.memory` permanently absent from
+  `launchctl list` and `tctl install` exiting 2 / `NOT VERIFIED`. Fixed by
+  running the same `is_loaded` → `bootstrap_fallback` postcondition on the
+  already-present branch too (reported as the new
+  `BootstrapAction::LoadedByFallback`), never re-running `service install`
+  over an existing plist (the non-clobber guarantee is unchanged — only the
+  *load* is repaired, not the plist itself).
+- Belt-and-braces second layer: the post-install verify tail
+  (`verify_tail::verify_one`) now also attempts the installer's own
+  `launchctl bootstrap` fallback for any member it classifies
+  `DownState::NotLoaded` whose plist is present on disk, re-probing on
+  success (#3841). This means a future regression in the install-time
+  skip-path handling — or any member the install-time bootstrap didn't run
+  for this invocation — still self-heals at verify time instead of silently
+  reporting `NOT VERIFIED`.
+- Manual workaround for a machine already stuck in this state (installer
+  0.4.8, no code fix applied): `launchctl bootstrap gui/$(id -u)
+  ~/Library/LaunchAgents/com.trusty.memory.plist && launchctl kickstart -k
+  gui/$(id -u)/com.trusty.memory`.
+
 ## [0.4.8] — 2026-07-24
 
 ### Fixed
