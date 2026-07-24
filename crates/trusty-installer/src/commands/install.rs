@@ -281,12 +281,24 @@ pub fn run(
 /// trusty-mpm supervisor bootstrap's candidate-version comparison, and the
 /// post-install shadow-detection warning. Threading the path through as data
 /// (rather than each downstream step re-resolving it) is what makes both
-/// immune to PATH order.
+/// immune to PATH order. `existed_before` (#3846 code-critic MEDIUM fix)
+/// exists for a third downstream step, the FDA/App-Data TCC guidance: it
+/// must be observed at the SAME concrete path per the SAME outcome branch
+/// (`install_dir` for the prebuilt path, the cargo bin dir for the
+/// `cargo install` fallback) — a caller re-deriving "did a binary already
+/// exist here" against a single fixed directory guesses wrong whenever the
+/// fallback branch fires, since that branch's real destination is a
+/// different directory.
 struct InstalledBinary {
     /// The concrete path the binary was health-gated at (never a bare name).
     path: PathBuf,
     /// The version that exact binary reported via `--version`.
     version: String,
+    /// Whether a file already existed at `path` immediately before THIS
+    /// call wrote to it — the "first install vs. reinstall" signal for the
+    /// TCC guidance. Captured before any write on the branch actually
+    /// taken (see [`install_one`]).
+    existed_before: bool,
 }
 
 /// Install every selected member in order, returning the aggregate report.
@@ -355,6 +367,10 @@ async fn install_all(
     // the per-component loop (see this function's doc) so it never interrupts
     // the live checklist; printed once, after every row has settled.
     let mut post_install_notes: Vec<String> = Vec::new();
+    // #3846: whether the shared once-per-run signing tip (Developer ID /
+    // TRUSTY_SIGN_IDENTITY) should be printed — true as soon as ANY
+    // component's TCC guidance (not a signed-OK note) is collected below.
+    let mut show_signing_tip = false;
 
     for m in selected {
         checklist.set(&m.crate_name, ComponentState::Downloading);
@@ -412,11 +428,22 @@ async fn install_all(
                 // Hardened Runtime, also matching pre-PR behavior. Demo-critical
                 // fix: the guidance text is now collected, not printed inline —
                 // see `post_install_notes` above.
+                // #3846 code-critic MEDIUM fix: `existed_before` and the
+                // guidance's interpolated binary path now come from
+                // `installed` (the CONCRETE path/replace-state `install_one`
+                // observed on the actual outcome branch taken — prebuilt
+                // `install_dir` or the cargo-fallback bin dir), never a fixed
+                // `install_dir` guess that names the wrong file/directory
+                // whenever the cargo-install fallback fires.
                 if m.crate_name == "trusty-search" {
-                    if let Some(note) =
-                        super::macos_signing::post_install_search(&install_dir, json)
-                    {
+                    if let Some((note, needs_tip)) = super::macos_signing::post_install_search(
+                        &install_dir,
+                        json,
+                        installed.existed_before,
+                        &installed.path,
+                    ) {
                         post_install_notes.push(note);
+                        show_signing_tip |= needs_tip;
                     }
                 }
                 // Phase 8b: codesign + App-Data-TCC guidance for trusty-mpm.
@@ -429,8 +456,14 @@ async fn install_all(
                 // hook DOES sign with Hardened Runtime (low risk either way).
                 // Demo-critical fix: deferred, same as trusty-search above.
                 if m.crate_name == "trusty-mpm" {
-                    if let Some(note) = super::macos_signing::post_install_mpm(&install_dir, json) {
+                    if let Some((note, needs_tip)) = super::macos_signing::post_install_mpm(
+                        &install_dir,
+                        json,
+                        installed.existed_before,
+                        &installed.path,
+                    ) {
                         post_install_notes.push(note);
+                        show_signing_tip |= needs_tip;
                     }
                 }
                 // Phase 7b (#2556): bootstrap the launchd plist for each shared
@@ -551,6 +584,12 @@ async fn install_all(
     for note in &post_install_notes {
         eprintln!("{note}");
     }
+    // #3846: the Developer ID / TRUSTY_SIGN_IDENTITY signing tip prints
+    // ONCE per run, after every per-component guidance block, instead of once
+    // per component (a search+mpm install used to print it twice).
+    if show_signing_tip {
+        eprintln!("{}", super::macos_signing::signing_persistence_tip());
+    }
     InstallReport::build(outcomes)
 }
 
@@ -611,6 +650,28 @@ fn cargo_fallback_bin_path(binary: &str, install_dir: &Path) -> PathBuf {
         .join(binary)
 }
 
+/// Pre-check "did a binary already exist" at BOTH candidate install
+/// destinations (#3846 code-critic MEDIUM fix).
+///
+/// Why: `install_one` cannot know which `Outcome` branch will fire — prebuilt
+/// (writes to `preferred_bin_path`, inside `install_dir`) or cargo-install
+/// fallback (writes to `cargo_bin_path`, inside the cargo bin dir) — until
+/// AFTER `download::try_install_prebuilt` returns. Both directories can
+/// differ (they always do unless `install_dir` itself happens to equal the
+/// cargo bin dir), so re-deriving "existed before" from a single fixed
+/// directory after the fact silently picks the wrong answer whenever the
+/// fallback branch fires. Checking both concrete destinations up front — a
+/// cheap, side-effect-free `.exists()` each, before either write path can
+/// run — means the right answer for whichever branch actually fires is
+/// always on hand. Extracted as a pure function of two already-resolved
+/// paths (never touches `CARGO_HOME`/env itself) so it is directly
+/// unit-testable with tempdirs standing in for both destinations.
+///
+/// Test: `tests::existed_before_at_both_distinguishes_preferred_from_cargo_bin_dir`.
+fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (bool, bool) {
+    (preferred_bin_path.exists(), cargo_bin_path.exists())
+}
+
 /// Install + health-gate a single member, prebuilt-first with cargo fallback.
 ///
 /// Why: Prebuilt binaries install in seconds without requiring a Rust toolchain;
@@ -663,6 +724,15 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
         }
     });
 
+    // #3846 code-critic MEDIUM fix: capture "did a binary already exist" at
+    // BOTH candidate destinations before EITHER write path below can run —
+    // see `existed_before_at_both`'s doc for why a single fixed directory
+    // guessed wrong whenever the cargo-install fallback fired.
+    let preferred_bin_path = install_dir.join(&m.binary);
+    let cargo_bin_path = cargo_fallback_bin_path(&m.binary, &install_dir);
+    let (existed_at_preferred, existed_at_cargo_bin) =
+        existed_before_at_both(&preferred_bin_path, &cargo_bin_path);
+
     let outcome = download::try_install_prebuilt(&m.crate_name, &install_dir).await;
     match outcome {
         Outcome::Installed { paths, version } => {
@@ -699,6 +769,7 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
             Ok(InstalledBinary {
                 path: bin_path,
                 version,
+                existed_before: existed_at_preferred,
             })
         }
         Outcome::Fallback { reason } => {
@@ -736,6 +807,7 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
             Ok(InstalledBinary {
                 path: bin_path,
                 version,
+                existed_before: existed_at_cargo_bin,
             })
         }
     }

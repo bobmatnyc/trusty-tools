@@ -117,17 +117,21 @@ fn identifier_migration_notice_silent_when_unchanged_or_absent() {
     assert!(identifier_migration_notice("trusty-search", "com.trusty.trusty-search").is_none());
 }
 
-/// Why: The FDA guidance must contain all 4 numbered steps and reference the
-/// binary path so the operator knows which file to re-add.
-/// What: Calls `fda_guidance` with a synthetic path and checks the output.
+/// Why (#3846): a first install has no prior FDA entry to remove — the
+/// fresh-install variant must NOT tell the operator to remove anything, only
+/// to grant FDA once, and must stay terse (≤3 lines) with a pointer to the
+/// full doc instead of inlining every step.
+/// What: Calls `fda_guidance` with `existed_before = false` and checks the
+/// output has no remove/re-add language, references the binary path, and
+/// points at the doc anchor.
 /// Test: This is the test.
 #[test]
-fn fda_guidance_contains_steps() {
-    let guidance = fda_guidance("/usr/local/bin/trusty-search");
-    assert!(guidance.contains("1."), "step 1 missing");
-    assert!(guidance.contains("2."), "step 2 missing");
-    assert!(guidance.contains("3."), "step 3 missing");
-    assert!(guidance.contains("4."), "step 4 missing");
+fn fda_guidance_fresh_install_has_no_remove_step() {
+    let guidance = fda_guidance("/usr/local/bin/trusty-search", false);
+    assert!(
+        !guidance.to_lowercase().contains("remove"),
+        "fresh-install guidance must not mention removing a prior entry: {guidance}"
+    );
     assert!(
         guidance.contains("/usr/local/bin/trusty-search"),
         "binary path not in guidance"
@@ -136,6 +140,57 @@ fn fda_guidance_contains_steps() {
         guidance.contains("Full Disk Access"),
         "FDA label not in guidance"
     );
+    assert!(
+        guidance.contains("docs/reference/release-workflow.md"),
+        "must point at the full-detail doc"
+    );
+    assert!(
+        guidance.lines().count() <= 3,
+        "fresh-install guidance must stay terse (<=3 lines): {guidance}"
+    );
+}
+
+/// Why (#3846): replacing an existing binary DOES invalidate its FDA
+/// grant (cdhash changed), so the reinstall variant must retain the
+/// remove-then-re-add + daemon-restart guidance the fresh variant omits.
+/// What: Calls `fda_guidance` with `existed_before = true` and checks for
+/// remove/re-add language, the binary path, and terseness.
+/// Test: This is the test.
+#[test]
+fn fda_guidance_reinstall_has_remove_and_readd() {
+    let guidance = fda_guidance("/usr/local/bin/trusty-search", true);
+    assert!(
+        guidance.to_lowercase().contains("re-grant") || guidance.to_lowercase().contains("remove"),
+        "reinstall guidance must mention re-granting/removing the stale entry: {guidance}"
+    );
+    assert!(
+        guidance.contains("/usr/local/bin/trusty-search"),
+        "binary path not in guidance"
+    );
+    assert!(
+        guidance.contains("docs/reference/release-workflow.md"),
+        "must point at the full-detail doc"
+    );
+    assert!(
+        guidance.lines().count() <= 3,
+        "reinstall guidance must stay terse (<=3 lines): {guidance}"
+    );
+}
+
+/// Why (#3846): the preamble must not claim `cargo install` specifically —
+/// this install path is prebuilt-tarball-based via `tctl`, and the guidance
+/// text must be installation-method-agnostic.
+/// What: Asserts neither guidance variant mentions `cargo install`.
+/// Test: This is the test.
+#[test]
+fn fda_guidance_is_install_method_agnostic() {
+    for existed_before in [false, true] {
+        let guidance = fda_guidance("/usr/local/bin/trusty-search", existed_before);
+        assert!(
+            !guidance.contains("cargo install"),
+            "guidance must not name a specific install method: {guidance}"
+        );
+    }
 }
 
 /// Why: `TRUSTY_SIGN_IDENTITY` env var must override the keychain probe.
@@ -247,34 +302,87 @@ fn parse_developer_id_identity_skips_malformed_line() {
     );
 }
 
-/// Why: `fda_guidance` must mention Developer ID as the permanent fix tip.
-/// What: Asserts the tip line is present.
+/// Why (#3846): the Developer ID / `TRUSTY_SIGN_IDENTITY` tip moved OUT of
+/// the per-component guidance into [`signing_persistence_tip`] so it prints
+/// once per run, not once per component — `fda_guidance` must no longer
+/// embed it.
+/// What: Asserts neither variant of `fda_guidance` mentions Developer ID,
+/// while `signing_persistence_tip` itself does.
 /// Test: This is the test.
 #[test]
-fn fda_guidance_mentions_developer_id_tip() {
-    let g = fda_guidance("/some/path/trusty-search");
-    assert!(
-        g.contains("Developer ID"),
-        "tip about Developer ID cert missing"
-    );
+fn fda_guidance_no_longer_embeds_signing_tip() {
+    for existed_before in [false, true] {
+        let g = fda_guidance("/some/path/trusty-search", existed_before);
+        assert!(
+            !g.contains("Developer ID"),
+            "the once-per-run signing tip must not be embedded per-component: {g}"
+        );
+    }
 }
 
 /// Why: The App-Data TCC guidance must reference the binary path and the
-/// actual macOS prompt wording so the operator recognises it.
-/// What: Calls `app_data_guidance` and checks the output.
+/// actual macOS prompt wording so the operator recognises it, in BOTH the
+/// fresh-install and reinstall variants, and must stay terse and
+/// method-agnostic (no "cargo install") like [`fda_guidance`].
+/// What: Calls `app_data_guidance` with both `existed_before` values and
+/// checks the output.
 /// Test: This is the test.
 #[test]
-fn app_data_guidance_mentions_prompt() {
-    let g = app_data_guidance("/usr/local/bin/trusty-mpm");
+fn app_data_guidance_fresh_and_reinstall_variants() {
+    for existed_before in [false, true] {
+        let g = app_data_guidance("/usr/local/bin/trusty-mpm", existed_before);
+        assert!(
+            g.contains("access data from other apps"),
+            "TCC prompt wording missing: {g}"
+        );
+        assert!(
+            g.contains("/usr/local/bin/trusty-mpm"),
+            "binary path missing: {g}"
+        );
+        assert!(
+            !g.contains("Developer ID"),
+            "signing tip must not be embedded per-component: {g}"
+        );
+        assert!(
+            !g.contains("cargo install"),
+            "guidance must not name a specific install method: {g}"
+        );
+        assert!(
+            g.contains("docs/reference/release-workflow.md"),
+            "must point at the full-detail doc: {g}"
+        );
+        assert!(
+            g.lines().count() <= 3,
+            "guidance must stay terse (<=3 lines): {g}"
+        );
+    }
+}
+
+/// Why (#3846): the fresh-install variant additionally must not carry any
+/// reinstall-specific wording ("reinstalling replaced").
+/// What: Asserts the `existed_before = false` variant has no reinstall
+/// language.
+/// Test: This is the test.
+#[test]
+fn app_data_guidance_fresh_install_has_no_reinstall_wording() {
+    let g = app_data_guidance("/usr/local/bin/trusty-mpm", false);
     assert!(
-        g.contains("access data from other apps"),
-        "TCC prompt wording missing"
+        !g.to_lowercase().contains("reinstall"),
+        "fresh-install guidance must not mention reinstalling: {g}"
     );
-    assert!(
-        g.contains("/usr/local/bin/trusty-mpm"),
-        "binary path missing"
-    );
-    assert!(g.contains("Developer ID"), "Developer ID tip missing");
+}
+
+/// Why (#3846): the signing tip must exist exactly once, be found via
+/// [`signing_persistence_tip`], and mention both the env-var override and the
+/// `tctl sign` invocation so it stands alone as a complete pointer.
+/// What: Asserts the returned string mentions `TRUSTY_SIGN_IDENTITY` and
+/// `tctl sign`.
+/// Test: This is the test.
+#[test]
+fn signing_persistence_tip_mentions_sign_identity_and_tctl_sign() {
+    let tip = signing_persistence_tip();
+    assert!(tip.contains("TRUSTY_SIGN_IDENTITY"));
+    assert!(tip.contains("tctl sign"));
 }
 
 /// Why: The cert-setup guidance must reference the exact `tctl sign`
