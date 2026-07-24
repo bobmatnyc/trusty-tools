@@ -629,6 +629,14 @@ fn ensure_deployment_complete_does_not_abort_when_no_carrier_reachable() {
 }
 
 // ── #3455 "launch on main" opt-out ──────────────────────────────────────────
+//
+// The functions under test moved out of `lifecycle` into the sibling
+// `launch_on_main` module (500-SLOC cap on `lifecycle.rs`); their tests stay
+// here with the rest of the spawn-surface tests and reach them via the
+// managed_routes-scoped `pub(super)` path.
+use super::super::launch_on_main::{
+    has_concurrent_main_checkout_session, spawn_managed_on_main, worktree_enabled_for_origin,
+};
 
 /// A project with no registry entry (or no `worktree` field set) defaults to
 /// worktree isolation ON — the no-regression default #3455 requires.
@@ -764,5 +772,47 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
         record.source_id.as_deref(),
         Some("acme/writing"),
         "source_id must still be set so reconnect works normally"
+    );
+}
+
+/// The concurrent-collision detector `spawn_managed_on_main` warns on (#3455)
+/// fires ONLY for an already-`Active` session whose cwd is EXACTLY the same
+/// main checkout — a session on a different path, or a non-Active one on the
+/// same path, must not match. This is the pure core of the "two sessions on
+/// one main checkout, no worktree isolating them" WARN path.
+/// Test: itself.
+#[test]
+fn spawn_managed_on_main_warns_on_concurrent_main_checkout_session() {
+    let checkout = std::path::Path::new("/Users/op/projects/writing");
+    let other = std::path::Path::new("/Users/op/projects/other");
+
+    // An Active session already rooted at the SAME checkout → detected.
+    let mut same = stub_record(None, ManagedSessionState::Active, "tm-writing-01");
+    same.cwd = checkout.to_path_buf();
+    let found = has_concurrent_main_checkout_session(std::slice::from_ref(&same), checkout)
+        .expect("an Active session sharing the exact cwd must be detected");
+    assert_eq!(
+        found.tmux_name, "tm-writing-01",
+        "the detector must return the colliding record so the caller can name it"
+    );
+
+    // A DIFFERENT checkout path → no collision.
+    assert!(
+        has_concurrent_main_checkout_session(std::slice::from_ref(&same), other).is_none(),
+        "a session on a different checkout must never collide"
+    );
+
+    // Same path but NOT Active (e.g. Stopped) → no collision.
+    let mut stopped = stub_record(None, ManagedSessionState::Stopped, "tm-writing-02");
+    stopped.cwd = checkout.to_path_buf();
+    assert!(
+        has_concurrent_main_checkout_session(std::slice::from_ref(&stopped), checkout).is_none(),
+        "a non-Active session on the same checkout must not count as a live collision"
+    );
+
+    // Empty set → no collision.
+    assert!(
+        has_concurrent_main_checkout_session(&[], checkout).is_none(),
+        "no sessions means no collision"
     );
 }
