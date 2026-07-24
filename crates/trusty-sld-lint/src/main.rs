@@ -3,17 +3,19 @@
 //! Why: a thin `anyhow`/clap wrapper keeps all logic in the unit-testable
 //! library ([`trusty_sld_lint`]); this binary just parses flags, runs the
 //! engine, prints diagnostics, and maps the result to an exit code.
-//! What: parses `--root`/`--strict`/`--allowlist`, runs [`trusty_sld_lint::run`],
-//! prints each `path:line: [severity check] message`, prints a one-line summary,
-//! and exits non-zero when any error-severity finding survives the allowlist.
+//! What: with no subcommand, parses `--root`/`--strict`/`--allowlist`, runs
+//! [`trusty_sld_lint::run`], prints each `path:line: [severity check] message`,
+//! prints a one-line summary, and exits non-zero when any error-severity
+//! finding survives the allowlist. The `gap-report` subcommand instead runs
+//! [`trusty_sld_lint::gap::run_gap_report`] (issue #595 slice 1).
 //! Test: exercised end-to-end by the wrapper `scripts/check_sld.sh` and the
 //! library's `tests/lint_real_tree.rs`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use trusty_sld_lint::{run, LintOptions, ALLOWLIST_FILE};
 
@@ -70,6 +72,9 @@ SCOPE
 Exits non-zero when any error-severity finding survives the allowlist."
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Repository root to lint (contains `docs/specs/` and `crates/`).
     #[arg(long, default_value = ".")]
     root: PathBuf,
@@ -83,14 +88,47 @@ struct Cli {
     allowlist: Option<PathBuf>,
 }
 
+/// `sld-lint` subcommands beyond the default lint run.
+///
+/// Why: issue #595 adds a read-only bidirectional traceability gap report as a
+/// subcommand rather than a second binary, so it shares the crate's discovery
+/// scope and CLI conventions.
+/// What: [`Command::GapReport`] — see [`trusty_sld_lint::gap`].
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Bidirectional SLD traceability gap report (backward + forward gaps).
+    GapReport {
+        /// Repository root to scan (contains `docs/specs/` and `crates/`).
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+
+        /// Emit machine-readable JSON instead of (in addition to) the summary.
+        #[arg(long)]
+        json: bool,
+
+        /// Exit non-zero when the report finds any gap or broken reference.
+        ///
+        /// Default: report-and-succeed (exit 0) — this is a read-only report,
+        /// not a gate, so it can never unexpectedly break CI (issue #595).
+        #[arg(long)]
+        strict: bool,
+    },
+}
+
 /// Parse flags, run the linter, print findings, and return an exit code.
 ///
 /// Why: keeps `main` a thin adapter — no check logic, just I/O and exit mapping.
-/// What: builds [`LintOptions`], runs [`run`], prints each diagnostic and a
-/// summary line, and returns `FAILURE` when the report is not clean.
+/// What: dispatches to [`run_gap_report_cmd`] for `gap-report`, else builds
+/// [`LintOptions`], runs [`run`], prints each diagnostic and a summary line,
+/// and returns `FAILURE` when the report is not clean.
 /// Test: covered end-to-end by `tests/lint_real_tree.rs` + `scripts/check_sld.sh`.
 fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
+
+    if let Some(Command::GapReport { root, json, strict }) = cli.command {
+        return Ok(run_gap_report_cmd(&root, json, strict));
+    }
+
     let strict = cli.strict;
     let allowlist_path = cli
         .allowlist
@@ -118,5 +156,32 @@ fn main() -> Result<ExitCode> {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Run the `gap-report` subcommand: print output, choose an exit code.
+///
+/// Why: kept separate from `main` so the dispatch in `main` stays a one-line
+/// match arm.
+/// What: runs [`trusty_sld_lint::gap::run_gap_report`], prints the JSON (when
+/// `json`) and always prints the human [`GapReport::summary`], then returns
+/// `FAILURE` only when `strict` is set AND the report is not
+/// [`GapReport::is_strict_clean`] — the default is report-and-succeed so this
+/// subcommand can never unexpectedly break CI (issue #595).
+/// Test: covered end-to-end by `tests/gap_report_real_tree.rs`.
+fn run_gap_report_cmd(root: &Path, json: bool, strict: bool) -> ExitCode {
+    let report = trusty_sld_lint::gap::run_gap_report(root);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report.to_json()).expect("gap report serializes")
+        );
+    }
+    println!("{}", report.summary());
+
+    if strict && !report.is_strict_clean() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }

@@ -8,8 +8,10 @@ use crate::allowlist;
 use crate::catalog;
 use crate::checks;
 use crate::discover;
+use crate::gap::{self, CodeUnit};
 use crate::report::{Diagnostic, Severity};
 use crate::{run, LintError, LintOptions};
+use trusty_common::sld::Reference;
 
 // A single lookup that knows about one target spec containing SPEC-X-01~draft.
 fn lookup(path: &str) -> Option<String> {
@@ -547,4 +549,270 @@ fn run_strict_flags_stale_allowlist_entry() {
         "default mode must not spuriously flag stale entries: {:?}",
         default_report.diagnostics
     );
+}
+
+// ── gap report ───────────────────────────────────────────────────────────────
+
+fn make_ref(id: &str, path: &str, anchor: &str, line: usize) -> Reference {
+    Reference {
+        id: id.to_string(),
+        path: path.to_string(),
+        anchor: anchor.to_string(),
+        line,
+    }
+}
+
+#[test]
+fn gap_detect_units_rust() {
+    let src = "//! module doc\npub fn visible() {}\npub(crate) fn hidden() {}\nfn private() {}\npub struct S;\npub async fn a() {}\npub const fn cf() {}\n";
+    let units = gap::detect_units("x.rs", src, "rs");
+    let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+    assert_eq!(names, vec!["visible", "S", "a", "cf"]);
+    assert_eq!(units[3].kind, "fn"); // `pub const fn cf` — const is a modifier, not the item.
+}
+
+#[test]
+fn gap_detect_units_python() {
+    let src = "def visible():\n    pass\n\n\ndef _private():\n    pass\n\n\nclass Public:\n    def method(self):\n        \"\"\"def not_a_unit(): pass\"\"\"\n        pass\n";
+    let units = gap::detect_units("x.py", src, "py");
+    let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+    // `_private` (underscore) and the indented `method`/docstring example are
+    // both out of scope for this module-level-only pragmatic scan.
+    assert_eq!(names, vec!["visible", "Public"]);
+}
+
+#[test]
+fn gap_detect_units_ts() {
+    let src = "export function visible() {}\nfunction internal() {}\nexport class Widget {}\nexport interface Shape {}\n";
+    let units = gap::detect_units("x.ts", src, "ts");
+    let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+    assert_eq!(names, vec!["visible", "Widget", "Shape"]);
+}
+
+#[test]
+fn gap_detect_units_unsupported_ext() {
+    assert!(gap::detect_units("x.toml", "pub fn not_real() {}\n", "toml").is_empty());
+}
+
+#[test]
+fn gap_backward_gaps_flags_undocumented_unit() {
+    let units = vec![CodeUnit {
+        path: "x.rs".into(),
+        line: 3,
+        kind: "fn".into(),
+        name: "f".into(),
+    }];
+    // No references at all: the unit is a gap.
+    assert_eq!(gap::backward_gaps(&units, &[]), units);
+}
+
+#[test]
+fn gap_backward_gaps_clears_documented_unit() {
+    let units = vec![CodeUnit {
+        path: "x.rs".into(),
+        line: 3,
+        kind: "fn".into(),
+        name: "f".into(),
+    }];
+    // A reference declared on line 2 (the doc comment directly above line 3's
+    // `pub fn`) falls inside the (0, 3) coverage window.
+    let refs = vec![make_ref(
+        "SPEC-X-01~draft",
+        "docs/specs/x.md",
+        "SPEC-X-01~draft",
+        2,
+    )];
+    assert!(gap::backward_gaps(&units, &refs).is_empty());
+}
+
+#[test]
+fn gap_backward_gaps_second_unit_needs_its_own_reference() {
+    let units = vec![
+        CodeUnit {
+            path: "x.rs".into(),
+            line: 3,
+            kind: "fn".into(),
+            name: "first".into(),
+        },
+        CodeUnit {
+            path: "x.rs".into(),
+            line: 6,
+            kind: "fn".into(),
+            name: "second".into(),
+        },
+    ];
+    // Only `first` (line 3) has a preceding reference (line 2); `second`
+    // (line 6) has nothing between line 3 and line 6, so it is still a gap.
+    let refs = vec![make_ref(
+        "SPEC-X-01~draft",
+        "docs/specs/x.md",
+        "SPEC-X-01~draft",
+        2,
+    )];
+    let gaps = gap::backward_gaps(&units, &refs);
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0].name, "second");
+}
+
+#[test]
+fn gap_run_report_backward_and_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // A spec doc with two sections: one referenced by code (linked), one not
+    // (a forward gap).
+    write(
+        root,
+        "docs/specs/x.md",
+        "## Linked {#SPEC-X-01~draft}\nbody\n\n## Orphan {#SPEC-X-02~draft}\nbody\n",
+    );
+
+    // A code file with two public units: one documented (backward-clean), one
+    // not (a backward gap). Only references `SPEC-X-01~draft`, leaving
+    // `SPEC-X-02~draft` with no inbound code link.
+    write(
+        root,
+        "crates/x/src/lib.rs",
+        "//! # Spec References\n//! - [`SPEC-X-01~draft`](docs/specs/x.md#SPEC-X-01~draft)\npub fn documented() {}\npub fn undocumented() {}\n",
+    );
+
+    let report = gap::run_gap_report(root);
+
+    assert_eq!(report.units_scanned, 2);
+    assert!(
+        report
+            .backward_gaps
+            .iter()
+            .any(|u| u.name == "undocumented"),
+        "expected `undocumented` as a backward gap: {:?}",
+        report.backward_gaps
+    );
+    assert!(
+        !report.backward_gaps.iter().any(|u| u.name == "documented"),
+        "did not expect `documented` as a backward gap: {:?}",
+        report.backward_gaps
+    );
+
+    assert_eq!(report.spec_sections_scanned, 2);
+    assert!(
+        report
+            .forward_gaps
+            .iter()
+            .any(|s| s.id == "SPEC-X-02~draft"),
+        "expected SPEC-X-02~draft as a forward gap: {:?}",
+        report.forward_gaps
+    );
+    assert!(
+        !report
+            .forward_gaps
+            .iter()
+            .any(|s| s.id == "SPEC-X-01~draft"),
+        "did not expect SPEC-X-01~draft as a forward gap: {:?}",
+        report.forward_gaps
+    );
+
+    assert!(!report.is_strict_clean());
+}
+
+#[test]
+fn gap_run_report_valid_linked_pair_is_fully_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "docs/specs/x.md",
+        "## Section {#SPEC-X-01~draft}\nbody\n",
+    );
+    write(
+        root,
+        "crates/x/src/lib.rs",
+        "//! # Spec References\n//! - [`SPEC-X-01~draft`](docs/specs/x.md#SPEC-X-01~draft)\npub fn f() {}\n",
+    );
+
+    let report = gap::run_gap_report(root);
+    assert!(
+        report.backward_gaps.is_empty(),
+        "{:?}",
+        report.backward_gaps
+    );
+    assert!(report.forward_gaps.is_empty(), "{:?}", report.forward_gaps);
+    assert!(
+        report.broken_references.is_empty(),
+        "{:?}",
+        report.broken_references
+    );
+    assert!(report.is_strict_clean());
+}
+
+#[test]
+fn gap_run_report_folds_in_broken_references() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "crates/x/src/lib.rs",
+        "//! # Spec References\n//! - [`SPEC-GONE-01~draft`](docs/specs/gone.md#SPEC-GONE-01~draft)\n",
+    );
+
+    let report = gap::run_gap_report(root);
+    assert!(report
+        .broken_references
+        .iter()
+        .any(|d| d.check == "ref-path-missing"));
+    assert!(!report.is_strict_clean());
+}
+
+#[test]
+fn gap_is_strict_clean_ignores_advisory_severity() {
+    let mut report = gap::GapReport::default();
+    report.broken_references.push(Diagnostic::warning(
+        "a.rs",
+        1,
+        "ref-revision-drift",
+        "stale",
+    ));
+    assert!(
+        report.is_strict_clean(),
+        "an advisory-only broken reference must not fail --strict"
+    );
+    report
+        .broken_references
+        .push(Diagnostic::error("a.rs", 1, "ref-path-missing", "gone"));
+    assert!(!report.is_strict_clean());
+}
+
+#[test]
+fn gap_to_json_round_trips_counts() {
+    let report = gap::GapReport {
+        units_scanned: 5,
+        spec_sections_scanned: 2,
+        ..gap::GapReport::default()
+    };
+    let json = report.to_json();
+    assert_eq!(json["units_scanned"], 5);
+    assert_eq!(json["spec_sections_scanned"], 2);
+    assert_eq!(json["backward_gaps"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn gap_summary_lists_top_offenders() {
+    let mut report = gap::GapReport::default();
+    for i in 0..3 {
+        report.backward_gaps.push(CodeUnit {
+            path: "crates/x/src/lib.rs".into(),
+            line: i + 1,
+            kind: "fn".into(),
+            name: format!("f{i}"),
+        });
+    }
+    report.backward_gaps.push(CodeUnit {
+        path: "crates/y/src/lib.rs".into(),
+        line: 1,
+        kind: "fn".into(),
+        name: "g".into(),
+    });
+    let summary = report.summary();
+    assert!(summary.contains("backward gaps"));
+    assert!(summary.contains("crates/x/src/lib.rs"));
+    assert!(summary.contains("   3  crates/x/src/lib.rs"));
 }

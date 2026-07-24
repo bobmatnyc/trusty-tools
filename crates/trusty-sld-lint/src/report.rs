@@ -11,6 +11,8 @@
 
 use std::fmt;
 
+use serde::Serialize;
+
 /// Whether a finding fails the lint (error) or is advisory (warning).
 ///
 /// Why: DOC-38 makes some conditions hard violations (an unresolved reference)
@@ -19,7 +21,7 @@ use std::fmt;
 /// still surfacing advisories.
 /// What: `Error` counts toward a non-zero exit; `Warning` is informational.
 /// Test: `super::tests::report_exit_counts_errors_only`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Severity {
     /// A hard violation — fails the lint (non-zero exit).
     Error,
@@ -35,7 +37,7 @@ pub enum Severity {
 /// What: the repo-relative `path`, 1-based `line` (0 when file-scoped, not
 /// line-scoped), the `severity`, the `check` identifier, and the `message`.
 /// Test: `super::tests::report_display`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Diagnostic {
     /// Repo-relative path of the offending file.
     pub path: String,
