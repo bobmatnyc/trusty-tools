@@ -5,7 +5,14 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [1.0.0] - 2026-07-24
+
+**First stable release.** trusty-mpm (the `tm` harness/CLI/daemon) has been in
+daily driver use for several weeks across the maintainer's own projects; this
+release marks it semver-committed / stable rather than signaling any single
+breaking change. Sibling crates (trusty-common, trusty-search,
+trusty-memory, etc.) are unaffected and keep their own independent 0.x
+version lines.
 
 ### Added
 
