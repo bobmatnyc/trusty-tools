@@ -173,7 +173,7 @@ pub(super) async fn dispatch_search_tool(
                 intent = %log_intent,
                 latency_ms = log_latency,
                 results = log_results,
-                query = %&query_text[..query_text.len().min(80)],
+                query = %crate::truncate_at_char_boundary(query_text, 80),
                 "search"
             );
             Some(Ok(resp))
@@ -356,7 +356,7 @@ impl McpServer {
             intent = %log_intent,
             latency_ms = log_latency,
             results = log_results,
-            query = %&query_text[..query_text.len().min(80)],
+            query = %crate::truncate_at_char_boundary(query_text, 80),
             "search"
         );
         Ok(resp)

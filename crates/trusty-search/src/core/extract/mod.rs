@@ -176,10 +176,7 @@ pub fn extract_text(path: &Path) -> Result<Extracted, ExtractError> {
     };
 
     if extracted.text.len() > MAX_EXTRACTED_TEXT_BYTES {
-        let mut cut = MAX_EXTRACTED_TEXT_BYTES;
-        while cut > 0 && !extracted.text.is_char_boundary(cut) {
-            cut -= 1;
-        }
+        let cut = crate::truncate_at_char_boundary(&extracted.text, MAX_EXTRACTED_TEXT_BYTES).len();
         extracted.text.truncate(cut);
     }
 

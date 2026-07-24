@@ -310,15 +310,22 @@ fn print_status_line_nontty(index_id: &str, body: &serde_json::Value) {
 
 /// Truncate a failure-reason string to at most 80 display characters.
 ///
-/// Why: raw failure reasons can be multi-kilobyte stack traces; rendering them
-/// verbatim breaks the terminal table layout.
-/// What: if `msg` exceeds 80 chars, returns the first 79 chars followed by `…`
-/// (Unicode ellipsis, one column wide), giving exactly 80 displayed columns.
-/// If `msg` fits, returns it unchanged as an owned `String`.
-/// Test: `failure_message_truncated_at_80_chars` in this module's tests.
+/// Why: raw failure reasons can be multi-kilobyte stack traces sourced from
+/// `JoinError`/embedder error text — not guaranteed ASCII — so rendering them
+/// verbatim breaks the terminal table layout, and a raw byte-index slice at
+/// byte 79 can land mid-multibyte-char and panic (the same class of bug as
+/// issue #3685's query-log truncation).
+/// What: if `msg` exceeds 80 bytes, returns the longest prefix that fits in
+/// 79 bytes without splitting a UTF-8 character (via
+/// [`trusty_search::truncate_at_char_boundary`]) followed by `…` (Unicode ellipsis,
+/// one column wide). If `msg` fits, returns it unchanged as an owned
+/// `String`.
+/// Test: `failure_message_truncated_at_80_chars` and
+/// `failure_message_truncation_handles_multibyte_split_at_79` in this
+/// module's tests.
 pub fn truncate_reason(msg: &str) -> String {
     if msg.len() > 80 {
-        format!("{}…", &msg[..79])
+        format!("{}…", trusty_search::truncate_at_char_boundary(msg, 79))
     } else {
         msg.to_string()
     }
@@ -469,6 +476,44 @@ mod tests {
         let exact_msg = "y".repeat(80);
         let result = truncate_reason(&exact_msg);
         assert_eq!(result, exact_msg, "80-char messages must not be truncated");
+    }
+
+    /// Regression test for the code-critic-flagged extension of issue #3685:
+    /// `truncate_reason` previously cut with a raw `&msg[..79]` byte slice,
+    /// the same panic class as the query-log truncation sites — failure
+    /// reasons are free-form (JoinError/embedder error text), not guaranteed
+    /// ASCII. This constructs a message whose byte 79 lands mid-way through
+    /// a 4-byte emoji, so a naive `[..79]` cut is guaranteed to split it and
+    /// panic with "byte index is not a char boundary".
+    #[test]
+    fn failure_message_truncation_handles_multibyte_split_at_79() {
+        // 78 ASCII bytes + a 4-byte emoji (🔥, U+1F525) puts the emoji's
+        // start at byte 78 and its end at byte 82 — byte index 79 sits
+        // squarely inside the emoji's UTF-8 encoding.
+        let msg = format!(
+            "{}{}",
+            "a".repeat(78),
+            "🔥 more failure text to push this past eighty bytes total"
+        );
+        assert_eq!(
+            msg.as_bytes()[79].leading_ones(),
+            1,
+            "sanity: byte 79 must be a UTF-8 continuation byte, not a boundary"
+        );
+        assert!(
+            msg.len() > 80,
+            "sanity: message must exceed the truncation threshold"
+        );
+
+        // Old behavior `format!("{}…", &msg[..79])` would panic here.
+        let truncated = truncate_reason(&msg);
+
+        assert!(truncated.ends_with('…'), "must end with ellipsis character");
+        assert_eq!(
+            truncated,
+            format!("{}…", "a".repeat(78)),
+            "must back off to the boundary before the split emoji"
+        );
     }
 
     /// `--watch` combined with `--json` must be rejected before any daemon

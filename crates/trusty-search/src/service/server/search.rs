@@ -356,7 +356,7 @@ pub(super) async fn search_handler(
         intent = %format!("{intent:?}"),
         latency_ms = latency_ms,
         results = results.len(),
-        query = %&query.text[..query.text.len().min(80)],
+        query = %crate::truncate_at_char_boundary(&query.text, 80),
         "search"
     );
 

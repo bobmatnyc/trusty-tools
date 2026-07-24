@@ -20,6 +20,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   #3716's fix: replaced the strict `anon <= total` bound with a one-directional
   structural check plus a generous sampling-skew headroom, rather than
   tightening/loosening an exact-equality bound.
+- **Panic on non-char-boundary truncation of free-form text in 4 sites
+  (issue #3685).** The `search` / `search_lexical` / `search_semantic` /
+  `search_kg` / `search_all` MCP tool handlers and the HTTP `search` endpoint
+  logged the query text truncated with a raw byte-index slice
+  (`&query_text[..query_text.len().min(80)]`), which panics with "byte index
+  is not a char boundary" whenever byte 80 lands mid-way through a
+  multi-byte UTF-8 character (e.g. an emoji or CJK query), crashing the
+  request instead of just logging it. `commands::index_status::truncate_reason`
+  had the same bug (`&msg[..79]` on free-form, non-ASCII-guaranteed
+  `JoinError`/embedder failure-reason text). Replaced all four sites with a
+  new `trusty_search::truncate_at_char_boundary` helper that backs off to the
+  nearest valid char boundary (mirroring the existing backward-scan pattern
+  in `core::extract::extract_text`'s byte-cap truncation), plus regression
+  tests covering an emoji split and a CJK split at the query-log 80-byte
+  boundary and a separate emoji split at `truncate_reason`'s 79-byte
+  boundary.
 - **`core::memguard_enforce::tests::enforcement_rss_mb_for_pid_matches_chosen_measure`
   deflaked for good (issue #3716).** Three successive rounds of calibrating a
   "two live RSS samples of the same measure agree" tolerance on this test
