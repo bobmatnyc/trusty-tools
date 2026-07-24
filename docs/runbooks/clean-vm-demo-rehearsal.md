@@ -1,4 +1,4 @@
-# Clean-VM Demo Rehearsal Runbook — trusty-mpm 1.0.0 + trusty-installer 0.4.7
+# Clean-VM Demo Rehearsal Runbook — trusty-mpm 1.0.1 + trusty-installer 0.4.7
 
 **Duration:** ~10 minutes  
 **Target:** Fresh macOS Apple Silicon VM with NO Claude Code, NO tmux, NO ~/.trusty-tools  
@@ -11,7 +11,7 @@
 Before starting, verify the VM has:
 
 - [ ] macOS Apple Silicon (M1/M2/M3 family)
-- [ ] No Claude Code installed (check: `which cc` → should be empty)
+- [ ] No Claude Code installed (check: `which claude` → should be empty)
 - [ ] No tmux installed (check: `which tmux` → should be empty)
 - [ ] No ~/.trusty-tools directory (check: `ls ~/.trusty-tools` → should fail)
 - [ ] Xcode Command Line Tools (check: `xcode-select --print-path` → should return a path)
@@ -25,7 +25,7 @@ Before starting, verify the VM has:
 
 **Command:**
 ```bash
-curl https://install.sh | sh -y
+curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh -s -- -y
 ```
 
 **Expected observations:**
@@ -44,10 +44,10 @@ After the checklist completes:
 
 **Command:**
 ```bash
-which cc
+which claude
 ```
 
-**Expected:** Returns `/opt/homebrew/bin/cc` (or similar homebrew path).
+**Expected:** Returns `/opt/homebrew/bin/claude` (or similar homebrew path).
 
 **Command:**
 ```bash
@@ -68,7 +68,7 @@ which tm
 tm version
 ```
 
-**Expected:** Outputs `tm 1.0.0`.
+**Expected:** Outputs `tm 1.0.1`.
 
 ---
 
@@ -147,6 +147,11 @@ tm doctor
 tm sessions new https://github.com/<your-github-user>/<throwaway-repo>.git --task "Add a demo README section explaining the new feature"
 ```
 
+**Note:** If the target repository's default branch is NOT `main` (e.g., `master`, `develop`), add `--git-ref <branch-name>` to the command to check out the correct branch:
+```bash
+tm sessions new https://github.com/<your-github-user>/<throwaway-repo>.git --git-ref master --task "Add a demo README section explaining the new feature"
+```
+
 **Expected:**
 - `tm` clones the repo into `.trusty-mpm-projects/<your-github-user>/<throwaway-repo>/`.
 - `.trusty-tools` skeleton and `.trusty-mpm/` directories are created inside the cloned repo.
@@ -160,8 +165,10 @@ tm sessions new https://github.com/<your-github-user>/<throwaway-repo>.git --tas
 
 **Command:**
 ```bash
-tm sessions attach
+tm sessions attach <SESSION-ID>
 ```
+
+(Replace `<SESSION-ID>` with the session ID or name returned by `tm sessions new` in Step 6, or retrieve it via `tm sessions list`.)
 
 **Expected:**
 - Terminal switches to the tmux session (you see a new tmux status bar at the bottom).
@@ -207,7 +214,7 @@ tm sessions resume
 
 **Command:**
 ```bash
-tm sessions attach
+tm sessions attach <SESSION-ID>
 ```
 
 **Expected:** Re-attaches to the tmux session. Session state (working directory, git branch, any uncommitted changes) is preserved from before the pause.
@@ -283,6 +290,18 @@ gh pr view <PR-NUMBER> --json checks,reviews
 - **Workaround:** Always run `tm start` first (Step 3). Explicit daemon bootstrap is required after a fresh install.
 - **Why:** Sessions new reads configuration from the daemon; it does not spawn it. This design keeps session creation lightweight and ensures daemon state is consistent.
 
+### Tmux Server Must Exist Before `tm sessions new`
+- **Trigger:** Running `tm sessions new` on a machine where tmux has never been run before.
+- **Symptom:** Command fails with a tmux socket error (e.g., "socket not found" or connection refused).
+- **Workaround:** On a truly fresh macOS, tmux is not present by default and the installer only prints Homebrew installation instructions if it detects no Homebrew. Before running `tm sessions new`, first bootstrap tmux by running `tmux new-session -d` (creates a background server and exits immediately). Then proceed with `tm sessions new`.
+- **Known issue:** This is filed as a bug; workaround is temporary until the installer auto-bootstraps the tmux server on first use.
+
+### Tmux and Claude Code May Require Manual Homebrew Install on Fresh Machines
+- **Trigger:** Running `curl ... | sh -s -- -y` on a machine with no Homebrew installed.
+- **Symptom:** The installer prints Homebrew installation instructions and exits with code 2 (prerequisite missing).
+- **Workaround:** If you do not have Homebrew, install it manually first (`/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`), then re-run the trusty-tools installer. Alternatively, follow the installer's prompts to install Homebrew during the install process, then re-run the installer with `-y`.
+- **Why:** The trusty-installer 0.4.7 assumes Homebrew is available or can be installed interactively; a fully automated install on a fresh box with no package manager requires pre-installing Homebrew.
+
 ### Worktree Auto-Cleanup on Pause
 - **Note:** When you pause a session (`tm sessions stop`), the worktree is automatically cleaned up after a grace period if the session is not resumed. On a fresh install, this is unlikely to matter, but it's good to know if you pause and walk away for hours.
 
@@ -301,8 +320,8 @@ Map each success criterion back to the four unsafe-on-live-machine objectives:
 - [ ] `tm version` returns 1.0.0 after install.
 - [ ] `tm doctor` shows daemon alive (launchd bootstrap successful).
 
-### 2. CC + Tmux Auto-Install-on-Missing
-- [ ] `which cc` returns a path (Claude Code was installed by the script).
+### 2. Claude Code + Tmux Auto-Install-on-Missing
+- [ ] `which claude` returns a path (Claude Code was installed by the script).
 - [ ] `which tmux` returns a path (tmux was installed by the script).
 - [ ] Both tools were listed in the progress checklist as "Installing" and completed.
 
