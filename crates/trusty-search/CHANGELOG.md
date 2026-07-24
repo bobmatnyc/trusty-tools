@@ -9,6 +9,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`commands::start::embedder_fallback::tests` module tracing-interest-cache
+  race deflaked (issue #3689).** Tagged every test in the module with
+  `#[serial]` — they all drive `record_failure_and_maybe_trip`'s same
+  `tracing::error!` call sites, and `tracing`'s per-callsite interest cache is
+  process-global, not per-thread, so a concurrently-running sibling with no
+  subscriber installed could get a call site cached as "never interested",
+  silently dropping events `fallback_logs_build_failure_exactly_once` counts.
 - **`core::memguard_enforce::tests::test_anon_rss_for_self_pid_on_linux` deflaked
   (issue #3762, recurrence of #3716's flake class).** The test compared two
   genuinely independent, non-atomic `/proc` reads taken microseconds apart

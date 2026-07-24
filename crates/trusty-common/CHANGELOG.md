@@ -7,6 +7,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **`update::tests::cache_fresh_returns_some_when_newer` env-race deflaked
+  (issue #3689).** Tagged it and the two `check_throttled_skips_when_*`
+  tests with the shared `#[serial(update_check_throttled_env)]` group so a
+  sibling's transient `CI_ENV`/`NO_UPDATE_CHECK_ENV` mutation can no longer
+  race this test's `check_throttled(...).await` and flip its expected
+  `Some(..)` to `None` under parallel `cargo test`.
+
 ---
 ## [0.26.0] — 2026-07-23
 
