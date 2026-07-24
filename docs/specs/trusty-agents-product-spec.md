@@ -410,12 +410,62 @@ Preferences, learned patterns, and approvals are recorded in trusty-memory inlin
 
 The continuous conversation is persisted in trusty-memory (local database or backend, per trusty-mpm's session/persistence model). Workstream classifications are metadata within that conversation history, enabling reconstruction of task-scoped views. Agent configuration packages (`agents/<name>/`) are backed up locally (dated snapshots in `~/.trusty-agents/backups/`).
 
+### 9.6 Filterable-Chat Context-Assembly Model (Bob 2026-07-24)
+
+The agent's context (what is sent to the LLM for inference) is dynamically assembled based on workstream classification and user focus. This model combines in-band classification, hierarchical summaries, and focused filtering while preserving the agent's access to all memories on demand.
+
+#### 9.6.1 Classification in-band
+
+Every prompt submitted by the user (or every agent reaction to an event) is sent to the LLM together with the current set of workstream/task classifications (a closed vocabulary of labels + explicit "new: <label>" escape so new workstreams are deliberate, preventing label drift). The LLM returns its response PLUS a suggested classification for that turn. Sidebar Tasks list is the rollup of these labels.
+
+User affordances: rename/merge/re-tag workstreams (corrections are learning signals). Periodic consolidation passes (dream-consolidation shaped) merge near-duplicate workstream labels.
+
+#### 9.6.2 Summaries (global + per-workstream)
+
+Two independent summary layers:
+
+- **Global prompt-history summary:** The existing infinite-context design's global summary (stored, cacheable), always present in context.
+- **Per-workstream summary:** Generated every N turns (configurable `summarize_every`) and cached. Reflects turn N to the last summarization point within that workstream's filtered history.
+
+Two independent tuning knobs:
+- `summarize_every`: N-turn cadence for per-workstream summary regeneration.
+- `recent_window`: Number of raw turns sent in focused mode (after the summaries).
+
+Re-tagging a turn lazily invalidates that workstream's cached summary (regenerated on next focused access).
+
+Reuses trusty-memory's durable record of all prompts/responses + compression machinery (tcode infinite-sessions pattern) — one mechanism, not a parallel one.
+
+#### 9.6.3 Focused mode (context assembly)
+
+Clicking a workstream in the sidebar enters **focused mode** for that workstream:
+
+1. **History filter:** Visible prompt history is filtered to matching prompts (or "All" for unfocused).
+2. **UI note:** The chat interface notes "working on task X" (or no note when unfocused/all).
+3. **Context assembly (stable order):**
+   - Global summary (small, always present — preserves "agent has full memory access", filtering constrains raw-turn history only).
+   - Per-workstream summary (if focused; if unfocused, N recent prompts of all types).
+   - N recent prompts of the filtered type (matching the workstream or all prompts if unfocused).
+   - Memory tools always live (agent can query memory at any time).
+
+4. **Stable assembly order** (for prompt-cache prefix reuse):
+   - Global summary → per-WS summary (only in focused mode) → recent prompts.
+   - Per-workstream summary only changes at N-turn boundaries, so the cache busts once per summarization cycle, not per turn.
+
+#### 9.6.4 Task bleed (agent agency over classification)
+
+Focused context is a **starting point, not a wall**. The agent has full agency:
+
+- **Memory search:** When a prompt bleeds across task boundaries, the agent can REQUEST A MEMORY SEARCH and pull broader context on demand.
+- **Re-classification:** The agent can DECIDE to KEEP or CHANGE the task classification after reviewing the broader context.
+- **Gentle nudge (no forcing):** If focused on task A and a prompt classifies as B, respond normally, label honestly with the new classification, and surface a gentle "this looks like a different task" nudge. Never force or drop the turn; the agent's honest classification is authoritative.
+
 ---
 
 ## 10. Design Decisions Log
 
 | Decision | Date | Tracking Issue |
 |----------|------|-----------------|
+| Filterable-chat context-assembly: in-band classification + global + per-WS summaries + focused-mode filtering + agent memory-search agency | 2026-07-24 | Bob 2026-07-24, approved filterable-chat design |
 | Inference provider policy: Izzie + CTO Assistant = Sonnet via OpenRouter (default); Concierge = Opus via OpenRouter (exception, harness configurator role) | 2026-07-24 | Bob 2026-07-24 morning, verified from resolver logs |
 | ONE continuous conversation per agent (not separate chat contexts); workstreams are classifications/filters over that conversation | 2026-07-24 | Coordinator clarification, aligns with tcode #2026-07-19/20 |
 | User-facing term "Tasks" = internal "Workstreams"; sidebar is a filter/view, not context boundaries | 2026-07-24 | Coordinator message, 2026-07-24 |
