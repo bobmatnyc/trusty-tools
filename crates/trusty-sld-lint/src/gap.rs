@@ -27,12 +27,18 @@
 //! - Module-level units (crate/file doc blocks) are not tracked separately —
 //!   only explicit `pub fn`/`struct`/`enum`/`trait`/`type`/`static`/`mod`
 //!   declarations (or their Python/TS/JS equivalents) count as a code unit.
-//! - A unit's "coverage window" runs from the previous unit's line (or file
-//!   start) to just above the unit itself; a crate-level doc block therefore
-//!   credits the FIRST unit in a file even when the block is really
-//!   module-level, not that unit's own documentation. This avoids double-
-//!   penalizing module-level linkage as a per-symbol gap and is a conservative
-//!   (fewer false positives) choice.
+//! - A unit is "covered" only by a reference inside the CONTIGUOUS
+//!   comment/docstring run immediately above its own declaration line — not
+//!   by any reference anywhere between the previous unit and this one. This
+//!   mirrors rustdoc's own attachment rule (a doc comment separated from its
+//!   item by a blank line is not attached to it either) and specifically
+//!   avoids a large struct/enum body's own reference block being mistaken for
+//!   the linkage of the NEXT, unrelated `pub fn` that happens to follow it.
+//!   See [`preceding_doc_block_start`].
+//! - Because coverage looks only ABOVE the unit, a language whose idiomatic
+//!   doc form sits BELOW/inside the declaration (e.g. a Python docstring as
+//!   the function body's first statement) is not recognised as covering that
+//!   unit — a documented false-positive-gap risk for that idiom in slice 1.
 //! - Detection is line-oriented regex, not an AST: multi-line signatures,
 //!   macro-generated items, and `pub(crate)`/`pub(super)` (intentionally
 //!   excluded — only crate-external `pub` counts as a "public" unit) are out of
@@ -53,7 +59,9 @@ use regex::Regex;
 use serde::Serialize;
 
 use trusty_common::sld::Reference;
-use trusty_common::sld::{base_id, parse_inline_refs, spec_anchors, syntax_for_extension};
+use trusty_common::sld::{
+    base_id, parse_inline_refs, spec_anchors, syntax_for_extension, CommentSyntax,
+};
 
 use crate::checks;
 use crate::discover;
@@ -340,36 +348,113 @@ pub fn detect_units(path: &str, content: &str, ext: &str) -> Vec<CodeUnit> {
     out
 }
 
+/// True when a trimmed line is comment/docstring content under `syntax`.
+///
+/// Why: [`preceding_doc_block_start`] walks upward from a unit's declaration
+/// line and must know, per line, whether it is still inside a comment or
+/// docstring region — a coarser question than [`parse_inline_refs`]'s (which
+/// also tracks the `# Spec References` marker and fenced code within it). This
+/// mirrors the block/docstring open-close tracking `trusty_common::sld::inline`
+/// applies internally, at the granularity this module needs: "is this line
+/// comment content at all?"
+/// What: for a block/docstring language (`syntax.block` is `Some`), tracks
+/// `in_doc` across calls (threaded through `in_doc`) — a line inside an open
+/// block, or one that opens/closes one, counts as comment content; otherwise
+/// falls back to [`CommentSyntax::strip_line_comment`]. A blank line is never
+/// comment content (a real doc comment or docstring line always carries its
+/// own delimiter/prefix), which is what breaks contiguity at a blank
+/// separator line.
+/// Test: covered by `super::tests::gap_preceding_doc_block_*`.
+pub(crate) fn is_comment_line(trimmed: &str, syntax: &CommentSyntax, in_doc: &mut bool) -> bool {
+    if let Some((open, close)) = syntax.block {
+        if *in_doc {
+            if trimmed.contains(close) {
+                *in_doc = false;
+            }
+            return true;
+        }
+        if let Some(idx) = trimmed.find(open) {
+            let after = &trimmed[idx + open.len()..];
+            *in_doc = !after.contains(close);
+            return true;
+        }
+    }
+    syntax.strip_line_comment(trimmed).is_some()
+}
+
+/// Find the first line of the contiguous comment/docstring run directly above
+/// `unit_line` (1-based), or `unit_line` itself when there is none.
+///
+/// Why: the backward-gap fix (issue #595 PR #3783 review) — a unit is
+/// "documented" only by its OWN immediately preceding doc block, never by a
+/// reference that happens to sit anywhere between the previous unit and this
+/// one (that previously let an unrelated `pub fn` following a large
+/// documented `struct`'s body inherit that struct's coverage). Determining
+/// comment-ness requires a forward scan from the top of the file (docstring
+/// open/close is stateful), even though this function reports upward from
+/// `unit_line`.
+/// What: scans `content` top-to-bottom tracking [`is_comment_line`] per line;
+/// returns the earliest line of the maximal contiguous comment run ending
+/// immediately at `unit_line - 1`, or `unit_line` when line `unit_line - 1`
+/// is not comment content (no preceding block at all) or `unit_line <= 1`.
+/// Test: `super::tests::gap_preceding_doc_block_contiguous_run`,
+/// `gap_preceding_doc_block_stops_at_blank_line`,
+/// `gap_preceding_doc_block_none_when_no_comment_directly_above`.
+#[must_use]
+pub(crate) fn preceding_doc_block_start(
+    content: &str,
+    unit_line: usize,
+    syntax: &CommentSyntax,
+) -> usize {
+    if unit_line <= 1 {
+        return unit_line;
+    }
+    let mut in_doc = false;
+    let mut run_start: Option<usize> = None;
+    for (idx, raw) in content.lines().enumerate() {
+        let line = idx + 1;
+        if line >= unit_line {
+            break;
+        }
+        if is_comment_line(raw.trim_start(), syntax, &mut in_doc) {
+            run_start.get_or_insert(line);
+        } else {
+            run_start = None;
+        }
+    }
+    // `run_start` only survives if the run reached all the way to `unit_line - 1`.
+    run_start.unwrap_or(unit_line)
+}
+
 /// Find units in `units` (file order) with no directly preceding spec reference.
 ///
-/// Why: a unit is "linked" when its own `# Spec References` block declares at
-/// least one reference; since [`trusty_common::sld::parse_inline_refs`] already
-/// gives each reference's line, "directly preceding" is checked with a
-/// coverage window rather than requiring a second parse pass over the raw
-/// text.
-/// What: for each unit (assumed sorted by `line`, as [`detect_units`]
-/// produces), the window is `(previous unit's line, this unit's line)`
-/// exclusive-exclusive (or `(0, line)` for the first unit) — i.e. every line
-/// strictly between the previous unit and this one. A unit is a gap when no
-/// `refs` entry's line falls in that window. See this module's doc comment for
-/// the documented limitation that a leading crate/module-level doc block
-/// credits the FIRST unit in the file.
+/// Why: a unit is "linked" when a reference is declared in the contiguous
+/// comment/doc block immediately above its OWN declaration — not merely
+/// somewhere after the previous unit (see [`preceding_doc_block_start`]'s doc
+/// comment for the bug this fixes).
+/// What: for each unit, computes its [`preceding_doc_block_start`] and flags
+/// it as a gap when no `refs` entry's line falls in
+/// `[block_start, unit.line)`.
 /// Test: `super::tests::gap_backward_gaps_flags_undocumented_unit`,
-/// `gap_backward_gaps_clears_documented_unit`.
+/// `gap_backward_gaps_clears_documented_unit`,
+/// `gap_backward_gaps_ref_inside_previous_unit_body_does_not_cover_next_unit`.
 #[must_use]
-pub fn backward_gaps(units: &[CodeUnit], refs: &[Reference]) -> Vec<CodeUnit> {
-    let mut gaps = Vec::new();
-    let mut window_start = 0usize;
-    for unit in units {
-        let covered = refs
-            .iter()
-            .any(|r| r.line > window_start && r.line < unit.line);
-        if !covered {
-            gaps.push(unit.clone());
-        }
-        window_start = unit.line;
-    }
-    gaps
+pub fn backward_gaps(
+    content: &str,
+    syntax: &CommentSyntax,
+    units: &[CodeUnit],
+    refs: &[Reference],
+) -> Vec<CodeUnit> {
+    units
+        .iter()
+        .filter(|unit| {
+            let block_start = preceding_doc_block_start(content, unit.line, syntax);
+            !refs
+                .iter()
+                .any(|r| r.line >= block_start && r.line < unit.line)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Run the full bidirectional gap report over a repository checkout.
@@ -417,7 +502,9 @@ pub fn run_gap_report(root: &Path) -> GapReport {
 
         let units = detect_units(&path, &content, ext);
         report.units_scanned += units.len();
-        report.backward_gaps.extend(backward_gaps(&units, &refs));
+        report
+            .backward_gaps
+            .extend(backward_gaps(&content, &syntax, &units, &refs));
     }
 
     for rel in &discovered.spec_docs {

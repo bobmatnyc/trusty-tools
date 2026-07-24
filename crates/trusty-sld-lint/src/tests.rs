@@ -11,7 +11,7 @@ use crate::discover;
 use crate::gap::{self, CodeUnit};
 use crate::report::{Diagnostic, Severity};
 use crate::{run, LintError, LintOptions};
-use trusty_common::sld::Reference;
+use trusty_common::sld::{syntax_for_extension, Reference};
 
 // A single lookup that knows about one target spec containing SPEC-X-01~draft.
 fn lookup(path: &str) -> Option<String> {
@@ -595,7 +595,32 @@ fn gap_detect_units_unsupported_ext() {
 }
 
 #[test]
+fn gap_preceding_doc_block_contiguous_run() {
+    let syntax = syntax_for_extension("rs").unwrap();
+    let content = "//! line one\n//! line two\npub fn f() {}\n";
+    assert_eq!(gap::preceding_doc_block_start(content, 3, &syntax), 1);
+}
+
+#[test]
+fn gap_preceding_doc_block_stops_at_blank_line() {
+    let syntax = syntax_for_extension("rs").unwrap();
+    // A blank separator line detaches the doc comment from the item below it
+    // (mirrors rustdoc's own attachment rule) — no block directly above line 3.
+    let content = "//! detached doc\n\npub fn f() {}\n";
+    assert_eq!(gap::preceding_doc_block_start(content, 3, &syntax), 3);
+}
+
+#[test]
+fn gap_preceding_doc_block_none_when_no_comment_directly_above() {
+    let syntax = syntax_for_extension("rs").unwrap();
+    let content = "let x = 1;\npub fn f() {}\n";
+    assert_eq!(gap::preceding_doc_block_start(content, 2, &syntax), 2);
+}
+
+#[test]
 fn gap_backward_gaps_flags_undocumented_unit() {
+    let syntax = syntax_for_extension("rs").unwrap();
+    let content = "let x = 1;\nlet y = 2;\npub fn f() {}\n";
     let units = vec![CodeUnit {
         path: "x.rs".into(),
         line: 3,
@@ -603,30 +628,34 @@ fn gap_backward_gaps_flags_undocumented_unit() {
         name: "f".into(),
     }];
     // No references at all: the unit is a gap.
-    assert_eq!(gap::backward_gaps(&units, &[]), units);
+    assert_eq!(gap::backward_gaps(content, &syntax, &units, &[]), units);
 }
 
 #[test]
 fn gap_backward_gaps_clears_documented_unit() {
+    let syntax = syntax_for_extension("rs").unwrap();
+    let content = "//! # Spec References\n//! - [`SPEC-X-01~draft`](docs/specs/x.md#SPEC-X-01~draft)\npub fn f() {}\n";
     let units = vec![CodeUnit {
         path: "x.rs".into(),
         line: 3,
         kind: "fn".into(),
         name: "f".into(),
     }];
-    // A reference declared on line 2 (the doc comment directly above line 3's
-    // `pub fn`) falls inside the (0, 3) coverage window.
+    // The reference on line 2 sits in the contiguous comment run directly
+    // above line 3's `pub fn`.
     let refs = vec![make_ref(
         "SPEC-X-01~draft",
         "docs/specs/x.md",
         "SPEC-X-01~draft",
         2,
     )];
-    assert!(gap::backward_gaps(&units, &refs).is_empty());
+    assert!(gap::backward_gaps(content, &syntax, &units, &refs).is_empty());
 }
 
 #[test]
 fn gap_backward_gaps_second_unit_needs_its_own_reference() {
+    let syntax = syntax_for_extension("rs").unwrap();
+    let content = "//! # Spec References\n//! - [`SPEC-X-01~draft`](docs/specs/x.md#SPEC-X-01~draft)\npub fn first() {}\n\npub fn second() {}\n";
     let units = vec![
         CodeUnit {
             path: "x.rs".into(),
@@ -636,22 +665,60 @@ fn gap_backward_gaps_second_unit_needs_its_own_reference() {
         },
         CodeUnit {
             path: "x.rs".into(),
-            line: 6,
+            line: 5,
             kind: "fn".into(),
             name: "second".into(),
         },
     ];
-    // Only `first` (line 3) has a preceding reference (line 2); `second`
-    // (line 6) has nothing between line 3 and line 6, so it is still a gap.
+    // Only `first` (line 3) has a directly preceding reference (line 2);
+    // `second` (line 5) has a blank line, then `first`'s own declaration,
+    // directly above it — no comment block of its own — so it is still a gap.
     let refs = vec![make_ref(
         "SPEC-X-01~draft",
         "docs/specs/x.md",
         "SPEC-X-01~draft",
         2,
     )];
-    let gaps = gap::backward_gaps(&units, &refs);
+    let gaps = gap::backward_gaps(content, &syntax, &units, &refs);
     assert_eq!(gaps.len(), 1);
     assert_eq!(gaps[0].name, "second");
+}
+
+#[test]
+fn gap_backward_gaps_ref_inside_previous_unit_body_does_not_cover_next_unit() {
+    // Regression for the PR #3783 review finding: a reference sitting
+    // anywhere between the previous unit and this one (e.g. inside the
+    // previous unit's own body, documenting ITS internals) must NOT count as
+    // covering the NEXT, unrelated unit just because it falls in that span.
+    let syntax = syntax_for_extension("rs").unwrap();
+    let content = "pub struct A {\n    field: u32,\n    // # Spec References\n    // - [`SPEC-X-01~draft`](docs/specs/x.md#SPEC-X-01~draft)\n}\n\npub fn b_unrelated() {}\n";
+    let units = vec![
+        CodeUnit {
+            path: "x.rs".into(),
+            line: 1,
+            kind: "struct".into(),
+            name: "A".into(),
+        },
+        CodeUnit {
+            path: "x.rs".into(),
+            line: 7,
+            kind: "fn".into(),
+            name: "b_unrelated".into(),
+        },
+    ];
+    let refs = vec![make_ref(
+        "SPEC-X-01~draft",
+        "docs/specs/x.md",
+        "SPEC-X-01~draft",
+        4,
+    )];
+    let gaps = gap::backward_gaps(content, &syntax, &units, &refs);
+    assert_eq!(
+        gaps.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
+        vec!["A", "b_unrelated"],
+        "the internal reference at line 4 documents A's own body, not \
+         b_unrelated, and must not silently clear b_unrelated as covered"
+    );
 }
 
 #[test]
