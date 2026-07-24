@@ -8,7 +8,8 @@
 //! `recall_across_palaces`, `recall_across_palaces_with_default_embedder`,
 //! `room_to_uuid`, `uuid_prefix_eq`, `dedup_extend`.
 //! Test: `recall_ranks_by_similarity_over_importance`, `l0_l1_always_present`,
-//! `l2_returns_relevant_drawer`, `recall_across_palaces_merges_results`.
+//! `l2_returns_relevant_drawer`, `l2_room_filter_excludes_other_rooms`,
+//! `recall_across_palaces_merges_results`.
 
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
@@ -166,11 +167,15 @@ pub fn rescore_l1_by_similarity(
 /// known.
 /// What: Embeds the query, searches the vector store with `top_k * 3` to
 /// leave room for filtering, maps each hit back to a drawer via UUID-prefix
-/// match, applies the optional room filter (currently a TODO — see below),
+/// match, applies the optional room filter by comparing `drawer.room_id`
+/// against `room_to_uuid(&filter)` (issue #3274 — the same deterministic
+/// hash `list_drawers` already uses, since there is no real Room table yet),
 /// scores as `drawer.importance * hit.score`, and returns the top `top_k`
 /// drawers tagged with `layer: 2`.
 /// Test: `l2_returns_relevant_drawer` upserts a Rust-themed drawer and
 /// asserts a Rust-themed query retrieves it at rank 0.
+/// `l2_room_filter_excludes_other_rooms` (issue #3274) asserts a drawer from
+/// a non-matching room is dropped rather than silently included.
 pub async fn retrieve_l2(
     handle: &PalaceHandle,
     embedder: &dyn Embedder,
@@ -194,6 +199,15 @@ pub async fn retrieve_l2(
     let query_tokens: Vec<String> = extract_keywords(query);
     let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
 
+    // Issue #3274: this used to be a silent no-op (empty if-body) — a
+    // caller-supplied `room_filter` was accepted but never applied, so
+    // results silently included every room. There is no real Room table yet,
+    // but `room_to_uuid` deterministically hashes a `RoomType` into the
+    // `Uuid` stamped on `Drawer::room_id` at creation time (see
+    // `PalaceHandle::upsert`), which is the exact mechanism `list_drawers`
+    // already uses to filter by room — so the filter IS enforceable now.
+    let target_room_id = room_filter.as_ref().map(room_to_uuid);
+
     for hit in hits {
         let Some(drawer) = drawers.iter().find(|d| uuid_prefix_eq(d.id, hit.drawer_id)) else {
             // Vector hit refers to a drawer we no longer have metadata for;
@@ -201,11 +215,10 @@ pub async fn retrieve_l2(
             continue;
         };
 
-        // TODO(room-filter): RoomType lives on Room, not Drawer. Once a Room
-        // table is wired into PalaceHandle (drawer.room_id -> RoomType), apply
-        // the filter here. For now, accept all drawers regardless of filter.
-        if room_filter.is_some() {
-            // Filter is acknowledged but not yet enforceable — see TODO above.
+        if let Some(rid) = target_room_id
+            && drawer.room_id != rid
+        {
+            continue;
         }
 
         let age_days = DecayConfig::age_days(drawer.created_at);
