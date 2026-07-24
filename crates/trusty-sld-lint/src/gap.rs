@@ -141,7 +141,7 @@ impl GapReport {
     /// What: `backward_gaps` and `forward_gaps` are both empty, and no
     /// `broken_references` entry is `Severity::Error` (advisories, e.g.
     /// `ref-revision-drift`, never fail).
-    /// Test: `super::tests::gap_is_strict_clean`.
+    /// Test: `super::tests::gap_is_strict_clean_ignores_advisory_severity`.
     #[must_use]
     pub fn is_strict_clean(&self) -> bool {
         self.backward_gaps.is_empty()

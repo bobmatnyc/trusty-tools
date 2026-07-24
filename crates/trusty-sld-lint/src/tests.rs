@@ -722,6 +722,27 @@ fn gap_backward_gaps_ref_inside_previous_unit_body_does_not_cover_next_unit() {
 }
 
 #[test]
+fn gap_forward_gap_detects_unlinked_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // A single anchored section, no code file at all: nothing can possibly
+    // link to it, so it must surface as exactly one forward gap.
+    write(
+        root,
+        "docs/specs/x.md",
+        "## Orphan {#SPEC-X-01~draft}\nbody\n",
+    );
+
+    let report = gap::run_gap_report(root);
+
+    assert_eq!(report.spec_sections_scanned, 1);
+    assert_eq!(report.forward_gaps.len(), 1);
+    assert_eq!(report.forward_gaps[0].id, "SPEC-X-01~draft");
+    assert_eq!(report.forward_gaps[0].path, "docs/specs/x.md");
+    assert_eq!(report.forward_gaps[0].line, 1);
+}
+
+#[test]
 fn gap_run_report_backward_and_forward() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
