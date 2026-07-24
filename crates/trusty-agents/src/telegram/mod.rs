@@ -112,12 +112,22 @@ pub(super) type SessionMap = Arc<Mutex<HashMap<ChatId, ChatSession>>>;
 /// directory package (`agents/assistant/agent.toml` + `persona.md`, no flat
 /// `assistant.toml`), so the old flat-only pre-check rejected `/switch
 /// assistant` with "Unknown persona" even though dispatch resolves it fine.
-/// What: returns true iff either form exists directly under `agents_dir`.
+/// What: returns true iff either a flat `<name>.toml` exists, OR a COMPLETE
+/// directory package exists. `load_agent_package` reads `<name>/agent.toml`
+/// AND `<name>/persona.md` UNCONDITIONALLY (no `Ok(None)` fallback if the
+/// persona is missing), so the package branch requires BOTH — otherwise an
+/// incomplete package (agent.toml only) would pass the pre-check here and then
+/// hard-fail on the next turn's load, the exact failure this pre-check exists
+/// to prevent.
 /// Test: `persona_exists_in_accepts_directory_package`,
-/// `persona_exists_in_rejects_unknown_name`.
+/// `persona_exists_in_rejects_unknown_name`,
+/// `persona_exists_in_rejects_package_missing_persona_md`.
 fn persona_exists_in(agents_dir: &std::path::Path, name: &str) -> bool {
-    agents_dir.join(format!("{name}.toml")).exists()
-        || agents_dir.join(name).join("agent.toml").exists()
+    if agents_dir.join(format!("{name}.toml")).exists() {
+        return true;
+    }
+    let pkg = agents_dir.join(name);
+    pkg.join("agent.toml").exists() && pkg.join("persona.md").exists()
 }
 
 /// Whether a persona resolves under a project's `.trusty-agents/agents/` dir,

@@ -553,6 +553,24 @@ fn persona_exists_in_rejects_unknown_name() {
     assert!(!super::persona_exists_in(&agents_dir, "does-not-exist"));
 }
 
+/// Why: `load_agent_package` reads `persona.md` unconditionally, so a package
+/// with `agent.toml` but no `persona.md` would pass a naive pre-check and then
+/// hard-fail on the next turn's load — the exact failure the pre-check guards
+/// against. It must be rejected here.
+/// What: an `agent.toml`-only package (no `persona.md`) resolves `false`.
+#[test]
+fn persona_exists_in_rejects_package_missing_persona_md() {
+    let agents_dir = tempdir_for_test();
+    let pkg = agents_dir.join("assistant");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("agent.toml"), "[agent]\nname = \"x\"\n").unwrap();
+    // No persona.md written.
+    assert!(
+        !super::persona_exists_in(&agents_dir, "assistant"),
+        "an incomplete package (agent.toml without persona.md) must NOT validate"
+    );
+}
+
 /// Why: the project-local tier of the `/switch` pre-check (checked before the
 /// `$HOME` fallback) is the one that resolves a repo's canonical `assistant`
 /// package — the demo path.
