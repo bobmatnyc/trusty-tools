@@ -105,6 +105,12 @@ pub(crate) enum PickerDecision {
     /// `tm sessions rename` issues, including its #3692
     /// auto-suffix-on-collision behavior — never a reimplementation.
     Rename(usize, String),
+    /// Re-print the current session list in place (issue #3863). Entered as
+    /// `ls` or `list` (case-insensitive). Not a selection — the driver takes
+    /// no daemon action beyond the re-fetch it already runs after every
+    /// dispatched choice, then redisplays the (refreshed) menu on the next
+    /// loop iteration.
+    ListSessions,
 }
 
 /// Scope describing which sessions the picker operates over and how to launch new.
@@ -558,6 +564,8 @@ fn decide_for_index(
 /// path, which can recreate its tmux pane (see
 /// [`super::guided_resume::needs_restart`]).
 ///   • `"q"` / `"Q"` → `Quit`
+///   • `"ls"` / `"list"` (case-insensitive, #3863) → `ListSessions` — re-print
+///     the current list in place, never a selection
 ///   • empty / whitespace, `sessions` empty → `LaunchNew`
 ///   • empty / whitespace, `sessions` non-empty → [`decide_for_index`] on
 ///     position 0, gated by `first_needs_restart`
@@ -586,7 +594,9 @@ fn decide_for_index(
 /// `guided_picker_numeric_unresumable_session_blocked`,
 /// `guided_picker_numeric_deleted_slot_blocked`,
 /// `guided_picker_delete_prefix_on_deleted_slot_blocked`,
-/// `guided_picker_launch_new_uses_highest_slot_with_gaps`.
+/// `guided_picker_launch_new_uses_highest_slot_with_gaps`,
+/// `guided_picker_ls_returns_list_sessions`,
+/// `guided_picker_list_returns_list_sessions`.
 pub(crate) fn parse_picker_choice(
     line: &str,
     sessions: &[ManagedSessionSummary],
@@ -595,6 +605,13 @@ pub(crate) fn parse_picker_choice(
     let choice = line.trim();
     if choice.eq_ignore_ascii_case("q") {
         return PickerDecision::Quit;
+    }
+    // #3863: `ls` / `list` re-print the current list in place — checked
+    // before the rename (`r<N>`)/delete (`d<N>`) prefix branches and the
+    // bare-Enter/numeric branches below since neither is a valid session
+    // slot number nor shares a prefix with them.
+    if choice.eq_ignore_ascii_case("ls") || choice.eq_ignore_ascii_case("list") {
+        return PickerDecision::ListSessions;
     }
     // #3723: see `next_launch_slot`'s doc — this must be the MAXIMUM slot
     // across the whole (possibly `sort_sessions`-reordered, #3483) slice,
@@ -692,7 +709,14 @@ pub(crate) fn parse_picker_choice(
 ///   • `SlotDeleted(i)` (#3034) → print a "session N was deleted" notice and
 ///     redisplay the SAME menu — no daemon round-trip, and never a
 ///     fallthrough to whichever session now occupies a neighboring slot;
-///   • `Quit` / EOF / `Unrecognised` → print notice and return `Ok`.
+///   • `ListSessions` (#3863) → no daemon action beyond the unconditional
+///     re-fetch that already runs at the bottom of every loop iteration —
+///     the next iteration reprints the (refreshed) menu, which is exactly
+///     "re-print the list";
+///   • `Unrecognised` (#3863) → print a one-line hint of the accepted input
+///     tokens and redisplay the SAME menu — this used to quit the picker
+///     outright, which was the wrong failure mode for a plain typo;
+///   • `Quit` / EOF → print notice and return `Ok`.
 ///
 /// #2678: both `Resume` and `LaunchNew` can end in a tmux hand-off — either a
 /// blocking `attach-session` (outside tmux; control returns here once the
@@ -753,6 +777,7 @@ pub(crate) async fn run_tty_picker(
             .unwrap_or(false);
         if sessions.is_empty() {
             eprintln!("[Enter] launch new session");
+            eprintln!("[ls]    re-print this list");
             eprintln!("[q]     quit");
         } else {
             if stale_slots {
@@ -779,6 +804,7 @@ pub(crate) async fn run_tty_picker(
             eprintln!("[{new_idx}] launch new session");
             eprintln!("[d<N>] delete session N (e.g. d1)");
             eprintln!("[r<N> <new-name>] rename session N (e.g. r1 tm-my-new-name)");
+            eprintln!("[ls] re-print this list");
             eprintln!("[q] quit");
             let first = &sessions[0];
             let first_num = shown_slot(&sessions, 0);
@@ -903,9 +929,22 @@ pub(crate) async fn run_tty_picker(
                 super::session_picker_rename::rename_selected(client, url, &sessions[i], new_name)
                     .await?;
             }
+            // #3863: `ls`/`list` re-print the current list in place — no
+            // daemon action of its own; simply fall through to the
+            // unconditional re-fetch below so the next loop iteration
+            // redisplays a freshly-fetched menu.
+            PickerDecision::ListSessions => {}
+            // #3863: an unrecognised choice used to quit the picker outright
+            // (a startling failure mode for a plain typo). Print a one-line
+            // hint of the accepted tokens and redisplay the SAME menu
+            // instead — no daemon round-trip.
             PickerDecision::Unrecognised => {
-                eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
-                break;
+                eprintln!(
+                    "tm: unrecognised choice '{}' — accepted: 1..{new_idx}, ls, d<N>, \
+                     r<N> <name>, q",
+                    line.trim()
+                );
+                continue;
             }
         }
 
