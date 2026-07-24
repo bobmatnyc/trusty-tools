@@ -228,6 +228,27 @@ fn doctor_data_dir_from_honors_explicit_override() {
     assert_eq!(p, std::path::PathBuf::from("/tmp/ts-x"));
 }
 
+/// Coverage for the PUBLIC `doctor_data_dir()` wrapper's env-reading half —
+/// the exact contract this PR (#3697) exists to protect. The two tests above
+/// exercise the pure `doctor_data_dir_from` core without touching process
+/// env, so this is the one test that must actually read `TRUSTY_DATA_DIR`:
+/// it is therefore the only `#[serial]` / env-mutating test in this file.
+/// `EnvVarGuard` save/restores the var so no sibling test is polluted, and
+/// `#[serial]` excludes it from the crate's other `TRUSTY_DATA_DIR` mutators.
+///
+/// Why: without this, the wrapper's `std::env::var("TRUSTY_DATA_DIR")` branch
+/// had zero coverage after the core was split out.
+/// What: set `TRUSTY_DATA_DIR=/tmp/ts-wrapper`, call `doctor_data_dir()`,
+/// assert it returns that path verbatim.
+/// Test: `doctor_data_dir_reads_env_var`.
+#[test]
+#[serial]
+fn doctor_data_dir_reads_env_var() {
+    let _g = EnvVarGuard::set("TRUSTY_DATA_DIR", "/tmp/ts-wrapper");
+    let p = doctor_data_dir();
+    assert_eq!(p, std::path::PathBuf::from("/tmp/ts-wrapper"));
+}
+
 #[test]
 fn fastembed_cache_dir_respects_env_override() {
     // Set a unique override value and assert the function returns exactly it.

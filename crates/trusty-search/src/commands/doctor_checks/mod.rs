@@ -146,8 +146,11 @@ pub fn check_model_cache() -> CheckResult {
 /// running daemon when an isolated data dir is active (issue #281).
 /// What: returns `$TRUSTY_DATA_DIR` when set, otherwise the platform-default
 /// `<data_local_dir>/trusty-search`.
-/// Test: set `TRUSTY_DATA_DIR=/tmp/ts-x`; assert `doctor_data_dir()` returns
-/// `PathBuf::from("/tmp/ts-x")`.
+/// Test: `doctor_data_dir_reads_env_var` covers this wrapper's env-reading
+/// half end-to-end (`#[serial]`, sets `TRUSTY_DATA_DIR` and asserts the
+/// wrapper returns it); the pure core's branches are covered without env
+/// access by `doctor_data_dir_returns_non_empty_path` (unset/fallback) and
+/// `doctor_data_dir_from_honors_explicit_override` (override).
 pub fn doctor_data_dir() -> std::path::PathBuf {
     doctor_data_dir_from(std::env::var("TRUSTY_DATA_DIR").ok())
 }
