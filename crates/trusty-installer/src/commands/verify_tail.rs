@@ -34,13 +34,19 @@
 //!    defensive-fallback check).
 //! 5. (#3841 belt-and-braces, second layer) A member classified
 //!    [`DownState::NotLoaded`] whose plist is present on disk gets ONE more
-//!    repair attempt here — [`attempt_verify_fallback`] calls the exact same
+//!    repair attempt here — [`apply_not_loaded_fallback`] calls the exact same
 //!    `ServiceEnv::bootstrap_fallback` primitive
-//!    `service_bootstrap::bootstrap_one`'s install-time postcondition uses,
-//!    and re-probes on success. This exists so that even a FUTURE skip-path
-//!    regression in the install-time layer (or a member the install-time
-//!    bootstrap never touched this run, e.g. `--no-service`) still self-heals
-//!    at verify time instead of silently reporting `NOT VERIFIED`.
+//!    `service_bootstrap::bootstrap_one`'s install-time postcondition uses
+//!    (via [`attempt_verify_fallback`]), and on success re-probes through the
+//!    SAME [`poll_until_not_down`]/[`bounded_attempts`] machinery the #2498
+//!    kickstart retry uses (#3849 code-critic MEDIUM 1 fix — a single instant
+//!    re-probe here would race a just-repaired but slow-starting daemon
+//!    exactly like the #3833 kickstart race did) — bounded by whatever of
+//!    `remaining_budget` the member's earlier kickstart poll (if any) hasn't
+//!    already spent. This exists so that even a FUTURE skip-path regression
+//!    in the install-time layer (or a member the install-time bootstrap never
+//!    touched this run, e.g. `--no-service`) still self-heals at verify time
+//!    instead of silently reporting `NOT VERIFIED`.
 //!
 //! Because `run_verify_tail` folds [`verify_one`] SEQUENTIALLY over every
 //! selected daemon member, and each member's poll wait can run up to
@@ -319,31 +325,156 @@ fn bounded_attempts(remaining: Duration) -> u32 {
 /// the EXACT same [`super::service_bootstrap::ServiceEnv::bootstrap_fallback`]
 /// primitive so the two layers can never disagree about how a label gets
 /// force-loaded.
-/// What: on macOS, if the member's plist exists on disk
-/// (`ServiceEnv::plist_present`), calls `ServiceEnv::bootstrap_fallback` and
-/// returns `Some(true)`/`Some(false)` for whether it succeeded. Returns
-/// `None` (nothing attempted) when the plist is not present at all — that is
-/// a genuine "never installed" state a `launchctl bootstrap` cannot repair
-/// (there is no plist to load), not this failure mode. Always `None` on
-/// non-macOS.
-/// Test: side-effecting (real `launchctl`); the trigger condition (`NotLoaded`
-/// only) and the resulting row shape are exercised by `verify_one`'s own
-/// side-effecting behaviour, which is validated manually — the pure pieces
-/// this composes with (`classify_down_state_from_entry`) are unit-tested in
-/// `verify_launchd_state`.
-#[cfg(target_os = "macos")]
-fn attempt_verify_fallback(binary: &str) -> Option<bool> {
-    use super::service_bootstrap::{RealServiceEnv, ServiceEnv};
-    let env = RealServiceEnv;
+///
+/// 🔴 (#3849 code-critic MEDIUM 2 fix) Takes `env: &dyn ServiceEnv` — never
+/// hardcodes `RealServiceEnv` itself — mirroring `service_bootstrap::
+/// bootstrap_one`'s own seam so this whole decision is unit-testable against
+/// an in-memory fake, the same way `bootstrap_one`'s is. The real call site
+/// ([`apply_not_loaded_fallback_real`]) is the only place that names
+/// `RealServiceEnv`.
+/// What: if the member's plist exists on disk (`ServiceEnv::plist_present`),
+/// calls `ServiceEnv::bootstrap_fallback` and returns `Some(true)`/`Some(false)`
+/// for whether it succeeded. Returns `None` (nothing attempted) when the
+/// plist is not present at all — that is a genuine "never installed" state a
+/// `launchctl bootstrap` cannot repair (there is no plist to load), not this
+/// failure mode.
+/// Test: `tests::apply_not_loaded_fallback_*` (via `FakeServiceEnv`, composed
+/// through [`apply_not_loaded_fallback`] below).
+fn attempt_verify_fallback(
+    env: &dyn super::service_bootstrap::ServiceEnv,
+    binary: &str,
+) -> Option<bool> {
     if !env.plist_present(binary) {
         return None;
     }
     Some(env.bootstrap_fallback(binary).is_ok())
 }
 
+/// The complete #3841 second-layer repair: attempt the bootstrap fallback via
+/// `env`, and on success, re-probe through the SAME bounded
+/// [`poll_until_not_down`]/[`bounded_attempts`] machinery the #2498 kickstart
+/// retry uses — never a single racy instant probe — before re-classifying.
+///
+/// Why: extracted as its own generic function (rather than inlined in
+/// [`verify_one`]) so the WHOLE `NotLoaded -> fallback -> re-poll ->
+/// re-classify` wiring is directly unit-testable against fakes, not just
+/// [`attempt_verify_fallback`] in isolation (#3849 code-critic MEDIUM 2). Also
+/// fixes #3849 code-critic MEDIUM 1: the pre-fix code re-probed exactly once,
+/// instantly, after a successful fallback — racing a just-repaired but
+/// slow-starting daemon (trusty-search's first-boot embedding-model download
+/// notably) into a false `down`/`NOT VERIFIED`, the same race class #3833
+/// already fixed for the kickstart path. `probe`/`wait`/`classify` are kept
+/// generic (rather than calling `probe_member_health`/`std::thread::sleep`/
+/// `classify_down_state` directly) so this composes hermetically in tests,
+/// never sleeping or shelling out to `launchctl` in the test suite.
+///
+/// # Preconditions
+/// Caller has already established the member is currently diagnosed
+/// [`DownState::NotLoaded`] (`manage == ManageStrategy::Launchd`, health ==
+/// `down`) — this function does not re-derive that starting condition.
+/// # Postconditions
+/// Returns `(health, down_state, verify_bootstrapped)`.
+/// `verify_bootstrapped` is `true` iff [`attempt_verify_fallback`] found a
+/// plist and attempted the fallback bootstrap, REGARDLESS of whether it
+/// succeeded. When the fallback attempt did not run at all (no plist) or the
+/// `bootstrap_fallback` call itself failed, `health`/`down_state` are
+/// returned UNCHANGED (`health_str::DOWN` / `Some(DownState::NotLoaded)`) —
+/// only a SUCCESSFUL fallback triggers the re-poll and re-classification.
+/// When `remaining_budget` is already exhausted at the moment the fallback
+/// succeeds, falls back to a single instant `probe()` (never an unbounded
+/// wait) rather than skipping the re-probe entirely.
+/// Test: `tests::apply_not_loaded_fallback_heals_after_poll_when_fallback_succeeds`,
+/// `tests::apply_not_loaded_fallback_reports_still_not_loaded_when_fallback_fails`,
+/// `tests::apply_not_loaded_fallback_noop_when_no_plist`,
+/// `tests::apply_not_loaded_fallback_uses_instant_probe_when_budget_exhausted`.
+fn apply_not_loaded_fallback<F, W, C>(
+    env: &dyn super::service_bootstrap::ServiceEnv,
+    binary: &str,
+    manage: ManageStrategy,
+    remaining_budget: Duration,
+    mut probe: F,
+    mut wait: W,
+    classify: C,
+) -> (String, Option<DownState>, bool)
+where
+    F: FnMut() -> String,
+    W: FnMut(),
+    C: Fn() -> DownState,
+{
+    let Some(succeeded) = attempt_verify_fallback(env, binary) else {
+        return (
+            health_str::DOWN.to_owned(),
+            Some(DownState::NotLoaded),
+            false,
+        );
+    };
+    if !succeeded {
+        return (
+            health_str::DOWN.to_owned(),
+            Some(DownState::NotLoaded),
+            true,
+        );
+    }
+    // #3849 MEDIUM 1: bounded re-poll, never a single instant re-probe — the
+    // fallback just force-loaded the label, but the daemon behind it can
+    // still take real wall-clock time to report healthy.
+    let health = if remaining_budget.is_zero() {
+        probe()
+    } else {
+        let (polled, _attempts) =
+            poll_until_not_down(&mut probe, &mut wait, bounded_attempts(remaining_budget));
+        polled
+    };
+    let down_state = if health == health_str::DOWN && manage == ManageStrategy::Launchd {
+        Some(classify())
+    } else {
+        None
+    };
+    (health, down_state, true)
+}
+
+/// Real-wiring shell for [`apply_not_loaded_fallback`] — the only place that
+/// names `RealServiceEnv`/`probe_member_health`/`classify_down_state`
+/// (mirrors `service_bootstrap::bootstrap_member_service`'s split from
+/// `bootstrap_one`).
+///
+/// Why: keeps [`verify_one`] itself free of platform `cfg` noise; on
+/// non-macOS this is an unconditional no-op returning the SAME "untouched"
+/// triple [`apply_not_loaded_fallback`] returns for its own no-plist case, so
+/// callers never need to branch on platform.
+/// What: on macOS, delegates to [`apply_not_loaded_fallback`] with
+/// [`super::service_bootstrap::RealServiceEnv`] and the real probe/wait/
+/// classify closures; on non-macOS, always `(down, Some(NotLoaded), false)`.
+/// Test: side-effecting (real `launchctl` + sleep) on macOS; the decision
+/// logic it wraps is `apply_not_loaded_fallback`'s own test suite.
+#[cfg(target_os = "macos")]
+fn apply_not_loaded_fallback_real(
+    binary: &str,
+    manage: ManageStrategy,
+    remaining_budget: Duration,
+) -> (String, Option<DownState>, bool) {
+    apply_not_loaded_fallback(
+        &super::service_bootstrap::RealServiceEnv,
+        binary,
+        manage,
+        remaining_budget,
+        || probe_member_health(binary, manage),
+        || std::thread::sleep(POLL_INTERVAL),
+        || classify_down_state(binary),
+    )
+}
+
 #[cfg(not(target_os = "macos"))]
-fn attempt_verify_fallback(_binary: &str) -> Option<bool> {
-    None
+fn apply_not_loaded_fallback_real(
+    _binary: &str,
+    _manage: ManageStrategy,
+    _remaining_budget: Duration,
+) -> (String, Option<DownState>, bool) {
+    (
+        health_str::DOWN.to_owned(),
+        Some(DownState::NotLoaded),
+        false,
+    )
 }
 
 /// Verify one daemon member, applying the #2498 kickstart retry + #3833 poll
@@ -368,13 +499,18 @@ fn attempt_verify_fallback(_binary: &str) -> Option<bool> {
 /// [`classify_down_state`] regardless of whether the budget was exhausted —
 /// that check is a single cheap `launchctl list`, not a poll, so it's never
 /// budget-gated. When the classification is [`DownState::NotLoaded`], calls
-/// [`attempt_verify_fallback`] (#3841); on a successful fallback, re-probes
-/// health and re-classifies so the returned row reflects the POST-repair
-/// state, not the stale diagnosis.
+/// [`apply_not_loaded_fallback_real`] (#3841); on a successful fallback,
+/// re-probes (via the SAME bounded poll machinery, #3849 MEDIUM 1) and
+/// re-classifies so the returned row reflects the POST-repair state, not the
+/// stale diagnosis. `remaining_budget` for that second poll is recomputed
+/// from `start.elapsed()` rather than reusing the raw parameter, so it
+/// correctly reflects whatever the kickstart poll immediately above already
+/// spent within this SAME member's turn.
 /// Test: side-effecting (subprocess + sleep); the decision halves are
 /// `needs_kickstart`, `poll_until_not_down`, `bounded_attempts`,
-/// `classify_down_state_from_entry`.
+/// `classify_down_state_from_entry`, `apply_not_loaded_fallback`.
 fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
+    let start = Instant::now();
     let mut health = probe_member_health(&m.binary, m.manage);
     let mut kickstarted = false;
     let mut budget_exhausted = false;
@@ -401,21 +537,18 @@ fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
 
     // #3841 belt-and-braces (layer 2): a `NotLoaded` diagnosis here means the
     // label was never bootstrapped by ANY earlier step this run took. Try
-    // the installer's own fallback bootstrap one more time and, if it
-    // succeeds, re-probe so the row reports reality, not a stale diagnosis.
+    // the installer's own fallback bootstrap one more time; on success,
+    // `apply_not_loaded_fallback_real` re-polls (bounded by whatever of
+    // `remaining_budget` is left after the kickstart phase above) rather than
+    // a single racy instant probe (#3849 MEDIUM 1).
     let mut verify_bootstrapped = false;
     if matches!(down_state, Some(DownState::NotLoaded)) {
-        if let Some(succeeded) = attempt_verify_fallback(&m.binary) {
-            verify_bootstrapped = true;
-            if succeeded {
-                health = probe_member_health(&m.binary, m.manage);
-                down_state = if health == health_str::DOWN && m.manage == ManageStrategy::Launchd {
-                    Some(classify_down_state(&m.binary))
-                } else {
-                    None
-                };
-            }
-        }
+        let remaining_now = remaining_budget.saturating_sub(start.elapsed());
+        let (new_health, new_down_state, attempted) =
+            apply_not_loaded_fallback_real(&m.binary, m.manage, remaining_now);
+        verify_bootstrapped = attempted;
+        health = new_health;
+        down_state = new_down_state;
     }
 
     VerifyRow {
@@ -595,405 +728,5 @@ pub fn print_human(report: &VerifyTailReport) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn row(member: &str, health: &str) -> VerifyRow {
-        VerifyRow {
-            member: member.to_owned(),
-            health: health.to_owned(),
-            kickstarted: false,
-            required: true,
-            budget_exhausted: false,
-            down_state: None,
-            verify_bootstrapped: false,
-        }
-    }
-
-    /// Like `row`, but marks the member OPTIONAL (graceful-degrade,
-    /// demo-critical fix).
-    fn optional_row(member: &str, health: &str) -> VerifyRow {
-        VerifyRow {
-            required: false,
-            ..row(member, health)
-        }
-    }
-
-    /// Why: only a `down` LAUNCHD daemon is the #2498 failure signature.
-    /// What: asserts the truth table across health x manage-strategy.
-    /// Test: This is the test.
-    #[test]
-    fn needs_kickstart_only_for_down_launchd() {
-        assert!(needs_kickstart(health_str::DOWN, ManageStrategy::Launchd));
-        assert!(!needs_kickstart(
-            health_str::HEALTHY,
-            ManageStrategy::Launchd
-        ));
-        assert!(!needs_kickstart(
-            health_str::NOT_INSTALLED,
-            ManageStrategy::Launchd
-        ));
-        assert!(!needs_kickstart(health_str::DOWN, ManageStrategy::OwnVerb));
-        assert!(!needs_kickstart(health_str::DOWN, ManageStrategy::None));
-    }
-
-    /// Why: the JSON envelope is a contract; pin its shape.
-    /// What: builds a report and asserts the keys.
-    /// Test: This is the test.
-    #[test]
-    fn report_serialises() {
-        let report = VerifyTailReport::build(true, vec![row("trusty-search", "healthy")]);
-        let v = serde_json::to_value(&report).expect("serialises");
-        assert_eq!(v["command"], "install.verify");
-        assert_eq!(v["ensure_ok"], true);
-        assert_eq!(v["verified"], true);
-        assert_eq!(v["members"][0]["member"], "trusty-search");
-    }
-
-    /// Why: THE #2560 safety property — a down/missing daemon OR a failed
-    /// ensure pass must both flip `verified` to `false`; only when BOTH are
-    /// clean is the install considered verified.
-    /// What: exercises each failure axis independently.
-    /// Test: This is the test.
-    #[test]
-    fn verified_requires_ensure_and_health() {
-        let ensure_failed = VerifyTailReport::build(false, vec![row("trusty-search", "healthy")]);
-        assert!(!ensure_failed.verified, "a failed ensure must not verify");
-
-        let health_failed = VerifyTailReport::build(true, vec![row("trusty-search", "down")]);
-        assert!(!health_failed.verified, "a down daemon must not verify");
-
-        let not_installed =
-            VerifyTailReport::build(true, vec![row("trusty-search", health_str::NOT_INSTALLED)]);
-        assert!(!not_installed.verified, "not_installed must not verify");
-
-        let both_ok = VerifyTailReport::build(true, vec![row("trusty-search", "healthy")]);
-        assert!(both_ok.verified);
-    }
-
-    /// Why: `stale` (running, below version floor) and `unknown`
-    /// (process-managed, unprobeable — trusty-mpm) must NOT fail verification
-    /// — mirrors `stack::health::HealthReport`'s degrade policy exactly.
-    /// What: a report with only stale/unknown members still verifies.
-    /// Test: This is the test.
-    #[test]
-    fn verified_tolerates_stale_and_unknown() {
-        let report = VerifyTailReport::build(
-            true,
-            vec![
-                row("trusty-search", health_str::STALE),
-                row("trusty-mpm", health_str::UNKNOWN),
-            ],
-        );
-        assert!(report.verified);
-    }
-
-    /// Why: THE demo-critical fix — an OPTIONAL daemon member (e.g.
-    /// `trusty-console` never installed because it has no prebuilt for this
-    /// platform) being `down`/`not_installed` must NOT fail `verified`; only
-    /// a REQUIRED member's bad health may.
-    /// What: a report mixing a healthy REQUIRED member with a `down` and a
-    /// `not_installed` OPTIONAL member still verifies; a `down` REQUIRED
-    /// member alongside a healthy OPTIONAL one does not.
-    /// Test: This is the test.
-    #[test]
-    fn verified_ignores_optional_down_member() {
-        let degraded = VerifyTailReport::build(
-            true,
-            vec![
-                row("trusty-search", health_str::HEALTHY),
-                optional_row("trusty-console", health_str::DOWN),
-                optional_row("tga", health_str::NOT_INSTALLED),
-            ],
-        );
-        assert!(
-            degraded.verified,
-            "an optional member's bad health must not fail verification"
-        );
-
-        let genuinely_failed = VerifyTailReport::build(
-            true,
-            vec![
-                row("trusty-search", health_str::DOWN),
-                optional_row("trusty-console", health_str::HEALTHY),
-            ],
-        );
-        assert!(
-            !genuinely_failed.verified,
-            "a required member's bad health must still fail verification"
-        );
-    }
-
-    /// Why: `print_human`'s colour path must never panic regardless of the
-    /// harness's stdout fd; this just confirms it is callable.
-    /// What: calls `use_color`, binds the result.
-    /// Test: This is the test.
-    #[test]
-    fn use_color_returns_bool() {
-        let _v: bool = use_color();
-    }
-
-    /// Why: #3797 critic finding (MEDIUM, demo-relevant) — an OPTIONAL daemon
-    /// that is `not_installed` must read as "(optional, skipped)", not a
-    /// bare, alarming `not_installed` right above the green `VERIFIED` line.
-    /// A REQUIRED member's `not_installed` must get NO such softening
-    /// annotation, and a successful `kickstarted` retry must win over it.
-    /// (#3833: a bare `down` health with no `down_state` set no longer
-    /// happens in production — `verify_one` always attaches a `down_state`
-    /// for a down LAUNCHD member — so the `down`-specific cases moved to
-    /// `optional_annotation_reports_down_state` below.)
-    /// What: exercises the `not_installed` + `kickstarted` truth table.
-    /// Test: This is the test.
-    #[test]
-    fn optional_annotation_covers_not_installed_and_down() {
-        assert_eq!(
-            optional_annotation(&optional_row("trusty-console", health_str::NOT_INSTALLED)),
-            " (optional, skipped)"
-        );
-        assert_eq!(
-            optional_annotation(&optional_row("trusty-console", health_str::HEALTHY)),
-            "",
-            "a healthy optional member needs no annotation"
-        );
-        assert_eq!(
-            optional_annotation(&row("trusty-search", health_str::NOT_INSTALLED)),
-            "",
-            "a REQUIRED member's not_installed health must not be softened"
-        );
-        let kickstarted = VerifyRow {
-            kickstarted: true,
-            health: health_str::HEALTHY.to_owned(),
-            ..optional_row("trusty-console", health_str::HEALTHY)
-        };
-        assert_eq!(
-            optional_annotation(&kickstarted),
-            " (kickstarted)",
-            "a kickstart retry that came back healthy is noted"
-        );
-    }
-
-    /// Why: #3833 — a member still `down` after the poll wait must report
-    /// WHICH of the three end states it is, for both REQUIRED (plain
-    /// diagnosis, no softening) and OPTIONAL (still prefixed `optional,` —
-    /// it is informational, not an alarm) members. This must take priority
-    /// over the plain `kickstarted` note, since `down_state` being `Some`
-    /// means the kickstart did NOT resolve the problem.
-    /// What: exercises all three `DownState` variants for both required and
-    /// optional members, and confirms `down_state` wins over `kickstarted`.
-    /// Test: This is the test.
-    #[test]
-    fn optional_annotation_reports_down_state() {
-        let with_state = |required: bool, state: DownState| VerifyRow {
-            required,
-            down_state: Some(state),
-            ..row("trusty-memory", health_str::DOWN)
-        };
-
-        assert_eq!(
-            optional_annotation(&with_state(true, DownState::NotLoaded)),
-            " (not loaded)"
-        );
-        assert_eq!(
-            optional_annotation(&with_state(false, DownState::NotLoaded)),
-            " (optional, not loaded)"
-        );
-        assert_eq!(
-            optional_annotation(&with_state(true, DownState::Crashed { exit_code: 2 })),
-            " (crashed, exit 2)"
-        );
-        assert_eq!(
-            optional_annotation(&with_state(false, DownState::Crashed { exit_code: -9 })),
-            " (optional, crashed, exit -9)"
-        );
-        assert_eq!(
-            optional_annotation(&with_state(true, DownState::StillStarting)),
-            " (still starting)"
-        );
-
-        let kickstarted_but_still_down = VerifyRow {
-            kickstarted: true,
-            ..with_state(true, DownState::StillStarting)
-        };
-        assert_eq!(
-            optional_annotation(&kickstarted_but_still_down),
-            " (still starting)",
-            "an unresolved down_state must win over the plain kickstarted note"
-        );
-    }
-
-    /// Why: THE #3841 layer-2 safety property — the verify tail's own
-    /// bootstrap-fallback attempt must be visible in the human summary both
-    /// when it RESOLVED the member (down_state cleared back to `None`) and
-    /// when it was attempted but the diagnosis persists (fallback also
-    /// failed, or launchd still didn't pick up the label).
-    /// What: `verify_bootstrapped: true` with `down_state: None` reports
-    /// "(bootstrapped by installer)"; `verify_bootstrapped: true` with a
-    /// still-`Some` `down_state` appends ", fallback attempted" to the
-    /// existing diagnosis phrase; `verify_bootstrapped: false` (the default)
-    /// changes nothing versus the pre-#3841 behaviour.
-    /// Test: This is the test.
-    #[test]
-    fn optional_annotation_reports_verify_bootstrapped() {
-        let resolved = VerifyRow {
-            verify_bootstrapped: true,
-            health: health_str::HEALTHY.to_owned(),
-            ..row("trusty-memory", health_str::HEALTHY)
-        };
-        assert_eq!(
-            optional_annotation(&resolved),
-            " (bootstrapped by installer)"
-        );
-
-        let still_broken = VerifyRow {
-            verify_bootstrapped: true,
-            down_state: Some(DownState::NotLoaded),
-            ..row("trusty-memory", health_str::DOWN)
-        };
-        assert_eq!(
-            optional_annotation(&still_broken),
-            " (not loaded, fallback attempted)"
-        );
-
-        let optional_still_broken = VerifyRow {
-            required: false,
-            ..still_broken.clone()
-        };
-        assert_eq!(
-            optional_annotation(&optional_still_broken),
-            " (optional, not loaded, fallback attempted)"
-        );
-    }
-
-    /// Why: THE #3833 safety property — polling must terminate the instant
-    /// health stops being `down`, without over-waiting or under-waiting.
-    /// What: a probe sequence [down, down, healthy] must return after
-    /// exactly 3 attempts with 2 waits.
-    /// Test: This is the test.
-    #[test]
-    fn poll_until_not_down_stops_when_healthy() {
-        let responses = std::cell::RefCell::new(vec![
-            health_str::HEALTHY.to_owned(),
-            health_str::DOWN.to_owned(),
-            health_str::DOWN.to_owned(),
-        ]);
-        let waits = std::cell::RefCell::new(0u32);
-        let (health, attempts) = poll_until_not_down(
-            || {
-                responses
-                    .borrow_mut()
-                    .pop()
-                    .expect("probe called too many times")
-            },
-            || *waits.borrow_mut() += 1,
-            10,
-        );
-        assert_eq!(health, health_str::HEALTHY);
-        assert_eq!(attempts, 3);
-        assert_eq!(*waits.borrow(), 2, "must wait exactly twice, not 3 times");
-    }
-
-    /// Why: against a genuinely dead daemon, the poll must still terminate —
-    /// never block `tctl install` forever.
-    /// What: a probe that always returns `down` must stop at exactly
-    /// `max_attempts`, waiting `max_attempts - 1` times (never after the
-    /// final attempt).
-    /// Test: This is the test.
-    #[test]
-    fn poll_until_not_down_stops_at_max_attempts() {
-        let waits = std::cell::RefCell::new(0u32);
-        let (health, attempts) = poll_until_not_down(
-            || health_str::DOWN.to_owned(),
-            || *waits.borrow_mut() += 1,
-            4,
-        );
-        assert_eq!(health, health_str::DOWN);
-        assert_eq!(attempts, 4);
-        assert_eq!(
-            *waits.borrow(),
-            3,
-            "must not wait after the final (4th) attempt"
-        );
-    }
-
-    /// Why: the common case — a daemon that is already healthy by the time
-    /// the retry fires — must return immediately with zero waits, not
-    /// needlessly sleep once.
-    /// What: a probe that is healthy on the first call triggers no wait.
-    /// Test: This is the test.
-    #[test]
-    fn poll_until_not_down_first_attempt_needs_no_wait() {
-        let waits = std::cell::RefCell::new(0u32);
-        let (health, attempts) = poll_until_not_down(
-            || health_str::HEALTHY.to_owned(),
-            || *waits.borrow_mut() += 1,
-            10,
-        );
-        assert_eq!(health, health_str::HEALTHY);
-        assert_eq!(attempts, 1);
-        assert_eq!(*waits.borrow(), 0);
-    }
-
-    /// Why: #3836 MEDIUM fix — with a generous remaining budget, a member
-    /// must still get its full [`POLL_MAX_ATTEMPTS`] ceiling, never MORE.
-    /// What: a large `remaining` (e.g. the full aggregate budget) clamps to
-    /// exactly `POLL_MAX_ATTEMPTS`.
-    /// Test: This is the test.
-    #[test]
-    fn bounded_attempts_clamped_to_max() {
-        assert_eq!(bounded_attempts(AGGREGATE_POLL_BUDGET), POLL_MAX_ATTEMPTS);
-        assert_eq!(
-            bounded_attempts(Duration::from_secs(3600)),
-            POLL_MAX_ATTEMPTS
-        );
-    }
-
-    /// Why: THE #3836 core safety property — a member turn late in the fold,
-    /// with little aggregate budget left, must get proportionally FEWER
-    /// attempts, not the full schedule (which is what let a single member
-    /// blow through the aggregate cap).
-    /// What: a small remaining budget yields fewer than `POLL_MAX_ATTEMPTS`
-    /// attempts, and a larger remaining budget yields a value in between.
-    /// Test: This is the test.
-    #[test]
-    fn bounded_attempts_shrinks_with_small_budget() {
-        // 12s remaining / 5s interval -> 1 + 2 = 3 attempts.
-        assert_eq!(bounded_attempts(Duration::from_secs(12)), 3);
-        // 30s remaining -> 1 + 6 = 7 attempts, strictly between 1 and the max.
-        let mid = bounded_attempts(Duration::from_secs(30));
-        assert!(
-            mid > 1 && mid < POLL_MAX_ATTEMPTS,
-            "expected a value strictly between 1 and {POLL_MAX_ATTEMPTS}, got {mid}"
-        );
-    }
-
-    /// Why: even a sliver of remaining budget must still attempt AT LEAST
-    /// one probe — never zero (a zero-attempt poll makes no sense; an
-    /// entirely exhausted budget is handled as its own separate case by
-    /// `verify_one`, not by this function receiving a zero `remaining`).
-    /// What: a 1-second remaining budget still yields `1`.
-    /// Test: This is the test.
-    #[test]
-    fn bounded_attempts_at_least_one() {
-        assert_eq!(bounded_attempts(Duration::from_secs(1)), 1);
-    }
-
-    /// Why: #3836 — the "budget exhausted" summary note must fire iff ANY
-    /// member's poll was skipped for that reason, and must NOT fire on an
-    /// all-clear report (avoids alarming an operator over nothing).
-    /// What: exercises both the empty/all-false case and a mixed case.
-    /// Test: This is the test.
-    #[test]
-    fn any_budget_exhausted_detects_any_row() {
-        assert!(!any_budget_exhausted(&[]));
-        assert!(!any_budget_exhausted(&[row("trusty-search", "healthy")]));
-
-        let exhausted = VerifyRow {
-            budget_exhausted: true,
-            ..row("trusty-memory", health_str::DOWN)
-        };
-        assert!(any_budget_exhausted(&[
-            row("trusty-search", "healthy"),
-            exhausted
-        ]));
-    }
-}
+#[path = "verify_tail_tests.rs"]
+mod tests;

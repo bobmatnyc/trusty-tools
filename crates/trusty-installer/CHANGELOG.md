@@ -34,7 +34,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   success (#3841). This means a future regression in the install-time
   skip-path handling — or any member the install-time bootstrap didn't run
   for this invocation — still self-heals at verify time instead of silently
-  reporting `NOT VERIFIED`.
+  reporting `NOT VERIFIED`. Code-critic fix round on PR #3849 (APPROVE, 2
+  MEDIUM): the post-fallback re-probe now goes through the SAME bounded
+  `poll_until_not_down`/`bounded_attempts` machinery the #2498 kickstart
+  retry uses (respecting whatever of the aggregate poll budget the member's
+  own kickstart phase already spent) instead of a single instant re-probe
+  that could race a just-repaired but slow-starting daemon into a false
+  `NOT VERIFIED` — the same race class #3833 fixed for the kickstart path;
+  and the fallback attempt itself (`apply_not_loaded_fallback`) now takes an
+  injectable `ServiceEnv` (mirroring `bootstrap_one`), with new unit tests
+  covering both a successful and a failed fallback outcome.
 - Manual workaround for a machine already stuck in this state (installer
   0.4.8, no code fix applied): `launchctl bootstrap gui/$(id -u)
   ~/Library/LaunchAgents/com.trusty.memory.plist && launchctl kickstart -k
