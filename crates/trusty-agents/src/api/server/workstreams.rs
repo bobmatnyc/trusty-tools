@@ -303,7 +303,7 @@ fn palace_id_for(cwd: &Path) -> Option<String> {
 /// Otherwise fetches up to `WORKSTREAM_SCAN_LIMIT` of the palace's most
 /// recent drawers and groups them.
 /// Test: `list_workstreams_at_no_project_root_is_empty`,
-/// `list_workstreams_at_against_mock_daemon`.
+/// `list_workstreams_at_unreachable_daemon_is_empty_not_error`.
 pub(super) async fn list_workstreams_at(cwd: &Path, base_url: &str) -> Vec<WorkstreamSummary> {
     let Some(palace_id) = palace_id_for(cwd) else {
         return Vec::new();

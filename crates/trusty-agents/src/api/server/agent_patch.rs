@@ -80,9 +80,10 @@ use super::state::AppState;
 /// `(toml_path, package_dir)`; `package_dir` is `Some` only for the package
 /// case, and is what [`patch_agent_at`] uses to locate a sibling `persona.md`.
 /// Returns `None` when neither a package nor a flat file exists for `name`.
-/// Test: `resolve_agent_paths_prefers_package_over_flat_shadow`,
-/// `resolve_agent_paths_falls_back_to_flat`, `resolve_agent_paths_none_when_absent`,
-/// `resolve_agent_paths_searches_second_tier_when_first_misses`.
+/// Test: `patch_agent_prefers_package_over_flat_shadow`,
+/// `patch_agent_prefers_first_tier_over_second`,
+/// `get_agent_searches_second_tier_when_first_misses`,
+/// `get_agent_route_unknown_agent_404` (the `None` case).
 ///
 /// `dirs` is searched in order (project-local tier before `$HOME`, matching
 /// [`crate::agents::agents_dir_candidates`]'s documented precedence) —
@@ -514,7 +515,7 @@ pub(super) async fn get_agent_at(dirs: &[PathBuf], name: &str) -> Response {
 /// not a write, and has its own response shape.
 /// What: Resolves `:name` via [`resolve_agent_paths`] and delegates to
 /// [`persona_at`].
-/// Test: `super::tests::agent_patch::persona_route_*`.
+/// Test: `super::tests::agent_patch::get_agent_persona_reads_package_persona`.
 pub(super) async fn get_agent_persona_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -533,8 +534,8 @@ pub(super) async fn get_agent_persona_route(
 /// agent, reads `persona.md` (empty string if the file is present but
 /// somehow unreadable-as-missing is treated as `content: null` — see the
 /// `NotFound` arm) and returns `editable: true`.
-/// Test: `persona_at_reads_package_persona`,
-/// `persona_at_flat_agent_not_editable`, `persona_at_unknown_agent_404`.
+/// Test: `get_agent_persona_reads_package_persona`,
+/// `get_agent_persona_not_editable_for_flat_agent`, `get_agent_persona_unknown_agent_404`.
 pub(super) async fn persona_at(dirs: &[PathBuf], name: &str) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
         return bad_request("invalid agent name");

@@ -362,7 +362,7 @@ pub struct AgentInfo {
     /// agent dispatchable but out of picker UIs (e.g. trimming the demo
     /// roster to Izzie/CTO Assistant/Concierge without touching
     /// `assistant`/`personal-assistant`/`research-agent`'s role or tools).
-    /// Test: `hidden_defaults_to_false`, `hidden_parses_true`.
+    /// Test: `parse_agent_toml_hidden_defaults_false_and_parses_true`.
     #[serde(default)]
     pub hidden: bool,
 
