@@ -15,6 +15,10 @@
 //! Test: `cargo test -p trusty-installer` runs all tests in this file.
 
 use super::*;
+// Not re-exported by `install.rs` itself (only used internally by
+// `install_report.rs`'s own `print_dry_run`), so pulled in directly here.
+use super::install_report::build_dry_run_report;
+use crate::commands::stable_set::ManageStrategy;
 
 /// Build an `InstallOutcome` with the pre-#2566 default service state
 /// (not attempted — `service_ok: true`, empty detail) and the pre-#3554
