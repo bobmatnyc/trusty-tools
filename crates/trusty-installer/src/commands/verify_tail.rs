@@ -340,6 +340,16 @@ fn bounded_attempts(remaining: Duration) -> u32 {
 /// failure mode.
 /// Test: `tests::apply_not_loaded_fallback_*` (via `FakeServiceEnv`, composed
 /// through [`apply_not_loaded_fallback`] below).
+///
+/// `#[cfg(any(test, target_os = "macos"))]`: the only PRODUCTION call site
+/// ([`apply_not_loaded_fallback_real`]'s macOS branch) is itself macOS-only —
+/// on a non-macOS build with `test` cfg off, nothing calls this function at
+/// all, and an un-gated `fn` here would be flagged `dead_code` under `-D
+/// warnings` (caught by Linux CI; mirrors the existing `kickstart` dual-cfg
+/// pattern just above, generalised to also stay compiled for the test target
+/// on every platform so `tests::apply_not_loaded_fallback_*` still run
+/// cross-platform).
+#[cfg(any(test, target_os = "macos"))]
 fn attempt_verify_fallback(
     env: &dyn super::service_bootstrap::ServiceEnv,
     binary: &str,
@@ -387,6 +397,10 @@ fn attempt_verify_fallback(
 /// `tests::apply_not_loaded_fallback_reports_still_not_loaded_when_fallback_fails`,
 /// `tests::apply_not_loaded_fallback_noop_when_no_plist`,
 /// `tests::apply_not_loaded_fallback_uses_instant_probe_when_budget_exhausted`.
+///
+/// `#[cfg(any(test, target_os = "macos"))]`: see [`attempt_verify_fallback`]'s
+/// doc — same reasoning, same non-macOS-production dead-code hazard.
+#[cfg(any(test, target_os = "macos"))]
 fn apply_not_loaded_fallback<F, W, C>(
     env: &dyn super::service_bootstrap::ServiceEnv,
     binary: &str,
