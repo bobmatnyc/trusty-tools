@@ -260,18 +260,30 @@ fn req_to_value(req: &mcp::Request) -> serde_json::Value {
     serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({}))
 }
 
-/// Inject `default_palace` into a JSON-RPC request's params when the caller
-/// hasn't already specified a `palace` field.
+/// Inject `default_palace` into a JSON-RPC request's arguments when the
+/// caller hasn't already specified a `palace` field.
 ///
 /// Why: `serve --stdio --palace <name>` should behave the same for the bridge
 /// path as it did for the direct-store path -- every tool call that accepts a
-/// `palace` parameter should see the default. We inject it at the envelope
-/// level here, avoiding per-tool-handler coupling.
-/// What: if `params` is a JSON object and has no `palace` key, adds
-/// `"palace": <default_palace>`. If params is null/absent, wraps it in an
-/// object `{"palace": default_palace}`. Leaves the value unchanged if params
-/// already contains `palace` or if `default_palace` is None.
-/// Test: `inject_default_palace_adds_when_absent`, `inject_default_palace_preserves_existing`.
+/// `palace` parameter should see the default. A real MCP client (Claude Code)
+/// sends the standard `tools/call` envelope (`method: "tools/call"`, `params:
+/// {name, arguments}`) and tool handlers read `arguments.palace`, NOT
+/// top-level `params.palace` -- injecting only at the top level (the
+/// pre-existing bug: issue reported live during demo prep) left every real
+/// `tools/call` request without a palace, surfacing as `-32603: memory_recall:
+/// missing 'palace'` even with `--palace` configured. This mirrors
+/// [`inject_caller_context`]'s dispatch-shape handling exactly.
+/// What: for `method: "tools/call"`, finds or creates `params.arguments` and
+/// injects `"palace": <default_palace>` there when absent. For any other
+/// (legacy direct method-per-tool, `params` IS the argument object) request
+/// shape, keeps the original top-level `params.palace` injection. Leaves the
+/// value unchanged if the target already contains `palace` or if
+/// `default_palace` is `None`.
+/// Test: `inject_default_palace_adds_when_absent`,
+/// `inject_default_palace_preserves_existing`,
+/// `inject_default_palace_tools_call_adds_when_absent`,
+/// `inject_default_palace_tools_call_preserves_existing`,
+/// `inject_default_palace_noop_when_none`.
 fn inject_default_palace(
     mut req: serde_json::Value,
     default_palace: Option<&str>,
@@ -280,7 +292,10 @@ fn inject_default_palace(
         return req;
     };
 
-    // Find or create the params object.
+    let is_tools_call = req.get("method").and_then(|m| m.as_str()) == Some("tools/call");
+
+    // Find or create the params object (same three-way shape as
+    // `inject_caller_context`).
     let params = match req.get_mut("params") {
         Some(p) if p.is_object() => p,
         Some(p) if p.is_null() => {
@@ -295,9 +310,30 @@ fn inject_default_palace(
         _ => return req,
     };
 
+    // For `tools/call`, the tool's actual argument object -- the one tool
+    // handlers actually read `palace` from -- is nested one level deeper at
+    // `params.arguments`. For legacy direct method-per-tool dispatch,
+    // `params` IS the argument object already.
+    let target = if is_tools_call {
+        match params.get_mut("arguments") {
+            Some(a) if a.is_object() => a,
+            Some(a) if a.is_null() => {
+                *a = serde_json::json!({});
+                a
+            }
+            None => {
+                params["arguments"] = serde_json::json!({});
+                params.get_mut("arguments").expect("just inserted")
+            }
+            _ => return req,
+        }
+    } else {
+        params
+    };
+
     // Only inject if the caller didn't already specify a palace.
-    if params.get("palace").is_none() {
-        params["palace"] = serde_json::Value::String(palace.to_string());
+    if target.get("palace").is_none() {
+        target["palace"] = serde_json::Value::String(palace.to_string());
     }
 
     req
@@ -316,19 +352,17 @@ fn inject_default_palace(
 /// non-notification request forwarded to `/rpc` gets this stamp, mirroring
 /// [`inject_default_palace`]'s `--palace` injection.
 ///
-/// What: unlike [`inject_default_palace`] — which only injects into
-/// top-level `params` and is therefore only actually effective against the
-/// "direct method-per-tool" dispatch shape (`method: "<tool-name>"`,
-/// `params: <arguments>`) — this function ALSO handles the standard MCP
-/// `tools/call` envelope (`method: "tools/call"`, `params: {name,
+/// What: like [`inject_default_palace`] (which now mirrors this same
+/// dispatch-shape branching for `--palace`), this function handles both the
+/// "direct method-per-tool" dispatch shape (`method: "<tool-name>"`, `params:
+/// <arguments>`) -- where `params` IS the argument object -- and the standard
+/// MCP `tools/call` envelope (`method: "tools/call"`, `params: {name,
 /// arguments}`) that a real MCP client (Claude Code) actually sends over
 /// stdio: it locates `params.arguments` for that shape and injects there
 /// instead, since that is the object [`crate::transport::rpc::dispatch`]'s
-/// `tools/call` branch actually hands to
-/// [`crate::tools::dispatch_tool`] (the sibling-of-`arguments`
-/// `params.palace` placement `inject_default_palace` uses is a pre-existing,
-/// separate gap in that function, out of scope here). Only injects fields
-/// the caller didn't already set — caller intent always wins. A no-op when
+/// `tools/call` branch actually hands to [`crate::tools::dispatch_tool`].
+/// Only injects fields the caller didn't already set — caller intent always
+/// wins. A no-op when
 /// both `workstream` and `cwd` are `None` (nothing resolvable — DOC-53
 /// §4.1's omit-cleanly rule, applied at the injection point too).
 /// Test: `inject_caller_context_direct_dispatch_shape`,
@@ -507,6 +541,80 @@ mod tests {
         });
         let out = inject_default_palace(req, Some("my-palace"));
         assert_eq!(out["params"]["palace"], "my-palace");
+    }
+
+    /// Why (root cause of the demo-blocking bug): a real MCP client (Claude
+    /// Code) sends the standard `tools/call` envelope, and tool handlers read
+    /// `arguments.palace` -- NOT top-level `params.palace`. Before this fix,
+    /// `inject_default_palace` only ever wrote to `params.palace`, so every
+    /// real `tools/call` request reached the handler with no palace at all,
+    /// surfacing as `-32603: memory_recall: missing 'palace' (no --palace
+    /// default configured)` even with `--palace` supplied on the CLI.
+    /// What: injects with a `tools/call` envelope whose `arguments` has no
+    /// `palace`; asserts the default lands at `params.arguments.palace`
+    /// (not as a sibling of `name`/`arguments` at the top level).
+    /// Test: itself.
+    #[test]
+    fn inject_default_palace_tools_call_adds_when_absent() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_recall",
+                "arguments": {"query": "hello"}
+            }
+        });
+        let out = inject_default_palace(req, Some("owner-profile"));
+        assert_eq!(out["params"]["arguments"]["palace"], "owner-profile");
+        assert_eq!(out["params"]["arguments"]["query"], "hello");
+        assert!(
+            out["params"].get("palace").is_none(),
+            "must not land as a sibling of name/arguments"
+        );
+    }
+
+    /// Why: an MCP caller that already set its own `arguments.palace` (e.g.
+    /// an explicit `--palace` argument on the tool call itself) must win --
+    /// the CLI default is a fallback, not an override.
+    /// What: pre-populates `arguments.palace`; asserts it survives unchanged.
+    /// Test: itself.
+    #[test]
+    fn inject_default_palace_tools_call_preserves_existing() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "memory_recall",
+                "arguments": {"query": "hi", "palace": "caller-palace"}
+            }
+        });
+        let out = inject_default_palace(req, Some("default-palace"));
+        assert_eq!(out["params"]["arguments"]["palace"], "caller-palace");
+    }
+
+    /// Why: the legacy direct method-per-tool dispatch shape (`method:
+    /// "<tool-name>"`, `params: <arguments>`) must keep receiving the
+    /// top-level injection so nothing regresses for callers still using
+    /// that shape.
+    /// What: injects a non-`tools/call` request; asserts `params.palace` is
+    /// still set directly (same assertion as
+    /// `inject_default_palace_adds_when_absent`, named here to make the
+    /// legacy-shape regression coverage explicit alongside the new
+    /// `tools/call` tests).
+    /// Test: itself.
+    #[test]
+    fn inject_default_palace_legacy_direct_shape_still_injects_top_level() {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "memory_recall",
+            "params": {"query": "hello"}
+        });
+        let out = inject_default_palace(req, Some("owner-profile"));
+        assert_eq!(out["params"]["palace"], "owner-profile");
+        assert_eq!(out["params"]["query"], "hello");
     }
 
     // -----------------------------------------------------------------------
