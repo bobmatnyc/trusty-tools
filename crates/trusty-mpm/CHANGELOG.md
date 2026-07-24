@@ -5,7 +5,7 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [1.0.1] - 2026-07-24
 
 ### Fixed
 
