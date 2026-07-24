@@ -17,17 +17,16 @@
    * What: Renders the Trusty Agents brand lockup (`<Logo>` — mark +
    * "TRUSTY AGENTS" wordmark + "UNIT-04 · MPM ORCHESTRATION" descriptor,
    * theme-aware per `docs/design/UI/icons/README.md`) on the left. On the
-   * right: the view-switch tabs (Chat/Projects/Personality — App.svelte owns
-   * `activeView`; this component only dispatches `switch-view` so
-   * App.svelte's unsaved-Personality-buffer guard in `switchView()` stays
-   * the single gate on navigation), the `AgentSwitcher` roster dropdown
-   * (#3223), the `ModelSwitcher` model/provider picker (#3245), a
+   * right: the view-switch tabs (#3819: Chat/Events — App.svelte owns
+   * `activeView`; this component only dispatches `switch-view`), the
+   * `ModelSwitcher` model/provider picker (#3245; the agent/persona picker
+   * moved into `ChatHeader`, #3819), a
    * DESKTOP/WEB transport badge (replaces the old floating pill), an API
    * READY/CONNECTING status badge driven by `apiReady`, and `ThemeToggle`.
-   * Every one of those right-hand controls (tabs container, `AgentSwitcher`,
-   * `ModelSwitcher`, the two status badges, `ThemeToggle`) shares one border
-   * standard — `border border-foundry-light-border dark:border-foundry-border`
-   * + `rounded-md` — per owner visual feedback that the borders read as
+   * Every one of those right-hand controls (tabs container, `ModelSwitcher`,
+   * the two status badges, `ThemeToggle`) shares one border standard —
+   * `border border-foundry-light-border dark:border-foundry-border` +
+   * `rounded-md` — per owner visual feedback that the borders read as
    * inconsistent widths/radii (some controls had no border at all, one used
    * a translucent accent border, `ThemeToggle` used a larger radius with no
    * border). Semantic state (active tab, ready/connecting, desktop/web)
@@ -35,18 +34,22 @@
    * a differently-weighted border.
    * Test: Mount `<Header activeView="chat" apiReady={true} />`, verify the
    * CHAT tab is highlighted, the API READY badge shows green, and clicking
-   * PROJECTS dispatches `switch-view` with `{ view: 'projects' }`. Manual:
+   * EVENTS dispatches `switch-view` with `{ view: 'events' }`. Manual:
    * toggle `apiReady` false→true, confirm the badge flips
    * CONNECTING→API READY.
    */
   import { createEventDispatcher } from 'svelte';
   import Logo from '../lib/icons/Logo.svelte';
   import ThemeToggle from './ThemeToggle.svelte';
-  import AgentSwitcher from './AgentSwitcher.svelte';
   import ModelSwitcher from './ModelSwitcher.svelte';
   import { isDesktop } from '../lib/transport';
 
-  export let activeView: 'chat' | 'projects' | 'personality' = 'chat';
+  // #3819: Chat/Projects/Personality → Chat/Events (Bob's nav reshape).
+  // `AgentSwitcher` moved out of this header into `ChatHeader` (the chat
+  // pane's own header — title + selector + gear all live together there
+  // now); `ModelSwitcher` stays here since model/provider is a separate,
+  // unrelated axis Bob's directive didn't touch.
+  export let activeView: 'chat' | 'events' = 'chat';
   export let apiReady = false;
 
   const desktop = isDesktop();
@@ -54,8 +57,7 @@
 
   const tabs: { id: typeof activeView; label: string }[] = [
     { id: 'chat', label: 'Chat' },
-    { id: 'projects', label: 'Projects' },
-    { id: 'personality', label: 'Personality' },
+    { id: 'events', label: 'Events' },
   ];
 
   function switchView(view: typeof activeView) {
@@ -92,7 +94,6 @@
       {/each}
     </div>
 
-    <AgentSwitcher />
     <ModelSwitcher />
 
     <span

@@ -214,6 +214,13 @@ impl TrustyAgentsRepl {
                 }
                 if let Ok(cfg) = crate::agents::AgentConfig::by_name_in(&dirs, stem)
                     && cfg.agent.role == "assistant"
+                    // #3819: `hidden = true` keeps a dispatchable
+                    // assistant-role agent (e.g. the base `assistant`
+                    // template, `personal-assistant`, `research-agent`)
+                    // out of picker/listing surfaces without touching its
+                    // role (which also gates tool-registry security
+                    // posture — see `AgentInfo::hidden`'s doc comment).
+                    && !cfg.agent.hidden
                 {
                     found.insert(stem.to_string(), cfg.agent.description.clone());
                 }

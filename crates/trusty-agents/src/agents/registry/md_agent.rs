@@ -175,6 +175,12 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
             runner,
             capabilities: fm.capabilities,
             display_name: fm.display_name,
+            // #3819: `.md` overlay agents have no `hidden` frontmatter key
+            // yet — the demo's hide-from-picker need is on the three
+            // TOML/package agents (`assistant`/`personal-assistant`/
+            // `research-agent`), not overlays. Defaulting visible here is
+            // the pre-#3819 behavior, unchanged.
+            hidden: false,
             prompt_label: None,
             extends: fm.extends,
         },

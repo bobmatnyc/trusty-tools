@@ -277,7 +277,14 @@ pub(super) async fn list_agents_route(State(_state): State<AppState>) -> Json<se
 /// scan) and the `mcp_serve` dispatcher's `tools/call` unit test (the envelope).
 pub(crate) async fn agent_roster() -> serde_json::Value {
     let dirs = crate::agents::agents_dir_candidates();
-    serde_json::json!({ "agents": scan_agent_catalog(&dirs).await })
+    let mut agents = scan_agent_catalog(&dirs).await;
+    // #3819: `hidden = true` (`AgentInfo::hidden`) removes an agent from
+    // LISTING surfaces only — never from `GET/PATCH /api/agents/:name`,
+    // which resolve by name directly and don't go through this fn. See
+    // `AgentInfo::hidden`'s doc comment for why this is a dedicated flag
+    // rather than a `role` repurpose.
+    agents.retain(|v| !v.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false));
+    serde_json::json!({ "agents": agents })
 }
 
 /// Parse one agent TOML file's `[agent]` table into the JSON shape shared by
@@ -317,6 +324,42 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
     let display_name = get_str("display_name")
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| name.clone());
+    // #3819: the gear-panel Tools tab reads `[tools].allow` (the glob-style
+    // persona tool-allowlist) and Permissions reads `[tools].scopes`
+    // (`ToolsConfig::scopes` — OpenRPC scope patterns; note this lives under
+    // `[tools]`, NOT `[agent]`, per `crates/trusty-agents/src/agents/config.rs`
+    // — confirmed against `.trusty-agents/agents/izzie/agent.toml`'s own
+    // `scopes = [...]` line, which sits inside its `[tools]` table).
+    // Read-only in this slice — no PATCH support yet, see `agent_patch`'s
+    // module doc. Both default to an empty array rather than being omitted,
+    // so a client never has to distinguish "absent key" from "empty list"
+    // for a UI that always wants to render a list.
+    let tools = parsed.get("tools");
+    let tools_allow: Vec<String> = tools
+        .and_then(|t| t.get("allow"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let scopes: Vec<String> = tools
+        .and_then(|t| t.get("scopes"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    // #3819: `hidden` — listing-surface-only visibility flag (see
+    // `AgentInfo::hidden`'s doc comment for why this is a dedicated field
+    // rather than repurposing `role`). Defaults to `false` when absent.
+    let hidden: bool = agent
+        .and_then(|a| a.get("hidden"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     Some(serde_json::json!({
         "name": name,
         "role": get_str("role").unwrap_or_default(),
@@ -325,6 +368,9 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
         "provider_id": get_str("provider_id").unwrap_or_default(),
         "description": get_str("description").unwrap_or_default(),
         "display_name": display_name,
+        "tools_allow": tools_allow,
+        "scopes": scopes,
+        "hidden": hidden,
     }))
 }
 
@@ -397,6 +443,9 @@ fn md_agent_to_catalog_json(
         "provider_id": "",
         "description": a.description.clone(),
         "display_name": display_name,
+        "tools_allow": cfg.tools.allow.clone().unwrap_or_default(),
+        "scopes": cfg.tools.scopes.clone().unwrap_or_default(),
+        "hidden": a.hidden,
     })
 }
 

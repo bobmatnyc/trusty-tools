@@ -9,6 +9,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **GUI reshape: WORKSTREAMS-backed "Tasks" sidebar, CHAT/EVENTS nav, and an
+  in-pane agent config gear panel (#3819, epic #3052):** replaces the
+  `PROJECTS` sidebar section and the `Chat/Projects/Personality` top nav.
+  Sidebar now shows a pinned Concierge (`ctrl`) entry plus a "Tasks" list
+  (user-facing label for trusty-memory's `ws:<name>`-tagged workstreams,
+  DOC-53) grouped/collapsible by owning agent, each row resumable (injects
+  recent tagged history as a context banner). Top nav is `Chat | Events`;
+  Events is a deterministic, listener-tagged event list with per-source
+  include/exclude toggles (excluded rows stay visible, muted) and inference-
+  cost guidance copy. The chat pane gets its own header: the active agent's
+  display name as the title, an inline selector (moved out of the top
+  toolbar), and a gear icon opening an in-pane Personality/OKG
+  Stores/Tools/Permissions/Listeners config form scoped to that agent — a
+  new add-agent flow creates an agent from the `assistant` template.
+  New backend surface: `GET /api/workstreams[/:name/history]`, `GET/PATCH
+  /api/agents/:name` (extended with `personality`/`tools_allow`), `GET
+  /api/agents/:name/persona`, `POST /api/agents` (template create). Also
+  fixes a pre-existing bug where `PATCH /api/agents/:name` wrote a
+  lower-priority flat TOML shadow instead of a directory-package agent's
+  real `agent.toml` for every bundled demo agent (`assistant`/`izzie`/
+  `cto-assistant`/`ctrl`). Adds `AgentInfo::hidden` (default `false`) — a
+  listing-only visibility flag, independent of `role` (which also gates
+  tool-registry security posture), honored by both the REPL's
+  `list_assistant_agents_into` and the API roster (`GET /api/agents`).
+  `ProjectsView`/`PersonalityPanel` are left in the tree but no longer
+  routed — their dropped/relocated capabilities are documented in the PR
+  body. Deferred to follow-ups: the eventstream connector backend (#3798
+  family), tagging new outgoing memory writes with the resumed workstream,
+  real per-listener wake plumbing, and reconciling "+ New Task" to Bob's
+  later-refined "continuous per-agent chat, tasks are an inferred filter/
+  view, not a context wall" model (this slice still clears context on "+ New
+  Task", matching the pre-existing architecture).
+
 - **`tagent mcp-serve` — stdio MCP server exposing trusty-agents to external MCP
   clients (Claude Code, etc.) (#3633 core):** a line-delimited JSON-RPC / MCP
   server over stdio, built on the shared `trusty_common::mcp` framework

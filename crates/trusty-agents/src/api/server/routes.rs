@@ -21,7 +21,8 @@ use axum::{
 };
 use trusty_common::server::{SelfOrigins, with_guarded_middleware};
 
-use super::agent_patch::patch_agent_route;
+use super::agent_create::create_agent_route;
+use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
 use super::ctrl_sessions::{
@@ -43,6 +44,7 @@ use super::tm::{
     tm_resume_session, tm_send_message, tm_set_favorite, tm_tell, tm_unset_favorite,
 };
 use super::ui::{serve_asset, serve_index};
+use super::workstreams::{list_workstreams_route, workstream_history_route};
 
 /// Build the axum router.
 ///
@@ -126,12 +128,28 @@ pub fn build_router_with_origins(
         // `.trusty-agents/projects/<name>.toml` rather than the global registry).
         .route("/api/projects/{name}", get(get_project_config))
         // #407: agent + session listing for the web UI / CLI clients.
-        .route("/api/agents", get(list_agents_route))
+        // #3819: POST creates a new agent from the `assistant` template.
+        .route(
+            "/api/agents",
+            get(list_agents_route).post(create_agent_route),
+        )
         // #3246: persist a per-agent model/provider override, validated
         // against the inference registry + runner constraints.
         .route(
             "/api/agents/{name}",
-            axum::routing::patch(patch_agent_route),
+            axum::routing::get(get_agent_route).patch(patch_agent_route),
+        )
+        // #3819: gear-panel Personality tab reads the agent's actual
+        // persona.md prose (package agents only — see agent_patch's module
+        // doc for the package-vs-flat distinction).
+        .route(
+            "/api/agents/{name}/persona",
+            axum::routing::get(get_agent_persona_route),
+        )
+        .route("/api/workstreams", get(list_workstreams_route))
+        .route(
+            "/api/workstreams/{name}/history",
+            get(workstream_history_route),
         )
         .route("/api/sessions", get(list_sessions_route))
         // #371: session recap retrieval

@@ -344,6 +344,28 @@ pub struct AgentInfo {
     #[serde(default)]
     pub display_name: Option<String>,
 
+    /// Whether this agent is hidden from PICKER/roster listings (#3819).
+    ///
+    /// Why: `role` is dual-purpose — beyond labeling an agent, it also gates
+    /// the tool-registry security posture (`runtime::tool_registry::build_registry_for_agent`).
+    /// Hiding an agent from the GUI/REPL picker by repurposing `role` would
+    /// therefore silently change its tool permissions too — not a safe
+    /// mechanism. `hidden` is a dedicated, orthogonal flag: it affects ONLY
+    /// listing surfaces (the REPL's `list_assistant_agents_into`, the GUI's
+    /// `GET /api/agents` roster), never dispatch, tool gating, or direct
+    /// by-name access (`GET/PATCH /api/agents/:name` still work for a hidden
+    /// agent — mirrors the existing precedent that a role-based listing
+    /// filter narrows the picker's SELECTABLE set, not what's reachable by
+    /// name, established for `ctrl`/Concierge).
+    /// What: Defaults to `false` (visible) so existing agent TOMLs are
+    /// unaffected. An operator sets `hidden = true` in `[agent]` to keep an
+    /// agent dispatchable but out of picker UIs (e.g. trimming the demo
+    /// roster to Izzie/CTO Assistant/Concierge without touching
+    /// `assistant`/`personal-assistant`/`research-agent`'s role or tools).
+    /// Test: `hidden_defaults_to_false`, `hidden_parses_true`.
+    #[serde(default)]
+    pub hidden: bool,
+
     /// Optional short label used as the REPL prompt indicator when this
     /// agent is the active conversation persona (#254).
     ///
