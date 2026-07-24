@@ -14,6 +14,7 @@
   import { pushSlackEvent, slackMirror } from './lib/slack-mirror';
   import { invoke, isDesktop, connectEventSource, listenEvent, emitWebEvent, type AppEvent } from './lib/transport';
   import { bridgeDelta } from './lib/chatStream';
+  import { shouldRefetchCatalogs } from './lib/catalogRefetch';
   import {
     apiAuthRequired,
     getCurrentApiToken,
@@ -424,24 +425,31 @@
 
   // Agent-picker cold-start race (owner report 2026-07-23):
   // AgentSwitcher/ModelSwitcher fetch their catalogs in their own `onMount`,
-  // but `<Header>` — and therefore
-  // both pickers — renders unconditionally, before `apiReady`. On a cold
-  // start the sidecar isn't listening yet, so that first fetch fails, the
-  // catalog stores stay empty, and the pickers show only their built-in
-  // default ("Assistant" / "Default") for the whole session with no retry —
-  // Izzie/CTO Bot never become selectable. Re-driving the catalog loads the
-  // moment the API becomes healthy backfills the already-mounted pickers via
-  // their reactive stores (and refetches on any later reconnect, mirroring
-  // the event-stream block above).
-  $: if (apiReady) {
-    fetchAgentCatalog().catch((e) =>
-      console.error('[App] fetchAgentCatalog failed:', e),
-    );
-    fetchModelCatalog().catch((e) =>
-      console.error('[App] fetchModelCatalog failed:', e),
-    );
-    refreshOverlayAgents();
+  // but `<Header>` — and therefore both pickers — renders unconditionally,
+  // before `apiReady`. On a cold start the sidecar isn't listening yet, so
+  // that first fetch fails, the catalog stores stay empty, and the pickers
+  // show only their built-in default ("Assistant" / "Default") for the whole
+  // session with no retry — Izzie/CTO Bot never become selectable. Re-driving
+  // the catalog loads the moment the API becomes healthy backfills the
+  // already-mounted pickers via their reactive stores. `apiReady` is set true
+  // exactly once per app lifetime and never reset, so this fires once; the
+  // edge-detector (`shouldRefetchCatalogs`) keeps it from re-running on any
+  // unrelated reactive re-evaluation, and would correctly re-fire if a future
+  // change ever reset `apiReady` false→true on reconnect.
+  let prevApiReady = false;
+  function refetchPickerCatalogsOnReady(ready: boolean) {
+    if (shouldRefetchCatalogs(prevApiReady, ready)) {
+      fetchAgentCatalog().catch((e) =>
+        console.error('[App] fetchAgentCatalog failed:', e),
+      );
+      fetchModelCatalog().catch((e) =>
+        console.error('[App] fetchModelCatalog failed:', e),
+      );
+      refreshOverlayAgents();
+    }
+    prevApiReady = ready;
   }
+  $: refetchPickerCatalogsOnReady(apiReady);
 
   onMount(() => {
     bootstrap();

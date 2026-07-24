@@ -67,6 +67,20 @@ describe('isDisplayableTask (owner report 2026-07-23)', () => {
     ).toBe(true);
   });
 
+  it('keeps a running task that has a title but no narrative yet (future request-text)', () => {
+    // Guards the pre-fix `task?.trim()` disjunct: once the backend populates a
+    // request-text `task` field (flagged as a follow-up), a running task with a
+    // title but not-yet-a-narrative must still show, not be silently hidden.
+    expect(
+      isDisplayableTask({
+        type: 'task_submitted',
+        status: 'running',
+        task: 'fix the auth bug',
+        narrative: '',
+      }),
+    ).toBe(true);
+  });
+
   it('shows a legacy row with no type as long as it is not an empty running placeholder', () => {
     // Older persisted snapshots predate the `type` surface; a terminal row with
     // content must still render.

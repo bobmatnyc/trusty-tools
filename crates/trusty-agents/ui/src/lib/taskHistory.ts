@@ -39,13 +39,19 @@ export const CHAT_RESPONSE_TYPE = 'agent_response';
  * Test: `taskHistory.test.ts`.
  */
 export function isDisplayableTask(
-  entry: Pick<TaskHistoryEntry, 'type' | 'status' | 'narrative'>,
+  entry: Pick<TaskHistoryEntry, 'type' | 'status' | 'narrative'> & {
+    task?: string;
+  },
 ): boolean {
   // A plain chat reply is not a task — never list it here.
   if (entry.type === CHAT_RESPONSE_TYPE) return false;
-  // Hide the contentless in-flight placeholder until it has content to show
-  // (preserves the pre-fix behavior for non-chat rows).
-  if (entry.status === 'running' && !entry.narrative?.trim()) return false;
+  // Hide the contentless in-flight placeholder until it has content to show.
+  // `task` is unpopulated on the wire today (no `PmResponse` request-text
+  // field), but this PR flags backend request-text population as a follow-up —
+  // keeping the `task` disjunct means a future running task that has a title
+  // but not yet a narrative still shows, matching the pre-fix guard.
+  if (entry.status === 'running' && !entry.narrative?.trim() && !entry.task?.trim())
+    return false;
   return true;
 }
 
@@ -57,7 +63,9 @@ export function isDisplayableTask(
  * Test: `taskHistory.test.ts`.
  */
 export function visibleTaskHistory<
-  T extends Pick<TaskHistoryEntry, 'type' | 'status' | 'narrative'>,
+  T extends Pick<TaskHistoryEntry, 'type' | 'status' | 'narrative'> & {
+    task?: string;
+  },
 >(entries: T[]): T[] {
   return entries.filter(isDisplayableTask);
 }
