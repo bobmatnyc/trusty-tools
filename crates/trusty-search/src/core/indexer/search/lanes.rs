@@ -149,10 +149,12 @@ impl CodeIndexer {
     /// Why: `embed_text` and `embed_query` are the two query-side embed call
     /// sites (design research: `search/lanes.rs:154,182` on pre-#3748 main)
     /// and need identical pool-vs-direct routing; factoring it out gives the
-    /// fallback branch (`self.embed_pool.is_none()`, exercised by every
-    /// existing test that doesn't call `set_embed_pool`) a single
-    /// implementation and keeps each call site a one-liner.
-    /// What: when `self.embed_pool` is `Some`, submits a single-text batch to
+    /// fallback branch (no pool resolvable — exercised by every existing
+    /// test that doesn't call `set_embed_pool`/`set_embed_pool_source`) a
+    /// single implementation and keeps each call site a one-liner.
+    /// What: resolves the pool via [`CodeIndexer::resolve_embed_pool`]
+    /// (self-healing boot-race fix, PR #3784 review) and, when one is
+    /// available, submits a single-text batch to
     /// [`crate::service::embed_pool::EmbedPool::embed`] with
     /// `RequestPriority::Interactive` and unwraps the one resulting vector;
     /// otherwise calls `embedder.embed(text)` directly. Errors surface as the
@@ -166,7 +168,7 @@ impl CodeIndexer {
         embedder: &Arc<dyn Embedder>,
         text: &str,
     ) -> Result<Vec<f32>> {
-        if let Some(pool) = &self.embed_pool {
+        if let Some(pool) = self.resolve_embed_pool().await {
             let mut out = pool
                 .embed(vec![text.to_string()], RequestPriority::Interactive)
                 .await?;

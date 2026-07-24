@@ -47,6 +47,10 @@ mod search;
 pub mod typeahead;
 mod types;
 
+/// Re-export for `EmbedPool::with_autotune`'s inflight-aware worker floor
+/// (issue #3748 PR #3784 review finding 3) — see
+/// `ingest::embed::resolve_embed_inflight`'s doc comment.
+pub(crate) use ingest::embed::resolve_embed_inflight;
 /// Re-export for the reindex orchestrator's progress-interval gate.
 pub(crate) use ingest::PROGRESS_CHUNK_INTERVAL;
 #[cfg(test)]
@@ -126,15 +130,36 @@ pub struct CodeIndexer {
     pub(super) embedder: Option<Arc<dyn Embedder>>,
     pub(super) store: Option<Arc<dyn VectorStore>>,
 
-    /// Priority-lane embed worker pool (issue #3748 slice B). `None` when no
-    /// pool has been installed (tests, CLI paths, or a daemon still warming
-    /// up) — the interactive query path (`search::lanes`) and the catch-up
-    /// ingest path (`ingest::embed`) both fall back to calling `embedder`
-    /// directly in that case, preserving pre-#3748 behaviour exactly.
-    /// `Some` once a production construction site (`restore_one_index`,
-    /// `restore_index_on_demand`, `create_index_handler`, the relocate
-    /// handler) attaches the daemon-wide pool via [`Self::set_embed_pool`].
-    pub(super) embed_pool: Option<Arc<crate::service::embed_pool::EmbedPool>>,
+    /// Priority-lane embed worker pool (issue #3748 slice B), fast-path
+    /// cache. Empty when no pool has been resolved yet (tests, CLI paths, a
+    /// daemon still warming up, or — the boot-race window this field's
+    /// `ArcSwapOption` type closes (critic review, PR #3784) — an index
+    /// constructed between `install_embedder` unblocking request handlers
+    /// and `install_embed_pool` completing). `embed_interactive` /
+    /// `embed_chunks_in_batches` both fall back to calling `embedder`
+    /// directly when this is empty AND [`Self::embed_pool_source`] has
+    /// nothing installed yet either.
+    ///
+    /// Why `ArcSwapOption` and not `Option<Arc<..>>`: reads are lock-free
+    /// (`.load()`/`.load_full()`) so the query hot path pays no lock cost,
+    /// AND — the load-bearing reason — it gives `&self` methods a way to
+    /// WRITE the self-healed value (see [`Self::resolve_embed_pool`])
+    /// without `&mut self`, which none of the async embed call sites have
+    /// (mirrors `SearchAppState::switchable_embedder`'s identical
+    /// lock-free-read-plus-self-heal shape).
+    pub(super) embed_pool: arc_swap::ArcSwapOption<crate::service::embed_pool::EmbedPool>,
+
+    /// Clone of the daemon-wide pool slot (`SearchAppState::embed_pool`),
+    /// used ONLY to lazily re-resolve [`Self::embed_pool`] when the fast
+    /// path is empty (issue #3748 boot-race fix, PR #3784 review). `None`
+    /// for every non-production construction path (tests, CLI) — those
+    /// never call [`Self::set_embed_pool_source`], so they fall back to the
+    /// direct embedder exactly as before this fix.
+    /// What: a small dedicated `Arc<RwLock<..>>` — NOT the whole
+    /// `SearchAppState` — so holding it creates no `Arc` cycle with the
+    /// index registry that owns this `CodeIndexer`.
+    pub(super) embed_pool_source:
+        Option<Arc<RwLock<Option<Arc<crate::service::embed_pool::EmbedPool>>>>>,
 
     /// In-memory chunk corpus. Write-through cache of the redb `CHUNKS_TABLE`.
     pub(super) chunks: Arc<RwLock<HashMap<String, RawChunk>>>,
@@ -389,7 +414,8 @@ impl CodeIndexer {
             root_path: root_path.into(),
             embedder: None,
             store: None,
-            embed_pool: None,
+            embed_pool: arc_swap::ArcSwapOption::empty(),
+            embed_pool_source: None,
             corpus: None,
             chunks: Arc::new(RwLock::new(HashMap::new())),
             entities: Arc::new(RwLock::new(HashMap::new())),
@@ -700,18 +726,119 @@ impl CodeIndexer {
         self.embedder.is_some()
     }
 
-    /// Attach (or clear) the daemon-wide priority-lane embed pool (issue
-    /// #3748 slice B PR 1).
+    /// Attach (or clear) the daemon-wide priority-lane embed pool's
+    /// fast-path cache directly (issue #3748 slice B PR 1).
     ///
     /// Why: the pool is built once, after the shared embedder finishes
     /// warming up (`commands/start/daemon.rs`), and is therefore always
     /// wired onto an already-constructed `CodeIndexer` rather than through
-    /// [`Self::with_components`] — mirrors [`Self::set_corpus_store`].
+    /// [`Self::with_components`] — mirrors [`Self::set_corpus_store`]. Tests
+    /// call this directly to install a pool synchronously with no daemon
+    /// state involved; production code should prefer
+    /// [`Self::set_embed_pool_source`], which self-heals if the pool is not
+    /// yet ready (PR #3784 review, boot-race fix) — it calls back into this
+    /// setter internally, so the warn log below covers both paths.
     /// What: stores the `Option<Arc<EmbedPool>>` verbatim; `None` restores
     /// the direct-embedder fallback used by every call site in
-    /// `search::lanes` and `ingest::embed`.
-    /// Test: `embed_pool_routing::*` in `core::indexer::tests`.
+    /// `search::lanes` and `ingest::embed`. Logs a `warn` when a caller
+    /// explicitly installs `None` — on a production path this means the
+    /// index was constructed before the daemon's pool finished installing;
+    /// [`Self::resolve_embed_pool`] will self-heal it on the first embed
+    /// call after the pool comes online, logged at `info` when it does.
+    /// Test: `embed_pool_routing::*` in `core::indexer::tests`;
+    /// `embed_pool_routing::index_self_heals_onto_pool_installed_after_construction`
+    /// covers the warn-then-heal sequence end to end.
     pub fn set_embed_pool(&mut self, pool: Option<Arc<crate::service::embed_pool::EmbedPool>>) {
-        self.embed_pool = pool;
+        if pool.is_none() {
+            tracing::warn!(
+                index_id = %self.index_id,
+                "embed pool not installed for this index yet — falling back to the direct \
+                 embedder until it self-heals via embed_pool_source (issue #3748)"
+            );
+        }
+        self.embed_pool.store(pool);
+    }
+
+    /// Register the daemon-wide pool slot for lazy self-healing (issue #3748
+    /// boot-race fix, PR #3784 review finding 1).
+    ///
+    /// Why: `restore_one_index` / `restore_index_on_demand` /
+    /// `create_index_handler` / the relocate handler all resolve the pool
+    /// via `state.current_embed_pool()` at construction time — but
+    /// `install_embedder` (which unblocks these handlers) completes strictly
+    /// BEFORE `install_embed_pool` in `commands/start/daemon.rs`, so a
+    /// request landing in that window previously left its `CodeIndexer`
+    /// permanently poolless. Storing the daemon's OWN slot (not a one-time
+    /// snapshot) lets [`Self::resolve_embed_pool`] re-check it lazily on the
+    /// next embed call, closing the window without polling.
+    /// What: best-effort non-blocking snapshot via `try_read()` to warm the
+    /// fast-path cache immediately when the pool is already installed (the
+    /// common case — avoids the source lock entirely thereafter), then
+    /// stores the source for later self-healing. A missed `try_read` (lock
+    /// momentarily write-held) is treated the same as "not installed yet" —
+    /// `resolve_embed_pool`'s `.await` read will catch it on the next call.
+    /// Test: `embed_pool_routing::index_self_heals_onto_pool_installed_after_construction`.
+    pub fn set_embed_pool_source(
+        &mut self,
+        source: Arc<RwLock<Option<Arc<crate::service::embed_pool::EmbedPool>>>>,
+    ) {
+        let snapshot = source.try_read().ok().and_then(|guard| guard.clone());
+        self.set_embed_pool(snapshot);
+        self.embed_pool_source = Some(source);
+    }
+
+    /// Resolve the embed pool for this call, self-healing the fast-path
+    /// cache if it was empty at construction time but the daemon's pool has
+    /// since come online (issue #3748 boot-race fix).
+    ///
+    /// Why: `embed_interactive` (search::lanes) and
+    /// `embed_chunks_in_batches` (ingest::embed) must never remain
+    /// permanently poolless just because they were constructed a few
+    /// microseconds before `install_embed_pool` completed.
+    /// What: returns the lock-free cached value when present (the
+    /// overwhelming common case — zero lock cost). Only when empty AND a
+    /// [`Self::embed_pool_source`] is registered does this take the
+    /// `.read().await` on the shared daemon slot; a hit there is cached back
+    /// into `self.embed_pool` (via `ArcSwapOption::store`, no `&mut self`
+    /// needed) so every SUBSEQUENT call on this index is lock-free again,
+    /// and logs once at `info` so the self-heal is observable.
+    /// Test: `embed_pool_routing::index_self_heals_onto_pool_installed_after_construction`.
+    pub(super) async fn resolve_embed_pool(
+        &self,
+    ) -> Option<Arc<crate::service::embed_pool::EmbedPool>> {
+        if let Some(pool) = self.embed_pool.load_full() {
+            return Some(pool);
+        }
+        let source = self.embed_pool_source.as_ref()?;
+        let snapshot = source.read().await.clone();
+        if let Some(pool) = &snapshot {
+            tracing::info!(
+                index_id = %self.index_id,
+                "embed pool self-healed onto index after initial construction raced the \
+                 daemon's pool install (issue #3748 boot-race fix)"
+            );
+            self.embed_pool.store(Some(Arc::clone(pool)));
+        }
+        snapshot
+    }
+
+    /// Whether this index currently has a resolved embed pool attached
+    /// (issue #3748 boot-race fix — `/health` observability, PR #3784
+    /// review finding 2).
+    ///
+    /// Why: `GET /health` needs a lock-free, non-async signal to aggregate
+    /// "how many registered indexes are currently poolless" across the
+    /// whole registry without touching `embed_pool_source`'s `.await` path
+    /// (which would make a health poll block on network-mount-slow or
+    /// merely-busy locks — the same reason `try_current_embedder()` exists).
+    /// What: `true` iff the fast-path cache is populated. Reports `false`
+    /// for an index that WOULD self-heal on its next embed call but hasn't
+    /// made one yet — intentional: it reflects the currently-attached state,
+    /// not eligibility, mirroring `handle.stages.try_read()`'s fail-open
+    /// posture elsewhere in `/health`.
+    /// Test: `health_surfaces_indexes_without_embed_pool` in
+    /// `service::server::tests_components`.
+    pub fn has_embed_pool(&self) -> bool {
+        self.embed_pool.load().is_some()
     }
 }

@@ -27,6 +27,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   wave rather than the whole reindex. No pool installed (tests, CLI paths)
   falls back to the pre-#3748 direct-embedder call unchanged. Second
   dedicated catch-up sidecar (PR 2) deferred pending measurement.
+  **Code-critic review round (PR #3784) fixed 4 issues before merge:**
+  (1) *boot-race self-heal* — `install_embedder` unblocks request handlers
+  strictly BEFORE `install_embed_pool` completes, so an index constructed in
+  that window used to stay poolless for the daemon's lifetime; `CodeIndexer`
+  now registers the daemon's own pool slot (`set_embed_pool_source`, an
+  `Arc<RwLock<..>>` clone of `SearchAppState::embed_pool`) rather than a
+  one-time snapshot, and `resolve_embed_pool` lazily re-checks + self-heals
+  a lock-free `ArcSwapOption` cache on the next embed call once the pool
+  comes online; (2) *observability* — `set_embed_pool`/`set_embed_pool_source`
+  now `warn!` when a daemon path installs an empty pool, self-heals log at
+  `info!`, and `GET /health` gained `indexes_embed_pool_missing` (same
+  registry-scan pattern as `indexes_kg_disabled`); (3) *inflight collapse* —
+  `EmbedPool::with_autotune` now floors its worker count at
+  `resolve_embed_inflight()` so a ≤16 GB host (autotune=1 worker) doesn't
+  silently serialize the `TRUSTY_EMBED_INFLIGHT` (default 2) concurrent
+  sub-batches issue #753's ANE-idle fix relies on; (4) the priority-ordering
+  regression test now uses a deterministic channel-send rendezvous instead of
+  fixed sleeps and loops 20x to reliably catch a dropped `biased;`.
 - **Deferred-embed catch-up queue is now size-ordered; `warm_boot_degraded`
   recomputes instead of staying sticky until restart (issue #3748 slice A).**
   The warm-boot deferred-embed (C2) catch-up queue was strictly serial and

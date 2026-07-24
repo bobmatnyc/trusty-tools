@@ -255,8 +255,9 @@ pub(super) async fn relocate_index_handler(
     };
     // Issue #3748 slice B PR 1: wire the priority-lane pool so the relocated
     // index's query + catch-up embeds route through Interactive/Background
-    // lanes instead of the raw embedder.
-    new_indexer.set_embed_pool(state.current_embed_pool().await);
+    // lanes instead of the raw embedder. Registers the daemon's own slot so
+    // a boot-race window self-heals (PR #3784 review finding 1).
+    new_indexer.set_embed_pool_source(Arc::clone(&state.embed_pool));
 
     // Issue #2336 defense-in-depth: `corpus_open_failed` is the ground truth
     // for a broken redb open (a raced collision, or an unrelated open

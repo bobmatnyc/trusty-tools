@@ -638,3 +638,51 @@ async fn health_surfaces_component_disabled_counts() {
         "only health-catching-up (enabled + InProgress) counts"
     );
 }
+
+/// `indexes_embed_pool_missing` counts only indexes whose `CodeIndexer` has
+/// no embed pool attached (issue #3748 boot-race fix, PR #3784 review
+/// finding 2) — folded into the same registry scan as
+/// `indexes_kg_disabled`/`indexes_vector_disabled` above.
+///
+/// Why: this is the machine-readable `/health` signal for the boot-race
+/// window fix 1 (self-healing `resolve_embed_pool`) closes — before an
+/// index self-heals it shows up here; `embed_pool_routing`'s
+/// `index_self_heals_onto_pool_installed_after_construction` already covers
+/// the self-heal transition itself, so this test only proves the COUNTING
+/// mechanism: one handle with a pool attached must not count, one without
+/// must.
+/// What: registers one handle with `set_embed_pool(Some(..))` called and one
+/// without; asserts `indexes_embed_pool_missing == 1` (only the poolless
+/// one).
+/// Test: this test.
+#[tokio::test]
+async fn health_surfaces_indexes_without_embed_pool() {
+    use crate::core::embed::MockEmbedder;
+    use crate::service::embed_pool::EmbedPool;
+
+    let registry = IndexRegistry::new();
+    let tmp = std::env::temp_dir();
+
+    let mut with_pool_indexer = CodeIndexer::new("health-pool-attached", &tmp);
+    let embedder: Arc<dyn crate::core::embed::Embedder> = Arc::new(MockEmbedder::new(8));
+    let pool = Arc::new(EmbedPool::new(1, embedder));
+    with_pool_indexer.set_embed_pool(Some(pool));
+    registry.register(IndexHandle::bare(
+        IndexId::new("health-pool-attached"),
+        Arc::new(RwLock::new(with_pool_indexer)),
+        tmp.clone(),
+    ));
+
+    registry.register(IndexHandle::bare(
+        IndexId::new("health-pool-missing"),
+        Arc::new(RwLock::new(CodeIndexer::new("health-pool-missing", &tmp))),
+        tmp,
+    ));
+
+    let state = Arc::new(SearchAppState::new(registry));
+    let Json(resp) = super::health::health_handler(State(state)).await;
+    assert_eq!(
+        resp.indexes_embed_pool_missing, 1,
+        "only health-pool-missing (no set_embed_pool call) counts"
+    );
+}
