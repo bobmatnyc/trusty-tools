@@ -15,6 +15,7 @@ pub mod goals;
 pub mod indexer;
 pub mod manager;
 pub mod retrieval;
+pub mod trim;
 
 pub use goals::GoalBlock;
 #[allow(unused_imports)]
