@@ -49,7 +49,6 @@ crates/trusty-agents/src/cli/search_cmd/format.rs	format_memory_results_json
 crates/trusty-agents/src/cli/search_cmd/format.rs	format_session_list_human
 crates/trusty-agents/src/compress/session.rs	compress_below_threshold_is_noop
 crates/trusty-agents/src/context/indexer.rs	spawn_then_drop_handle_shuts_down_cleanly
-crates/trusty-agents/src/context/manager.rs	trim_respects_protected_count
 crates/trusty-agents/src/ctrl/config.rs	apply_credential_routing_openrouter_qualifies_model
 crates/trusty-agents/src/ctrl/config.rs	resolve_agent_config_falls_back_to_project_ctrl
 crates/trusty-agents/src/ctrl/config.rs	resolve_agent_config_falls_back_to_user_ctrl

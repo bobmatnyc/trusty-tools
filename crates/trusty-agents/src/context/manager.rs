@@ -1,15 +1,16 @@
-//! Context window budgeting (#69).
+//! Context window budgeting (#69) — public surface.
 //!
 //! Why: Long multi-turn workflows push prompt token counts toward the model's
-//! hard context limit, causing surprise failures. Proactively evicting the
-//! oldest non-protected turns once usage crosses ~50% of the window keeps
-//! requests comfortably within the cache-friendly zone and preserves the
-//! initial system/goals block.
-//! What: `ContextManager` holds a soft threshold (fraction of the window);
-//! `trim_to_budget` walks the messages, estimating tokens cheaply, and
-//! removes the oldest evictable entries until the total fits.
-//! Test: See unit tests — we assert protected messages are never evicted and
-//! that the return count matches the number trimmed.
+//! hard context limit, causing surprise failures. Proactively trimming once
+//! usage crosses the soft threshold keeps requests within the cache-friendly
+//! zone and preserves the initial system/goals block AND the live turn.
+//! What: This module holds the thin public surface — `ContextManager` (the
+//! per-agent budget handle), `TrimOutcome` (its trim result), and
+//! `context_window` (per-model ceilings). The `trim_to_budget` strategies and
+//! their machinery live in the sibling `context::trim` module (split out under
+//! the 500-SLOC file cap, issue #610).
+//! Test: `context_window_known_models`; the trim behavior is covered by
+//! `context::trim`'s own tests.
 
 use std::collections::HashMap;
 
@@ -32,8 +33,39 @@ pub fn context_window(model: &str) -> u32 {
     }
 }
 
+/// Outcome of a `trim_to_budget` pass.
+///
+/// Why: The trimmer has TWO ways to shed tokens — evicting whole messages
+/// (oldest-first) and truncating an oversized message's content in place.
+/// Callers must be able to tell them apart: a truncation is NOT an eviction, so
+/// a truncation-only pass must still surface its result (the message vector
+/// changed) but must not be logged as "trimmed messages evicted".
+/// What: Two independent counters. `evicted` counts whole messages dropped;
+/// `truncated` counts messages whose `content` was shortened in place.
+/// Test: `trim_truncates_single_oversized_message`,
+/// `trim_drops_oldest_evictable` (both in `context::trim`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TrimOutcome {
+    /// Number of whole messages evicted (dropped) from the history.
+    pub evicted: usize,
+    /// Number of messages whose `content` was truncated in place.
+    pub truncated: usize,
+}
+
+impl TrimOutcome {
+    /// True when the pass changed the message vector at all (evicted or
+    /// truncated at least one message). Callers use this to decide whether to
+    /// re-serialize the trimmed messages or return the originals untouched.
+    pub fn changed(&self) -> bool {
+        self.evicted > 0 || self.truncated > 0
+    }
+}
+
 /// Shared context manager — cheap to clone (`HashMap` is cloned, which is
 /// acceptable because it's only used for per-agent budget caching).
+///
+/// Its `trim_to_budget` method is implemented in the sibling `context::trim`
+/// module.
 #[derive(Debug, Clone)]
 pub struct ContextManager {
     /// Soft threshold as a fraction of the model's context window (0..=1).
@@ -52,74 +84,11 @@ impl ContextManager {
             budgets: HashMap::new(),
         }
     }
-
-    /// Trim a message history to fit within `soft_threshold` of the model's
-    /// context window.
-    ///
-    /// Why: Protects the system/goals header (first `protected_count` entries)
-    /// from eviction; everything beyond is fair game in oldest-first order.
-    /// What: Sums rough token estimates across all messages. If under budget,
-    /// returns the input unchanged. Otherwise drops evictable entries from the
-    /// front until the remaining total fits.
-    /// Returns `(trimmed_messages, evicted_count)`.
-    /// Test: `trim_drops_oldest_evictable`, `trim_respects_protected_count`.
-    pub fn trim_to_budget(
-        &self,
-        messages: Vec<serde_json::Value>,
-        model: &str,
-        protected_count: usize,
-    ) -> (Vec<serde_json::Value>, usize) {
-        let budget = (context_window(model) as f32 * self.soft_threshold) as u32;
-        let total: u32 = messages.iter().map(estimate_tokens).sum();
-
-        if total <= budget {
-            return (messages, 0);
-        }
-
-        let protected_count = protected_count.min(messages.len());
-        let mut iter = messages.into_iter();
-        let protected: Vec<serde_json::Value> = iter.by_ref().take(protected_count).collect();
-        let mut evictable: Vec<serde_json::Value> = iter.collect();
-
-        let protected_tokens: u32 = protected.iter().map(estimate_tokens).sum();
-
-        // MIN-6 (#103): Maintain a running sum of evictable tokens instead of
-        // re-summing every iteration. This turns the eviction loop from O(n²)
-        // into O(n) — important when a long history needs many evictions.
-        let mut remaining: u32 = evictable.iter().map(estimate_tokens).sum();
-        let mut evicted = 0usize;
-        while protected_tokens + remaining > budget && !evictable.is_empty() {
-            remaining = remaining.saturating_sub(estimate_tokens(&evictable[0]));
-            evictable.remove(0);
-            evicted += 1;
-        }
-
-        let mut result = protected;
-        result.extend(evictable);
-        (result, evicted)
-    }
-}
-
-/// Rough token estimate for a chat message: 4 chars ≈ 1 token.
-///
-/// Why: A real tokenizer per model would be heavier than the benefit; the
-/// estimator only needs to be monotonic to drive eviction correctly.
-/// What: Reads `content` as a string (falls back to stringifying the full
-/// value when `content` isn't a plain string — e.g. multi-part blocks).
-/// Test: Indirectly via `trim_*` tests.
-pub fn estimate_tokens(message: &serde_json::Value) -> u32 {
-    let content_str = match message.get("content") {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-        None => message.to_string(),
-    };
-    ((content_str.len() as u32) / 4).max(1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn context_window_known_models() {
@@ -128,44 +97,5 @@ mod tests {
         assert_eq!(context_window("openai/gpt-4o"), 128_000);
         assert_eq!(context_window("openai/gpt-5.1-codex"), 400_000);
         assert_eq!(context_window("some-unknown-model"), 128_000);
-    }
-
-    #[test]
-    fn trim_noop_when_under_budget() {
-        let mgr = ContextManager::new(0.5);
-        let msgs = vec![json!({"role":"system","content":"hi"})];
-        let (out, n) = mgr.trim_to_budget(msgs.clone(), "claude-sonnet-4-6", 1);
-        assert_eq!(n, 0);
-        assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    fn trim_drops_oldest_evictable() {
-        // Force tiny budget by using a threshold that makes virtually any
-        // payload exceed it: combine a big dummy message + small threshold.
-        // We can't set threshold below 0.1, so instead build messages large
-        // enough that 10% of a 128k context (~12.8k tokens) is exceeded.
-        let big = "a".repeat(80_000); // ~20k tokens
-        let mgr = ContextManager::new(0.1);
-        let msgs = vec![
-            json!({"role":"system","content":"sys"}),
-            json!({"role":"user","content":big.clone()}),
-            json!({"role":"assistant","content":big.clone()}),
-            json!({"role":"user","content":big.clone()}),
-        ];
-        let (out, n) = mgr.trim_to_budget(msgs, "gpt-4", 1);
-        assert!(n >= 1, "expected at least one eviction");
-        // Protected system message must survive.
-        assert_eq!(out[0]["role"], "system");
-    }
-
-    #[test]
-    fn trim_respects_protected_count_greater_than_len() {
-        let mgr = ContextManager::new(0.1);
-        let msgs = vec![json!({"role":"system","content":"s"})];
-        // protected_count=5 > len=1 should not panic.
-        let (out, n) = mgr.trim_to_budget(msgs, "gpt-4", 5);
-        assert_eq!(n, 0);
-        assert_eq!(out.len(), 1);
     }
 }

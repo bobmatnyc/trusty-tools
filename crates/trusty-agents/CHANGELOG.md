@@ -42,6 +42,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **MCP tool results no longer collapse the live conversation to the system
+  prompt:** an MCP tool result (e.g. `grep` via trusty-search) is shrunk by no
+  `compress_tool_output` filter and can be multiple megabytes; the send-time
+  context trimmer's pure oldest-first, whole-message eviction then evicted the
+  user's question AND the assistant tool-call turn AND the result itself,
+  leaving only the protected system message — so the follow-up completion
+  answered with zero context (`input_tokens` flatlined at the system-prompt
+  size and the model ignored the tool output). `ContextManager::trim_to_budget`
+  now splits the history into three regions — the protected system header, an
+  OLD history region, and a RECENCY window (the "live turn": from the last user
+  message to the end) — and applies strategies in increasing order of damage:
+  (1) water-fill-truncate only the OLD region, keeping the header AND the newest
+  turn at FULL fidelity; (2) evict oldest OLD messages (never the header, never
+  the recency window); (3) as a last resort — when the oversized message is
+  itself inside the live turn (the MCP shape) — truncate within the recency
+  window so the question and every assistant/tool pairing survive rather than
+  being evicted. This preserves THREE guarantees at once: the live conversation
+  never collapses; the **newest turn keeps full fidelity** whenever the budget
+  allows (restoring what oldest-first eviction implicitly gave — a
+  uniformly-sized long conversation no longer shrinks its most recent message);
+  and **no assistant `tool_calls` message is ever separated from its `tool`
+  results** — the recency boundary is pairing-atomic (it can't split a
+  multi-tool-call group even in a tools-only continuation with no user message)
+  and Strategy 2 evicts tool-call groups atomically by sweeping the whole
+  history regardless of message ordering/adjacency (so even adversarial or
+  replayed interleaved groups leave whole), so the request never carries an
+  orphaned `tool_call_id` that OpenAI/OpenRouter would reject.
+  Truncation is logged distinctly from eviction so it never masquerades as the
+  catastrophic path.
 - **Chat stream renders inside ONE stable assistant bubble — no mid-stream
   flicker:** as `task-delta` tokens arrived the reply bubble visibly flashed
   because each delta fired two separate `messages` store writes (content, then
