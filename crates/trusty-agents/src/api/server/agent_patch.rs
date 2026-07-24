@@ -58,7 +58,7 @@
 //! (500), package-vs-flat path resolution, `tools_allow` round-trip, and
 //! `personality` accept (package)/reject (flat-only) cases.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use axum::{
     Json,
@@ -70,7 +70,6 @@ use serde::Deserialize;
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 use trusty_common::inference::registry::{self, ProviderId};
 
-use super::handlers::agents_dir;
 use super::projects::parse_agent_toml;
 use super::state::AppState;
 
@@ -82,16 +81,27 @@ use super::state::AppState;
 /// case, and is what [`patch_agent_at`] uses to locate a sibling `persona.md`.
 /// Returns `None` when neither a package nor a flat file exists for `name`.
 /// Test: `resolve_agent_paths_prefers_package_over_flat_shadow`,
-/// `resolve_agent_paths_falls_back_to_flat`, `resolve_agent_paths_none_when_absent`.
-fn resolve_agent_paths(dir: &Path, name: &str) -> Option<(PathBuf, Option<PathBuf>)> {
-    let package_dir = dir.join(name);
-    let package_toml = package_dir.join("agent.toml");
-    if package_toml.is_file() {
-        return Some((package_toml, Some(package_dir)));
-    }
-    let flat = dir.join(format!("{name}.toml"));
-    if flat.is_file() {
-        return Some((flat, None));
+/// `resolve_agent_paths_falls_back_to_flat`, `resolve_agent_paths_none_when_absent`,
+/// `resolve_agent_paths_searches_second_tier_when_first_misses`.
+///
+/// `dirs` is searched in order (project-local tier before `$HOME`, matching
+/// [`crate::agents::agents_dir_candidates`]'s documented precedence) —
+/// critical for the packaged desktop app, where the Tauri sidecar's cwd is
+/// `/` (sealed volume, #3741): a SINGLE cwd-relative directory (the
+/// pre-#3819 behavior) would never resolve ANY bundled agent there, since
+/// every bundled agent lives in the `$HOME/.trusty-agents/agents` tier, not
+/// a nonexistent `/.trusty-agents/agents`.
+fn resolve_agent_paths(dirs: &[PathBuf], name: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+    for dir in dirs {
+        let package_dir = dir.join(name);
+        let package_toml = package_dir.join("agent.toml");
+        if package_toml.is_file() {
+            return Some((package_toml, Some(package_dir)));
+        }
+        let flat = dir.join(format!("{name}.toml"));
+        if flat.is_file() {
+            return Some((flat, None));
+        }
     }
     None
 }
@@ -147,31 +157,38 @@ fn bad_request(msg: impl Into<String>) -> Response {
 /// Why: Thin axum glue over [`patch_agent_at`], which does the real work
 /// against an injectable directory so it can be unit-tested without
 /// depending on the process cwd.
-/// What: Resolves the on-disk agents directory via [`agents_dir`] and
-/// delegates.
+/// What: Resolves the on-disk agent directory CANDIDATES via
+/// [`crate::agents::agents_dir_candidates`] (project-local tier, then
+/// `$HOME/.trusty-agents/agents` — see [`resolve_agent_paths`]'s doc comment
+/// for why a single cwd-relative directory is wrong for the packaged
+/// desktop app) and delegates.
 /// Test: `super::tests::agent_patch` drives this through the full router.
 pub(super) async fn patch_agent_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
     Json(req): Json<PatchAgentRequest>,
 ) -> Response {
-    patch_agent_at(&agents_dir(), &name, req).await
+    patch_agent_at(&crate::agents::agents_dir_candidates(), &name, req).await
 }
 
-/// Core PATCH logic against an explicit agents directory.
+/// Core PATCH logic against explicit candidate agent directories.
 ///
-/// Why: Extracted so tests can drive it against a `tempfile::TempDir`
+/// Why: Extracted so tests can drive it against `tempfile::TempDir`s
 /// without mutating the process-global cwd (mirrors the
 /// `scan_agents_dir`/`load_sessions_from` pattern already used by the
 /// sibling listing routes).
 /// What: See the module-level doc for the full validation + write sequence.
-/// Postconditions: on `200 OK`, the file at `dir/<name>.toml` has been
-/// rewritten with the requested field(s) updated and every other key/comment
-/// preserved; the response body is [`parse_agent_toml`]'s view of that same
-/// file, so an immediate follow-up read observes an identical result
-/// (round-trip).
+/// Postconditions: on `200 OK`, the resolved file (see
+/// [`resolve_agent_paths`]) has been rewritten with the requested field(s)
+/// updated and every other key/comment preserved; the response body is
+/// [`parse_agent_toml`]'s view of that same file, so an immediate follow-up
+/// read observes an identical result (round-trip).
 /// Test: `super::tests::agent_patch::*`.
-pub(super) async fn patch_agent_at(dir: &Path, name: &str, req: PatchAgentRequest) -> Response {
+pub(super) async fn patch_agent_at(
+    dirs: &[PathBuf],
+    name: &str,
+    req: PatchAgentRequest,
+) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
         return bad_request("invalid agent name");
     }
@@ -185,7 +202,7 @@ pub(super) async fn patch_agent_at(dir: &Path, name: &str, req: PatchAgentReques
         );
     }
 
-    let Some((path, package_dir)) = resolve_agent_paths(dir, name) else {
+    let Some((path, package_dir)) = resolve_agent_paths(dirs, name) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "unknown agent", "name": name })),
@@ -454,14 +471,14 @@ pub(super) async fn get_agent_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Response {
-    get_agent_at(&agents_dir(), &name).await
+    get_agent_at(&crate::agents::agents_dir_candidates(), &name).await
 }
 
-pub(super) async fn get_agent_at(dir: &Path, name: &str) -> Response {
+pub(super) async fn get_agent_at(dirs: &[PathBuf], name: &str) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
         return bad_request("invalid agent name");
     }
-    let Some((path, _package_dir)) = resolve_agent_paths(dir, name) else {
+    let Some((path, _package_dir)) = resolve_agent_paths(dirs, name) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "unknown agent", "name": name })),
@@ -502,7 +519,7 @@ pub(super) async fn get_agent_persona_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Response {
-    persona_at(&agents_dir(), &name).await
+    persona_at(&crate::agents::agents_dir_candidates(), &name).await
 }
 
 /// Core persona-read logic against an explicit agents directory.
@@ -518,11 +535,11 @@ pub(super) async fn get_agent_persona_route(
 /// `NotFound` arm) and returns `editable: true`.
 /// Test: `persona_at_reads_package_persona`,
 /// `persona_at_flat_agent_not_editable`, `persona_at_unknown_agent_404`.
-pub(super) async fn persona_at(dir: &Path, name: &str) -> Response {
+pub(super) async fn persona_at(dirs: &[PathBuf], name: &str) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
         return bad_request("invalid agent name");
     }
-    let Some((_path, package_dir)) = resolve_agent_paths(dir, name) else {
+    let Some((_path, package_dir)) = resolve_agent_paths(dirs, name) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": "unknown agent", "name": name })),
