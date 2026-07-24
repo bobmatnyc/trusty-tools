@@ -582,7 +582,7 @@ impl CodeIndexer {
     /// check `embed_deferred_chunks` runs, and counts the `false`
     /// (not-yet-embedded) entries.
     /// Test: `pending_embed_count_matches_delta_not_total_chunk_count`,
-    /// `pending_embed_count_falls_back_to_full_count_without_embedder`.
+    /// `pending_embed_count_equals_total_on_a_cold_index`.
     pub async fn pending_embed_count(&self) -> usize {
         if self.store.is_none() || self.embedder.is_none() {
             // `embed_deferred_chunks` would short-circuit to `Ok((0, total))`
