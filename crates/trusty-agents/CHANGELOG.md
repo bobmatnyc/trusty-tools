@@ -9,6 +9,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **OKG builder tools — the base assistant can now BUILD its own knowledge
+  graph (epic #3052):** four tools registered into the assistant tier, backed by
+  the new `trusty-kb::okg` engine (which owns every idempotency guarantee and
+  stays pure and network-free).
+  - `okg_ingest_docstore` — point the KB at a directory of text documents.
+    Unchanged files skip on a content hash, edited files replace their prior
+    entry, binary files are skipped and reported, deletions are surfaced (or
+    tombstoned with content preserved).
+  - `okg_ingest_gmail` — query + date-window ingestion. The ledger is consulted
+    BEFORE the body fetch, so a message is pulled exactly once, ever; widening
+    `after` further back in time re-lists the covered window but only pays for
+    the genuinely older messages. Deletion detection is off — a windowed pull
+    can never prove a message is gone.
+  - `okg_ingest_drive` — folder-scoped and revision-aware. The list call
+    carries `version`, so an unchanged file is skipped without downloading and
+    a new revision re-ingests. Deletion detection is enabled only for a
+    complete recursive listing.
+  - `okg_sources` — read-only status view: kind, locator, destination
+    collection, item and tombstone counts, oldest/newest coverage, last run.
+  Registration is folded into ingestion, so "point at this directory" and
+  "reach further back in time" are the same idempotent call and a window can
+  never desync from its ledger. All four are added to the base `assistant`
+  persona's `[tools].allow` and registered into BOTH assistant dispatch paths
+  (`build_assistant_tier_registry` and the persona-chat path), avoiding the
+  divergence #3745 item C had to fix for the izzie tools.
+- Gmail and Drive fetching reuses `trusty-gworkspace`'s authenticated
+  `BaseClient` — no second OAuth path, no browser prompt. List calls go through
+  `BaseClient::get` with our own field sets because the crate's convenience
+  wrappers hardcode `fields` and drop `nextPageToken` (Drive's does not even
+  request it), which makes a bulk backfill impossible through them. Google's
+  soft-error responses (403/404 arrive as a success value carrying an `error`
+  key) are detected and raised rather than silently reported as an empty page.
+
 - **First real eventstream listener: Gmail history-poll + agent wake (#3820,
   DOC-54 SPEC-AGENTS-04/06):** the third leg of the agent-config triple
   (stores / tools / **listeners**) lands with a working Gmail connector.

@@ -491,6 +491,16 @@ pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
         reg.register(tool);
     }
 
+    // OKG builder tools (`okg_ingest_docstore`, `okg_ingest_gmail`,
+    // `okg_ingest_drive`, `okg_sources`). Registered alongside izzie's tools
+    // and, like them, only REACHABLE here — whether a persona can call them is
+    // still decided by `scope_assistant_allowed_tools` against its
+    // `[tools].allow` globs. Construction is I/O- and credential-free; the
+    // Google-backed tools resolve credentials lazily inside `execute`.
+    for tool in crate::tools::okg::okg_tools() {
+        reg.register(tool);
+    }
+
     reg
 }
 
