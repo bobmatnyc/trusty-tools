@@ -39,10 +39,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   sources all three) triple the install dir in `PATH` on a single fresh
   install. bash gets both `.bashrc` and `.bash_profile` (its interactive and
   login files respectively — a default bash session sources only one of the
-  two, not both). Each write skips itself when a `PATH=` line already names
-  the install dir in that file — in ANY quoting style, not only this
-  script's own — so repeat installs, or a machine with a pre-existing
-  hand-written PATH entry, never get a duplicate export line.
+  two, not both). Each write skips itself only when the file already
+  contains a genuine, live `PATH=` assignment (not a commented-out line, and
+  not a same-prefix sibling like `MANPATH=`/`FPATH=`) naming the install dir
+  as a `:`/quote/whitespace-delimited path segment (not merely as a
+  substring of a longer, different directory) — recognising any quoting
+  style, not only this script's own — so repeat installs, or a machine with
+  a pre-existing hand-written PATH entry, never get a duplicate export line,
+  while a commented-out or unrelated-variable entry never silently blocks
+  the real PATH export from being written.
 
 - **`tctl install -y` dead-ended on a truly clean macOS box with no
   Homebrew: tmux could never be auto-installed, and the install ran to

@@ -339,29 +339,56 @@ confirm() {
 # PATH handling
 # ---------------------------------------------------------------------------
 
-# Why (#3874; broadened per #3897 code-critic WARN): a repeat install run
-#      must not accumulate duplicate `export PATH=...` lines in the same RC
-#      file — but the original check only matched OUR OWN exact single-quote
-#      format (`PATH='<dir>'`), so a user's pre-existing hand-written entry in
-#      a different style (e.g. `export PATH="$HOME/.local/bin:$PATH"`, or no
-#      quotes at all) went undetected and got a redundant second entry
-#      appended anyway. Matching `PATH=` followed anywhere on the same line by
-#      the literal directory (regex-escaped; the caller's allowlist already
-#      restricts `_pdir` to `A-Za-z0-9/_.~-`, of which only `.` is an ERE
-#      metacharacter) catches any reasonable quoting/spacing style, not just
-#      this script's own.
-# What: returns 0 (already present) iff `_pfile` exists and already contains
-#      a `PATH=` line naming `_pdir`, in ANY quoting style; 1 otherwise
-#      (including a missing file).
+# Why (#3874; broadened per #3897 code-critic WARN, then CORRECTED per
+#      #3897 code-critic BLOCK — a first broadening was a free-substring
+#      match on "PATH=.*<dir>" with no anchoring, which produced FALSE
+#      positives that made `_append_path_export` silently skip writing the
+#      real export line — reproduced two ways: (a) a commented-out line
+#      naming the dir, e.g. `# export PATH="<dir>:$PATH"  (disabled)` —
+#      grep doesn't skip `#` lines by default; (b) `PATH=` is a substring of
+#      `MANPATH=`/`FPATH=`/`PYTHONPATH=`/`CLASSPATH=`, and with no
+#      right-hand boundary check, `.../.local/bin` also matched inside
+#      `.../.local/binaries`. Both left `.zshenv` with ZERO real
+#      `export PATH=` lines while the script exited reporting success —
+#      strictly worse than the cosmetic over-broadening it replaced, since
+#      that one still worked): a repeat install run must not accumulate
+#      duplicate `export PATH=...` lines in the same RC file, and a user's
+#      pre-existing hand-written entry in a different quoting style (e.g.
+#      `export PATH="$HOME/.local/bin:$PATH"`) must be recognised too — but
+#      ONLY when it is an actual, live `PATH=` assignment naming this exact
+#      directory as a `:`/quote/whitespace/end-of-line-delimited path
+#      segment.
+# What: returns 0 (already present) iff, after dropping full-line comments
+#      (lines whose first non-whitespace character is `#`), `_pfile`
+#      contains a line where: (i) `PATH=` is not itself the tail of a longer
+#      identifier (required not to be preceded by a word character, so
+#      `MANPATH=`/`FPATH=`/etc. can never match); (ii) `_pdir` is either
+#      immediately glued to `PATH=` (the unquoted `PATH=<dir>:$PATH` form)
+#      OR immediately preceded by one of `:`, `'`, `"` (so it can never
+#      match as a bare substring tacked onto an unrelated word, e.g.
+#      `PATH=FOO<dir>`); AND (iii) `_pdir` is immediately followed by one of
+#      `:`, `'`, `"`, whitespace, or end-of-line (so `.local/bin` can never
+#      match inside `.local/binaries`). Returns 1 otherwise (including a
+#      missing file, or a match found only in a commented-out line).
+# What it does NOT guarantee: this is not a shell parser — an assignment
+#      split across a `\`-continued line, or one hidden behind further
+#      indirection (`eval`, a sourced variable), will not be detected. That
+#      is an accepted, narrow gap; false-negative here just means a second
+#      (harmless, still-idempotent-on-ITS-OWN-writes) export line gets
+#      appended, never a silently-skipped real fix — the failure mode this
+#      function exists to avoid is a false POSITIVE, not a false negative.
 # Test: appending twice via `_append_path_export` leaves exactly one line;
-#      a pre-existing differently-quoted entry is also detected (no second
-#      entry appended).
+#      a pre-existing differently-quoted entry is detected (no second entry
+#      appended); a commented-out entry is NOT detected (the real line still
+#      gets written); a sibling `MANPATH=`/`FPATH=` line naming the same dir
+#      is NOT detected (the real `PATH=` line still gets written).
 _path_export_present_in() {
     _pdir="$1"
     _pfile="$2"
     [ -f "${_pfile}" ] || return 1
     _pdir_esc=$(printf '%s' "${_pdir}" | sed 's/[.]/\\&/g')
-    grep -Eq "PATH=.*${_pdir_esc}" "${_pfile}" 2>/dev/null
+    grep -v '^[[:space:]]*#' "${_pfile}" 2>/dev/null \
+        | grep -Eq "(^|[^A-Za-z0-9_])PATH=(.*[:='\"])?${_pdir_esc}(:|'|\"|[[:space:]]|\$)"
 }
 
 # Why (#3874): shared by every RC file `maybe_update_path` writes so the

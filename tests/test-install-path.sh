@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # tests/test-install-path.sh — unit tests for install.sh's PATH handling
 # (#3874: write PATH idempotently to the file(s) each shell always sources;
-# #3897 code-critic follow-up: no PATH tripling in a normal login+interactive
-# session, and idempotency detects pre-existing differently-quoted entries).
+# #3897 code-critic follow-up round 1 [WARN]: no PATH tripling in a normal
+# login+interactive session, and idempotency detects pre-existing
+# differently-quoted entries; round 2 [BLOCK]: the round-1 idempotency
+# broadening was an unanchored substring match that silently matched
+# commented-out lines and sibling *PATH variables, causing the REAL export
+# line to be skipped while the script still exited reporting success).
 #
 # Why: install.sh previously wrote the PATH export only to `.zshrc`, which
 # neither non-interactive (`ssh host cmd`) nor login-but-not-interactive zsh
@@ -12,11 +16,18 @@
 # A first fix wrote all three of .zshenv/.zprofile/.zshrc, but a normal
 # login+interactive session (a fresh Terminal.app window) sources all three
 # in ONE shell, tripling the install dir in PATH on a single fresh install
-# (#3897 code-critic MEDIUM finding) — fixed by writing only `.zshenv`
-# (sufficient on its own; sourced unconditionally). A second finding showed
-# the idempotency check only recognised this script's own exact quoting
-# style, so a hand-written differently-quoted PATH entry got a redundant
-# second entry appended — fixed by broadening the match.
+# (round 1 MEDIUM finding) — fixed by writing only `.zshenv` (sufficient on
+# its own; sourced unconditionally). A round-1 second finding showed the
+# idempotency check only recognised this script's own exact quoting style,
+# so a hand-written differently-quoted PATH entry got a redundant second
+# entry appended — fixed by broadening the match to `PATH=.*<dir>`. THAT
+# broadening was itself unanchored (round 2 CRITICAL/BLOCK): it silently
+# matched a commented-out line naming the dir, and matched `PATH=` as a
+# substring of `MANPATH=`/`FPATH=`/etc. and the dir as a substring of a
+# longer sibling directory — in both cases the REAL export was never
+# written, and the script still exited 0. Fixed with a comment-stripping
+# pre-pass plus a properly anchored (word-boundary on `PATH=`, delimiter
+# boundary on both sides of the directory) match.
 #
 # What: sources install.sh with TRUSTY_INSTALL_SOURCE_ONLY=1 (skips the
 # network `main` flow) inside a synthetic $HOME, then drives
@@ -25,9 +36,18 @@
 # - bash: both .bashrc/.bash_profile get the export line
 # - repeat runs do not duplicate the export line in any file (idempotency)
 # - a real login+interactive zsh sourcing every file install.sh could have
-#   touched sees the install dir on PATH EXACTLY ONCE (the tripling regression)
+#   touched sees the install dir on PATH EXACTLY ONCE (the round-1 tripling
+#   regression)
 # - a pre-existing, differently-quoted PATH entry is recognised (no second
 #   entry appended)
+# - a pre-existing COMMENTED-OUT entry naming the dir does NOT block the
+#   real export line from being written (round-2 trigger a)
+# - a pre-existing sibling `MANPATH=` entry naming the dir does NOT block
+#   the real `PATH=` line from being written (round-2 trigger b, part 1)
+# - a pre-existing entry naming a longer directory that merely STARTS WITH
+#   the install dir (`.../.local/binaries`) does NOT block the real
+#   `.../.local/bin` export line from being written (round-2 trigger b,
+#   part 2)
 #
 # Test: This file *is* the test. Run with: tests/test-install-path.sh
 
@@ -176,6 +196,73 @@ test_differently_quoted_existing_entry_is_recognised() {
     rm -rf "$home"
 }
 
+# #3897 code-critic BLOCK finding, trigger (a): a broadened idempotency
+# match on a bare "PATH=.*<dir>" substring silently matched a COMMENTED-OUT
+# line naming the dir, so `_append_path_export` thought a real export was
+# already present and skipped writing one — leaving `.zshenv` with ZERO
+# live `export PATH=` lines while the script exited reporting success. The
+# real fix must strip full-line comments before matching, so a disabled
+# entry never blocks the real write.
+test_commented_out_entry_does_not_block_real_write() {
+    echo "--- test_commented_out_entry_does_not_block_real_write ---"
+    local home
+    home=$(mktemp -d -t install-path-test-XXXXXX)
+    mkdir -p "$home"
+    printf '# export PATH="%s/.local/bin:$PATH"  (disabled)\n' "$home" >"$home/.zshenv"
+
+    run_maybe_update_path "$home" "/bin/zsh" >/dev/null
+
+    local real_lines
+    real_lines=$(grep -Ec "^[[:space:]]*export PATH=" "$home/.zshenv")
+    assert_eq "$real_lines" "1" "a commented-out entry does not block the real export line from being written"
+
+    rm -rf "$home"
+}
+
+# #3897 code-critic BLOCK finding, trigger (b) part 1: "PATH=" is a
+# substring of MANPATH=/FPATH=/PYTHONPATH=/CLASSPATH=, so an unanchored
+# match on a sibling *PATH variable naming the install dir also silently
+# blocked the real PATH export from ever being written.
+test_sibling_path_var_does_not_block_real_write() {
+    echo "--- test_sibling_path_var_does_not_block_real_write ---"
+    local home
+    home=$(mktemp -d -t install-path-test-XXXXXX)
+    mkdir -p "$home"
+    printf 'export MANPATH="%s/.local/bin:$MANPATH"\n' "$home" >"$home/.zshenv"
+
+    run_maybe_update_path "$home" "/bin/zsh" >/dev/null
+
+    local real_lines
+    real_lines=$(grep -Ec "^[[:space:]]*export PATH=" "$home/.zshenv")
+    assert_eq "$real_lines" "1" "a sibling MANPATH= entry naming the dir does not block the real PATH= line from being written"
+
+    rm -rf "$home"
+}
+
+# #3897 code-critic BLOCK finding, trigger (b) part 2: with no right-hand
+# word-boundary check, ".../.local/bin" matched inside ".../.local/binaries"
+# — a different, longer directory that merely starts with the install dir's
+# path — also silently blocking the real write.
+test_dir_as_prefix_of_longer_path_does_not_block_real_write() {
+    echo "--- test_dir_as_prefix_of_longer_path_does_not_block_real_write ---"
+    local home
+    home=$(mktemp -d -t install-path-test-XXXXXX)
+    mkdir -p "$home"
+    printf 'export PATH="%s/.local/binaries:$PATH"\n' "$home" >"$home/.zshenv"
+
+    run_maybe_update_path "$home" "/bin/zsh" >/dev/null
+
+    local real_lines
+    real_lines=$(grep -Ec "^[[:space:]]*export PATH=" "$home/.zshenv")
+    assert_eq "$real_lines" "2" "an unrelated .../.local/binaries entry does not block the real .../.local/bin export line from being written (2 total export lines: the pre-existing unrelated one + the new real one)"
+
+    local dir_lines
+    dir_lines=$(grep -cF "PATH='${home}/.local/bin'" "$home/.zshenv")
+    assert_eq "$dir_lines" "1" "exactly one export line names the exact install dir (not the .../.local/binaries lookalike)"
+
+    rm -rf "$home"
+}
+
 echo "==========================================================="
 echo "install.sh PATH-handling test suite (#3874, #3897 follow-up)"
 echo "==========================================================="
@@ -185,6 +272,9 @@ test_repeat_install_is_idempotent
 test_already_on_path_is_noop
 test_login_interactive_zsh_sources_dir_exactly_once
 test_differently_quoted_existing_entry_is_recognised
+test_commented_out_entry_does_not_block_real_write
+test_sibling_path_var_does_not_block_real_write
+test_dir_as_prefix_of_longer_path_does_not_block_real_write
 
 echo "==========================================================="
 echo "Result: $PASS passed, $FAIL failed"
