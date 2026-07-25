@@ -8,6 +8,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`session.get_context_budget` now surfaces the real working-context
+  floor, not just a point-in-time snapshot (#3912).** The load-realistic
+  compression soak (epic #3866, PR #3909) proved the RPC's cached
+  `working_context_pct` can read 98-99% while the durable
+  `compression.jsonl` telemetry recorded a real floor of 48-60% for the
+  SAME session — a coarse once-per-`task.run`-call poll reliably misses
+  the turn where the floor was lowest. Added
+  `agent_loop::telemetry::session_working_context_floor` (scans the
+  durable JSONL, scoped to one session) and two new response fields,
+  `working_context_pct_low_water_mark` / `working_context_pct_sample_count`,
+  computed fresh on every `session.get_context_budget` query — mirroring
+  `lifetime_compaction_alarm_count`'s existing "read fresh at query time"
+  pattern exactly.
+
 ### Fixed
 
 - **`TurnCapExceeded` permanently un-resumed a session (#3888).** A

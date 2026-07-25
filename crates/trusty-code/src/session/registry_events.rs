@@ -247,6 +247,10 @@ impl SessionRegistry {
             // `get_context_budget` reads this field back out, and it always
             // overwrites it first.
             lifetime_compaction_alarm_count: 0,
+            // (#3912) Same placeholder contract as the field above —
+            // `get_context_budget` overwrites both before returning.
+            working_context_pct_low_water_mark: None,
+            working_context_pct_sample_count: 0,
         };
         {
             let mut sessions = self.lock();
@@ -295,10 +299,17 @@ impl SessionRegistry {
     /// once per query, not once per turn per session. This is also why the
     /// count reflects fires from ANY session on this machine, not just this
     /// one: it is derived from a shared log, not a per-session cache.
+    /// (#3912) `working_context_pct_low_water_mark`/
+    /// `working_context_pct_sample_count` are likewise read fresh here, from
+    /// the SAME durable log filtered to THIS session — the fix for the
+    /// load-realistic soak's finding that the cached snapshot above
+    /// (`working_context_pct`) can read 98-99% while this session's real
+    /// floor (durably recorded) was 48-60%.
     /// Test: `registry_tests::record_context_budget_caches_snapshot_for_late_query`,
     /// `protocol_budget::tests::get_context_budget_never_recorded_session_returns_never_recorded`,
     /// `registry_tests::get_context_budget_unknown_session_errors`,
-    /// `protocol_budget::tests::get_context_budget_reflects_lifetime_compaction_alarm_count`.
+    /// `protocol_budget::tests::get_context_budget_reflects_lifetime_compaction_alarm_count`,
+    /// `protocol_budget::tests::get_context_budget_reflects_working_context_floor`.
     pub fn get_context_budget(&self, id: &str) -> Result<ContextBudgetQuery, RpcError> {
         self.ensure_exists(id)?;
         Ok(self
@@ -306,10 +317,13 @@ impl SessionRegistry {
             .get(id)
             .and_then(|e| e.context_budget)
             .map(|mut snapshot| {
+                let data_dir = crate::agent_loop::telemetry::default_data_dir();
                 snapshot.lifetime_compaction_alarm_count =
-                    crate::agent_loop::telemetry::lifetime_compaction_alarm_count(
-                        &crate::agent_loop::telemetry::default_data_dir(),
-                    );
+                    crate::agent_loop::telemetry::lifetime_compaction_alarm_count(&data_dir);
+                let (low_water_mark, sample_count) =
+                    crate::agent_loop::telemetry::session_working_context_floor(&data_dir, id);
+                snapshot.working_context_pct_low_water_mark = low_water_mark;
+                snapshot.working_context_pct_sample_count = sample_count;
                 ContextBudgetQuery::Recorded(snapshot)
             })
             .unwrap_or(ContextBudgetQuery::NeverRecorded))

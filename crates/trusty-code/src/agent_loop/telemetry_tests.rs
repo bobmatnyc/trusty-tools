@@ -279,6 +279,89 @@ fn record_cadence_event_writes_jsonl() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// -- session_working_context_floor (issue #3912) --
+
+#[test]
+fn session_working_context_floor_missing_file_is_none() {
+    let dir = temp_dir("floor-missing");
+    assert_eq!(session_working_context_floor(&dir, "sess-a"), (None, 0));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn session_working_context_floor_tracks_minimum_for_session() {
+    let dir = temp_dir("floor-tracks-min");
+    record_cadence_event(
+        &dir,
+        Some("sess-a".to_string()),
+        100_000,
+        90_000,
+        200_000,
+        5,
+        3,
+    );
+    record_cadence_event(
+        &dir,
+        Some("sess-a".to_string()),
+        100_000,
+        104_000,
+        200_000,
+        5,
+        4,
+    );
+    record_cadence_event(
+        &dir,
+        Some("sess-a".to_string()),
+        100_000,
+        52_000,
+        200_000,
+        5,
+        5,
+    );
+
+    // overhead_pct is tokens_after/context_window*100; working = 100 - that.
+    // 90_000/200_000 = 45% -> working 55; 104_000/200_000 = 52% -> working 48;
+    // 52_000/200_000 = 26% -> working 74. Floor must be 48.
+    assert_eq!(
+        session_working_context_floor(&dir, "sess-a"),
+        (Some(48), 3),
+        "must report the lowest working_context_pct_after across all samples, not the latest"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn session_working_context_floor_ignores_other_sessions() {
+    let dir = temp_dir("floor-ignores-others");
+    record_cadence_event(
+        &dir,
+        Some("sess-a".to_string()),
+        100_000,
+        190_000,
+        200_000,
+        5,
+        3,
+    );
+    record_cadence_event(
+        &dir,
+        Some("sess-b".to_string()),
+        100_000,
+        10_000,
+        200_000,
+        5,
+        3,
+    );
+
+    let (min_pct, count) = session_working_context_floor(&dir, "sess-a");
+    assert_eq!(count, 1, "only sess-a's own sample must be counted");
+    assert_eq!(
+        min_pct,
+        Some(5),
+        "sess-b's much lower reading must not leak in"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // -- default_data_dir / DATA_DIR_ENV_VAR --
 
 #[tokio::test]
