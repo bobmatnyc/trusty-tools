@@ -251,6 +251,9 @@ impl SessionRegistry {
             // `get_context_budget` overwrites both before returning.
             working_context_pct_low_water_mark: None,
             working_context_pct_sample_count: 0,
+            // (#3911) Same placeholder contract as
+            // `lifetime_compaction_alarm_count` above.
+            lifetime_cadence_floor_breach_count: 0,
         };
         {
             let mut sessions = self.lock();
@@ -324,6 +327,8 @@ impl SessionRegistry {
                     crate::agent_loop::telemetry::session_working_context_floor(&data_dir, id);
                 snapshot.working_context_pct_low_water_mark = low_water_mark;
                 snapshot.working_context_pct_sample_count = sample_count;
+                snapshot.lifetime_cadence_floor_breach_count =
+                    crate::agent_loop::telemetry::lifetime_cadence_floor_breach_count(&data_dir);
                 ContextBudgetQuery::Recorded(snapshot)
             })
             .unwrap_or(ContextBudgetQuery::NeverRecorded))

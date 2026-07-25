@@ -31,11 +31,17 @@ use std::path::{Path, PathBuf};
 pub const SURFACE_TCODE_CADENCE: &str = "tcode-cadence";
 /// [`CompressionEvent::surface`] value for the #2308 threshold compactor.
 pub const SURFACE_TCODE_THRESHOLD: &str = "tcode-threshold";
+/// [`CompressionEvent::surface`] value for a #3911 cadence floor-breach
+/// backstop fire — see [`record_cadence_floor_breach`].
+pub const SURFACE_TCODE_CADENCE_FLOOR_BREACH: &str = "tcode-cadence-floor-breach";
 
 /// `surface_detail` used for every [`SURFACE_TCODE_CADENCE`] record.
 pub const DETAIL_CADENCE: &str = "cadence";
 /// `surface_detail` used for every [`SURFACE_TCODE_THRESHOLD`] record.
 pub const DETAIL_THRESHOLD: &str = "threshold";
+/// `surface_detail` used for every [`SURFACE_TCODE_CADENCE_FLOOR_BREACH`]
+/// record.
+pub const DETAIL_CADENCE_FLOOR_BREACH: &str = "cadence-floor-breach";
 
 /// Filename of the durable compression-telemetry JSONL, under whatever data
 /// directory the caller resolves (production: `crate::workstreams::
@@ -45,6 +51,14 @@ const COMPRESSION_LOG_FILENAME: &str = "compression.jsonl";
 /// Filename of Slice B's durable compaction-alarm log, one line per
 /// `cadence: Some(_)` threshold-compaction fire.
 const COMPACTION_ALARM_LOG_FILENAME: &str = "compaction_alarm.log";
+
+/// Filename of the #3911 durable cadence floor-breach alarm log, one line
+/// per turn `cadence::enforce_budget` exhausted every eligible entry and
+/// STILL exceeded the overhead cap (`CadenceOutcome::within_budget ==
+/// false`) — the never-event alarm for a cadence-level 60%-floor breach,
+/// mirroring [`COMPACTION_ALARM_LOG_FILENAME`]'s identical append-only
+/// design but for the cadence backstop rather than the threshold one.
+const CADENCE_FLOOR_BREACH_ALARM_LOG_FILENAME: &str = "cadence_floor_breach_alarm.log";
 
 /// Escape-hatch env var overriding [`default_data_dir`] for one process,
 /// mirroring `cadence::CADENCE_TURNS_ENV_VAR`'s precedent. Test-only in
@@ -158,6 +172,11 @@ pub fn compaction_alarm_log_path(data_dir: &Path) -> PathBuf {
     data_dir.join(COMPACTION_ALARM_LOG_FILENAME)
 }
 
+/// Resolve `<data_dir>/cadence_floor_breach_alarm.log` (issue #3911).
+pub fn cadence_floor_breach_alarm_log_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(CADENCE_FLOOR_BREACH_ALARM_LOG_FILENAME)
+}
+
 /// Append `event` as one JSONL line to `<data_dir>/compression.jsonl`.
 ///
 /// Why: emission must never fail the compaction/cadence operation it
@@ -246,6 +265,68 @@ pub fn record_compaction_alarm(data_dir: &Path) {
 /// `tests::lifetime_compaction_alarm_count_matches_fire_count`.
 pub fn lifetime_compaction_alarm_count(data_dir: &Path) -> u64 {
     let path = compaction_alarm_log_path(data_dir);
+    let Ok(file) = std::fs::File::open(&path) else {
+        return 0;
+    };
+    std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty())
+        .count() as u64
+}
+
+/// Append one line to `<data_dir>/cadence_floor_breach_alarm.log`, recording
+/// that `cadence::enforce_budget` exhausted every eligible entry and STILL
+/// exceeded the overhead cap this turn (issue #3911's backstop).
+///
+/// Why: before this, a cadence-level 60%-floor breach produced only an
+/// in-process `tracing::warn!` inside `cadence::enforce_budget` — invisible
+/// outside stderr, never durable, never counted. The load-realistic soak
+/// (epic #3866, PR #3909) proved this breach can and does happen under
+/// heavy load (floor 48%) while EVERY other alarm signal
+/// (`lifetime_compaction_alarm_count`, `TranscriptRecord.compaction_events`)
+/// stayed at 0 — because those signals watch the THRESHOLD compactor, a
+/// mechanically independent trigger cadence's own floor breach never
+/// crosses (see [`record_cadence_floor_breach`]'s docs for why). This is
+/// the durable signal that closes that gap. Same append-only,
+/// count-by-lines design as [`record_compaction_alarm`] for the identical
+/// reason: concurrent fires from different sessions can never race each
+/// other into a lost increment.
+/// What: best-effort, matching [`write_compression_event`]'s failure
+/// posture.
+/// Test: `tests::record_cadence_floor_breach_alarm_appends_one_line_per_call`,
+/// `tests::record_cadence_floor_breach_alarm_unwritable_dir_does_not_panic`.
+pub fn record_cadence_floor_breach_alarm(data_dir: &Path) {
+    let _ = std::fs::create_dir_all(data_dir);
+    let path = cadence_floor_breach_alarm_log_path(data_dir);
+    let line = format!("{}\n", chrono::Utc::now().to_rfc3339());
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(line.as_bytes()) {
+                tracing::debug!(error = %e, path = %path.display(), "cadence floor-breach alarm: write failed");
+                return;
+            }
+            let _ = f.flush();
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, path = %path.display(), "cadence floor-breach alarm: open failed");
+        }
+    }
+}
+
+/// Count how many times [`record_cadence_floor_breach_alarm`] has ever
+/// fired for `data_dir` — the lifetime, cross-session, cross-restart alarm
+/// count exposed on `session.get_context_budget` as
+/// `lifetime_cadence_floor_breach_count` (issue #3911).
+///
+/// What: `0` when the file is missing or unreadable (the common,
+/// never-event case); otherwise the number of non-empty lines. Mirrors
+/// [`lifetime_compaction_alarm_count`]'s identical read-fresh-from-disk
+/// contract.
+/// Test: `tests::lifetime_cadence_floor_breach_count_zero_when_missing`,
+/// `tests::lifetime_cadence_floor_breach_count_matches_fire_count`.
+pub fn lifetime_cadence_floor_breach_count(data_dir: &Path) -> u64 {
+    let path = cadence_floor_breach_alarm_log_path(data_dir);
     let Ok(file) = std::fs::File::open(&path) else {
         return 0;
     };
@@ -406,6 +487,94 @@ pub fn record_cadence_event(
             rounds,
         ),
     );
+}
+
+/// Build and emit the [`SURFACE_TCODE_CADENCE_FLOOR_BREACH`] telemetry
+/// record plus the durable [`record_cadence_floor_breach_alarm`] line, for
+/// one `AgentLoop::maybe_cadence_compress` call whose
+/// `CadenceOutcome::within_budget` was `false` (issue #3911).
+///
+/// Why: `cadence::enforce_budget`'s own "documented floor" case (active
+/// zone shrunk to zero, still over the overhead cap) previously only
+/// logged `tracing::warn!` from deep inside that function — no durable
+/// record, no counter, and critically NOT the same alarm the #2308
+/// threshold compactor's OWN breach uses
+/// (`record_threshold_event`/`lifetime_compaction_alarm_count`), because
+/// that alarm is keyed to a MECHANICALLY INDEPENDENT trigger: threshold
+/// fires only once the raw transcript crosses 75% of the context window
+/// (`CompactionConfig::for_context_window`), a laxer bound than cadence's
+/// own 40%-overhead enforcement cap — so by the time cadence has already
+/// compacted as hard as it structurally can (`enforce_budget` shrinks the
+/// active zone to zero, re-compacting at every step) and still exceeds
+/// its OWN cap, the transcript is nowhere near threshold's separate,
+/// higher bound. The load-realistic soak (epic #3866, PR #3909) proved
+/// this empirically: a 48% floor breach produced zero threshold events,
+/// zero alarm-count increments, and zero visible signal anywhere but a
+/// stderr line. This function is the durable, countable trigger that
+/// closes that gap — always called (unconditionally, unlike
+/// `record_threshold_event`'s cadence-gated alarm) because this call site
+/// only exists on the cadence-enabled path in the first place
+/// (`AgentLoop::maybe_cadence_compress` already returns early when
+/// `self.config.cadence` is `None`).
+/// What: writes a `compaction_event: true` JSONL row (this genuinely IS an
+/// alarm-worthy event — the same semantic `record_threshold_event` uses
+/// `true` for) tagged `surface: "tcode-cadence-floor-breach"`, then
+/// unconditionally appends the durable alarm line.
+///
+/// (post-review fix, issue #3911) `working_context_pct_after`/
+/// `overhead_pct_after` are ALWAYS `None` on this row, deliberately — NOT
+/// derived from `tokens_after`/`context_window` the way every other
+/// surface's percentages are. Why: `AgentLoop::maybe_cadence_compress`
+/// calls [`record_cadence_event`] unconditionally whenever `outcome.rounds
+/// > 0` (which every floor breach satisfies — `enforce_budget` always ran
+/// at least one round to reach `within_budget: false`) BEFORE this
+/// function, for the exact same turn, with the exact same
+/// `outcome.overhead_tokens`/`context_window`. Computing the percentage
+/// here too would write a SECOND row carrying an IDENTICAL
+/// `working_context_pct_after` for one real measurement — exactly the
+/// double-count a code-review pass caught: `compression_report.py`'s
+/// `compute_context_floor` (and this crate's own
+/// `session_working_context_floor`, issue #3912) aggregate every row with
+/// a non-`None` percentage with no surface-based dedup, so a single
+/// breach was being counted TWICE toward the observed floor (measured: a
+/// soak run with 21 real breaches reported 42 below-target samples).
+/// Leaving these `None` here is the single-point fix: every existing and
+/// future consumer that filters on "has a working_context_pct_after
+/// sample" — not just this function's two current call sites — inherits
+/// the fix for free, rather than requiring each one to separately learn to
+/// exclude this surface. The paired `tcode-cadence` row is the ONE
+/// authoritative percentage sample for this turn; this row's job is only
+/// to durably flag THAT a breach happened (`compaction_event: true`,
+/// `tokens_before`/`tokens_after`/`rounds` are still real and useful for
+/// debugging), not to re-report the same number under a second surface.
+/// Test: `tests::record_cadence_floor_breach_writes_jsonl_and_alarm`,
+/// `tests::record_cadence_floor_breach_never_double_counts_the_floor`.
+#[allow(clippy::too_many_arguments)]
+pub fn record_cadence_floor_breach(
+    data_dir: &Path,
+    session_id: Option<String>,
+    tokens_before: usize,
+    tokens_after: usize,
+    _context_window: usize,
+    duration_ms: u64,
+    rounds: usize,
+) {
+    write_compression_event(
+        data_dir,
+        &CompressionEvent::new(
+            session_id,
+            SURFACE_TCODE_CADENCE_FLOOR_BREACH,
+            DETAIL_CADENCE_FLOOR_BREACH,
+            tokens_before,
+            tokens_after,
+            None,
+            None,
+            true,
+            duration_ms,
+            rounds,
+        ),
+    );
+    record_cadence_floor_breach_alarm(data_dir);
 }
 
 /// Test-only helper: run `f` with [`DATA_DIR_ENV_VAR`] pointed at `dir`,

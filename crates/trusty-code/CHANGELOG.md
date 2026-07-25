@@ -24,6 +24,42 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `lifetime_compaction_alarm_count`'s existing "read fresh at query time"
   pattern exactly.
 
+- **A cadence-level 60%-floor breach now has a durable backstop alarm
+  (#3911).** The load-realistic soak (epic #3866, PR #3909) proved that
+  when `cadence::enforce_budget` exhausts every eligible entry and still
+  exceeds the overhead cap (a real guarantee violation — floor 48% in the
+  soak's exploratory run), NOTHING durable reacted: the #2308 threshold
+  compactor's own alarm (`lifetime_compaction_alarm_count`) stayed at 0
+  because it is keyed to a mechanically independent, laxer 75%-of-window
+  trigger cadence's own breach never crosses. Added
+  `agent_loop::telemetry::record_cadence_floor_breach` (writes a
+  `tcode-cadence-floor-breach` JSONL row plus a durable alarm line) and a
+  new `lifetime_cadence_floor_breach_count` field on
+  `session.get_context_budget`, elevated the prior in-process `warn!` to
+  `error!` at the call site. Re-running both `compression_load_soak.py`
+  profiles confirms the backstop now fires on every observed breach (2/2
+  in the primary run, 21/21 in the exploratory run) — see PR for the full
+  residual-limits discussion (this is an alarm, not additional
+  compaction capacity: the floor itself is unchanged).
+
+- **(#3911 post-review fix) The floor-breach JSONL row no longer
+  double-counts a real breach as two floor samples.** A breach writes BOTH
+  a `tcode-cadence` row (the real measurement) and a
+  `tcode-cadence-floor-breach` alarm row for the SAME turn; the breach row
+  previously also carried its own `working_context_pct_after`, so any
+  consumer aggregating "samples with a percentage" — `compression_report.py`'s
+  `compute_context_floor` and `session_working_context_floor` (#3912) alike
+  — counted one real breach twice (measured: 21 real breaches reported as
+  42 below-target samples). `record_cadence_floor_breach` now always writes
+  `None` for that field; the paired `tcode-cadence` row remains the one
+  authoritative sample. Corrected re-run: the exploratory profile now
+  correctly reports 21 below-target samples (not 42), matching the
+  original soak's finding.
+
+- `compression_report.py` now additionally reports the #3911 backstop's
+  own fire count in a dedicated section, flagging a floor breach with
+  zero backstop fires as a FINDING.
+
 ### Fixed
 
 - **`TurnCapExceeded` permanently un-resumed a session (#3888).** A

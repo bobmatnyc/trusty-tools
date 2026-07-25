@@ -344,3 +344,145 @@ async fn unwritable_data_dir_does_not_fail_the_loop() {
          by telemetry write failures"
     );
 }
+
+// ── #3911: cadence floor-breach backstop ────────────────────────────────────
+
+/// A genuine cadence-level 60%-floor breach — `cadence::enforce_budget`
+/// exhausts every eligible entry (the huge seeded task alone, which is
+/// `user`-role and therefore NEVER compacted, exceeds a deliberately tiny
+/// cap) — now writes the durable `tcode-cadence-floor-breach` JSONL record
+/// AND the alarm log, AND emits an `ERROR`-level log, end to end through
+/// `AgentLoop::maybe_cadence_compress`. Mirrors
+/// `agent_loop::tests::cadence::forced_degradation_increments_counter_and_logs_error`'s
+/// shape (real loop run, not a bare `cadence::maybe_cadence_compress` unit
+/// call) for the SAME reason: this is the acceptance criterion that the
+/// signal fires through the actual turn boundary, not just at the pure
+/// `cadence` module level (`cadence_tests::floor_exceeded_warns_not_panics`
+/// already covers that unit).
+///
+/// Why: before #3911, this exact scenario — proven by the load-realistic
+/// soak (epic #3866, PR #3909) to occur under heavy real-world load
+/// (floor 48%) — produced ZERO durable signal anywhere:
+/// `lifetime_compaction_alarm_count` stayed 0 (that alarm is keyed to the
+/// mechanically-independent threshold compactor, which this scenario never
+/// crosses — see `telemetry::record_cadence_floor_breach`'s docs), and the
+/// only trace was an in-process `tracing::warn!` inside
+/// `cadence::enforce_budget`. This test pins the fix.
+#[tokio::test]
+async fn cadence_floor_breach_writes_alarm_and_error_log() {
+    crate::test_support::begin_capture();
+
+    let dir = telemetry::test_temp_dir("floor-breach");
+    let fixtures: Vec<Value> = vec![stop_response("all done")];
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm,
+        registry,
+        AgentLoopConfig {
+            max_turns: 10,
+            mode: crate::mode::HarnessMode::DailyDriver,
+            cadence: Some(CadenceConfig {
+                cadence_turns: 1,
+                max_overhead_fraction_pct: 1, // trivially tiny cap
+            }),
+            telemetry_data_dir: Some(dir.clone()),
+            ..AgentLoopConfig::default()
+        },
+    );
+    // A huge `user`-role seed: never eligible for compaction (system/user
+    // exemption), so it alone blows the tiny cap above no matter how hard
+    // `enforce_budget` shrinks the active zone — the documented,
+    // structural floor this backstop is about, not a tuning gap.
+    let mut transcript = Transcript::seed("system prompt", &"x".repeat(200_000));
+
+    agent
+        .run_with_transcript(&mut transcript, "the task")
+        .await
+        .expect("run completes even through a floor breach");
+
+    let messages = crate::test_support::captured_at_least(tracing::Level::ERROR);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("floor breached") && m.contains("cadence")),
+        "expected an error-level floor-breach log, got: {messages:?}"
+    );
+
+    let events = read_jsonl(&dir);
+    let breach_events: Vec<_> = events
+        .iter()
+        .filter(|e| e.surface == telemetry::SURFACE_TCODE_CADENCE_FLOOR_BREACH)
+        .collect();
+    assert!(
+        !breach_events.is_empty(),
+        "expected at least one tcode-cadence-floor-breach JSONL line, got {events:?}"
+    );
+    for e in &breach_events {
+        assert!(
+            e.compaction_event,
+            "a floor breach is alarm-worthy: compaction_event must be true: {e:?}"
+        );
+    }
+
+    assert!(
+        telemetry::lifetime_cadence_floor_breach_count(&dir) >= 1,
+        "a cadence floor breach must record the durable alarm line"
+    );
+    assert_eq!(
+        telemetry::lifetime_compaction_alarm_count(&dir),
+        0,
+        "the cadence floor-breach alarm must be a DISTINCT counter from the \
+         threshold-under-cadence alarm — this scenario never touches the \
+         threshold compactor at all"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The regression guard: a normal run that stays within budget the whole
+/// time must never write the floor-breach alarm or JSONL surface.
+#[tokio::test]
+async fn cadence_within_budget_never_writes_floor_breach_alarm() {
+    let dir = telemetry::test_temp_dir("floor-no-breach");
+    let mut fixtures: Vec<Value> = (0..3)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm,
+        registry,
+        AgentLoopConfig {
+            cadence: Some(CadenceConfig {
+                cadence_turns: 1,
+                ..CadenceConfig::default()
+            }),
+            telemetry_data_dir: Some(dir.clone()),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("system prompt", "a small task")
+        .await
+        .expect("run completes");
+
+    let events = read_jsonl(&dir);
+    assert!(
+        events
+            .iter()
+            .all(|e| e.surface != telemetry::SURFACE_TCODE_CADENCE_FLOOR_BREACH),
+        "a healthy run must never write the floor-breach surface: {events:?}"
+    );
+    assert_eq!(
+        telemetry::lifetime_cadence_floor_breach_count(&dir),
+        0,
+        "a healthy run must never increment the floor-breach alarm"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

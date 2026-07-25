@@ -313,4 +313,59 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // -- issue #3911: lifetime_cadence_floor_breach_count --
+
+    /// The RPC surfaces the #3911 backstop's own durable alarm count,
+    /// distinct from `lifetime_compaction_alarm_count`.
+    #[tokio::test]
+    async fn get_context_budget_reflects_cadence_floor_breach_count() {
+        let dir = telemetry_temp_dir("floor-breach-reflects");
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        let result = crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
+            crate::agent_loop::telemetry::record_cadence_floor_breach_alarm(&dir);
+            crate::agent_loop::telemetry::record_cadence_floor_breach_alarm(&dir);
+            registry
+                .record_context_budget(&session.id, &measurement())
+                .unwrap();
+            get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
+                .await
+                .unwrap()
+        })
+        .await;
+
+        assert_eq!(result["lifetime_cadence_floor_breach_count"], 2);
+        assert_eq!(
+            result["lifetime_compaction_alarm_count"], 0,
+            "the two alarm counters must never conflate — this scenario never \
+             recorded a threshold-under-cadence fire"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session with no floor-breach fires reports `0`, never a fabricated
+    /// count.
+    #[tokio::test]
+    async fn get_context_budget_floor_breach_count_zero_without_a_fire() {
+        let dir = telemetry_temp_dir("floor-breach-zero");
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        let result = crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
+            registry
+                .record_context_budget(&session.id, &measurement())
+                .unwrap();
+            get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
+                .await
+                .unwrap()
+        })
+        .await;
+
+        assert_eq!(result["lifetime_cadence_floor_breach_count"], 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
