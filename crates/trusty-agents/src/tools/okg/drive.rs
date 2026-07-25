@@ -16,10 +16,12 @@
 //! Test: `super::tests::drive_item_fingerprints_on_version`,
 //! `drive_item_falls_back_to_mtime`.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_gworkspace::api::client::BaseClient;
-use trusty_kb::okg::ingest::SourceItem;
+use trusty_kb::okg::ingest::{IngestReport, SourceItem};
 use trusty_kb::okg::ledger::Ledger;
 use trusty_kb::okg::registry::{Locator, SourceSpec};
 
@@ -29,6 +31,16 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 
 /// Default ceiling on files listed in one call.
 const DEFAULT_MAX_FILES: usize = 500;
+
+/// Hard ceiling, enforced regardless of what the caller asks for.
+///
+/// Why: `max_files` comes from the model; without a clamp a single call could
+/// be told to pull an unbounded folder and hold every downloaded body at once.
+const MAX_FILES_CEILING: usize = 5_000;
+
+/// Files downloaded and committed per chunk — bounds peak memory and makes each
+/// chunk a ledger commit point, so a crash mid-backfill keeps prior progress.
+const CHUNK: usize = 50;
 
 /// `okg_ingest_drive` — ingest a Google Drive folder into the OKG.
 pub struct OkgIngestDriveTool;
@@ -134,11 +146,13 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     let spec = store.okg_source(&registered.id)?;
 
     let account = arg_str(args, "account");
+    // Clamp, never trust: a model-supplied ceiling only ever narrows the pull.
     let max_files = args
         .get("max_files")
         .and_then(Value::as_u64)
         .map(|n| n as usize)
-        .unwrap_or(DEFAULT_MAX_FILES);
+        .unwrap_or(DEFAULT_MAX_FILES)
+        .clamp(1, MAX_FILES_CEILING);
 
     let client = BaseClient::new()?;
     client
@@ -152,45 +166,66 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     // download — an unchanged folder costs one list call and nothing else.
     let ledger = Ledger::load(&store.root, &spec.id)?;
     let mut needs_fetch: Vec<Value> = Vec::new();
-    let mut unchanged: Vec<SourceItem> = Vec::new();
+    let mut present_ids: BTreeSet<String> = BTreeSet::new();
+    let mut skipped_unchanged = 0usize;
     for file in &files {
         let Some(probe) = gapi::drive_item(file, String::new()) else {
             continue;
         };
-        if ledger.is_current(&probe.item_id, &probe.fingerprint) {
-            // Still presented to the engine (so it counts as covered rather
-            // than vanished) — it will skip on the fingerprint match.
-            unchanged.push(probe);
+        present_ids.insert(probe.item_id.clone());
+        // `volatile` files have no usable revision signal, so they must always
+        // be re-fetched — consulting the ledger for them would freeze them.
+        if !probe.volatile && ledger.is_current(&probe.item_id, &probe.fingerprint) {
+            skipped_unchanged += 1;
         } else {
             needs_fetch.push(file.clone());
         }
     }
     drop(ledger);
 
-    let mut items = unchanged;
-    let mut fetch_errors: Vec<String> = Vec::new();
+    // Download and COMMIT in chunks so peak memory is one chunk of file bodies
+    // and a crash mid-backfill keeps everything already committed.
+    let mut report = IngestReport::default();
     let mut skipped_binary = 0usize;
-    for file in &needs_fetch {
-        let id = file.get("id").and_then(Value::as_str).unwrap_or_default();
-        match gapi::drive_content(&client, account, id).await {
-            Ok(Some(content)) => match gapi::drive_item(file, content) {
-                Some(item) => items.push(item),
-                None => fetch_errors.push(format!("{id}: file metadata had no usable id")),
-            },
-            Ok(None) => {
-                skipped_binary += 1;
-                fetch_errors.push(format!("{id}: skipped (binary or non-exportable content)"));
+    for batch in needs_fetch.chunks(CHUNK) {
+        let mut items: Vec<SourceItem> = Vec::with_capacity(batch.len());
+        for file in batch {
+            let id = file.get("id").and_then(Value::as_str).unwrap_or_default();
+            match gapi::drive_content(&client, account, id).await {
+                Ok(Some(content)) => match gapi::drive_item(file, content) {
+                    Some(item) => items.push(item),
+                    None => report
+                        .errors
+                        .push(format!("{id}: file metadata had no usable id")),
+                },
+                Ok(None) => {
+                    skipped_binary += 1;
+                    report
+                        .errors
+                        .push(format!("{id}: skipped (binary or non-exportable content)"));
+                }
+                Err(e) => report.errors.push(format!("{id}: {e}")),
             }
-            Err(e) => fetch_errors.push(format!("{id}: {e}")),
         }
+        // Detection is OFF per chunk — a single page cannot tell which files
+        // exist folder-wide, and treating it as authoritative would tombstone
+        // every file in the other chunks. The sweep runs once, below.
+        report.merge(store.ingest_items(&spec, &items, false, &now)?);
     }
 
-    // A recursive listing enumerates the whole folder tree, so an absent file is
-    // genuinely absent. A shallow listing does not — subfolder contents were
-    // never listed, and tombstoning them would be a lie.
+    // A recursive listing that did not hit the cap enumerates the whole folder
+    // tree, so an absent file is genuinely absent. A shallow or truncated
+    // listing does not — tombstoning from one would be a lie.
     let report_deletions = recursive && files.len() < max_files;
-    let mut report = store.ingest_items(&spec, &items, report_deletions, &now)?;
-    report.errors.extend(fetch_errors);
+    if report_deletions {
+        report.merge(store.okg_sweep_deleted(&spec, &present_ids, &now)?);
+    }
+
+    report.source_id = spec.id.clone();
+    report.kind = spec.kind().to_string();
+    report.collection = spec.collection.clone();
+    report.skipped += skipped_unchanged;
+    report.scanned = files.len();
 
     Ok(ok_json(&json!({
         "source": registered,
@@ -199,6 +234,7 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
         "downloaded": needs_fetch.len(),
         "skipped_binary": skipped_binary,
         "deletion_detection": report_deletions,
+        "max_files": max_files,
         "ingest": report,
     })))
 }

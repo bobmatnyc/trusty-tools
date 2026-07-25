@@ -231,6 +231,9 @@ pub fn message_to_item(msg: &Value) -> Option<SourceItem> {
         timestamp,
         body,
         fields,
+        // A Gmail message is immutable, so its id is a perfect change signal —
+        // never volatile, which is what makes "pull exactly once, ever" hold.
+        volatile: false,
     })
 }
 
@@ -385,17 +388,22 @@ pub fn drive_item(file: &Value, content: String) -> Option<SourceItem> {
         .get("modifiedTime")
         .and_then(Value::as_str)
         .map(String::from);
-    let fingerprint = match file.get("version").and_then(|v| {
+    // `volatile` is the load-bearing half of this. A constant fingerprint like
+    // `unversioned:<id>` is INDISTINGUISHABLE from "unchanged" to the ledger, so
+    // marking the item volatile is what actually delivers the intended
+    // re-ingest — the string alone silently froze the entity at its first-seen
+    // content forever (code-critic HIGH 3).
+    let (fingerprint, volatile) = match file.get("version").and_then(|v| {
         v.as_str()
             .map(String::from)
             .or_else(|| v.as_i64().map(|n| n.to_string()))
     }) {
-        Some(version) => format!("version:{version}"),
+        Some(version) => (format!("version:{version}"), false),
         None => match &modified {
-            Some(m) => format!("modified:{m}"),
-            // No revision signal at all: fall back to re-ingesting every run
-            // rather than pretending the file is unchanged.
-            None => format!("unversioned:{id}"),
+            Some(m) => (format!("modified:{m}"), false),
+            // No revision signal at all: re-ingest every run rather than
+            // pretending the file is unchanged.
+            None => (format!("unversioned:{id}"), true),
         },
     };
 
@@ -417,5 +425,6 @@ pub fn drive_item(file: &Value, content: String) -> Option<SourceItem> {
         timestamp: modified,
         body: content,
         fields,
+        volatile,
     })
 }

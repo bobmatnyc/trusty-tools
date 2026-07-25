@@ -82,9 +82,19 @@ allow = [
   # real sources — a directory of documents, a Gmail query window, a Drive
   # folder — idempotently and additively. Generic capability (every user
   # benefits from an assistant that can build its own KB), so it belongs on the
-  # base rather than a personalization overlay. Ingestion is scoped to the
-  # assistant's OWN tree under the knowledge directory and cannot write outside
-  # it; the Google-backed tools reuse the existing read-only `google.read`
+  # base rather than a personalization overlay.
+  #
+  # TWO SEPARATE BOUNDARIES apply, and both matter:
+  #   WRITE — every entity lands under the assistant's OWN tree inside the
+  #     knowledge directory; a model-supplied `root` outside it is rejected.
+  #   READ  — `okg_ingest_docstore` reads a model-supplied filesystem path, so
+  #     it is confined to an operator-controlled allow-list: `[okg]
+  #     docstore_roots` in ~/.trusty-agents/config.toml, defaulting to $HOME
+  #     with every hidden path below a root excluded (so ~/.ssh, ~/.aws,
+  #     ~/.gnupg are refused without being enumerated). Widen it deliberately —
+  #     anything reachable becomes searchable and quotable in chat, and
+  #     ingested content is itself untrusted input.
+  # The Google-backed tools reuse the existing read-only `google.read`
   # credentials and never prompt for auth.
   "okg_ingest_docstore",
   "okg_ingest_gmail",

@@ -65,6 +65,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   persona's `[tools].allow` and registered into BOTH assistant dispatch paths
   (`build_assistant_tier_registry` and the persona-chat path), avoiding the
   divergence #3745 item C had to fix for the izzie tools.
+- **`[okg]` config section** — `docstore_roots` in `~/.trusty-agents/config.toml`
+  is the operator-controlled allow-list of directories `okg_ingest_docstore` may
+  read. `~`-expandable and defaulting to `$HOME`, with every hidden path below a
+  root refused, so ordinary corpora work out of the box while credential
+  directories never do. Widening it is a deliberate act: anything reachable
+  becomes searchable and quotable in chat.
+
 - Gmail and Drive fetching reuses `trusty-gworkspace`'s authenticated
   `BaseClient` — no second OAuth path, no browser prompt. List calls go through
   `BaseClient::get` with our own field sets because the crate's convenience
@@ -73,7 +80,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   soft-error responses (403/404 arrive as a success value carrying an `error`
   key) are detected and raised rather than silently reported as an empty page.
 
+### Security
+
+- **`okg_ingest_docstore` is confined on the READ side.** Its `path` was a
+  free-form model-supplied string with only an `is_dir()` check, which made the
+  default base assistant — and every persona extending it — capable of reading
+  arbitrary local files (`/etc`, `~/.ssh`) into a searchable KB. Paths are now
+  checked against `[okg] docstore_roots` before registration AND again inside
+  the engine on every run, so a poisoned registry row cannot replay the read.
+
 ### Fixed
+
+- **Bulk backfills are bounded and resumable.** `max_messages`/`max_files` were
+  taken from the model with no ceiling, and every fetched item accumulated in
+  memory with the ledger committed only after the whole batch — so a large pull
+  could exhaust memory, and a crash mid-fetch lost all progress. Both are now
+  hard-clamped regardless of the caller's value, and items are fetched and
+  committed in chunks, making each chunk a durable commit point. Drive's
+  deletion sweep runs once at the end (via `okg_sweep_deleted`) rather than
+  per chunk, which would have tombstoned everything outside the current page.
+- **Drive files with no revision signal are re-ingested rather than frozen.**
+  Such a file received a constant fingerprint, which the ledger read as
+  "unchanged" forever. They are now marked volatile and always re-fetched.
 
 - **`vector_search` had no `index_id` parameter and silently searched the
   wrong corpus (#3864):** personas documented `vector_search(index_id=…)`

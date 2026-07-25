@@ -44,7 +44,7 @@ impl ToolExecutor for OkgIngestDocstoreTool {
             "type": "function",
             "function": {
                 "name": "okg_ingest_docstore",
-                "description": "Ingest a directory of text documents (md/txt/rst/csv/json/…) into the assistant's knowledge graph. Idempotent: unchanged files are skipped by content hash, edited files replace their prior entry, and deleted files are reported (or tombstoned). Additive: registering a new source_id never disturbs sources already ingested. Binary files are skipped and reported.",
+                "description": "Ingest a directory of text documents (md/txt/rst/csv/json/…) into the assistant's knowledge graph. Idempotent: unchanged files are skipped by content hash, edited files replace their prior entry, and deleted files are reported (or tombstoned). Additive: registering a new source_id never disturbs sources already ingested. Binary files are skipped and reported. Readable directories are limited to an operator-configured allow-list ([okg] docstore_roots, default $HOME); hidden paths such as ~/.ssh and ~/.aws are always refused.",
                 "parameters": {
                     "type": "object",
                     "properties": with_root(json!({
@@ -93,9 +93,15 @@ fn run(args: &Value) -> anyhow::Result<ToolResult> {
             anyhow::bail!("'path' is required when registering the new source {source_id:?}")
         }
     };
-    if !std::path::Path::new(&path).is_dir() {
-        anyhow::bail!("doc store path {path:?} is not a directory");
-    }
+    // Confine the READ side before anything is registered, so a rejected path
+    // never even reaches `registry.toml`. The engine re-checks this same policy
+    // at scan time on every later run, so this is a fast, clear failure rather
+    // than the only line of defence.
+    let policy = crate::tools::okg::docstore_policy();
+    let path = policy
+        .permit(std::path::Path::new(&path))?
+        .to_string_lossy()
+        .to_string();
 
     let extensions: Vec<String> = args
         .get("extensions")
@@ -134,7 +140,7 @@ fn run(args: &Value) -> anyhow::Result<ToolResult> {
     );
     spec.tombstone_deleted = tombstone;
     let registered = store.okg_register_source(spec)?;
-    let report = store.okg_ingest_docstore(&registered.id, &now)?;
+    let report = store.okg_ingest_docstore(&registered.id, &policy, &now)?;
 
     Ok(ok_json(&json!({
         "source": registered,
