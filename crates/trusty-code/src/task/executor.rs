@@ -458,6 +458,10 @@ async fn run_and_record(
     // new "spawn" on every run. Namespaced with a `pm-` prefix so it reads
     // distinctly from an engineer's bare UUID in a raw event dump.
     .with_agent_id(format!("pm-{session_id}"))
+    // (#3867) Stamps this session's real id onto every durable
+    // compression-telemetry JSONL record this loop's cadence/threshold
+    // instrumentation emits — see `AgentLoop::with_session_id`'s docs.
+    .with_session_id(session_id.clone())
     .with_cancel_flag(Arc::clone(&cancel))
     // #2279: mirrors `run_task::execute_run_task`'s own wiring — the PM
     // never calls `bash` itself, so its verify-before-finish gate scans the

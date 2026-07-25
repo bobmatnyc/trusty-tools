@@ -222,18 +222,28 @@ fn overwhelmed_cadence() -> CadenceConfig {
 /// schedules a fire (`overwhelmed_cadence`), while `aggressive_compaction`'s
 /// `token_threshold: 1` trips the #2308 threshold compactor on the very
 /// first turn boundary. This must increment
-/// `Transcript::compaction_events()` AND emit an ERROR-level log — the
+/// `Transcript::compaction_events()`, emit an ERROR-level log — the
 /// "cadence sizing / daemon-availability / turn-size assumptions violated"
-/// regression signal.
+/// regression signal — AND (issues #3867/#3868) durably record BOTH a
+/// `compaction_event: true` JSONL line and the alarm-log line, from the SAME
+/// fire.
 ///
 /// Why: This is #2349's core acceptance criterion — proving the signal
 /// actually fires end-to-end through `AgentLoop::maybe_compact_transcript`,
-/// not just at the `Transcript` unit level.
+/// not just at the `Transcript` unit level. #3868's acceptance criterion is
+/// explicit that a threshold-compaction fire must produce BOTH the ERROR log
+/// and the durable JSONL line — asserting both signals in this ONE test
+/// (rather than splitting them across separate tests) is what makes
+/// reordering or dropping either signal at the `compaction_control.rs` call
+/// site fail a test, instead of two independently-passable partial checks.
 /// What: Runs a 3-tool-call-then-stop script under `mode: DailyDriver` with
 /// both `compaction: aggressive_compaction()` and
-/// `cadence: Some(overwhelmed_cadence())` attached. Asserts
-/// `transcript.compaction_events() > 0` and that the captured ERROR-level
-/// log messages contain the expected "regression signal" text.
+/// `cadence: Some(overwhelmed_cadence())` attached, with
+/// `telemetry::DATA_DIR_ENV_VAR` pointed at an isolated temp dir for the
+/// whole run. Asserts `transcript.compaction_events() > 0`, the captured
+/// ERROR-level log text, a `tcode-threshold`/`compaction_event: true` JSONL
+/// line, AND `lifetime_compaction_alarm_count >= 1` — all from this one
+/// fire.
 /// Test: this test.
 #[tokio::test]
 async fn forced_degradation_increments_counter_and_logs_error() {
@@ -258,10 +268,24 @@ async fn forced_degradation_increments_counter_and_logs_error() {
         },
     );
     let mut transcript = Transcript::seed("system prompt", "the task");
-    agent
-        .run_with_transcript(&mut transcript, "the task")
-        .await
-        .expect("run completes");
+
+    let dir = std::env::temp_dir().join(format!(
+        "tcode-forced-degradation-telemetry-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
+        agent
+            .run_with_transcript(&mut transcript, "the task")
+            .await
+            .expect("run completes");
+    })
+    .await;
 
     assert!(
         transcript.compaction_events() > 0,
@@ -274,6 +298,33 @@ async fn forced_degradation_increments_counter_and_logs_error() {
             .any(|m| m.contains("regression signal") && m.contains("cadence")),
         "expected an error-level regression-signal log, got: {messages:?}"
     );
+
+    // (#3867/#3868) The durable signals, from the SAME fire that produced
+    // the ERROR log above.
+    let jsonl_path = crate::agent_loop::telemetry::compression_log_path(&dir);
+    let jsonl_contents = std::fs::read_to_string(&jsonl_path)
+        .unwrap_or_else(|e| panic!("expected {jsonl_path:?} to exist: {e}"));
+    let threshold_events: Vec<crate::agent_loop::telemetry::CompressionEvent> = jsonl_contents
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid CompressionEvent JSONL line"))
+        .filter(|e: &crate::agent_loop::telemetry::CompressionEvent| {
+            e.surface == crate::agent_loop::telemetry::SURFACE_TCODE_THRESHOLD
+        })
+        .collect();
+    assert!(
+        !threshold_events.is_empty(),
+        "expected a tcode-threshold JSONL line from the same fire, got: {jsonl_contents:?}"
+    );
+    assert!(
+        threshold_events.iter().all(|e| e.compaction_event),
+        "every tcode-threshold record must have compaction_event: true: {threshold_events:?}"
+    );
+    assert!(
+        crate::agent_loop::telemetry::lifetime_compaction_alarm_count(&dir) >= 1,
+        "the same cadence: Some(_) fire must also record the durable alarm line"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The cadence-`None` counterpart: threshold compaction firing is the
