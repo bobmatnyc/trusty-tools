@@ -19,6 +19,7 @@
 //!
 //! Test: `append_then_reload_is_current`, `changed_fingerprint_is_not_current`,
 //! `tombstoned_item_is_not_current`, `torn_line_is_skipped_not_fatal`,
+//! `torn_mid_utf8_codepoint_is_skipped_not_fatal`,
 //! `append_after_torn_line_does_not_corrupt_the_new_record`,
 //! `watermark_spans_oldest_and_newest`.
 
@@ -120,12 +121,25 @@ impl Ledger {
 
     /// Read a source's journal into a last-record-wins index.
     ///
-    /// Why: an absent journal is a first run, not an error; and a malformed
-    /// line must be SKIPPED rather than abort the load, or one torn write from
-    /// a crash would permanently brick the source.
-    /// What: parses each line, keeping the last record per item id and counting
-    /// what it could not parse.
-    /// Test: `torn_line_is_skipped_not_fatal`.
+    /// Why: an absent journal is a first run, not an error; and a damaged line
+    /// must be SKIPPED rather than abort the load, or one torn write from a
+    /// crash would permanently brick the source.
+    ///
+    /// The parse is deliberately BYTE-oriented. Reading the file as a `String`
+    /// first (`read_to_string`) fails the WHOLE load on invalid UTF-8, and a
+    /// crash mid-write lands mid-codepoint whenever the record contains
+    /// non-ASCII text — which for this crate is the common case, not the exotic
+    /// one: a Gmail subject with a dash or an accent, a Drive filename in any
+    /// non-Latin script. That turned a one-item loss into a permanently
+    /// unloadable source, the exact failure this doc promises cannot happen.
+    /// Splitting on `b'\n'` and decoding per line contains the damage to the
+    /// torn line, whether it is invalid UTF-8 or merely invalid JSON.
+    ///
+    /// What: splits the raw bytes on newlines, decodes and parses each line
+    /// independently, keeps the last record per item id, and counts every line
+    /// it could not use.
+    /// Test: `torn_line_is_skipped_not_fatal`,
+    /// `torn_mid_utf8_codepoint_is_skipped_not_fatal`.
     pub fn load(root: &Path, source_id: &str) -> anyhow::Result<Self> {
         let path = Self::path_for(root, source_id)?;
         let mut ledger = Self {
@@ -139,13 +153,18 @@ impl Ledger {
         if !ledger.path.exists() {
             return Ok(ledger);
         }
-        let text = std::fs::read_to_string(&ledger.path)?;
-        ledger.needs_newline = !text.is_empty() && !text.ends_with('\n');
-        for line in text.lines() {
-            if line.trim().is_empty() {
+        let bytes = std::fs::read(&ledger.path)?;
+        ledger.needs_newline = !bytes.is_empty() && bytes.last() != Some(&b'\n');
+        for line in bytes.split(|b| *b == b'\n') {
+            // Tolerate CRLF journals and blank separator lines.
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            match serde_json::from_str::<LedgerRecord>(line) {
+            // `from_slice` handles the UTF-8 check itself, so an invalid-UTF-8
+            // line lands in exactly the same `malformed` bucket as bad JSON —
+            // no separate decode step, no way for one to abort the other.
+            match serde_json::from_slice::<LedgerRecord>(line) {
                 Ok(record) => {
                     ledger.last_ingest_at = Some(record.ingested_at.clone());
                     ledger.latest.insert(record.item_id.clone(), record);
@@ -362,6 +381,64 @@ mod tests {
         assert!(reloaded.is_current("a.md", "f1"), "intact record survives");
         assert!(!reloaded.contains("b.md"), "torn record is not trusted");
         assert_eq!(reloaded.watermark().malformed_lines, 1);
+    }
+
+    /// Why: regression guard (code-critic CRITICAL 1). A crash lands mid-write
+    /// at an arbitrary BYTE, and this crate's records routinely carry non-ASCII
+    /// text — a Gmail subject with an em-dash, a Drive filename in kana. Tearing
+    /// such a record mid-codepoint left the file invalid UTF-8, and the old
+    /// `read_to_string` load then failed outright, bricking the source on every
+    /// subsequent run instead of losing one item.
+    /// What: writes a record whose subject is multi-byte, tears it in the MIDDLE
+    /// of a codepoint (asserted non-UTF-8), and proves the load still succeeds,
+    /// keeps the intact record, counts the damage, and can append afterwards.
+    /// Test: self-contained.
+    #[test]
+    fn torn_mid_utf8_codepoint_is_skipped_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mut ledger = Ledger::load(root, "mail").unwrap();
+        ledger.append(record("m1", "f1", "2026-07-01")).unwrap();
+
+        // A realistic second record: non-ASCII subject in the entity name.
+        let mut unicode = record("m2", "f2", "2026-07-02");
+        unicode.entity = "mail/2026-07-02-プロジェクト—更新".to_string();
+        let line = serde_json::to_string(&unicode).unwrap();
+
+        // Tear INSIDE a multi-byte character rather than on a char boundary —
+        // cutting one byte off the end would land on the ASCII `}` and prove
+        // nothing. Find the first non-ASCII char and cut one byte into it.
+        let path = Ledger::path_for(root, "mail").unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let cut = line
+            .char_indices()
+            .find(|(_, c)| !c.is_ascii())
+            .map(|(i, _)| i + 1)
+            .expect("fixture must contain a multi-byte character");
+        let fragment = &line.as_bytes()[..cut];
+        assert!(
+            std::str::from_utf8(fragment).is_err(),
+            "the fixture must actually be invalid UTF-8 or it proves nothing"
+        );
+        bytes.extend_from_slice(fragment);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(
+            String::from_utf8(std::fs::read(&path).unwrap()).is_err(),
+            "the journal file as a whole must be invalid UTF-8"
+        );
+
+        // The load must survive — this is the regression.
+        let mut reloaded =
+            Ledger::load(root, "mail").expect("invalid UTF-8 must not brick loading");
+        assert!(reloaded.is_current("m1", "f1"), "intact record survives");
+        assert!(!reloaded.contains("m2"), "the torn record is not trusted");
+        assert_eq!(reloaded.watermark().malformed_lines, 1);
+
+        // And the source keeps working: the lost item re-ingests cleanly.
+        reloaded.append(record("m2", "f2", "2026-07-02")).unwrap();
+        let settled = Ledger::load(root, "mail").unwrap();
+        assert!(settled.is_current("m2", "f2"), "recovery converges");
+        assert_eq!(settled.watermark().items, 2);
     }
 
     /// Why: regression guard. Appending straight after a torn (newline-less)

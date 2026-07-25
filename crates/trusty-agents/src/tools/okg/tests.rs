@@ -15,14 +15,18 @@ use serde_json::{Value, json};
 use super::*;
 use crate::test_env::HOME_LOCK;
 
-/// Point the OKG root resolution at a temp knowledge dir for one test.
+/// Sandbox both the KB knowledge dir and `$HOME` into one tempdir.
 ///
-/// Mutating `KB_KNOWLEDGE_DIR` is process-global, so every test here holds
-/// `HOME_LOCK` (the crate's existing serializing mutex) and restores the prior
-/// value on drop.
+/// `$HOME` matters as much as `KB_KNOWLEDGE_DIR` here: it is what the
+/// doc-store read policy defaults to, so without sandboxing it a test corpus in
+/// a tempdir would be (correctly) refused, and a misconfigured test could reach
+/// the developer's real home. Both are process-global mutations, so every test
+/// holds `HOME_LOCK` (the crate's existing serializing mutex) and restores the
+/// prior values on drop.
 struct KnowledgeDirGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
-    prior: Option<std::ffi::OsString>,
+    prior_knowledge: Option<std::ffi::OsString>,
+    prior_home: Option<std::ffi::OsString>,
     dir: tempfile::TempDir,
 }
 
@@ -30,13 +34,18 @@ impl KnowledgeDirGuard {
     fn new() -> Self {
         let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
-        let prior = std::env::var_os("KB_KNOWLEDGE_DIR");
+        let prior_knowledge = std::env::var_os("KB_KNOWLEDGE_DIR");
+        let prior_home = std::env::var_os("HOME");
         // SAFETY: guarded by HOME_LOCK — no other test mutates the env
-        // concurrently, and the prior value is restored in Drop.
-        unsafe { std::env::set_var("KB_KNOWLEDGE_DIR", dir.path()) };
+        // concurrently, and the prior values are restored in Drop.
+        unsafe {
+            std::env::set_var("KB_KNOWLEDGE_DIR", dir.path());
+            std::env::set_var("HOME", dir.path());
+        }
         Self {
             _lock: lock,
-            prior,
+            prior_knowledge,
+            prior_home,
             dir,
         }
     }
@@ -51,9 +60,13 @@ impl Drop for KnowledgeDirGuard {
     fn drop(&mut self) {
         // SAFETY: still holding HOME_LOCK for the lifetime of this guard.
         unsafe {
-            match &self.prior {
+            match &self.prior_knowledge {
                 Some(v) => std::env::set_var("KB_KNOWLEDGE_DIR", v),
                 None => std::env::remove_var("KB_KNOWLEDGE_DIR"),
+            }
+            match &self.prior_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
             }
         }
     }
@@ -269,6 +282,143 @@ async fn sources_tool_reports_registered_sources() {
     );
     assert!(source["watermark"]["oldest"].is_null());
     assert!(source["watermark"]["last_ingest_at"].is_null());
+}
+
+// ───────────────────── doc-store read confinement ─────────────────────
+
+/// Why: code-critic CRITICAL 2 — `path` was a free-form model-supplied string
+/// with only `is_dir()` checked, which made this tool an arbitrary local-file
+/// read on the DEFAULT assistant persona. Credential directories must be
+/// refused, and refused BEFORE anything is written to the registry, so a
+/// rejected path cannot be replayed by a later run.
+/// What: points the tool at a `.ssh`-style directory and at a path outside the
+/// configured roots; asserts both error and that neither was registered.
+/// Test: self-contained.
+#[tokio::test]
+async fn docstore_tool_rejects_credential_dir() {
+    let guard = KnowledgeDirGuard::new();
+    let root = guard.root().to_string_lossy().to_string();
+    let home = guard.dir.path().join("home");
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    std::fs::write(home.join(".ssh/id_rsa"), "PRIVATE KEY").unwrap();
+    std::fs::create_dir_all(home.join("Documents")).unwrap();
+    std::fs::write(home.join("Documents/ok.md"), "fine").unwrap();
+
+    let tool = OkgIngestDocstoreTool::new();
+    // A credential directory inside the permitted root: refused by the
+    // hidden-path rule.
+    let denied = tool
+        .execute(json!({
+            "root": &root,
+            "source_id": "keys",
+            "path": home.join(".ssh").to_string_lossy(),
+        }))
+        .await;
+    assert!(denied.is_error(), "~/.ssh must never be ingestible");
+    assert!(
+        denied.content().contains("hidden directory"),
+        "got: {}",
+        denied.content()
+    );
+
+    // A directory outside every configured root.
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.md"), "elsewhere").unwrap();
+    let denied = tool
+        .execute(json!({
+            "root": &root,
+            "source_id": "outside",
+            "path": outside.path().to_string_lossy(),
+        }))
+        .await;
+    assert!(denied.is_error(), "outside the allow-list must be refused");
+    assert!(
+        denied.content().contains("outside every configured"),
+        "got: {}",
+        denied.content()
+    );
+
+    // Neither rejected path may have been persisted — a poisoned registry row
+    // would be replayed on every later run.
+    let listed = payload(
+        &OkgSourcesTool::new()
+            .execute(json!({ "root": &root }))
+            .await,
+    );
+    assert_eq!(
+        listed["count"], 0,
+        "a refused path must not be registered: {listed}"
+    );
+
+    // The ordinary directory still works, so the gate is not simply "deny all".
+    let allowed = payload(
+        &tool
+            .execute(json!({
+                "root": &root,
+                "source_id": "docs",
+                "path": home.join("Documents").to_string_lossy(),
+            }))
+            .await,
+    );
+    assert_eq!(allowed["ingest"]["ingested"], 1);
+}
+
+/// Why: the permitted roots are OPERATOR configuration, not a hardcoded home
+/// check — a real corpus lives at `~/Duetto/cto-resources`, and other users'
+/// will live elsewhere entirely.
+/// What: asserts the default is home, that an explicit `[okg] docstore_roots`
+/// entry replaces it, and that `~` expands.
+/// Test: self-contained.
+#[test]
+fn config_defaults_to_home() {
+    let home = std::path::Path::new("/tmp/fake-home");
+    let default = config::OkgConfig::default();
+    assert_eq!(
+        default.policy(home),
+        trusty_kb::okg::policy::DocStorePolicy::home_default(home),
+        "an absent [okg] section means home, never everything"
+    );
+
+    let configured = config::OkgConfig {
+        docstore_roots: vec!["~/Duetto/cto-resources".into(), "/srv/corpora".into()],
+    };
+    assert_eq!(
+        configured.policy(home),
+        trusty_kb::okg::policy::DocStorePolicy::new(vec![
+            home.join("Duetto/cto-resources"),
+            std::path::PathBuf::from("/srv/corpora"),
+        ]),
+        "configured roots replace the default and expand ~"
+    );
+}
+
+/// Why: the `[okg]` section must parse out of a real config file, and a config
+/// that predates the section must keep working.
+/// What: round-trips the TOML both with and without `[okg]`.
+/// Test: self-contained.
+#[test]
+fn config_roots_expand_tilde() {
+    let with_section: toml::Value = toml::from_str(
+        "[okg]\ndocstore_roots = [\"~/Documents\", \"/Users/masa/Duetto/cto-resources\"]\n",
+    )
+    .unwrap();
+    let parsed: config::OkgConfig = with_section["okg"].clone().try_into().unwrap();
+    assert_eq!(
+        parsed.docstore_roots,
+        vec![
+            "~/Documents".to_string(),
+            "/Users/masa/Duetto/cto-resources".to_string()
+        ]
+    );
+
+    // A config with no [okg] section still deserialises to the default.
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        #[serde(default)]
+        okg: config::OkgConfig,
+    }
+    let legacy: Wrapper = toml::from_str("[mcp]\n").unwrap();
+    assert_eq!(legacy.okg, config::OkgConfig::default());
 }
 
 /// Why: a first registration without a path, or a kind mismatch, must fail with

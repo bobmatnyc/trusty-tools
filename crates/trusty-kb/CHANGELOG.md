@@ -39,6 +39,14 @@ independent semantic versioning per the workspace convention.
   Vanished items are surfaced in `missing`, or tombstoned (`source_status:
   deleted` + `tombstoned:`, body preserved — never a deletion) when the caller
   can prove the source's full corpus was enumerated.
+- `okg::policy` — **read-side confinement for doc stores.** `DocStorePolicy`
+  holds an operator-configured allow-list of ingestible roots and additionally
+  refuses any hidden path below a root, so `~/.ssh`, `~/.aws`, `~/.gnupg`, and
+  `~/.config/gh` are excluded without being enumerated. It resolves symlinks and
+  `..` before judging, and an unconfigured policy denies everything rather than
+  defaulting open. Enforced inside `scan` — at the point the filesystem is
+  touched — so a hand-edited `registry.toml` row pointing at a credential
+  directory is refused on every run, not just at registration.
 - `okg::docstore` — the in-crate filesystem fetcher: deterministic sorted walk,
   extension filtering, SHA-256 content fingerprints (path and mtime both lie),
   graceful binary skipping (reported by name, never fatal), and deterministic
@@ -47,8 +55,39 @@ independent semantic versioning per the workspace convention.
 - `KbStore::okg_register_source` / `okg_source` / `okg_sources` — registration
   and the per-source status view.
 
+### Security
+
+- Doc-store ingestion is confined to operator-configured roots (see
+  `okg::policy` above). Without it, `okg_ingest_docstore` — reachable from the
+  default base assistant — was an arbitrary local-file-read primitive: a path
+  supplied by the model could walk `/etc` or `~/.ssh` into a KB tree that is then
+  searchable and quotable in chat. Because ingested content is itself untrusted,
+  a prompt-injected document could also name the next path to read.
+
+### Fixed
+
+- **A journal torn mid-UTF-8-codepoint no longer bricks its source.**
+  `Ledger::load` read the file with `read_to_string`, which fails outright on
+  invalid UTF-8 — and a crash mid-write lands mid-codepoint whenever a record
+  carries non-ASCII text (a Gmail subject with an em-dash, a Drive filename in
+  any non-Latin script). The whole source then failed to load on every
+  subsequent run, turning a one-item loss into permanent breakage. The parse is
+  now byte-oriented: lines are split on `b'\n'` and decoded independently, so an
+  undecodable line is counted as malformed exactly like invalid JSON.
+- **Items with no revision signal are no longer frozen forever.** A constant
+  fingerprint is indistinguishable from "unchanged", so an item whose source
+  reports neither a version nor a modified time was skipped on every run after
+  the first, silently serving stale content — the opposite of the intended
+  fail-open. `SourceItem::volatile` marks such items and bypasses the skip test
+  entirely.
+
 ### Changed
 
+- `KbStore::okg_sweep_deleted` separates the deletion sweep from `ingest_items`,
+  so a source ingested page by page can commit each page and then run deletion
+  detection ONCE against the complete observed id set. A per-page sweep would
+  have tombstoned every item outside the page. `IngestReport::merge` folds the
+  per-chunk reports into one summary.
 - `collection_dirs_on_disk` now skips every `_`-prefixed directory rather than
   only `_state`, so store machinery (`_sources`) is never mistaken for a free
   topic collection and never gets a generated `index.md`. `kb_convert_tree`'s
