@@ -227,7 +227,9 @@ impl TmuxDriver {
     /// What: delegates to [`crate::core::tmux::ensure_server_up`] (the same
     /// retried-with-backoff `tmux start-server` primitive #3722 added),
     /// mapping its `Err(String)` to `Error::Protocol`.
-    /// Test: `ensure_server_up_does_not_panic_on_missing_binary`.
+    /// Test: `ensure_server_up_issues_start_server_on_a_fresh_socket`,
+    /// `ensure_server_up_fails_loudly_when_the_server_never_comes_up`
+    /// (`tmux_tests.rs`, both drive a scripted fake `tmux` binary).
     pub fn ensure_server_up(&self) -> Result<()> {
         crate::core::tmux::ensure_server_up(&self.tmux_path).map_err(Error::Protocol)
     }

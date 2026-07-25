@@ -43,11 +43,17 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// `tmux start-server` with backoff via
     /// [`crate::core::tmux::ensure_server_up`] (the same #3722 primitive
     /// `create_managed_session` uses).
-    /// Test: `RealTmuxDriver`'s override is covered by
-    /// `ensure_server_up_starts_server_before_list_sessions` in
-    /// `session_manager::create_tests` (drives a scripted fake `tmux`
-    /// binary); the trait default is exercised transitively by every
-    /// `FakeTmuxDriver`-backed manager test (never errors).
+    /// Test: `session_manager::server_up_tests` (`create_ensures_server_up_
+    /// before_creating_session`, `create_fails_loudly_when_server_cannot_
+    /// start`, `create_with_reserved_name_ensures_server_up_before_creating_
+    /// session`, `resume_fails_loudly_when_server_cannot_start`) exercises
+    /// `RealTmuxDriver`'s override via a call-counting/failure-injecting
+    /// `FakeTmuxDriver`; `daemon::tmux::tests::ensure_server_up_issues_
+    /// start_server_on_a_fresh_socket`/`_fails_loudly_when_the_server_
+    /// never_comes_up` cover the underlying `TmuxDriver::ensure_server_up`
+    /// this override delegates to. The trait default is exercised
+    /// transitively by every `FakeTmuxDriver`-backed manager test (never
+    /// errors).
     fn ensure_server_up(&self) -> Result<(), ManagedError> {
         Ok(())
     }

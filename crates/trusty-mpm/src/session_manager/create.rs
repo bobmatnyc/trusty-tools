@@ -74,7 +74,14 @@ impl SessionManager {
         // `list-sessions` probe, below) — on a machine where tmux has never
         // run, that probe is what used to 500 the whole create, long before
         // the #3386/#3722 choke point in `create_with_resolved_name` would
-        // have started it.
+        // have started it. On the (common) case where the server is already
+        // up, `tmux start-server` is a cheap no-op round-trip — redundant
+        // with the pre-existing #3386/#3722 `ensure_server_up` call inside
+        // `core::tmux::create_managed_session` (reached a few calls later
+        // via `create_with_resolved_name` → `self.tmux.create_session()`),
+        // but accepted: correctness (never racing the FIRST tmux call
+        // against an absent socket) outweighs the cost of one extra
+        // idempotent subprocess spawn per session create.
         self.tmux.ensure_server_up()?;
 
         // Never run (and therefore never recursively watch/scan) a managed
@@ -144,6 +151,10 @@ impl SessionManager {
         // #3823: same server-up guarantee as `create_with_id` — this path's
         // first tmux call is `create_with_resolved_name`'s
         // `dedupe_session_name`, which also issues a raw `list-sessions`.
+        // Same accepted redundant-but-idempotent round-trip note as
+        // `create_with_id`'s call above: a no-op `tmux start-server` when
+        // the server is already up, still cheaper than risking the FIRST
+        // tmux call racing an absent socket.
         self.tmux.ensure_server_up()?;
 
         // Never run (and therefore never recursively watch/scan) a managed
