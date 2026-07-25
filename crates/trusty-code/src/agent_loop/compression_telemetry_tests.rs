@@ -486,3 +486,143 @@ async fn cadence_within_budget_never_writes_floor_breach_alarm() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// (#3925) Standing regression guard for the #3902 race CLASS, not just the
+/// five originally-affected call sites PR #3920 fixed.
+///
+/// Why: PR #3920's fix was verified only by the author's local 40x loop
+/// (2/40 failures pre-fix, 0/40 post-fix) — a manual process that lives
+/// nowhere in CI. At a ~5% per-run failure rate, an ordinary single-run
+/// `cargo test` has a good chance of missing a REINTRODUCTION of the same
+/// omission before it lands, exactly how #3902 reached `main` via PR #3896
+/// in the first place: a sixth loop-integration test could trigger a real
+/// cadence/threshold fire without injecting `telemetry_data_dir` and pass
+/// CI outright (the `#[cfg(test)]` guard in
+/// `AgentLoop::telemetry_data_dir()` only catches the "forgot to inject
+/// AND env var unset" case deterministically — it does NOT prove the
+/// injected path stays correct under concurrent load). Rather than a
+/// brute-force `#[ignore]`d N-iteration loop (only catches the historical
+/// rate probabilistically, and only if it's actually run), this test
+/// DETERMINISTICALLY manufactures the exact attack: a background task
+/// rewrites `TCODE_TELEMETRY_DATA_DIR` in a tight loop with NO
+/// synchronization per-write — exactly what an un-injected caller does by
+/// simply never touching `telemetry::DATA_DIR_ENV_LOCK` — for the FULL
+/// duration of four concurrent `AgentLoop` runs that all correctly inject
+/// `telemetry_data_dir`. Because an injected loop's
+/// `AgentLoop::telemetry_data_dir()` never consults the env var at all,
+/// every run below MUST see exactly its own cadence records no matter how
+/// aggressively the global churns concurrently; if a future change makes
+/// that resolution fall back to the env var again for an injected config,
+/// this test starts failing on the FIRST run, deterministically, rather
+/// than ~5% of the time. Mirrors the identical pattern applied to
+/// `trusty-agents`' `EventStore`/`$HOME` race (issue #3922) — see that
+/// crate's `listeners::store::tests::concurrent_event_store_scenarios_survive_home_env_hammering`;
+/// kept as two separate, crate-local tests rather than one shared harness
+/// since the two crates have no shared test-support crate today and the
+/// domain types (`AgentLoopConfig` vs. a bare directory parameter) differ
+/// enough that a literal shared abstraction would be more machinery than
+/// the ~40 lines it would save.
+/// What: Holds `telemetry::DATA_DIR_ENV_LOCK` for this test's ENTIRE body
+/// (same convention `session::protocol_budget`'s tests use) so the
+/// hammering below can never leak out and destabilize any OTHER
+/// lock-respecting test in this crate — the chaos is fully internal to
+/// this test's own scope. Spawns a background task that rewrites
+/// `TCODE_TELEMETRY_DATA_DIR` on every `tokio::task::yield_now` while four
+/// scripted loops (each `cadence: Some(cadence_turns: 1)`, guaranteeing a
+/// fire every turn) run concurrently via `tokio::join!`, each pointed at
+/// its own tempdir via `telemetry_data_dir`. Asserts each loop's own
+/// directory contains at least one `tcode-cadence` record — nothing lost
+/// to the concurrently-churning global.
+/// Test: itself. Validated to fail deterministically (not probabilistically)
+/// when one scenario's `telemetry_data_dir` injection is reverted to `None`
+/// (falling back to the raced env-var path) — see PR discussion for the
+/// before/after failure output.
+#[tokio::test]
+async fn concurrent_agent_loops_survive_data_dir_env_hammering() {
+    let _guard = telemetry::DATA_DIR_ENV_LOCK.lock().await;
+    let prev = std::env::var_os(telemetry::DATA_DIR_ENV_VAR);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let hammer_stop = stop.clone();
+    let hammer = tokio::spawn(async move {
+        let mut i: u64 = 0;
+        while !hammer_stop.load(Ordering::Relaxed) {
+            i += 1;
+            // SAFETY: intentionally UNSYNCHRONIZED per-write — this
+            // reproduces the exact #3902 attack shape (a caller that never
+            // takes `DATA_DIR_ENV_LOCK`). Holding the lock for this whole
+            // test (above) keeps the hammering from leaking into any OTHER
+            // test; the injected scenarios below must survive it regardless.
+            unsafe {
+                std::env::set_var(
+                    telemetry::DATA_DIR_ENV_VAR,
+                    format!("/tmp/tcode-hammer-{i}"),
+                );
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    async fn scenario(
+        label: &'static str,
+    ) -> (std::path::PathBuf, Vec<telemetry::CompressionEvent>) {
+        let dir = temp_dir(label);
+        let mut fixtures: Vec<Value> = (0..4)
+            .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+            .collect();
+        fixtures.push(stop_response("all done"));
+        let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+        let registry = registry_with_echo(false);
+
+        let agent = make_loop(
+            llm,
+            registry,
+            AgentLoopConfig {
+                cadence: Some(CadenceConfig {
+                    cadence_turns: 1,
+                    ..CadenceConfig::default()
+                }),
+                telemetry_data_dir: Some(dir.clone()),
+                ..AgentLoopConfig::default()
+            },
+        );
+        agent
+            .run("system prompt", "the task")
+            .await
+            .expect("run completes");
+        let events = read_jsonl(&dir);
+        (dir, events)
+    }
+
+    let (a, b, c, d) = tokio::join!(
+        scenario("hammer-a"),
+        scenario("hammer-b"),
+        scenario("hammer-c"),
+        scenario("hammer-d"),
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    hammer.await.unwrap();
+
+    // SAFETY: still holding DATA_DIR_ENV_LOCK; restoring pre-test value
+    // before the guard drops at function end.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(telemetry::DATA_DIR_ENV_VAR, v),
+            None => std::env::remove_var(telemetry::DATA_DIR_ENV_VAR),
+        }
+    }
+
+    for (label, (dir, events)) in [("a", a), ("b", b), ("c", c), ("d", d)] {
+        let cadence_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.surface == telemetry::SURFACE_TCODE_CADENCE)
+            .collect();
+        assert!(
+            !cadence_events.is_empty(),
+            "scenario {label} lost its own cadence records under \
+             TCODE_TELEMETRY_DATA_DIR hammering: {events:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
