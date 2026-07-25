@@ -23,6 +23,7 @@ use trusty_common::server::{SelfOrigins, with_guarded_middleware};
 
 use super::agent_create::create_agent_route;
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
+use super::agent_stores::agent_stores_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
 use super::ctrl_sessions::{
@@ -146,6 +147,14 @@ pub fn build_router_with_origins(
         .route(
             "/api/agents/{name}/persona",
             axum::routing::get(get_agent_persona_route),
+        )
+        // #3816/#3864: the gear-panel OKG Stores tab reads the agent's
+        // `[[stores]]` bindings resolved LIVE against trusty-search /
+        // trusty-memory (connected + chunk count, or not-connected + reason).
+        // Read-only in this slice — bindings are edited in `agent.toml`.
+        .route(
+            "/api/agents/{name}/stores",
+            axum::routing::get(agent_stores_route),
         )
         .route("/api/workstreams", get(list_workstreams_route))
         .route(

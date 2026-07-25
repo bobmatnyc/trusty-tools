@@ -9,6 +9,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Live OKG store bindings — the FIRST leg of the agent-config triple
+  (#3816, DOC-54 SPEC-AGENTS-04 §5.1):** `agent.toml` gains `[[stores]]`,
+  declaring what an agent KNOWS alongside how it ACTS (`[tools]`) and REACTS
+  (`[[listeners]]`). A binding names an OKG knowledge tree (`okg://<agent>`),
+  the trusty-search index built over it, and optionally a trusty-memory
+  palace. Both spellings parse: the rich `[[stores]]` array-of-tables and the
+  product spec's `[stores] allow = [...]` shorthand (which derives tree and
+  index). New `crate::stores` module resolves each binding LIVE at request
+  time against `GET /indexes/{id}/status` and
+  `GET /api/v1/palaces/{id}/drawers`, reporting connected + chunk count /
+  root / readiness, or not-connected + a human-readable reason. Nothing here
+  is fatal: an unknown index, a down daemon, or a malformed binding degrades
+  to a reported disconnect — the agent still boots. Under `extends`, a
+  child's `[[stores]]` REPLACES the base's rather than unioning (exactly one
+  store per agent), so a personalization overlay's own index is the default
+  search target.
+- **`GET /api/agents/:name/stores`:** sidecar route returning each binding's
+  live status plus any non-fatal config `issues`. Malformed agent TOML
+  returns `200` with a `config_error` field rather than a 500, so one bad
+  hand-edit cannot blank the config panel.
+- **Bundled seed bindings for the demo personas:** `izzie` binds
+  `okg://izzie` → trusty-search `bob-kb` + palace `owner-profile`;
+  `cto-assistant` binds `okg://cto-assistant` → trusty-search
+  `cto-assistant` + palace `cto`. Seeded in the embedded provisioning source
+  of truth (`.trusty-agents/agents/`), both the directory packages and their
+  flat shadows, with regression tests asserting that the embedded bytes of
+  EVERY seed spelling — package and flat shadow alike — still carry each
+  binding and grant `vector_search`. A reprovision that dropped either, or an
+  edit that updated the package but not its load-bearing `extends`-shadow
+  counterpart, would otherwise fail silently. `izzie`'s `[tools].allow` now
+  grants `vector_search` so her binding is actually reachable.
+
+### Fixed
+
+- **`vector_search` had no `index_id` parameter and silently searched the
+  wrong corpus (#3864):** personas documented `vector_search(index_id=…)`
+  while the tool advertised no such field and was hardwired to the
+  CWD-relative `.trusty-agents/state/code/` index, so index routing was a
+  no-op (the live workaround was to grant `grep` instead). The tool now takes
+  an optional `index_id`, defaulting to the agent's bound OKG store index, and
+  routes to the shared trusty-search daemon (`POST /indexes/{id}/search`) when
+  one resolves — an unqualified search hits the agent's OWN knowledge, an
+  explicit id still targets another corpus. Every failure (undiscoverable
+  daemon, missing index, transport error) degrades to the embedded index and
+  then to the regex fallback, never an errored turn. `vector_search` is also
+  now registered on the persona-chat dispatch path, where it previously was
+  not — the grant in `cto-assistant`'s allowlist had nothing behind it.
+
+### Changed
+
+- **GUI OKG Stores pane is real:** the gear panel's OKG Stores tab now fetches
+  `GET /api/agents/:name/stores` and renders observed state — CONNECTED with
+  the index name, chunk count, readiness and indexed root, or NOT CONNECTED
+  with the backend's reason (plus a separate line for palace health). The
+  "Scaffolding — `agent.toml` has no OKG store binding field yet" placeholder
+  and the client-side `scaffoldOkgStores()` fabricator are deleted; an agent
+  that binds nothing now says so explicitly instead of showing a fake row.
+
 - **First real eventstream listener: Gmail history-poll + agent wake (#3820,
   DOC-54 SPEC-AGENTS-04/06):** the third leg of the agent-config triple
   (stores / tools / **listeners**) lands with a working Gmail connector.

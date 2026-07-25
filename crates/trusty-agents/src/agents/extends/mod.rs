@@ -300,6 +300,19 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // above), rather than appending a shadowing duplicate.
     merged.listeners = union_listener_bindings(merged.listeners, child.listeners);
 
+    // `stores` (#3816): child REPLACES rather than unions. Unlike listeners
+    // and tools — where "the base's surface plus my extras" is the intent —
+    // the spec allows exactly ONE OKG store per agent (DOC-54 §5.1). A
+    // personalization overlay declaring its own store (`izzie` → `bob-kb`,
+    // `cto-assistant` → `cto-assistant`) means "this is MY knowledge", not
+    // "add mine alongside the base's"; unioning would produce a two-store
+    // config whose default search target is the BASE's index, silently
+    // routing every unqualified `vector_search` to the wrong corpus. A child
+    // that declares no `[[stores]]` still inherits the base's.
+    if !child.stores.bindings.is_empty() {
+        merged.stores = child.stores.clone();
+    }
+
     // --- Prose: base-first concatenation ---
     merged.system_prompt.content =
         concat_prose(&merged.system_prompt.content, &child.system_prompt.content);

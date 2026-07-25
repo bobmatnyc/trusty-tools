@@ -420,3 +420,112 @@ fn ensure_deployed_blocks_on_externally_held_pass_lock() {
     // this establishes the baseline stamp without touching any file.
     assert_eq!(report, ReprovisionReport::default());
 }
+
+/// Every embedded seed spelling of a demo persona, as
+/// `(asset_path, agent_name)`.
+///
+/// Why: each persona ships TWO embedded files — the directory PACKAGE
+/// (`<name>/agent.toml`, the higher-ranked form `scan_agents_dir_tiered`
+/// actually dispatches) and the flat SHADOW (`<name>.toml`). The shadow is
+/// not dead weight: its own header documents it as the load-bearing
+/// `extends`-shadow fallback, so the two must stay in sync. Asserting only
+/// the package would let a future edit update one and silently leave the
+/// other behind — which is precisely the drift these seeds are most exposed
+/// to, since the reprovision path rewrites both. Driving the store/tool
+/// assertions off ONE shared table is what makes that drift mechanically
+/// impossible to miss (#3878 code-critic MEDIUM-1). The agent name is carried
+/// explicitly rather than derived from the path because the two layouts spell
+/// it differently (`izzie/agent.toml` vs `izzie.toml`).
+const SEED_SPELLINGS: &[(&str, &str)] = &[
+    ("izzie/agent.toml", "izzie"),
+    ("izzie.toml", "izzie"),
+    ("cto-assistant/agent.toml", "cto-assistant"),
+    ("cto-assistant.toml", "cto-assistant"),
+];
+
+/// The OKG store binding each persona's seeds must declare, keyed by agent
+/// name: `(agent_name, index, palace, tree)`.
+const EXPECTED_BINDINGS: &[(&str, &str, &str, &str)] = &[
+    ("izzie", "bob-kb", "owner-profile", "okg://izzie"),
+    (
+        "cto-assistant",
+        "cto-assistant",
+        "cto",
+        "okg://cto-assistant",
+    ),
+];
+
+/// #3816/#3864: every embedded seed spelling of each demo persona must carry
+/// its OKG store binding.
+///
+/// Why: the bindings are what make `vector_search` route to the agent's own
+/// corpus and what the GUI's OKG Stores card renders. They live in files that
+/// the reprovision path rewrites (#3556, and the reprovision-clobber class of
+/// bug generally), so a silent drop here would degrade both surfaces with no
+/// compile error anywhere — exactly the failure mode #3864 documented. Covers
+/// BOTH the package and the flat shadow (see [`SEED_SPELLINGS`]) so the two
+/// cannot drift apart. Asserts against the EMBEDDED bytes (the provisioning
+/// source of truth), not against `~/.trusty-agents`, which this crate must
+/// never read in a test.
+/// Test: itself.
+#[test]
+fn bundled_personas_carry_their_okg_store_bindings() {
+    #[derive(serde::Deserialize)]
+    struct Partial {
+        #[serde(default)]
+        stores: crate::stores::StoresConfig,
+    }
+
+    for (file, agent_name) in SEED_SPELLINGS {
+        let (_, index, palace, tree) = EXPECTED_BINDINGS
+            .iter()
+            .find(|(name, ..)| name == agent_name)
+            .unwrap_or_else(|| panic!("no expected binding declared for agent `{agent_name}`"));
+
+        let raw =
+            BundledAgents::get(file).unwrap_or_else(|| panic!("bundled asset missing: {file}"));
+        let text = std::str::from_utf8(&raw.data).unwrap();
+        let parsed: Partial =
+            toml::from_str(text).unwrap_or_else(|e| panic!("{file} is not valid TOML: {e}"));
+        let binding = parsed
+            .stores
+            .primary()
+            .unwrap_or_else(|| panic!("{file} declares no [[stores]] binding"));
+        assert_eq!(binding.resolved_index(), *index, "{file} index");
+        assert_eq!(binding.palace.as_deref(), Some(*palace), "{file} palace");
+        assert_eq!(binding.resolved_tree(agent_name), *tree, "{file} tree");
+        assert!(
+            parsed.stores.validate().is_empty(),
+            "{file} binding has config issues: {:?}",
+            parsed.stores.validate()
+        );
+    }
+}
+
+/// Both demo personas must actually be ABLE to call `vector_search` — a
+/// binding the persona's `[tools].allow` doesn't grant is inert. Checked on
+/// every seed spelling (package + flat shadow) for the same anti-drift reason
+/// as [`bundled_personas_carry_their_okg_store_bindings`].
+#[test]
+fn bundled_personas_grant_vector_search() {
+    #[derive(serde::Deserialize)]
+    struct Partial {
+        tools: Tools,
+    }
+    #[derive(serde::Deserialize)]
+    struct Tools {
+        #[serde(default)]
+        allow: Vec<String>,
+    }
+
+    for (file, _agent_name) in SEED_SPELLINGS {
+        let raw =
+            BundledAgents::get(file).unwrap_or_else(|| panic!("bundled asset missing: {file}"));
+        let text = std::str::from_utf8(&raw.data).unwrap();
+        let parsed: Partial = toml::from_str(text).unwrap();
+        assert!(
+            parsed.tools.allow.iter().any(|t| t == "vector_search"),
+            "{file} binds an OKG store but does not grant vector_search"
+        );
+    }
+}

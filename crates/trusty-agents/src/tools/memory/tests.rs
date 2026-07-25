@@ -603,3 +603,142 @@ fn vector_search_schema_names_tool() {
     let s = t.schema();
     assert_eq!(s["function"]["name"], "vector_search");
 }
+
+/// #3864: the parameter whose ABSENCE was the bug — the persona documented
+/// `vector_search(index_id=…)` while the schema advertised no such field, so
+/// index routing silently no-op'd.
+#[test]
+fn vector_search_schema_advertises_index_id() {
+    let s = VectorSearchTool::new().schema();
+    let props = &s["function"]["parameters"]["properties"];
+    assert!(
+        props.get("index_id").is_some(),
+        "index_id must be advertised: {props}"
+    );
+    assert_eq!(props["index_id"]["type"], "string");
+    // Still optional — an agent with no bound store must keep working.
+    let required = s["function"]["parameters"]["required"].as_array().unwrap();
+    assert!(!required.iter().any(|v| v == "index_id"));
+}
+
+/// The bound-store id is named in the schema so the model can see which
+/// corpus an unqualified call actually searches.
+#[test]
+fn vector_search_schema_names_bound_default_index() {
+    let s = VectorSearchTool::new()
+        .with_default_index(Some("cto-assistant".to_string()))
+        .schema();
+    let desc = s["function"]["parameters"]["properties"]["index_id"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(desc.contains("cto-assistant"), "description was: {desc}");
+}
+
+#[test]
+fn vector_search_index_defaults_to_bound_store() {
+    let t = VectorSearchTool::new().with_default_index(Some("bob-kb".to_string()));
+    assert_eq!(
+        t.effective_index_id(&json!({"query": "q"})).as_deref(),
+        Some("bob-kb")
+    );
+}
+
+#[test]
+fn vector_search_prefers_explicit_index_over_default() {
+    let t = VectorSearchTool::new().with_default_index(Some("bob-kb".to_string()));
+    assert_eq!(
+        t.effective_index_id(&json!({"query": "q", "index_id": "cto-assistant"}))
+            .as_deref(),
+        Some("cto-assistant"),
+        "an explicit index_id must always win over the bound default"
+    );
+}
+
+#[test]
+fn vector_search_index_none_without_binding() {
+    let t = VectorSearchTool::new();
+    assert_eq!(t.effective_index_id(&json!({"query": "q"})), None);
+}
+
+/// A blank/whitespace id (from a malformed binding or a model emitting `""`)
+/// must be treated as absent — never used to build a `/indexes//search` URL.
+#[test]
+fn vector_search_blank_index_ids_are_treated_as_absent() {
+    let t = VectorSearchTool::new().with_default_index(Some("   ".to_string()));
+    assert_eq!(t.effective_index_id(&json!({"query": "q"})), None);
+    let t = VectorSearchTool::new().with_default_index(Some("bob-kb".to_string()));
+    assert_eq!(
+        t.effective_index_id(&json!({"query": "q", "index_id": "  "}))
+            .as_deref(),
+        Some("bob-kb"),
+        "a blank explicit id falls back to the bound default, not to an empty id"
+    );
+}
+
+/// End-to-end #3864: a bound store routes the query to that index on the
+/// trusty-search daemon and returns the normalized hit envelope.
+#[tokio::test]
+async fn vector_search_routes_to_daemon_index() {
+    use axum::{Json, Router, extract::Path, http::StatusCode, routing::post};
+    use tokio::net::TcpListener;
+
+    let app = Router::new().route(
+        "/indexes/{id}/search",
+        post(|Path(id): Path<String>| async move {
+            if id == "bob-kb" {
+                (
+                    StatusCode::OK,
+                    Json(json!({"results": [
+                        {"path": "notes/travel.md", "score": 0.87, "content": "flight to NYC"}
+                    ]})),
+                )
+            } else {
+                (StatusCode::NOT_FOUND, Json(json!({"error": "no index"})))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tmp = tempdir().unwrap();
+    let tool = VectorSearchTool::new()
+        .with_code_dir(tmp.path().join("no-index"))
+        .with_default_index(Some("bob-kb".to_string()))
+        .with_search_base_url(Some(format!("http://{addr}")));
+
+    let out = tool.execute(json!({"query": "travel"})).await;
+    assert!(!out.is_error());
+    let body = out.content();
+    assert!(body.contains("notes/travel.md"), "body was: {body}");
+    assert!(
+        !body.contains("grep_fallback"),
+        "daemon hit must not fall through: {body}"
+    );
+}
+
+/// A missing index on the daemon degrades to the local/grep path rather than
+/// erroring the agent turn.
+#[tokio::test]
+async fn vector_search_falls_back_when_daemon_index_missing() {
+    use axum::{Router, http::StatusCode, routing::post};
+    use tokio::net::TcpListener;
+
+    let app = Router::new().route(
+        "/indexes/{id}/search",
+        post(|| async { (StatusCode::NOT_FOUND, "no such index") }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tmp = tempdir().unwrap();
+    let tool = VectorSearchTool::new()
+        .with_code_dir(tmp.path().join("no-index"))
+        .with_default_index(Some("ghost".to_string()))
+        .with_search_base_url(Some(format!("http://{addr}")));
+
+    let out = tool.execute(json!({"query": "anything"})).await;
+    assert!(!out.is_error(), "must degrade, not error");
+    assert!(out.content().contains("grep_fallback"));
+}

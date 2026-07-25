@@ -103,6 +103,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
         workstreams: crate::agents::WorkstreamContextConfig::default(),
         adapter: Arc::new(crate::llm::adapter::GenericAdapter),
         listeners: Vec::new(),
+        stores: crate::stores::StoresConfig::default(),
     }
 }
 

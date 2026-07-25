@@ -41,6 +41,26 @@ temperature = 0.3
 # #469: Bumped from the base's 1024 to 4096 to leave room for GFA reports and
 # structured org data tables which were getting truncated.
 max_tokens = 4096
+# OKG STORE BINDING (#3816/#3864, DOC-54 SPEC-AGENTS-04 §5.1) — the FIRST leg
+# of the stores/tools/listeners config triple: what this agent KNOWS, as
+# opposed to how it ACTS (`[tools].allow`) or REACTS (`[[listeners]]`).
+#
+# Exactly ONE store per agent (Bob, 2026-07-24). `index` is a trusty-search
+# index id (over /Users/masa/trusty-mpm-projects/bob-duetto/cto), `palace` a
+# trusty-memory palace; the harness resolves both against the live daemons at
+# boot and reports each as connected / not-connected with a reason
+# (`crate::stores::status`) — a missing index degrades the store, it never
+# blocks the agent from booting. `index` is also the DEFAULT target for an
+# unqualified `vector_search(query)` call, which is the #3864 fix: this
+# persona's `[tools].allow` grants `vector_search`, and before the binding
+# existed that call silently searched a hardcoded local code index instead of
+# the CTO corpus.
+[[stores]]
+name = "cto-assistant-kb"
+tree = "okg://cto-assistant"
+index = "cto-assistant"
+palace = "cto"
+
 
 [tools]
 # CTO-specific DELTAS only — the base `assistant` already grants git_log,

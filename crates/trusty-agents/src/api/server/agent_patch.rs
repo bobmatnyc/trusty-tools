@@ -92,7 +92,10 @@ use super::state::AppState;
 /// pre-#3819 behavior) would never resolve ANY bundled agent there, since
 /// every bundled agent lives in the `$HOME/.trusty-agents/agents` tier, not
 /// a nonexistent `/.trusty-agents/agents`.
-fn resolve_agent_paths(dirs: &[PathBuf], name: &str) -> Option<(PathBuf, Option<PathBuf>)> {
+pub(super) fn resolve_agent_paths(
+    dirs: &[PathBuf],
+    name: &str,
+) -> Option<(PathBuf, Option<PathBuf>)> {
     for dir in dirs {
         let package_dir = dir.join(name);
         let package_toml = package_dir.join("agent.toml");
