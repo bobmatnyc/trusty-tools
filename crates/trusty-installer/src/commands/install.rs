@@ -180,6 +180,7 @@ pub fn run(
     // Prints ✓ lines for found tools and offers interactive install for missing ones.
     {
         use super::prereqs::phase::{run_prereq_phase, PrereqPhaseConfig};
+        use super::tmux_gap::{decide_tmux_gap_action, TmuxGapAction, TmuxGapInputs};
         let crate_names: Vec<String> = selected.iter().map(|m| m.crate_name.clone()).collect();
         let phase_result = run_prereq_phase(&PrereqPhaseConfig {
             selected: &crate_names,
@@ -187,24 +188,63 @@ pub fn run(
             json,
         });
         // If trusty-mpm is selected and tmux is still missing after the phase,
-        // give the user one final chance to abort the overall install or continue.
+        // decide (via the pure #3821 gate) whether to prompt, warn, or abort
+        // BEFORE installing anything else.
         let mpm_selected = selected.iter().any(|m| m.crate_name == "trusty-mpm");
-        let tmux_still_missing = phase_result
+        let tmux_missing = phase_result
             .still_missing
             .iter()
-            .any(|m| m.binary == "tmux");
-        if mpm_selected && tmux_still_missing {
-            if !json && super::progress_ui::is_tty() && !yes {
+            .find(|m| m.binary == "tmux");
+        let action = decide_tmux_gap_action(TmuxGapInputs {
+            mpm_selected,
+            tmux_still_missing: tmux_missing.is_some(),
+            yes,
+            json,
+            is_tty: super::progress_ui::is_tty(),
+        });
+        match action {
+            TmuxGapAction::None => {}
+            TmuxGapAction::PromptContinue => {
                 let q = "trusty-mpm requires tmux (still not installed). Continue install anyway?";
                 if !super::progress_ui::prompt_yes_no(q) {
                     eprintln!("tctl install: aborted (tmux not installed).");
                     return 3;
                 }
-            } else if !json {
+            }
+            TmuxGapAction::WarnAndContinue => {
                 eprintln!(
                     "tctl install: warning: trusty-mpm requires tmux which is not installed; \
                      managed sessions will not work until tmux is available."
                 );
+            }
+            TmuxGapAction::FailEarly => {
+                // #3821: `--yes` (piped `curl | sh -s -- -y`) with tmux still
+                // unmet after Phase 6 — never continue on to install the rest
+                // of the stable set only to fail later at the verify tail.
+                // Fail HERE, before any install side effect, with one clear,
+                // actionable message built from the platform-specific hint
+                // Phase 6 already computed.
+                let hint = tmux_missing
+                    .map(|m| m.hint.as_str())
+                    .unwrap_or("Install tmux, then re-run `tctl install`.");
+                let msg = format!(
+                    "tctl install: tmux is required for trusty-mpm and could not be \
+                     auto-installed on this machine. {hint} Re-run `tctl install` once \
+                     tmux is available, or install without trusty-mpm's session \
+                     management by omitting it from the member list. Nothing has been \
+                     installed."
+                );
+                if json {
+                    if render_json(&serde_json::json!({"command": "install", "error": msg}))
+                        .is_err()
+                    {
+                        eprintln!("tctl install: failed to write JSON output");
+                        return 1;
+                    }
+                } else {
+                    eprintln!("{msg}");
+                }
+                return 3;
             }
         }
     }

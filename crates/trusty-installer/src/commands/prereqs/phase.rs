@@ -249,23 +249,31 @@ pub fn run_prereq_phase_with(
     }
 }
 
+/// Run a prereq auto-install command (e.g. `brew install tmux`) with its
+/// output CAPTURED, never inherited.
+///
+/// Why (#3821, reusing the #3830 fix): an earlier version of this function
+/// inherited stdout/stderr so brew/apt progress streamed live. That is safe
+/// only as long as no [`trusty_progress::LiveChecklist`] is animating at the
+/// same time — true today (this phase runs before `install_all` starts one),
+/// but fragile: any future reordering would silently reintroduce the exact
+/// interleaved-line corruption #3830 fixed elsewhere in this same command
+/// (`install.rs`'s `perform_upgrade_captured` call, `service_bootstrap`'s
+/// `run_captured`). Delegating to the SAME shared `run_captured` primitive
+/// those call sites use removes that footgun entirely rather than relying on
+/// call-order discipline.
+/// What: Builds `sh -c <cmd>` and runs it via
+/// [`super::super::service_bootstrap::run_captured`], which uses
+/// `Command::output()` and folds captured stderr into the error on failure.
+/// Test: `tests::real_exec_captures_not_inherits` (asserts the failure path
+/// carries the child's captured stderr, which is only possible when the
+/// command was run via `.output()` — `.status()` has no access to it); the
+/// stdout-never-leaks-to-parent-fd guarantee itself is proven once, at the
+/// shared primitive, by `service_bootstrap::tests::run_captured_never_leaks_to_parent_stdio`.
 fn real_exec(cmd: &str) -> anyhow::Result<()> {
-    // Inherit stdout/stderr so package-manager progress (brew, apt, etc.)
-    // is visible to the operator during potentially long installs.
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "command exited with code {:?}",
-            status.code()
-        ))
-    }
+    let mut command = std::process::Command::new("sh");
+    command.arg("-c").arg(cmd);
+    super::super::service_bootstrap::run_captured(command, &format!("`{cmd}`"))
 }
 
 #[cfg(test)]
@@ -664,5 +672,38 @@ mod tests {
             &|_| false,
         );
         assert!(result.still_missing.iter().any(|m| m.binary == "tmux"));
+    }
+
+    /// Why (#3821): `real_exec` — the production `exec_fn` wired up by
+    /// `run_prereq_phase` for `brew install tmux` and friends — must run
+    /// CAPTURED, not inherited, mirroring the #3830 fix already applied to
+    /// every other shell-out in this crate. A `.status()`-based
+    /// implementation has no access to the child's stderr at all, so it
+    /// physically cannot satisfy this assertion; only a `.output()`-based
+    /// (captured) implementation can.
+    /// What: Runs a command that writes a distinctive marker to stderr and
+    /// exits non-zero through the real (non-injected) `real_exec`; asserts
+    /// the returned error's message contains that exact marker.
+    /// Test: This is the test.
+    #[test]
+    fn real_exec_captures_not_inherits() {
+        let err = real_exec("echo 'DISTINCTIVE_MARKER_3821: brew install tmux failed' >&2; exit 7")
+            .expect_err("expected Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("DISTINCTIVE_MARKER_3821: brew install tmux failed"),
+            "error message did not fold in captured stderr (implies inherited, \
+             not captured, execution): {msg}"
+        );
+    }
+
+    /// Why: the success path must also go through `real_exec` (not a
+    /// hand-rolled duplicate), proving the delegation to the shared captured
+    /// primitive round-trips correctly for the common case too.
+    /// What: Runs a trivially successful command; asserts `Ok(())`.
+    /// Test: This is the test.
+    #[test]
+    fn real_exec_success_returns_ok() {
+        assert!(real_exec("exit 0").is_ok());
     }
 }

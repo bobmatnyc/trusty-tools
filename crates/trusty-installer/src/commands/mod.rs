@@ -37,6 +37,7 @@ pub mod sign;
 pub mod stable_set;
 pub mod stack;
 pub mod status;
+pub mod tmux_gap;
 pub mod ui;
 pub mod up;
 pub mod update_engine;
