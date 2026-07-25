@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [1.0.2] - 2026-07-25
+
 ### Added
 
 - **`tm compress` durable compression-effectiveness telemetry (closes [#3870](https://github.com/bobmatnyc/trusty-tools/issues/3870), epic [#3866](https://github.com/bobmatnyc/trusty-tools/issues/3866) Slice D):** every rewritten Bash tool call piped through `tm compress` (issue #1956's PreToolUse spike) now appends a durable JSONL record to `~/.trusty-mpm/compression.jsonl` — `surface`, `surface_detail` (tool name), byte-proxy `tokens_before`/`tokens_after`, `pct_reduction`, and `compression_path` (`"rtk_binary"`/`"native_fallback"`) — alongside the existing stderr `tracing::info!` stats line (still emitted, unchanged). Awaited inline rather than spawned, since `tm compress` is a short-lived pipe filter with no background runtime to hand a detached write off to.
