@@ -218,6 +218,59 @@ async fn docstore_tool_ingests_and_is_idempotent() {
     assert_eq!(sources[1]["kind"], "docstore");
 }
 
+/// Why: `okg_sources` is the "what does this graph cover, and how far back?"
+/// view. It must answer on a tree that has never been ingested (an empty list,
+/// not an error) and must surface each source's locator so the operator can see
+/// exactly what a widened window would change.
+/// What: asserts the empty-store case, then a registered-but-never-ingested
+/// Gmail source's kind, locator, and zeroed watermark.
+/// Test: self-contained.
+#[tokio::test]
+async fn sources_tool_reports_registered_sources() {
+    let guard = KnowledgeDirGuard::new();
+    let root = guard.root().to_string_lossy().to_string();
+    let tool = OkgSourcesTool::new();
+
+    let empty = payload(&tool.execute(json!({ "root": &root })).await);
+    assert_eq!(
+        empty["count"], 0,
+        "a fresh tree reports no sources, not an error"
+    );
+    assert_eq!(empty["sources"].as_array().map(Vec::len), Some(0));
+
+    let store = resolve_store(&json!({ "root": &root })).unwrap();
+    store
+        .okg_register_source(trusty_kb::okg::registry::SourceSpec::new(
+            "sent-mail",
+            Some("mail"),
+            trusty_kb::okg::registry::Locator::Gmail {
+                query: "in:sent".into(),
+                after: Some("2026/01/01".into()),
+                before: None,
+            },
+            "2026-07-24T12:00:00Z",
+        ))
+        .unwrap();
+
+    let listed = payload(&tool.execute(json!({ "root": &root })).await);
+    assert_eq!(listed["count"], 1);
+    let source = &listed["sources"][0];
+    assert_eq!(source["id"], "sent-mail");
+    assert_eq!(source["kind"], "gmail");
+    assert_eq!(source["collection"], "mail");
+    assert_eq!(source["enabled"], true);
+    assert_eq!(
+        source["locator"]["gmail"]["after"], "2026/01/01",
+        "the covered window is visible: {listed}"
+    );
+    assert_eq!(
+        source["watermark"]["items"], 0,
+        "registered but not yet ingested"
+    );
+    assert!(source["watermark"]["oldest"].is_null());
+    assert!(source["watermark"]["last_ingest_at"].is_null());
+}
+
 /// Why: a first registration without a path, or a kind mismatch, must fail with
 /// an actionable message rather than silently doing nothing.
 /// What: asserts both error paths.
