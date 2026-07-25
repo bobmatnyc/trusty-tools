@@ -166,6 +166,13 @@ impl KbStore {
 
     /// Directory names directly under the root that look like collections
     /// (any subdirectory), sorted.
+    ///
+    /// Underscore-prefixed directories are store MACHINERY, not collections:
+    /// `_state` holds the conversion log and `_sources` holds the OKG source
+    /// registry + per-source ledgers. Excluding the whole `_` prefix (rather
+    /// than naming each one) keeps `status`, `ensure_structure`, and `validate`
+    /// from ever treating a future bookkeeping dir as a free topic collection
+    /// and generating an `index.md` inside it.
     pub fn collection_dirs_on_disk(&self) -> anyhow::Result<Vec<String>> {
         let mut out = Vec::new();
         if !self.root.is_dir() {
@@ -175,7 +182,7 @@ impl KbStore {
             let entry = entry?;
             if entry.path().is_dir() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if !name.starts_with('.') && name != "_state" {
+                if !name.starts_with('.') && !name.starts_with('_') {
                     out.push(name);
                 }
             }
