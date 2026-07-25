@@ -19,11 +19,134 @@
 //! `validate_version_envelope`, and the strategy gating in `probe_member_health`
 //! (the parse/classify halves; the subprocess spawn itself is side-effecting).
 
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::stable_set::ManageStrategy;
 use super::up::member::MemberHealth;
 use super::up::system_runner::classify_status;
+
+/// Bound on how long a single `<binary> health --json` subprocess may run
+/// before it is treated as a hung probe (#3875).
+///
+/// Why: [`super::verify_tail`]'s poll-until-ready loop bounds the NUMBER of
+/// probe attempts (`bounded_attempts`/`POLL_MAX_ATTEMPTS`) and the AGGREGATE
+/// wall-clock budget across all members, but every one of those bounds
+/// assumed a single probe call itself returns promptly. VM evidence (#3875)
+/// showed `tctl install` hanging >6 minutes at "waiting for trusty-search to
+/// start..." with a genuinely-dead daemon: the child `health --json` process
+/// itself never exited (e.g. blocked on a half-open socket to the dead
+/// daemon), so `Command::output()` — which blocks until EOF on both pipes —
+/// never returned, defeating every attempt/aggregate bound above it.
+/// What: 10s — generous for a live daemon's near-instant `health --json`
+/// reply, short enough that a single hung probe can never itself consume more
+/// than a small slice of `verify_tail`'s ~120s aggregate budget.
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `cmd`, killing it and returning a timeout error if it has not exited
+/// within `timeout` (#3875).
+///
+/// Why: `std::process::Command::output()` has no built-in timeout — a hung
+/// child (dead daemon, wedged health check) blocks the caller forever. This
+/// wraps spawn + a bounded `try_wait` poll, killing the child on expiry, so
+/// no caller of a subprocess health probe can hang indefinitely.
+/// What: spawns `cmd` with piped stdout/stderr, drains both pipes
+/// concurrently on background threads (so a chatty child can never deadlock
+/// on a full pipe buffer while we're only polling `try_wait`), and polls
+/// `try_wait` every 25ms. On timeout, kills + reaps the child and returns
+/// `Err(ErrorKind::TimedOut)`. On normal exit, joins the reader threads and
+/// returns the collected `Output`.
+/// Test: `tests::output_with_timeout_returns_output_for_fast_command`,
+/// `tests::output_with_timeout_kills_hung_command`.
+fn output_with_timeout(
+    mut cmd: Command,
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = stdout_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = stderr_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("command timed out after {timeout:?}"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Whether `path` exists and is executable (unix) / a regular file (other
+/// platforms) — the concrete-file half of [`resolve_binary_path`]'s #3876
+/// PATH-independent fallback.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// Resolve `binary` to a concrete path, trying `PATH` first and falling back
+/// to the default install directory (#3876).
+///
+/// Why: the verify table classified genuinely-installed binaries as
+/// `not_installed` whenever `PATH` was incomplete (#3874 — a fresh
+/// non-login/non-interactive shell lacks `~/.local/bin`). Relying on `which`
+/// alone conflates "not on PATH" with "not installed", which are different
+/// facts; probing the install directory directly makes the verdict resilient
+/// to a broken PATH instead of cascading its failure into a false negative.
+/// What: returns `which::which(binary)`'s path when it resolves; otherwise
+/// probes `<default_install_dir>/<binary>` and returns it iff
+/// [`is_executable`]; otherwise `None` (genuinely not installed).
+/// Test: `tests::resolve_binary_path_install_dir_fallback_detects_executable`,
+/// `tests::resolve_binary_path_none_when_absent_everywhere`.
+fn resolve_binary_path(binary: &str) -> Option<PathBuf> {
+    if let Ok(p) = which::which(binary) {
+        return Some(p);
+    }
+    let candidate = crate::download::default_install_dir()?.join(binary);
+    is_executable(&candidate).then_some(candidate)
+}
 
 /// Coarse health verdict string vocabulary used across the rollup commands.
 ///
@@ -90,20 +213,24 @@ pub fn health_string(h: MemberHealth) -> &'static str {
 /// standard verb would always fail and falsely report `down`; returning a flat
 /// `unknown` string instead keeps the rollup honest without claiming a false
 /// verdict in either direction.
-/// What: returns `not_installed` when the binary is absent. For a `Launchd`
-/// member, spawns `<binary> health --json` and classifies the envelope. For an
-/// `OwnVerb` member, returns `unknown` (health is not probeable via the standard
-/// contract). For `None` (non-daemon), returns `unknown` too (callers should not
-/// ask, but it is a safe default).
+/// What: returns `not_installed` when [`resolve_binary_path`] finds the binary
+/// neither on `PATH` NOR in the default install directory (#3876). For a
+/// `Launchd` member, spawns `<resolved path> health --json` under a bounded
+/// timeout (#3875) and classifies the envelope. For an `OwnVerb` member,
+/// returns `unknown` (health is not probeable via the standard contract). For
+/// `None` (non-daemon), returns `unknown` too (callers should not ask, but it
+/// is a safe default).
 /// Test: `tests::own_verb_member_is_unknown`; the launchd spawn is side-effecting
 /// and its parse half is covered by `classify_health_json`.
 pub fn probe_member_health(binary: &str, manage: ManageStrategy) -> String {
-    if which::which(binary).is_err() {
+    let Some(bin_path) = resolve_binary_path(binary) else {
         return health_str::NOT_INSTALLED.to_owned();
-    }
+    };
     match manage {
         ManageStrategy::Launchd => {
-            let out = Command::new(binary).args(["health", "--json"]).output();
+            let mut cmd = Command::new(&bin_path);
+            cmd.args(["health", "--json"]);
+            let out = output_with_timeout(cmd, HEALTH_PROBE_TIMEOUT);
             let health = match out {
                 Ok(out) if out.status.success() => classify_health_json(&out.stdout),
                 Ok(_) | Err(_) => MemberHealth::Down,
@@ -245,6 +372,91 @@ mod tests {
         let h = probe_member_health("definitely-not-a-real-binary-xyz", ManageStrategy::OwnVerb);
         // Absent binary short-circuits to not_installed before the strategy arm.
         assert_eq!(h, health_str::NOT_INSTALLED);
+    }
+
+    /// Why (#3875): a fast, well-behaved command must return its real output
+    /// through the timeout wrapper — the wrapper must not alter normal
+    /// (non-hung) behaviour.
+    /// What: runs `/bin/echo hello` (or `cmd /C echo hello` on non-unix) under
+    /// a generous timeout; asserts success + the expected stdout.
+    /// Test: This is the test.
+    #[test]
+    fn output_with_timeout_returns_output_for_fast_command() {
+        let mut cmd = Command::new("echo");
+        cmd.arg("hello");
+        let out = output_with_timeout(cmd, Duration::from_secs(5)).expect("echo should run");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hello");
+    }
+
+    /// Why (#3875): the entire point of the wrapper is that a hung child must
+    /// never block the caller past the bound — this is the regression test for
+    /// the VM hang (`tctl install` stuck >6 min at "waiting for trusty-search
+    /// to start...").
+    /// What: runs `sleep 60` under a 1s timeout; asserts the call returns
+    /// (rather than hanging) and yields a `TimedOut` error, well within a
+    /// generous wall-clock assertion.
+    /// Test: This is the test.
+    #[test]
+    fn output_with_timeout_kills_hung_command() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("60");
+        let start = Instant::now();
+        let err = output_with_timeout(cmd, Duration::from_secs(1))
+            .expect_err("a 60s sleep must not complete within a 1s timeout");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "timeout wrapper took far longer than its 1s bound: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Why (#3876): the verify table must not report a genuinely-installed
+    /// binary as `not_installed` just because it is missing from `PATH` — the
+    /// exact false-negative the VM run hit under a broken (#3874) PATH.
+    /// What: creates a fake executable at a temp "install dir", monkeys
+    /// `resolve_binary_path`'s install-dir fallback by exercising
+    /// [`is_executable`] + the join logic it uses directly (since
+    /// `default_install_dir` is HOME-derived and not injectable here), proving
+    /// the executable-detection half of the fallback in isolation.
+    /// Test: This is the test.
+    #[test]
+    fn resolve_binary_path_install_dir_fallback_detects_executable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin_path = dir.path().join("fake-trusty-search");
+        std::fs::write(&bin_path, b"#!/bin/sh\necho hi\n").expect("write fake binary");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&bin_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&bin_path, perms).unwrap();
+        }
+        assert!(is_executable(&bin_path));
+
+        let non_exec = dir.path().join("not-a-binary.txt");
+        std::fs::write(&non_exec, b"just text").expect("write plain file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&non_exec).unwrap().permissions();
+            perms.set_mode(0o644);
+            std::fs::set_permissions(&non_exec, perms).unwrap();
+        }
+        #[cfg(unix)]
+        assert!(!is_executable(&non_exec));
+    }
+
+    /// Why (#3876): a binary absent from both `PATH` and the install
+    /// directory must still resolve to `None` (genuinely not installed) — the
+    /// fallback must not turn every lookup into a false positive.
+    /// What: asserts `resolve_binary_path` returns `None` for an
+    /// unmistakably-fake binary name.
+    /// Test: This is the test.
+    #[test]
+    fn resolve_binary_path_none_when_absent_everywhere() {
+        assert!(resolve_binary_path("definitely-not-a-real-binary-xyz-3876").is_none());
     }
 
     /// Why: A fully-conformant envelope (contract_version + non-empty verbs)

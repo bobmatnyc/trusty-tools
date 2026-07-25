@@ -339,12 +339,45 @@ confirm() {
 # PATH handling
 # ---------------------------------------------------------------------------
 
+# Why (#3874): a repeat install run must not accumulate duplicate `export
+#      PATH=...` lines in the same RC file.
+# What: returns 0 (already present) iff `_pfile` exists and already contains
+#      an export line for `_pdir`; 1 otherwise (including a missing file).
+# Test: appending twice via `_append_path_export` leaves exactly one line.
+_path_export_present_in() {
+    _pdir="$1"
+    _pfile="$2"
+    [ -f "${_pfile}" ] && grep -qF "PATH='${_pdir}'" "${_pfile}" 2>/dev/null
+}
+
+# Why (#3874): shared by every RC file `maybe_update_path` writes so the
+#      idempotency check + append format stay in one place.
+# What: appends the marker comment + export line to `_afile` unless
+#      `_path_export_present_in` already finds it there.
+# Test: `_append_path_export "${dir}" "${file}"` called twice appends once.
+_append_path_export() {
+    _adir="$1"
+    _afile="$2"
+    if _path_export_present_in "${_adir}" "${_afile}"; then
+        return 0
+    fi
+    {
+        printf '\n# Added by trusty-tools install.sh\n'
+        # shellcheck disable=SC2016
+        # Single-quote _adir so it is written verbatim; $PATH expands at
+        # shell startup, not now. The allowlist guard in maybe_update_path
+        # already rejects single-quote characters from _adir.
+        printf "export PATH='%s':\$PATH\n" "${_adir}"
+    } >>"${_afile}"
+}
+
 # Why: Installing into ~/.local/bin is useless if it is not on PATH; help the
 #      user wire it up, but never modify their shell config without consent.
-# What: If install dir is not on PATH, append an export line to the detected
-#      shell RC file (after confirmation). Skipped when TRUSTY_NO_MODIFY_PATH=1.
+# What: If install dir is not on PATH, append an export line to every RC file
+#      relevant to the detected shell (after confirmation), idempotently.
+#      Skipped when TRUSTY_NO_MODIFY_PATH=1.
 # Test: With a dir already on PATH, returns immediately. With a dir not on PATH
-#      and ASSUME_YES=1, appends an export line to the detected RC file.
+#      and ASSUME_YES=1, appends an export line to each detected RC file, once.
 maybe_update_path() {
     _dir="$1"
 
@@ -367,31 +400,37 @@ maybe_update_path() {
         return 0
     fi
 
-    # Detect the RC file from the login shell; default to ~/.profile.
+    # Detect the RC file(s) from the login shell; default to ~/.profile.
+    #
+    # Why (#3874): writing only to .zshrc misses non-interactive/non-login
+    # invocations (e.g. a plain `ssh host 'cmd'`), which zsh never sources
+    # .zshrc (or .zprofile) for — only .zshenv is sourced unconditionally on
+    # every zsh invocation. Writing PATH to all three covers interactive
+    # (.zshrc), login (.zprofile), and non-interactive/non-login (.zshenv)
+    # shells. bash similarly gets both its interactive (.bashrc) and login
+    # (.bash_profile) file.
     _shell_name="$(basename "${SHELL:-/bin/sh}")"
     case "${_shell_name}" in
         zsh)
-            _rc="${HOME}/.zshrc"
+            _rc_files="${HOME}/.zshenv ${HOME}/.zprofile ${HOME}/.zshrc"
+            _rc_display="${HOME}/.zshenv, ${HOME}/.zprofile, and ${HOME}/.zshrc"
             ;;
         bash)
-            _rc="${HOME}/.bashrc"
+            _rc_files="${HOME}/.bashrc ${HOME}/.bash_profile"
+            _rc_display="${HOME}/.bashrc and ${HOME}/.bash_profile"
             ;;
         *)
-            _rc="${HOME}/.profile"
+            _rc_files="${HOME}/.profile"
+            _rc_display="${HOME}/.profile"
             ;;
     esac
 
     say ""
-    if confirm "Add ${_dir} to your PATH in ${_rc}?"; then
-        {
-            printf '\n# Added by trusty-tools install.sh\n'
-            # shellcheck disable=SC2016
-            # Single-quote _dir so it is written verbatim; $PATH expands at
-            # shell startup, not now. The allowlist guard above already rejects
-            # single-quote characters from _dir.
-            printf "export PATH='%s':\$PATH\n" "${_dir}"
-        } >>"${_rc}"
-        say "Added ${_dir} to PATH in ${_rc}. Restart your shell or run:"
+    if confirm "Add ${_dir} to your PATH in ${_rc_display}?"; then
+        for _rc in ${_rc_files}; do
+            _append_path_export "${_dir}" "${_rc}"
+        done
+        say "Added ${_dir} to PATH in ${_rc_display}. Restart your shell or run:"
         say "    export PATH=\"${_dir}:\$PATH\""
     else
         say "Skipped PATH modification. Add this to your shell config manually:"
@@ -683,4 +722,11 @@ main() {
     print_next_steps
 }
 
-main "$@"
+# Why: lets tests (tests/install_path_test.sh) source this file to exercise
+#      individual functions (e.g. maybe_update_path) without triggering the
+#      full network install flow. Unset (the curl|sh default) behaves exactly
+#      as before — main always runs.
+# What: skips the `main "$@"` call iff TRUSTY_INSTALL_SOURCE_ONLY=1.
+if [ "${TRUSTY_INSTALL_SOURCE_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi
