@@ -10,6 +10,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Post-install verify could hang indefinitely instead of failing fast when
+  a daemon was genuinely dead** (#3875). Root cause: the bounded poll-until-
+  ready loop bounded the *number* of health-probe attempts and the aggregate
+  wall-clock budget, but each individual `<binary> health --json` subprocess
+  call had no timeout of its own — a single hung child (e.g. blocked on a
+  half-open socket to a dead daemon) could block `Command::output()` forever,
+  defeating every bound above it. Fixed by wrapping every health-probe
+  subprocess call in a bounded (10s) timeout that kills and reaps a
+  still-running child rather than waiting on it forever; on timeout, the
+  probe's stdout/stderr reader threads are also reclaimed within a short
+  bounded grace period instead of being left to detach indefinitely.
+- **Verify table reported genuinely-installed binaries as `not_installed`
+  under an incomplete `PATH`** (#3876). Root cause: binary presence was
+  resolved via `which::which` alone, which depends entirely on `PATH`;
+  binaries installed to `~/.local/bin` were mis-reported `not_installed`
+  whenever that directory was missing from `PATH` (see #3874). Fixed by
+  falling back to probing the default install directory directly when
+  `which` fails, so the verdict is resilient to a broken `PATH`.
+- **`install.sh` only added `~/.local/bin` to `PATH` via `.zshrc`, which
+  non-interactive and non-login zsh invocations (e.g. a plain
+  `ssh host 'cmd'`) never source** (#3874), causing false "not found"
+  preflight warnings and bogus verify results on fresh machines. Fixed by
+  writing the PATH export to `.zshenv`, which zsh sources unconditionally for
+  every invocation type (interactive, login, non-interactive, script) — so
+  one write covers the gap without also writing `.zprofile`/`.zshrc`, which
+  would make a normal login+interactive session (a fresh Terminal.app window
+  sources all three) triple the install dir in `PATH` on a single fresh
+  install. bash gets both `.bashrc` and `.bash_profile` (its interactive and
+  login files respectively — a default bash session sources only one of the
+  two, not both). Each write skips itself only when the file already
+  contains a genuine, live `PATH=` assignment (not a commented-out line, and
+  not a same-prefix sibling like `MANPATH=`/`FPATH=`) naming the install dir
+  as a `:`/quote/whitespace-delimited path segment (not merely as a
+  substring of a longer, different directory) — recognising any quoting
+  style, not only this script's own — so repeat installs, or a machine with
+  a pre-existing hand-written PATH entry, never get a duplicate export line,
+  while a commented-out or unrelated-variable entry never silently blocks
+  the real PATH export from being written.
+
 - **`tctl install -y` dead-ended on a truly clean macOS box with no
   Homebrew: tmux could never be auto-installed, and the install ran to
   completion anyway before failing with an unexplained exit 2** (#3821,

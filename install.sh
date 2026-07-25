@@ -339,12 +339,90 @@ confirm() {
 # PATH handling
 # ---------------------------------------------------------------------------
 
+# Why (#3874; broadened per #3897 code-critic WARN, then CORRECTED per
+#      #3897 code-critic BLOCK — a first broadening was a free-substring
+#      match on "PATH=.*<dir>" with no anchoring, which produced FALSE
+#      positives that made `_append_path_export` silently skip writing the
+#      real export line — reproduced two ways: (a) a commented-out line
+#      naming the dir, e.g. `# export PATH="<dir>:$PATH"  (disabled)` —
+#      grep doesn't skip `#` lines by default; (b) `PATH=` is a substring of
+#      `MANPATH=`/`FPATH=`/`PYTHONPATH=`/`CLASSPATH=`, and with no
+#      right-hand boundary check, `.../.local/bin` also matched inside
+#      `.../.local/binaries`. Both left `.zshenv` with ZERO real
+#      `export PATH=` lines while the script exited reporting success —
+#      strictly worse than the cosmetic over-broadening it replaced, since
+#      that one still worked): a repeat install run must not accumulate
+#      duplicate `export PATH=...` lines in the same RC file, and a user's
+#      pre-existing hand-written entry in a different quoting style (e.g.
+#      `export PATH="$HOME/.local/bin:$PATH"`) must be recognised too — but
+#      ONLY when it is an actual, live `PATH=` assignment naming this exact
+#      directory as a `:`/quote/whitespace/end-of-line-delimited path
+#      segment.
+# What: returns 0 (already present) iff, after dropping full-line comments
+#      (lines whose first non-whitespace character is `#`), `_pfile`
+#      contains a line where: (i) `PATH=` is not itself the tail of a longer
+#      identifier (required not to be preceded by a word character, so
+#      `MANPATH=`/`FPATH=`/etc. can never match); (ii) `_pdir` is either
+#      immediately glued to `PATH=` (the unquoted `PATH=<dir>:$PATH` form)
+#      OR immediately preceded by one of `:`, `'`, `"` (so it can never
+#      match as a bare substring tacked onto an unrelated word, e.g.
+#      `PATH=FOO<dir>`); AND (iii) `_pdir` is immediately followed by one of
+#      `:`, `'`, `"`, whitespace, or end-of-line (so `.local/bin` can never
+#      match inside `.local/binaries`). Returns 1 otherwise (including a
+#      missing file, or a match found only in a commented-out line).
+# What it does NOT guarantee: this is not a shell parser — an assignment
+#      split across a `\`-continued line, or one hidden behind further
+#      indirection (`eval`, a sourced variable), will not be detected. That
+#      is an accepted, narrow gap; false-negative here just means a second
+#      (harmless, still-idempotent-on-ITS-OWN-writes) export line gets
+#      appended, never a silently-skipped real fix — the failure mode this
+#      function exists to avoid is a false POSITIVE, not a false negative.
+#      One residual false-positive gap remains for the same reason (line-based
+#      text matching, not a shell interpreter): a `PATH=` line sitting inside
+#      a never-invoked function body reads as "present" too — an unusual,
+#      self-inflicted dotfile pattern, not worth chasing with more regex.
+# Test: appending twice via `_append_path_export` leaves exactly one line;
+#      a pre-existing differently-quoted entry is detected (no second entry
+#      appended); a commented-out entry is NOT detected (the real line still
+#      gets written); a sibling `MANPATH=`/`FPATH=` line naming the same dir
+#      is NOT detected (the real `PATH=` line still gets written).
+_path_export_present_in() {
+    _pdir="$1"
+    _pfile="$2"
+    [ -f "${_pfile}" ] || return 1
+    _pdir_esc=$(printf '%s' "${_pdir}" | sed 's/[.]/\\&/g')
+    grep -v '^[[:space:]]*#' "${_pfile}" 2>/dev/null \
+        | grep -Eq "(^|[^A-Za-z0-9_])PATH=(.*[:='\"])?${_pdir_esc}(:|'|\"|[[:space:]]|\$)"
+}
+
+# Why (#3874): shared by every RC file `maybe_update_path` writes so the
+#      idempotency check + append format stay in one place.
+# What: appends the marker comment + export line to `_afile` unless
+#      `_path_export_present_in` already finds it there.
+# Test: `_append_path_export "${dir}" "${file}"` called twice appends once.
+_append_path_export() {
+    _adir="$1"
+    _afile="$2"
+    if _path_export_present_in "${_adir}" "${_afile}"; then
+        return 0
+    fi
+    {
+        printf '\n# Added by trusty-tools install.sh\n'
+        # shellcheck disable=SC2016
+        # Single-quote _adir so it is written verbatim; $PATH expands at
+        # shell startup, not now. The allowlist guard in maybe_update_path
+        # already rejects single-quote characters from _adir.
+        printf "export PATH='%s':\$PATH\n" "${_adir}"
+    } >>"${_afile}"
+}
+
 # Why: Installing into ~/.local/bin is useless if it is not on PATH; help the
 #      user wire it up, but never modify their shell config without consent.
-# What: If install dir is not on PATH, append an export line to the detected
-#      shell RC file (after confirmation). Skipped when TRUSTY_NO_MODIFY_PATH=1.
+# What: If install dir is not on PATH, append an export line to every RC file
+#      relevant to the detected shell (after confirmation), idempotently.
+#      Skipped when TRUSTY_NO_MODIFY_PATH=1.
 # Test: With a dir already on PATH, returns immediately. With a dir not on PATH
-#      and ASSUME_YES=1, appends an export line to the detected RC file.
+#      and ASSUME_YES=1, appends an export line to each detected RC file, once.
 maybe_update_path() {
     _dir="$1"
 
@@ -367,31 +445,44 @@ maybe_update_path() {
         return 0
     fi
 
-    # Detect the RC file from the login shell; default to ~/.profile.
+    # Detect the RC file(s) from the login shell; default to ~/.profile.
+    #
+    # Why (#3874, revised per #3897 code-critic WARN): writing only to
+    # .zshrc misses non-interactive/non-login invocations (e.g. a plain
+    # `ssh host 'cmd'`), which zsh never sources .zshrc (or .zprofile) for.
+    # The FIRST fix here wrote all three of .zshenv/.zprofile/.zshrc, but a
+    # normal login+interactive session (the default for a new Terminal.app
+    # window) sources ALL THREE in one shell — .zshenv, then .zprofile (it's
+    # a login shell), then .zshrc (it's interactive) — so the install dir
+    # landed in PATH three times from a single fresh install. `.zshenv` is
+    # sourced UNCONDITIONALLY by every zsh invocation type (interactive,
+    # login, non-interactive, script), so it alone is sufficient to fix
+    # #3874's actual gap; writing the other two only added duplication risk
+    # without covering any invocation .zshenv doesn't already cover. Kept
+    # zsh on the same idempotent single-directory append machinery as
+    # bash/profile below, just pointed at one file.
     _shell_name="$(basename "${SHELL:-/bin/sh}")"
     case "${_shell_name}" in
         zsh)
-            _rc="${HOME}/.zshrc"
+            _rc_files="${HOME}/.zshenv"
+            _rc_display="${HOME}/.zshenv"
             ;;
         bash)
-            _rc="${HOME}/.bashrc"
+            _rc_files="${HOME}/.bashrc ${HOME}/.bash_profile"
+            _rc_display="${HOME}/.bashrc and ${HOME}/.bash_profile"
             ;;
         *)
-            _rc="${HOME}/.profile"
+            _rc_files="${HOME}/.profile"
+            _rc_display="${HOME}/.profile"
             ;;
     esac
 
     say ""
-    if confirm "Add ${_dir} to your PATH in ${_rc}?"; then
-        {
-            printf '\n# Added by trusty-tools install.sh\n'
-            # shellcheck disable=SC2016
-            # Single-quote _dir so it is written verbatim; $PATH expands at
-            # shell startup, not now. The allowlist guard above already rejects
-            # single-quote characters from _dir.
-            printf "export PATH='%s':\$PATH\n" "${_dir}"
-        } >>"${_rc}"
-        say "Added ${_dir} to PATH in ${_rc}. Restart your shell or run:"
+    if confirm "Add ${_dir} to your PATH in ${_rc_display}?"; then
+        for _rc in ${_rc_files}; do
+            _append_path_export "${_dir}" "${_rc}"
+        done
+        say "Added ${_dir} to PATH in ${_rc_display}. Restart your shell or run:"
         say "    export PATH=\"${_dir}:\$PATH\""
     else
         say "Skipped PATH modification. Add this to your shell config manually:"
@@ -683,4 +774,11 @@ main() {
     print_next_steps
 }
 
-main "$@"
+# Why: lets tests (tests/install_path_test.sh) source this file to exercise
+#      individual functions (e.g. maybe_update_path) without triggering the
+#      full network install flow. Unset (the curl|sh default) behaves exactly
+#      as before — main always runs.
+# What: skips the `main "$@"` call iff TRUSTY_INSTALL_SOURCE_ONLY=1.
+if [ "${TRUSTY_INSTALL_SOURCE_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi
