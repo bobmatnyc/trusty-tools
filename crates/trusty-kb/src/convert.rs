@@ -132,7 +132,10 @@ impl KbStore {
             }
             let rel = self.rel(path);
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if rel.starts_with("_state/") || rel.contains("/.") || rel.starts_with('.') {
+            // Underscore-prefixed dirs are store machinery (`_state`'s
+            // conversion log, `_sources`' OKG registry + ledgers) — the
+            // converter must never plan a move for them.
+            if rel.starts_with('_') || rel.contains("/.") || rel.starts_with('.') {
                 continue;
             }
             if !file_name.ends_with(".md") {

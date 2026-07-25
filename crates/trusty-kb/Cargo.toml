@@ -36,7 +36,15 @@ serde_json = { workspace = true }
 # workspace Cargo.toml note on the serde_yaml pin). Frontmatter split is
 # hand-rolled (split on `---`); serde_yaml only parses/renders the block.
 serde_yaml = { workspace = true }
-# Recursive markdown-tree walking for kb_validate / kb_convert_tree.
+# OKG source registry (`_sources/registry.toml`) — human-readable, hand-editable,
+# and safe to commit alongside the markdown tree.
+toml = { workspace = true }
+# Content hashing for doc-store change detection. Path and mtime both lie (a
+# fresh checkout rewrites mtimes; a moved file keeps its content), so the
+# ledger's fingerprint is a real digest of the bytes.
+sha2 = { workspace = true }
+# Recursive markdown-tree walking for kb_validate / kb_convert_tree, and the
+# OKG doc-store walk.
 walkdir = { workspace = true }
 # ISO-8601 timestamps for created/updated stamping and dated merge sections.
 chrono = { workspace = true }
