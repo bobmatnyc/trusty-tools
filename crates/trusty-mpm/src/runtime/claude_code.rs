@@ -559,6 +559,25 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// `None` (home unresolved): falls back to the legacy
 /// [`crate::core::home_trust_seed::preseed_home_trust`] and returns `None`
 /// (no `CLAUDE_CONFIG_DIR` to inject).
+///
+/// Issue #3918: before this fix, [`crate::core::standalone::preseed_managed_trust`]
+/// derived `enabledMcpjsonServers` from a hardcoded three-server list that
+/// structurally excluded `trusty-mpm`, so a managed session's OWN MCP server
+/// could end up genuinely untrusted in the one file Claude Code actually reads
+/// for a managed session (`<config_dir>/.claude.json` — never `~/.claude.json`,
+/// per the isolation invariant above). `trusty-mpm` now joins the framework
+/// constant (`mcp_config::BUILTIN_MANAGED_MCP_SERVERS`) instead. An earlier
+/// version of this fix derived the trust list from `cwd`'s own `.mcp.json`
+/// (which `session_launch::prepare_session` populates earlier in this call
+/// chain) — a code-critic review rejected that: `.mcp.json` is git-tracked
+/// content that arrives with a cloned repo, so trusting it unconditionally in
+/// a headless managed session (no human to decline a consent dialog) would
+/// let a hostile clone smuggle an arbitrary MCP server past approval on the
+/// very first `tm session new`. See `standalone::trust_seed`'s module doc for
+/// the corrected derivation and its security reasoning. Consequently this
+/// function has NO ordering dependency on `session_launch::prepare_session`
+/// having run for `cwd` — the trust list depends only on the framework
+/// constant and the managed config dir's own `tm mcp add` registry.
 /// Test: exercised via `spawn_sends_env_scrub_when_binary_available` and the
 /// `spawn_command`/`resume_command` config-dir tests (the command-string layer);
 /// the provisioning itself is covered in `core::managed_config`.

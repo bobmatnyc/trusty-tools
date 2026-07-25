@@ -457,6 +457,14 @@ mod tests {
             servers.contains_key("trusty-search"),
             "trusty-search must be defined in .mcp.json"
         );
+        // Issue #3918: trusty-mpm joined BUILTIN_MANAGED_MCP_SERVERS, so the
+        // standalone driver's own global .mcp.json now also self-declares it
+        // (previously the standalone `tm run` driver could not connect to its
+        // own trusty-mpm MCP server either).
+        assert!(
+            servers.contains_key("trusty-mpm"),
+            "trusty-mpm must be defined in .mcp.json (#3918)"
+        );
     }
 
     // WI-8: trusty-review server entry must use stdio transport and the correct command/args.

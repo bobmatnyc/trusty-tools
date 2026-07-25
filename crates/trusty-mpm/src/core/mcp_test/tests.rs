@@ -59,7 +59,8 @@ fn map(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
 
 #[test]
 fn select_bare_unions_builtins() {
-    // A single user server plus the three built-ins, deduped + sorted.
+    // A single user server plus the four built-ins (#3918: trusty-mpm joined
+    // the framework constant), deduped + sorted.
     let servers = map(json!({
         "aaa-custom": { "type": "stdio", "command": "x", "args": [] }
     }));
@@ -70,6 +71,7 @@ fn select_bare_unions_builtins() {
         vec![
             "aaa-custom",
             "trusty-memory",
+            "trusty-mpm",
             "trusty-review",
             "trusty-search"
         ]
