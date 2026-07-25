@@ -364,7 +364,7 @@ async fn docstore_tool_rejects_credential_dir() {
 }
 
 /// Why: the permitted roots are OPERATOR configuration, not a hardcoded home
-/// check — a real corpus lives at `~/Duetto/cto-resources`, and other users'
+/// check — a real corpus lives at `~/Corpora/research`, and other users'
 /// will live elsewhere entirely.
 /// What: asserts the default is home, that an explicit `[okg] docstore_roots`
 /// entry replaces it, and that `~` expands.
@@ -380,12 +380,12 @@ fn config_defaults_to_home() {
     );
 
     let configured = config::OkgConfig {
-        docstore_roots: vec!["~/Duetto/cto-resources".into(), "/srv/corpora".into()],
+        docstore_roots: vec!["~/Corpora/research".into(), "/srv/corpora".into()],
     };
     assert_eq!(
         configured.policy(home),
         trusty_kb::okg::policy::DocStorePolicy::new(vec![
-            home.join("Duetto/cto-resources"),
+            home.join("Corpora/research"),
             std::path::PathBuf::from("/srv/corpora"),
         ]),
         "configured roots replace the default and expand ~"
@@ -399,7 +399,7 @@ fn config_defaults_to_home() {
 #[test]
 fn config_roots_expand_tilde() {
     let with_section: toml::Value = toml::from_str(
-        "[okg]\ndocstore_roots = [\"~/Documents\", \"/Users/masa/Duetto/cto-resources\"]\n",
+        "[okg]\ndocstore_roots = [\"~/Documents\", \"/Users/example/Corpora/research\"]\n",
     )
     .unwrap();
     let parsed: config::OkgConfig = with_section["okg"].clone().try_into().unwrap();
@@ -407,7 +407,7 @@ fn config_roots_expand_tilde() {
         parsed.docstore_roots,
         vec![
             "~/Documents".to_string(),
-            "/Users/masa/Duetto/cto-resources".to_string()
+            "/Users/example/Corpora/research".to_string()
         ]
     );
 

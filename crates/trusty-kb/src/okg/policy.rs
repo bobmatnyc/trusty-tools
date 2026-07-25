@@ -29,7 +29,7 @@
 //! directory inside `~/Library`) is taken at their word — explicit
 //! configuration beats the default heuristic. The roots are configuration, not
 //! a hardcoded list: real corpora live in arbitrary places
-//! (`~/Duetto/cto-resources`), so an operator must be able to extend them.
+//! (`~/Corpora/research`), so an operator must be able to extend them.
 //!
 //! Known limits, accepted deliberately:
 //!   - Loose non-hidden files sitting directly in `$HOME` (`~/private_key.pem`)
@@ -63,7 +63,7 @@ impl DocStorePolicy {
 
     /// The default policy: the user's home directory, minus every dot-path.
     ///
-    /// Why: ordinary corpora (`~/Documents`, `~/Duetto/cto-resources`) work out
+    /// Why: ordinary corpora (`~/Documents`, `~/Corpora/research`) work out
     /// of the box, while the credential and config directories that make an
     /// unconfined read dangerous are excluded by the dot-segment rule rather
     /// than by an enumeration that would inevitably fall behind.
@@ -223,7 +223,7 @@ mod tests {
         // every prefix comparison in these tests accidental.
         let home = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(home.join("Documents/notes")).unwrap();
-        std::fs::create_dir_all(home.join("Duetto/cto-resources")).unwrap();
+        std::fs::create_dir_all(home.join("Corpora/research")).unwrap();
         std::fs::create_dir_all(home.join(".ssh")).unwrap();
         std::fs::create_dir_all(home.join(".config/gh")).unwrap();
         (tmp, home)
