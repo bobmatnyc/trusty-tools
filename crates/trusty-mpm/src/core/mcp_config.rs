@@ -316,20 +316,24 @@ pub fn managed_mcp_server_names(config: &Value) -> Vec<String> {
 
 /// Collect the MCP server names a workspace's `.mcp.json` actually declares.
 ///
-/// Why: backs [`crate::core::session_launch::settings::preseed_workspace_trust`]
-/// (the interactive `tm launch` path, writing `~/.claude.json`) — moved here
-/// from a private duplicate in `session_launch/settings.rs` so it has one
-/// definition. **NOT used by the daemon-managed trust seed
-/// ([`crate::core::standalone::trust_seed::preseed_managed_trust`], which uses
-/// [`managed_mcp_server_names`] instead) — see that function's security note
-/// for why raw `.mcp.json` content must not drive an unattended trust
-/// decision.**
+/// **SECURITY — DO NOT use this to derive an auto-approval / trust list
+/// (issue #3926).** `<workspace>/.mcp.json` is git-tracked and travels WITH a
+/// cloned repo, so its key set is content a hostile or compromised repo
+/// controls directly. Until issue #3926, [`crate::core::session_launch::settings::preseed_workspace_trust`]
+/// (the interactive `tm launch` path) derived `enabledMcpjsonServers` from
+/// exactly this function's output — filtered only by a narrow project-scope
+/// exclusion (issue #2739) — which silently pre-approved (and, on first
+/// launch, connected with the operator's credentials) ANY server name a
+/// cloned repo declared. That path now derives from
+/// [`launch_trusted_mcp_names`] instead (provenance the operator/framework
+/// controls, mirroring [`managed_mcp_server_names`]'s already-fixed
+/// derivation for the daemon-managed path, #3918/#3924). This raw reader
+/// remains for non-trust purposes (diagnostics, listing what a workspace
+/// currently declares) — reach for [`launch_trusted_mcp_names`] for any
+/// approval decision.
 /// What: reads `<workspace>/.mcp.json`, parses it, and returns the sorted keys
 /// of its `mcpServers` object. A missing, unreadable, malformed, or
-/// server-less file yields an empty vector — this never fails, so a degenerate
-/// `.mcp.json` cannot crash trust-seeding. Sorting makes the result
-/// deterministic so the written settings are stable across runs (supporting
-/// idempotency).
+/// server-less file yields an empty vector — this never fails.
 /// Test: `mcp_server_names_reads_workspace_mcp_json`,
 /// `mcp_server_names_empty_when_absent`.
 pub fn mcp_server_names(workspace: &Path) -> Vec<String> {
@@ -347,6 +351,70 @@ pub fn mcp_server_names(workspace: &Path) -> Vec<String> {
         .unwrap_or_default();
     names.sort_unstable();
     names
+}
+
+/// Compute the set of MCP server names an interactive `tm launch` session may
+/// pre-approve (`enabledMcpjsonServers`) WITHOUT surfacing Claude Code's own
+/// "new MCP servers found" consent dialog — i.e. names sourced from
+/// provenance a cloned repo's committed `.mcp.json` cannot influence (issue
+/// #3926).
+///
+/// Why: [`crate::core::session_launch::settings::preseed_workspace_trust`]
+/// previously derived that approval list from [`mcp_server_names`] — the raw
+/// key set of `<workspace>/.mcp.json` — which a hostile or compromised
+/// cloned repo controls directly (see that function's SECURITY doc). This is
+/// the interactive-path counterpart of [`managed_mcp_server_names`], reusing
+/// it verbatim over the SAME managed `.claude.json` registry
+/// (`<config_dir>/.claude.json`, resolved via
+/// [`crate::core::trusty_tools_config::managed_claude_config_dir`] — the
+/// real operator `$HOME`, the same file `tm mcp add/remove/list` and
+/// `session_launch::native_mcp`/`custom_mcp`'s user-scope loop read): the
+/// framework builtin four (`trusty-memory`/`trusty-mpm`/`trusty-review`/
+/// `trusty-search` — each force-overwritten to its canonical entry on every
+/// `prepare_session` run by a dedicated injector, so content-blind approval
+/// is safe for them specifically) UNION every name the operator personally
+/// registered via `tm mcp add` (also force-overwritten into the workspace's
+/// `.mcp.json` this run, by `session_launch::native_mcp`/`custom_mcp`'s
+/// user-scope loop, whenever it matches that registry). Project-scope
+/// `[mcp.custom]` manifest names are deliberately NOT unioned here — the
+/// caller (`session_launch::mod::prepare_session_inner`) subtracts them
+/// separately so a project-scope entry still surfaces the consent dialog
+/// even after `tm project trust` (issue #2739's existing defense-in-depth
+/// design, preserved unchanged by this fix).
+/// What: thin production wrapper — resolves
+/// [`crate::core::trusty_tools_config::managed_claude_config_dir`] and
+/// delegates to [`launch_trusted_mcp_names_from`]. An unresolved home (a
+/// stripped environment) falls back to just the builtin four (never fails —
+/// trust-seeding must never abort a launch).
+/// Test: `launch_trusted_mcp_names_from_unions_registry`,
+/// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`.
+pub fn launch_trusted_mcp_names() -> Vec<String> {
+    match crate::core::trusty_tools_config::managed_claude_config_dir() {
+        Some(dir) => launch_trusted_mcp_names_from(&dir),
+        None => managed_mcp_server_names(&Value::Object(Map::new())),
+    }
+}
+
+/// Hermetic core of [`launch_trusted_mcp_names`]: union the framework builtin
+/// four with whatever `<config_dir>/.claude.json`'s own top-level
+/// `mcpServers` map declares.
+///
+/// Why: split out so tests can drive it against a tempdir config dir instead
+/// of the real `$HOME` (mirrors the `managed_claude_config_dir` /
+/// `managed_claude_config_dir_at` and `inject_native_trusty_mcps` /
+/// `inject_native_trusty_mcps_from` hermetic-core split already used
+/// elsewhere in this crate).
+/// What: reads `config_dir` via [`list_servers`] (quarantines a malformed
+/// file, empty map when absent or unreadable — never fails) and returns
+/// [`managed_mcp_server_names`] over the resulting `{"mcpServers": ...}`
+/// value.
+/// Test: `launch_trusted_mcp_names_from_unions_registry`,
+/// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`.
+pub fn launch_trusted_mcp_names_from(config_dir: &Path) -> Vec<String> {
+    let servers = list_servers(config_dir).unwrap_or_default();
+    let mut config = Map::new();
+    config.insert("mcpServers".to_string(), Value::Object(servers));
+    managed_mcp_server_names(&Value::Object(config))
 }
 
 // ─── internal helpers ─────────────────────────────────────────────────────
@@ -695,5 +763,50 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // No .mcp.json written — must not fail, must yield an empty vector.
         assert!(mcp_server_names(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn launch_trusted_mcp_names_from_unions_registry() {
+        // Why (#3926): the interactive `tm launch` path must trust the SAME
+        // provenance-safe set as the daemon-managed path — builtin four union
+        // the operator's own `tm mcp add` registry, regardless of what a
+        // cloned repo's workspace `.mcp.json` separately declares (this
+        // function never even looks at a workspace).
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().join("claude-config");
+        add_server(&cfg, "slack-mcp", stdio("slack-mcp", &["serve"])).unwrap();
+
+        let names = launch_trusted_mcp_names_from(&cfg);
+        assert_eq!(
+            names,
+            vec![
+                "slack-mcp",
+                "trusty-memory",
+                "trusty-mpm",
+                "trusty-review",
+                "trusty-search"
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_trusted_mcp_names_from_defaults_to_builtin_when_absent() {
+        // Why (#3926): a fresh install with no `tm mcp add` registry yet must
+        // still trust exactly the framework builtin four — never error, never
+        // an empty list (the four builtins always launch, so they must always
+        // be pre-approved).
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().join("does-not-exist");
+
+        let names = launch_trusted_mcp_names_from(&cfg);
+        assert_eq!(
+            names,
+            vec![
+                "trusty-memory",
+                "trusty-mpm",
+                "trusty-review",
+                "trusty-search"
+            ]
+        );
     }
 }
