@@ -6,6 +6,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **`tctl install -y` dead-ended on a truly clean macOS box with no
+  Homebrew: tmux could never be auto-installed, and the install ran to
+  completion anyway before failing with an unexplained exit 2** (#3821,
+  demo-critical — reproduced piping `install.sh | sh -s -- -y` on a fresh
+  macOS 15.7.7 arm64 VM). Root cause: Phase 6's prereq-check correctly
+  detects that no auto-install command is safe when no package manager is
+  present (bootstrapping Homebrew itself needs sudo/CLT and can prompt, so
+  it is intentionally never auto-run), but the caller then only warned and
+  continued installing the rest of the stable set — the actual failure
+  only surfaced later, at the post-install verify tail, with no message
+  connecting it back to tmux. Fixed with a new pure decision gate
+  (`commands::tmux_gap::decide_tmux_gap_action`, mirroring
+  `install_gate::decide_install_gate`): under `--yes` with tmux still
+  missing after Phase 6, `tctl install` now fails EARLY — before installing
+  anything else — with one clear, actionable message (both human and
+  `--json` output). Brew-present machines are unaffected: `brew install
+  tmux` still auto-installs under `-y` exactly as before. Interactive TTY
+  behavior is unchanged (prompts to continue anyway). Issue #3823 (tm
+  needs a tmux *server* started) is separate and out of scope here.
+- The Phase 6 prereq auto-install command (`brew install tmux` and
+  friends) now runs fully captured (never `Stdio::inherit()`, #3830) via a
+  new `prereqs::exec_heartbeat::run_captured_with_heartbeat` — removing a
+  latent footgun where a future reordering of the prereq phase relative to
+  the live install checklist could reintroduce #3830's interleaved-line
+  corruption.
+- **A first-run `brew install tmux` can legitimately take 1-5+ minutes
+  (Homebrew self-update, a non-bottled build) with zero output** — code
+  critic caught this on PR #3879: the fully-captured exec above would sit
+  silently for that entire span on the exact piped `curl | sh -s -- -y`
+  demo path, reading as a hang. `run_captured_with_heartbeat` now emits an
+  installer-owned `still running: ... (Ns elapsed)...` line every ~15s
+  while the child is still running — never child stdout passthrough, so
+  captured output discipline is unaffected.
+- **`tctl install --json`'s Phase-6 fail-early error dropped the real cause
+  when a package manager WAS present but the auto-install attempt itself
+  failed** (network/disk/permissions) — the JSON envelope carried only the
+  static "Homebrew required" hint, indistinguishable from "no package
+  manager found at all". The envelope now carries `hint` (the static,
+  platform-appropriate note) and `detail` (the actual captured stderr from
+  the failed attempt, `null` when no attempt was even possible) as
+  distinct fields.
+
 ## [0.4.9] - 2026-07-24
 
 ### Fixed

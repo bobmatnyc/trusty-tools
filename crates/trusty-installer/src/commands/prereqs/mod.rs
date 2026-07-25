@@ -10,11 +10,14 @@
 //! - `detect` — binary detection + version query (extra-path fallback for claude).
 //! - `hints` — platform/pkg-mgr detection and OS-specific install-command selection.
 //! - `phase` — full check-confirm-offer-install-reverify phase orchestration.
+//! - `exec_heartbeat` — captured, heartbeat-emitting command execution for
+//!   long-running auto-install commands (#3821).
 //!
 //! Test: `tests` validates the legacy `check_and_warn` relevance filtering and
 //! missing-tool detection; new sub-module tests live in their respective files.
 
 pub mod detect;
+pub mod exec_heartbeat;
 pub mod hints;
 pub mod phase;
 
@@ -47,7 +50,13 @@ pub struct Prereq {
 /// Why: Callers may want to block on some missing tools (trusty-mpm → tmux)
 /// while only warning for others; returning a typed list lets the caller decide.
 ///
-/// What: Holds the `binary` name and the `hint` string.
+/// What: Holds the `binary` name, the static `hint` string, and an optional
+/// `detail` — the ACTUAL captured error from a failed auto-install attempt
+/// (e.g. brew's stderr), kept distinct from `hint` so a `--json` consumer
+/// never has to guess whether "Homebrew required" is the real cause or just
+/// the generic fallback text (#3821 finding 2: a failed `brew install tmux`
+/// attempt — network/disk/permissions — was silently losing this detail in
+/// `--json` mode, leaving only the static hint).
 ///
 /// Test: `tests::check_returns_missing_for_injected_absent`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +65,10 @@ pub struct Missing {
     pub binary: String,
     /// Install guidance for the missing binary.
     pub hint: String,
+    /// The captured error from a failed auto-install attempt, when one was
+    /// actually made (`None` when no auto-install was even possible, e.g.
+    /// no package manager was detected).
+    pub detail: Option<String>,
 }
 
 /// The canonical prerequisite table.
@@ -128,6 +141,7 @@ pub fn check_and_warn(
             let m = Missing {
                 binary: prereq.binary.to_owned(),
                 hint: prereq.hint.to_owned(),
+                detail: None,
             };
             if !json {
                 let _ = narr.info(&format!(

@@ -208,6 +208,7 @@ pub fn run_prereq_phase_with(
                                     still_missing.push(Missing {
                                         binary: prereq.binary.to_owned(),
                                         hint: hint.manual_note.clone(),
+                                        detail: None,
                                     });
                                 }
                             }
@@ -219,9 +220,16 @@ pub fn run_prereq_phase_with(
                                     hint.manual_note
                                 ));
                             }
+                            // #3821 finding 2: keep the ACTUAL captured error
+                            // (e.g. brew's stderr — network/disk/permissions)
+                            // distinct from the static `hint` so a `--json`
+                            // consumer can tell "no auto-install was even
+                            // possible" apart from "an attempt was made and
+                            // failed".
                             still_missing.push(Missing {
                                 binary: prereq.binary.to_owned(),
                                 hint: hint.manual_note.clone(),
+                                detail: Some(e.to_string()),
                             });
                         }
                     }
@@ -237,6 +245,7 @@ pub fn run_prereq_phase_with(
                     still_missing.push(Missing {
                         binary: prereq.binary.to_owned(),
                         hint: hint.manual_note,
+                        detail: None,
                     });
                 }
             }
@@ -249,23 +258,34 @@ pub fn run_prereq_phase_with(
     }
 }
 
+/// Run a prereq auto-install command (e.g. `brew install tmux`) with its
+/// output CAPTURED, never inherited — AND a periodic heartbeat while it runs.
+///
+/// Why (#3821): a first-run `brew install tmux` can legitimately take
+/// several minutes (Homebrew self-update, a non-bottled build) with zero
+/// output — exactly on the piped `curl | sh -s -- -y` demo path this exists
+/// to support. A plain blocking captured call (this crate's #3830-safe
+/// default elsewhere) would sit silent that whole time, reading as a hang
+/// (code-critic HIGH finding on PR #3879). Delegating to
+/// [`super::exec_heartbeat::run_captured_with_heartbeat`] keeps the exact
+/// same captured-not-inherited guarantee while adding an installer-emitted
+/// "still running" line every [`super::exec_heartbeat::DEFAULT_HEARTBEAT`].
+/// What: Builds `sh -c <cmd>` and runs it with a heartbeat callback that
+/// prints one `eprintln!` line per tick (this function is only ever reached
+/// under `!json` — see `auto_yes`/`should_offer` above — so writing directly
+/// to stderr can never corrupt `--json` output).
+/// Test: The captured-exec + heartbeat primitive itself is exhaustively
+/// tested in `exec_heartbeat::tests`; this thin wrapper only needs to prove
+/// the command is actually built and run — see `tests::real_exec_*` below.
 fn real_exec(cmd: &str) -> anyhow::Result<()> {
-    // Inherit stdout/stderr so package-manager progress (brew, apt, etc.)
-    // is visible to the operator during potentially long installs.
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            "command exited with code {:?}",
-            status.code()
-        ))
-    }
+    let mut command = std::process::Command::new("sh");
+    command.arg("-c").arg(cmd);
+    super::exec_heartbeat::run_captured_with_heartbeat(
+        command,
+        &format!("`{cmd}`"),
+        super::exec_heartbeat::DEFAULT_HEARTBEAT,
+        |elapsed| eprintln!("  still running: `{cmd}` ({elapsed}s elapsed)..."),
+    )
 }
 
 #[cfg(test)]
@@ -642,9 +662,12 @@ mod tests {
     }
 
     /// Why: under `--yes`, exec failure must still land the binary in
-    /// `still_missing` (not silently `installed`).
+    /// `still_missing` (not silently `installed`) — AND (#3821 finding 2)
+    /// the real captured error must be threaded onto `Missing.detail`,
+    /// distinct from the static `hint`, so `--json` consumers don't lose it.
     /// What: `yes: true, json: false`; exec_fn returns Err; asserts tmux ends
-    /// up in `still_missing`.
+    /// up in `still_missing` with `detail` carrying the exec error and
+    /// `hint` unchanged from the static manual note.
     /// Test: This is the test.
     #[test]
     fn phase_yes_exec_failure_adds_to_still_missing() {
@@ -663,6 +686,34 @@ mod tests {
             &|| false,
             &|_| false,
         );
-        assert!(result.still_missing.iter().any(|m| m.binary == "tmux"));
+        let tmux = result
+            .still_missing
+            .iter()
+            .find(|m| m.binary == "tmux")
+            .expect("tmux must be missing");
+        assert_eq!(tmux.detail.as_deref(), Some("fake failure"));
+        assert_ne!(Some(tmux.hint.as_str()), tmux.detail.as_deref());
+    }
+
+    /// Why (#3821): `real_exec` — the production `exec_fn` wired up by
+    /// `run_prereq_phase` for `brew install tmux` and friends — is a thin
+    /// `sh -c` wrapper around `exec_heartbeat::run_captured_with_heartbeat`
+    /// (whose captured-not-inherited + heartbeat guarantees are exhaustively
+    /// tested in `exec_heartbeat::tests`); this only needs to prove the
+    /// wrapper itself round-trips both outcomes correctly.
+    /// What: A failing command's error carries the child's captured stderr
+    /// (proving `sh -c` + the shared primitive are actually wired up, not a
+    /// no-op); a trivially successful command returns `Ok(())`.
+    /// Test: This is the test.
+    #[test]
+    fn real_exec_wraps_command_and_captures_stderr() {
+        assert!(real_exec("exit 0").is_ok());
+        let err = real_exec("echo 'DISTINCTIVE_MARKER_3821: brew install tmux failed' >&2; exit 7")
+            .expect_err("expected Err");
+        assert!(
+            err.to_string()
+                .contains("DISTINCTIVE_MARKER_3821: brew install tmux failed"),
+            "error message did not fold in captured stderr: {err}"
+        );
     }
 }
