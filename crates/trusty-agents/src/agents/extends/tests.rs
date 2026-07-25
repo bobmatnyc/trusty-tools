@@ -856,3 +856,90 @@ fn registry_extends_error_surfaced_in_summary() {
         "error names the missing base: {err}"
     );
 }
+
+/// #3816: unlike listeners/tools (union), a child's `[[stores]]` REPLACES
+/// the base's. The spec allows exactly one OKG store per agent, so a
+/// personalization overlay declaring its own store must not end up with the
+/// BASE's index as the default `vector_search` target.
+#[test]
+fn extends_child_stores_replace_base_stores() {
+    let base = cfg(r#"
+[agent]
+name = "assistant"
+role = "assistant"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+[[stores]]
+name = "assistant-kb"
+index = "assistant"
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "cto-assistant"
+role = "assistant"
+model = ""
+description = ""
+extends = "assistant"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+[[stores]]
+name = "cto-assistant-kb"
+index = "cto-assistant"
+palace = "cto"
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(
+        merged.stores.bindings.len(),
+        1,
+        "child replaces, not appends"
+    );
+    assert_eq!(
+        merged.stores.default_search_index(),
+        Some("cto-assistant"),
+        "the overlay's OWN index must be the default search target"
+    );
+    assert_eq!(merged.stores.bindings[0].palace.as_deref(), Some("cto"));
+}
+
+/// A child that declares no stores still inherits the base's binding.
+#[test]
+fn extends_child_without_stores_inherits_base_binding() {
+    let base = cfg(r#"
+[agent]
+name = "assistant"
+role = "assistant"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+[[stores]]
+name = "assistant-kb"
+index = "assistant"
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "child"
+role = "assistant"
+model = ""
+description = ""
+extends = "assistant"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(merged.stores.default_search_index(), Some("assistant"));
+}

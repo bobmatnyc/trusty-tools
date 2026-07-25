@@ -3,17 +3,15 @@
 //
 // Why: the chat-pane gear panel needs a single typed surface over the agent
 // config read/write routes (`GET/PATCH /api/agents/:name`,
-// `GET /api/agents/:name/persona`) plus the LIVE listener/OKG-store shape
-// Bob asked the concept demo to render even though there is no backend for
-// either yet (issue being filed for listeners; OKG store bindings have no
-// `agent.toml` field today — see `DEFINED_LISTENERS`/`describeOkgStores`'s
-// doc comments). Keeping the fetch/patch logic here (not inline in the
-// component) makes it independently testable, mirroring `stores/app.ts`'s
-// `fetchAgentCatalog` pattern.
-// What: `fetchAgentDetail`/`fetchAgentPersona`/`patchAgent` — thin REST
-// wrappers; `DEFINED_LISTENERS` — the two listener bindings from the (not
-// yet implemented) listener spec, rendered as honest scaffolding; a
-// `template-scaffolded-agent.toml`-shaped starter for the add-agent flow.
+// `GET /api/agents/:name/persona`), the LIVE OKG-store bindings
+// (`GET /api/agents/:name/stores`, #3816/#3864), and the listener shape Bob
+// asked the concept demo to render while its backend is still being built
+// (see `DEFINED_LISTENERS`' doc comment). Keeping the fetch/patch logic here
+// (not inline in the component) makes it independently testable, mirroring
+// `stores/app.ts`'s `fetchAgentCatalog` pattern.
+// What: `fetchAgentDetail`/`fetchAgentPersona`/`patchAgent`/`fetchAgentStores`
+// — thin REST wrappers; `DEFINED_LISTENERS` — the two listener bindings from
+// the (not yet implemented) listener spec, rendered as honest scaffolding.
 // Test: `agentConfig.test.ts`.
 
 import { apiBase } from './api-config';
@@ -138,33 +136,56 @@ export const DEFINED_LISTENERS: ListenerDefinition[] = [
 ];
 
 /**
- * Why: "OKG Stores" (the agent's bound knowledge trees + search indexes,
- * e.g. Izzie's `bob-kb`) has no representation in `agent.toml` today —
- * confirmed by grep against `crates/trusty-agents/src/agents/config.rs`
- * before choosing to scaffold rather than fabricate a live reading. Per
- * Bob's own escape valve ("render... as a structured placeholder... state
- * in the PR body which sections are live vs scaffolded"), this returns a
- * fixed, clearly-labeled scaffold shape rather than fake doc/chunk counts —
- * inventing believable-looking numbers here would be fabricated data
- * (BASE-ENGINEER "No Mock Data" — mock data belongs in test code only).
- * What: One scaffold row so the section isn't empty in the concept demo;
- * `connected: false` and the UI renders it as "not yet connected" rather
- * than implying a live reading.
+ * One OKG store binding, resolved LIVE by the backend (#3816/#3864).
+ *
+ * Why: this replaces the pre-#3816 client-side scaffold. The binding now
+ * exists in `agent.toml` as `[[stores]]` and
+ * `GET /api/agents/:name/stores` resolves each one against the running
+ * trusty-search / trusty-memory daemons, so the card reports an OBSERVED
+ * state instead of asserting "not connected" for every agent.
+ * What: mirrors `crate::stores::status::StoreStatus`'s serde shape.
+ * `connected` reflects the SEARCH INDEX (the corpus `vector_search` routes
+ * to); `reason` is present only when it is false. Palace health is separate
+ * so a missing palace downgrades one line, not the whole store. Every
+ * optional field is omitted by the server when absent — never guessed.
  */
 export interface OkgStoreBinding {
   name: string;
   tree: string;
   index: string;
+  palace?: string;
   connected: boolean;
+  reason?: string;
+  chunk_count?: number;
+  root_path?: string;
+  index_status?: string;
+  palace_connected?: boolean;
+  palace_reason?: string;
 }
 
-export function scaffoldOkgStores(agentName: string): OkgStoreBinding[] {
-  return [
-    {
-      name: `${agentName}-kb`,
-      tree: `okg://${agentName}`,
-      index: `trusty-search:${agentName}`,
-      connected: false,
-    },
-  ];
+/** `GET /api/agents/:name/stores`'s wire shape. */
+export interface AgentStores {
+  stores: OkgStoreBinding[];
+  /** Non-fatal config problems (e.g. more than one store bound). */
+  issues: string[];
+  /** Present only when the agent's TOML failed to parse. */
+  config_error?: string;
+}
+
+/**
+ * Why: an agent that binds no store is a normal state (empty list), and a
+ * daemon being down is reported per-store rather than as a request failure —
+ * so the only `null` case worth branching on is a stale roster selection.
+ * What: `GET /api/agents/:name/stores`. Returns `null` on 404; throws on any
+ * other network/HTTP error.
+ * Test: `fetchAgentStores_returns_null_on_404`,
+ * `fetchAgentStores_parses_live_status`.
+ */
+export async function fetchAgentStores(name: string): Promise<AgentStores | null> {
+  const r = await fetch(`${apiBase()}/api/agents/${encodeURIComponent(name)}/stores`, {
+    headers: authHeaders(),
+  });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GET /api/agents/${name}/stores failed: ${r.status}`);
+  return (await r.json()) as AgentStores;
 }

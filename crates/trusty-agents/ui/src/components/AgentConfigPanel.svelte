@@ -7,9 +7,10 @@
    * currently active in the chat pane, opened via the gear icon in
    * `ChatHeader`. Five sections, in the order Bob specified: Personality
    * (main persona.md prose — real read/write), OKG Stores (the agent's bound
-   * knowledge trees/search indexes — no `agent.toml` field exists yet,
-   * confirmed by grep; rendered as honest structured scaffolding, not
-   * fabricated live numbers), Tools (the `[tools].allow` glob allowlist —
+   * knowledge trees/search indexes — REAL as of #3816/#3864: read from
+   * `agent.toml`'s `[[stores]]` and resolved live against trusty-search /
+   * trusty-memory by `GET /api/agents/:name/stores`), Tools (the
+   * `[tools].allow` glob allowlist —
    * real read/write), Permissions (`[agent].scopes` — real, READ-ONLY: no
    * write contract established yet), Listeners (gmail/google-calendar —
    * no backend yet, spec being filed; rendered from `DEFINED_LISTENERS` as
@@ -18,7 +19,8 @@
    * and whenever `agentName` changes. Personality and Tools are editable
    * with their own Save button (independent PATCH calls, so saving one
    * doesn't require the other to be valid). Permissions/OKG
-   * Stores/Listeners render read-only. Concierge (`ctrl`) gets a static
+   * Stores/Listeners render read-only — store bindings are edited in
+   * `agent.toml`, not here. Concierge (`ctrl`) gets a static
    * notice per Bob: editable by name, but not an add-agent template.
    * Test: `agentConfig.test.ts` covers the scaffolding data; this component
    * is exercised manually (`pnpm dev`, open the gear, edit + save
@@ -32,9 +34,10 @@
     fetchAgentDetail,
     fetchAgentPersona,
     patchAgent,
-    scaffoldOkgStores,
+    fetchAgentStores,
     DEFINED_LISTENERS,
     type AgentDetail,
+    type OkgStoreBinding,
   } from '../lib/agentConfig';
 
   export let agentName: string;
@@ -55,6 +58,12 @@
   let toolsText = ''; // one glob per line — simplest editable form of a string[]
   let savedToolsText = '';
 
+  /** Live OKG store bindings (#3816/#3864) — `null` until the first load
+   * resolves, so the pane can distinguish "loading" from "binds nothing". */
+  let okgStores: OkgStoreBinding[] | null = null;
+  let okgIssues: string[] = [];
+  let okgError = '';
+
   let saving = false;
   let saveError = '';
   let justSaved: Tab | null = null;
@@ -74,7 +83,14 @@
     loading = true;
     loadError = '';
     detail = null;
+    okgStores = null;
+    okgIssues = [];
+    okgError = '';
     try {
+      // Store resolution talks to two daemons and can be the slowest leg, but
+      // it must never block (or fail) the rest of the panel — hence
+      // `allSettled`-style isolation via its own catch rather than a shared
+      // `Promise.all` rejection path.
       const [d, p] = await Promise.all([fetchAgentDetail(name), fetchAgentPersona(name)]);
       detail = d;
       if (d) {
@@ -97,6 +113,15 @@
       loadError = `Failed to load agent config: ${e}`;
     } finally {
       loading = false;
+    }
+    try {
+      const s = await fetchAgentStores(name);
+      okgStores = s?.stores ?? [];
+      okgIssues = s?.issues ?? [];
+      if (s?.config_error) okgIssues = [...okgIssues, s.config_error];
+    } catch (e) {
+      okgStores = [];
+      okgError = `${e}`;
     }
   }
 
@@ -137,8 +162,6 @@
       saving = false;
     }
   }
-
-  $: okgStores = scaffoldOkgStores(agentName);
 
   onMount(() => () => {
     if (justSavedTimer) clearTimeout(justSavedTimer);
@@ -228,25 +251,60 @@
     {:else if tab === 'okg'}
       <div class="flex flex-col gap-2">
         <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
-          Knowledge trees + search indexes bound to this agent.
+          Knowledge trees + search indexes bound to this agent, resolved live against
+          trusty-search and trusty-memory. Edit bindings in
+          <code class="font-mono">agent.toml</code>'s <code class="font-mono">[[stores]]</code>.
         </p>
-        <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
-          Scaffolding — <code class="font-mono">agent.toml</code> has no OKG store binding field
-          yet. Shown here so the concept reads end to end; not yet connected to a live index.
-        </p>
-        {#each okgStores as store (store.name)}
+        {#if okgStores === null}
+          <div class="flex items-center gap-2 text-xs text-foundry-light-muted dark:text-foundry-text/60">
+            <Loader2 class="h-3.5 w-3.5 animate-spin" /> Resolving stores…
+          </div>
+        {:else if okgError}
+          <p class="flex items-center gap-1.5 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-500 dark:text-red-400">
+            <AlertCircle class="h-3.5 w-3.5 shrink-0" /> Could not read store bindings: {okgError}
+          </p>
+        {:else if okgStores.length === 0}
+          <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
+            This agent binds no OKG store. Add a <code class="font-mono">[[stores]]</code> table to
+            its <code class="font-mono">agent.toml</code> to give it a knowledge tree.
+          </p>
+        {/if}
+        {#each okgStores ?? [] as store (store.name)}
           <div class="rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2">
-            <div class="flex items-center justify-between">
+            <div class="flex items-center justify-between gap-2">
               <span class="font-mono text-xs font-semibold text-foundry-light-text dark:text-foundry-text">{store.name}</span>
-              <span class="rounded-md bg-foundry-light-border/50 dark:bg-black/30 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50">
-                not connected
+              <span
+                class="shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide {store.connected
+                  ? 'bg-foundry-teal/15 text-foundry-teal'
+                  : 'bg-foundry-light-border/50 dark:bg-black/30 text-foundry-light-muted dark:text-foundry-text/50'}"
+              >
+                {store.connected ? 'connected' : 'not connected'}
               </span>
             </div>
             <div class="mt-1 flex flex-col gap-0.5 font-mono text-[11px] text-foundry-light-muted dark:text-foundry-text/50">
               <span>tree: {store.tree}</span>
-              <span>index: {store.index}</span>
+              <span>
+                index: {store.index}{#if store.connected && store.chunk_count !== undefined}
+                  &nbsp;· {store.chunk_count.toLocaleString()} chunks{/if}{#if store.connected && store.index_status}
+                  &nbsp;· {store.index_status}{/if}
+              </span>
+              {#if store.root_path}<span>root: {store.root_path}</span>{/if}
+              {#if store.palace}
+                <span>
+                  palace: {store.palace}
+                  {#if store.palace_connected === false}
+                    <span class="text-foundry-amber">— {store.palace_reason ?? 'not connected'}</span>
+                  {/if}
+                </span>
+              {/if}
             </div>
+            {#if !store.connected && store.reason}
+              <p class="mt-1.5 text-[11px] text-foundry-amber">{store.reason}</p>
+            {/if}
           </div>
+        {/each}
+        {#each okgIssues as issue (issue)}
+          <p class="text-[11px] text-foundry-amber">{issue}</p>
         {/each}
       </div>
     {:else if tab === 'tools'}

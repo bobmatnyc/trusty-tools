@@ -333,6 +333,27 @@ pub async fn run_pm_task_with_persona(
                 crate::tools::web_search::BraveSearchTool::from_env(),
             ));
 
+            // #3864 / #3816: `vector_search`, bound to THIS persona's OKG
+            // store index. Personas (cto-assistant, izzie) grant
+            // `vector_search` in `[tools].allow` but it was never registered
+            // on this path — the persona-documented `vector_search(index_id=…)`
+            // call shape resolved to nothing, which is the bug #3864 filed.
+            // Registering it here with the persona's bound store means an
+            // unqualified search hits the agent's OWN knowledge; an explicit
+            // `index_id` still overrides. Personas with no `[[stores]]`
+            // binding get `None` and the tool's pre-existing local-index
+            // behaviour. As with every tool above, registration alone grants
+            // nothing — `filter_persona_tool_names` against `patterns` still
+            // decides reachability.
+            registry.register(Arc::new(
+                crate::tools::memory::VectorSearchTool::new().with_default_index(
+                    persona_cfg
+                        .stores
+                        .default_search_index()
+                        .map(str::to_string),
+                ),
+            ));
+
             // system_status epic (#3052): lets a persona report on-demand
             // trusty-* subsystem health (daemons, MCP servers, credential
             // tiers, registry counts) without it being injected into every

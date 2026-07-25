@@ -138,6 +138,31 @@ pub struct AgentConfig {
     /// `crate::listeners::wake` tests cover matching semantics.
     #[serde(default)]
     pub listeners: Vec<crate::listeners::config::AgentListenerBinding>,
+
+    /// Per-agent OKG store bindings (#3816/#3864, DOC-54 SPEC-AGENTS-04
+    /// §5.1) — the FIRST leg of the stores/tools/listeners config triple.
+    ///
+    /// Why: An agent KNOWS things via a bound OKG store (its knowledge tree
+    /// plus the trusty-search index over it, optionally plus a trusty-memory
+    /// palace), distinct from how it ACTS (`[tools].allow`) and REACTS
+    /// (`[[listeners]]`). Before this field existed there was no way to point
+    /// an agent's semantic search at its own corpus — `vector_search` was
+    /// hardwired to a CWD-relative local code index (#3864) — and the GUI's
+    /// OKG Stores pane could only render a placeholder. Bob's 2026-07-24
+    /// decision is exactly ONE store per agent; more than one parses but is
+    /// reported by `StoresConfig::validate` and only the first is used as the
+    /// default search target.
+    /// What: [`crate::stores::StoresConfig`], accepting either the
+    /// `[[stores]]` array-of-tables (rich: name/tree/index/palace) or the
+    /// product spec's `[stores] allow = [...]` shorthand. Absent = the agent
+    /// binds no store, which is valid and leaves every dependent behaviour on
+    /// its pre-existing default. Nothing here is fatal: an unresolvable or
+    /// malformed binding is surfaced as a disconnected store with a reason
+    /// (`crate::stores::status`), never a boot failure.
+    /// Test: `crate::stores::config` unit tests cover the binding shapes;
+    /// `crate::stores::status` covers live resolution.
+    #[serde(default)]
+    pub stores: crate::stores::StoresConfig,
 }
 
 fn default_adapter() -> Arc<dyn ModelAdapter> {

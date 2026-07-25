@@ -420,3 +420,77 @@ fn ensure_deployed_blocks_on_externally_held_pass_lock() {
     // this establishes the baseline stamp without touching any file.
     assert_eq!(report, ReprovisionReport::default());
 }
+
+/// #3816/#3864: the embedded seed for each demo persona must carry its OKG
+/// store binding.
+///
+/// Why: the bindings are what make `vector_search` route to the agent's own
+/// corpus and what the GUI's OKG Stores card renders. They live in files that
+/// the reprovision path rewrites (#3556, and the reprovision-clobber class of
+/// bug generally), so a silent drop here would degrade both surfaces with no
+/// compile error anywhere — exactly the failure mode #3864 documented. Asserts
+/// against the EMBEDDED bytes (the provisioning source of truth), not against
+/// `~/.trusty-agents`, which this crate must never read in a test.
+/// Test: itself.
+#[test]
+fn bundled_personas_carry_their_okg_store_bindings() {
+    #[derive(serde::Deserialize)]
+    struct Partial {
+        #[serde(default)]
+        stores: crate::stores::StoresConfig,
+    }
+
+    for (file, index, palace, tree) in [
+        ("izzie/agent.toml", "bob-kb", "owner-profile", "okg://izzie"),
+        (
+            "cto-assistant/agent.toml",
+            "cto-assistant",
+            "cto",
+            "okg://cto-assistant",
+        ),
+    ] {
+        let raw =
+            BundledAgents::get(file).unwrap_or_else(|| panic!("bundled asset missing: {file}"));
+        let text = std::str::from_utf8(&raw.data).unwrap();
+        let parsed: Partial =
+            toml::from_str(text).unwrap_or_else(|e| panic!("{file} is not valid TOML: {e}"));
+        let binding = parsed
+            .stores
+            .primary()
+            .unwrap_or_else(|| panic!("{file} declares no [[stores]] binding"));
+        assert_eq!(binding.resolved_index(), index, "{file} index");
+        assert_eq!(binding.palace.as_deref(), Some(palace), "{file} palace");
+        let agent_name = file.split('/').next().unwrap();
+        assert_eq!(binding.resolved_tree(agent_name), tree, "{file} tree");
+        assert!(
+            parsed.stores.validate().is_empty(),
+            "{file} binding has config issues: {:?}",
+            parsed.stores.validate()
+        );
+    }
+}
+
+/// Both demo personas must actually be ABLE to call `vector_search` — a
+/// binding the persona's `[tools].allow` doesn't grant is inert.
+#[test]
+fn bundled_personas_grant_vector_search() {
+    #[derive(serde::Deserialize)]
+    struct Partial {
+        tools: Tools,
+    }
+    #[derive(serde::Deserialize)]
+    struct Tools {
+        #[serde(default)]
+        allow: Vec<String>,
+    }
+
+    for file in ["izzie/agent.toml", "cto-assistant/agent.toml"] {
+        let raw = BundledAgents::get(file).unwrap();
+        let text = std::str::from_utf8(&raw.data).unwrap();
+        let parsed: Partial = toml::from_str(text).unwrap();
+        assert!(
+            parsed.tools.allow.iter().any(|t| t == "vector_search"),
+            "{file} binds an OKG store but does not grant vector_search"
+        );
+    }
+}
