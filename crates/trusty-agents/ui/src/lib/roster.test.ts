@@ -6,8 +6,10 @@ import { describe, expect, it } from 'vitest';
 import {
   BASE_AGENT_ID,
   BASE_AGENT_LABEL,
+  CONCIERGE_AGENT_ID,
   buildOverlayMarkdown,
   buildRoster,
+  configAgentName,
   parseOverlayMarkdown,
   responderDisplayName,
   rosterDisplayName,
@@ -236,5 +238,19 @@ describe('parseOverlayMarkdown', () => {
       extends: '',
       instructions: 'Just some prose, no frontmatter.',
     });
+  });
+});
+
+describe('configAgentName', () => {
+  it('configAgentName_null_selection_is_concierge', () => {
+    // `activeAgentId === null` is the Concierge selection on the dispatch
+    // axis; the config surface addresses it by name (`ctrl`).
+    expect(configAgentName(null)).toBe(CONCIERGE_AGENT_ID);
+    expect(CONCIERGE_AGENT_ID).toBe('ctrl');
+  });
+
+  it('configAgentName_passes_through_a_selected_id', () => {
+    expect(configAgentName('izzie')).toBe('izzie');
+    expect(configAgentName('cto-assistant')).toBe('cto-assistant');
   });
 });

@@ -22,13 +22,22 @@
    * Stores/Listeners render read-only — store bindings are edited in
    * `agent.toml`, not here. Concierge (`ctrl`) gets a static
    * notice per Bob: editable by name, but not an add-agent template.
-   * Test: `agentConfig.test.ts` covers the scaffolding data; this component
-   * is exercised manually (`pnpm dev`, open the gear, edit + save
-   * Personality/Tools, confirm a re-open shows the persisted value) per the
-   * project's existing convention for fetch-driven Svelte views (see
-   * `PersonalityPanel.svelte`'s own "Test: Manual" precedent).
+   *
+   * #3894 (Bob: "when we're in agent configuration, let's take over that
+   * pane"): this panel no longer shares the chat column as a 320px strip —
+   * `AgentConfigOverlay` mounts it as a full-pane takeover, so the layout here
+   * is now a height-filling flex column: header + tabs are `shrink-0` and the
+   * active tab takes the rest, with the instructions editor growing into every
+   * remaining pixel instead of #3862's `55vh/70vh` clamp. The header carries
+   * the takeover's exit affordances (Back / Close, plus an Esc hint —
+   * `AgentConfigOverlay` owns the key handler) via the `onExit` prop.
+   * Test: `AgentConfigPanel.test.ts` (exit affordances, instructions-editor
+   * sizing invariants, tab preservation) + `agentConfig.test.ts` (scaffolding
+   * data); the save round-trip stays manual (`pnpm dev`, open the gear, edit +
+   * save Personality/Tools, confirm a re-open shows the persisted value) per
+   * the project's convention for fetch-driven Svelte views.
    */
-  import { AlertCircle, Save, Loader2, Settings2 } from 'lucide-svelte';
+  import { AlertCircle, ArrowLeft, Save, Loader2, Settings2, X } from 'lucide-svelte';
   import { onMount } from 'svelte';
   import {
     fetchAgentDetail,
@@ -44,6 +53,19 @@
   /** True when the active pane is Concierge (`ctrl`) — fixed coordination
    * layer, no template derivations (Bob). Edits are still allowed. */
   export let isConcierge = false;
+  /**
+   * Why (#3894): the takeover covers `ChatHeader`, which used to be the thing
+   * naming the selected agent ("Concierge"), so this header is now the ONLY
+   * label on screen and must agree with the picker the user just used —
+   * including before `detail` has loaded and for Concierge, whose picker label
+   * is not derived from `agent.toml` at all.
+   * What: Optional display label; falls back to the fetched `display_name`,
+   * then the raw name, exactly as before.
+   */
+  export let displayName = '';
+  /** Leaves the config surface and returns to chat (#3894). Wired to the
+   * Back/Close affordances; Esc is handled by `AgentConfigOverlay`. */
+  export let onExit: () => void;
 
   type Tab = 'personality' | 'okg' | 'tools' | 'permissions' | 'listeners';
   let tab: Tab = 'personality';
@@ -169,21 +191,41 @@
 </script>
 
 <div class="flex h-full w-full flex-col overflow-hidden bg-foundry-light-surface dark:bg-foundry-surface">
-  <header class="flex items-center gap-2 border-b border-foundry-light-border dark:border-foundry-border px-4 py-3">
-    <Settings2 class="h-4 w-4 text-foundry-light-primary dark:text-foundry-primary" />
+  <header class="flex shrink-0 items-center gap-2 border-b border-foundry-light-border dark:border-foundry-border px-4 py-3">
+    <button
+      type="button"
+      class="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
+      on:click={onExit}
+    >
+      <ArrowLeft class="h-3.5 w-3.5" /> Back to chat
+    </button>
+    <Settings2 class="ml-2 h-4 w-4 text-foundry-light-primary dark:text-foundry-primary" />
     <h2 class="font-mono text-xs font-semibold uppercase tracking-wide text-foundry-light-text dark:text-foundry-text">
-      Configure {detail?.display_name ?? agentName}
+      Configure {displayName || detail?.display_name || agentName}
     </h2>
+    <span class="ml-auto flex items-center gap-2">
+      <kbd class="rounded border border-foundry-light-border dark:border-foundry-border px-1.5 py-0.5 font-mono text-[10px] uppercase text-foundry-light-muted dark:text-foundry-text/40">
+        Esc
+      </kbd>
+      <button
+        type="button"
+        class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
+        aria-label="Close agent configuration"
+        on:click={onExit}
+      >
+        <X class="h-4 w-4" />
+      </button>
+    </span>
   </header>
 
   {#if isConcierge}
-    <p class="mx-4 mt-3 rounded-md border border-foundry-amber/40 bg-foundry-amber/10 px-3 py-2 text-xs text-foundry-amber">
+    <p class="mx-4 mt-3 shrink-0 rounded-md border border-foundry-amber/40 bg-foundry-amber/10 px-3 py-2 text-xs text-foundry-amber">
       Concierge is trusty-agents' fixed coordination layer — editable here, but not offered as an
       add-agent template.
     </p>
   {/if}
 
-  <div class="flex flex-wrap gap-1 border-b border-foundry-light-border dark:border-foundry-border px-3 py-2" role="tablist">
+  <div class="flex shrink-0 flex-wrap gap-1 border-b border-foundry-light-border dark:border-foundry-border px-3 py-2" role="tablist">
     {#each [['personality', 'Personality'], ['okg', 'OKG Stores'], ['tools', 'Tools'], ['permissions', 'Permissions'], ['listeners', 'Listeners']] as [id, label] (id)}
       <button
         type="button"
@@ -199,7 +241,13 @@
     {/each}
   </div>
 
-  <div class="flex-1 overflow-y-auto px-4 py-3">
+  <!-- #3894: the body is a flex COLUMN with `min-h-0`, and each tab owns its
+       own scrolling. The editor tabs (Personality/Tools) grow their textarea
+       into the leftover space and scroll INSIDE it; the read-only tabs
+       (OKG/Permissions/Listeners) scroll as a whole. A single shared
+       `overflow-y-auto` here — what #3826 had — would put a second scrollbar
+       around an already-scrolling textarea. -->
+  <div class="flex min-h-0 flex-1 flex-col px-4 py-3">
     {#if loading}
       <div class="flex items-center gap-2 text-sm text-foundry-light-muted dark:text-foundry-text/60">
         <Loader2 class="h-4 w-4 animate-spin" /> Loading…
@@ -209,21 +257,31 @@
         <AlertCircle class="h-4 w-4" /> {loadError}
       </div>
     {:else if tab === 'personality'}
-      <div class="flex h-full flex-col gap-2">
-        <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
+      <div class="flex min-h-0 flex-1 flex-col gap-2">
+        <p class="shrink-0 text-xs text-foundry-light-muted dark:text-foundry-text/60">
           Main instructions — this agent's <code class="font-mono">persona.md</code>.
         </p>
         {#if !personaEditable}
-          <p class="rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2 text-xs text-foundry-light-muted dark:text-foundry-text/50">
+          <p class="shrink-0 rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2 text-xs text-foundry-light-muted dark:text-foundry-text/50">
             This agent has no editable persona.md (flat-file agents don't carry a separate
             personality file).
           </p>
         {:else}
+          <!-- #3894 (supersedes #3862's vh clamp): the instructions editor is
+               the primary surface of this pane, so it takes EVERY remaining
+               pixel of the takeover — `flex-1 min-h-0`, no `rows`, no
+               `min-h-[55vh]/max-h-[70vh]` clamp (which capped it at 70% of the
+               viewport and left dead space below on a tall window, and could
+               overflow its container on a short one). It is the only scroll
+               container in this tab; `resize-none` because a drag handle can
+               only make a full-height field smaller. -->
           <textarea
             bind:value={personaContent}
-            class="w-full flex-1 min-h-[55vh] max-h-[70vh] resize-y overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 font-mono text-xs text-foundry-light-text dark:text-foundry-text focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
+            spellcheck="false"
+            data-instructions-editor
+            class="w-full min-h-0 flex-1 resize-none overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 font-mono text-xs leading-relaxed text-foundry-light-text dark:text-foundry-text focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
           ></textarea>
-          <div class="sticky bottom-0 flex items-center gap-2 bg-foundry-light-surface dark:bg-foundry-surface pt-1 pb-1">
+          <div class="flex shrink-0 items-center gap-2 pt-1">
             <button
               type="button"
               class="inline-flex items-center gap-1.5 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
@@ -237,19 +295,19 @@
             {/if}
           </div>
         {/if}
-        <p class="pt-2 text-xs text-foundry-light-muted dark:text-foundry-text/40">
+        <p class="shrink-0 pt-2 text-xs text-foundry-light-muted dark:text-foundry-text/40">
           Event-specific instructions (per-connector context loaded on an incoming event — e.g. a
           Gmail event loading Gmail-connector instructions) are a separate runtime epic. This
           section is scaffolding until that backend exists.
         </p>
-        <div class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-xs text-foundry-light-muted dark:text-foundry-text/40">
+        <div class="shrink-0 rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-xs text-foundry-light-muted dark:text-foundry-text/40">
           {#each DEFINED_LISTENERS as listener (listener.id)}
             <div class="py-0.5">{listener.label}: no event instructions configured</div>
           {/each}
         </div>
       </div>
     {:else if tab === 'okg'}
-      <div class="flex flex-col gap-2">
+      <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
         <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
           Knowledge trees + search indexes bound to this agent, resolved live against
           trusty-search and trusty-memory. Edit bindings in
@@ -308,16 +366,18 @@
         {/each}
       </div>
     {:else if tab === 'tools'}
-      <div class="flex h-full flex-col gap-2">
-        <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
+      <div class="flex min-h-0 flex-1 flex-col gap-2">
+        <p class="shrink-0 text-xs text-foundry-light-muted dark:text-foundry-text/60">
           MCP tool allow-list — one glob pattern per line (e.g. <code class="font-mono">gworkspace_*</code>). Empty = no restriction.
         </p>
+        <!-- Same full-height treatment as the instructions editor above. -->
         <textarea
           bind:value={toolsText}
+          spellcheck="false"
           placeholder="gworkspace_*&#10;memory_*"
-          class="w-full flex-1 min-h-[55vh] max-h-[70vh] resize-y overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 font-mono text-xs text-foundry-light-text dark:text-foundry-text focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
+          class="w-full min-h-0 flex-1 resize-none overflow-y-auto rounded-md border border-foundry-light-border dark:border-foundry-primary/30 bg-foundry-light-bg dark:bg-foundry-bg px-3 py-2 font-mono text-xs leading-relaxed text-foundry-light-text dark:text-foundry-text focus:border-foundry-light-primary dark:focus:border-foundry-primary focus:outline-none"
         ></textarea>
-        <div class="flex items-center gap-2 pt-1">
+        <div class="flex shrink-0 items-center gap-2 pt-1">
           <button
             type="button"
             class="inline-flex items-center gap-1.5 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
@@ -332,7 +392,7 @@
         </div>
       </div>
     {:else if tab === 'permissions'}
-      <div class="flex flex-col gap-2">
+      <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
         <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
           RBAC / OpenRPC scopes claimed by this agent — read-only (no write path yet).
         </p>
@@ -349,7 +409,7 @@
         {/if}
       </div>
     {:else if tab === 'listeners'}
-      <div class="flex flex-col gap-3">
+      <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
         <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
           Inbound event bindings — API connections to upstream event providers, not MCP tools. No
           backend yet (spec being filed); shown as the two defined listener bindings.
@@ -376,7 +436,7 @@
     {/if}
 
     {#if saveError}
-      <p class="mt-2 text-xs text-red-500 dark:text-red-400">{saveError}</p>
+      <p class="mt-2 shrink-0 text-xs text-red-500 dark:text-red-400">{saveError}</p>
     {/if}
   </div>
 </div>
