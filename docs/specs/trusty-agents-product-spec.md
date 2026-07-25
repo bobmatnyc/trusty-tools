@@ -97,6 +97,12 @@ Agent packages live in the user's local agent directory (e.g., `~/.trusty-agents
 
 ## 5. SPEC-AGENTS-04 — Agent Configuration: The Config Triple {#SPEC-AGENTS-04~draft}
 
+> **SUPERSEDED (2026-07-25) by [DOC-57 — Five-Section Agent Configuration](./agent-config-five-sections.md) (`SPEC-AGENTCFG-01~draft` … `-09~draft`).**
+> The owner redefined the configuration model on 2026-07-25: *"Instead of tools, let's show skills. Should be Personality, Knowledge (list knowledge tools including and MCP connections to knowledge stores), Skills (each tool should be wrapped in a skill), Listeners, the Permissions."*
+> The three legs below are retained in substance and redistributed across five sections — Stores widens into **Knowledge** (DOC-57 §4), Tools is replaced by **Skills** (DOC-57 §5), Listeners is unchanged (DOC-57 §6), and **Personality** and **Permissions** are promoted to first-class sections (DOC-57 §3, §7).
+> This section is kept for historical grounding: the `[[stores]]` / `[tools]` / `[[listeners]]` config surfaces it describes all keep working unchanged under DOC-57 §9's compatibility contract, and existing code comments referencing "the config triple" remain accurate as history (DOC-57 §9.2).
+> **§8.4 below is likewise superseded** by DOC-57 §8.2's tab mapping.
+
 Each agent defines exactly three binding kinds, persisted in `agent.toml` and the `persona.md` manifest:
 
 | Leg | Answers | Config table | Example |
@@ -332,12 +338,12 @@ Users see "Tasks" in the sidebar as a **filter/view over the single continuous a
 ### 8.4 In-pane agent configuration
 
 - **Trigger:** Gear icon in the chat pane header (top-right).
-- **Opens:** In-pane config form with four sections:
+- **Opens:** In-pane config form. **Superseded by [DOC-57](./agent-config-five-sections.md) §8.2**, which fixes the five sections, their labels and their order (Personality → Knowledge → Skills → Listeners → Permissions). The historical list below said "four sections" and enumerated five; DOC-57 §8.2 is the authority.
   1. **Personality** — View/edit persona instructions.
-  2. **OKG Store** — Manage agent's knowledge base.
-  3. **Tools** — View/manage MCP tool allow-list.
+  2. **OKG Store** — Manage agent's knowledge base. *(→ DOC-57 "Knowledge")*
+  3. **Tools** — View/manage MCP tool allow-list. *(→ DOC-57 "Skills")*
   4. **Listeners** — Configure event bindings and filters.
-  5. **Permissions** — Manage agent's autonomy level (learned patterns).
+  5. **Permissions** — Manage agent's autonomy level (learned patterns). *(→ DOC-57 §7, widened beyond autonomy)*
 
 ### 8.5 Add-agent flow
 
