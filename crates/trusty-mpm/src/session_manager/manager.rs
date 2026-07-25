@@ -834,6 +834,21 @@ impl SessionManager {
             }
         }
 
+        // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
+        // below (`session_exists`'s `list-sessions` probe). Its default trait
+        // implementation swallows a `list-sessions` failure into `false`
+        // (harmless here — the recreate branch below already routes through
+        // the #3386/#3722 `create_managed_session` choke point, which starts
+        // the server itself), but resuming should not depend on that
+        // swallow-and-recreate side effect being correct forever; an explicit
+        // guard makes the guarantee the issue asks for ("session creation
+        // *and resume*") structural rather than incidental. Also redundant
+        // (cheap no-op `tmux start-server`) with the recreate branch's own
+        // eventual #3386/#3722 `ensure_server_up` when the pane needs
+        // rebuilding — accepted for the same reason as the create paths'
+        // identical round-trip: correctness over one extra idempotent spawn.
+        self.tmux.ensure_server_up()?;
+
         // Prefer last_cwd → workspace_path → cwd (#1816), each existence-checked
         // on disk (#2250 — workspace_path and cwd previously were NOT, so a
         // stale/removed worktree silently rooted the recreated pane at $HOME).

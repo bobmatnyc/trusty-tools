@@ -69,6 +69,9 @@ mod naming_tests;
 mod resume_reattach_tests;
 
 #[cfg(test)]
+mod server_up_tests;
+
+#[cfg(test)]
 mod set_source_id_tests;
 
 #[cfg(test)]

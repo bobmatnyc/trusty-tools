@@ -339,7 +339,14 @@ const APPLY_VERIFY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_
 /// Test: `ensure_server_up_retries_then_succeeds`,
 /// `ensure_server_up_fails_loudly_after_exhausting_retries` (both drive a
 /// scripted fake `tmux` binary — no live tmux server required).
-fn ensure_server_up(bin: &str) -> Result<(), String> {
+///
+/// Visibility (#3823): `pub(crate)` (not private) so
+/// [`crate::daemon::tmux::TmuxDriver`] can call it directly to guarantee the
+/// server exists before the FIRST tmux call of the session-creation/resume
+/// flow (`list-sessions`, issued by name-collision checks well before
+/// [`create_managed_session`] is ever reached) — not just before this
+/// module's own `set-option -g`/`new-session` sequence.
+pub(crate) fn ensure_server_up(bin: &str) -> Result<(), String> {
     let mut last_err = String::new();
     for attempt in 1..=START_SERVER_MAX_ATTEMPTS {
         match run_tmux_with_bin(bin, &TmuxCommand::StartServer) {

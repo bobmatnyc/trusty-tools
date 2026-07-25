@@ -63,6 +63,18 @@ pub const MOCK_LLM_ECHO_RECALL: &str = "echo-recall";
 /// a script that does.
 pub const MOCK_LLM_ECHO_SEARCH: &str = "echo-search";
 
+/// The `TCODE_MOCK_LLM` value that selects [`SoakEchoLlmClient`] (issue
+/// #3869, epic #3866 Slice C).
+///
+/// Why: `task::protocol::task_run` rebuilds this `Arc<dyn LlmClientTrait>`
+/// fresh on EVERY `task.run` call, so the compression-effectiveness soak
+/// harness — which drives 200+ PM turns across many repeated `task.run`
+/// calls against one `session_id` — needs a script that ends cleanly
+/// (`SessionStatus::Finished`, resumable) within ONE call's turn budget,
+/// not a script that spans the whole soak. See
+/// `SoakEchoLlmClient`'s docs for why it ends every call in a bare `stop`.
+pub const MOCK_LLM_ECHO_SOAK: &str = "echo-soak";
+
 /// Build the `Arc<dyn LlmClientTrait>` `task.run` executions share.
 ///
 /// Why: the single seam that decides "real model or offline mock" — kept
@@ -71,7 +83,9 @@ pub const MOCK_LLM_ECHO_SEARCH: &str = "echo-search";
 /// What: if [`MOCK_LLM_ENV`] is set to [`MOCK_LLM_ECHO`], returns an
 /// [`EchoLlmClient`]; if set to [`MOCK_LLM_ECHO_FANOUT`] (DOC-39 AC-13),
 /// returns a [`FanoutEchoLlmClient`]; if set to [`MOCK_LLM_ECHO_SEARCH`]
-/// (DOC-39 Slice B), returns a [`SearchEchoLlmClient`]. Otherwise builds a
+/// (DOC-39 Slice B), returns a [`SearchEchoLlmClient`]; if set to
+/// [`MOCK_LLM_ECHO_SOAK`] (issue #3869), returns a [`SoakEchoLlmClient`].
+/// Otherwise builds a
 /// real `DispatchingLlmClient` — routing
 /// `bedrock/*` slugs to AWS Bedrock, `fireworks/*` to Fireworks, and everything
 /// else to OpenRouter (#1021 phase 1; #2406). Construction touches no
@@ -89,6 +103,7 @@ pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
         Some(MOCK_LLM_ECHO_FANOUT) => return Ok(Arc::new(FanoutEchoLlmClient::new())),
         Some(MOCK_LLM_ECHO_RECALL) => return Ok(Arc::new(RecallEchoLlmClient::new())),
         Some(MOCK_LLM_ECHO_SEARCH) => return Ok(Arc::new(SearchEchoLlmClient::new())),
+        Some(MOCK_LLM_ECHO_SOAK) => return Ok(Arc::new(SoakEchoLlmClient::new())),
         _ => {}
     }
     Ok(Arc::new(DispatchingLlmClient::new()))
@@ -512,6 +527,14 @@ fn search_code_response() -> Value {
         "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28}
     })
 }
+
+/// [`SoakEchoLlmClient`] (issue #3869's unbounded soak script), split into
+/// its own file purely to keep this production file under the crate's
+/// 500-SLOC cap — same rationale as `session::registry`'s `events`/
+/// `memory_sink_ext` child modules.
+#[path = "mock_llm_soak.rs"]
+mod mock_llm_soak;
+pub use mock_llm_soak::SoakEchoLlmClient;
 
 /// Serializes every test in this crate that sets/reads the process-wide
 /// [`MOCK_LLM_ENV`] var — `cargo test` runs tests in parallel within one
