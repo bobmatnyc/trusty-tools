@@ -7,7 +7,8 @@
 **Spec ID:** `SPEC-AGENTSYNC-01~draft` … `SPEC-AGENTSYNC-07~draft` (DOC-56)  
 **Builds on:** #3837 (git-backed per-agent content store — the local repo already exists); DOC-54 [Trusty Agents Product Specification](./trusty-agents-product-spec.md) §3.2/§3.3; #3816 (declarative templates)  
 **Supersedes:** DOC-54 §3.3 — see §2.4  
-**Subsumes:** #3844 (reprovision clobber) — see §6
+**Subsumes:** #3844 (reprovision clobber) — see §6  
+**Implements:** #3899 (tagent-native sync of agent config to the monorepo)
 
 ---
 
@@ -70,6 +71,29 @@ The rejected alternative — a separate repo synchronized by a copy/export step 
 was rejected because it introduces a second source of truth, a bidirectional
 copier, and its own conflict surface, to solve a problem `.gitignore` already
 solves. It also throws away the #3837 history.
+
+> **State of the world, 2026-07-25.** The repo now exists and carries an
+> **initial one-off manual sync** (#3899): `ctrl`, `izzie`, `cto-assistant`, and
+> `assistant`, each as `agents/<agent>/{agent.toml, persona.md, events/*.md}`
+> plus a `<agent>.toml.shadow` copy of the flat file where one existed, with a
+> root `README.md`. That pass was a **copy/export** from `~/.trusty-agents/agents/`
+> — the local #3837 repo was left untouched and nothing was pushed from it.
+>
+> That is the right call for a one-off (it got the content off a single machine
+> today) but it is the shape this section rejects for the *platform* feature.
+> Implementation should convert the remote into the working copy's origin rather
+> than perpetuate the copier. Two concrete follow-ons: the `.toml.shadow` files
+> are the flat/package ambiguity §3.2 requires normalizing away, not a durable
+> layout; and `user.toml`, excluded from the manual pass, is proposed for
+> inclusion here (§4.1) because a restore without it is not a restore — see Q7.
+
+> **PII posture.** #3899 records that several personas deliberately embed real
+> personal data (name, personal email, employer, coworkers, home region) as part
+> of how those assistants are instructed to behave. That is by design for named
+> per-user assistants and is the reason §2.1 fixes visibility at **private,
+> permanently**. It is also why §5.1's secret gate blocks rather than redacts:
+> the content is *supposed* to be personal, so the gate's job is credentials, and
+> the repo's job is never being public.
 
 **Consequence to accept explicitly:** the monorepo will contain a small amount of
 non-agent platform config (`config.toml`, `user.toml`, `skills/index.json`). That
@@ -499,6 +523,8 @@ auto-sync with the A1/A2 constraints; GUI conflict surfacing.
 | Q4 | Is the `templates`-branch merge (§6.2) too heavy vs. #3844's simpler marker? | Do #3844's visible warning now as a stopgap; the merge is the real fix | Recommendation stands |
 | Q5 | Who creates the repo, and with what account? | The `bobmatnyc` account (memory: never the work identity) | Assigned in parallel to a version-control agent |
 | Q6 | Listener-lease design for §8.3 | Separate ticket; do not bundle | Follow-up |
+| Q7 | Does `user.toml` sync? (#3899 excluded it from the manual pass) | Yes — small, stable, and a restore without owner identity is not a restore | Recommendation stands |
+| Q8 | Keep the `<agent>.toml.shadow` files the manual pass created? | No — they are the flat/package ambiguity §3.2 normalizes away | Recommendation stands |
 
 ---
 
