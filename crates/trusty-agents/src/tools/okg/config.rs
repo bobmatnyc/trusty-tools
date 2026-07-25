@@ -3,7 +3,7 @@
 //! Why: `okg_ingest_docstore` takes a path from a MODEL, so the set of readable
 //! directories is a security boundary and therefore belongs to the OPERATOR,
 //! not to the model or to a hardcoded constant. Real corpora live in arbitrary
-//! places (`~/Duetto/cto-resources`), so the list has to be extensible; the
+//! places (`~/Corpora/research`), so the list has to be extensible; the
 //! default has to be useful without being `/`.
 //!
 //! What: [`OkgConfig`] is the `[okg]` section of `~/.trusty-agents/config.toml`.
