@@ -10,10 +10,9 @@
 //! percentage/alarm helpers work in isolation; these tests prove the OTHER
 //! half — that `AgentLoop::maybe_compact_transcript`/`maybe_cadence_compress`
 //! actually call them at the right turn boundary with the right values,
-//! through a real (scripted) loop run, guarding
-//! `telemetry::DATA_DIR_ENV_VAR` with `telemetry::DATA_DIR_ENV_LOCK` for the
-//! whole async run so every write lands in an isolated temp directory
-//! instead of the real `~/.trusty-code`.
+//! through a real (scripted) loop run, using
+//! `telemetry::with_data_dir_env_fut` to point every write at an isolated
+//! temp directory instead of the real `~/.trusty-code`.
 
 use std::io::Read as _;
 
@@ -51,14 +50,14 @@ fn read_jsonl(dir: &std::path::Path) -> Vec<telemetry::CompressionEvent> {
 /// the exact acceptance criterion issue #3868 names: "a threshold-compaction
 /// event produces BOTH the ERROR log and the durable JSONL line."
 ///
-/// Why: the ERROR log is exercised by the pre-existing
-/// `forced_degradation_increments_counter_and_logs_error`-style coverage;
-/// this test is the durability half — the JSONL record and the alarm log
-/// must exist on disk, independent of whether anyone was tailing stderr.
+/// Why: `agent_loop::tests::cadence::forced_degradation_increments_counter_and_logs_error`
+/// pins the ERROR-log half of this exact scenario; this test is the
+/// durability half — the JSONL record and the alarm log must exist on disk,
+/// independent of whether anyone was tailing stderr.
 /// What: runs a `DailyDriver` loop with an aggressive `CompactionConfig`
 /// (guarantees a threshold fire) AND `cadence: Some(_)` (the regression
-/// case), against an isolated `with_data_dir_env` temp dir. Asserts exactly
-/// one `tcode-threshold` JSONL line with `compaction_event: true`, and
+/// case), against an isolated `with_data_dir_env_fut` temp dir. Asserts at
+/// least one `tcode-threshold` JSONL line with `compaction_event: true`, and
 /// `lifetime_compaction_alarm_count >= 1`.
 #[tokio::test]
 async fn threshold_fire_under_cadence_writes_jsonl_and_alarm() {
@@ -90,23 +89,13 @@ async fn threshold_fire_under_cadence_writes_jsonl_and_alarm() {
         },
     );
 
-    // `with_data_dir_env` (used by `telemetry_tests.rs`) only wraps a SYNC
-    // closure; running the loop is async, so this inlines the same
-    // set/run/clear sequence held across the whole async run instead.
-    {
-        let _guard = telemetry::DATA_DIR_ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation, serialized by `DATA_DIR_ENV_LOCK`.
-        unsafe {
-            std::env::set_var(telemetry::DATA_DIR_ENV_VAR, &dir);
-        }
+    telemetry::with_data_dir_env_fut(&dir, async {
         agent
             .run("system prompt", "the original task")
             .await
             .expect("run completes");
-        unsafe {
-            std::env::remove_var(telemetry::DATA_DIR_ENV_VAR);
-        }
-    }
+    })
+    .await;
 
     let events = read_jsonl(&dir);
     let threshold_events: Vec<_> = events
@@ -173,20 +162,13 @@ async fn threshold_fire_under_no_cadence_writes_jsonl_but_no_alarm() {
         },
     );
 
-    {
-        let _guard = telemetry::DATA_DIR_ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation, serialized by `DATA_DIR_ENV_LOCK`.
-        unsafe {
-            std::env::set_var(telemetry::DATA_DIR_ENV_VAR, &dir);
-        }
+    telemetry::with_data_dir_env_fut(&dir, async {
         agent
             .run("system prompt", "the original task")
             .await
             .expect("run completes");
-        unsafe {
-            std::env::remove_var(telemetry::DATA_DIR_ENV_VAR);
-        }
-    }
+    })
+    .await;
 
     let events = read_jsonl(&dir);
     let threshold_events: Vec<_> = events
@@ -236,20 +218,13 @@ async fn cadence_fire_writes_compression_telemetry() {
         },
     );
 
-    {
-        let _guard = telemetry::DATA_DIR_ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation, serialized by `DATA_DIR_ENV_LOCK`.
-        unsafe {
-            std::env::set_var(telemetry::DATA_DIR_ENV_VAR, &dir);
-        }
+    telemetry::with_data_dir_env_fut(&dir, async {
         agent
             .run("system prompt", "the task")
             .await
             .expect("run completes");
-        unsafe {
-            std::env::remove_var(telemetry::DATA_DIR_ENV_VAR);
-        }
-    }
+    })
+    .await;
 
     let events = read_jsonl(&dir);
     let cadence_events: Vec<_> = events
@@ -299,20 +274,13 @@ async fn cadence_disabled_writes_no_cadence_telemetry() {
 
     let agent = make_loop(llm, registry, AgentLoopConfig::default());
 
-    {
-        let _guard = telemetry::DATA_DIR_ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation, serialized by `DATA_DIR_ENV_LOCK`.
-        unsafe {
-            std::env::set_var(telemetry::DATA_DIR_ENV_VAR, &dir);
-        }
+    telemetry::with_data_dir_env_fut(&dir, async {
         agent
             .run("system prompt", "the task")
             .await
             .expect("run completes");
-        unsafe {
-            std::env::remove_var(telemetry::DATA_DIR_ENV_VAR);
-        }
-    }
+    })
+    .await;
 
     let events = read_jsonl(&dir);
     assert!(
@@ -323,4 +291,70 @@ async fn cadence_disabled_writes_no_cadence_telemetry() {
     );
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An unwritable telemetry data directory must never fail the loop itself
+/// (issue #3867 acceptance criteria: "a broken/unwritable log directory
+/// must not fail the compression/summarization operation itself"). This is
+/// the LOOP-level contract — `telemetry_tests.rs` already proves the
+/// writer function alone doesn't panic; this proves `AgentLoop::run` still
+/// returns `Ok` with a normal compaction/cadence outcome when telemetry
+/// emission can't land anywhere.
+///
+/// Why: `/dev/null` is a character device, never a directory, on every
+/// platform this crate targets — appending a path segment under it makes
+/// EVERY `create_dir_all`/`open` call underneath fail with `ENOTDIR`,
+/// simulating "every telemetry write fails" without touching real
+/// filesystem permissions bits (unreliable to assert portably in CI) or an
+/// embedded NUL byte (which `std::env::set_var` itself rejects with a
+/// panic, since this path must round-trip through `TCODE_TELEMETRY_DATA_DIR`
+/// — unlike `telemetry_tests.rs`'s writer-only tests, which never go
+/// through the env var and can use a NUL-byte path directly).
+/// What: runs the SAME aggressive-compaction + cadence:Some(_) scenario as
+/// `threshold_fire_under_cadence_writes_jsonl_and_alarm`, but points
+/// `TCODE_TELEMETRY_DATA_DIR` at an unwritable path. Asserts `agent.run`
+/// still completes `Ok`, and that the loop's own state (turn count via
+/// `llm.calls()`) reflects a normal run — the compaction/cadence outcome
+/// itself must be unaffected by telemetry's failure.
+#[tokio::test]
+async fn unwritable_data_dir_does_not_fail_the_loop() {
+    let bogus = std::path::PathBuf::from("/dev/null/not-a-real-dir-segment");
+    let mut fixtures: Vec<Value> = (0..5)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            max_turns: 10,
+            mode: crate::mode::HarnessMode::DailyDriver,
+            compaction: aggressive_compaction(),
+            cadence: Some(CadenceConfig {
+                cadence_turns: 1,
+                ..CadenceConfig::default()
+            }),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    let output = telemetry::with_data_dir_env_fut(&bogus, async {
+        agent.run("system prompt", "the original task").await
+    })
+    .await
+    .expect("an unwritable telemetry dir must not fail the run");
+
+    assert!(
+        !output.content.is_empty() || output.summary.is_some(),
+        "the loop must still produce a normal completed output: {output:?}"
+    );
+    assert_eq!(
+        llm.calls(),
+        6,
+        "the loop must still run its full scripted turn sequence, unaffected \
+         by telemetry write failures"
+    );
 }

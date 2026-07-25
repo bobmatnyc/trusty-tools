@@ -128,23 +128,28 @@ mod tests {
     /// A recorded threshold-compaction alarm fire is reflected on
     /// `session.get_context_budget`'s `lifetime_compaction_alarm_count`
     /// field (issue #3868's core acceptance criterion).
+    ///
+    /// (#3868 fix) The alarm-log read now happens in `get_context_budget`
+    /// itself (the query path), not `record_context_budget` (the every-turn
+    /// write path) — so the RPC call, not just the record call, must run
+    /// with the data-dir env var still set. `with_data_dir_env_fut` wraps
+    /// the WHOLE async sequence for exactly that reason.
     #[tokio::test]
     async fn get_context_budget_reflects_lifetime_compaction_alarm_count() {
         let dir = telemetry_temp_dir("reflects");
         let registry = SessionRegistry::new();
         let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
-        crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+        let result = crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
             crate::agent_loop::telemetry::record_compaction_alarm(&dir);
             registry
                 .record_context_budget(&session.id, &measurement())
                 .unwrap();
+            get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
+                .await
+                .unwrap()
         })
         .await;
-
-        let result = get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
-            .await
-            .unwrap();
 
         assert_eq!(result["status"], "recorded");
         assert!(
@@ -165,16 +170,15 @@ mod tests {
         let registry = SessionRegistry::new();
         let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
 
-        crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+        let result = crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
             registry
                 .record_context_budget(&session.id, &measurement())
                 .unwrap();
+            get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
+                .await
+                .unwrap()
         })
         .await;
-
-        let result = get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
-            .await
-            .unwrap();
 
         assert_eq!(result["lifetime_compaction_alarm_count"], 0);
 
@@ -190,32 +194,28 @@ mod tests {
     async fn get_context_budget_alarm_count_survives_fresh_registry() {
         let dir = telemetry_temp_dir("survives-restart");
 
-        crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+        let result = crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
             crate::agent_loop::telemetry::record_compaction_alarm(&dir);
             crate::agent_loop::telemetry::record_compaction_alarm(&dir);
-        })
-        .await;
 
-        // A FRESH registry — nothing in-memory carried over from whatever
-        // recorded the fires above.
-        let fresh_registry = SessionRegistry::new();
-        let session =
-            fresh_registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
-
-        crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+            // A FRESH registry — nothing in-memory carried over from
+            // whatever recorded the fires above.
+            let fresh_registry = SessionRegistry::new();
+            let session =
+                fresh_registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
             fresh_registry
                 .record_context_budget(&session.id, &measurement())
                 .unwrap();
+
+            get_context_budget(
+                &fresh_registry,
+                json!({"session_id": session.id}),
+                test_ctx(),
+            )
+            .await
+            .unwrap()
         })
         .await;
-
-        let result = get_context_budget(
-            &fresh_registry,
-            json!({"session_id": session.id}),
-            test_ctx(),
-        )
-        .await
-        .unwrap();
 
         assert_eq!(
             result["lifetime_compaction_alarm_count"], 2,

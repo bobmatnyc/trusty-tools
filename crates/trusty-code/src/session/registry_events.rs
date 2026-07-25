@@ -218,6 +218,14 @@ impl SessionRegistry {
     /// disagree; every value is already computed by the caller, so this adds
     /// no arithmetic of its own. Errors with `session_not_found` if `id` is
     /// unknown.
+    /// (#3868) `lifetime_compaction_alarm_count` is stored as a `0`
+    /// placeholder here — this method runs on the EVERY-TURN write path
+    /// (`AgentLoop::maybe_cadence_compress` forwards to it once per cadence
+    /// tick), so a `File::open` + line-scan here would pay the durable-log
+    /// read cost once per turn per session. [`Self::get_context_budget`]
+    /// (the actual RPC query path — called far less often, once per client
+    /// poll) overwrites this field with a fresh read before returning, so no
+    /// caller ever observes the placeholder.
     /// Test: `registry_tests::record_context_budget_publishes_event`,
     /// `registry_tests::record_context_budget_caches_snapshot_for_late_query`.
     pub fn record_context_budget(
@@ -226,14 +234,6 @@ impl SessionRegistry {
         measurement: &crate::agent_loop::ContextBudgetSnapshot,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
-        // (#3868) Read fresh from the durable, cross-session alarm log every
-        // time — never cached/stale — so a query reflects fires from ANY
-        // session on this machine, not just this one. See
-        // `ContextBudgetSnapshot::lifetime_compaction_alarm_count`'s docs.
-        let lifetime_compaction_alarm_count =
-            crate::agent_loop::telemetry::lifetime_compaction_alarm_count(
-                &crate::agent_loop::telemetry::default_data_dir(),
-            );
         let snapshot = ContextBudgetSnapshot {
             context_window_tokens: measurement.context_window,
             overhead_tokens: measurement.overhead_tokens,
@@ -243,7 +243,10 @@ impl SessionRegistry {
             within_budget: measurement.within_budget,
             compaction_fired: measurement.fired,
             compaction_rounds: measurement.rounds,
-            lifetime_compaction_alarm_count,
+            // (#3868) Placeholder — see doc note above. Never observed: only
+            // `get_context_budget` reads this field back out, and it always
+            // overwrites it first.
+            lifetime_compaction_alarm_count: 0,
         };
         {
             let mut sessions = self.lock();
@@ -285,16 +288,30 @@ impl SessionRegistry {
     /// `record_context_budget` call has happened yet (e.g. a session queried
     /// before its first PM turn completes, or a delegated sub-agent session,
     /// which never emits cadence budget events at all).
+    /// (#3868) `lifetime_compaction_alarm_count` is read fresh from the
+    /// durable, cross-session alarm log HERE — the query path, called once
+    /// per client poll — rather than in [`Self::record_context_budget`] (the
+    /// every-turn write path), so the `File::open` + line-scan cost is paid
+    /// once per query, not once per turn per session. This is also why the
+    /// count reflects fires from ANY session on this machine, not just this
+    /// one: it is derived from a shared log, not a per-session cache.
     /// Test: `registry_tests::record_context_budget_caches_snapshot_for_late_query`,
     /// `protocol_budget::tests::get_context_budget_never_recorded_session_returns_never_recorded`,
-    /// `registry_tests::get_context_budget_unknown_session_errors`.
+    /// `registry_tests::get_context_budget_unknown_session_errors`,
+    /// `protocol_budget::tests::get_context_budget_reflects_lifetime_compaction_alarm_count`.
     pub fn get_context_budget(&self, id: &str) -> Result<ContextBudgetQuery, RpcError> {
         self.ensure_exists(id)?;
         Ok(self
             .lock()
             .get(id)
             .and_then(|e| e.context_budget)
-            .map(ContextBudgetQuery::Recorded)
+            .map(|mut snapshot| {
+                snapshot.lifetime_compaction_alarm_count =
+                    crate::agent_loop::telemetry::lifetime_compaction_alarm_count(
+                        &crate::agent_loop::telemetry::default_data_dir(),
+                    );
+                ContextBudgetQuery::Recorded(snapshot)
+            })
             .unwrap_or(ContextBudgetQuery::NeverRecorded))
     }
 

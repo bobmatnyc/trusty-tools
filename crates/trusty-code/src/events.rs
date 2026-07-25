@@ -920,14 +920,20 @@ pub struct IndexReadinessSnapshot {
 /// every other field here, has NO twin on `Event::ContextBudget` — it is
 /// deliberately absent from the per-turn stream. Why: the stream event is
 /// derived once, at the moment a turn's cadence measurement lands, from
-/// values the caller already computed; the alarm count is read fresh from
-/// `agent_loop::telemetry::lifetime_compaction_alarm_count`'s durable,
-/// cross-session log every time `record_context_budget` runs, so a session
-/// that never fires threshold compaction still gets an accurate (`0`) count
-/// rather than a stale one baked in at some earlier turn. It answers "has
-/// threshold compaction EVER fired under cadence, cumulative across every
-/// session on this machine" — a fact with no natural single-turn "stream"
-/// moment to attach to.
+/// values the caller already computed; the alarm count instead needs a
+/// `File::open` + line-scan of `agent_loop::telemetry`'s durable,
+/// cross-session alarm log, which is too expensive to pay on the EVERY-TURN
+/// write path (`record_context_budget`, called once per cadence tick). It is
+/// therefore read fresh only in `SessionRegistry::get_context_budget` — the
+/// actual RPC query path, called once per client poll — which overwrites
+/// the field on the cached snapshot right before returning it; the copy
+/// `record_context_budget` stores is a `0` placeholder never observed by a
+/// caller. This also means a session that never fires threshold compaction
+/// still gets an accurate count reflecting fires from ANY session on this
+/// machine, not a stale per-session value baked in at some earlier turn. It
+/// answers "has threshold compaction EVER fired under cadence, cumulative
+/// across every session on this machine" — a fact with no natural
+/// single-turn "stream" moment to attach to.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ContextBudgetSnapshot {
     pub context_window_tokens: usize,

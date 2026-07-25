@@ -387,6 +387,31 @@ pub(crate) async fn with_data_dir_env<T>(dir: &Path, f: impl FnOnce() -> T) -> T
     result
 }
 
+/// Async twin of [`with_data_dir_env`] for loop-level tests that must await
+/// an `AgentLoop::run`/`run_with_transcript` call WHILE the env var is set
+/// (a plain `FnOnce() -> T` closure cannot itself `.await`).
+///
+/// Why: without this, every loop-integration test needed to hand-inline the
+/// lock/set/run/clear sequence, duplicating the `unsafe` env mutation at
+/// each call site. Centralising it here keeps that `unsafe` block in exactly
+/// one place, matching [`with_data_dir_env`]'s same rationale.
+#[cfg(test)]
+pub(crate) async fn with_data_dir_env_fut<T>(
+    dir: &Path,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    let _guard = DATA_DIR_ENV_LOCK.lock().await;
+    // SAFETY: test-only env mutation, serialized by `DATA_DIR_ENV_LOCK`.
+    unsafe {
+        std::env::set_var(DATA_DIR_ENV_VAR, dir);
+    }
+    let result = fut.await;
+    unsafe {
+        std::env::remove_var(DATA_DIR_ENV_VAR);
+    }
+    result
+}
+
 #[cfg(test)]
 #[path = "telemetry_tests.rs"]
 mod tests;
