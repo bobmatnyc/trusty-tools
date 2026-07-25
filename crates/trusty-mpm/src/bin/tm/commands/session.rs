@@ -88,7 +88,21 @@ pub(crate) async fn session(
                 .json()
                 .await?;
             if body.sessions.is_empty() {
+                // #3822: `tm sessions list` (this command) and `tm sessions
+                // ls` are two DIFFERENT, intentionally-scoped subsystems —
+                // `list` shows this project's local (pre-session-manager)
+                // sessions, `ls` shows daemon-managed sessions (e.g. every
+                // session created via `tm sessions new <url>`) from
+                // anywhere. A user who ran `sessions new` and then checked
+                // with `sessions list` sees an empty result here even
+                // though their session is alive and well under `ls` — a
+                // repeated support/bug-report source. Nudge toward the
+                // command that actually shows managed sessions rather than
+                // leaving the empty result unexplained.
                 println!("no sessions for {}", path.display());
+                println!(
+                    "(looking for a session created via `tm sessions new`? try `tm sessions ls`)"
+                );
             }
             for s in &body.sessions {
                 let status = s.status.as_str().unwrap_or("unknown");
