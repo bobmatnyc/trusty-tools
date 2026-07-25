@@ -10,6 +10,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Compression-effectiveness soak harness + scored report (epic #3866,
+  Slice C #3869).** New `TCODE_MOCK_LLM=echo-soak` mock LLM
+  (`task::mock_llm_soak::SoakEchoLlmClient`) drives a deterministic,
+  offline PM loop for a 200+-turn soak against a real `tcode serve --http`
+  daemon (`crates/trusty-code/scripts/compression_soak.py`), and a new
+  stdlib-only report generator
+  (`crates/trusty-code/scripts/compression_report.py`, unit-tested against
+  a hand-crafted fixture) scores the resulting `compression.jsonl` against
+  epic #2343's targets (working context >= 60% at all times,
+  `compaction_events == 0`). First run's report:
+  `docs/research/tcode-compression-effectiveness-soak-2026-07-25.md`
+  (PASS).
+
 - **Durable compression-effectiveness telemetry (epic #3866, Slice A #3867 +
   Slice B #3868).** New `agent_loop::telemetry` module appends one JSONL
   line per compression event to `~/.trusty-code/compression.jsonl` — one for
