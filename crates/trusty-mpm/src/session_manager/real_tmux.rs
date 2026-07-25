@@ -45,6 +45,14 @@ impl RealTmuxDriver {
 }
 
 impl ManagedTmuxDriver for RealTmuxDriver {
+    /// Overrides the trait's no-op default so the production path actually
+    /// starts the tmux server when it is not yet running (#3823).
+    fn ensure_server_up(&self) -> Result<(), ManagedError> {
+        self.driver
+            .ensure_server_up()
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
         self.driver
             .create_session(name, Some(workdir))
