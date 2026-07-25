@@ -25,6 +25,12 @@ not a log-parsing exercise.
 
 ## The Real Pipeline
 
+Before step 1, load the pipeline's tool schemas if not already in your tool
+list — `ToolSearch(query:
+"select:mcp__trusty-mpm__list_recent_errors,mcp__trusty-mpm__preview_bug_report,mcp__trusty-mpm__report_bug")`
+— see `tm-tool-usage-guide`'s "Deferred MCP Tool Loading" section; absence
+from your loaded list does not mean these tools are unavailable.
+
 1. `mcp__trusty-mpm__list_recent_errors(limit)` — lists recently captured
    ERROR-level events across all trusty-* daemons. Each entry carries a
    64-char hex SHA-256 `fingerprint` (for deduplication), an occurrence

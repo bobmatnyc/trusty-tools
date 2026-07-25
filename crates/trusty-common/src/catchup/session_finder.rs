@@ -311,18 +311,44 @@ fn parse_trusty_mpm_session(path: &Path) -> anyhow::Result<PausedSession> {
 /// Why: the trusty-mpm session format uses level-2 headers as section delimiters.
 /// What: returns the trimmed content between `## <header>` and the next `## `
 /// or end-of-file. Returns `None` when the section is absent.
-/// Test: covered indirectly by `parse_trusty_mpm_session_extracts_sections`.
+///
+/// Fails closed on a malformed header: `text.find` alone would treat
+/// `## Next Steps (all Bob's call — none required)` as a match for header
+/// `"Next Steps"` and silently prepend the trailing `(all Bob's call — none
+/// required)` text into the parsed body (a real corruption seen in a
+/// hand-written snapshot, see `extract_section_rejects_header_with_trailing_text`).
+/// A match is only accepted when nothing but whitespace follows the header
+/// text before the line break (or end-of-file) — i.e. the header line reads
+/// exactly `## <header>`, optionally with trailing spaces. Malformed
+/// candidates are skipped in favor of a later well-formed occurrence, if any.
+/// Test: `extract_section_finds_content`,
+/// `extract_section_rejects_header_with_trailing_text`.
 fn extract_section(text: &str, header: &str) -> Option<String> {
     let needle = format!("## {header}");
-    let start = text.find(&needle)?;
-    let after = &text[start + needle.len()..];
-    let end = after.find("\n## ").unwrap_or(after.len());
-    let section = after[..end].trim().to_owned();
-    if section.is_empty() {
-        None
-    } else {
-        Some(section)
+    let mut search_from = 0;
+    while let Some(rel_start) = text[search_from..].find(&needle) {
+        let start = search_from + rel_start;
+        let after_needle = start + needle.len();
+        let rest = &text[after_needle..];
+        let line_end = rest.find('\n').unwrap_or(rest.len());
+        let header_trailer = &rest[..line_end];
+        if !header_trailer.trim().is_empty() {
+            // Header line has extra text after it (e.g. a hand-written
+            // "## Next Steps (all Bob's call — none required)") — this is
+            // not the delimiter we're looking for. Keep scanning past it
+            // rather than absorbing the trailing text into the body.
+            search_from = after_needle;
+            continue;
+        }
+        let end = rest.find("\n## ").unwrap_or(rest.len());
+        let section = rest[..end].trim().to_owned();
+        return if section.is_empty() {
+            None
+        } else {
+            Some(section)
+        };
     }
+    None
 }
 
 /// Parse a timestamp from the `YYYYMMDD-HHMMSS` portion of a session filename.
@@ -391,6 +417,52 @@ mod tests {
             Some("Fix tests.")
         );
         assert!(extract_section(md, "Missing").is_none());
+    }
+
+    /// Regression test for issue #3901: a hand-written snapshot header with
+    /// trailing text (`## Next Steps (all Bob's call — none required)`) must
+    /// NOT be treated as a match for the `"Next Steps"` section — the old
+    /// substring-`find` implementation absorbed the trailing `(all Bob's
+    /// call — none required)` into the parsed body. Fixture text is the
+    /// actual corrupted header shape from
+    /// `.trusty-mpm/sessions/session-20260721-020826.md` in this project.
+    #[test]
+    fn extract_section_rejects_header_with_trailing_text() {
+        let md = "## In Progress\n\nNOTHING.\n\n\
+                   ## Next Steps (all Bob's call — none required)\n\n\
+                   - Bob's tested one-liner (handed over, not yet run).\n\
+                   - Installer NOT VERIFIED in isolation.\n";
+        // No well-formed "## Next Steps" header exists, so the section is
+        // absent rather than corrupted with the trailing header text.
+        assert!(extract_section(md, "Next Steps").is_none());
+        // The well-formed sibling header still parses correctly.
+        assert_eq!(
+            extract_section(md, "In Progress").as_deref(),
+            Some("NOTHING.")
+        );
+    }
+
+    /// A malformed header earlier in the document must not shadow a later,
+    /// well-formed occurrence of the same header.
+    #[test]
+    fn extract_section_finds_later_well_formed_header_after_malformed_one() {
+        let md = "## Next Steps (draft, ignore)\nstale draft text\n\n\
+                   ## Next Steps\nReal next steps.\n";
+        assert_eq!(
+            extract_section(md, "Next Steps").as_deref(),
+            Some("Real next steps.")
+        );
+    }
+
+    /// Trailing whitespace after the header (no visible extra text) is still
+    /// a well-formed header and must parse normally.
+    #[test]
+    fn extract_section_allows_trailing_whitespace_on_header_line() {
+        let md = "## Next Steps   \nDo the thing.\n";
+        assert_eq!(
+            extract_section(md, "Next Steps").as_deref(),
+            Some("Do the thing.")
+        );
     }
 
     #[test]

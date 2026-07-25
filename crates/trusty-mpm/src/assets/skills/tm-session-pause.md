@@ -115,6 +115,21 @@ if [ -n "$TMUX" ]; then
 fi
 ```
 
+Then **load the tool schema before calling it**. In harnesses with deferred
+MCP tool loading (Claude Code, when many tools are registered), the daemon
+always registers `session_context_pause` — it is never gated by launch mode —
+but the harness may not have fetched its schema yet, so it can be missing
+from your currently loaded tool list. **Absence from that list does NOT mean
+the tool is unavailable** — it means the schema needs to be fetched first:
+
+```
+ToolSearch(query: "select:mcp__trusty-mpm__session_context_pause")
+```
+
+This is mandatory before attempting the call and before considering any
+fallback (see "If the Tool Call Fails" below) — do not skip straight to a
+hand-written snapshot just because the tool isn't in your loaded list yet.
+
 Then call the MCP tool to write the snapshot, append the pause-log entry, and
 prune worktrees, all in one step:
 
@@ -143,6 +158,95 @@ in the same project keep their own history), and computes the
 itself — no separate `git status`/`git log` shell-out needed.
 
 Report the returned `snapshot_path` to the user.
+
+## If the Tool Call Fails — Diagnose Before Falling Back
+
+Never report a bare "MCP pause tool unavailable", and — this is the stricter
+rule — **never assert a cause you have not tested**. Do not write "the
+trusty-mpm MCP server isn't connected in this session" or "the daemon is
+down" or "the project isn't registered" from a hunch — each of those has a
+concrete, checkable basis (see step 3's deferred-tool-list check below for
+"server connected at all"; `tm doctor` or
+`mcp__trusty-mpm__project_get` for "project registered"), and you must
+actually run that check before stating the conclusion it supports. If all
+you know is that a load or a call did not succeed and you have not yet run
+the check, say exactly that and nothing more: *"I could not load/call
+`session_context_pause`; I have not yet determined whether the server is
+absent or its schema is merely unloaded."* An invented explanation is worse
+than no explanation — it sends whoever reads it chasing a diagnosis that was
+never actually made. A *tested* explanation (step 3) is exactly what should
+be reported, in the same concrete terms as the test itself.
+
+Follow this exact ordered procedure — it is not optional, and no step may be
+skipped or reordered:
+
+1. **Attempt the `ToolSearch` load** (see above). Mandatory, every time,
+   regardless of what you expect the outcome to be.
+2. **If the tool is now loaded, attempt the call.** Do not skip straight to a
+   fallback because the tool was merely absent from your list before loading
+   — step 1 may have fixed that.
+3. **If step 1 or step 2 fails, report the actual observed error text**, not
+   an interpretation of it. Quote what `ToolSearch` or the tool call actually
+   returned. Do not paraphrase a raw error into a diagnosis you have not
+   tested — instead run the one concrete, checkable test available to you:
+   **does any `mcp__trusty-mpm__*` name appear anywhere in your tool
+   list — loaded *or* deferred** (deferred tools are the ones a system
+   reminder lists as available-via-`ToolSearch`-but-not-yet-loaded)?
+     - **Yes, some `mcp__trusty-mpm__*` name is present** (even only in the
+       deferred list): the server IS registered and the tools are merely
+       unloaded. Do not claim disconnection — the correct action is to
+       `ToolSearch`-load the specific tool (step 1), not to fall back.
+     - **No `mcp__trusty-mpm__*` name appears anywhere**, loaded or deferred:
+       "the trusty-mpm MCP server does not appear to be available in this
+       session" is a defensible statement — state the concrete basis for it
+       exactly that way ("no `mcp__trusty-mpm__*` tools are present in
+       either the loaded or deferred tool lists"), not a bare assertion.
+   Never attribute a failure to "the daemon restarted" — `trusty-mpm serve
+   --stdio` is a stateless proxy designed to survive a daemon restart and
+   auto-reconnect transparently, so a mid-session daemon restart is not a
+   valid explanation for a tool disappearing.
+4. **Only after step 3, hand-write the snapshot as a fallback** — and label it
+   as one (see "Self-Identifying Fallback Snapshot" below). This is the only
+   step at which writing a file by hand is permitted.
+
+When you do fall back at step 4, match the tool's own format exactly, not
+free prose — reuse the shape from "Snapshot Content" above verbatim: RFC3339
+timestamps (`date -u +%Y-%m-%dT%H:%M:%S.%6N+00:00` or equivalent), the exact
+literal section headers with nothing appended after them on the same line
+(`## Summary`, `## Next Steps`, etc. — never `## Next Steps (some
+annotation)`, which corrupts what `/tm-session-resume`'s parser extracts, see
+`extract_section` hardening in `session_finder.rs`), and the three-line `##
+Git Context` shape (`Branch: … / Last commit: … / Uncommitted changes: …`).
+
+### Self-Identifying Fallback Snapshot
+
+A hand-written snapshot must never be indistinguishable from a tool-written
+one — the only way this project's own history could tell them apart was a
+forensic timestamp tell (real tool output carries fractional seconds and a
+`+00:00` offset; hand-written snapshots drifted to a bare `Z` suffix), which
+is how six drifted files went unnoticed for three days. Instead, mark it
+explicitly. Add a line immediately under the `# Session Pause - {timestamp}`
+title, before `## Summary`:
+
+```markdown
+# Session Pause - {timestamp}
+
+> FALLBACK SNAPSHOT — hand-written, not produced by
+> `mcp__trusty-mpm__session_context_pause`. Observed failure: {the exact
+> error text from step 3 above, or "no mcp__trusty-mpm__* tools present in
+> either the loaded or deferred tool lists" if that is what was actually
+> observed}.
+
+## Summary
+...
+```
+
+This is additive prose above the parsed sections — `/tm-session-resume`'s
+`extract_section` reads sections by header, so the marker line does not
+interfere with parsing, but a human (or a future PM) resuming from it
+immediately sees it was not tool-generated and why. State in your report to
+the user, in the same terms, which step you stopped at and what you actually
+observed — never the bare "MCP pause tool unavailable."
 
 ## Worktree Pruning
 

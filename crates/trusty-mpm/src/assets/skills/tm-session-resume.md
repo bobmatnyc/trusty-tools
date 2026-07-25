@@ -43,6 +43,46 @@ newest-first (session id, time elapsed, topic) and confirm which to resume.
 
 ## Implementation: `mcp__trusty-mpm__session_context_catchup`
 
+**Load the tool schema before calling it.** In harnesses with deferred MCP
+tool loading (Claude Code, when many tools are registered), the daemon
+always registers `session_context_catchup` — it is never gated by launch
+mode — but the harness may not have fetched its schema yet, so it can be
+absent from your currently loaded tool list even though it is fully
+available. **Absence from that list does NOT mean the tool is unavailable.**
+Load it first:
+
+```
+ToolSearch(query: "select:mcp__trusty-mpm__session_context_catchup")
+```
+
+This is mandatory before attempting the call below — do not conclude the
+tool is unavailable, and do not hand-parse `.trusty-mpm/sessions/*.md`
+yourself as a substitute, just because it's missing from the loaded list.
+
+If the load or the call still fails, **never assert a cause you have not
+tested.** Run the one concrete, checkable test available: does any
+`mcp__trusty-mpm__*` name appear anywhere in your tool list, loaded *or*
+deferred (deferred = listed by a system reminder as available-via-`ToolSearch`
+but not yet loaded)?
+
+- **Yes** (even only deferred): the server IS registered — the tools are
+  merely unloaded. Do not claim disconnection; go back and `ToolSearch`-load
+  the specific tool instead.
+- **No** `mcp__trusty-mpm__*` name appears anywhere: "the trusty-mpm MCP
+  server does not appear to be available in this session" is a defensible
+  statement — report the concrete basis exactly that way ("no
+  `mcp__trusty-mpm__*` tools present in either the loaded or deferred tool
+  lists"), and only then fall back to the CLI `tm session catchup` instead of
+  hand-parsing snapshot files yourself, since it implements the same
+  merge/validation logic.
+
+Report the exact error text `ToolSearch` or the call returned rather than
+interpreting it, and state in your report to the user which of the two cases
+above you observed. Never attribute a failure to "the daemon restarted" —
+`trusty-mpm serve --stdio` is a stateless proxy designed to survive a daemon
+restart and auto-reconnect transparently, so a mid-session restart is not a
+valid explanation for a tool disappearing.
+
 Resume calls the MCP tool rather than shelling out to `git log`/`git status`
 and hand-parsing snapshot files, so the merge/validation logic stays in one
 place and returns typed JSON instead of scraped text:

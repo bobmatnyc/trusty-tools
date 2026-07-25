@@ -5,6 +5,23 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **`catchup::session_finder::extract_section` no longer absorbs trailing
+  header text** (issue #3901): a substring match on `## <header>` treated a
+  hand-written header like `## Next Steps (all Bob's call — none required)`
+  as a match for `"Next Steps"`, silently prepending the trailing annotation
+  into the parsed section body — a real corruption reproduced from this
+  project's own `.trusty-mpm/sessions/session-20260721-020826.md`. The
+  matcher now requires only whitespace between the header text and the line
+  break (or end-of-file) before accepting a match, and keeps scanning past a
+  malformed candidate in case a later, well-formed occurrence of the same
+  header exists. Regression tests added using the real corrupted header
+  shape as the fixture.
+
+---
 ## [0.26.1] — 2026-07-24
 
 ### Added
