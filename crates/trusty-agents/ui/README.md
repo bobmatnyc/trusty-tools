@@ -77,6 +77,29 @@ permissive CORS layer on the API server:
 VITE_TAGENT_API=https://tagent.example.com pnpm build
 ```
 
+## Testing
+
+```sh
+pnpm test:unit          # vitest — pure logic + mounted components (jsdom). Runs in CI.
+pnpm run check          # svelte-check. Runs in CI.
+pnpm test               # playwright e2e. NOT run in CI: needs a running server.
+```
+
+The Playwright specs need something serving the app at `TAGENT_URL`
+(default `http://127.0.0.1:7654`, i.e. a real `tagent --api`). All `/api/*`
+routes are stubbed inside the specs, so a plain Vite dev server works too and
+is the fastest loop:
+
+```sh
+pnpm dev --host 127.0.0.1                                    # shell 1
+TAGENT_URL=http://127.0.0.1:5173 pnpm test                   # shell 2
+```
+
+`tests/config-takeover.spec.ts` is the layout guard for the agent-config
+takeover: it MEASURES the instructions editor's rendered height at two
+viewports, because that sizing has regressed twice and jsdom (no layout
+engine) can only check the classes that are supposed to produce it.
+
 ## Production build
 
 ```sh

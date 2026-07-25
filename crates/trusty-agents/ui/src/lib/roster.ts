@@ -207,6 +207,33 @@ export function rosterDisplayName(
 }
 
 /**
+ * Why (#3819): Concierge — the `ctrl` agent — is selected by
+ * `activeAgentId === null` (the tools-armed base PM/ctrl dispatch path; see
+ * `stores/app.ts`'s `activeAgentId` doc comment) but is CONFIGURED by name
+ * like any other agent. Two surfaces now need that mapping — `ChatHeader`'s
+ * picker and the full-pane `AgentConfigOverlay` (#3894) — so it lives here
+ * once instead of being re-derived in each.
+ */
+export const CONCIERGE_AGENT_ID = 'ctrl';
+
+/** Human-facing label for the Concierge selection (`activeAgentId === null`). */
+export const CONCIERGE_LABEL = 'Concierge';
+
+/**
+ * Why (#3894): the config surface addresses agents by NAME (`GET
+ * /api/agents/:name`), while chat dispatch addresses the active selection by
+ * `activeAgentId`, where `null` means Concierge. This is the one translation
+ * between the two axes.
+ * What: Returns the selected agent's name, or `CONCIERGE_AGENT_ID` when
+ * nothing is selected.
+ * Test: `configAgentName_null_selection_is_concierge`,
+ * `configAgentName_passes_through_a_selected_id`.
+ */
+export function configAgentName(activeAgentId: string | null): string {
+  return activeAgentId ?? CONCIERGE_AGENT_ID;
+}
+
+/**
  * Why (#3737): chat attribution must reflect who ANSWERED. When a turn
  * delegates (base "Assistant" → Izzie for a weather question), the server
  * reports the responder's agent NAME in `PmResponse.responder_agent`; the GUI

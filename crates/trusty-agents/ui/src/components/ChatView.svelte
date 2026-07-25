@@ -14,6 +14,7 @@
   import { responderDisplayName } from '../lib/roster';
   import { listenEvent, type UnlistenFn } from '../lib/transport';
   import { streamAccumulator, type DeltaPayload } from '../lib/chatStream';
+  import { isPinnedToBottom } from '../lib/chatScroll';
   import ActionIcon from '../lib/icons/ActionIcon.svelte';
   import WorkflowPhaseCard from './WorkflowPhaseCard.svelte';
   import { workflowState } from '../stores/workflow';
@@ -127,15 +128,39 @@
     unlistenDelta?.();
   });
 
+  /**
+   * Why (PR #3895 code-critic HIGH-3): this used to force
+   * `scrollTop = scrollHeight` on EVERY render, unconditionally. That drags a
+   * reader who scrolled up to read history back to the newest message the
+   * instant a streaming delta arrives — and because the chat keeps rendering
+   * while the agent-config takeover covers it (#3894 deliberately leaves it
+   * mounted so its scroll offset survives), a delta arriving mid-configuration
+   * silently reset the covered chat's position, breaking the very thing the
+   * takeover promises. Anchoring to "was the reader already at the bottom?" is
+   * the generally-correct chat behavior and fixes both cases at once, without
+   * the takeover needing a special case.
+   * What: `pinnedToBottom` tracks the reader's intent from actual scroll
+   * events (it starts true — an empty chat is at its bottom); `afterUpdate`
+   * only re-anchors while that holds.
+   * Test: `lib/chatScroll.test.ts` (the predicate) and `ChatPane.test.ts`
+   * (a message appended while the takeover is open leaves the covered chat's
+   * offset alone).
+   */
+  let pinnedToBottom = true;
+
+  function onScroll() {
+    if (scrollEl) pinnedToBottom = isPinnedToBottom(scrollEl);
+  }
+
   afterUpdate(() => {
     // Why: afterUpdate fires after the DOM is already patched — tick() is
     // redundant here and creates an infinite microtask chain (afterUpdate →
     // tick() resolves → Svelte flushes → afterUpdate → …) that permanently
     // blocks V8's event loop, starving Playwright CDP and other async tasks.
-    // What: Scrolls the message list to the bottom after each render.
     // Test: Send a message that fills the chat — the view scrolls to the newest
-    // entry without any blank-screen or scroll freeze.
-    if (scrollEl) {
+    // entry without any blank-screen or scroll freeze; scroll up mid-stream and
+    // the view stays where you put it.
+    if (scrollEl && pinnedToBottom) {
       scrollEl.scrollTop = scrollEl.scrollHeight;
     }
   });
@@ -145,7 +170,12 @@
   }
 </script>
 
-<div bind:this={scrollEl} class="flex-1 overflow-y-auto px-6 py-4 bg-foundry-light-bg dark:bg-foundry-bg">
+<div
+  bind:this={scrollEl}
+  on:scroll={onScroll}
+  data-chat-scroll
+  class="flex-1 overflow-y-auto px-6 py-4 bg-foundry-light-bg dark:bg-foundry-bg"
+>
   {#if $activeMessages.length === 0}
     <div class="mt-10 text-center text-sm text-foundry-light-muted dark:text-foundry-text/50 font-sans">
       Start chatting. Messages will appear here.

@@ -2,13 +2,13 @@
   import { onMount } from 'svelte';
   import { get } from 'svelte/store';
   import Sidebar from './components/Sidebar.svelte';
-  import ChatView from './components/ChatView.svelte';
-  import InputArea from './components/InputArea.svelte';
-  import RecapPanel from './components/RecapPanel.svelte';
   import Header from './components/Header.svelte';
-  import ChatHeader from './components/ChatHeader.svelte';
+  // #3894: the Chat view's whole composition (chat column + recap rail +
+  // Slack mirror + the agent-configuration takeover that covers them) lives
+  // in `ChatPane` — see that component's doc comment for why the takeover
+  // has to be a sibling of the group rather than nested in the chat column.
+  import ChatPane from './components/ChatPane.svelte';
   import EventsView from './components/EventsView.svelte';
-  import SlackMirror from './components/SlackMirror.svelte';
   // #3819: `ProjectsView`/`PersonalityPanel` are no longer routed — Bob's
   // nav reshape drops the Projects/Personality top tabs entirely. Left
   // unimported/unrouted rather than deleted pending a decision on their
@@ -19,7 +19,7 @@
   // via `ChatHeader`'s gear icon).
   // #3752: live Slack conversation mirror — the SSE bridge feeds these two
   // event kinds into the store the SlackMirror pane renders.
-  import { pushSlackEvent, slackMirror } from './lib/slack-mirror';
+  import { pushSlackEvent } from './lib/slack-mirror';
   // #3819: the Events tab's rolling log — fed from the same bridge as
   // `pushSlackEvent`, additive, never a replacement for the existing
   // task-progress/webBus routing below.
@@ -37,6 +37,7 @@
     refreshOverlayAgents,
   } from './stores/app';
   import { setRecap, type Recap } from './stores/recap';
+  import { requestExitConfigPane } from './stores/configPane';
   // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
   // comment for the full rationale. Additive to the flattened webBus path
   // below, never a replacement.
@@ -58,6 +59,14 @@
   let activeView: 'chat' | 'events' = 'chat';
 
   function switchView(view: 'chat' | 'events') {
+    // #3894: leaving Chat abandons any open configuration takeover, so the
+    // top-level tabs always mean what they say — coming back to Chat shows
+    // chat, never a config surface the user left behind minutes ago.
+    // PR #3895 code-critic HIGH-1: this is also an EXIT path — leaving Chat
+    // unmounts the panel — so it goes through the same guard. When the panel
+    // holds unsaved edits the request raises its confirm and returns false;
+    // we stay on Chat rather than tearing the edit out from under it.
+    if (view !== 'chat' && !requestExitConfigPane()) return;
     activeView = view;
   }
   let tokenInput = '';
@@ -559,27 +568,11 @@
       <!-- #3220: the top-level Chat/Events tab nav lives in <Header/>, which
            dispatches `switch-view` back up to `switchView()` above. #3819:
            the chat pane additionally gets its OWN header (`ChatHeader`) —
-           active-agent title + inline selector + gear config panel — since
+           active-agent title + inline selector + gear config button — since
            that state (which agent) is scoped to the chat view, not the
            whole app. -->
       {#if activeView === 'chat'}
-        <!-- #3219: RecapPanel is now a persistent right rail (own scroll,
-             AGENTS ACTIVE / FILES TOUCHED / TOKENS + folded recap summary),
-             so it sits beside the chat+input column rather than stacked
-             between them. -->
-        <div class="flex flex-1 min-h-0">
-          <div class="flex flex-1 flex-col min-w-0">
-            <ChatHeader />
-            <ChatView />
-            <InputArea />
-          </div>
-          <RecapPanel />
-          <!-- #3752: the live Slack mirror only mounts once there's activity,
-               so normal (non-Slack) usage is visually unchanged. -->
-          {#if $slackMirror.length > 0}
-            <SlackMirror />
-          {/if}
-        </div>
+        <ChatPane />
       {:else}
         <EventsView />
       {/if}
