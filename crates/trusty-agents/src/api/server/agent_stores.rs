@@ -36,7 +36,7 @@ use crate::stores::{StoresConfig, resolve_store_statuses};
 /// Why/What: see the module doc. Daemon base URLs are discovered here (via
 /// the shared `http_addr` convention every trusty-* daemon writes) and
 /// threaded into [`stores_at`] so tests can substitute a mock.
-/// Test: `super::tests::agent_stores::stores_route_reports_bindings`.
+/// Test: `super::tests::agent_stores::stores_route_reports_connected_binding_with_stats`.
 pub(super) async fn agent_stores_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -59,9 +59,9 @@ pub(super) async fn agent_stores_route(
 /// a hand-edited file breaking the stores table still lets the panel render
 /// the rest of the agent. Every per-store failure is inside the `StoreStatus`
 /// entries, not the HTTP status.
-/// Test: `stores_route_reports_bindings`, `stores_route_unknown_agent_404`,
+/// Test: `stores_route_reports_connected_binding_with_stats`, `stores_route_unknown_agent_404`,
 /// `stores_route_empty_for_unbound_agent`,
-/// `stores_route_reports_config_error_without_failing`.
+/// `stores_route_degrades_on_malformed_toml`.
 pub(super) async fn stores_at(
     dirs: &[PathBuf],
     name: &str,
