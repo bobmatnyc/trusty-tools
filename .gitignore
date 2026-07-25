@@ -67,6 +67,10 @@ tga.db
 # Obsidian editor config (personal)
 .obsidian/
 
+# Python bytecode cache (crates/trusty-code/scripts/*.py, issue #3869)
+__pycache__/
+*.pyc
+
 # Code-signing certificate artifacts — never commit (see #873/#1726)
 docs/certificates/*.certSigningRequest
 docs/certificates/*.p12
