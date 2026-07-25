@@ -53,11 +53,12 @@ impl AgentLoop {
     /// derives from).
     /// Test: `agent_loop::tests::daily_driver_mode_compacts_long_running_loop`,
     /// `agent_loop::tests::parity_mode_never_compacts_even_past_threshold`,
-    /// `agent_loop::tests::forced_degradation_increments_counter_and_logs_error`,
-    /// `agent_loop::tests::cadence_none_threshold_fire_does_not_log_error`,
-    /// `agent_loop::tests::threshold_fire_writes_compression_telemetry`,
-    /// `agent_loop::tests::threshold_fire_under_cadence_records_compaction_alarm`,
-    /// `agent_loop::tests::threshold_fire_under_no_cadence_does_not_record_alarm`.
+    /// `agent_loop::tests::cadence::forced_degradation_increments_counter_and_logs_error`
+    /// (asserts the ERROR log AND both durable signals from one fire),
+    /// `agent_loop::tests::cadence::cadence_none_threshold_fire_does_not_log_error`,
+    /// `agent_loop::tests::compression_telemetry_tests::threshold_fire_under_cadence_writes_jsonl_and_alarm`,
+    /// `agent_loop::tests::compression_telemetry_tests::threshold_fire_under_no_cadence_writes_jsonl_but_no_alarm`,
+    /// `agent_loop::tests::compression_telemetry_tests::unwritable_data_dir_does_not_fail_the_loop`.
     pub(super) fn maybe_compact_transcript(&self, transcript: &mut Transcript) {
         if self.config.mode != HarnessMode::DailyDriver {
             return;
@@ -134,8 +135,8 @@ impl AgentLoop {
     /// `agent_loop::tests::cadence_fire_logs_info`,
     /// `agent_loop::tests::cadence_emits_context_budget_snapshot`,
     /// `agent_loop::tests::no_context_budget_event_when_cadence_disabled`,
-    /// `agent_loop::tests::cadence_fire_writes_compression_telemetry`,
-    /// `agent_loop::tests::cadence_tick_without_rounds_writes_no_telemetry`.
+    /// `agent_loop::tests::compression_telemetry_tests::cadence_fire_writes_compression_telemetry`,
+    /// `agent_loop::tests::compression_telemetry_tests::cadence_disabled_writes_no_cadence_telemetry`.
     pub(super) async fn maybe_cadence_compress(&self, transcript: &mut Transcript) {
         if self.config.mode != HarnessMode::DailyDriver {
             return;
