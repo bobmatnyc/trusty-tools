@@ -41,12 +41,19 @@ independent semantic versioning per the workspace convention.
   can prove the source's full corpus was enumerated.
 - `okg::policy` — **read-side confinement for doc stores.** `DocStorePolicy`
   holds an operator-configured allow-list of ingestible roots and additionally
-  refuses any hidden path below a root, so `~/.ssh`, `~/.aws`, `~/.gnupg`, and
-  `~/.config/gh` are excluded without being enumerated. It resolves symlinks and
-  `..` before judging, and an unconfigured policy denies everything rather than
-  defaulting open. Enforced inside `scan` — at the point the filesystem is
-  touched — so a hand-edited `registry.toml` row pointing at a credential
-  directory is refused on every run, not just at registration.
+  refuses any HIDDEN path below a root. "Hidden" spans three rules, because one
+  platform's convention is not another's: a dot-prefix (`~/.ssh`, `~/.aws`,
+  `~/.gnupg`, `~/.config/gh`), the macOS `UF_HIDDEN` file flag, and a `Library`
+  name backstop for when that flag is absent. The flag rule matters because
+  `~/Library` — holding `Application Support/<App>` tokens, `Keychains`, and
+  `Preferences` — is **not** dot-prefixed, so a dot-only rule would have left it
+  fully readable under the default `$HOME` policy. It resolves symlinks and `..`
+  before judging, and an unconfigured policy denies everything rather than
+  defaulting open. Scoped below the matched root, so an operator who names a
+  directory inside hidden territory in `docstore_roots` still opts in explicitly.
+  Enforced inside `scan` — at the point the filesystem is touched — so a
+  hand-edited `registry.toml` row pointing at a credential directory is refused
+  on every run, not just at registration.
 - `okg::docstore` — the in-crate filesystem fetcher: deterministic sorted walk,
   extension filtering, SHA-256 content fingerprints (path and mtime both lie),
   graceful binary skipping (reported by name, never fatal), and deterministic
