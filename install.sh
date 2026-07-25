@@ -377,6 +377,10 @@ confirm() {
 #      (harmless, still-idempotent-on-ITS-OWN-writes) export line gets
 #      appended, never a silently-skipped real fix — the failure mode this
 #      function exists to avoid is a false POSITIVE, not a false negative.
+#      One residual false-positive gap remains for the same reason (line-based
+#      text matching, not a shell interpreter): a `PATH=` line sitting inside
+#      a never-invoked function body reads as "present" too — an unusual,
+#      self-inflicted dotfile pattern, not worth chasing with more regex.
 # Test: appending twice via `_append_path_export` leaves exactly one line;
 #      a pre-existing differently-quoted entry is detected (no second entry
 #      appended); a commented-out entry is NOT detected (the real line still
