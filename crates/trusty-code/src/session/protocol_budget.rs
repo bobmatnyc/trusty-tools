@@ -109,4 +109,119 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, -32007);
     }
+
+    // -- issue #3868: lifetime_compaction_alarm_count --
+
+    fn telemetry_temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tcode-protocol-budget-alarm-test-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A recorded threshold-compaction alarm fire is reflected on
+    /// `session.get_context_budget`'s `lifetime_compaction_alarm_count`
+    /// field (issue #3868's core acceptance criterion).
+    #[tokio::test]
+    async fn get_context_budget_reflects_lifetime_compaction_alarm_count() {
+        let dir = telemetry_temp_dir("reflects");
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+            crate::agent_loop::telemetry::record_compaction_alarm(&dir);
+            registry
+                .record_context_budget(&session.id, &measurement())
+                .unwrap();
+        })
+        .await;
+
+        let result = get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "recorded");
+        assert!(
+            result["lifetime_compaction_alarm_count"].as_u64().unwrap() >= 1,
+            "expected a non-zero alarm count, got {result:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session that never records an alarm fire has
+    /// `lifetime_compaction_alarm_count == 0` — the `cadence: None`
+    /// regression guard (issue #3868 acceptance criteria: "cadence: None
+    /// runs never increment this counter").
+    #[tokio::test]
+    async fn get_context_budget_alarm_count_zero_without_a_fire() {
+        let dir = telemetry_temp_dir("zero");
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+            registry
+                .record_context_budget(&session.id, &measurement())
+                .unwrap();
+        })
+        .await;
+
+        let result = get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(result["lifetime_compaction_alarm_count"], 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The alarm count is read fresh from the durable log every time, so a
+    /// BRAND NEW `SessionRegistry` (simulating a daemon restart) querying a
+    /// brand new session still sees fires recorded by an earlier registry
+    /// instance — the durability requirement the old in-memory `Transcript`
+    /// counter failed (issue #3868: "persists across a session restart").
+    #[tokio::test]
+    async fn get_context_budget_alarm_count_survives_fresh_registry() {
+        let dir = telemetry_temp_dir("survives-restart");
+
+        crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+            crate::agent_loop::telemetry::record_compaction_alarm(&dir);
+            crate::agent_loop::telemetry::record_compaction_alarm(&dir);
+        })
+        .await;
+
+        // A FRESH registry — nothing in-memory carried over from whatever
+        // recorded the fires above.
+        let fresh_registry = SessionRegistry::new();
+        let session =
+            fresh_registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        crate::agent_loop::telemetry::with_data_dir_env(&dir, || {
+            fresh_registry
+                .record_context_budget(&session.id, &measurement())
+                .unwrap();
+        })
+        .await;
+
+        let result = get_context_budget(
+            &fresh_registry,
+            json!({"session_id": session.id}),
+            test_ctx(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result["lifetime_compaction_alarm_count"], 2,
+            "a fresh registry must read the SAME durable count, not reset to 0"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

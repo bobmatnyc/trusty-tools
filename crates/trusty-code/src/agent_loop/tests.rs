@@ -1947,3 +1947,6 @@ async fn run_with_transcript_does_not_clobber_finish_task_summary() {
 
 #[path = "budget_tests.rs"]
 mod budget_tests;
+
+#[path = "compression_telemetry_tests.rs"]
+mod compression_telemetry_tests;

@@ -36,9 +36,12 @@
 
 mod cadence;
 mod compaction;
+#[path = "compaction_control.rs"]
+mod compaction_control;
 mod error;
 mod goals;
 mod sink;
+pub mod telemetry;
 mod transcript;
 
 #[cfg(test)]
@@ -50,7 +53,7 @@ mod tests;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -215,6 +218,17 @@ pub struct AgentLoop {
     /// is the correlation key a UI must use instead. `None` falls back to
     /// `events::UNATTRIBUTED_AGENT_ID` — see [`Self::with_agent_id`].
     agent_id: Option<String>,
+    /// (#3867) This loop's session id, stamped on every durable compression-
+    /// telemetry JSONL record this loop emits (`agent_loop::telemetry`).
+    /// Separate from `agent_id`: `agent_id` is a per-SPAWN identity shared by
+    /// no other loop, while `session_id` is the session this loop's
+    /// transcript persists against — the id `session.get_context_budget`
+    /// and the rest of the daemon-facing API key off. `None` for call sites
+    /// with no session (the delegated engineer's own loop, `run_task`'s
+    /// one-shot path) — telemetry then records `session_id: null` rather
+    /// than fabricating one, per issue #3867's field notes.
+    /// Test: `agent_loop::tests::cadence_fire_writes_compression_telemetry`.
+    session_id: Option<String>,
     cancel: Option<Arc<AtomicBool>>,
     stop_signal: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     finish_gate: Option<FinishGate>,
@@ -254,6 +268,7 @@ impl AgentLoop {
             sink: None,
             agent: None,
             agent_id: None,
+            session_id: None,
             cancel: None,
             stop_signal: None,
             finish_gate: None,
@@ -338,6 +353,27 @@ impl AgentLoop {
         self.agent_id
             .as_deref()
             .unwrap_or(crate::events::UNATTRIBUTED_AGENT_ID)
+    }
+
+    /// Declare this loop's session id, stamped on every durable
+    /// compression-telemetry JSONL record it emits (issue #3867).
+    ///
+    /// Why: `telemetry::CompressionEvent.session_id` needs "tcode's real
+    /// session id" per the issue's schema notes, but `AgentLoop` itself is
+    /// deliberately session-agnostic everywhere else (see `sink.rs`'s doc
+    /// note: "a session id the engine layer must not know about") — this
+    /// mirrors [`Self::with_agent_id`]'s existing precedent of accepting a
+    /// caller-supplied identity as an explicit opt-in rather than reaching
+    /// into a session layer this crate's lower engine module must not
+    /// depend on.
+    /// What: Builder-style setter; returns `self` for chaining. Unset loops
+    /// emit `session_id: None` on every telemetry record — never a
+    /// fabricated id (issue #3867: "`null` is acceptable when no natural id
+    /// exists, but never fabricate one").
+    /// Test: `agent_loop::tests::cadence_fire_writes_compression_telemetry`.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
     }
 
     /// Attach a cancellation flag checked once per turn boundary (#2056).
@@ -772,138 +808,6 @@ impl AgentLoop {
                 .await;
         }
         transcript.push_tool_result(call_id, tool, &message);
-    }
-
-    /// Apply non-destructive context compaction to `transcript`, gated on mode
-    /// (#2070, §5.4; reconciled with §5.9's D2 the same way `tool_definitions`
-    /// is).
-    ///
-    /// Why: The parity-spec (D2) requires `HarnessMode::Parity` runs to stay
-    /// byte-identical / full-history for cross-model benchmark fairness —
-    /// compacting would silently change what a Parity run sends after enough
-    /// turns, breaking that guarantee. `HarnessMode::DailyDriver` is
-    /// production's token-efficiency mode, so it is the only mode this method
-    /// ever calls `Transcript::maybe_compact` for. (#2349, epic #2343) Under
-    /// the #2346 cadence system a threshold fire is no longer expected in
-    /// steady state — it means cadence sizing / daemon-availability /
-    /// turn-size assumptions were violated — so this is also where that
-    /// regression signal is raised. Cadence-DISABLED contexts (`run_task`
-    /// one-shot, `Parity`, delegated sub-agent engineer loops — all
-    /// `cadence: None`) still use threshold compaction as their PRIMARY,
-    /// EXPECTED mechanism, so the error-level framing below must never apply
-    /// to them.
-    /// What: No-op under `HarnessMode::Parity`; under `HarnessMode::DailyDriver`,
-    /// delegates to `transcript.maybe_compact(&self.config.compaction)`. When
-    /// that returns `true` (a fire actually happened), unconditionally calls
-    /// `transcript.record_threshold_compaction()` (#2349's fact counter,
-    /// exposed via `session::TranscriptRecord.compaction_events` —
-    /// increments regardless of cadence), then — ONLY when
-    /// `self.config.cadence.is_some()` — emits `tracing::error!` with the
-    /// current estimated token count, the configured `token_threshold`, and
-    /// `cadence_enabled = true` for context. `cadence: None` keeps today's
-    /// existing behaviour exactly as it was before this ticket: no log at
-    /// this call site at all.
-    /// Test: `agent_loop::tests::daily_driver_mode_compacts_long_running_loop`,
-    /// `agent_loop::tests::parity_mode_never_compacts_even_past_threshold`,
-    /// `agent_loop::tests::forced_degradation_increments_counter_and_logs_error`,
-    /// `agent_loop::tests::cadence_none_threshold_fire_does_not_log_error`.
-    fn maybe_compact_transcript(&self, transcript: &mut Transcript) {
-        if self.config.mode != HarnessMode::DailyDriver {
-            return;
-        }
-        if !transcript.maybe_compact(&self.config.compaction) {
-            return;
-        }
-        transcript.record_threshold_compaction();
-
-        if self.config.cadence.is_some() {
-            let estimated_tokens = compaction::estimate_total_tokens(&transcript.to_messages());
-            tracing::error!(
-                estimated_tokens,
-                token_threshold = self.config.compaction.token_threshold,
-                cadence_enabled = true,
-                "threshold compaction fired unexpectedly under cadence — this is a regression \
-                 signal: cadence sizing, daemon availability, or turn-size assumptions were \
-                 likely violated (epic #2343 expects compaction_events == 0 in steady state)"
-            );
-        }
-    }
-
-    /// Apply the #2346 cadence compressor to `transcript`, gated on mode the
-    /// SAME way [`Self::maybe_compact_transcript`] is, plus an explicit
-    /// per-run opt-in.
-    ///
-    /// Why: Cadence must respect the identical `HarnessMode::Parity` carve-out
-    /// as threshold compaction (byte-identical benchmark runs), AND must stay
-    /// off by default (`self.config.cadence == None`) so every call site that
-    /// doesn't explicitly opt in — the delegated engineer's own loop,
-    /// `run_task`'s legacy one-shot/bake-off path — sees zero behavioural
-    /// change from before this ticket. Only
-    /// `task::executor::run_and_record`'s persistent-session PM loop sets
-    /// `AgentLoopConfig.cadence = Some(_)`.
-    /// What: No-op unless `mode == HarnessMode::DailyDriver` AND
-    /// `self.config.cadence` is `Some`; otherwise resolves the model's real
-    /// context window (`crate::provider::resolve_context_window`, mirroring
-    /// `Self::maybe_compact_transcript`'s own model-aware sibling) and
-    /// delegates to `cadence::maybe_cadence_compress`, reusing
-    /// `self.config.compaction.keep_last_messages` as the shared active-zone
-    /// size rather than introducing a second, possibly-inconsistent knob.
-    /// (#2857) `cadence::maybe_cadence_compress`'s returned `CadenceOutcome`
-    /// was previously discarded entirely — its own doc says it exists "for
-    /// observability/tests", yet nothing observed it. When `outcome.fired`,
-    /// this now emits `tracing::info!` with the round count and whether the
-    /// transcript ended within budget — a notable-but-normal event (routine
-    /// scheduled compression), not a failure, hence `info` rather than
-    /// `warn`. The budget-floor-exceeded case is already `warn!`-logged
-    /// inside `cadence::enforce_budget` itself. The SAME outcome is also
-    /// forwarded to `self.sink` (when one is attached) as a
-    /// [`ContextBudgetSnapshot`], so a `session.attach`ed UI can render a live
-    /// budget indicator. Emission sits AFTER both guards above, which is what
-    /// keeps it PM-only for free: only `task::executor::run_and_record`'s
-    /// persistent-session PM loop sets `cadence: Some(_)`, so a delegated
-    /// engineer loop never emits.
-    /// Test: `agent_loop::tests::cadence_disabled_by_default`,
-    /// `agent_loop::tests::cadence_never_fires_in_parity_mode`,
-    /// `agent_loop::tests::cadence_fires_in_daily_driver_when_configured`,
-    /// `agent_loop::tests::cadence_fire_logs_info`,
-    /// `agent_loop::tests::cadence_emits_context_budget_snapshot`,
-    /// `agent_loop::tests::no_context_budget_event_when_cadence_disabled`.
-    async fn maybe_cadence_compress(&self, transcript: &mut Transcript) {
-        if self.config.mode != HarnessMode::DailyDriver {
-            return;
-        }
-        let Some(cadence_cfg) = &self.config.cadence else {
-            return;
-        };
-        let context_window = crate::provider::resolve_context_window(&self.config.model);
-        let outcome = cadence::maybe_cadence_compress(
-            transcript,
-            cadence_cfg,
-            self.config.compaction.keep_last_messages,
-            context_window,
-        );
-        if outcome.fired {
-            tracing::info!(
-                rounds = outcome.rounds,
-                within_budget = outcome.within_budget,
-                "agent_loop: cadence compression fired (#2346)"
-            );
-        }
-
-        let Some(sink) = &self.sink else {
-            return;
-        };
-        sink.context_budget(&ContextBudgetSnapshot {
-            context_window,
-            overhead_tokens: outcome.overhead_tokens,
-            overhead_cap_tokens: cadence_cfg.overhead_cap_tokens(context_window),
-            working_context_pct: outcome.working_context_pct(context_window),
-            overhead_pct: outcome.overhead_pct(context_window),
-            within_budget: outcome.within_budget,
-            fired: outcome.fired,
-            rounds: outcome.rounds,
-        })
-        .await;
     }
 
     /// Build a `ChatRequest` from the running transcript and tool schemas.

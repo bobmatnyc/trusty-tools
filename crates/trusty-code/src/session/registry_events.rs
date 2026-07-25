@@ -226,6 +226,14 @@ impl SessionRegistry {
         measurement: &crate::agent_loop::ContextBudgetSnapshot,
     ) -> Result<(), RpcError> {
         self.ensure_exists(id)?;
+        // (#3868) Read fresh from the durable, cross-session alarm log every
+        // time — never cached/stale — so a query reflects fires from ANY
+        // session on this machine, not just this one. See
+        // `ContextBudgetSnapshot::lifetime_compaction_alarm_count`'s docs.
+        let lifetime_compaction_alarm_count =
+            crate::agent_loop::telemetry::lifetime_compaction_alarm_count(
+                &crate::agent_loop::telemetry::default_data_dir(),
+            );
         let snapshot = ContextBudgetSnapshot {
             context_window_tokens: measurement.context_window,
             overhead_tokens: measurement.overhead_tokens,
@@ -235,6 +243,7 @@ impl SessionRegistry {
             within_budget: measurement.within_budget,
             compaction_fired: measurement.fired,
             compaction_rounds: measurement.rounds,
+            lifetime_compaction_alarm_count,
         };
         {
             let mut sessions = self.lock();

@@ -8,6 +8,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Durable compression-effectiveness telemetry (epic #3866, Slice A #3867 +
+  Slice B #3868).** New `agent_loop::telemetry` module appends one JSONL
+  line per compression event to `~/.trusty-code/compression.jsonl` — one for
+  every `tcode-cadence` fire (`AgentLoop::maybe_cadence_compress`) and every
+  `tcode-threshold` fire (`AgentLoop::maybe_compact_transcript`), with
+  `ts`/`session_id`/`surface`/`tokens_before`/`tokens_after`/`ratio`/
+  `working_context_pct_after`/`overhead_pct_after`/`compaction_event`/
+  `duration_ms`/`rounds` fields. Emission is best-effort (never fails the
+  compaction it instruments). A threshold-compaction fire under
+  `cadence: Some(_)` also appends a durable line to
+  `~/.trusty-code/compaction_alarm.log` — the never-event alarm epic #2343
+  expects to stay empty in steady state — and `session.get_context_budget`'s
+  response gains an additive `lifetime_compaction_alarm_count` field
+  (`ContextBudgetSnapshot`) reflecting that log's lifetime, cross-session,
+  cross-restart line count, so the never-event check is reachable from the
+  one RPC that's already the front door for budget state instead of a
+  second `session.get_transcript` call.
+
 ### Fixed
 
 - **Test-only ambient-daemon leaks closed for two `run_task` tests (issue
