@@ -689,6 +689,17 @@ async fn spawn_managed_cloned(
     mgr.set_worktree_owner_best_effort(&session_id, session_id)
         .await;
 
+    // #3822: explicit spawn-time project registration — the one-shot
+    // `auto_register_from_sessions` boot pass (`ProjectRegistry::
+    // auto_register_from_sessions`) never sees a session created after the
+    // registry's first touch, so `tm project list` reported this project
+    // missing forever without this. Best-effort; never blocks the spawn.
+    state
+        .project_registry()
+        .await
+        .register_from_session(&record)
+        .await;
+
     // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
     //
     // Between record-creation and `adapter.spawn`, resolve the ticket+spec intent
@@ -996,6 +1007,14 @@ async fn spawn_managed_inproject(
     mgr.set_worktree_owner_best_effort(session_id, *session_id)
         .await;
 
+    // #3822: mirrors `spawn_managed_cloned`'s identical explicit
+    // spawn-time project registration.
+    state
+        .project_registry()
+        .await
+        .register_from_session(&record)
+        .await;
+
     // Front gate with the original repo_url so GitHub identity is parseable.
     if let Some(record) =
         front_gate_or_escalate(&mgr, &record, &params.repo_url, &params.task).await?
@@ -1244,6 +1263,14 @@ async fn spawn_managed_local(
     if let Err(e) = mgr.set_source_id(session_id, &source_id_str).await {
         warn!(id = %session_id, "spawn_managed (local→managed): set_source_id failed: {e}");
     }
+
+    // #3822: mirrors `spawn_managed_cloned`'s identical explicit
+    // spawn-time project registration.
+    state
+        .project_registry()
+        .await
+        .register_from_session(&record)
+        .await;
 
     // FRONT gate: origin_url is a real GitHub URL so the gate is active.
     if let Some(record) = front_gate_or_escalate(&mgr, &record, &origin_url, &params.task).await? {

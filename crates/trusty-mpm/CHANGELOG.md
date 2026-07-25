@@ -5,6 +5,13 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **`tm sessions list`/`tm project list` now show a session created via `sessions new <url>`** (closes [#3822](https://github.com/bobmatnyc/trusty-tools/issues/3822)): `ProjectRegistry::auto_register_from_sessions` only ever ran ONCE per daemon process — inside `DaemonState::project_registry()`'s `OnceCell::get_or_init`, seeded from whatever session snapshot existed the moment ANY of its 15+ call sites (a status poll, an MCP tool, `resolve_gh_env`, …) first touched the registry, frequently before any session existed. Nothing else called that pass again, so a project implied by a session spawned afterward was registered nowhere — even though the daemon plainly knew about the session (`tm stop`/`tm resume` by explicit name still worked, since those go through the separate session-manager store). Added `ProjectRegistry::register_from_session`, an explicit per-session counterpart called at spawn time from all three managed-session creation paths (`spawn_managed_cloned`, `spawn_managed_inproject`, `spawn_managed_local` in `daemon::managed_routes::lifecycle`), right after the session record is persisted — so registration no longer depends on which caller happened to touch the registry first.
+
+---
 ## [1.0.1] - 2026-07-24
 
 ### Fixed
