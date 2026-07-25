@@ -17,7 +17,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_gworkspace::api::client::BaseClient;
-use trusty_kb::okg::ingest::SourceItem;
+use trusty_kb::okg::ingest::{IngestReport, SourceItem};
 use trusty_kb::okg::ledger::Ledger;
 use trusty_kb::okg::registry::{Locator, SourceSpec};
 
@@ -27,6 +27,21 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 
 /// Default ceiling on messages listed in one call.
 const DEFAULT_MAX_MESSAGES: usize = 500;
+
+/// Hard ceiling, enforced regardless of what the caller asks for.
+///
+/// Why: `max_messages` comes from the model. Without a clamp a single call
+/// could be told to pull 10,000,000 messages, and the fetch loop would hold
+/// every decoded body in memory at once.
+const MAX_MESSAGES_CEILING: usize = 5_000;
+
+/// Messages fetched and committed per chunk.
+///
+/// Why: bounds peak memory to one chunk of message bodies, and — because the
+/// ledger is written inside `ingest_items` — makes each chunk a commit point.
+/// A crash during a long backfill loses at most this many fetches, not all of
+/// them.
+const CHUNK: usize = 100;
 
 /// `okg_ingest_gmail` — ingest a Gmail query window into the OKG.
 pub struct OkgIngestGmailTool;
@@ -132,11 +147,13 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     let spec = store.okg_source(&registered.id)?;
 
     let account = arg_str(args, "account");
+    // Clamp, never trust: a model-supplied ceiling only ever narrows the pull.
     let max_messages = args
         .get("max_messages")
         .and_then(Value::as_u64)
         .map(|n| n as usize)
-        .unwrap_or(DEFAULT_MAX_MESSAGES);
+        .unwrap_or(DEFAULT_MAX_MESSAGES)
+        .clamp(1, MAX_MESSAGES_CEILING);
 
     let client = BaseClient::new()?;
     // Fail loudly on a broken credential instead of letting the client fall
@@ -159,25 +176,38 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
         .collect();
     drop(ledger);
 
-    let mut items: Vec<SourceItem> = Vec::with_capacity(unseen.len());
-    let mut fetch_errors: Vec<String> = Vec::new();
-    for id in &unseen {
-        match gapi::gmail_message(&client, account, id).await {
-            Ok(msg) => match gapi::message_to_item(&msg) {
-                Some(item) => items.push(item),
-                None => fetch_errors.push(format!("{id}: message payload had no usable id")),
-            },
-            Err(e) => fetch_errors.push(format!("{id}: {e}")),
+    // Fetch and COMMIT in chunks. Accumulating every body before a single
+    // ingest would hold the whole backfill in memory and lose all of it to a
+    // crash mid-fetch; committing per chunk bounds both.
+    let mut report = IngestReport::default();
+    let mut fetched = 0usize;
+    for batch in unseen.chunks(CHUNK) {
+        let mut items: Vec<SourceItem> = Vec::with_capacity(batch.len());
+        for id in batch {
+            match gapi::gmail_message(&client, account, id).await {
+                Ok(msg) => match gapi::message_to_item(&msg) {
+                    Some(item) => items.push(item),
+                    None => report
+                        .errors
+                        .push(format!("{id}: message payload had no usable id")),
+                },
+                Err(e) => report.errors.push(format!("{id}: {e}")),
+            }
         }
+        fetched += batch.len();
+        // detect_deletions = false: a windowed pull sees only its window, so an
+        // absent message means "outside the window", never "deleted". There is
+        // deliberately no deletion sweep for Gmail at all.
+        let chunk = store.ingest_items(&spec, &items, false, &now)?;
+        report.merge(chunk);
     }
 
-    // detect_deletions = false: a windowed pull sees only its window, so an
-    // absent message means "outside the window", never "deleted".
-    let mut report = store.ingest_items(&spec, &items, false, &now)?;
-    report.errors.extend(fetch_errors);
     // `missing` here would list every message outside this window — noise, not
     // signal, for a source that never enumerates its full corpus.
     report.missing.clear();
+    report.source_id = spec.id.clone();
+    report.kind = spec.kind().to_string();
+    report.collection = spec.collection.clone();
     // Re-frame the counts around what was LISTED, folding in the ids the ledger
     // let us skip before ever paying for a fetch.
     report.skipped += ids.len() - unseen.len();
@@ -187,7 +217,8 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
         "source": registered,
         "query": effective_query,
         "listed": ids.len(),
-        "fetched": unseen.len(),
+        "fetched": fetched,
+        "max_messages": max_messages,
         "ingest": report,
     })))
 }

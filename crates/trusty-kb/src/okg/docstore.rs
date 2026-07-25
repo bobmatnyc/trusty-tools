@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::okg::ingest::SourceItem;
+use crate::okg::policy::DocStorePolicy;
 
 /// Extensions treated as text when a source names none.
 pub const DEFAULT_EXTENSIONS: &[&str] = &[
@@ -55,16 +56,21 @@ pub struct ScanOutcome {
 /// Walk a doc-store directory into [`SourceItem`]s.
 ///
 /// Why/What: see the module doc. `extensions` empty means [`DEFAULT_EXTENSIONS`].
-/// Test: the four tests in this module.
+///
+/// `policy` is the READ-side confinement gate and is applied HERE, at the point
+/// the filesystem is actually touched, rather than only at the tool boundary —
+/// so a `registry.toml` row that was hand-edited (or written before the policy
+/// existed) to point at `~/.ssh` is still refused on every later run.
+/// Test: the tests in this module, plus `policy::tests`.
 pub fn scan(
     dir: &Path,
     extensions: &[String],
     recursive: bool,
     chunk_chars: usize,
+    policy: &DocStorePolicy,
 ) -> anyhow::Result<ScanOutcome> {
-    if !dir.is_dir() {
-        anyhow::bail!("doc store {} is not a directory", dir.display());
-    }
+    // Walk the RESOLVED path the policy returned, never the caller's spelling.
+    let dir = &policy.permit(dir)?;
     let accepted: Vec<String> = if extensions.is_empty() {
         DEFAULT_EXTENSIONS.iter().map(|e| e.to_string()).collect()
     } else {
@@ -187,6 +193,8 @@ fn chunk_items(
                 timestamp: timestamp.map(str::to_string),
                 body,
                 fields,
+                // A content hash is a real change signal, so never volatile.
+                volatile: false,
             }
         })
         .collect()
@@ -241,6 +249,11 @@ fn modified_iso(path: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A policy that permits exactly the fixture directory.
+    fn policy(tmp: &tempfile::TempDir) -> DocStorePolicy {
+        DocStorePolicy::new(vec![tmp.path().canonicalize().unwrap()])
+    }
+
     fn seed(files: &[(&str, &[u8])]) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         for (rel, bytes) in files {
@@ -265,8 +278,8 @@ mod tests {
             ("skipme.png", b"not-text-by-extension"),
             (".hidden/d.md", b"hidden"),
         ]);
-        let first = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS).unwrap();
-        let second = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS).unwrap();
+        let first = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS, &policy(&tmp)).unwrap();
+        let second = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS, &policy(&tmp)).unwrap();
         assert_eq!(first.items, second.items, "scan must be deterministic");
 
         let ids: Vec<&str> = first.items.iter().map(|i| i.item_id.as_str()).collect();
@@ -290,7 +303,7 @@ mod tests {
         );
 
         // Non-recursive must stay at depth 1.
-        let flat = scan(tmp.path(), &[], false, DEFAULT_CHUNK_CHARS).unwrap();
+        let flat = scan(tmp.path(), &[], false, DEFAULT_CHUNK_CHARS, &policy(&tmp)).unwrap();
         assert_eq!(flat.items.len(), 2);
     }
 
@@ -306,7 +319,7 @@ mod tests {
             ("nulls.txt", b"pdf\x00\x01binary"),
             ("badutf.txt", &[0xff, 0xfe, 0x41, 0x42]),
         ]);
-        let out = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS).unwrap();
+        let out = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS, &policy(&tmp)).unwrap();
         assert_eq!(out.items.len(), 1);
         assert_eq!(out.items[0].item_id, "good.md");
         assert_eq!(
@@ -325,9 +338,9 @@ mod tests {
     #[test]
     fn edit_changes_the_fingerprint() {
         let tmp = seed(&[("a.md", b"before"), ("b.md", b"stable")]);
-        let before = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS).unwrap();
+        let before = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS, &policy(&tmp)).unwrap();
         std::fs::write(tmp.path().join("a.md"), b"after").unwrap();
-        let after = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS).unwrap();
+        let after = scan(tmp.path(), &[], true, DEFAULT_CHUNK_CHARS, &policy(&tmp)).unwrap();
 
         assert_ne!(
             before.items[0].fingerprint, after.items[0].fingerprint,
@@ -355,7 +368,7 @@ mod tests {
         let body = vec![para.as_str(); 40].join("\n\n");
         let tmp = seed(&[("big.md", body.as_bytes())]);
 
-        let out = scan(tmp.path(), &[], true, 1_000).unwrap();
+        let out = scan(tmp.path(), &[], true, 1_000, &policy(&tmp)).unwrap();
         assert!(
             out.items.len() > 1,
             "expected a split; got {}",
@@ -380,6 +393,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert_eq!(joined.chars().filter(|c| *c == 'x').count(), 40 * 60);
-        assert_eq!(out.items, scan(tmp.path(), &[], true, 1_000).unwrap().items);
+        assert_eq!(
+            out.items,
+            scan(tmp.path(), &[], true, 1_000, &policy(&tmp))
+                .unwrap()
+                .items
+        );
     }
 }

@@ -20,6 +20,7 @@
 //! Test: `super::tests` covers the pure adapters, the tool schemas, and a full
 //! docstore ingest round-trip against a temp-dir tree.
 
+pub mod config;
 pub mod docstore;
 pub mod drive;
 pub mod gapi;
@@ -148,6 +149,18 @@ pub(super) fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 /// A required non-empty string argument.
 pub(super) fn require_str<'a>(args: &'a Value, key: &str) -> anyhow::Result<&'a str> {
     arg_str(args, key).ok_or_else(|| anyhow::anyhow!("missing required '{key}'"))
+}
+
+/// The doc-store read-confinement policy for this process.
+///
+/// Why: `okg_ingest_docstore` reads a model-supplied path, so the permitted
+/// roots are operator configuration (`[okg] docstore_roots`), never a model
+/// argument. Resolved per call so an operator can widen the list without
+/// restarting the agent.
+/// Test: `config_defaults_to_home`, `docstore_tool_rejects_credential_dir`.
+pub(super) fn docstore_policy() -> trusty_kb::okg::policy::DocStorePolicy {
+    let home = config::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    config::load().policy(&home)
 }
 
 /// Current UTC timestamp in the format the KB store stamps entities with.

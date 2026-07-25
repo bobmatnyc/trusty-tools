@@ -30,6 +30,7 @@
 pub mod docstore;
 pub mod ingest;
 pub mod ledger;
+pub mod policy;
 pub mod registry;
 
 use serde::Serialize;
@@ -121,11 +122,18 @@ impl KbStore {
     ///
     /// Why: the whole doc-store path is local and deterministic, so it runs
     /// end-to-end inside this crate — the agent tool is a thin wrapper.
-    /// What: resolves the source, walks its directory, and hands the items to
-    /// the ingest engine with deletion detection enabled (a full walk DOES
-    /// enumerate the corpus, so an absent file is genuinely absent).
-    /// Test: `docstore_ingest_is_idempotent_end_to_end`.
-    pub fn okg_ingest_docstore(&self, source_id: &str, now: &str) -> anyhow::Result<IngestReport> {
+    /// What: resolves the source, walks its directory (subject to `policy`, the
+    /// read-side confinement gate), and hands the items to the ingest engine
+    /// with deletion detection enabled (a full walk DOES enumerate the corpus,
+    /// so an absent file is genuinely absent).
+    /// Test: `docstore_ingest_is_idempotent_end_to_end`,
+    /// `ingest_rechecks_the_policy_on_every_run`.
+    pub fn okg_ingest_docstore(
+        &self,
+        source_id: &str,
+        policy: &policy::DocStorePolicy,
+        now: &str,
+    ) -> anyhow::Result<IngestReport> {
         let spec = self.okg_source(source_id)?;
         let Locator::DocStore {
             path,
@@ -148,6 +156,7 @@ impl KbStore {
             extensions,
             *recursive,
             docstore::DEFAULT_CHUNK_CHARS,
+            policy,
         )?;
         let mut report = self.ingest_items(&spec, &scan.items, true, now)?;
         report.errors.extend(scan.errors);
@@ -163,12 +172,70 @@ impl KbStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::okg::policy::DocStorePolicy;
     use crate::schema::Profile;
+
+    /// A policy permitting the whole fixture tempdir.
+    fn policy(tmp: &tempfile::TempDir) -> DocStorePolicy {
+        DocStorePolicy::new(vec![tmp.path().canonicalize().unwrap()])
+    }
 
     fn store() -> (tempfile::TempDir, KbStore) {
         let tmp = tempfile::tempdir().unwrap();
         let store = KbStore::new(tmp.path().join("kb"), Profile::default_profile());
         (tmp, store)
+    }
+
+    /// Why: code-critic CRITICAL 2 — the read-side gate must live in the ENGINE,
+    /// not only at the tool boundary. A `registry.toml` row can be hand-edited
+    /// (or was written before the policy existed) to point at `~/.ssh`, and the
+    /// row is re-read on every run; validating only at registration time would
+    /// let that poisoned row read credentials forever.
+    /// What: registers a doc store while the policy permits it, then re-runs with
+    /// a policy that does NOT, and asserts the ingest is refused.
+    /// Test: self-contained.
+    #[test]
+    fn ingest_rechecks_the_policy_on_every_run() {
+        let (tmp, store) = store();
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("a.md"), "alpha").unwrap();
+
+        store
+            .okg_register_source(SourceSpec::new(
+                "docs",
+                Some("notes"),
+                Locator::DocStore {
+                    path: corpus.to_string_lossy().to_string(),
+                    extensions: vec![],
+                    recursive: true,
+                },
+                "t0",
+            ))
+            .unwrap();
+        assert_eq!(
+            store
+                .okg_ingest_docstore("docs", &policy(&tmp), "t0")
+                .unwrap()
+                .ingested,
+            1
+        );
+
+        // The same registered row, now outside the permitted roots.
+        let narrowed = DocStorePolicy::new(vec![tmp.path().join("somewhere-else")]);
+        let err = store
+            .okg_ingest_docstore("docs", &narrowed, "t1")
+            .expect_err("a registered row must not bypass the policy");
+        assert!(
+            err.to_string().contains("outside every configured"),
+            "unexpected error: {err}"
+        );
+
+        // And an empty policy denies it too — the gate fails closed.
+        let err = store
+            .okg_ingest_docstore("docs", &DocStorePolicy::default(), "t2")
+            .expect_err("unconfigured policy must deny");
+        assert!(err.to_string().contains("no doc-store roots"), "{err}");
     }
 
     /// Why: Bob's core requirement — "I can add a new doc store" — must not
@@ -197,7 +264,9 @@ mod tests {
             ))
             .unwrap();
         assert!(first.created && first.changed);
-        store.okg_ingest_docstore("docs", "t0").unwrap();
+        store
+            .okg_ingest_docstore("docs", &policy(&tmp), "t0")
+            .unwrap();
 
         let before = store.okg_sources().unwrap();
         assert_eq!(before.len(), 1);
@@ -271,7 +340,9 @@ mod tests {
         spec.tombstone_deleted = true;
         store.okg_register_source(spec).unwrap();
 
-        let first = store.okg_ingest_docstore("corpus", "t0").unwrap();
+        let first = store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "t0")
+            .unwrap();
         assert_eq!((first.ingested, first.updated, first.skipped), (2, 0, 0));
         assert_eq!(first.scanned, 2, ".bin filtered by extension");
         let one = store.entity_path("notes", "one").unwrap();
@@ -282,7 +353,9 @@ mod tests {
         );
 
         // Re-run: nothing changes.
-        let second = store.okg_ingest_docstore("corpus", "t1").unwrap();
+        let second = store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "t1")
+            .unwrap();
         assert_eq!(
             (
                 second.ingested,
@@ -296,7 +369,9 @@ mod tests {
 
         // Edit one file: exactly one entity re-ingests.
         std::fs::write(docs.join("one.md"), "first note, revised").unwrap();
-        let third = store.okg_ingest_docstore("corpus", "t2").unwrap();
+        let third = store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "t2")
+            .unwrap();
         assert_eq!((third.ingested, third.updated, third.skipped), (0, 1, 1));
         assert!(
             std::fs::read_to_string(&one).unwrap().contains("revised"),
@@ -305,7 +380,9 @@ mod tests {
 
         // Delete one file: tombstoned, content preserved.
         std::fs::remove_file(docs.join("sub/two.txt")).unwrap();
-        let fourth = store.okg_ingest_docstore("corpus", "t3").unwrap();
+        let fourth = store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "t3")
+            .unwrap();
         assert_eq!(fourth.tombstoned, 1);
         let two = std::fs::read_to_string(store.entity_path("notes", "sub/two").unwrap()).unwrap();
         assert!(two.contains("source_status: deleted"), "flagged: {two}");
