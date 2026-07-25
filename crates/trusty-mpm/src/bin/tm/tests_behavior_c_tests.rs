@@ -380,6 +380,61 @@ fn guided_picker_non_numeric_unrecognised() {
     );
 }
 
+#[test]
+fn guided_picker_ls_returns_list_sessions() {
+    // Why: #3863 — "ls" must re-print the list, not resume/launch/quit, and
+    // must work regardless of case, surrounding whitespace, or whether the
+    // list is empty.
+    assert_eq!(
+        parse_picker_choice("ls", &picker_fixture(3, &[]), false),
+        PickerDecision::ListSessions
+    );
+    assert_eq!(
+        parse_picker_choice("LS", &picker_fixture(3, &[]), false),
+        PickerDecision::ListSessions
+    );
+    assert_eq!(
+        parse_picker_choice("ls\n", &[], false),
+        PickerDecision::ListSessions
+    );
+    assert_eq!(
+        parse_picker_choice("  ls  ", &picker_fixture(1, &[]), false),
+        PickerDecision::ListSessions
+    );
+}
+
+#[test]
+fn guided_picker_list_returns_list_sessions() {
+    // Why: #3863 — "list" is the accepted long form, same semantics as "ls".
+    assert_eq!(
+        parse_picker_choice("list", &picker_fixture(3, &[]), false),
+        PickerDecision::ListSessions
+    );
+    assert_eq!(
+        parse_picker_choice("List", &picker_fixture(3, &[]), false),
+        PickerDecision::ListSessions
+    );
+    assert_eq!(
+        parse_picker_choice("LIST\n", &[], false),
+        PickerDecision::ListSessions
+    );
+}
+
+#[test]
+fn guided_picker_ls_does_not_shadow_launch_new_or_delete_prefix() {
+    // Why: guard against a careless implementation matching "ls"/"list" as a
+    // substring prefix rather than the whole trimmed token — must not
+    // swallow legitimate `d<N>`/`r<N>` input or other look-alikes.
+    assert_eq!(
+        parse_picker_choice("list1", &picker_fixture(3, &[]), false),
+        PickerDecision::Unrecognised
+    );
+    assert_eq!(
+        parse_picker_choice("lsx", &picker_fixture(3, &[]), false),
+        PickerDecision::Unrecognised
+    );
+}
+
 // ── tty_gate ──────────────────────────────────────────────────────────────────
 
 #[test]
