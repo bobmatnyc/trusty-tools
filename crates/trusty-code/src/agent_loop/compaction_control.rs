@@ -17,6 +17,19 @@
 use super::*;
 
 impl AgentLoop {
+    /// Resolve the write target for this loop's own compression-telemetry
+    /// calls: `self.config.telemetry_data_dir` when injected (test-only DI,
+    /// issue #3902), otherwise `telemetry::default_data_dir()` — identical
+    /// to production behaviour before this field existed.
+    /// Test: see `AgentLoopConfig::telemetry_data_dir`'s doc for the full
+    /// list of tests this unblocks.
+    fn telemetry_data_dir(&self) -> std::path::PathBuf {
+        self.config
+            .telemetry_data_dir
+            .clone()
+            .unwrap_or_else(telemetry::default_data_dir)
+    }
+
     /// Apply non-destructive context compaction to `transcript`, gated on mode
     /// (#2070, §5.4; reconciled with §5.9's D2 the same way `tool_definitions`
     /// is).
@@ -73,7 +86,7 @@ impl AgentLoop {
         let estimated_tokens = compaction::estimate_total_tokens(&transcript.to_messages());
         let cadence_enabled = self.config.cadence.is_some();
         telemetry::record_threshold_event(
-            &telemetry::default_data_dir(),
+            &self.telemetry_data_dir(),
             self.session_id.clone(),
             tokens_before,
             estimated_tokens,
@@ -163,7 +176,7 @@ impl AgentLoop {
 
         if outcome.rounds > 0 {
             telemetry::record_cadence_event(
-                &telemetry::default_data_dir(),
+                &self.telemetry_data_dir(),
                 self.session_id.clone(),
                 tokens_before,
                 outcome.overhead_tokens,

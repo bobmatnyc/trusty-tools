@@ -51,6 +51,7 @@ pub(crate) use cadence_env_helper::with_cadence_env;
 #[cfg(test)]
 mod tests;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -158,6 +159,47 @@ pub struct AgentLoopConfig {
     /// `Some(_)`. Consulted only under `HarnessMode::DailyDriver` — see
     /// `Self::maybe_cadence_compress`'s docs.
     pub cadence: Option<CadenceConfig>,
+
+    /// Overrides `telemetry::default_data_dir()` for THIS loop instance's
+    /// own compression-telemetry writes (issue #3902).
+    ///
+    /// Why: before this field existed, `compaction_control.rs`'s two
+    /// telemetry call sites always resolved their write target via
+    /// `telemetry::default_data_dir()`, which reads the process-global
+    /// `TCODE_TELEMETRY_DATA_DIR` env var — shared, mutable, process-wide
+    /// state. Every test that wanted an isolated write target had to mutate
+    /// that ONE env var and rely on every other concurrently-running test
+    /// (in a different `#[tokio::test]`'s own runtime/OS thread) also taking
+    /// `telemetry::DATA_DIR_ENV_LOCK` first. Several loop-integration tests
+    /// never did (`agent_loop::tests::daily_driver_mode_compacts_long_running_loop`,
+    /// `agent_loop::tests::cadence::cadence_fires_in_daily_driver_when_configured`,
+    /// `agent_loop::tests::cadence::cadence_fire_logs_info`,
+    /// `agent_loop::tests::cadence::cadence_none_threshold_fire_does_not_log_error`,
+    /// `agent_loop::budget_tests::cadence_emits_context_budget_snapshot`), so
+    /// under `cargo test`'s parallel scheduling a locked test's temp dir
+    /// could end up on the env var WHILE one of those unguarded tests' loop
+    /// ran, and that unguarded loop's own cadence/threshold telemetry write
+    /// would land inside the locked test's directory — a SPURIOUS record
+    /// appearing in a directory whose own test never wrote it (issue #3902's
+    /// `cadence_disabled_writes_no_cadence_telemetry` CI failure). This field
+    /// removes the shared mutable state from the equation entirely: each
+    /// `AgentLoop` instance now carries its own write target, so two
+    /// concurrently-running loops can never race each other over it, and no
+    /// lock is needed.
+    /// What: `None` (the default, every production call site) falls back to
+    /// `telemetry::default_data_dir()` exactly as before — this field never
+    /// changes production behaviour. `Some(dir)` is test-only: every
+    /// loop-integration test that needs an isolated telemetry directory now
+    /// sets this directly instead of mutating `TCODE_TELEMETRY_DATA_DIR`.
+    /// `telemetry::DATA_DIR_ENV_VAR`/`DATA_DIR_ENV_LOCK` remain for the one
+    /// caller that has no `AgentLoopConfig` to inject through:
+    /// `session::registry_events::SessionRegistry::get_context_budget`'s own
+    /// direct `telemetry::default_data_dir()` read.
+    /// Test: `agent_loop::tests::compression_telemetry_tests::*`,
+    /// `agent_loop::tests::cadence::*`,
+    /// `agent_loop::budget_tests::cadence_emits_context_budget_snapshot`,
+    /// `agent_loop::tests::daily_driver_mode_compacts_long_running_loop`.
+    pub telemetry_data_dir: Option<PathBuf>,
 }
 
 impl Default for AgentLoopConfig {
@@ -182,6 +224,7 @@ impl Default for AgentLoopConfig {
             mode: HarnessMode::default(),
             compaction: CompactionConfig::default(),
             cadence: None,
+            telemetry_data_dir: None,
         }
     }
 }

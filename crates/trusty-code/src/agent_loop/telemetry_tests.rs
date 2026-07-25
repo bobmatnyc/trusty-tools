@@ -3,18 +3,7 @@
 use super::*;
 use std::io::Read as _;
 
-fn temp_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "tcode-telemetry-test-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use test_temp_dir as temp_dir;
 
 fn read_lines(path: &Path) -> Vec<String> {
     let mut s = String::new();

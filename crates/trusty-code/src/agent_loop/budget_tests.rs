@@ -7,6 +7,7 @@
 //! `use super::*` rather than duplicating it.
 
 use super::*;
+use crate::agent_loop::telemetry;
 
 /// A `ToolEventSink` that captures every `context_budget` snapshot it is
 /// handed, ignoring the tool hooks.
@@ -98,11 +99,20 @@ async fn cadence_emits_context_budget_snapshot() {
     let registry = registry_with_echo(false);
     let sink = Arc::new(BudgetSink::new());
 
+    // Issue #3902: isolate this run's own telemetry writes via
+    // `AgentLoopConfig::telemetry_data_dir` rather than leaving it `None` —
+    // an un-isolated cadence fire here (this config guarantees one every
+    // turn) would otherwise call `telemetry::default_data_dir()`, which can
+    // race a concurrently-running test's `TCODE_TELEMETRY_DATA_DIR` env-var
+    // critical section and write a spurious record into THAT test's
+    // directory.
+    let dir = telemetry::test_temp_dir("cadence-emits-budget-snapshot");
     let agent = make_loop(
         llm,
         registry,
         AgentLoopConfig {
             cadence: Some(CadenceConfig::default()),
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     )
@@ -111,6 +121,7 @@ async fn cadence_emits_context_budget_snapshot() {
         .run("system prompt", "the task")
         .await
         .expect("run completes");
+    std::fs::remove_dir_all(&dir).ok();
 
     let snapshots = sink.snapshots();
     assert_eq!(
