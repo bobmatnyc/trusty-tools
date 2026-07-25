@@ -58,6 +58,12 @@ mod tests_search_index;
 #[cfg(test)]
 #[path = "tests_mcp_trust_seed_e2e.rs"]
 mod tests_mcp_trust_seed_e2e;
+// Issue #3926 — e2e coverage for the `tm launch` MCP-trust-preseed
+// name-squatting fix, mirroring the `tests_mcp_trust_seed_e2e` split pattern
+// immediately above.
+#[cfg(test)]
+#[path = "tests_launch_trust_3926.rs"]
+mod tests_launch_trust_3926;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -729,14 +735,31 @@ fn prepare_session_inner(
     // (issue #1269) so the interactive tmux Claude session does not stall on the
     // "Do you trust this folder?" dialog and the injected task prompt is
     // received. tm owns this workspace path, so marking it trusted is safe.
-    // `project_scope_mcp_names` is excluded from the `enabledMcpjsonServers`
-    // auto-approval (issue #2739 follow-up security fix): a project-scope
-    // `[mcp.custom]` entry ships with the cloned repo itself, so silently
-    // pre-approving it would let an untrusted repo smuggle a live MCP server
-    // past Claude Code's own "new MCP servers found" consent dialog. See
-    // `session_launch::custom_mcp`'s "Consent gate" docs. Non-fatal: a
-    // trust-seed failure only means the operator may see the dialog.
-    if let Err(err) = preseed_workspace_trust_home(project_dir, &project_scope_mcp_names) {
+    //
+    // `enabledMcpjsonServers` (issue #3926 security fix): computed here, NEVER
+    // by reading the workspace's own `.mcp.json` (that file is git-tracked and
+    // travels WITH a cloned repo — see `mcp_config::mcp_server_names`'s
+    // SECURITY doc for the vulnerability this closes). `launch_trusted_mcp_names`
+    // returns the framework builtin four (force-overwritten to their canonical
+    // entry by the injectors above, every run) UNION the operator's own `tm
+    // mcp add` registry (also force-overwritten above, by the native/custom
+    // injectors, whenever a registry name matches) — provenance the operator
+    // or the framework controls, mirroring `mcp_config::managed_mcp_server_names`'s
+    // already-fixed derivation for the daemon-managed path (#3918/#3924).
+    // `project_scope_mcp_names` is then subtracted (issue #2739's existing
+    // defense-in-depth, preserved unchanged): a project-scope `[mcp.custom]`
+    // entry ships with the cloned repo itself, so it still surfaces Claude
+    // Code's "new MCP servers found" consent dialog even after `tm project
+    // trust` — see `session_launch::custom_mcp`'s "Consent gate" docs. A name
+    // that reaches neither source — e.g. one a cloned repo merely committed
+    // to `.mcp.json` directly — now correctly falls through to that same
+    // dialog instead of being silently pre-approved. Non-fatal: a trust-seed
+    // failure only means the operator may see the dialog.
+    let trusted_mcp_names: BTreeSet<String> = crate::core::mcp_config::launch_trusted_mcp_names()
+        .into_iter()
+        .filter(|name| !project_scope_mcp_names.contains(name))
+        .collect();
+    if let Err(err) = preseed_workspace_trust_home(project_dir, &trusted_mcp_names) {
         tracing::warn!("failed to pre-seed workspace trust: {err}");
     }
 

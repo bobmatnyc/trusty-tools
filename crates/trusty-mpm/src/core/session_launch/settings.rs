@@ -617,27 +617,45 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
 /// clobbering the operator's OAuth/login data), ensures
 /// `projects.<workspace>` carries `hasTrustDialogAccepted: true`,
 /// `hasCompletedProjectOnboarding: true`, `projectOnboardingSeenCount >= 1`, and
-/// `enabledMcpjsonServers` listing every server name from
-/// `<workspace>/.mcp.json` (see [`crate::core::mcp_config::mcp_server_names`]; an empty array when the
-/// project ships none), then writes it back pretty-printed preserving every
-/// other key. Idempotent. The OAuth fields elsewhere in the file are never
-/// touched.
-/// `exclude_mcp_names` (issue #2739 follow-up security fix) removes names from
-/// the auto-approved `enabledMcpjsonServers` list even though they are present
-/// in `.mcp.json` — used to keep project-scope-bridged custom MCP servers
-/// (which ship with the cloned repo, not the operator's own registry) behind
-/// Claude Code's normal "new MCP servers found" consent dialog rather than
-/// silently pre-approved. Pass an empty set to preserve the pre-#2739-fix
-/// behaviour of approving every name in `.mcp.json`.
+/// `enabledMcpjsonServers` set to exactly `trusted_mcp_names`, then writes it
+/// back pretty-printed preserving every other key. Idempotent. The OAuth
+/// fields elsewhere in the file are never touched.
+///
+/// **Security (issue #3926):** this function does NOT read the workspace's
+/// own `.mcp.json` — `trusted_mcp_names` is the FINAL, already-computed
+/// approval set the caller passes in, derived exclusively from provenance a
+/// cloned repo's committed `.mcp.json` cannot influence. Before this fix,
+/// `enabledMcpjsonServers` was derived from the raw key set of
+/// `<workspace>/.mcp.json` (see `mcp_config::mcp_server_names`'s SECURITY
+/// doc) filtered only by a narrow project-scope exclusion (issue #2739) — so
+/// ANY server name a cloned repo declared in its tracked `.mcp.json` was
+/// silently pre-approved and, on first `tm launch` in that clone, connected
+/// with the operator's credentials. The production call site
+/// (`session_launch::mod::prepare_session_inner`) now computes
+/// `trusted_mcp_names` via `mcp_config::launch_trusted_mcp_names()` (the
+/// framework builtin four, force-overwritten to their canonical entry every
+/// run, UNION the operator's own `tm mcp add` registry, also
+/// force-overwritten when it matches) MINUS any name bridged from a
+/// project-scope `[mcp.custom]` manifest entry this run (issue #2739's
+/// existing defense-in-depth: even a `tm project trust`-ed project's entries
+/// still surface Claude Code's consent dialog). A name merely present in
+/// `.mcp.json` that is in none of those provenance-safe sources now
+/// correctly falls through to that dialog instead of being silently
+/// approved. This mirrors, for the interactive path,
+/// `mcp_config::managed_mcp_server_names`'s already-fixed derivation for the
+/// daemon-managed path (issues #3918/#3924).
 /// Test: `preseed_trust_marks_directory`, `preseed_trust_preserves_other_keys`,
 /// `preseed_trust_is_idempotent`, `preseed_trust_leaves_malformed_file`,
-/// `preseed_trust_enables_mcp_servers_from_mcp_json`,
-/// `preseed_trust_enables_empty_when_no_mcp_json`,
-/// `preseed_trust_excludes_project_scope_names_from_approval`.
+/// `preseed_trust_enables_given_mcp_names`,
+/// `preseed_trust_enables_empty_when_no_names_given`, plus the full-pipeline
+/// regression coverage in `tests_mcp_trust_seed_e2e.rs`
+/// (`prepare_session_excludes_foreign_mcp_json_entry_from_trust_preseed`,
+/// `prepare_session_preseeds_enabled_mcp_servers`,
+/// `prepare_session_excludes_trusted_project_scope_custom_from_trust_preseed`).
 pub(super) fn preseed_workspace_trust(
     claude_json: &Path,
     workspace: &Path,
-    exclude_mcp_names: &BTreeSet<String>,
+    trusted_mcp_names: &BTreeSet<String>,
 ) -> Result<(), PrepError> {
     use serde_json::Value;
 
@@ -687,25 +705,22 @@ pub(super) fn preseed_workspace_trust(
     }
     let entry = entry.as_object_mut().expect("project entry is an object");
 
-    // Derive the set of MCP servers the project ships so we can pre-approve them
-    // (issue #1296), EXCLUDING any name in `exclude_mcp_names` (issue #2739
-    // follow-up security fix) — a project-scope custom MCP bridge target ships
-    // with the cloned repo, so it must still surface Claude Code's own "new
-    // MCP servers found" consent dialog rather than being silently
-    // pre-approved. Sorted (via `mcp_config::mcp_server_names`) for a deterministic,
-    // idempotency-friendly result.
+    // The approval list is exactly what the caller determined is
+    // provenance-safe (issue #3926) — never re-derived from the workspace's
+    // own `.mcp.json` here. `BTreeSet` iteration is already sorted, giving a
+    // deterministic, idempotency-friendly result.
     let enabled_mcp = Value::Array(
-        crate::core::mcp_config::mcp_server_names(workspace)
-            .into_iter()
-            .filter(|name| !exclude_mcp_names.contains(name))
+        trusted_mcp_names
+            .iter()
+            .cloned()
             .map(Value::String)
             .collect(),
     );
 
     // Idempotent: skip the write when trust is already fully accepted AND the MCP
-    // approval list already matches what `.mcp.json` declares. The latter check
-    // is essential — without it a second prep run (after `.mcp.json` gained the
-    // injected servers) would never persist `enabledMcpjsonServers`.
+    // approval list already matches `trusted_mcp_names`. The latter check is
+    // essential — without it a second prep run (after the injectors added more
+    // names) would never persist `enabledMcpjsonServers`.
     let already_trusted = entry.get("hasTrustDialogAccepted") == Some(&Value::Bool(true))
         && entry.get("hasCompletedProjectOnboarding") == Some(&Value::Bool(true))
         && entry.get("enabledMcpjsonServers") == Some(&enabled_mcp);
@@ -740,20 +755,20 @@ pub(super) fn preseed_workspace_trust(
 /// Why: thin home-resolving wrapper over [`preseed_workspace_trust`] so
 /// `prepare_session` can call it without knowing the config-dir layout; tests
 /// target a temp file via the inner function directly.
-/// What: resolves `~/.claude.json` and delegates, forwarding `exclude_mcp_names`
-/// unchanged (see [`preseed_workspace_trust`]'s doc — issue #2739 follow-up
-/// security fix). A missing home directory is a soft failure (logged,
-/// non-fatal) so launch still proceeds.
+/// What: resolves `~/.claude.json` and delegates, forwarding
+/// `trusted_mcp_names` unchanged (see [`preseed_workspace_trust`]'s doc —
+/// issue #3926 security fix). A missing home directory is a soft failure
+/// (logged, non-fatal) so launch still proceeds.
 /// Test: covered by the inner `preseed_trust_*` tests.
 pub(super) fn preseed_workspace_trust_home(
     workspace: &Path,
-    exclude_mcp_names: &BTreeSet<String>,
+    trusted_mcp_names: &BTreeSet<String>,
 ) -> Result<(), PrepError> {
     let Some(home) = dirs::home_dir() else {
         tracing::warn!("skipping trust pre-seed: home directory unresolved");
         return Ok(());
     };
-    preseed_workspace_trust(&home.join(".claude.json"), workspace, exclude_mcp_names)
+    preseed_workspace_trust(&home.join(".claude.json"), workspace, trusted_mcp_names)
 }
 
 /// Remove the `trusty-memory` hook entries from `~/.claude/settings.json`.

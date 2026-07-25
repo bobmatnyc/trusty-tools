@@ -9,6 +9,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`tm launch` no longer auto-trusts every MCP server name a repo's
+  committed `.mcp.json` declares** (closes [#3926](https://github.com/bobmatnyc/trusty-tools/issues/3926)):
+  `preseed_workspace_trust` derived `enabledMcpjsonServers` from the raw key
+  set of `<workspace>/.mcp.json` — content a cloned repo controls directly —
+  filtered only by a narrow project-scope-custom exclusion (#2739), so any
+  MCP server name a repository committed was silently pre-approved and
+  connected with the operator's credentials on the first `tm launch` in that
+  clone. It now derives from `mcp_config::launch_trusted_mcp_names` (the
+  framework builtin four, force-overwritten to their canonical entry every
+  run, UNION the operator's own `tm mcp add` registry), mirroring the
+  already-fixed daemon-managed-path derivation
+  (`managed_mcp_server_names`, [#3924](https://github.com/bobmatnyc/trusty-tools/pull/3924)/[#3918](https://github.com/bobmatnyc/trusty-tools/issues/3918)).
+  A name that reaches neither provenance-safe source now correctly falls
+  through to Claude Code's own "new MCP servers found" consent dialog instead
+  of being silently approved; project-scope `[mcp.custom]` entries remain
+  excluded from pre-approval even for a `tm project trust`-ed project,
+  unchanged from #2739's existing design. Originates from #1296/#2739.
+
 - **`/tm-session-pause` and `/tm-session-resume` now instruct the PM to load
   the deferred MCP tool before calling it** (closes [#3901](https://github.com/bobmatnyc/trusty-tools/issues/3901)):
   `session_context_pause`/`session_context_catchup` are always registered by

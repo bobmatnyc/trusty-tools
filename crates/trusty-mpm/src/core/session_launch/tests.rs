@@ -1370,23 +1370,22 @@ fn preseed_trust_leaves_malformed_file() {
 }
 
 #[test]
-fn preseed_trust_enables_mcp_servers_from_mcp_json() {
-    // Why (#1296): a spawned workspace ships a `.mcp.json` with multiple MCP
-    // servers; Claude Code shows a blocking "new MCP servers found" dialog
-    // unless the server names are pre-approved via `enabledMcpjsonServers` in
-    // the project entry. Seeding trust must also seed that approval list.
+fn preseed_trust_enables_given_mcp_names() {
+    // Why (#1296, re-scoped by #3926): `enabledMcpjsonServers` must be set to
+    // EXACTLY the caller-supplied `trusted_mcp_names` set — this function no
+    // longer reads the workspace's own `.mcp.json` (see its SECURITY doc:
+    // that file is git-tracked and a cloned repo controls its content, so it
+    // must never be the source of a trust decision). The caller
+    // (`session_launch::mod::prepare_session_inner`) is responsible for
+    // computing a provenance-safe set via `mcp_config::launch_trusted_mcp_names`.
     let tmp = tempdir().unwrap();
     let claude_json = tmp.path().join(".claude.json");
     let workspace = tmp.path().join("ws");
-    std::fs::create_dir_all(&workspace).unwrap();
-    // The project ships a `.mcp.json` with two servers.
-    std::fs::write(
-        workspace.join(".mcp.json"),
-        r#"{"mcpServers":{"trusty-search":{"command":"trusty-search"},"trusty-memory":{"command":"trusty-memory"}}}"#,
-    )
-    .unwrap();
+    let mut trusted = BTreeSet::new();
+    trusted.insert("trusty-memory".to_string());
+    trusted.insert("trusty-search".to_string());
 
-    preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("seed succeeds");
+    preseed_workspace_trust(&claude_json, &workspace, &trusted).expect("seed succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
@@ -1399,19 +1398,19 @@ fn preseed_trust_enables_mcp_servers_from_mcp_json() {
     assert_eq!(
         names,
         vec!["trusty-memory", "trusty-search"],
-        "all .mcp.json server names must be pre-approved"
+        "enabledMcpjsonServers must match the caller-supplied set exactly"
     );
 }
 
 #[test]
-fn preseed_trust_enables_empty_when_no_mcp_json() {
-    // Why (#1296): when the workspace has no `.mcp.json`, seeding must never
-    // crash; it writes an empty approval list so the key is present and Claude
-    // Code does not prompt.
+fn preseed_trust_enables_empty_when_no_names_given() {
+    // Why: an empty `trusted_mcp_names` set (e.g. the caller could resolve no
+    // provenance-safe names) must never crash; it writes an empty approval
+    // list so the key is present and Claude Code shows its normal per-server
+    // consent dialog rather than tm silently approving nothing-in-particular.
     let tmp = tempdir().unwrap();
     let claude_json = tmp.path().join(".claude.json");
     let workspace = tmp.path().join("ws");
-    std::fs::create_dir_all(&workspace).unwrap();
 
     preseed_workspace_trust(&claude_json, &workspace, &BTreeSet::new()).expect("seed succeeds");
 
@@ -1423,14 +1422,17 @@ fn preseed_trust_enables_empty_when_no_mcp_json() {
         .expect("enabledMcpjsonServers is an array");
     assert!(
         enabled.is_empty(),
-        "no .mcp.json yields an empty approval list, not a crash"
+        "an empty trusted-names set yields an empty approval list, not a crash"
     );
 }
 
-// `preseed_trust_excludes_project_scope_names_from_approval` (issue #2739
-// follow-up security fix) lives in `native_mcp_tests.rs` instead of here to
-// stay under this file's 1500-SLOC test cap; it exercises the same
-// `preseed_workspace_trust` imported above.
+// The project-scope-exclusion regression (issue #2739's defense-in-depth,
+// preserved by the #3926 fix) is now covered end-to-end, through the REAL
+// `prepare_session_inner` pipeline, by
+// `prepare_session_excludes_trusted_project_scope_custom_from_trust_preseed`
+// in `tests_mcp_trust_seed_e2e.rs` — a stronger guarantee than unit-testing
+// `preseed_workspace_trust`'s pass-through in isolation, since the exclusion
+// set is now computed by the caller, not this function.
 
 #[test]
 #[serial_test::serial]
@@ -1463,9 +1465,7 @@ fn prepare_session_preseeds_enabled_mcp_servers() {
 
     // prepare_session seeds `tmp_home/.claude.json` (the temp home, via the
     // `$HOME` override above) via preseed_workspace_trust_home — NOT the
-    // operator's real `~/.claude.json` — so re-derive the per-workspace
-    // approval list by reading .mcp.json directly and asserting both injected
-    // servers landed.
+    // operator's real `~/.claude.json`.
     let mcp: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
     let servers = mcp["mcpServers"].as_object().expect("mcpServers object");
@@ -1474,10 +1474,15 @@ fn prepare_session_preseeds_enabled_mcp_servers() {
     assert!(servers.contains_key("trusty-mpm"));
     assert!(servers.contains_key("trusty-review"));
 
-    // Seed an isolated ~/.claude.json to assert the approval list is derived
-    // from the now-populated .mcp.json.
-    let claude_json = tmp_home.path().join(".claude-iso.json");
-    preseed_workspace_trust(&claude_json, project, &BTreeSet::new()).expect("seed succeeds");
+    // Read the REAL `tmp_home/.claude.json` `prepare_session` itself wrote
+    // (issue #3926: the approval list is now derived from
+    // `mcp_config::launch_trusted_mcp_names` — the framework builtin four
+    // UNION the operator's `tm mcp add` registry — NOT by re-reading
+    // `.mcp.json`, so there is nothing left to "re-derive" here; asserting
+    // directly against the file `prepare_session` produced is the faithful
+    // end-to-end check). `tmp_home` has no `tm mcp add` registry, so exactly
+    // the builtin four are expected.
+    let claude_json = tmp_home.path().join(".claude.json");
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
     let key = project.to_string_lossy().to_string();
