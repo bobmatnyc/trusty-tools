@@ -82,7 +82,13 @@ pub fn scan(
     let chunk_chars = chunk_chars.max(1_000);
 
     let mut outcome = ScanOutcome::default();
+    // `follow_links(false)` is WalkDir's default, but it is pinned here because
+    // it is LOAD-BEARING for confinement: `DocStorePolicy` authorises the root,
+    // and this is what stops a symlink INSIDE that root from walking the scan
+    // back out to `~/.ssh` or `/etc`. A refactor that flipped it would silently
+    // reopen the hole the policy exists to close.
     let walker = WalkDir::new(dir)
+        .follow_links(false)
         .max_depth(if recursive { usize::MAX } else { 1 })
         .sort_by_file_name();
 

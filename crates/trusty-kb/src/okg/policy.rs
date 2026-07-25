@@ -16,14 +16,29 @@
 //!
 //! What: [`DocStorePolicy`] holds allow-list roots. [`DocStorePolicy::permit`]
 //! canonicalises a candidate directory, requires it to sit under one of those
-//! roots, and then rejects any hidden segment BELOW the matched root — that one
-//! rule covers `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, and
-//! `~/.trusty-agents` itself without enumerating them, and it fails closed for
-//! the dotfile dirs nobody has invented yet. It is scoped below the root rather
-//! than applied to the whole path so an operator who explicitly configures a
-//! hidden root (`~/.local/share/corpus`) is taken at their word. The roots are
-//! configuration, not a hardcoded list: real corpora live in arbitrary places
+//! roots, and then rejects any HIDDEN segment below the matched root. "Hidden"
+//! means three things, because one platform's convention is not another's: a
+//! dot-prefix (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
+//! `~/.trusty-agents`), the `UF_HIDDEN` file flag (macOS marks `~/Library` this
+//! way — it is NOT dot-prefixed, yet holds `Application Support/<App>` tokens,
+//! `Keychains`, and `Preferences`), and a small name backstop for when the flag
+//! is absent. Together they fail closed for the credential dirs nobody has
+//! invented yet, without enumerating the ones that exist. The check is scoped
+//! below the root rather than applied to the whole path so an operator who
+//! explicitly configures a hidden root (`~/.local/share/corpus`, or even a
+//! directory inside `~/Library`) is taken at their word — explicit
+//! configuration beats the default heuristic. The roots are configuration, not
+//! a hardcoded list: real corpora live in arbitrary places
 //! (`~/Duetto/cto-resources`), so an operator must be able to extend them.
+//!
+//! Known limits, accepted deliberately:
+//!   - Loose non-hidden files sitting directly in `$HOME` (`~/private_key.pem`)
+//!     are still reachable under the DEFAULT policy. That is inherent to
+//!     defaulting to `$HOME` at all; an operator wanting a tighter boundary
+//!     narrows `docstore_roots` to the specific corpus directories.
+//!   - This gate authorises a ROOT. Per-file symlink safety during the walk is
+//!     `WalkDir`'s `follow_links(false)`, pinned explicitly in
+//!     [`crate::okg::docstore::scan`] so a refactor cannot silently flip it.
 //!
 //! Test: `home_default_permits_ordinary_dir`, `ssh_style_dotdir_is_rejected`,
 //! `outside_allow_list_is_rejected`, `symlink_escape_is_rejected`,
@@ -109,11 +124,11 @@ impl DocStorePolicy {
         // and on macOS even a plain temp dir lives under a dot-named path. And
         // it runs on the RESOLVED path, so a symlink from `~/Documents/keys`
         // into `~/.ssh` is still caught.
-        let relative = resolved.strip_prefix(&matched).unwrap_or(Path::new(""));
-        if let Some(dot) = first_dot_segment(relative) {
+        if let Some(hidden) = hidden_segment_below(&matched, &resolved) {
             anyhow::bail!(
-                "doc store {} is not ingestible: it lies inside the hidden directory {dot:?}, \
-                 which is excluded because such paths hold credentials and tool state",
+                "doc store {} is not ingestible: it lies inside the hidden directory {hidden:?}, \
+                 which is excluded because such paths hold credentials and tool state — \
+                 name it directly in [okg] docstore_roots if you really intend to ingest it",
                 resolved.display()
             );
         }
@@ -121,15 +136,74 @@ impl DocStorePolicy {
     }
 }
 
-/// The first path component that begins with `.` (ignoring `/` and `..`).
-fn first_dot_segment(path: &Path) -> Option<String> {
-    path.components().find_map(|c| match c {
-        Component::Normal(part) => {
-            let s = part.to_string_lossy();
-            s.starts_with('.').then(|| s.to_string())
+/// Segment names excluded by name on every platform.
+///
+/// Why: `~/Library` is the macOS equivalent of the dotfile directories — it
+/// holds `Application Support/<App>/*.json` tokens, `Keychains`, `Preferences`,
+/// and `Logs` — but it is NOT dot-prefixed; Finder hides it with the `UF_HIDDEN`
+/// file flag instead. A dot-only rule therefore left every per-app credential
+/// file under the default `$HOME` policy readable, and `.json`/`.log`/`.toml`
+/// are all in `DEFAULT_EXTENSIONS`. The flag check below catches this properly,
+/// but it is a filesystem query that can be defeated (a restored-from-backup or
+/// synced home may not carry the flag), so the name is also refused outright as
+/// a backstop. Cross-platform rather than macOS-gated: `Library` is not a
+/// conventional corpus directory anywhere, and keeping one rule everywhere makes
+/// the behaviour testable on every CI runner instead of only on macOS.
+const EXCLUDED_SEGMENT_NAMES: &[&str] = &["Library"];
+
+/// The first excluded segment BELOW `root`, if any.
+///
+/// Why: three rules, one walk — dot-prefix, the name backstop, and the
+/// platform hidden flag. Walking segment by segment (rather than testing only
+/// the leaf) means a corpus nested deep under a hidden ancestor is still
+/// refused.
+/// Test: `ssh_style_dotdir_is_rejected`, `macos_library_is_rejected`,
+/// `platform_hidden_flag_is_rejected`.
+fn hidden_segment_below(root: &Path, resolved: &Path) -> Option<String> {
+    let relative = resolved.strip_prefix(root).ok()?;
+    let mut probe = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            continue;
+        };
+        probe.push(part);
+        let name = part.to_string_lossy().to_string();
+        if name.starts_with('.') {
+            return Some(name);
         }
-        _ => None,
-    })
+        if EXCLUDED_SEGMENT_NAMES
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(&name))
+        {
+            return Some(name);
+        }
+        if is_platform_hidden(&probe) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Whether the OS marks this path hidden by a file flag rather than by name.
+///
+/// macOS sets `UF_HIDDEN` on `~/Library` and friends. Checking the real flag
+/// generalises past the hardcoded name list to anything else the user or an
+/// installer has hidden.
+#[cfg(target_os = "macos")]
+fn is_platform_hidden(path: &Path) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    /// `UF_HIDDEN` from `<sys/stat.h>` — "hint that this item should not be displayed".
+    const UF_HIDDEN: u32 = 0x0000_8000;
+    std::fs::metadata(path)
+        .map(|m| m.st_flags() & UF_HIDDEN != 0)
+        .unwrap_or(false)
+}
+
+/// Non-macOS platforms have no equivalent flag; the dot-prefix and name rules
+/// carry the whole exclusion there.
+#[cfg(not(target_os = "macos"))]
+fn is_platform_hidden(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -180,6 +254,108 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    /// Why: code-critic CRITICAL — `~/Library` is macOS's credential and
+    /// app-state tree (`Application Support/<App>/*.json` tokens, `Keychains`,
+    /// `Preferences`, `Logs`) but it is NOT dot-prefixed, so the original
+    /// dot-only rule PERMITTED all of it under the default `$HOME` policy —
+    /// and `.json`/`.log`/`.toml` are all in `DEFAULT_EXTENSIONS`. Every prior
+    /// fixture was dot-prefixed, so nothing caught it.
+    /// What: asserts the three real-world shapes are refused by name, on every
+    /// platform, at any nesting depth.
+    /// Test: self-contained.
+    #[test]
+    fn macos_library_is_rejected() {
+        let (_t, home) = home();
+        let policy = DocStorePolicy::home_default(&home);
+
+        for relative in [
+            "Library",
+            "Library/Application Support/SomeApp",
+            "Library/Keychains",
+            "Library/Preferences",
+            "Library/Logs",
+        ] {
+            let path = home.join(relative);
+            std::fs::create_dir_all(&path).unwrap();
+            let err = policy
+                .permit(&path)
+                .expect_err(&format!("{relative} must not be ingestible"));
+            assert!(
+                err.to_string().contains("hidden directory"),
+                "unexpected error for {relative}: {err}"
+            );
+        }
+    }
+
+    /// Why: explicit configuration must still beat the heuristic — an operator
+    /// who names a directory inside `~/Library` in `docstore_roots` has opted
+    /// in deliberately, consistent with how a configured `~/.local/...` root
+    /// already behaves.
+    /// What: configures a root INSIDE Library and asserts it is permitted while
+    /// its siblings under the plain `$HOME` root are still refused.
+    /// Test: self-contained.
+    #[test]
+    fn explicitly_configured_library_root_is_permitted() {
+        let (_t, home) = home();
+        let corpus = home.join("Library/Application Support/MyCorpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        let secrets = home.join("Library/Application Support/SomeApp");
+        std::fs::create_dir_all(&secrets).unwrap();
+
+        // Home alone: the corpus is refused along with everything else there.
+        assert!(DocStorePolicy::home_default(&home).permit(&corpus).is_err());
+
+        // Named directly: permitted, because the operator said so.
+        let policy = DocStorePolicy::new(vec![home.clone(), corpus.clone()]);
+        assert_eq!(
+            policy.permit(&corpus).unwrap(),
+            corpus,
+            "an explicitly configured root inside Library must still work"
+        );
+        assert!(
+            policy.permit(&secrets).is_err(),
+            "opting one directory in must not open the rest of Library"
+        );
+    }
+
+    /// Why: the name backstop only covers `Library`. The real generalisation is
+    /// the `UF_HIDDEN` flag, which covers anything else the user or an installer
+    /// has hidden — so the flag path needs its own coverage, independent of the
+    /// name list.
+    /// What: creates an ordinarily-named directory, sets `UF_HIDDEN` via
+    /// `chflags`, and asserts it becomes non-ingestible. macOS-only: no other
+    /// supported platform has the flag, and `is_platform_hidden` is compiled to
+    /// a constant `false` there.
+    /// Test: self-contained.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn platform_hidden_flag_is_rejected() {
+        let (_t, home) = home();
+        let policy = DocStorePolicy::home_default(&home);
+        let dir = home.join("Vault");
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+
+        // Ordinary name, no flag → permitted.
+        assert!(policy.permit(&dir).is_ok(), "control case must pass");
+
+        let ok = std::process::Command::new("/usr/bin/chflags")
+            .arg("hidden")
+            .arg(&dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(ok, "chflags must succeed for this test to mean anything");
+
+        assert!(
+            policy.permit(&dir).is_err(),
+            "a UF_HIDDEN directory must not be ingestible"
+        );
+        assert!(
+            policy.permit(&dir.join("inner")).is_err(),
+            "nor anything beneath it"
+        );
     }
 
     /// Why: paths outside the allow-list entirely — `/etc`, `/` — are the other
