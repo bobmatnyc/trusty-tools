@@ -75,6 +75,20 @@ pub const MOCK_LLM_ECHO_SEARCH: &str = "echo-search";
 /// `SoakEchoLlmClient`'s docs for why it ends every call in a bare `stop`.
 pub const MOCK_LLM_ECHO_SOAK: &str = "echo-soak";
 
+/// The `TCODE_MOCK_LLM` value that selects [`SoakLoadEchoLlmClient`] (epic
+/// #3866's load-realistic follow-up soak).
+///
+/// Why: [`MOCK_LLM_ECHO_SOAK`]'s own soak (PR #3887, issue #3869) proved the
+/// cadence mechanism functions but — per that soak's own report — never
+/// stressed the 60%-working-context-floor boundary: five of its six
+/// per-call turns carry near-empty arguments. This variant carries a
+/// realistically-sized payload (approximating a `git diff`/`grep`/`cargo
+/// test`-log dump) on every `set_goal` turn instead, so a single `task.run`
+/// call's turns actually approach/exceed the default overhead cap. Same
+/// resumable-`stop`-ending shape and reuse rationale as
+/// [`MOCK_LLM_ECHO_SOAK`] — see [`SoakLoadEchoLlmClient`]'s module docs.
+pub const MOCK_LLM_ECHO_SOAK_LOAD: &str = "echo-soak-load";
+
 /// Build the `Arc<dyn LlmClientTrait>` `task.run` executions share.
 ///
 /// Why: the single seam that decides "real model or offline mock" — kept
@@ -104,6 +118,7 @@ pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
         Some(MOCK_LLM_ECHO_RECALL) => return Ok(Arc::new(RecallEchoLlmClient::new())),
         Some(MOCK_LLM_ECHO_SEARCH) => return Ok(Arc::new(SearchEchoLlmClient::new())),
         Some(MOCK_LLM_ECHO_SOAK) => return Ok(Arc::new(SoakEchoLlmClient::new())),
+        Some(MOCK_LLM_ECHO_SOAK_LOAD) => return Ok(Arc::new(SoakLoadEchoLlmClient::new())),
         _ => {}
     }
     Ok(Arc::new(DispatchingLlmClient::new()))
@@ -535,6 +550,13 @@ fn search_code_response() -> Value {
 #[path = "mock_llm_soak.rs"]
 mod mock_llm_soak;
 pub use mock_llm_soak::SoakEchoLlmClient;
+
+/// [`SoakLoadEchoLlmClient`] (epic #3866 load-realistic follow-up soak),
+/// split into its own file for the same 500-SLOC-cap reason as
+/// `mock_llm_soak` above.
+#[path = "mock_llm_soak_load.rs"]
+mod mock_llm_soak_load;
+pub use mock_llm_soak_load::SoakLoadEchoLlmClient;
 
 /// Serializes every test in this crate that sets/reads the process-wide
 /// [`MOCK_LLM_ENV`] var — `cargo test` runs tests in parallel within one

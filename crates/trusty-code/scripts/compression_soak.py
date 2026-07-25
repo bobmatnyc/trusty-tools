@@ -86,9 +86,15 @@ def build_project_fixture(root: Path) -> None:
     (agents_dir / "pm.md").write_text(PM_AGENT_MD, encoding="utf-8")
 
 
-def spawn_daemon(tcode_bin: Path, project: Path, data_dir: Path) -> tuple[subprocess.Popen, str]:
+def spawn_daemon(
+    tcode_bin: Path, project: Path, data_dir: Path, mock_llm: str = "echo-soak"
+) -> tuple[subprocess.Popen, str]:
     """Spawn `tcode serve --http --port 0` and discover its bound address
     from stderr, mirroring `tests/support/mod.rs::spawn_http_daemon_with_env`.
+
+    `mock_llm` selects the `TCODE_MOCK_LLM` scripted client (default
+    `echo-soak`; `compression_load_soak.py` passes `echo-soak-load` — see
+    that script's docs for why a load-realistic variant exists).
     """
     proc = subprocess.Popen(
         [str(tcode_bin), "serve", "--project", str(project), "--http", "--port", "0"],
@@ -96,7 +102,7 @@ def spawn_daemon(tcode_bin: Path, project: Path, data_dir: Path) -> tuple[subpro
         stderr=subprocess.PIPE,
         text=True,
         env={
-            "TCODE_MOCK_LLM": "echo-soak",
+            "TCODE_MOCK_LLM": mock_llm,
             "TCODE_TELEMETRY_DATA_DIR": str(data_dir),
             "PATH": _inherited_path(),
             "HOME": str(Path.home()),
