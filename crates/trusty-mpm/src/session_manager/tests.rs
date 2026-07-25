@@ -94,6 +94,13 @@ pub struct FakeTmuxDriver {
     /// Names to report from `attached_session_names` (seed to simulate a
     /// client being attached to a session for `tm ls` reconciliation tests).
     pub attached_names: Mutex<Vec<String>>,
+    /// Count of `ensure_server_up` calls (#3823) — asserts the
+    /// server-up guard actually ran, and exactly once per create/resume.
+    pub ensure_server_up_calls: Mutex<u32>,
+    /// When `true`, `ensure_server_up` fails with `TmuxUnavailable` —
+    /// simulates a machine where tmux has never run and the server cannot be
+    /// started (#3823).
+    pub ensure_server_up_should_fail: Mutex<bool>,
 }
 
 impl FakeTmuxDriver {
@@ -116,11 +123,25 @@ impl FakeTmuxDriver {
             pane_capture_calls: Mutex::new(Vec::new()),
             rename_calls: Mutex::new(Vec::new()),
             attached_names: Mutex::new(Vec::new()),
+            ensure_server_up_calls: Mutex::new(0),
+            ensure_server_up_should_fail: Mutex::new(false),
         })
     }
 }
 
 impl ManagedTmuxDriver for FakeTmuxDriver {
+    /// Records the call and optionally fails, simulating a fresh machine
+    /// where the tmux server cannot be started (#3823).
+    fn ensure_server_up(&self) -> Result<(), ManagedError> {
+        *self.ensure_server_up_calls.lock().unwrap() += 1;
+        if *self.ensure_server_up_should_fail.lock().unwrap() {
+            return Err(ManagedError::TmuxUnavailable(
+                "fake: tmux server absent and could not be started".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError> {
         self.sessions
             .lock()

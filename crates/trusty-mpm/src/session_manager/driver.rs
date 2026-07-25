@@ -22,6 +22,36 @@ use super::manager::ManagedError;
 /// pane output, list session names, and probe existence.
 /// Test: `FakeTmuxDriver` in `manager.rs`'s test section (`tests.rs`).
 pub trait ManagedTmuxDriver: Send + Sync {
+    /// Confirm the tmux SERVER exists (starting it if necessary) before any
+    /// OTHER tmux call in this driver relies on it (#3823).
+    ///
+    /// Why: on a machine where tmux has never run, the very FIRST tmux call a
+    /// session-creation/resume flow issues is a `list-sessions` probe
+    /// (`SessionManager::resolve_session_name`/`dedupe_session_name`'s
+    /// name-collision checks, `SessionManager::resume`'s
+    /// `session_exists`/`ensure_pane_alive` checks) — well before the
+    /// #3386/#3722 `create_managed_session` choke point (which already
+    /// guarantees server-up, but only for the `set-option -g`/`new-session`
+    /// sequence it directly issues) is ever reached. Without an explicit
+    /// guard here, that first `list-sessions` fails on the missing socket and
+    /// the whole flow 500s instead of transparently starting tmux.
+    /// What: the default is `Ok(())` — a safe no-op for every test double
+    /// (`FakeTmuxDriver`, `FakeNoopTmuxDriver`) and the `NoopTmuxDriver`
+    /// tmux-absent fallback, none of which spawn a real tmux process.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides this to call
+    /// [`crate::daemon::tmux::TmuxDriver::ensure_server_up`], which retries
+    /// `tmux start-server` with backoff via
+    /// [`crate::core::tmux::ensure_server_up`] (the same #3722 primitive
+    /// `create_managed_session` uses).
+    /// Test: `RealTmuxDriver`'s override is covered by
+    /// `ensure_server_up_starts_server_before_list_sessions` in
+    /// `session_manager::create_tests` (drives a scripted fake `tmux`
+    /// binary); the trait default is exercised transitively by every
+    /// `FakeTmuxDriver`-backed manager test (never errors).
+    fn ensure_server_up(&self) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
     /// Create a detached tmux session named `name`, rooted at `workdir`.
     fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError>;
 

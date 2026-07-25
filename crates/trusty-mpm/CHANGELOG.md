@@ -5,6 +5,13 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **`tm sessions new`/`tm resume` no longer 500 on a machine where tmux has never run** (closes [#3823](https://github.com/bobmatnyc/trusty-tools/issues/3823)): session creation's FIRST tmux call was a raw `list-sessions` probe (`SessionManager::resolve_session_name`/`dedupe_session_name`'s name-collision checks — issued well before the #3386/#3722 `create_managed_session` choke point, which already guaranteed server-up but only for its own `set-option -g`/`new-session` sequence), so a fresh socket directory's "No such file or directory" error propagated straight to the caller as `TmuxUnavailable` instead of transparently starting the server. Added `ManagedTmuxDriver::ensure_server_up` (default no-op for test doubles; `RealTmuxDriver` delegates to the new `TmuxDriver::ensure_server_up`, which reuses the existing retried-with-backoff `core::tmux::ensure_server_up` primitive) and call it at the top of `SessionManager::create_with_id`, `create_with_reserved_name`, and `resume` — before any other tmux call in those flows.
+
+---
 ## [1.0.1] - 2026-07-24
 
 ### Fixed

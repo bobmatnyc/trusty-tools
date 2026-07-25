@@ -69,6 +69,14 @@ impl SessionManager {
         ephemeral: bool,
         owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
+        // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
+        // this flow issues (`resolve_session_name`'s name-collision
+        // `list-sessions` probe, below) — on a machine where tmux has never
+        // run, that probe is what used to 500 the whole create, long before
+        // the #3386/#3722 choke point in `create_with_resolved_name` would
+        // have started it.
+        self.tmux.ensure_server_up()?;
+
         // Never run (and therefore never recursively watch/scan) a managed
         // session in `$HOME` or a TCC-protected folder — that triggers a cascade
         // of macOS "trusty-mpm would like to access …" folder prompts (#2758).
@@ -133,6 +141,11 @@ impl SessionManager {
         ephemeral: bool,
         owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
+        // #3823: same server-up guarantee as `create_with_id` — this path's
+        // first tmux call is `create_with_resolved_name`'s
+        // `dedupe_session_name`, which also issues a raw `list-sessions`.
+        self.tmux.ensure_server_up()?;
+
         // Never run (and therefore never recursively watch/scan) a managed
         // session in `$HOME` or a TCC-protected folder — that triggers a cascade
         // of macOS "trusty-mpm would like to access …" folder prompts (#2758).
