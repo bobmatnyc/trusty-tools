@@ -4,14 +4,18 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { get } from 'svelte/store';
 import {
   closeConfigPane,
+  configExitIntent,
+  configPaneDirty,
   configPaneOpen,
   isConfigExitKey,
   openConfigPane,
+  requestExitConfigPane,
   toggleConfigPane,
 } from './configPane';
 
 beforeEach(() => {
   closeConfigPane();
+  configPaneDirty.set(false);
 });
 
 describe('configPaneOpen', () => {
@@ -58,5 +62,43 @@ describe('isConfigExitKey', () => {
     expect(isConfigExitKey(key('Escape', { metaKey: true }))).toBe(false);
     expect(isConfigExitKey(key('Escape', { ctrlKey: true }))).toBe(false);
     expect(isConfigExitKey(key('Escape', { altKey: true }))).toBe(false);
+  });
+});
+
+describe('requestExitConfigPane (code-critic HIGH-1: no silent discard)', () => {
+  it('closes immediately when the panel has nothing unsaved', () => {
+    openConfigPane();
+    const intentBefore = get(configExitIntent);
+
+    expect(requestExitConfigPane()).toBe(true);
+    expect(get(configPaneOpen)).toBe(false);
+    // Nothing to confirm, so the panel is never asked.
+    expect(get(configExitIntent)).toBe(intentBefore);
+  });
+
+  it('refuses to close a dirty panel and raises the confirm instead', () => {
+    openConfigPane();
+    configPaneDirty.set(true);
+    const intentBefore = get(configExitIntent);
+
+    expect(requestExitConfigPane()).toBe(false);
+    expect(get(configPaneOpen)).toBe(true);
+    expect(get(configExitIntent)).toBe(intentBefore + 1);
+  });
+
+  it('every repeated request raises a fresh intent so a re-press is not swallowed', () => {
+    openConfigPane();
+    configPaneDirty.set(true);
+    const intentBefore = get(configExitIntent);
+
+    requestExitConfigPane();
+    requestExitConfigPane();
+    expect(get(configExitIntent)).toBe(intentBefore + 2);
+  });
+
+  it('is a no-op that reports success when the pane is already closed', () => {
+    configPaneDirty.set(true); // stale flag must not resurrect a closed pane
+    expect(requestExitConfigPane()).toBe(true);
+    expect(get(configPaneOpen)).toBe(false);
   });
 });

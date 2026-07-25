@@ -15,7 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import { mount, unmount } from 'svelte';
 import ChatPane from './ChatPane.svelte';
-import { closeConfigPane, configPaneOpen } from '../stores/configPane';
+import { closeConfigPane, configPaneDirty, configPaneOpen } from '../stores/configPane';
+import { activeAgentId, activeProjectId, addMessage } from '../stores/app';
 
 let target: HTMLDivElement;
 let instance: Record<string, unknown> | null = null;
@@ -76,6 +77,8 @@ function pressEscape() {
 
 beforeEach(() => {
   closeConfigPane();
+  configPaneDirty.set(false);
+  activeAgentId.set(null);
   stubApi();
   target = document.createElement('div');
   document.body.appendChild(target);
@@ -184,5 +187,155 @@ describe('ChatPane — agent configuration takeover (#3894)', () => {
     pressEscape();
     await waitFor(() => takeover() === null);
     expect(gearButton().getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #3895 code-critic follow-ups. Each block pins one HIGH finding.
+// ---------------------------------------------------------------------------
+
+const editor = () =>
+  target.querySelector('[data-instructions-editor]') as HTMLTextAreaElement | null;
+const confirmDialog = () => target.querySelector('[role="alertdialog"]');
+const button = (label: string) =>
+  Array.from(target.querySelectorAll('button')).find((b) =>
+    b.textContent?.trim().includes(label),
+  ) as HTMLButtonElement;
+
+/** Opens the takeover and dirties the Personality editor. */
+async function openAndDirty(text = 'a half-finished system prompt') {
+  gearButton().click();
+  await waitFor(() => (editor()?.value.length ?? 0) > 0);
+  const el = editor() as HTMLTextAreaElement;
+  el.value = text;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  await waitFor(() => get(configPaneDirty));
+}
+
+describe('ChatPane — unsaved edits are never discarded silently (HIGH-1)', () => {
+  it('Esc on a dirty panel confirms instead of closing', async () => {
+    await openAndDirty();
+
+    pressEscape();
+    await waitFor(() => confirmDialog() !== null);
+
+    expect(takeover()).not.toBeNull();
+    expect(get(configPaneOpen)).toBe(true);
+    expect(editor()?.value).toBe('a half-finished system prompt');
+  });
+
+  it('Back and Close on a dirty panel confirm instead of closing', async () => {
+    await openAndDirty();
+
+    button('Back to chat').click();
+    await waitFor(() => confirmDialog() !== null);
+    expect(get(configPaneOpen)).toBe(true);
+
+    button('Keep editing').click();
+    await waitFor(() => confirmDialog() === null);
+
+    (target.querySelector('[aria-label="Close agent configuration"]') as HTMLButtonElement).click();
+    await waitFor(() => confirmDialog() !== null);
+    expect(get(configPaneOpen)).toBe(true);
+  });
+
+  it('"Keep editing" returns to the panel with the edit intact', async () => {
+    await openAndDirty();
+    pressEscape();
+    await waitFor(() => confirmDialog() !== null);
+
+    button('Keep editing').click();
+    await waitFor(() => confirmDialog() === null);
+
+    expect(takeover()).not.toBeNull();
+    expect(editor()?.value).toBe('a half-finished system prompt');
+  });
+
+  it('"Discard changes" is the only path that throws the edit away', async () => {
+    await openAndDirty();
+    pressEscape();
+    await waitFor(() => confirmDialog() !== null);
+
+    button('Discard changes').click();
+    await waitFor(() => takeover() === null);
+
+    expect(get(configPaneOpen)).toBe(false);
+    expect(get(configPaneDirty)).toBe(false);
+  });
+
+  it('"Save and close" persists the edit before leaving', async () => {
+    await openAndDirty('saved before exit');
+    pressEscape();
+    await waitFor(() => confirmDialog() !== null);
+
+    button('Save and close').click();
+    await waitFor(() => takeover() === null);
+
+    const patch = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => (c[1] as RequestInit | undefined)?.method === 'PATCH',
+    );
+    expect(patch).toBeDefined();
+    expect(JSON.parse(String((patch![1] as RequestInit).body))).toEqual({
+      personality: 'saved before exit',
+    });
+    expect(get(configPaneOpen)).toBe(false);
+  });
+
+  it('a clean panel still exits on the first press — the guard is not a nag', async () => {
+    gearButton().click();
+    await waitFor(() => takeover() !== null);
+
+    pressEscape();
+    await waitFor(() => takeover() === null);
+    expect(confirmDialog()).toBeNull();
+  });
+});
+
+describe('ChatPane — the configured agent is pinned at open time (HIGH-2)', () => {
+  it('a background agent switch cannot retarget the open panel or discard its edits', async () => {
+    await openAndDirty('edits for the pinned agent');
+    expect(target.querySelector('header')?.textContent).toContain('Concierge');
+
+    // The Sidebar's resume-workstream flow does exactly this while the
+    // takeover is up — it lives outside the inert chat.
+    activeAgentId.set('izzie');
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(target.querySelector('header')?.textContent).toContain('Concierge');
+    expect(editor()?.value).toBe('edits for the pinned agent');
+    // No refetch was triggered for the other agent.
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(calls.some((u) => u.includes('/api/agents/izzie'))).toBe(false);
+  });
+});
+
+describe('ChatPane — a covered chat keeps its scroll offset (HIGH-3)', () => {
+  it('a message arriving while the takeover is open leaves the scrolled-up chat where it was', async () => {
+    const scroller = target.querySelector('[data-chat-scroll]') as HTMLElement;
+    // jsdom does no layout, so give the container real metrics: 1000px of
+    // content in a 200px window, parked 100px from the top (i.e. scrolled up
+    // to read history — decidedly NOT pinned to the bottom).
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 200, configurable: true });
+    Object.defineProperty(scroller, 'scrollTop', { value: 100, writable: true, configurable: true });
+    scroller.dispatchEvent(new Event('scroll'));
+
+    gearButton().click();
+    await waitFor(() => takeover() !== null);
+
+    // An SSE delta landing mid-configuration.
+    addMessage(get(activeProjectId), {
+      id: 'm-while-covered',
+      role: 'assistant',
+      content: 'a reply that arrived while you were configuring',
+      timestamp: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(scroller.scrollTop).toBe(100);
+
+    pressEscape();
+    await waitFor(() => takeover() === null);
+    expect(scroller.scrollTop).toBe(100);
   });
 });

@@ -20,7 +20,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (unmodified only, so platform chords like Cmd+Esc are left alone); switching
   to the Events tab also drops the takeover. Every existing section — OKG
   Stores, Tools, Permissions, Listeners scaffolding, and the per-section save
-  flow — is unchanged.
+  flow — is unchanged. Unsaved Personality/Tools edits are never discarded
+  silently: every exit path (Esc, Back, Close, and the Chat→Events tab switch)
+  stops on a confirm offering Save and close / Discard / Keep editing. The
+  agent being configured is pinned when the takeover opens, so a background
+  agent switch (the Sidebar's resume-workstream flow) can no longer retarget an
+  open panel or throw away what is typed in it.
 
 - **Live OKG store bindings — the FIRST leg of the agent-config triple
   (#3816, DOC-54 SPEC-AGENTS-04 §5.1):** `agent.toml` gains `[[stores]]`,
@@ -112,7 +117,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   remaining pixel (`flex-1`/`min-h-0`, no `rows`, no viewport clamp) and is the
   only scroll container in its tab, so there are no nested double scrollbars.
   Measured in a real browser: 26 visible lines at a 900px viewport, 52 at
-  1400px. The Tools allowlist textarea gets the same treatment.
+  1400px. The Tools allowlist textarea gets the same treatment, and a
+  Playwright spec (`ui/tests/config-takeover.spec.ts`) now measures the
+  rendered height at two viewports so a third regression cannot ship quietly.
+- **Chat no longer yanks you back to the newest message.** `ChatView` forced
+  `scrollTop = scrollHeight` after every render, so a streaming delta pulled a
+  reader who had scrolled up back to the bottom — and reset the scroll offset
+  of the chat sitting behind the config takeover, which is supposed to be left
+  exactly as it was. It now re-anchors only while the reader is already at the
+  bottom (`lib/chatScroll.ts`).
 - **Bulk backfills are bounded and resumable.** `max_messages`/`max_files` were
   taken from the model with no ceiling, and every fetched item accumulated in
   memory with the ledger committed only after the whole batch — so a large pull

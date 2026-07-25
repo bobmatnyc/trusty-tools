@@ -15,10 +15,55 @@
 // config pane, which falls out for free when there is only one source).
 // Test: `configPane.test.ts`.
 
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 
 /** True while the agent-configuration surface has taken over the pane. */
 export const configPaneOpen = writable(false);
+
+/**
+ * Why (PR #3895 code-critic HIGH-1): Esc is habitual while editing text, and
+ * the config surface holds long, hand-written system prompts. Every exit path
+ * — Esc, Back, Close, and leaving the Chat tab — must therefore consult
+ * whether the open panel has unsaved Personality/Tools edits before it
+ * unmounts, or the takeover becomes a fresh data-loss path. The dirty bit is
+ * published here (rather than kept private to `AgentConfigPanel`) because two
+ * of those exit paths originate OUTSIDE the panel and need the answer
+ * synchronously.
+ * What: Mirrors `personalityDirty || toolsDirty`. Written by the panel while
+ * it is mounted, cleared on its destroy.
+ * Test: `ChatPane.test.ts` — every exit path with a dirty editor.
+ */
+export const configPaneDirty = writable(false);
+
+/**
+ * Why: a dirty exit has to be resolved by the panel (only it can save, and
+ * only it knows which section is dirty), but the request can come from
+ * anywhere. A monotonic nonce is the smallest thing that carries "someone
+ * asked to leave" to a component without the store needing a handle on it.
+ * What: Incremented by `requestExitConfigPane` when the pane is dirty; the
+ * panel watches for a change and raises its confirm-before-discard prompt.
+ */
+export const configExitIntent = writable(0);
+
+/**
+ * Why: the single entry point every exit path funnels through, so the
+ * dirty-check cannot be forgotten at one call site (it already was at three).
+ * What: Closes the pane immediately when there is nothing to lose and returns
+ * `true`. When the panel holds unsaved edits it instead raises the panel's
+ * confirm prompt and returns `false`, letting a caller that was going
+ * somewhere else (the Chat→Events tab switch) stay put.
+ * Test: `configPane.test.ts` (both branches) and `ChatPane.test.ts` (each
+ * exit affordance end to end).
+ */
+export function requestExitConfigPane(): boolean {
+  if (!get(configPaneOpen)) return true;
+  if (get(configPaneDirty)) {
+    configExitIntent.update((n) => n + 1);
+    return false;
+  }
+  closeConfigPane();
+  return true;
+}
 
 export function openConfigPane(): void {
   configPaneOpen.set(true);

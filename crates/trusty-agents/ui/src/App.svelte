@@ -37,7 +37,7 @@
     refreshOverlayAgents,
   } from './stores/app';
   import { setRecap, type Recap } from './stores/recap';
-  import { closeConfigPane } from './stores/configPane';
+  import { requestExitConfigPane } from './stores/configPane';
   // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
   // comment for the full rationale. Additive to the flattened webBus path
   // below, never a replacement.
@@ -61,10 +61,12 @@
   function switchView(view: 'chat' | 'events') {
     // #3894: leaving Chat abandons any open configuration takeover, so the
     // top-level tabs always mean what they say — coming back to Chat shows
-    // chat, never a config surface the user left behind minutes ago. Config
-    // edits are saved per-section explicitly, so nothing is lost but the
-    // scroll position within the config form.
-    if (view !== 'chat') closeConfigPane();
+    // chat, never a config surface the user left behind minutes ago.
+    // PR #3895 code-critic HIGH-1: this is also an EXIT path — leaving Chat
+    // unmounts the panel — so it goes through the same guard. When the panel
+    // holds unsaved edits the request raises its confirm and returns false;
+    // we stay on Chat rather than tearing the edit out from under it.
+    if (view !== 'chat' && !requestExitConfigPane()) return;
     activeView = view;
   }
   let tokenInput = '';

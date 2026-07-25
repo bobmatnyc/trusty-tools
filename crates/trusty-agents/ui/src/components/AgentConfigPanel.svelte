@@ -30,7 +30,9 @@
    * active tab takes the rest, with the instructions editor growing into every
    * remaining pixel instead of #3862's `55vh/70vh` clamp. The header carries
    * the takeover's exit affordances (Back / Close, plus an Esc hint —
-   * `AgentConfigOverlay` owns the key handler) via the `onExit` prop.
+   * `AgentConfigOverlay` owns the key handler) via the `onExit` prop, and no
+   * exit path reaches `onExit` without passing the unsaved-changes confirm
+   * (see `requestExit` / `configPaneDirty`).
    * Test: `AgentConfigPanel.test.ts` (exit affordances, instructions-editor
    * sizing invariants, tab preservation) + `agentConfig.test.ts` (scaffolding
    * data); the save round-trip stays manual (`pnpm dev`, open the gear, edit +
@@ -38,7 +40,9 @@
    * the project's convention for fetch-driven Svelte views.
    */
   import { AlertCircle, ArrowLeft, Save, Loader2, Settings2, X } from 'lucide-svelte';
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
+  import { get } from 'svelte/store';
+  import { configExitIntent, configPaneDirty } from '../stores/configPane';
   import {
     fetchAgentDetail,
     fetchAgentPersona,
@@ -93,6 +97,58 @@
 
   $: personalityDirty = personaContent !== savedPersonaContent;
   $: toolsDirty = toolsText !== savedToolsText;
+
+  /**
+   * Why (PR #3895 code-critic HIGH-1): before this, Esc/Back/Close unmounted
+   * the panel and took any unsaved persona edit with them — silently, with no
+   * confirmation, on a surface whose whole point is hand-writing long system
+   * prompts. Confirm-before-discard (with a save option) rather than
+   * auto-save-on-exit: auto-saving would persist a half-finished prompt to
+   * `persona.md` and change how the agent actually behaves, which is the worse
+   * failure of the two.
+   * What: `configPaneDirty` mirrors the panel's dirty state for the exit paths
+   * that live outside it (Esc, and App's Chat→Events switch); those raise
+   * `configExitIntent`, which this component turns into the confirm prompt.
+   * Test: `ChatPane.test.ts` — Esc / Back / Close / tab-switch with a dirty
+   * editor.
+   */
+  let confirmingExit = false;
+  let seenExitIntent = get(configExitIntent);
+
+  $: configPaneDirty.set(personalityDirty || toolsDirty);
+  $: if ($configExitIntent !== seenExitIntent) {
+    seenExitIntent = $configExitIntent;
+    confirmingExit = true;
+  }
+  $: dirtySections = [personalityDirty && 'Personality', toolsDirty && 'Tools']
+    .filter(Boolean)
+    .join(' and ');
+
+  onDestroy(() => configPaneDirty.set(false));
+
+  /** Exit affordances go through here, never straight to `onExit`. */
+  function requestExit() {
+    if (personalityDirty || toolsDirty) {
+      confirmingExit = true;
+      return;
+    }
+    onExit();
+  }
+
+  function discardAndExit() {
+    confirmingExit = false;
+    configPaneDirty.set(false);
+    onExit();
+  }
+
+  async function saveAndExit() {
+    saveError = '';
+    if (personalityDirty) await savePersonality();
+    if (!saveError && toolsDirty) await saveTools();
+    if (saveError) return; // stay put and show the error rather than lose the edit
+    confirmingExit = false;
+    onExit();
+  }
 
   function toolsArrayFromText(text: string): string[] {
     return text
@@ -190,12 +246,12 @@
   });
 </script>
 
-<div class="flex h-full w-full flex-col overflow-hidden bg-foundry-light-surface dark:bg-foundry-surface">
+<div class="relative flex h-full w-full flex-col overflow-hidden bg-foundry-light-surface dark:bg-foundry-surface">
   <header class="flex shrink-0 items-center gap-2 border-b border-foundry-light-border dark:border-foundry-border px-4 py-3">
     <button
       type="button"
       class="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
-      on:click={onExit}
+      on:click={requestExit}
     >
       <ArrowLeft class="h-3.5 w-3.5" /> Back to chat
     </button>
@@ -211,7 +267,7 @@
         type="button"
         class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
         aria-label="Close agent configuration"
-        on:click={onExit}
+        on:click={requestExit}
       >
         <X class="h-4 w-4" />
       </button>
@@ -439,4 +495,53 @@
       <p class="mt-2 shrink-0 text-xs text-red-500 dark:text-red-400">{saveError}</p>
     {/if}
   </div>
+
+  <!-- Confirm-before-discard (code-critic HIGH-1). Rendered inside the panel
+       because only this component can save; every exit path — the header's
+       Back/Close, Esc, and the Chat→Events tab switch — arrives here. -->
+  {#if confirmingExit}
+    <div
+      role="alertdialog"
+      aria-modal="true"
+      aria-label="Unsaved configuration changes"
+      class="absolute inset-0 z-30 flex items-center justify-center bg-black/40 px-4"
+    >
+      <div class="w-full max-w-md rounded-lg border border-foundry-light-border dark:border-foundry-border bg-foundry-light-surface dark:bg-foundry-surface p-5 shadow-xl">
+        <h3 class="mb-1 text-sm font-semibold text-foundry-light-text dark:text-foundry-text">
+          Unsaved changes
+        </h3>
+        <p class="mb-4 text-xs leading-relaxed text-foundry-light-muted dark:text-foundry-text/60">
+          Your {dirtySections} {dirtySections.includes(' and ') ? 'edits have' : 'edit has'} not been
+          saved. Leaving configuration now discards {dirtySections.includes(' and ') ? 'them' : 'it'}.
+        </p>
+        <div class="flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-md px-3 py-1.5 text-xs font-medium text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10"
+            on:click={() => (confirmingExit = false)}
+          >
+            Keep editing
+          </button>
+          <button
+            type="button"
+            class="rounded-md border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-500 dark:text-red-400 hover:bg-red-500/10"
+            on:click={discardAndExit}
+          >
+            Discard changes
+          </button>
+          <button
+            type="button"
+            class="inline-flex items-center gap-1.5 rounded-md bg-foundry-light-primary dark:bg-foundry-primary px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-foundry-light-primary/80 dark:hover:bg-foundry-primary/80 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={saving}
+            on:click={saveAndExit}
+          >
+            <Save class="h-3.5 w-3.5" /> {saving ? 'Saving…' : 'Save and close'}
+          </button>
+        </div>
+        {#if saveError}
+          <p class="mt-3 text-xs text-red-500 dark:text-red-400">{saveError}</p>
+        {/if}
+      </div>
+    </div>
+  {/if}
 </div>
