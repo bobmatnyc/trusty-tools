@@ -224,4 +224,93 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // -- issue #3912: working_context_pct_low_water_mark --
+
+    /// The core #3912 acceptance criterion: `session.get_context_budget`
+    /// must surface the REAL floor this session's telemetry recorded, not
+    /// just the most-recent cached snapshot — reproducing the load-soak's
+    /// finding (RPC reads 98-99% while the durable JSONL floor was 48-60%)
+    /// with a small fixture instead of a full daemon soak.
+    #[tokio::test]
+    async fn get_context_budget_reflects_working_context_floor() {
+        let dir = telemetry_temp_dir("floor-reflects");
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        let result = crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
+            // Two durable cadence samples for THIS session: one healthy
+            // (90% working), one a real dip (48% working) — simulating the
+            // exact gap the load soak found between a coarse snapshot and
+            // the true per-turn floor.
+            crate::agent_loop::telemetry::record_cadence_event(
+                &dir,
+                Some(session.id.clone()),
+                100_000,
+                20_000,
+                200_000,
+                5,
+                1,
+            ); // working = 90%
+            crate::agent_loop::telemetry::record_cadence_event(
+                &dir,
+                Some(session.id.clone()),
+                100_000,
+                104_000,
+                200_000,
+                5,
+                4,
+            ); // working = 48%
+
+            // The CACHED snapshot itself still only reflects the latest
+            // (healthy-looking) turn, exactly like the real
+            // `record_context_budget` write path.
+            let mut healthy = measurement();
+            healthy.working_context_pct = 90;
+            registry
+                .record_context_budget(&session.id, &healthy)
+                .unwrap();
+
+            get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
+                .await
+                .unwrap()
+        })
+        .await;
+
+        assert_eq!(
+            result["working_context_pct"], 90,
+            "the point-in-time snapshot alone still reads the healthy-looking latest turn"
+        );
+        assert_eq!(
+            result["working_context_pct_low_water_mark"], 48,
+            "the low-water mark must surface the real floor the snapshot alone hides"
+        );
+        assert_eq!(result["working_context_pct_sample_count"], 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session with no durable telemetry samples yet reports `None`/`0`,
+    /// never a fabricated floor.
+    #[tokio::test]
+    async fn get_context_budget_floor_none_without_samples() {
+        let dir = telemetry_temp_dir("floor-none");
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+        let result = crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
+            registry
+                .record_context_budget(&session.id, &measurement())
+                .unwrap();
+            get_context_budget(&registry, json!({"session_id": session.id}), test_ctx())
+                .await
+                .unwrap()
+        })
+        .await;
+
+        assert!(result["working_context_pct_low_water_mark"].is_null());
+        assert_eq!(result["working_context_pct_sample_count"], 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

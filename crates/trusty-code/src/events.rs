@@ -950,6 +950,24 @@ pub struct ContextBudgetSnapshot {
     /// for budget state (`session.get_context_budget`) instead of requiring
     /// a second `session.get_transcript` call.
     pub lifetime_compaction_alarm_count: u64,
+    /// (issue #3912) This SESSION's lowest-ever `working_context_pct`,
+    /// derived fresh from `agent_loop::telemetry::session_working_context_floor`
+    /// every time this RPC is queried — `None` when no durable sample for
+    /// this session exists yet. Same "read fresh at query time, `0`/`None`
+    /// placeholder on the write path" pattern as
+    /// `lifetime_compaction_alarm_count` immediately above, and for the same
+    /// reason: the load-realistic compression soak (epic #3866) proved the
+    /// single most-recent snapshot above (`working_context_pct`) can read
+    /// 98-99% while a durable per-turn sample this same session produced
+    /// moments earlier was 48-60% — a coarse once-per-`task.run`-call poll
+    /// reliably misses the turn where the floor was lowest. This field is
+    /// the fix: the real floor, not a snapshot that can miss it.
+    pub working_context_pct_low_water_mark: Option<u8>,
+    /// (issue #3912) How many durable telemetry samples
+    /// `working_context_pct_low_water_mark` was computed over for this
+    /// session — lets a consumer distinguish "no samples yet" (`None` above)
+    /// from "exactly one, possibly unrepresentative, sample".
+    pub working_context_pct_sample_count: usize,
 }
 
 /// One row in a session's RETAINED search/recall audit trail (issue #3072;

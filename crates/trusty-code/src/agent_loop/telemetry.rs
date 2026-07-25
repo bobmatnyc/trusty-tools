@@ -256,6 +256,51 @@ pub fn lifetime_compaction_alarm_count(data_dir: &Path) -> u64 {
         .count() as u64
 }
 
+/// Session-scoped working-context low-water mark, read fresh from the
+/// durable `compression.jsonl` log (issue #3912).
+///
+/// Why: `session.get_context_budget` cached only the MOST RECENT
+/// `ContextBudgetSnapshot` — a single point-in-time value that a coarse,
+/// once-per-`task.run`-call poll can easily miss the real dip on (the
+/// load-realistic soak, epic #3866, observed the RPC report 98-99% while
+/// the durable JSONL recorded a 48-60% floor for the SAME run). Every
+/// cadence/threshold fire already writes its `working_context_pct_after`
+/// to this log (issue #3867) — this is the query that turns "every sample
+/// this session ever produced" into the one number an operator actually
+/// needs: how low did it REALLY get.
+/// What: scans `<data_dir>/compression.jsonl` line by line (best-effort,
+/// matching every other reader in this module — a missing file, an
+/// unreadable line, or a record with no `working_context_pct_after` is
+/// silently skipped, never an error), keeping only rows whose `session_id`
+/// matches `session_id` exactly. Returns `(None, 0)` when the file is
+/// missing or no matching sample carries a percentage; otherwise
+/// `(Some(min), count)` — the lowest `working_context_pct_after` observed
+/// for this session and how many samples that minimum was computed over.
+/// Test: `tests::session_working_context_floor_missing_file_is_none`,
+/// `tests::session_working_context_floor_tracks_minimum_for_session`,
+/// `tests::session_working_context_floor_ignores_other_sessions`.
+pub fn session_working_context_floor(data_dir: &Path, session_id: &str) -> (Option<u8>, usize) {
+    let Ok(file) = std::fs::File::open(compression_log_path(data_dir)) else {
+        return (None, 0);
+    };
+    let mut min_pct: Option<u8> = None;
+    let mut count = 0usize;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<CompressionEvent>(&line) else {
+            continue;
+        };
+        if event.session_id.as_deref() != Some(session_id) {
+            continue;
+        }
+        let Some(pct) = event.working_context_pct_after else {
+            continue;
+        };
+        count += 1;
+        min_pct = Some(min_pct.map_or(pct, |m| m.min(pct)));
+    }
+    (min_pct, count)
+}
+
 /// Derive `(working_context_pct, overhead_pct)` from a raw token measurement
 /// against a model's context window, mirroring
 /// `cadence::CadenceOutcome::working_context_pct`/`overhead_pct`'s own
