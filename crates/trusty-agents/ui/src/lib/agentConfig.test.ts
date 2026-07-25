@@ -7,7 +7,15 @@
 // nothing, so it gets a mocked-fetch test.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DEFINED_LISTENERS, fetchAgentStores, type AgentStores } from './agentConfig';
+import {
+  DEFINED_LISTENERS,
+  KNOWLEDGE_MCP_ENDPOINTS,
+  STORE_BOUND_KNOWLEDGE_TOOLS,
+  fetchAgentStores,
+  matchesToolGlob,
+  synthesizeSkills,
+  type AgentStores,
+} from './agentConfig';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -95,5 +103,71 @@ describe('fetchAgentStores', () => {
   it('throws on a non-404 error status', async () => {
     stubFetch(500, { error: 'boom' });
     await expect(fetchAgentStores('izzie')).rejects.toThrow(/500/);
+  });
+});
+
+// --- DOC-57 Phase-1 derivations (#3932) -------------------------------------
+
+describe('matchesToolGlob', () => {
+  it('matches exact names', () => {
+    expect(matchesToolGlob('vector_search', 'vector_search')).toBe(true);
+    expect(matchesToolGlob('vector_search', 'vector_searchx')).toBe(false);
+  });
+
+  it('matches trailing wildcard prefixes, and only trailing ones', () => {
+    expect(matchesToolGlob('vector_*', 'vector_search')).toBe(true);
+    expect(matchesToolGlob('*', 'anything_at_all')).toBe(true);
+    // A leading wildcard is a listener-filter dialect, not an allow-list one
+    // — the server's `match_any_glob` treats it as a literal, and so must this.
+    expect(matchesToolGlob('*_search', 'vector_search')).toBe(false);
+  });
+});
+
+describe('synthesizeSkills', () => {
+  it('groups allow-list patterns by tool-name prefix (S-8)', () => {
+    const skills = synthesizeSkills(['git_status', 'gworkspace_*', 'git_log']);
+    expect(skills.map((s) => s.name)).toEqual(['git', 'gworkspace']);
+    expect(skills[0].patterns).toEqual(['git_log', 'git_status']);
+    expect(skills.every((s) => s.synthetic)).toBe(true);
+  });
+
+  it('keeps an unprefixed pattern as its own single-pattern skill (S-8)', () => {
+    const skills = synthesizeSkills(['*']);
+    expect(skills).toEqual([{ name: '*', synthetic: true, patterns: ['*'] }]);
+  });
+
+  it('drops blanks and collapses duplicates', () => {
+    const skills = synthesizeSkills(['  ', 'git_log', 'git_log', ' git_status ']);
+    expect(skills).toHaveLength(1);
+    expect(skills[0].patterns).toEqual(['git_log', 'git_status']);
+  });
+
+  it('returns nothing for an empty allow-list', () => {
+    expect(synthesizeSkills([])).toEqual([]);
+  });
+});
+
+describe('KNOWLEDGE_MCP_ENDPOINTS', () => {
+  it('reports the shipped disabled defaults with a reason, never as connected (C-03.2)', () => {
+    const byName = Object.fromEntries(KNOWLEDGE_MCP_ENDPOINTS.map((e) => [e.name, e]));
+    expect(byName['trusty-memory'].enabled).toBe(false);
+    expect(byName['trusty-memory'].reason).toBeTruthy();
+    expect(byName['trusty-search'].enabled).toBe(false);
+    expect(byName['gworkspace'].enabled).toBe(true);
+    // A disabled endpoint carries a reason; an enabled one has nothing to
+    // explain. The invariant, not the individual flags, is what must hold.
+    for (const endpoint of KNOWLEDGE_MCP_ENDPOINTS) {
+      expect(Boolean(endpoint.reason)).toBe(!endpoint.enabled);
+      expect(endpoint.scopes.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('STORE_BOUND_KNOWLEDGE_TOOLS', () => {
+  it('is the vector_search seam and nothing more (§4.3)', () => {
+    // Widening this to §4.3's illustrative tool list would be the hardcoded
+    // taxonomy that same section warns against; classification belongs to
+    // `kind = "knowledge"` manifests (#3933).
+    expect([...STORE_BOUND_KNOWLEDGE_TOOLS]).toEqual(['vector_search']);
   });
 });

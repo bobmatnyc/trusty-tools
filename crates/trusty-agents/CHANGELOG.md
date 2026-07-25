@@ -7,6 +7,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- **Agent configuration is five sections: Personality / Knowledge / Skills /
+  Listeners / Permissions (#3932, GUI):** per the owner's directive — *"Instead
+  of tools, let's show skills"* — the config takeover's tab strip is reshaped to
+  DOC-57's normative order and re-backed, not merely relabelled. **Knowledge**
+  widens the old OKG Stores tab from store bindings alone to one pane over three
+  sub-surfaces: the live bindings, the `vector_search`→store linkage resolved
+  from the agent's own allow-list, and the declared MCP knowledge endpoints
+  (which report `trusty-memory` and `trusty-search` as *disabled* — their
+  shipped default — rather than quietly omitting them). **Skills** replaces the
+  Tools tab's single monospace textarea of raw globs with capability cards
+  grouped by tool-name prefix, each badged `synthetic` because no skill manifest
+  wraps its tools yet — so the unwrapped surface stays visible and wrapping
+  progress becomes measurable. **Permissions** moves last and stops being a chip
+  list: each mechanism now carries an explicit *enforced* / *not enforced*
+  marker, states the deny-on-absent polarity of an empty allow-list, and names
+  what it cannot see (values inherited through `extends`, the reserved
+  `user_authority` field, and the tier/autonomy model with no read path).
+  Front-end only: no new HTTP route, no config-schema change, independently
+  revertable. The panel is split into one component per section with the persona
+  edit buffer and dirty aggregation kept in the shell, so an in-progress prompt
+  survives a section switch and every exit path still routes through the
+  unsaved-changes guard.
+
+### Removed
+
+- **The Tools tab's glob textarea, and with it GUI editing of
+  `[tools].allow` (#3932):** capability is now shown as skills, and editing
+  returns as `PATCH { skills_allow }` over skill names rather than over the
+  globs beneath them (DOC-57 §5.7). Until then `agent.toml` is the edit surface,
+  which the Skills pane says outright.
+- **The Listeners pane's hardcoded "not bound" badge (#3932):** it asserted a
+  per-agent binding state for every agent regardless of configuration, inventing
+  a listener that may not exist and hiding one that is quietly failing. The pane
+  now labels itself as connector scaffolding until `GET /api/agents/:name/listeners`
+  lands (#3937). The Personality pane's fabricated per-connector-instructions
+  list is gone for the same reason — it enumerated connectors it had never
+  looked at.
+
 ### Added
 
 - **Agent configuration takes over the pane (#3894, GUI):** opening the gear no

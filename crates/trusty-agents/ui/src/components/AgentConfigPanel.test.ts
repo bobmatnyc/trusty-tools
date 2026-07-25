@@ -1,20 +1,27 @@
-// Why (#3894): two regressions this component has already shipped twice are
-// pinned here. (1) The instructions editor keeps shrinking back to a strip —
-// #3862 fixed a 2-line field with a `55vh/70vh` clamp, which the full-pane
-// takeover then made wrong in the other direction (dead space below on a tall
-// window). The fix is "grow into whatever the pane gives you", which is a
-// structural property: a `flex-1`/`min-h-0` chain with no fixed `rows` and no
-// second scroll container wrapped around it. (2) The takeover needs exit
-// affordances that actually call back out. Neither is expressible without
-// mounting the component.
+// Why (#3894/#3932): three properties of this shell have each shipped wrong at
+// least once, and none is expressible without mounting the component.
+// (1) The instructions editor keeps shrinking back to a strip — #3862 fixed a
+// 2-line field with a `55vh/70vh` clamp, which the full-pane takeover then made
+// wrong in the other direction (dead space below on a tall window). The fix is
+// "grow into whatever the pane gives you", a structural property: a
+// `flex-1`/`min-h-0` chain with no fixed `rows` and no second scroll container
+// wrapped around it — which the #3932 decomposition into per-section child
+// components must not break (DOC-57 §8.4, G-6b / C-07.3).
+// (2) The takeover needs exit affordances that actually call back out, and the
+// persona edit buffer must survive a SECTION SWITCH now that the body it lives
+// in is an unmounted-on-switch child (G-6a / C-07.4).
+// (3) The five sections and their order are normative (DOC-57 §2.1, C-07.1),
+// and every pane must render an explicit empty/error state rather than
+// fabricated content when its backend is absent or failing (G-4, C-07.2).
 // What: Mounts the real panel with `fetch` stubbed for the three routes it
 // loads (`/api/agents/:name`, `.../persona`, `.../stores`), then asserts the
-// sizing invariants and the Back/Close wiring. jsdom does no layout, so the
-// "grows with the viewport" half is asserted as the flex chain that produces
-// it rather than as a measured pixel height.
+// sizing invariants, the Back/Close wiring, the tab strip, and each pane's
+// degraded rendering. jsdom does no layout, so the "grows with the viewport"
+// half is asserted as the flex chain that produces it rather than as a measured
+// pixel height (`tests/config-takeover.spec.ts` measures the real thing).
 // Test: this file.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mount, unmount } from 'svelte';
+import { mount, tick, unmount } from 'svelte';
 import AgentConfigPanel from './AgentConfigPanel.svelte';
 
 let target: HTMLDivElement;
@@ -43,7 +50,7 @@ function stubApi() {
           : {
               name: 'izzie',
               display_name: 'Izzie',
-              tools_allow: ['gworkspace_*'],
+              tools_allow: ['gworkspace_*', 'vector_search', 'git_log', 'git_status'],
               scopes: ['agents.read'],
             };
       return { ok: true, status: 200, json: async () => json } as Response;
@@ -51,19 +58,46 @@ function stubApi() {
   );
 }
 
-function mountPanel(onExit = vi.fn()) {
+/**
+ * The C-07.2 fixture: an agent that declares nothing, with the stores route
+ * failing outright. Every pane must still render, each saying what it does not
+ * know rather than filling the gap.
+ */
+function stubBareApiWithFailingStores() {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/stores')) return { ok: false, status: 503, json: async () => ({}) } as Response;
+      const json = url.includes('/persona')
+        ? { content: '', editable: false }
+        : { name: 'bare', display_name: 'Bare', tools_allow: [], scopes: [] };
+      return { ok: true, status: 200, json: async () => json } as Response;
+    }),
+  );
+}
+
+function mountPanel(onExit = vi.fn(), agentName = 'izzie') {
   instance = mount(AgentConfigPanel, {
     target,
-    props: { agentName: 'izzie', isConcierge: false, displayName: 'Izzie', onExit },
+    props: { agentName, isConcierge: false, displayName: 'Izzie', onExit },
   }) as unknown as Record<string, unknown>;
   return onExit;
 }
 
 const editor = () => target.querySelector('[data-instructions-editor]') as HTMLTextAreaElement;
+const tabLabels = () =>
+  Array.from(target.querySelectorAll('[role="tab"]')).map((b) => b.textContent?.trim());
 const tabButton = (label: string) =>
   Array.from(target.querySelectorAll('[role="tab"]')).find(
     (b) => b.textContent?.trim() === label,
   ) as HTMLButtonElement;
+
+/** Drives `bind:value` the way a keystroke would. */
+function typeInto(el: HTMLTextAreaElement, value: string) {
+  el.value = value;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
 
 beforeEach(() => {
   stubApi();
@@ -100,6 +134,26 @@ describe('AgentConfigPanel — exit affordances (#3894)', () => {
     await waitFor(() => editor() !== null);
     expect(target.querySelector('header')?.textContent).toContain('Izzie');
   });
+
+  it('an unsaved persona edit blocks Back and raises the confirm dialog (C-07.4)', async () => {
+    const onExit = mountPanel();
+    await waitFor(() => editor() !== null);
+
+    typeInto(editor(), 'edited prompt');
+    // The child→shell binding propagates synchronously, but the shell's
+    // `personalityDirty` is a reactive statement and lands on the next flush.
+    // A real keystroke and a real click are always separate tasks; only the
+    // test needs to say so.
+    await tick();
+
+    const back = Array.from(target.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Back to chat'),
+    ) as HTMLButtonElement;
+    back.click();
+
+    await waitFor(() => target.querySelector('[role="alertdialog"]') !== null);
+    expect(onExit).not.toHaveBeenCalled();
+  });
 });
 
 describe('AgentConfigPanel — instructions editor sizing (#3894)', () => {
@@ -130,7 +184,8 @@ describe('AgentConfigPanel — instructions editor sizing (#3894)', () => {
 
     // Walk from the editor up to the panel root: every ancestor must be a
     // height-passing flex box, never a second scroller wrapped around the
-    // first.
+    // first. Splitting the body into child components (#3932) adds no DOM
+    // node, so this chain is unchanged — which is exactly what it must prove.
     const root = target.firstElementChild as HTMLElement;
     for (let el = editor().parentElement; el && el !== root; el = el.parentElement) {
       expect(el.className).not.toContain('overflow-y-auto');
@@ -148,24 +203,92 @@ describe('AgentConfigPanel — instructions editor sizing (#3894)', () => {
   });
 });
 
-describe('AgentConfigPanel — existing sections still render (#3826/#3816 regression guard)', () => {
-  it('keeps the OKG stores, Tools, Permissions and Listeners tabs', async () => {
+describe('AgentConfigPanel — five sections (#3932, DOC-57 §8.2)', () => {
+  it('renders exactly five tabs in the normative order (C-07.1)', async () => {
+    mountPanel();
+    await waitFor(() => editor() !== null);
+    expect(tabLabels()).toEqual([
+      'Personality',
+      'Knowledge',
+      'Skills',
+      'Listeners',
+      'Permissions',
+    ]);
+  });
+
+  it('each section renders its own data', async () => {
     mountPanel();
     await waitFor(() => editor() !== null);
 
-    tabButton('OKG Stores').click();
+    tabButton('Knowledge').click();
     await waitFor(() => target.textContent?.includes('izzie-kb') ?? false);
     expect(target.textContent).toContain('okg://izzie');
+    // The vector_search→store seam (§4.3) and the declared MCP endpoints (§4.4).
+    expect(target.textContent).toContain('vector_search');
+    expect(target.textContent).toContain('trusty-memory');
 
-    tabButton('Tools').click();
-    await waitFor(() => target.querySelector('textarea') !== null);
-    expect((target.querySelector('textarea') as HTMLTextAreaElement).value).toBe('gworkspace_*');
-
-    tabButton('Permissions').click();
-    await waitFor(() => target.textContent?.includes('agents.read') ?? false);
+    // Skills replaced the raw-glob textarea with cards (G-3), grouped by tool
+    // prefix (S-8) and badged synthetic (S-10).
+    tabButton('Skills').click();
+    await waitFor(() => target.textContent?.includes('gworkspace') ?? false);
+    expect(target.querySelector('textarea')).toBeNull();
+    expect(target.textContent).toContain('git');
+    expect(target.textContent).toContain('synthetic');
 
     tabButton('Listeners').click();
     await waitFor(() => target.textContent?.includes('Gmail') ?? false);
     expect(target.textContent).toContain('Google Calendar');
+
+    tabButton('Permissions').click();
+    await waitFor(() => target.textContent?.includes('agents.read') ?? false);
+    expect(target.textContent).toContain('gworkspace_*');
+  });
+
+  it('keeps an in-progress persona edit across a section switch (G-6a)', async () => {
+    mountPanel();
+    await waitFor(() => editor() !== null);
+
+    typeInto(editor(), 'half-written system prompt');
+    tabButton('Skills').click();
+    await waitFor(() => editor() === null);
+
+    tabButton('Personality').click();
+    await waitFor(() => editor() !== null);
+    expect(editor().value).toBe('half-written system prompt');
+  });
+});
+
+describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
+  it('renders every pane with an explicit empty/error state and no fabricated content', async () => {
+    vi.unstubAllGlobals();
+    stubBareApiWithFailingStores();
+    mountPanel(vi.fn(), 'bare');
+    await waitFor(() => tabLabels().length === 5);
+
+    // Personality: no editable persona.md is a stated fact, not a blank box.
+    await waitFor(() => target.textContent?.includes('no editable persona.md') ?? false);
+
+    tabButton('Knowledge').click();
+    await waitFor(() => target.textContent?.includes('Could not read store bindings') ?? false);
+    // The knowledge-classification gap is named rather than guessed at, and a
+    // disabled endpoint is shown as disabled rather than hidden (C-03.2).
+    expect(target.textContent).toContain('kind = "knowledge"');
+    expect(target.textContent).toContain('disabled');
+
+    tabButton('Skills').click();
+    await waitFor(() => target.textContent?.includes('declares no') ?? false);
+    // An absent allow-list denies; the pane must not read as "unrestricted".
+    expect(target.textContent).toContain('not "unrestricted"');
+
+    tabButton('Listeners').click();
+    await waitFor(() => target.textContent?.includes('Scaffolding, not configuration') ?? false);
+    // L-1: the hardcoded per-listener "not bound" badge is gone.
+    expect(target.textContent).not.toContain('not bound');
+
+    tabButton('Permissions').click();
+    await waitFor(() => target.textContent?.includes('No allow-list declared') ?? false);
+    expect(target.textContent).toContain('No scopes declared');
+    // PM-6: unenforced mechanisms are marked as such.
+    expect(target.textContent).toContain('not enforced');
   });
 });

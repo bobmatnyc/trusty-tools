@@ -1,5 +1,5 @@
 // Agent config API client + declarative scaffolding shapes for the
-// gear-panel config form (#3819, epic #3052).
+// gear-panel config form (#3819, epic #3052; five-section reshape #3932).
 //
 // Why: the chat-pane gear panel needs a single typed surface over the agent
 // config read/write routes (`GET/PATCH /api/agents/:name`,
@@ -11,8 +11,13 @@
 // `stores/app.ts`'s `fetchAgentCatalog` pattern.
 // What: `fetchAgentDetail`/`fetchAgentPersona`/`patchAgent`/`fetchAgentStores`
 // — thin REST wrappers; `DEFINED_LISTENERS` — the two listener bindings from
-// the (not yet implemented) listener spec, rendered as honest scaffolding.
+// the (not yet implemented) listener spec, rendered as honest scaffolding;
+// and the DOC-57 Phase-1 derivations the five-section panes read from
+// already-served data (`synthesizeSkills`, `matchesToolGlob`,
+// `KNOWLEDGE_MCP_ENDPOINTS`).
 // Test: `agentConfig.test.ts`.
+// Spec: docs/specs/agent-config-five-sections.md (DOC-57) §5.5 (synthetic
+// skills), §4.4 (MCP knowledge connections), §8.5 (Phase-1 data mapping).
 
 import { apiBase } from './api-config';
 import { getCurrentApiToken } from '../stores/app';
@@ -75,6 +80,13 @@ export interface PatchAgentBody {
   model_id?: string;
   provider_id?: string;
   personality?: string;
+  /**
+   * Mirrors the server's `PatchAgentRequest.tools_allow`. Unused by the GUI
+   * since #3932: the Tools textarea was replaced by the read-only Skills pane
+   * (DOC-57 §8.2/G-3), and capability editing returns as
+   * `PATCH { skills_allow }` in Phase 3 (§5.7, S-12). Kept because this type
+   * documents the route's body, not the panel's current usage of it.
+   */
   tools_allow?: string[];
 }
 
@@ -101,17 +113,20 @@ export async function patchAgent(name: string, body: PatchAgentBody): Promise<Ag
 
 /**
  * Why (Bob, concept-demo priority): the config pane's LISTENERS section has
- * no backend yet (spec being filed) — Bob explicitly asked for the two
- * DEFINED listeners (gmail, google-calendar) rendered as structured,
- * honestly-scaffolded bindings rather than lorem-ipsum placeholders, "so
- * it's honest scaffolding that will become live." This is UI-only data: no
- * fetch, no persistence — every agent shows the same two listener
- * definitions with per-agent event-type filter chips toggled from nothing
- * (all off) until a real backend exists.
- * What: `id`/`label` identify the listener; `eventTypes` are the
- * connector's defined event kinds a per-agent binding can filter to (empty
- * `enabledEventTypes` = "not bound" — the honest default, never
- * pre-checked).
+ * no backend yet — Bob explicitly asked for the two DEFINED listeners
+ * (gmail, google-calendar) rendered as structured, honestly-scaffolded
+ * bindings rather than lorem-ipsum placeholders, "so it's honest scaffolding
+ * that will become live." This is UI-only data: no fetch, no persistence.
+ *
+ * It is CONNECTOR DEFINITIONS, never an agent's `[[listeners]]` bindings, and
+ * DOC-57 §6.2 (L-1) is explicit that rendering it as per-agent state is a
+ * defect: the pane used to stamp a hardcoded "not bound" badge on both
+ * entries regardless of configuration, which both invents a binding that may
+ * not exist and hides one that is quietly failing. #3932 therefore drops the
+ * badge and labels the pane as UI scaffolding; `GET /api/agents/:name/listeners`
+ * (#3937 / #3891) replaces this constant outright (C-05.1).
+ * What: `id`/`label` identify the connector; `eventTypes` are the event kinds
+ * a per-agent binding could filter to.
  */
 export interface ListenerDefinition {
   id: 'gmail' | 'google-calendar';
@@ -188,4 +203,164 @@ export async function fetchAgentStores(name: string): Promise<AgentStores | null
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`GET /api/agents/${name}/stores failed: ${r.status}`);
   return (await r.json()) as AgentStores;
+}
+
+// ---------------------------------------------------------------------------
+// DOC-57 Phase-1 derivations (#3932)
+//
+// Everything below turns data the sidecar ALREADY serves (`AgentDetail`) into
+// the five-section view. Phase 1 adds no HTTP route and no config-schema
+// change (DOC-57 §8.5, G-7); `GET …/skills` (§5.7), `GET …/knowledge` (§4.5)
+// and `GET …/permissions` (§7.4) replace these derivations in Phases 2-4.
+// ---------------------------------------------------------------------------
+
+/**
+ * Why: `[tools].allow` is a glob allow-list, and the Knowledge pane has to
+ * answer "does this agent hold the store-bound knowledge tool?" from those
+ * patterns. Re-deriving the matcher client-side is the only option in a phase
+ * with no resolution route — so it mirrors the server's matcher exactly rather
+ * than inventing a fourth glob dialect (DOC-57 §5.2, S-1).
+ * What: Ports `match_any_glob` (`ctrl/pm_task/helpers.rs:146`): exact equality,
+ * or a trailing `*` matched as a prefix. No other wildcard position is
+ * supported, there and here.
+ * Test: `matchesToolGlob_matches_exact_names`,
+ * `matchesToolGlob_matches_trailing_wildcard_prefixes`.
+ */
+export function matchesToolGlob(pattern: string, tool: string): boolean {
+  if (pattern.endsWith('*')) return tool.startsWith(pattern.slice(0, -1));
+  return pattern === tool;
+}
+
+/**
+ * Why (DOC-57 §4.3): `vector_search`'s default index is the agent's own store
+ * binding (`persona.rs:346-355`, the #3864 fix), and the spec requires the
+ * Knowledge pane show that linkage rather than leave the tool as a
+ * free-floating chip. It is named here as the ONE store-bound knowledge tool
+ * the spec states normatively — deliberately not §4.3's broader illustrative
+ * tool list, which the same section marks "illustrative, not normative" and
+ * warns against hardcoding, because a hardcoded taxonomy drifts exactly the
+ * way the removed static `gworkspace` tool list drifted. Authoritative
+ * classification arrives with `kind = "knowledge"` skill manifests in Phase 2
+ * (#3933); until then the pane says so instead of guessing.
+ * What: Tool names whose availability the Knowledge pane resolves against the
+ * agent's own `[tools].allow`.
+ * Test: `storeBoundKnowledgeTools_is_the_vector_search_seam`.
+ */
+export const STORE_BOUND_KNOWLEDGE_TOOLS = ['vector_search'] as const;
+
+/**
+ * One MCP/OpenRPC endpoint that backs a knowledge service (DOC-57 §4.4, K-c).
+ *
+ * `enabled` is the SHIPPED DEFAULT from
+ * `crates/trusty-agents/assets/config/default-config.toml`, not a probe of the
+ * running harness — see `KNOWLEDGE_MCP_ENDPOINTS`.
+ */
+export interface KnowledgeEndpoint {
+  name: string;
+  description: string;
+  enabled: boolean;
+  scopes: string[];
+  /** Why the endpoint is not carrying traffic. Non-null iff `!enabled`. */
+  reason?: string;
+}
+
+/**
+ * Why (DOC-57 §8.5): Phase 1 maps the Knowledge pane's K-c sub-surface onto "a
+ * read-only, statically-declared MCP knowledge-endpoint list", because no
+ * route exposes `[[tool_registry.endpoints]]` yet. §4.4 is emphatic about WHAT
+ * such a list must say: the two endpoints most obviously "MCP connections to
+ * knowledge stores" ship `enabled = false` (awaiting `--rpc` on their
+ * binaries), so the agent's memory and search capability today flows through
+ * in-process tools, not through these endpoints. Rendering a
+ * configured-but-disabled endpoint as connected — or omitting it — is the same
+ * class of defect as the fabricated listener pane (C-03.2).
+ * What: The three knowledge endpoints declared in this crate's shipped
+ * `assets/config/default-config.toml:193-243`, verbatim including their
+ * `enabled` flags and scopes. This is the DEFAULT declaration; an operator who
+ * has edited `~/.trusty-agents/config.toml` may have flipped a flag, which is
+ * why the pane labels the list as declared-not-probed and Phase 3's
+ * `GET /api/agents/:name/knowledge` (§4.5) replaces it with resolved state.
+ * Test: `knowledgeEndpoints_report_the_shipped_disabled_defaults`.
+ */
+export const KNOWLEDGE_MCP_ENDPOINTS: KnowledgeEndpoint[] = [
+  {
+    name: 'trusty-memory',
+    description: 'Trusty memory service — recall/remember/forget',
+    enabled: false,
+    scopes: ['memory.read', 'memory.write'],
+    reason: 'disabled in the shipped config — awaits `--rpc` mode on the binary',
+  },
+  {
+    name: 'trusty-search',
+    description: 'Trusty search service — semantic + keyword code search',
+    enabled: false,
+    scopes: ['search.read'],
+    reason: 'disabled in the shipped config — awaits `--rpc` mode on the binary',
+  },
+  {
+    name: 'gworkspace',
+    description: 'Google Workspace — Gmail, Calendar, Drive, Docs, Sheets, Tasks',
+    enabled: true,
+    scopes: ['google.*'],
+  },
+];
+
+/**
+ * One synthetic skill card — a capability family derived from `[tools].allow`
+ * rather than from an authored manifest (DOC-57 §5.5).
+ */
+export interface SyntheticSkill {
+  /** S-8's grouping key: the pattern's prefix before the first `_`. */
+  name: string;
+  /**
+   * Always `true` here. Phase 1 has no manifest carrying `tools:`, so every
+   * card is synthetic and badged as such (S-10) — which is the point: the
+   * unwrapped surface stays visible, and wrapping progress is measurable.
+   */
+  synthetic: boolean;
+  /**
+   * The `[tools].allow` entries grouped under `name`, deduped and sorted.
+   * Deliberately NOT called `tools`: these are GLOBS, and a skill manifest's
+   * `tools:` are exact names (S-1). Calling them tools would assert a
+   * resolution this phase cannot perform.
+   */
+  patterns: string[];
+}
+
+/**
+ * Why (DOC-57 §5.5, S-7/S-8): the Skills pane must be complete on day one, and
+ * requiring an authored manifest for every tool before it renders anything
+ * would block the GUI slice on a large content project. So any capability not
+ * claimed by a skill is wrapped in a synthetic one, grouped by the tool-name
+ * prefix — the same heuristic S-8 specifies for the backend, applied here to
+ * the allow-list patterns Phase 1 actually has.
+ * What: Groups `[tools].allow` by the substring before the first `_`
+ * (`gworkspace_*` → `gworkspace`; `git_log` + `git_status` → `git`), falling
+ * back to the whole pattern when it carries no `_` (`*`, `web_search`'s
+ * unprefixed cousins). Blank entries are dropped, duplicates collapse, and
+ * both the groups and the patterns inside them come back sorted so the pane
+ * has a stable order. S-9 applies: this is a heuristic, never a taxonomy — an
+ * authored manifest supersedes it in Phase 2.
+ * Test: `synthesizeSkills_groups_by_tool_name_prefix`,
+ * `synthesizeSkills_keeps_unprefixed_patterns_as_their_own_skill`,
+ * `synthesizeSkills_returns_nothing_for_an_empty_allow_list`.
+ */
+export function synthesizeSkills(toolsAllow: string[]): SyntheticSkill[] {
+  const groups = new Map<string, Set<string>>();
+  for (const raw of toolsAllow) {
+    const pattern = raw.trim();
+    if (!pattern) continue;
+    const cut = pattern.indexOf('_');
+    const name = cut > 0 ? pattern.slice(0, cut) : pattern;
+    const bucket = groups.get(name) ?? new Set<string>();
+    bucket.add(pattern);
+    groups.set(name, bucket);
+  }
+  return Array.from(groups.entries())
+    .map(([name, patterns]) => ({
+      name,
+      synthetic: true,
+      patterns: Array.from(patterns).sort(),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
