@@ -34,10 +34,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `cto-assistant` binds `okg://cto-assistant` → trusty-search
   `cto-assistant` + palace `cto`. Seeded in the embedded provisioning source
   of truth (`.trusty-agents/agents/`), both the directory packages and their
-  flat shadows, with regression tests asserting the embedded bytes still
-  carry each binding and grant `vector_search` — a reprovision that dropped
-  either would otherwise fail silently. `izzie`'s `[tools].allow` now grants
-  `vector_search` so her binding is actually reachable.
+  flat shadows, with regression tests asserting that the embedded bytes of
+  EVERY seed spelling — package and flat shadow alike — still carry each
+  binding and grant `vector_search`. A reprovision that dropped either, or an
+  edit that updated the package but not its load-bearing `extends`-shadow
+  counterpart, would otherwise fail silently. `izzie`'s `[tools].allow` now
+  grants `vector_search` so her binding is actually reachable.
 
 ### Fixed
 
