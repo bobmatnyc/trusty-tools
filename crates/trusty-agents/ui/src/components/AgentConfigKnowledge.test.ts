@@ -70,6 +70,7 @@ describe('AgentConfigKnowledge — knowledge tools (K-b)', () => {
   it('shows the store-bound tool under the store it reads (§4.3)', () => {
     render({ storeBoundTools: ['vector_search'] });
     expect(target.textContent).toContain('reads via');
+    expect(target.textContent).toContain('reading');
     expect(target.textContent).toContain('vector_search');
   });
 
@@ -77,6 +78,43 @@ describe('AgentConfigKnowledge — knowledge tools (K-b)', () => {
     render({ storeBoundTools: [] });
     expect(target.textContent).toContain('grants no store-bound knowledge tool');
     expect(target.textContent).toContain('kind = "knowledge"');
+  });
+
+  // PR #3945 code-critic HIGH-1. `storeBoundTools` is derived from
+  // `[tools].allow` alone, so before the fix the pane asserted a linkage from
+  // the GRANT without consulting whether any binding existed — rendering
+  // "binds no OKG store" and "bound to the store above" in the same view. Two
+  // independent facts must be correlated before either is claimed.
+  it('never claims a store linkage for an agent that binds nothing', () => {
+    render({ stores: [], storeBoundTools: ['vector_search'] });
+    expect(target.textContent).toContain('binds no OKG store');
+    // The contradicting half must be absent in every spelling it could take.
+    expect(target.textContent).not.toContain('the store above');
+    expect(target.textContent).not.toContain('reads via');
+    expect(target.textContent).not.toMatch(/reading\s/);
+    // …replaced by what actually happens: no agent-owned store, so the tool
+    // uses its own shipped index.
+    expect(target.textContent).toContain('binds no');
+    expect(target.textContent).toContain("shipped default index");
+  });
+
+  it('claims no linkage while the bindings are still resolving', () => {
+    render({ stores: null, storeBoundTools: ['vector_search'] });
+    expect(target.textContent).toContain('resolving which store it reads');
+    expect(target.textContent).not.toContain('reads via');
+    expect(target.textContent).not.toContain('shipped default index');
+  });
+
+  it('points a multi-store agent at the one binding the tool actually defaults to', () => {
+    render({
+      stores: [STORE, { ...STORE, name: 'second-kb', index: 'second-kb' }],
+      storeBoundTools: ['vector_search'],
+    });
+    // `default_search_index` is the PRIMARY binding — one chip, on one card,
+    // not one per card implying the tool reads all of them.
+    expect(target.textContent?.match(/reads via/g)).toHaveLength(1);
+    expect(target.textContent).toContain('izzie-kb');
+    expect(target.textContent).toContain('Only the first binding is the default search target');
   });
 });
 

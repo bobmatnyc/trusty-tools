@@ -20,6 +20,18 @@
    * K-c reports the shipped defaults as declared-not-probed, and shows a
    * disabled endpoint as DISABLED with its reason instead of hiding it
    * (C-03.2).
+   *
+   * K-b's linkage is a CORRELATION of two independent facts and must be
+   * rendered as one (PR #3945 code-critic HIGH-1). `storeBoundTools` says only
+   * that `[tools].allow` grants the tool; `stores` says what the tool would
+   * actually read. Asserting the linkage from the grant alone produced a
+   * self-contradicting pane — "binds no OKG store" above "bound to the store
+   * above" — which is precisely the fabrication class this section exists to
+   * eliminate. The correlation follows `AgentStoresConfig::default_search_index`
+   * (`stores/config.rs:170`): the tool's default index is the PRIMARY (first)
+   * binding, so with no binding it falls back to the tool's own shipped index,
+   * and with several only the first is the target — hence one chip on one card,
+   * never one per card.
    * Test: `AgentConfigKnowledge.test.ts`.
    */
   import { AlertCircle, Loader2 } from 'lucide-svelte';
@@ -32,8 +44,18 @@
   /**
    * Store-bound knowledge tools this agent's `[tools].allow` actually grants
    * (DOC-57 §4.3). Resolved by the shell; empty is a real answer, not a gap.
+   * On its own it says nothing about whether a store exists to read — see the
+   * component doc.
    */
   export let storeBoundTools: string[] = [];
+
+  /**
+   * The binding `vector_search` actually defaults to: the PRIMARY (first) one,
+   * mirroring `default_search_index`. `null` while loading and when the agent
+   * binds nothing — two states this pane must not conflate with "bound".
+   */
+  $: primaryStore = stores && stores.length > 0 ? stores[0] : null;
+  $: grantedTools = storeBoundTools.join(', ');
 
   const heading =
     'shrink-0 font-mono text-[10px] font-semibold uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/50';
@@ -61,7 +83,7 @@
         <code class="font-mono">agent.toml</code> to give it a knowledge tree.
       </p>
     {/if}
-    {#each stores ?? [] as store (store.name)}
+    {#each stores ?? [] as store, index (store.name)}
       <div class="rounded-md border border-foundry-light-border dark:border-foundry-border px-3 py-2">
         <div class="flex items-center justify-between gap-2">
           <span class="font-mono text-xs font-semibold text-foundry-light-text dark:text-foundry-text">{store.name}</span>
@@ -95,8 +117,10 @@
         {/if}
         <!-- §4.3: `vector_search`'s default index IS this binding (#3864), so
              the tool renders UNDER the store it reads, not as a free-floating
-             chip elsewhere in the pane. -->
-        {#if storeBoundTools.length > 0}
+             chip elsewhere in the pane. Only the PRIMARY binding is that
+             target (`default_search_index`) — repeating the chip under every
+             card would claim the tool reads all of them. -->
+        {#if index === 0 && storeBoundTools.length > 0}
           <div class="mt-2 flex flex-wrap items-center gap-1.5 border-t border-foundry-light-border/60 dark:border-foundry-border/60 pt-2">
             <span class="font-mono text-[10px] uppercase tracking-wide text-foundry-light-muted dark:text-foundry-text/40">
               reads via
@@ -117,13 +141,31 @@
 
   <section class="flex flex-col gap-2">
     <h3 class={heading}>Knowledge tools</h3>
+    <!-- Four states, because the grant and the binding are independent facts:
+         not granted / granted-but-still-resolving / granted with a store to
+         read / granted with none. Collapsing the last two is the HIGH-1
+         fabrication. -->
     {#if storeBoundTools.length === 0}
       <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
         This agent's allow-list grants no store-bound knowledge tool.
       </p>
-    {:else}
+    {:else if stores === null}
       <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
-        Bound to the store above: <span class="font-mono">{storeBoundTools.join(', ')}</span>.
+        Grants <span class="font-mono">{grantedTools}</span> — resolving which store it reads…
+      </p>
+    {:else if primaryStore}
+      <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
+        Grants <span class="font-mono">{grantedTools}</span>, reading
+        <span class="font-mono">{primaryStore.name}</span>.{#if stores.length > 1}
+          Only the first binding is the default search target; the
+          {stores.length - 1} other{stores.length > 2 ? 's are' : ' is'} reachable solely by an
+          explicit <code class="font-mono">index_id</code>.{/if}
+      </p>
+    {:else}
+      <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-amber">
+        Grants <span class="font-mono">{grantedTools}</span> but binds no
+        <code class="font-mono">[[stores]]</code>, so there is no agent-owned store for it to read
+        — searches fall back to the tool's shipped default index.
       </p>
     {/if}
     <p class="rounded-md border border-dashed border-foundry-light-border dark:border-foundry-border px-3 py-2 text-[11px] text-foundry-light-muted dark:text-foundry-text/40">
