@@ -189,6 +189,12 @@ fn hidden_segment_below(root: &Path, resolved: &Path) -> Option<String> {
 /// macOS sets `UF_HIDDEN` on `~/Library` and friends. Checking the real flag
 /// generalises past the hardcoded name list to anything else the user or an
 /// installer has hidden.
+///
+/// Fails CLOSED: an unreadable segment counts as hidden. A permission-denied
+/// stat, a transient IO error, or a segment removed between canonicalisation
+/// and this probe all mean "cannot determine" — and in a security gate that
+/// must read as "not permitted", never as "not hidden". Erring the other way
+/// let an unreadable path through on an error the caller never saw.
 #[cfg(target_os = "macos")]
 fn is_platform_hidden(path: &Path) -> bool {
     use std::os::macos::fs::MetadataExt;
@@ -196,7 +202,7 @@ fn is_platform_hidden(path: &Path) -> bool {
     const UF_HIDDEN: u32 = 0x0000_8000;
     std::fs::metadata(path)
         .map(|m| m.st_flags() & UF_HIDDEN != 0)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Non-macOS platforms have no equivalent flag; the dot-prefix and name rules
@@ -356,6 +362,49 @@ mod tests {
             policy.permit(&dir.join("inner")).is_err(),
             "nor anything beneath it"
         );
+    }
+
+    /// Why: code-critic HIGH — the flag probe swallowed metadata errors as
+    /// `false`, so a permission-denied stat, a transient IO error, or a segment
+    /// removed mid-check silently read as "not hidden" and PERMITTED the path.
+    /// A security gate must treat "cannot determine" as "not permitted".
+    /// What: probes the flag layer directly on paths whose metadata cannot be
+    /// read, and asserts each is reported hidden. macOS-only: the flag layer is
+    /// compiled to a constant `false` elsewhere, so there is nothing to fail
+    /// open there — the dot and name rules are unconditional on every platform,
+    /// which is why the `~/Library` exclusion holds regardless of this.
+    /// Test: self-contained.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn unreadable_segment_fails_closed() {
+        let (_t, home) = home();
+
+        // A path that vanished between validation and probe.
+        assert!(
+            is_platform_hidden(&home.join("gone-between-check-and-read")),
+            "an unstattable path must count as hidden, not as safe"
+        );
+
+        // A real permission-denied stat: a child under a mode-0o000 parent.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = home.join("locked");
+            let child = locked.join("inner");
+            std::fs::create_dir_all(&child).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+            // Root ignores the mode bits, so only assert when the read really fails.
+            let unreadable = std::fs::metadata(&child).is_err();
+            if unreadable {
+                assert!(
+                    is_platform_hidden(&child),
+                    "a permission-denied segment must count as hidden"
+                );
+            }
+            // Restore so the tempdir can be cleaned up.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
     }
 
     /// Why: paths outside the allow-list entirely — `/etc`, `/` — are the other

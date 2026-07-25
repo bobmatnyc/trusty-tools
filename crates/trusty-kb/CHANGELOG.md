@@ -53,7 +53,12 @@ independent semantic versioning per the workspace convention.
   directory inside hidden territory in `docstore_roots` still opts in explicitly.
   Enforced inside `scan` — at the point the filesystem is touched — so a
   hand-edited `registry.toml` row pointing at a credential directory is refused
-  on every run, not just at registration.
+  on every run, not just at registration. The hidden-flag probe fails CLOSED: a
+  permission-denied stat, a transient IO error, or a segment removed mid-check
+  counts as hidden, because "cannot determine" must never read as "safe".
+  Known gap, tracked in #3889: validation is by path and the walk re-resolves
+  it, leaving a TOCTOU window against a co-located same-user adversary; closing
+  it needs fd-relative (`openat`) traversal.
 - `okg::docstore` — the in-crate filesystem fetcher: deterministic sorted walk,
   extension filtering, SHA-256 content fingerprints (path and mtime both lie),
   graceful binary skipping (reported by name, never fatal), and deterministic
