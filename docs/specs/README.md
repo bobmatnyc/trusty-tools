@@ -72,6 +72,7 @@ normative grammar — this note does not restate it.
 | DOC-54 | `SPEC-AGENTS-01~draft` … `-08~draft` | [Trusty Agents Product Specification](./trusty-agents-product-spec.md) | trusty-agents — product vision / agent model / eventstream processing / GUI |
 | DOC-55 | `SPEC-OKGIMPORT-01~draft` … `-07~draft` | [Universal OKG Importer: Any File Type, Any Connectable System, Assistant-Driven](./okg-universal-importer.md) | trusty-kb — format extraction / connector framework / ingest engine; trusty-agents — connector adapters, assistant-facing tools, deterministic CLI surface |
 | DOC-56 | `SPEC-AGENTSYNC-01~draft` … `-07~draft` | [Agent Configuration Sync: The `trusty-agents-agents` Private Monorepo](./trusty-agents-agents-sync.md) | trusty-agents — agent configuration lifecycle, provisioning merge (subsumes #3844), multi-machine sync |
+| DOC-57 | `SPEC-AGENTCFG-01~draft` … `-09~draft` | [Five-Section Agent Configuration: Personality / Knowledge / Skills / Listeners / Permissions](./agent-config-five-sections.md) | trusty-agents — agent configuration model, capability declaration (tool→skill wrapping), permissions surface, GUI config pane (**supersedes DOC-54 §5**) |
 
 > **Catalog note — `DOC-34` gap.** `DOC-34` (`SPEC-CFGDIR-01~draft`…`-05~draft`,
 > [Managed sessions launch with a tm-owned `CLAUDE_CONFIG_DIR`](./managed-session-config-dir.md))
@@ -85,16 +86,18 @@ normative grammar — this note does not restate it.
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
 > untouched); a follow-up should assign it the next free `DOC-N` and add a catalog row.
-> **Next free `DOC-N` = `DOC-57`** (updated 2026-07-25 — DOC-55 claimed by
-> [Universal OKG Importer](./okg-universal-importer.md) and DOC-56 by
-> [Agent Configuration Sync](./trusty-agents-agents-sync.md)):
-> the highest cataloged number is now **DOC-56**, which claimed the next free numbers after
+> **Next free `DOC-N` = `DOC-58`** (updated 2026-07-25 — DOC-55 claimed by
+> [Universal OKG Importer](./okg-universal-importer.md), DOC-56 by
+> [Agent Configuration Sync](./trusty-agents-agents-sync.md), and DOC-57 by
+> [Five-Section Agent Configuration](./agent-config-five-sections.md)):
+> the highest cataloged number is now **DOC-57**, which claimed the next free number after
+> **DOC-56**, itself claimed after
 > **DOC-54** ([Trusty Agents Product Specification](./trusty-agents-product-spec.md))
 > per the scan-before-claim rule ([DOC-38 §4.1](./spec-linked-documentation.md) — a catalog's "next free"
 > note is a *hint, not authority*; the scan is authoritative). DOC-44/45 are claimed by the
 > unmerged `spec-twin-lead-architecture` branch ([DOC-44 Engineering Lead Twin Orchestration](https://github.com/bobmatnyc/trusty-tools/tree/spec-twin-lead-architecture));
 > DOC-34 is assigned ([`managed-session-config-dir.md`](./managed-session-config-dir.md),
-> #1999 — still a catalog gap), DOC-35/36/38/39/40/41/46/47/48/50/51/52/53/54/55/56 are cataloged (DOC-49 was pre-claimed by PR #3313), and **DOC-37** is
+> #1999 — still a catalog gap), DOC-35/36/38/39/40/41/46/47/48/50/51/52/53/54/55/56/57 are cataloged (DOC-49 was pre-claimed by PR #3313), and **DOC-37** is
 > self-labeled by [`trusty-search-managed-repo-awareness.md`](./trusty-search-managed-repo-awareness.md)
 > (`SPEC-SEARCHREPO-01~draft`…, uncataloged). What was open PR #2792 (Eve-style agent framework
 > for trusty-agents) previously also self-labeled `DOC-37` for this unrelated spec — that
