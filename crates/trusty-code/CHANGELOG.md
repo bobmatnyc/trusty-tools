@@ -25,6 +25,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Load-realistic compression-effectiveness stress soak (epic #3866,
+  follow-up to #3869/PR #3887).** New `TCODE_MOCK_LLM=echo-soak-load` mock
+  LLM (`task::mock_llm_soak_load::SoakLoadEchoLlmClient`) sizes every
+  `set_goal` turn (not one in six) at a realistic tool-output magnitude
+  (~160-300 KB, approximating a `git diff`/`grep` dump/`cargo test` failure
+  log), driven by a new harness
+  (`crates/trusty-code/scripts/compression_load_soak.py`, reusing
+  `compression_soak.py`'s daemon/RPC plumbing) that adds a session-fidelity
+  check (`session.get_goals`/`session.get_transcript`/one more `task.run`)
+  after the load-driving calls. Result: the measured working-context floor
+  drops from #3887's comfortable 94-95% to exactly 60-61% under this load —
+  right at the epic's target boundary — and a reproducibly heavier profile
+  (not shipped as the default) breaches it outright (floor 48%). Full
+  writeup: `docs/research/tcode-compression-load-soak-2026-07-25.md`.
 - **Compression-effectiveness soak harness + scored report (epic #3866,
   Slice C #3869).** New `TCODE_MOCK_LLM=echo-soak` mock LLM
   (`task::mock_llm_soak::SoakEchoLlmClient`) drives a deterministic,

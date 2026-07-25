@@ -1,0 +1,46 @@
+session_id=aba1109f-9a3a-4634-9d2c-a42992293f06
+call 1/35: status=finished turns~=7 wall_ms=312 budget=99
+call 2/35: status=finished turns~=14 wall_ms=2021 budget=99
+call 3/35: status=finished turns~=21 wall_ms=105 budget=99
+call 4/35: status=finished turns~=28 wall_ms=149 budget=99
+call 5/35: status=finished turns~=35 wall_ms=149 budget=99
+call 6/35: status=finished turns~=42 wall_ms=166 budget=99
+call 7/35: status=finished turns~=49 wall_ms=106 budget=99
+call 8/35: status=finished turns~=56 wall_ms=164 budget=99
+call 9/35: status=finished turns~=63 wall_ms=111 budget=99
+call 10/35: status=finished turns~=70 wall_ms=172 budget=99
+call 11/35: status=finished turns~=77 wall_ms=165 budget=99
+call 12/35: status=finished turns~=84 wall_ms=121 budget=99
+call 13/35: status=finished turns~=91 wall_ms=170 budget=99
+call 14/35: status=finished turns~=98 wall_ms=154 budget=99
+call 15/35: status=finished turns~=105 wall_ms=171 budget=99
+call 16/35: status=finished turns~=112 wall_ms=166 budget=98
+call 17/35: status=finished turns~=119 wall_ms=106 budget=98
+call 18/35: status=finished turns~=126 wall_ms=175 budget=98
+call 19/35: status=finished turns~=133 wall_ms=170 budget=98
+call 20/35: status=finished turns~=140 wall_ms=241 budget=98
+call 21/35: status=finished turns~=147 wall_ms=165 budget=98
+call 22/35: status=finished turns~=154 wall_ms=177 budget=98
+call 23/35: status=finished turns~=161 wall_ms=177 budget=98
+call 24/35: status=finished turns~=168 wall_ms=161 budget=98
+call 25/35: status=finished turns~=175 wall_ms=245 budget=98
+call 26/35: status=finished turns~=182 wall_ms=280 budget=98
+call 27/35: status=finished turns~=189 wall_ms=209 budget=98
+call 28/35: status=finished turns~=196 wall_ms=138 budget=98
+call 29/35: status=finished turns~=203 wall_ms=270 budget=98
+call 30/35: status=finished turns~=210 wall_ms=284 budget=98
+call 31/35: status=finished turns~=217 wall_ms=161 budget=98
+call 32/35: status=finished turns~=224 wall_ms=279 budget=98
+call 33/35: status=finished turns~=231 wall_ms=275 budget=98
+call 34/35: status=finished turns~=238 wall_ms=274 budget=98
+call 35/35: status=finished turns~=245 wall_ms=232 budget=98
+{
+  "session_id": "aba1109f-9a3a-4634-9d2c-a42992293f06",
+  "total_turns": 245,
+  "compression_jsonl": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/66306ece-6625-43d4-ad98-f8f0a322c7a7/scratchpad/load-soak-final/telemetry/compression.jsonl",
+  "context_budget_samples": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/66306ece-6625-43d4-ad98-f8f0a322c7a7/scratchpad/load-soak-final/context_budget_samples.json",
+  "fidelity_check": "/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/66306ece-6625-43d4-ad98-f8f0a322c7a7/scratchpad/load-soak-final/fidelity_check.json",
+  "fidelity_pass": true,
+  "mean_call_wall_ms": 240.6,
+  "max_call_wall_ms": 2020.7
+}

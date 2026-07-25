@@ -1,0 +1,11 @@
+{
+  "goals_after_soak": [],
+  "goals_clean": true,
+  "transcript_turn_count": 140,
+  "transcript_readable": true,
+  "transcript_compaction_events": 0,
+  "resume_after_soak_status": "finished",
+  "resume_after_soak_error": null,
+  "resume_ok": true,
+  "overall_pass": true
+}
