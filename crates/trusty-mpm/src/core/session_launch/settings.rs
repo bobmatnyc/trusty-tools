@@ -632,18 +632,24 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
 /// silently pre-approved and, on first `tm launch` in that clone, connected
 /// with the operator's credentials. The production call site
 /// (`session_launch::mod::prepare_session_inner`) now computes
-/// `trusted_mcp_names` via `mcp_config::launch_trusted_mcp_names()` (the
-/// framework builtin four, force-overwritten to their canonical entry every
-/// run, UNION the operator's own `tm mcp add` registry, also
-/// force-overwritten when it matches) MINUS any name bridged from a
+/// `trusted_mcp_names` via `mcp_config::launch_trusted_mcp_names(trusty_mpm_injected,
+/// trusty_review_injected, trusty_memory_injected, trusty_search_injected)`
+/// (the framework builtin four, EACH included only when its own
+/// force-overwrite injector actually SUCCEEDED writing its canonical entry
+/// this run — issue #3945: a manifest toggle being on, or a builtin having
+/// no toggle at all, is not sufficient when the write itself can still fail
+/// — see [`crate::core::session_launch::PrepReport`]'s `trusty_*_injected`
+/// fields) UNION the operator's own `tm mcp add` registry, also
+/// force-overwritten when it matches, MINUS any name bridged from a
 /// project-scope `[mcp.custom]` manifest entry this run (issue #2739's
 /// existing defense-in-depth: even a `tm project trust`-ed project's entries
 /// still surface Claude Code's consent dialog). A name merely present in
-/// `.mcp.json` that is in none of those provenance-safe sources now
+/// `.mcp.json` that is in none of those provenance-safe sources — or a
+/// framework builtin whose injector was disabled OR failed this run — now
 /// correctly falls through to that dialog instead of being silently
 /// approved. This mirrors, for the interactive path,
 /// `mcp_config::managed_mcp_server_names`'s already-fixed derivation for the
-/// daemon-managed path (issues #3918/#3924).
+/// daemon-managed path (issues #3918/#3924/#3934/#3945).
 /// Test: `preseed_trust_marks_directory`, `preseed_trust_preserves_other_keys`,
 /// `preseed_trust_is_idempotent`, `preseed_trust_leaves_malformed_file`,
 /// `preseed_trust_enables_given_mcp_names`,

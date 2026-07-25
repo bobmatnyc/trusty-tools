@@ -15,10 +15,15 @@
 //! injector unit tests) and
 //! `prepare_session_creates_working_trusty_mpm_entry_when_absent` /
 //! `prepare_session_overwrites_hostile_trusty_mpm_and_review_entries` (e2e,
-//! driving `prepare_session_inner` directly).
+//! driving `prepare_session_inner` directly). Also
+//! `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`
+//! (issue #3945, fifth instance: a genuine `.mcp.json` write failure — not a
+//! mocked toggle — must exclude all four builtins from
+//! `enabledMcpjsonServers`).
 //! Test: this is the test module.
 
 use super::settings::{inject_trusty_mpm_mcp, inject_trusty_review_mcp};
+use super::tests::EnvVarGuard;
 use super::*;
 use tempfile::tempdir;
 
@@ -266,4 +271,90 @@ fn prepare_session_overwrites_hostile_trusty_mpm_and_review_entries() {
          closed: {value}"
     );
     assert_eq!(review["args"], serde_json::json!(["serve", "--stdio"]));
+}
+
+/// Issue #3945 (fifth instance of the name-approval/content-pinning
+/// vulnerability class, found by code-critic while approving PR #3946).
+///
+/// Why: before this fix, `prepare_session_inner` computed
+/// `trusted_mcp_names` from `plan.inject_trusty_memory`/`inject_trusty_search`
+/// (the manifest TOGGLE) for the two conditional builtins, and unconditionally
+/// included `trusty-mpm`/`trusty-review` regardless of any per-run signal at
+/// all — neither reflected whether the force-overwrite injector's WRITE
+/// actually SUCCEEDED this run. This test forces a REAL write failure (not a
+/// mocked boolean): `repo/.mcp.json` is an existing DIRECTORY, so
+/// `inject_mcp_server`'s `std::fs::write` fails with an IO error for all four
+/// builtins, which share that one file. `#[serial]` + `EnvVarGuard` redirect
+/// `$HOME` because `prepare_session_inner` calls `preseed_workspace_trust_home`,
+/// which reads/writes the REAL `$HOME/.claude.json` (mirrors
+/// `tests_launch_trust_3926.rs`'s pattern).
+/// What: asserts the returned `PrepReport`'s four `trusty_*_injected` fields
+/// are all `false`, AND that none of the four names appear in
+/// `$HOME/.claude.json`'s `enabledMcpjsonServers` for this workspace.
+/// Test: itself; `prepare_session_preseeds_enabled_mcp_servers` (in
+/// `tests.rs`) covers the complementary non-regression case — a normal run
+/// still approves all four.
+#[test]
+#[serial_test::serial]
+fn prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails() {
+    let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    // Force EVERY builtin injector's write to fail: `.mcp.json` is a
+    // directory, not a file, so `std::fs::write` fails with an IO error
+    // ("Is a directory") regardless of permission bits — portable even in a
+    // CI container that runs as root, where a read-only-directory
+    // permission trick would not actually block the write.
+    std::fs::create_dir_all(project.join(".mcp.json")).unwrap();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    let report = prepare_session_inner(&fw, project, None, true, None).expect(
+        "prepare_session_inner must still succeed: injector failures are non-fatal to launch",
+    );
+
+    assert!(
+        !report.trusty_mpm_injected,
+        "a failed write must never count as pinned, even though trusty-mpm has no manifest toggle"
+    );
+    assert!(
+        !report.trusty_review_injected,
+        "same as trusty-mpm, for trusty-review"
+    );
+    assert!(
+        !report.trusty_memory_injected,
+        "a failed write must never count as pinned, independent of the manifest toggle"
+    );
+    assert!(
+        !report.trusty_search_injected,
+        "same as trusty-memory, for trusty-search"
+    );
+
+    let claude_json = tmp_home.path().join(".claude.json");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    let key = project.to_string_lossy().to_string();
+    let enabled: Vec<&str> = value["projects"][&key]["enabledMcpjsonServers"]
+        .as_array()
+        .expect("enabledMcpjsonServers is an array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+
+    assert!(
+        !enabled.contains(&"trusty-mpm"),
+        "trusty-mpm must not be pre-approved when its pin write failed this run: {enabled:?}"
+    );
+    assert!(
+        !enabled.contains(&"trusty-review"),
+        "trusty-review must not be pre-approved when its pin write failed this run: {enabled:?}"
+    );
+    assert!(
+        !enabled.contains(&"trusty-memory"),
+        "trusty-memory must not be pre-approved when its pin write failed this run: {enabled:?}"
+    );
+    assert!(
+        !enabled.contains(&"trusty-search"),
+        "trusty-search must not be pre-approved when its pin write failed this run: {enabled:?}"
+    );
 }

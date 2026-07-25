@@ -617,12 +617,33 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
     // must never assume both are unconditionally trustworthy: a manifest that
     // disabled one, paired with a spoofed `.mcp.json` entry the injector
     // therefore never overwrote, must not have that name pre-approved.
+    //
+    // Known residual gap (issue #3945, filed not fixed here): this toggle
+    // re-resolution — like the pre-#3945 code for every call site — reflects
+    // whether the injector was ATTEMPTED, not whether its write actually
+    // SUCCEEDED this run, and this function has no way to observe that: it
+    // runs behind the `RuntimeAdapter` trait (also reached by `spawn_resume`,
+    // which may have no corresponding fresh `prepare_session` call in this
+    // exact request at all), a genuinely disjoint call chain from wherever
+    // `session_launch::prepare_session_with_repo_url` last ran for `cwd`
+    // — unlike `standalone::load::load_alias`, which #3945 fixed because its
+    // `prepare_session_with_repo_url` call and this trust-seed call are
+    // in the SAME function, so the actual `PrepReport` is available to
+    // thread through. Closing this call site's residual gap would need
+    // either a `RuntimeAdapter` trait signature change to carry the actual
+    // per-run pin result across that boundary, or content-verifying `cwd`'s
+    // own `.mcp.json` against the framework-controlled command at this call
+    // site directly — both larger, separately-scoped changes. The two
+    // unconditional builtins are passed `true, true` here, preserving this
+    // call site's pre-existing (unchanged, not newly introduced) behavior.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(cwd);
     let (inject_trusty_memory, inject_trusty_search) =
         crate::core::mcp_config::resolve_conditional_mcp_toggles(&fw, cwd);
     if let Err(e) = crate::core::standalone::preseed_managed_trust(
         &config_dir,
         cwd,
+        true,
+        true,
         inject_trusty_memory,
         inject_trusty_search,
     ) {
