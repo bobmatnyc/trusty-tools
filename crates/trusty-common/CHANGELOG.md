@@ -5,6 +5,35 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **`catchup::session_finder::extract_section` no longer absorbs trailing
+  header text** (issue #3901): a substring match on `## <header>` treated a
+  hand-written header like `## Next Steps (all Bob's call — none required)`
+  as a match for `"Next Steps"`, silently prepending the trailing annotation
+  into the parsed section body — a real corruption reproduced from this
+  project's own `.trusty-mpm/sessions/session-20260721-020826.md`. The
+  matcher now skips past the entire header LINE (through its own newline)
+  before capturing the body, regardless of what follows the header text on
+  that line, so the trailing annotation never leaks in. An earlier draft of
+  this fix instead rejected any header with trailing text outright
+  (fail-closed, returning `None` for the whole section) — code review caught
+  that this was a worse regression than the bug it fixed: annotated headers
+  (`## In Progress (BACKGROUND AGENTS DIE AT PAUSE — …)`, `## Next Steps
+  (RESUME PLAYBOOK)`) were this project's own standard hand-written
+  convention for weeks before the native `pause.rs` writer existed, not an
+  isolated incident, and `render_session` silently omits a `None` section
+  with no warning. Simulated against this project's own 50-file
+  `.trusty-mpm/sessions/*.md` archive (07-06 through 07-24, 300 section
+  extractions): the fail-closed draft regressed 64 from present-content to
+  `None`; the shipped line-skip fix regresses zero and additionally corrects
+  64 sections that previously carried leaked annotation-text prefixes.
+  Regression tests added, including a representative sample of the corpus's
+  annotated-header styles.
+
+---
 ## [0.26.1] — 2026-07-24
 
 ### Added

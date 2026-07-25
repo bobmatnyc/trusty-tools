@@ -15,6 +15,30 @@ Detailed usage patterns for the PM's real tool families:
 `mcp__trusty-review__*`. This is the concrete "how" behind the constraints in
 `tm-circuit-breaker`.
 
+## Deferred MCP Tool Loading (Mandatory Before Any "Unavailable" Fallback)
+
+Harnesses with many-tool MCP servers (Claude Code, for `mcp__trusty-mpm__*`
+in particular — over 30 registered tools) may defer loading a tool's schema
+until it is explicitly fetched. The daemon-side tool is always registered
+regardless of launch mode; **absence from your currently loaded tool list
+does not mean the tool is unavailable** — it means the schema hasn't been
+fetched yet.
+
+Before calling any `mcp__*` tool that isn't already in your loaded tool list,
+load it first:
+
+```
+ToolSearch(query: "select:<full-tool-name>[,<other-tool-name>...]")
+```
+
+Batch every tool you expect to need for the current step into one
+`ToolSearch` call rather than loading one at a time. This load step is
+**mandatory** before concluding a tool is unavailable or improvising a
+fallback — see `tm-session-pause` / `tm-session-resume` for the fully worked
+three-way diagnosis (load failed / call failed / server genuinely absent)
+that applies to every skill instructing a direct MCP call, including
+`tm-bug-reporting` and `tm-postmortem`.
+
 ## Context-First Protocol (Mandatory)
 
 Before delegating to Research or reading any file:

@@ -29,7 +29,11 @@ already knows this: `report_bug`'s description states it files into
 ## The Real Filing Pipeline (MCP-Native, Not `gh issue create`)
 
 This is the entire mechanism — no manual `gh issue create` template
-construction:
+construction. **Before calling any of these**, load their schemas if not
+already in your tool list — `ToolSearch(query:
+"select:mcp__trusty-mpm__list_recent_errors,mcp__trusty-mpm__preview_bug_report,mcp__trusty-mpm__report_bug")`
+— see `tm-tool-usage-guide`'s "Deferred MCP Tool Loading" section; absence
+from your loaded list does not mean these tools are unavailable:
 
 1. **`mcp__trusty-mpm__list_recent_errors(limit)`** — surfaces recently
    captured ERROR-level events across trusty-search, trusty-memory,

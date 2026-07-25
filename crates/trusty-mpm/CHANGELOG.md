@@ -7,6 +7,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **`/tm-session-pause` and `/tm-session-resume` now instruct the PM to load
+  the deferred MCP tool before calling it** (closes [#3901](https://github.com/bobmatnyc/trusty-tools/issues/3901)):
+  `session_context_pause`/`session_context_catchup` are always registered by
+  the daemon, but Claude Code defers loading their schemas until fetched via
+  `ToolSearch`, so the PM previously saw the tool missing from its loaded
+  list, concluded (wrongly) that it was unavailable, and improvised an
+  undocumented "MCP pause tool unavailable" fallback that hand-wrote
+  snapshots drifting out of the format `/tm-session-resume`'s parser expects
+  — reproduced 6 times in this project's own `.trusty-mpm/sessions/` history
+  over 3 days. Both skills now mandate a `ToolSearch(query:
+  "select:mcp__trusty-mpm__<tool>")` load step before the call, and replace
+  the improvised fallback with an ordered, evidence-based diagnostic
+  procedure: attempt the load, attempt the call, report the actual observed
+  error text (never an unverified guess like "the server isn't connected" —
+  that claim is only valid when checked against whether any
+  `mcp__trusty-mpm__*` name appears anywhere in the loaded-or-deferred tool
+  list), and only then hand-write a snapshot — which must now
+  self-identify as a fallback with the observed failure recorded, so a
+  resumed session can tell at a glance it wasn't tool-generated. The same
+  deferred-tool-loading gap and fix pattern was also applied to
+  `tm-bug-reporting` and `tm-postmortem` (same `mcp__trusty-mpm__*`
+  procedural-call shape), with a canonical "Deferred MCP Tool Loading"
+  reference added to `tm-tool-usage-guide`.
+
 ---
 ## [1.0.2] - 2026-07-25
 
