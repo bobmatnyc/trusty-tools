@@ -130,6 +130,45 @@ class CompactionCountTests(unittest.TestCase):
         self.assertEqual(cr.compute_compaction_count(events), 0)
 
 
+def floor_breach_event(session_id="s1"):
+    """A #3911 cadence floor-breach backstop record — mechanically distinct
+    from `threshold_event` above (different surface, same `compaction_event:
+    True` alarm-worthy shape)."""
+    return {
+        "ts": "2026-07-25T00:00:00Z",
+        "session_id": session_id,
+        "surface": cr.SURFACE_CADENCE_FLOOR_BREACH,
+        "surface_detail": "cadence-floor-breach",
+        "tokens_before": 200_000,
+        "tokens_after": 104_000,
+        "ratio": 0.52,
+        "working_context_pct_after": 48,
+        "overhead_pct_after": 52,
+        "compaction_event": True,
+        "duration_ms": 6,
+        "rounds": 7,
+    }
+
+
+class FloorBreachCountTests(unittest.TestCase):
+    """Issue #3911: the backstop's own fire count must be a DISTINCT signal
+    from `compute_compaction_count` (the threshold-compactor's count) —
+    neither surface's rows may be double-counted as the other's."""
+
+    def test_counts_only_floor_breach_surface(self):
+        events = [
+            floor_breach_event(),
+            threshold_event(True),  # different surface — not counted
+            cadence_event(0.8, 90),  # different surface — not counted
+        ]
+        self.assertEqual(cr.compute_floor_breach_count(events), 1)
+        self.assertEqual(cr.compute_compaction_count(events), 1)
+
+    def test_zero_when_no_floor_breach_events(self):
+        events = [cadence_event(0.8, 90), threshold_event(True)]
+        self.assertEqual(cr.compute_floor_breach_count(events), 0)
+
+
 class VerdictTests(unittest.TestCase):
     def test_pass_when_both_targets_met(self):
         events = [cadence_event(0.8, 90), cadence_event(0.8, 75)]
@@ -218,6 +257,44 @@ class RenderMarkdownTests(unittest.TestCase):
             markdown, verdict_pass = cr.build_report(path, session_id=None)
             self.assertFalse(verdict_pass)
             self.assertIn("FAIL", markdown)
+        finally:
+            path.unlink()
+
+    def test_report_flags_a_breach_the_backstop_never_caught(self):
+        """Issue #3911's core reporting acceptance criterion: a floor breach
+        with ZERO backstop fires must be called out explicitly — this is
+        exactly what the original soak (pre-#3911) observed."""
+        import json
+        import tempfile
+
+        events = [cadence_event(0.8, 90), cadence_event(0.8, 48)]  # breach, no backstop row
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False
+        ) as f:
+            for e in events:
+                f.write(json.dumps(e) + "\n")
+            path = Path(f.name)
+        try:
+            markdown, _ = cr.build_report(path, session_id=None)
+            self.assertIn("FINDING", markdown)
+            self.assertIn("backstop fired 0 times", markdown)
+        finally:
+            path.unlink()
+
+    def test_report_confirms_backstop_engaged_on_a_breach(self):
+        import json
+        import tempfile
+
+        events = [cadence_event(0.8, 90), cadence_event(0.8, 48), floor_breach_event()]
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False
+        ) as f:
+            for e in events:
+                f.write(json.dumps(e) + "\n")
+            path = Path(f.name)
+        try:
+            markdown, _ = cr.build_report(path, session_id=None)
+            self.assertIn("1 backstop fire(s) recorded", markdown)
         finally:
             path.unlink()
 

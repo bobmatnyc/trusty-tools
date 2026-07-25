@@ -24,6 +24,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `lifetime_compaction_alarm_count`'s existing "read fresh at query time"
   pattern exactly.
 
+- **A cadence-level 60%-floor breach now has a durable backstop alarm
+  (#3911).** The load-realistic soak (epic #3866, PR #3909) proved that
+  when `cadence::enforce_budget` exhausts every eligible entry and still
+  exceeds the overhead cap (a real guarantee violation — floor 48% in the
+  soak's exploratory run), NOTHING durable reacted: the #2308 threshold
+  compactor's own alarm (`lifetime_compaction_alarm_count`) stayed at 0
+  because it is keyed to a mechanically independent, laxer 75%-of-window
+  trigger cadence's own breach never crosses. Added
+  `agent_loop::telemetry::record_cadence_floor_breach` (writes a
+  `tcode-cadence-floor-breach` JSONL row plus a durable alarm line) and a
+  new `lifetime_cadence_floor_breach_count` field on
+  `session.get_context_budget`, elevated the prior in-process `warn!` to
+  `error!` at the call site. Re-running both `compression_load_soak.py`
+  profiles confirms the backstop now fires on every observed breach (2/2
+  in the primary run, 21/21 in the exploratory run) — see PR for the full
+  residual-limits discussion (this is an alarm, not additional
+  compaction capacity: the floor itself is unchanged).
+
+- `compression_report.py` now additionally reports the #3911 backstop's
+  own fire count in a dedicated section, flagging a floor breach with
+  zero backstop fires as a FINDING.
+
 ### Fixed
 
 - **`TurnCapExceeded` permanently un-resumed a session (#3888).** A

@@ -42,6 +42,13 @@ from typing import Any
 
 SURFACE_CADENCE = "tcode-cadence"
 SURFACE_THRESHOLD = "tcode-threshold"
+# The #3911 cadence floor-breach backstop: a durable, alarm-worthy record of
+# `CadenceOutcome::within_budget == false` (cadence's OWN continuous
+# enforcement exhausted every eligible entry and still exceeded the overhead
+# cap) — mechanically distinct from `SURFACE_THRESHOLD` above (see
+# `agent_loop::telemetry::record_cadence_floor_breach`'s docs for why the two
+# alarms cannot be the same signal).
+SURFACE_CADENCE_FLOOR_BREACH = "tcode-cadence-floor-breach"
 
 # Epic #2343's stated success-metric thresholds.
 TARGET_MIN_WORKING_CONTEXT_PCT = 60
@@ -157,6 +164,22 @@ def compute_compaction_count(events: list[dict[str, Any]]) -> int:
     )
 
 
+def compute_floor_breach_count(events: list[dict[str, Any]]) -> int:
+    """Count of #3911 cadence floor-breach backstop fires
+    (`SURFACE_CADENCE_FLOOR_BREACH`).
+
+    Why: distinct from `compute_compaction_count` above — a floor breach
+    (cadence's OWN enforcement exhausted every eligible entry and still
+    exceeded the cap) is mechanically independent of a threshold-compactor
+    fire (a separate, laxer 75%-of-window trigger). Reporting this
+    separately answers "did the backstop actually engage on a real breach",
+    which `compute_context_floor`'s `below_target` list alone cannot: that
+    list is derived from measured percentages, not from whether anything
+    reacted to them.
+    """
+    return sum(1 for e in events if e.get("surface") == SURFACE_CADENCE_FLOOR_BREACH)
+
+
 def compute_surface_counts(events: list[dict[str, Any]]) -> dict[str, int]:
     """Event count per `surface` value, for the report's overview table."""
     counts: dict[str, int] = {}
@@ -200,6 +223,7 @@ def render_markdown(
     ratio_stats: dict[str, float] | None,
     context_floor: dict[str, Any],
     compaction_count: int,
+    floor_breach_count: int,
     surface_counts: dict[str, int],
     verdict_pass: bool,
     verdict_reason: str,
@@ -287,6 +311,35 @@ def render_markdown(
         lines.append("0 threshold-compaction events fired. Target met.")
     lines.append("")
 
+    lines.append("## Cadence floor-breach backstop (`tcode-cadence-floor-breach`, issue #3911)")
+    lines.append("")
+    lines.append(
+        "Distinct from the threshold-compaction signal above: this counts "
+        "the #3911 backstop, which fires when cadence's OWN continuous "
+        "budget enforcement exhausts every eligible entry and still exceeds "
+        "the overhead cap — i.e. it answers \"did something durable react "
+        "to the floor breach\", not just \"was the floor breached\" (the "
+        "Working-context floor section above already answers that)."
+    )
+    lines.append("")
+    if context_floor["below_target"] and floor_breach_count == 0:
+        lines.append(
+            f"**FINDING: the floor was breached at "
+            f"{len(context_floor['below_target'])} sample(s) but the backstop "
+            "fired 0 times.** The backstop is not engaging on a real breach."
+        )
+    elif floor_breach_count > 0:
+        lines.append(
+            f"{floor_breach_count} backstop fire(s) recorded — the backstop "
+            "engaged on the observed floor breach(es)."
+        )
+    else:
+        lines.append(
+            "0 backstop fires recorded, and the floor never dropped below "
+            "target — consistent (nothing to catch)."
+        )
+    lines.append("")
+
     return "\n".join(lines)
 
 
@@ -297,6 +350,7 @@ def build_report(
     ratio_stats = compute_ratio_stats(events)
     context_floor = compute_context_floor(events)
     compaction_count = compute_compaction_count(events)
+    floor_breach_count = compute_floor_breach_count(events)
     surface_counts = compute_surface_counts(events)
     verdict_pass, verdict_reason = compute_verdict(context_floor, compaction_count)
     markdown = render_markdown(
@@ -306,6 +360,7 @@ def build_report(
         ratio_stats=ratio_stats,
         context_floor=context_floor,
         compaction_count=compaction_count,
+        floor_breach_count=floor_breach_count,
         surface_counts=surface_counts,
         verdict_pass=verdict_pass,
         verdict_reason=verdict_reason,

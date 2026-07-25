@@ -177,6 +177,82 @@ fn lifetime_compaction_alarm_count_matches_fire_count() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// -- cadence floor-breach alarm (issue #3911) --
+
+#[test]
+fn record_cadence_floor_breach_alarm_appends_one_line_per_call() {
+    let dir = temp_dir("floor-breach-alarm-append");
+    assert_eq!(lifetime_cadence_floor_breach_count(&dir), 0);
+
+    record_cadence_floor_breach_alarm(&dir);
+    assert_eq!(lifetime_cadence_floor_breach_count(&dir), 1);
+
+    record_cadence_floor_breach_alarm(&dir);
+    record_cadence_floor_breach_alarm(&dir);
+    assert_eq!(lifetime_cadence_floor_breach_count(&dir), 3);
+
+    // A distinct log from the threshold-under-cadence alarm — this scenario
+    // must never touch that counter.
+    assert_eq!(lifetime_compaction_alarm_count(&dir), 0);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn record_cadence_floor_breach_alarm_unwritable_dir_does_not_panic() {
+    let bogus = PathBuf::from("/dev/null/not-a-real-dir-\0-segment");
+    record_cadence_floor_breach_alarm(&bogus);
+}
+
+#[test]
+fn lifetime_cadence_floor_breach_count_zero_when_missing() {
+    let dir = temp_dir("floor-breach-missing");
+    assert_eq!(lifetime_cadence_floor_breach_count(&dir), 0);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn lifetime_cadence_floor_breach_count_matches_fire_count() {
+    let dir = temp_dir("floor-breach-persist");
+    for _ in 0..4 {
+        record_cadence_floor_breach_alarm(&dir);
+    }
+    assert_eq!(lifetime_cadence_floor_breach_count(&dir), 4);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn record_cadence_floor_breach_writes_jsonl_and_alarm() {
+    let dir = temp_dir("floor-breach-jsonl");
+    record_cadence_floor_breach(
+        &dir,
+        Some("sess-breach".to_string()),
+        200_000,
+        104_000,
+        200_000,
+        6,
+        7,
+    );
+
+    let lines = read_lines(&compression_log_path(&dir));
+    assert_eq!(lines.len(), 1);
+    let event: CompressionEvent = serde_json::from_str(&lines[0]).unwrap();
+    assert_eq!(event.surface, SURFACE_TCODE_CADENCE_FLOOR_BREACH);
+    assert_eq!(event.surface_detail, DETAIL_CADENCE_FLOOR_BREACH);
+    assert!(
+        event.compaction_event,
+        "a floor breach is unconditionally alarm-worthy"
+    );
+    assert_eq!(event.working_context_pct_after, Some(48));
+
+    assert_eq!(
+        lifetime_cadence_floor_breach_count(&dir),
+        1,
+        "the durable alarm line must always accompany the JSONL record"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // -- context_pcts --
 
 #[test]

@@ -968,6 +968,17 @@ pub struct ContextBudgetSnapshot {
     /// session — lets a consumer distinguish "no samples yet" (`None` above)
     /// from "exactly one, possibly unrepresentative, sample".
     pub working_context_pct_sample_count: usize,
+    /// (issue #3911) Lifetime, cross-session count of a cadence-level
+    /// 60%-floor breach (`CadenceOutcome::within_budget == false` after
+    /// `cadence::enforce_budget` exhausted every eligible entry) — the
+    /// backstop's own alarm, mirroring `lifetime_compaction_alarm_count`
+    /// exactly but keyed to the cadence mechanism's OWN floor guarantee
+    /// rather than the mechanically-independent threshold compactor's
+    /// separate 75%-of-window trigger (see
+    /// `agent_loop::telemetry::record_cadence_floor_breach`'s docs for why
+    /// the two alarms cannot be the same counter). Same "placeholder `0` on
+    /// the write path, real read on the query path" pattern.
+    pub lifetime_cadence_floor_breach_count: u64,
 }
 
 /// One row in a session's RETAINED search/recall audit trail (issue #3072;

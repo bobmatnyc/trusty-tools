@@ -170,16 +170,39 @@ impl AgentLoop {
     /// this now emits `tracing::info!` with the round count and whether the
     /// transcript ended within budget — a notable-but-normal event (routine
     /// scheduled compression), not a failure, hence `info` rather than
-    /// `warn`. The budget-floor-exceeded case is already `warn!`-logged
-    /// inside `cadence::enforce_budget` itself. The SAME outcome is also
-    /// forwarded to `self.sink` (when one is attached) as a
-    /// [`ContextBudgetSnapshot`], so a `session.attach`ed UI can render a live
-    /// budget indicator. Emission sits AFTER both guards above, which is what
-    /// keeps it PM-only for free: only `task::executor::run_and_record`'s
-    /// persistent-session PM loop sets `cadence: Some(_)`, so a delegated
-    /// engineer loop never emits. (#3867) ALSO — only when
-    /// `outcome.rounds > 0` (compaction work actually happened this turn) —
-    /// writes a durable `telemetry::record_cadence_event` JSONL record.
+    /// `warn`. The SAME outcome is also forwarded to `self.sink` (when one
+    /// is attached) as a [`ContextBudgetSnapshot`], so a `session.attach`ed
+    /// UI can render a live budget indicator. Emission sits AFTER both
+    /// guards above, which is what keeps it PM-only for free: only
+    /// `task::executor::run_and_record`'s persistent-session PM loop sets
+    /// `cadence: Some(_)`, so a delegated engineer loop never emits. (#3867)
+    /// ALSO — only when `outcome.rounds > 0` (compaction work actually
+    /// happened this turn) — writes a durable `telemetry::record_cadence_event`
+    /// JSONL record.
+    /// (#3911) `cadence::enforce_budget`'s budget-floor-exceeded case
+    /// (`!outcome.within_budget` — the active zone shrunk to zero, still
+    /// over the overhead cap) was previously ONLY `warn!`-logged from deep
+    /// inside that function: no durable record, no counter, and not the
+    /// same alarm the #2308 threshold compactor's own breach uses (that
+    /// alarm's trigger is a mechanically independent, laxer 75%-of-window
+    /// bound — see `telemetry::record_cadence_floor_breach`'s docs for why
+    /// it can miss a cadence-level breach entirely, which the load-realistic
+    /// soak, epic #3866 PR #3909, proved happens: a measured 48% floor
+    /// breach with zero threshold events and zero alarm-count increments).
+    /// When `!outcome.within_budget`, this now ALSO emits `tracing::error!`
+    /// (elevated from the prior `warn!` — a floor breach is the epic's
+    /// stated guarantee being violated, not a routine event) and writes a
+    /// durable `telemetry::record_cadence_floor_breach` JSONL record plus
+    /// alarm line, unconditionally (this call site is cadence-enabled-only
+    /// by construction — see the guard above). This does NOT attempt any
+    /// additional compaction: `enforce_budget` already shrank the active
+    /// zone to zero and re-compacted at every step, so nothing further is
+    /// evictable without violating the pinned/system/user preservation
+    /// invariant `Transcript::mark_compacted` enforces — the residual floor
+    /// here is structural (typically a single turn's own oversized
+    /// tool-call argument), not a tuning gap this alarm can close by
+    /// itself. It makes the breach OBSERVABLE and COUNTABLE, which is what
+    /// #3911 asks for; see that issue for the full design rationale.
     /// Test: `agent_loop::tests::cadence_disabled_by_default`,
     /// `agent_loop::tests::cadence_never_fires_in_parity_mode`,
     /// `agent_loop::tests::cadence_fires_in_daily_driver_when_configured`,
@@ -187,7 +210,9 @@ impl AgentLoop {
     /// `agent_loop::tests::cadence_emits_context_budget_snapshot`,
     /// `agent_loop::tests::no_context_budget_event_when_cadence_disabled`,
     /// `agent_loop::tests::compression_telemetry_tests::cadence_fire_writes_compression_telemetry`,
-    /// `agent_loop::tests::compression_telemetry_tests::cadence_disabled_writes_no_cadence_telemetry`.
+    /// `agent_loop::tests::compression_telemetry_tests::cadence_disabled_writes_no_cadence_telemetry`,
+    /// `agent_loop::tests::compression_telemetry_tests::cadence_floor_breach_writes_alarm_and_error_log`,
+    /// `agent_loop::tests::compression_telemetry_tests::cadence_within_budget_never_writes_floor_breach_alarm`.
     pub(super) async fn maybe_cadence_compress(&self, transcript: &mut Transcript) {
         if self.config.mode != HarnessMode::DailyDriver {
             return;
@@ -214,6 +239,33 @@ impl AgentLoop {
 
         if outcome.rounds > 0 {
             telemetry::record_cadence_event(
+                &self.telemetry_data_dir(),
+                self.session_id.clone(),
+                tokens_before,
+                outcome.overhead_tokens,
+                context_window,
+                started.elapsed().as_millis() as u64,
+                outcome.rounds,
+            );
+        }
+
+        // (#3911) The backstop: a cadence-level floor breach is a violation
+        // of epic #2343's stated guarantee, not a routine event — make it
+        // durable and countable instead of an in-process-only `warn!` (see
+        // `cadence::enforce_budget`'s own log, still emitted there too).
+        if !outcome.within_budget {
+            tracing::error!(
+                working_context_pct = outcome.working_context_pct(context_window),
+                overhead_tokens = outcome.overhead_tokens,
+                overhead_cap_tokens = cadence_cfg.overhead_cap_tokens(context_window),
+                rounds = outcome.rounds,
+                "cadence: working-context floor breached even after continuous budget \
+                 enforcement exhausted every eligible entry — epic #2343's 60% guarantee is \
+                 violated this turn (issue #3911). No further eviction-based compaction is \
+                 possible: the active zone (pinned + system/user + the current turn-group) \
+                 alone exceeds the overhead cap."
+            );
+            telemetry::record_cadence_floor_breach(
                 &self.telemetry_data_dir(),
                 self.session_id.clone(),
                 tokens_before,
