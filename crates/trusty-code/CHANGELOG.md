@@ -97,7 +97,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   any FUTURE test that reaches a real telemetry write with neither
   `telemetry_data_dir` injected nor the env var set, turning the next
   instance of this omission into a deterministic failure instead of a ~5%
-  flake.
+  flake — this guard immediately caught a genuinely new instance of the
+  same omission in `task::executor::tests::spawn_task_run_turn_cap_exceeded_is_resumable`
+  (landed on `main` via the unrelated #3898, concurrently with this fix),
+  which is now closed the same way: `TaskRunParams` gains a
+  `telemetry_data_dir` field (`None` on the one production call site,
+  `task::protocol::task_run`) threaded into `run_and_record`'s
+  `AgentLoopConfig`, and the shared `executor_tests.rs::params()` test
+  helper now injects an isolated dir unconditionally so no future test
+  built on it can reintroduce the omission either.
 
 - **Test-only ambient-daemon leaks closed for two `run_task` tests (issue
   #2914).** `spawns_indexing_thread_for_non_git_project_path` and

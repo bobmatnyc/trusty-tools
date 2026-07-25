@@ -326,6 +326,8 @@ async fn task_run(
         model_override: p.model_override,
         mode,
         deadline_secs: p.deadline_secs,
+        // #3902: no test-only override for this production call site.
+        telemetry_data_dir: None,
     };
     spawn_task_run(registry, llm, task_params)?;
 

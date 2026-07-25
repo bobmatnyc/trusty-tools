@@ -106,6 +106,22 @@ pub struct TaskRunParams {
     /// and default tiers — resolved once in `run_and_record` and applied to
     /// BOTH the PM's own loop and the delegated engineer's loop.
     pub deadline_secs: Option<u64>,
+    /// Test-only override for the PM loop's `AgentLoopConfig::telemetry_data_dir`
+    /// (issue #3902). `None` on every production call site
+    /// (`task::protocol::task_run`) — falls through to
+    /// `telemetry::default_data_dir()` exactly as before this field existed.
+    /// A `spawn_task_run` test that runs enough turns to trip a real
+    /// cadence/threshold fire (this daemon path always sets `cadence:
+    /// Some(_)` on the PM loop, see the `cadence` field's docs below) MUST
+    /// set this — `AgentLoop::telemetry_data_dir`'s `#[cfg(test)]` guard
+    /// panics on the first un-injected fire rather than risk the #3902 race.
+    /// `spawn_task_run` immediately `tokio::spawn`s the actual run, which
+    /// outlives the caller's own stack frame, so the
+    /// `telemetry::with_data_dir_env_fut` pattern
+    /// `compression_telemetry_tests.rs` uses (hold a lock across one
+    /// `.await`) does not fit here — injecting through this field is the
+    /// only mechanism that reaches a detached background task correctly.
+    pub telemetry_data_dir: Option<PathBuf>,
 }
 
 /// Reserve the session's execution slot and spawn the background run.
@@ -435,6 +451,10 @@ async fn run_and_record(
             // one-shot/bake-off path both keep the default `None` — zero
             // behaviour change there, per #2346's explicit scope.
             cadence: Some(resolve_cadence_config(&work_root)),
+            // #3902: test-only DI, see `TaskRunParams::telemetry_data_dir`'s
+            // docs. `None` (every production call site) falls through to
+            // `telemetry::default_data_dir()` unchanged.
+            telemetry_data_dir: params.telemetry_data_dir.clone(),
             ..AgentLoopConfig::default()
         },
         pm_llm,

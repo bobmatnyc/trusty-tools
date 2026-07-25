@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::*;
+use crate::agent_loop::telemetry;
 use crate::agent_loop::with_cadence_env;
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::session::{SessionRegistry, SessionStatus};
@@ -44,6 +45,16 @@ fn params(agents: &TempDir, project: &TempDir, session_id: &str) -> TaskRunParam
         model_override: None,
         mode: crate::mode::HarnessMode::default(),
         deadline_secs: None,
+        // #3902: this daemon path (`run_and_record`) always sets `cadence:
+        // Some(_)` on the PM loop, so any test built from this shared
+        // helper that runs enough turns to trip a real cadence/threshold
+        // fire needs an isolated telemetry dir — `AgentLoop::telemetry_data_dir`'s
+        // `#[cfg(test)]` guard panics on the first un-injected fire rather
+        // than risk the race. Isolating every call unconditionally (rather
+        // than only the specific tests known to fire today) means a FUTURE
+        // test built on this same helper can never reintroduce the
+        // omission either.
+        telemetry_data_dir: Some(telemetry::test_temp_dir("task-executor")),
     }
 }
 
@@ -121,6 +132,9 @@ fn resolve_engineer_model_falls_back_to_embedded_when_disk_config_missing() {
         model_override: None,
         mode: crate::mode::HarnessMode::default(),
         deadline_secs: None,
+        // Never reaches an `AgentLoop` run in this test (only
+        // `resolve_engineer_model` is called below) — irrelevant here.
+        telemetry_data_dir: None,
     };
     let model = resolve_engineer_model(&p);
     assert_ne!(
