@@ -520,19 +520,45 @@ pub fn record_cadence_event(
 /// alarm-worthy event — the same semantic `record_threshold_event` uses
 /// `true` for) tagged `surface: "tcode-cadence-floor-breach"`, then
 /// unconditionally appends the durable alarm line.
-/// Test: `tests::record_cadence_floor_breach_writes_jsonl_and_alarm`.
+///
+/// (post-review fix, issue #3911) `working_context_pct_after`/
+/// `overhead_pct_after` are ALWAYS `None` on this row, deliberately — NOT
+/// derived from `tokens_after`/`context_window` the way every other
+/// surface's percentages are. Why: `AgentLoop::maybe_cadence_compress`
+/// calls [`record_cadence_event`] unconditionally whenever `outcome.rounds
+/// > 0` (which every floor breach satisfies — `enforce_budget` always ran
+/// at least one round to reach `within_budget: false`) BEFORE this
+/// function, for the exact same turn, with the exact same
+/// `outcome.overhead_tokens`/`context_window`. Computing the percentage
+/// here too would write a SECOND row carrying an IDENTICAL
+/// `working_context_pct_after` for one real measurement — exactly the
+/// double-count a code-review pass caught: `compression_report.py`'s
+/// `compute_context_floor` (and this crate's own
+/// `session_working_context_floor`, issue #3912) aggregate every row with
+/// a non-`None` percentage with no surface-based dedup, so a single
+/// breach was being counted TWICE toward the observed floor (measured: a
+/// soak run with 21 real breaches reported 42 below-target samples).
+/// Leaving these `None` here is the single-point fix: every existing and
+/// future consumer that filters on "has a working_context_pct_after
+/// sample" — not just this function's two current call sites — inherits
+/// the fix for free, rather than requiring each one to separately learn to
+/// exclude this surface. The paired `tcode-cadence` row is the ONE
+/// authoritative percentage sample for this turn; this row's job is only
+/// to durably flag THAT a breach happened (`compaction_event: true`,
+/// `tokens_before`/`tokens_after`/`rounds` are still real and useful for
+/// debugging), not to re-report the same number under a second surface.
+/// Test: `tests::record_cadence_floor_breach_writes_jsonl_and_alarm`,
+/// `tests::record_cadence_floor_breach_never_double_counts_the_floor`.
 #[allow(clippy::too_many_arguments)]
 pub fn record_cadence_floor_breach(
     data_dir: &Path,
     session_id: Option<String>,
     tokens_before: usize,
     tokens_after: usize,
-    context_window: usize,
+    _context_window: usize,
     duration_ms: u64,
     rounds: usize,
 ) {
-    let (working_context_pct_after, overhead_pct_after) =
-        context_pcts(tokens_after, context_window);
     write_compression_event(
         data_dir,
         &CompressionEvent::new(
@@ -541,8 +567,8 @@ pub fn record_cadence_floor_breach(
             DETAIL_CADENCE_FLOOR_BREACH,
             tokens_before,
             tokens_after,
-            working_context_pct_after,
-            overhead_pct_after,
+            None,
+            None,
             true,
             duration_ms,
             rounds,

@@ -114,6 +114,28 @@ class WorkingContextFloorTests(unittest.TestCase):
         floor = cr.compute_context_floor(events)
         self.assertEqual(floor["sample_count"], 1)
 
+    def test_floor_breach_row_does_not_double_count_a_real_breach(self):
+        """Regression test for the exact bug a code-review pass caught: a
+        floor breach writes BOTH a `tcode-cadence` row (the real
+        measurement) AND a `tcode-cadence-floor-breach` alarm row for the
+        SAME turn. Before the fix, the breach row also carried
+        `working_context_pct_after`, so `compute_context_floor` scored the
+        one real breach TWICE (a soak run with 21 real breaches reported 42
+        below-target samples). `floor_breach_event()`'s `None` percentages
+        (matching the fixed production behavior) must collapse this back to
+        exactly one sample per breach."""
+        events = [
+            cadence_event(0.8, 90),
+            cadence_event(0.8, 48),  # the one real breach measurement
+            floor_breach_event(),  # paired alarm row for the SAME turn
+        ]
+        floor = cr.compute_context_floor(events)
+        self.assertEqual(floor["sample_count"], 2, "not 3 — the breach row adds no sample")
+        self.assertEqual(
+            len(floor["below_target"]), 1, "not 2 — the one real breach, counted once"
+        )
+        self.assertEqual(floor["min_pct"], 48)
+
 
 class CompactionCountTests(unittest.TestCase):
     def test_counts_only_true_compaction_events(self):
@@ -133,7 +155,15 @@ class CompactionCountTests(unittest.TestCase):
 def floor_breach_event(session_id="s1"):
     """A #3911 cadence floor-breach backstop record — mechanically distinct
     from `threshold_event` above (different surface, same `compaction_event:
-    True` alarm-worthy shape)."""
+    True` alarm-worthy shape).
+
+    `working_context_pct_after`/`overhead_pct_after` are `None`, matching
+    production (`telemetry::record_cadence_floor_breach`, post-review fix):
+    the paired `tcode-cadence` row from the SAME turn already carries the
+    one real measurement — populating it here too would double-count a
+    single breach as two floor samples (the exact bug a code-review pass
+    caught: a soak run with 21 real breaches reported 42 below-target
+    samples before this fix)."""
     return {
         "ts": "2026-07-25T00:00:00Z",
         "session_id": session_id,
@@ -142,8 +172,8 @@ def floor_breach_event(session_id="s1"):
         "tokens_before": 200_000,
         "tokens_after": 104_000,
         "ratio": 0.52,
-        "working_context_pct_after": 48,
-        "overhead_pct_after": 52,
+        "working_context_pct_after": None,
+        "overhead_pct_after": None,
         "compaction_event": True,
         "duration_ms": 6,
         "rounds": 7,

@@ -42,6 +42,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   residual-limits discussion (this is an alarm, not additional
   compaction capacity: the floor itself is unchanged).
 
+- **(#3911 post-review fix) The floor-breach JSONL row no longer
+  double-counts a real breach as two floor samples.** A breach writes BOTH
+  a `tcode-cadence` row (the real measurement) and a
+  `tcode-cadence-floor-breach` alarm row for the SAME turn; the breach row
+  previously also carried its own `working_context_pct_after`, so any
+  consumer aggregating "samples with a percentage" — `compression_report.py`'s
+  `compute_context_floor` and `session_working_context_floor` (#3912) alike
+  — counted one real breach twice (measured: 21 real breaches reported as
+  42 below-target samples). `record_cadence_floor_breach` now always writes
+  `None` for that field; the paired `tcode-cadence` row remains the one
+  authoritative sample. Corrected re-run: the exploratory profile now
+  correctly reports 21 below-target samples (not 42), matching the
+  original soak's finding.
+
 - `compression_report.py` now additionally reports the #3911 backstop's
   own fire count in a dedicated section, flagging a floor breach with
   zero backstop fires as a FINDING.

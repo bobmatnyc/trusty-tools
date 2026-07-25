@@ -243,13 +243,62 @@ fn record_cadence_floor_breach_writes_jsonl_and_alarm() {
         event.compaction_event,
         "a floor breach is unconditionally alarm-worthy"
     );
-    assert_eq!(event.working_context_pct_after, Some(48));
+    assert_eq!(
+        event.working_context_pct_after, None,
+        "the floor-breach row must NEVER carry its own percentage — the \
+         paired tcode-cadence row already does, and double-reporting it \
+         double-counts the same breach toward the floor (issue #3911 \
+         post-review fix)"
+    );
+    assert_eq!(event.overhead_pct_after, None);
 
     assert_eq!(
         lifetime_cadence_floor_breach_count(&dir),
         1,
         "the durable alarm line must always accompany the JSONL record"
     );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Regression test for the exact double-count a code-review pass caught:
+/// `AgentLoop::maybe_cadence_compress` calls `record_cadence_event`
+/// unconditionally (whenever `outcome.rounds > 0`, which every breach
+/// satisfies) THEN `record_cadence_floor_breach` for the SAME turn, with
+/// the SAME `tokens_after`/`context_window`. Any consumer that counts
+/// "samples with a `working_context_pct_after`" — `compression_report.py`'s
+/// `compute_context_floor`, and this crate's own
+/// `session_working_context_floor` (issue #3912) — must see exactly ONE
+/// such sample per real breach, not two.
+#[test]
+fn record_cadence_floor_breach_never_double_counts_the_floor() {
+    let dir = temp_dir("floor-breach-no-double-count");
+    // Mirrors the real call order at one turn boundary: the paired
+    // tcode-cadence record first, then the floor-breach alarm.
+    record_cadence_event(&dir, Some("s".to_string()), 200_000, 104_000, 200_000, 5, 7);
+    record_cadence_floor_breach(&dir, Some("s".to_string()), 200_000, 104_000, 200_000, 5, 7);
+
+    let events = read_lines(&compression_log_path(&dir))
+        .iter()
+        .map(|l| serde_json::from_str::<CompressionEvent>(l).unwrap())
+        .collect::<Vec<_>>();
+    let with_pct = events
+        .iter()
+        .filter(|e| e.working_context_pct_after.is_some())
+        .count();
+    assert_eq!(
+        with_pct, 1,
+        "exactly one row from this turn may carry a working_context_pct_after \
+         sample — the paired tcode-cadence row — not both: {events:?}"
+    );
+
+    let (min_pct, sample_count) = session_working_context_floor(&dir, "s");
+    assert_eq!(min_pct, Some(48));
+    assert_eq!(
+        sample_count, 1,
+        "session_working_context_floor (issue #3912) must not double-count \
+         a single breach as two samples"
+    );
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
