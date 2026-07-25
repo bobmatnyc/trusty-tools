@@ -147,3 +147,41 @@ async fn compress_success_result_appends_rtk_record_with_correct_fields() {
     assert_eq!(parsed["compression_path"], "native_fallback");
     assert!(parsed["tokens_before"].as_u64().unwrap() > 0);
 }
+
+/// #3885 code-critic MEDIUM (mirrors #3867's acceptance criteria and PR
+/// #3880's `unwritable_data_dir_does_not_fail_the_loop` pattern): a broken
+/// telemetry sink must never fail the tool result itself. Simulates
+/// "unwritable" by pointing `project_dir` at a path whose `.trusty-agents`
+/// segment is a plain FILE, not a directory — `append_compression`'s
+/// `create_dir_all`/`OpenOptions::open` both fail on that, and the failure
+/// must be swallowed (logged at debug, never propagated).
+#[tokio::test]
+async fn compress_success_result_survives_unwritable_sink() {
+    let dir = tempfile::tempdir().unwrap();
+    // Pre-create `.trusty-agents` as a regular file so the sink's own
+    // `mkdir -p .trusty-agents/state` cannot succeed.
+    tokio::fs::write(dir.path().join(".trusty-agents"), b"blocked")
+        .await
+        .unwrap();
+
+    let mut input = String::new();
+    for i in 0..50 {
+        input.push_str(&format!("test mod::t{i} ... ok\n"));
+    }
+    input.push_str("test result: ok. 50 passed; 0 failed\n");
+
+    let (compressed, handle) =
+        super::compress_success_result("cargo test", &input, dir.path().to_path_buf()).await;
+    assert!(
+        compressed.len() < input.len(),
+        "the tool result must still compress normally despite an unwritable sink"
+    );
+    handle
+        .await
+        .expect("the append task must complete without panicking, even on I/O failure");
+
+    assert!(
+        !dir.path().join(".trusty-agents/state").exists(),
+        "the blocked .trusty-agents file must not have been silently replaced with a dir"
+    );
+}

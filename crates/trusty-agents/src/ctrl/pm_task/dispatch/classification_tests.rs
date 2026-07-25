@@ -529,6 +529,47 @@ async fn maybe_summarize_workstream_emits_exactly_one_compression_event() {
     );
 }
 
+/// #3885 code-critic MEDIUM (mirrors #3867's acceptance criteria and PR
+/// #3880's `unwritable_data_dir_does_not_fail_the_loop` pattern): a broken
+/// compression-telemetry sink must never fail the summary refresh itself —
+/// the drawer write and the `tracing::info!` still succeed, only the
+/// best-effort JSONL append silently fails. Simulates "unwritable" the same
+/// way the sibling `rtk` test does: `.trusty-agents` pre-created as a plain
+/// FILE so `append_compression`'s `create_dir_all`/`OpenOptions::open` both
+/// fail.
+#[tokio::test]
+async fn maybe_summarize_workstream_survives_unwritable_sink() {
+    let (addr, state) = mock_daemon::spawn().await;
+    let base_url = format!("http://{addr}");
+    state.seed_drawers(
+        "ws:feat-y",
+        &["Substantial progress on feat-y: schema migration landed, backfill running."],
+    );
+    state.set_chat_reply("Summary: feat-y migration in progress.");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+    std::fs::write(tmp.path().join(".trusty-agents"), b"blocked").expect("block the sink dir");
+
+    let client = test_client_with_base(&base_url);
+    let mut cfg = test_persona_cfg();
+    cfg.workstreams.enabled = true;
+    cfg.workstreams.summarize_every = 1;
+
+    maybe_summarize_workstream(tmp.path(), &base_url, "feat-y", &client, &cfg)
+        .await
+        .expect("summary refresh must still succeed despite an unwritable telemetry sink");
+
+    assert!(
+        state.drawer_tags_contain("ws-summary:feat-y"),
+        "the summary drawer itself must still be persisted"
+    );
+    assert!(
+        !tmp.path().join(".trusty-agents/state").exists(),
+        "the blocked .trusty-agents file must not have been silently replaced with a dir"
+    );
+}
+
 // ---------------------------------------------------------------------
 // should_refresh_summary — pure cadence decision (DOC-54 §9.6.2)
 // ---------------------------------------------------------------------

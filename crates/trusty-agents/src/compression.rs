@@ -45,7 +45,14 @@ use trusty_agents_common::compress::CompressionPath;
 /// (e.g. `working_context_pct_after` for `agents-ws-summary`, or
 /// `compression_path` for anything but `rtk`) serialize to JSON `null`
 /// rather than being omitted, so downstream consumers can rely on every key
-/// always being present.
+/// always being present **within this crate's `compression.jsonl` rows**.
+/// This "every key present" guarantee is scoped to THIS sink only: it does
+/// NOT extend across the epic #3866 join — `trusty-code`'s sibling
+/// `compression.jsonl` (Slice A, `telemetry::CompressionEvent`) has no
+/// `compression_path` key at all (not even `null`), since that field only
+/// ever applies to this crate's `rtk` surface. A cross-sink reader (e.g.
+/// the Slice C soak report) must treat `compression_path` as
+/// this-crate-only, not assume its presence when joining across files.
 /// What: see per-field docs below.
 /// Test: `compression_record_serializes_to_valid_jsonl`,
 /// `ws_summary_record_serializes_to_valid_jsonl`.

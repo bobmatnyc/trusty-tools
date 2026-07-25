@@ -17,10 +17,12 @@
 //! `trusty_agents_common::compress::compress_tool_output_async_with_path`
 //! (issue #1959), emits a structured `tracing::info!` stats log line to
 //! stderr (never stdout — stdout carries the compressed payload back to the
-//! shell pipeline), durably appends the same stats to
-//! `~/.trusty-mpm/compression.jsonl` (issue #3870, epic #3866 Slice D —
-//! this doc comment's own former "will eventually consume" note is now
-//! discharged), and writes the compressed text to stdout.
+//! shell pipeline), durably appends a `trusty-agents::compression::CompressionRecord`-
+//! shaped record (issue #3867's schema, plus issue #3870's additive
+//! `compression_path`) to `~/.trusty-mpm/compression.jsonl` (issue #3870,
+//! epic #3866 Slice D — this doc comment's own former "will eventually
+//! consume" note is now discharged), and writes the compressed text to
+//! stdout.
 //! Test: `run_compress_shrinks_repetitive_cargo_test_output`,
 //! `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
 //! `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
@@ -70,7 +72,9 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     let mut input = String::new();
     tokio::io::stdin().read_to_string(&mut input).await?;
 
+    let started = std::time::Instant::now();
     let (compressed, path) = compress_tool_output_async_with_path(tool, &input).await;
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     log_compression_stats(tool, input.len(), compressed.len(), path.as_str());
     // #3870: durable sink, awaited (not spawned) because `tm compress` is a
     // short-lived pipe filter — see `append_compression_record`'s doc
@@ -81,6 +85,7 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
         input.len(),
         compressed.len(),
         path.as_str(),
+        duration_ms,
     )
     .await;
 
@@ -160,23 +165,41 @@ fn log_compression_stats(tool_name: &str, bytes_before: usize, bytes_after: usiz
 /// One row of `tm compress`'s durable compression-effectiveness log.
 ///
 /// Why: Mirrors `trusty-agents`'s `compression::CompressionRecord` shape
-/// field-for-field (issue #3870, epic #3866 Slice D) so a downstream
-/// aggregator can treat both sinks' JSONL rows identically despite living
-/// in different files/crates — `trusty-mpm` does not depend on the
-/// `trusty-agents` lib crate (only `trusty-agents-common`), so this is an
-/// intentional small duplication rather than a shared type.
-/// What: ts (RFC3339), surface (always `"tm-compress"` here), surface_detail
-/// (the tool name), byte-proxy token counts, pct_reduction (unclamped, same
-/// convention as [`log_compression_stats`]), and the RTK-vs-native path.
+/// field-for-field (issue #3867's schema, plus issue #3870's additive
+/// `compression_path`) so the epic #3866 Slice C soak report can join all
+/// three sinks (`trusty-code`'s, `trusty-agents`'s, this one) on identical
+/// columns — `trusty-mpm` does not depend on the `trusty-agents` lib crate
+/// (only `trusty-agents-common`), so this is an intentional small
+/// duplication rather than a shared type. A code-critic pass on the initial
+/// version of this file (PR #3885) caught a genuine schema divergence here
+/// (a `pct_reduction` field with inverted-sign semantics vs. every other
+/// sink's `ratio`, and five missing fields) — fixed by matching
+/// `trusty-agents::compression::CompressionRecord` exactly.
+/// What: ts (RFC3339), session_id (always `None` — `tm compress` has no
+/// session concept), surface (always `"tm-compress"` here), surface_detail
+/// (the tool name), byte-proxy token counts, `ratio` (`tokens_after /
+/// tokens_before`, **not** a percentage and **not** `1 - ratio` — see
+/// [`append_compression_record`]'s doc for why this differs from
+/// [`log_compression_stats`]'s stderr-only `pct_reduction`),
+/// `working_context_pct_after`/`overhead_pct_after` (always `None` —
+/// `tcode`-only concepts), `compaction_event` (always `false`),
+/// `duration_ms` (the real wall-clock of the compression call), `rounds`
+/// (always `1`), and the RTK-vs-native path.
 /// Test: `compression_record_serializes_to_valid_jsonl`.
 #[derive(Debug, Clone, Serialize)]
 struct CompressionRecord {
     ts: String,
+    session_id: Option<String>,
     surface: &'static str,
     surface_detail: String,
     tokens_before: u32,
     tokens_after: u32,
-    pct_reduction: f64,
+    ratio: f64,
+    working_context_pct_after: Option<u8>,
+    overhead_pct_after: Option<u8>,
+    compaction_event: bool,
+    duration_ms: u64,
+    rounds: u32,
     compression_path: String,
 }
 
@@ -221,7 +244,14 @@ fn compression_log_path() -> PathBuf {
 /// **awaited inline** in `run_compress`, best-effort (any I/O/serialize
 /// failure logs at debug level and is swallowed — a full disk must never
 /// turn the pipe filter into a non-zero exit and break the caller's shell
-/// pipeline).
+/// pipeline). `ratio` uses the `tokens_after / tokens_before` convention
+/// (0.0 when `tokens_before == 0`) — deliberately the OPPOSITE field and
+/// sign convention from [`log_compression_stats`]'s stderr-only
+/// `pct_reduction` (`(1 - after/before) * 100`); the two fields serve
+/// different audiences (this one is the epic #3866 Slice C soak report's
+/// join column and must match `trusty-agents`'s/`trusty-code`'s `ratio`
+/// exactly, the stderr one is a human-readable percentage for live
+/// debugging) and are intentionally NOT unified into one field.
 /// What: `mkdir -p` the parent dir, then open `create + append`, write one
 /// `serde_json::to_string(&record)` line + `\n`, flush.
 /// Test: `append_compression_record_creates_file`,
@@ -232,21 +262,28 @@ async fn append_compression_record(
     bytes_before: usize,
     bytes_after: usize,
     compression_path: &str,
+    duration_ms: u64,
 ) {
     let tokens_before = estimate_tokens_from_bytes(bytes_before);
     let tokens_after = estimate_tokens_from_bytes(bytes_after);
-    let pct_reduction = if tokens_before > 0 {
-        (1.0 - tokens_after as f64 / tokens_before as f64) * 100.0
+    let ratio = if tokens_before > 0 {
+        f64::from(tokens_after) / f64::from(tokens_before)
     } else {
         0.0
     };
     let record = CompressionRecord {
         ts: chrono::Utc::now().to_rfc3339(),
+        session_id: None,
         surface: "tm-compress",
         surface_detail: tool_name.to_string(),
         tokens_before,
         tokens_after,
-        pct_reduction,
+        ratio,
+        working_context_pct_after: None,
+        overhead_pct_after: None,
+        compaction_event: false,
+        duration_ms,
+        rounds: 1,
         compression_path: compression_path.to_string(),
     };
     if let Some(parent) = path.parent() {
@@ -340,11 +377,17 @@ mod tests {
     fn compression_record_serializes_to_valid_jsonl() {
         let record = CompressionRecord {
             ts: "2026-07-24T19:00:00Z".to_string(),
+            session_id: None,
             surface: "tm-compress",
             surface_detail: "cargo test".to_string(),
             tokens_before: 100,
             tokens_after: 25,
-            pct_reduction: 75.0,
+            ratio: 0.25,
+            working_context_pct_after: None,
+            overhead_pct_after: None,
+            compaction_event: false,
+            duration_ms: 4,
+            rounds: 1,
             compression_path: "native_fallback".to_string(),
         };
         let json = serde_json::to_string(&record).unwrap();
@@ -352,7 +395,14 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["surface"], "tm-compress");
         assert_eq!(parsed["surface_detail"], "cargo test");
+        assert_eq!(parsed["ratio"], 0.25);
+        assert_eq!(parsed["duration_ms"], 4);
+        assert_eq!(parsed["rounds"], 1);
+        assert_eq!(parsed["compaction_event"], false);
         assert_eq!(parsed["compression_path"], "native_fallback");
+        assert!(parsed["session_id"].is_null());
+        assert!(parsed["working_context_pct_after"].is_null());
+        assert!(parsed["overhead_pct_after"].is_null());
     }
 
     #[tokio::test]
@@ -364,7 +414,7 @@ mod tests {
         // line uses, not a second independent computation.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("compression.jsonl");
-        append_compression_record(&path, "cargo test", 400, 100, "native_fallback").await;
+        append_compression_record(&path, "cargo test", 400, 100, "native_fallback", 7).await;
         assert!(path.exists(), "compression.jsonl should be created");
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         let lines: Vec<&str> = contents.lines().collect();
@@ -374,16 +424,20 @@ mod tests {
         assert_eq!(parsed["surface_detail"], "cargo test");
         assert_eq!(parsed["tokens_before"], 100);
         assert_eq!(parsed["tokens_after"], 25);
-        assert_eq!(parsed["pct_reduction"], 75.0);
+        assert_eq!(parsed["ratio"], 0.25);
+        assert_eq!(parsed["duration_ms"], 7);
+        assert_eq!(parsed["rounds"], 1);
+        assert_eq!(parsed["compaction_event"], false);
         assert_eq!(parsed["compression_path"], "native_fallback");
+        assert!(parsed["session_id"].is_null());
     }
 
     #[tokio::test]
     async fn append_compression_record_appends() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("compression.jsonl");
-        append_compression_record(&path, "cargo test", 400, 100, "rtk_binary").await;
-        append_compression_record(&path, "git diff", 200, 200, "native_fallback").await;
+        append_compression_record(&path, "cargo test", 400, 100, "rtk_binary", 1).await;
+        append_compression_record(&path, "git diff", 200, 200, "native_fallback", 2).await;
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2, "second append should not overwrite");
@@ -392,7 +446,34 @@ mod tests {
         assert_eq!(p1["surface_detail"], "cargo test");
         assert_eq!(p1["compression_path"], "rtk_binary");
         assert_eq!(p2["surface_detail"], "git diff");
-        assert_eq!(p2["pct_reduction"], 0.0);
+        assert_eq!(
+            p2["ratio"], 1.0,
+            "unchanged-size compression must report ratio 1.0, not 0.0"
+        );
+    }
+
+    /// #3885 code-critic MEDIUM: an unwritable durable-log directory must
+    /// never fail the pipe filter's actual job (compressing + returning
+    /// output) — mirrors PR #3880's
+    /// `unwritable_data_dir_does_not_fail_the_loop` pattern. Simulates
+    /// "unwritable" by pointing the sink at a path whose PARENT is a plain
+    /// file (so `create_dir_all`/`OpenOptions::open` both fail), the same
+    /// technique used by the `trusty-agents` siblings of this test.
+    #[tokio::test]
+    async fn unwritable_log_dir_does_not_panic_or_block_the_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("not-a-dir");
+        tokio::fs::write(&blocked, b"i am a file, not a directory")
+            .await
+            .unwrap();
+        let path = blocked.join("compression.jsonl");
+
+        // Must return normally (best-effort swallow), not panic or hang.
+        append_compression_record(&path, "cargo test", 400, 100, "native_fallback", 1).await;
+        assert!(
+            !path.exists(),
+            "the record must not have been written under an unwritable parent"
+        );
     }
 
     #[test]
