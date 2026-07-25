@@ -49,15 +49,71 @@ const CLAUDE_JSON: &str = ".claude.json";
 /// `session_launch::custom_mcp::is_reserved_name`, which already checks
 /// membership in this list), so no `[mcp.custom]` manifest or `tm mcp add`
 /// entry can shadow it.
+///
+/// **This is the full RESERVED-NAME set (issue #3934 preserved this
+/// unchanged) — do NOT use it to derive an approval/trust list.** For that,
+/// see [`UNCONDITIONAL_BUILTIN_MCP_SERVERS`] / [`CONDITIONAL_BUILTIN_MCP_SERVERS`]
+/// and [`managed_mcp_server_names`].
 /// What: the sorted list `["trusty-memory","trusty-mpm","trusty-review","trusty-search"]`,
 /// matching the keys `standalone::global_config::ensure_mcp_config` writes into
 /// the managed `.mcp.json`.
-/// Test: `managed_mcp_server_names_unions_builtin_with_configured`.
+/// Test: `managed_mcp_server_names_unions_builtin_with_configured`,
+/// `builtin_mcp_server_split_unions_to_full_set` (drift guard).
 pub const BUILTIN_MANAGED_MCP_SERVERS: &[&str] = &[
     "trusty-memory",
     "trusty-mpm",
     "trusty-review",
     "trusty-search",
+];
+
+/// The builtins whose `.mcp.json` entry is force-overwritten to the canonical
+/// framework command UNCONDITIONALLY, on every `prepare_session` run — no
+/// manifest toggle can disable them (`inject_trusty_mpm_mcp` /
+/// `inject_trusty_review_mcp`).
+///
+/// Why (issue #3934): [`managed_mcp_server_names`]'s content-blind
+/// `enabledMcpjsonServers` approval is safe for a builtin name ONLY when
+/// something in the SAME run is guaranteed to have pinned its content to the
+/// framework-controlled command — see that function's security doc. These two
+/// names have no manifest escape hatch, so that guarantee always holds.
+/// Test: `builtin_mcp_server_split_unions_to_full_set`.
+pub const UNCONDITIONAL_BUILTIN_MCP_SERVERS: &[&str] = &["trusty-mpm", "trusty-review"];
+
+/// The `trusty-memory` builtin name — see [`CONDITIONAL_BUILTIN_MCP_SERVERS`].
+pub const CONDITIONAL_BUILTIN_TRUSTY_MEMORY: &str = "trusty-memory";
+
+/// The `trusty-search` builtin name — see [`CONDITIONAL_BUILTIN_MCP_SERVERS`].
+pub const CONDITIONAL_BUILTIN_TRUSTY_SEARCH: &str = "trusty-search";
+
+/// The builtins whose force-overwrite is GATED by a manifest `[mcp]` toggle
+/// (`trusty_memory` / `trusty_search`, `HarnessPlan::inject_trusty_memory` /
+/// `inject_trusty_search`, default on — `core::manifest::apply::HarnessPlan::from_manifest`).
+///
+/// **Issue #3934 — read before touching either the toggle or the trust
+/// derivation.** The manifest layer that supplies this toggle is resolved
+/// project > user > catalog > default (`core::manifest::resolve_manifest`),
+/// and the PROJECT layer (`<project>/.trusty-mpm/manifest.toml`) is
+/// git-tracked, cloned-with-the-repo content — content a hostile or
+/// compromised repo controls directly, exactly like the `.mcp.json` entry
+/// itself. Unlike `[mcp.custom]` (gated by `core::project_trust::is_project_trusted`
+/// since issue #2739), this toggle has NO trust gate: an untrusted repo can
+/// set `[mcp] trusty_memory = false` and disable the force-overwrite that
+/// [`managed_mcp_server_names`]'s content-blind approval assumed always ran.
+/// Combined with a spoofed `.mcp.json` entry under the same name, this let an
+/// attacker-controlled command run pre-approved (empirically confirmed while
+/// attack-testing issue #3940). The fix is NOT to trust-gate the toggle itself
+/// (a legitimate operator may genuinely want to disable an optional
+/// integration) — it is to make trust-set membership for these two names
+/// CONDITIONAL on the toggle being on THIS run, so a disabled injector simply
+/// drops the name from `enabledMcpjsonServers` (Claude Code's own "new MCP
+/// servers found" dialog covers it from there) instead of leaving the name
+/// approved with unverified content behind it. See
+/// [`resolve_conditional_mcp_toggles`] (the single place this toggle is
+/// re-resolved for trust derivation) and [`managed_mcp_server_names`].
+/// Test: `builtin_mcp_server_split_unions_to_full_set`.
+pub const CONDITIONAL_BUILTIN_MCP_SERVERS: &[&str] = &[
+    CONDITIONAL_BUILTIN_TRUSTY_MEMORY,
+    CONDITIONAL_BUILTIN_TRUSTY_SEARCH,
 ];
 
 /// The stdio launch entry tm provisions for a built-in framework MCP server.
@@ -297,21 +353,77 @@ pub fn list_servers(config_dir: &Path) -> Result<Map<String, Value>> {
 /// identical `.mcp.json`-trusting behavior for the interactive path predates
 /// this fix and was NOT in scope here — reported separately.)
 /// What: takes an already-parsed `.claude.json` value, collects the top-level
-/// `mcpServers` object keys, unions them with [`BUILTIN_MANAGED_MCP_SERVERS`],
-/// then sorts + dedups for a deterministic (idempotency-friendly) result.
+/// `mcpServers` object keys, unions them with [`UNCONDITIONAL_BUILTIN_MCP_SERVERS`]
+/// (always) and [`CONDITIONAL_BUILTIN_MCP_SERVERS`] (only the names whose
+/// `inject_trusty_memory` / `inject_trusty_search` flag is `true`), then sorts
+/// + dedups for a deterministic (idempotency-friendly) result.
+///
+/// **Security (issue #3934):** `trusty-memory`/`trusty-search` must NOT be
+/// unioned in unconditionally — see [`CONDITIONAL_BUILTIN_MCP_SERVERS`]'s doc
+/// for the vulnerability this closes. Callers MUST pass the toggle values
+/// actually in effect for the workspace this trust list is being computed
+/// for — either the in-memory `HarnessPlan` already resolved earlier in the
+/// SAME `prepare_session` run, or a fresh [`resolve_conditional_mcp_toggles`]
+/// call when no such plan is in scope. Passing `true, true` unconditionally
+/// (e.g. a diagnostic sweep unrelated to any one project, like `tm mcp test`)
+/// is safe ONLY when the caller does not use the result as an
+/// `enabledMcpjsonServers` approval list.
 /// Test: `managed_mcp_server_names_unions_builtin_with_configured`,
-/// `managed_mcp_server_names_defaults_to_builtin`.
-pub fn managed_mcp_server_names(config: &Value) -> Vec<String> {
-    let mut names: Vec<String> = BUILTIN_MANAGED_MCP_SERVERS
+/// `managed_mcp_server_names_defaults_to_builtin`,
+/// `managed_mcp_server_names_excludes_disabled_conditional_builtins`.
+pub fn managed_mcp_server_names(
+    config: &Value,
+    inject_trusty_memory: bool,
+    inject_trusty_search: bool,
+) -> Vec<String> {
+    let mut names: Vec<String> = UNCONDITIONAL_BUILTIN_MCP_SERVERS
         .iter()
         .map(|s| s.to_string())
         .collect();
+    if inject_trusty_memory {
+        names.push(CONDITIONAL_BUILTIN_TRUSTY_MEMORY.to_string());
+    }
+    if inject_trusty_search {
+        names.push(CONDITIONAL_BUILTIN_TRUSTY_SEARCH.to_string());
+    }
     if let Some(servers) = config.get("mcpServers").and_then(Value::as_object) {
         names.extend(servers.keys().cloned());
     }
     names.sort();
     names.dedup();
     names
+}
+
+/// Re-resolve whether the effective harness manifest currently enables
+/// force-injecting `trusty-memory` / `trusty-search` into `project_dir`.
+///
+/// Why (issue #3934): the two conditionally-injected builtins' entries are
+/// only guaranteed content-pinned to the framework command when their
+/// manifest toggle is on for THIS workspace (see [`CONDITIONAL_BUILTIN_MCP_SERVERS`]).
+/// A trust-derivation call site that does not already have the in-memory
+/// `HarnessPlan` from the SAME `prepare_session_inner` run (e.g.
+/// `standalone::trust_seed::preseed_managed_trust`'s daemon-managed callers,
+/// which run in a disjoint call chain from the one that ran the injectors)
+/// needs this pure, side-effect-free re-derivation instead. It resolves the
+/// IDENTICAL manifest layering `prepare_session_inner` uses
+/// (`ManifestSources::resolve` + `resolve_manifest` +
+/// `HarnessPlan::from_manifest`, project > user > catalog > default), so the
+/// two can never diverge. Performing this again after `prepare_session_inner`
+/// has already run for `project_dir` is safe and idempotent — it reads
+/// files, it never writes.
+/// What: returns `(inject_trusty_memory, inject_trusty_search)`.
+/// Test: `resolve_conditional_mcp_toggles_defaults_to_both_on`,
+/// `resolve_conditional_mcp_toggles_honors_project_manifest_toggle`.
+pub fn resolve_conditional_mcp_toggles(
+    fw: &crate::core::paths::FrameworkPaths,
+    project_dir: &Path,
+) -> (bool, bool) {
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    let sources =
+        crate::core::manifest::ManifestSources::resolve(project_dir, &fw.root, &catalog_root);
+    let manifest = crate::core::manifest::resolve_manifest(&sources);
+    let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
+    (plan.inject_trusty_memory, plan.inject_trusty_search)
 }
 
 /// Collect the MCP server names a workspace's `.mcp.json` actually declares.
@@ -386,12 +498,29 @@ pub fn mcp_server_names(workspace: &Path) -> Vec<String> {
 /// delegates to [`launch_trusted_mcp_names_from`]. An unresolved home (a
 /// stripped environment) falls back to just the builtin four (never fails —
 /// trust-seeding must never abort a launch).
+///
+/// **Issue #3934:** `inject_trusty_memory` / `inject_trusty_search` MUST be the
+/// toggle values actually resolved for THIS workspace this run (the caller's
+/// in-memory `HarnessPlan`, or [`resolve_conditional_mcp_toggles`] when none is
+/// in scope) — never a hardcoded `true, true` — otherwise a manifest that
+/// disables the force-overwrite injector reopens the name-squatting exploit
+/// [`CONDITIONAL_BUILTIN_MCP_SERVERS`] documents.
 /// Test: `launch_trusted_mcp_names_from_unions_registry`,
-/// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`.
-pub fn launch_trusted_mcp_names() -> Vec<String> {
+/// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`,
+/// `launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins`.
+pub fn launch_trusted_mcp_names(
+    inject_trusty_memory: bool,
+    inject_trusty_search: bool,
+) -> Vec<String> {
     match crate::core::trusty_tools_config::managed_claude_config_dir() {
-        Some(dir) => launch_trusted_mcp_names_from(&dir),
-        None => managed_mcp_server_names(&Value::Object(Map::new())),
+        Some(dir) => {
+            launch_trusted_mcp_names_from(&dir, inject_trusty_memory, inject_trusty_search)
+        }
+        None => managed_mcp_server_names(
+            &Value::Object(Map::new()),
+            inject_trusty_memory,
+            inject_trusty_search,
+        ),
     }
 }
 
@@ -407,14 +536,24 @@ pub fn launch_trusted_mcp_names() -> Vec<String> {
 /// What: reads `config_dir` via [`list_servers`] (quarantines a malformed
 /// file, empty map when absent or unreadable — never fails) and returns
 /// [`managed_mcp_server_names`] over the resulting `{"mcpServers": ...}`
-/// value.
+/// value, gated by `inject_trusty_memory` / `inject_trusty_search` (issue
+/// #3934 — see [`launch_trusted_mcp_names`]'s doc).
 /// Test: `launch_trusted_mcp_names_from_unions_registry`,
-/// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`.
-pub fn launch_trusted_mcp_names_from(config_dir: &Path) -> Vec<String> {
+/// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`,
+/// `launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins`.
+pub fn launch_trusted_mcp_names_from(
+    config_dir: &Path,
+    inject_trusty_memory: bool,
+    inject_trusty_search: bool,
+) -> Vec<String> {
     let servers = list_servers(config_dir).unwrap_or_default();
     let mut config = Map::new();
     config.insert("mcpServers".to_string(), Value::Object(servers));
-    managed_mcp_server_names(&Value::Object(config))
+    managed_mcp_server_names(
+        &Value::Object(config),
+        inject_trusty_memory,
+        inject_trusty_search,
+    )
 }
 
 // ─── internal helpers ─────────────────────────────────────────────────────
@@ -503,310 +642,5 @@ fn write(path: &Path, config: &Value) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn stdio(command: &str, args: &[&str]) -> Value {
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        build_stdio_entry(command, &args, &Map::new())
-    }
-
-    fn strings(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn strip_arg_separator_removes_only_leading() {
-        // The npx shape: a leading `--` is dropped exactly once.
-        let args = strings(&["--", "-y", "@modelcontextprotocol/server-github"]);
-        assert_eq!(
-            strip_arg_separator(&args),
-            &["-y", "@modelcontextprotocol/server-github"]
-        );
-        // Only the FIRST token is stripped — a second leading `--` survives.
-        let doubled = strings(&["--", "--", "-y"]);
-        assert_eq!(strip_arg_separator(&doubled), &["--", "-y"]);
-    }
-
-    #[test]
-    fn strip_arg_separator_preserves_deeper_and_absent() {
-        // A `--` that is not the first token is a real argument — keep it.
-        let deeper = strings(&["run", "--", "tool"]);
-        assert_eq!(strip_arg_separator(&deeper), &["run", "--", "tool"]);
-        // No separator at all → unchanged.
-        let clean = strings(&["-y", "pkg"]);
-        assert_eq!(strip_arg_separator(&clean), &["-y", "pkg"]);
-        // Empty slice → empty (no panic).
-        let empty: Vec<String> = Vec::new();
-        assert!(strip_arg_separator(&empty).is_empty());
-    }
-
-    #[test]
-    fn build_stdio_entry_has_expected_shape() {
-        let e = stdio("echo", &["hi"]);
-        assert_eq!(e["type"], "stdio");
-        assert_eq!(e["command"], "echo");
-        assert_eq!(e["args"], serde_json::json!(["hi"]));
-        assert!(e.get("env").is_none(), "env omitted when empty");
-    }
-
-    #[test]
-    fn build_stdio_entry_with_env() {
-        let mut env = Map::new();
-        env.insert("API_KEY".into(), Value::String("xxx".into()));
-        let e = build_stdio_entry("srv", &[], &env);
-        assert_eq!(e["env"]["API_KEY"], "xxx");
-        assert_eq!(e["args"], serde_json::json!([]), "args always present");
-    }
-
-    #[test]
-    fn build_remote_entry_http() {
-        let e = build_remote_entry(McpTransport::Http, "https://x/mcp", &Map::new());
-        assert_eq!(e["type"], "http");
-        assert_eq!(e["url"], "https://x/mcp");
-        assert!(e.get("headers").is_none());
-        // sse shares the shape with a different discriminant.
-        let s = build_remote_entry(McpTransport::Sse, "https://x/sse", &Map::new());
-        assert_eq!(s["type"], "sse");
-    }
-
-    #[test]
-    fn build_remote_entry_with_headers() {
-        let mut h = Map::new();
-        h.insert("Authorization".into(), Value::String("Bearer t".into()));
-        let e = build_remote_entry(McpTransport::Http, "https://x", &h);
-        assert_eq!(e["headers"]["Authorization"], "Bearer t");
-    }
-
-    #[test]
-    fn add_then_get_roundtrips() {
-        let tmp = TempDir::new().unwrap();
-        // config dir does not exist yet — add must create it + a fresh {}.
-        let cfg = tmp.path().join("claude-config");
-        assert!(add_server(&cfg, "echo", stdio("echo", &["hi"])).unwrap());
-        let got = get_server(&cfg, "echo").unwrap().expect("server present");
-        assert_eq!(got["command"], "echo");
-        // The file must be valid JSON with a top-level mcpServers map.
-        let text = std::fs::read_to_string(cfg.join(CLAUDE_JSON)).unwrap();
-        let v: Value = serde_json::from_str(&text).unwrap();
-        assert!(v["mcpServers"]["echo"].is_object());
-    }
-
-    #[test]
-    fn add_is_idempotent() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("cc");
-        assert!(add_server(&cfg, "echo", stdio("echo", &["hi"])).unwrap());
-        // Second identical add → no change, no rewrite.
-        assert!(!add_server(&cfg, "echo", stdio("echo", &["hi"])).unwrap());
-    }
-
-    #[test]
-    fn add_preserves_other_keys() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("cc");
-        std::fs::create_dir_all(&cfg).unwrap();
-        std::fs::write(
-            cfg.join(CLAUDE_JSON),
-            r#"{"oauthAccount":{"keep":"me"},"mcpServers":{"pre":{"type":"stdio","command":"pre","args":[]}}}"#,
-        )
-        .unwrap();
-        add_server(&cfg, "echo", stdio("echo", &["hi"])).unwrap();
-        let v: Value =
-            serde_json::from_str(&std::fs::read_to_string(cfg.join(CLAUDE_JSON)).unwrap()).unwrap();
-        assert_eq!(v["oauthAccount"]["keep"], "me", "unrelated key preserved");
-        assert!(v["mcpServers"]["pre"].is_object(), "existing server kept");
-        assert!(v["mcpServers"]["echo"].is_object(), "new server added");
-    }
-
-    #[test]
-    fn remove_existing_returns_true() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("cc");
-        add_server(&cfg, "echo", stdio("echo", &["hi"])).unwrap();
-        assert!(remove_server(&cfg, "echo").unwrap());
-        assert!(get_server(&cfg, "echo").unwrap().is_none());
-    }
-
-    #[test]
-    fn remove_absent_returns_false() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("cc");
-        assert!(!remove_server(&cfg, "nope").unwrap());
-    }
-
-    #[test]
-    fn get_absent_returns_none() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("cc");
-        assert!(get_server(&cfg, "nope").unwrap().is_none());
-    }
-
-    #[test]
-    fn list_returns_all_added() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("cc");
-        add_server(&cfg, "a", stdio("a", &[])).unwrap();
-        add_server(
-            &cfg,
-            "b",
-            build_remote_entry(McpTransport::Http, "https://b", &Map::new()),
-        )
-        .unwrap();
-        let all = list_servers(&cfg).unwrap();
-        assert_eq!(all.len(), 2);
-        assert_eq!(all["a"]["type"], "stdio");
-        assert_eq!(all["b"]["type"], "http");
-    }
-
-    #[test]
-    fn add_quarantines_malformed_json() {
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("cc");
-        std::fs::create_dir_all(&cfg).unwrap();
-        std::fs::write(cfg.join(CLAUDE_JSON), b"{ not valid json !!!").unwrap();
-        // add must succeed despite the corrupt file.
-        add_server(&cfg, "echo", stdio("echo", &["hi"])).unwrap();
-        assert!(
-            cfg.join(".claude.json.corrupt").exists(),
-            "corrupt file quarantined, not deleted"
-        );
-        let v: Value =
-            serde_json::from_str(&std::fs::read_to_string(cfg.join(CLAUDE_JSON)).unwrap()).unwrap();
-        assert!(v["mcpServers"]["echo"].is_object());
-    }
-
-    #[test]
-    fn builtin_server_entry_matches_known_servers() {
-        // Every name in the builtin list resolves to a stdio launch entry.
-        for name in BUILTIN_MANAGED_MCP_SERVERS {
-            let e = builtin_server_entry(name).expect("builtin resolves");
-            assert_eq!(e["type"], "stdio");
-            assert_eq!(e["command"], *name, "command matches the binary name");
-            assert!(e["args"].is_array(), "args always present");
-        }
-        // The exact launch args must stay pinned (parity with ensure_mcp_config).
-        assert_eq!(
-            builtin_server_entry("trusty-memory").unwrap()["args"],
-            serde_json::json!(["serve", "--stdio"])
-        );
-        assert_eq!(
-            builtin_server_entry("trusty-mpm").unwrap()["args"],
-            serde_json::json!(["serve", "--stdio"])
-        );
-        assert_eq!(
-            builtin_server_entry("trusty-search").unwrap()["args"],
-            serde_json::json!(["serve"])
-        );
-        // Unknown names yield None.
-        assert!(builtin_server_entry("not-a-builtin").is_none());
-    }
-
-    #[test]
-    fn managed_mcp_server_names_defaults_to_builtin() {
-        let names = managed_mcp_server_names(&serde_json::json!({}));
-        assert_eq!(
-            names,
-            vec![
-                "trusty-memory",
-                "trusty-mpm",
-                "trusty-review",
-                "trusty-search"
-            ]
-        );
-    }
-
-    #[test]
-    fn managed_mcp_server_names_unions_builtin_with_configured() {
-        let config = serde_json::json!({
-            "mcpServers": {
-                "aaa-custom": { "type": "stdio", "command": "x", "args": [] },
-                "trusty-memory": { "type": "stdio", "command": "trusty-memory", "args": [] }
-            }
-        });
-        let names = managed_mcp_server_names(&config);
-        // Built-in four + the custom server, sorted + deduped (trusty-memory
-        // appears once despite being in both the builtin list and the config).
-        assert_eq!(
-            names,
-            vec![
-                "aaa-custom",
-                "trusty-memory",
-                "trusty-mpm",
-                "trusty-review",
-                "trusty-search"
-            ]
-        );
-    }
-
-    #[test]
-    fn mcp_server_names_reads_workspace_mcp_json() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(
-            tmp.path().join(".mcp.json"),
-            serde_json::json!({
-                "mcpServers": {
-                    "trusty-mpm": {"type": "stdio", "command": "trusty-mpm", "args": []},
-                    "tickets-mcp": {"type": "stdio", "command": "tickets-mcp", "args": []},
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let names = mcp_server_names(tmp.path());
-        assert_eq!(names, vec!["tickets-mcp", "trusty-mpm"], "sorted keys");
-    }
-
-    #[test]
-    fn mcp_server_names_empty_when_absent() {
-        let tmp = TempDir::new().unwrap();
-        // No .mcp.json written — must not fail, must yield an empty vector.
-        assert!(mcp_server_names(tmp.path()).is_empty());
-    }
-
-    #[test]
-    fn launch_trusted_mcp_names_from_unions_registry() {
-        // Why (#3926): the interactive `tm launch` path must trust the SAME
-        // provenance-safe set as the daemon-managed path — builtin four union
-        // the operator's own `tm mcp add` registry, regardless of what a
-        // cloned repo's workspace `.mcp.json` separately declares (this
-        // function never even looks at a workspace).
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("claude-config");
-        add_server(&cfg, "slack-mcp", stdio("slack-mcp", &["serve"])).unwrap();
-
-        let names = launch_trusted_mcp_names_from(&cfg);
-        assert_eq!(
-            names,
-            vec![
-                "slack-mcp",
-                "trusty-memory",
-                "trusty-mpm",
-                "trusty-review",
-                "trusty-search"
-            ]
-        );
-    }
-
-    #[test]
-    fn launch_trusted_mcp_names_from_defaults_to_builtin_when_absent() {
-        // Why (#3926): a fresh install with no `tm mcp add` registry yet must
-        // still trust exactly the framework builtin four — never error, never
-        // an empty list (the four builtins always launch, so they must always
-        // be pre-approved).
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("does-not-exist");
-
-        let names = launch_trusted_mcp_names_from(&cfg);
-        assert_eq!(
-            names,
-            vec![
-                "trusty-memory",
-                "trusty-mpm",
-                "trusty-review",
-                "trusty-search"
-            ]
-        );
-    }
-}
+#[path = "mcp_config_tests.rs"]
+mod tests;

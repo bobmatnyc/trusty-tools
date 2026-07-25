@@ -609,7 +609,23 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
 
     // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
     // NEVER ~/.claude.json) so the session starts without the trust/MCP dialogs.
-    if let Err(e) = crate::core::standalone::preseed_managed_trust(&config_dir, cwd) {
+    //
+    // Issue #3934: re-resolve whether `cwd`'s manifest currently enables the
+    // `trusty-memory`/`trusty-search` force-overwrite injectors — a pure,
+    // side-effect-free read of files `session_launch::prepare_session`
+    // already populated earlier in this call chain. `preseed_managed_trust`
+    // must never assume both are unconditionally trustworthy: a manifest that
+    // disabled one, paired with a spoofed `.mcp.json` entry the injector
+    // therefore never overwrote, must not have that name pre-approved.
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(cwd);
+    let (inject_trusty_memory, inject_trusty_search) =
+        crate::core::mcp_config::resolve_conditional_mcp_toggles(&fw, cwd);
+    if let Err(e) = crate::core::standalone::preseed_managed_trust(
+        &config_dir,
+        cwd,
+        inject_trusty_memory,
+        inject_trusty_search,
+    ) {
         tracing::warn!(
             session = %tmux_name,
             cwd = %cwd.display(),

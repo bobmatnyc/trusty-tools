@@ -249,6 +249,11 @@ pub fn classify_transport(entry: &Value) -> TestTransport {
 /// entry from `servers`, falling back to [`builtin_server_entry`] for a built-in
 /// not present in the user config. With `name = Some(n)`, returns just that
 /// server (config entry, else built-in fallback), erroring if neither exists.
+/// `tm mcp test` (bare) is an operator-invoked diagnostic sweep over
+/// configured servers, unrelated to any one project's manifest, so it always
+/// passes `true, true` for the two conditional builtins (issue #3934's
+/// per-workspace trust gating does not apply here — see
+/// [`managed_mcp_server_names`]'s doc).
 /// Test: `select_bare_unions_builtins`, `select_named_uses_config`,
 /// `select_named_falls_back_to_builtin`, `select_named_unknown_errors`.
 pub fn select_targets(
@@ -272,7 +277,7 @@ pub fn select_targets(
             // Reuse the exact union semantics `managed_mcp_server_names` applies
             // when seeding trust, so the sweep and the trust list never diverge.
             let config = json!({ "mcpServers": Value::Object(servers.clone()) });
-            let names = managed_mcp_server_names(&config);
+            let names = managed_mcp_server_names(&config, true, true);
             let targets = names
                 .into_iter()
                 .map(|n| {
