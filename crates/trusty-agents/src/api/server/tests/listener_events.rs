@@ -17,16 +17,18 @@ use tower::ServiceExt;
 
 use crate::api::server::routes::build_router;
 use crate::api::server::state::AppState;
-use crate::test_env::HOME_LOCK;
 
 fn router() -> Router {
     build_router(AppState::default())
 }
 
 fn set_test_home(dir: &std::path::Path) {
-    // SAFETY: caller holds `HOME_LOCK` for the duration of the test (see
-    // `crate::test_env`'s module doc) so no other thread observes `HOME`
-    // mid-mutation.
+    // SAFETY: caller holds `HOME_LOCK` for the duration of the test (via
+    // `crate::test_env::lock_home()`, see `crate::test_env`'s module doc)
+    // so no other thread observes `HOME` mid-mutation. `lock_home()` also
+    // marks this thread as the current holder for
+    // `listeners::store::events_dir`'s per-caller recurrence guard (issue
+    // #3922 follow-up), which these tests reach via the routed handlers.
     unsafe {
         std::env::set_var("HOME", dir);
     }
@@ -34,7 +36,7 @@ fn set_test_home(dir: &std::path::Path) {
 
 #[tokio::test]
 async fn list_returns_empty_when_no_log() {
-    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_env::lock_home();
     let tmp = tempfile::tempdir().unwrap();
     set_test_home(tmp.path());
 
@@ -53,7 +55,7 @@ async fn list_returns_empty_when_no_log() {
 
 #[tokio::test]
 async fn filter_post_persists_and_list_reflects_it() {
-    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_env::lock_home();
     let tmp = tempfile::tempdir().unwrap();
     set_test_home(tmp.path());
 
@@ -102,7 +104,7 @@ async fn filter_post_persists_and_list_reflects_it() {
 
 #[tokio::test]
 async fn filter_post_rejects_empty_event_type() {
-    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::test_env::lock_home();
     let tmp = tempfile::tempdir().unwrap();
     set_test_home(tmp.path());
 

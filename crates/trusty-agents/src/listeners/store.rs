@@ -62,9 +62,9 @@ pub struct StoredEvent {
 /// the layout.
 ///
 /// (#3922 recurrence guard) `#[cfg(test)]`-only: panics if a test reaches
-/// this `$HOME`-reading production path without holding
-/// `crate::test_env::HOME_LOCK` for the duration of the call. Why: this
-/// function used to be the ONLY seam `EventStore`'s tests had for
+/// this `$HOME`-reading production path without the CALLING thread holding
+/// `crate::test_env::HOME_LOCK` via [`crate::test_env::lock_home`]. Why:
+/// this function used to be the ONLY seam `EventStore`'s tests had for
 /// isolation, so every test that wanted its own directory had to mutate the
 /// process-global `$HOME` under `HOME_LOCK` — but nothing stopped some
 /// OTHER test elsewhere in the crate from mutating `$HOME` under a
@@ -80,26 +80,40 @@ pub struct StoredEvent {
 /// module was migrated to that seam and no longer touches `$HOME`.
 /// `listeners::poll`'s cursor tests and a few API/handler-level tests still
 /// call the plain `$HOME`-sandboxing path directly (no `AppState`/handler
-/// seam to inject through yet); they hold `HOME_LOCK` correctly, so this
-/// guard passes for them (a held lock makes `try_lock` fail, i.e. "busy" —
-/// exactly what this checks for). A held lock isn't proof the CURRENT
-/// thread is the holder, only that the crate's exclusion convention was
-/// followed; on the other hand `try_lock` succeeding removes ALL doubt —
-/// nobody is honouring the convention right now, so this is exactly the
-/// #3922 shape and must fail loud rather than silently race. Production
-/// builds are entirely unaffected — this whole check compiles out.
+/// seam to inject through yet); they now acquire the lock via
+/// `crate::test_env::lock_home()` (not the raw `HOME_LOCK.lock()`), so this
+/// guard passes for them.
+///
+/// (code-critic HIGH on PR #3943, fixed) An EARLIER version of this guard
+/// checked `crate::test_env::HOME_LOCK.try_lock().is_ok()` — global
+/// contention, not per-caller ownership. The critic reproduced the gap
+/// directly: a background thread takes `HOME_LOCK` for an unrelated reason
+/// and holds it; a second, completely lock-less thread then calls this
+/// function, and the OLD check read `try_lock()` reporting "busy" as "the
+/// convention is honoured" — even though the ACTUAL caller was not
+/// participating at all. `crate::test_env::home_lock_held_by_this_thread()`
+/// answers the correct, narrower question (does the CALLING thread's own
+/// `lock_home()` guard exist right now?) via a thread-local flag — see that
+/// function's docs for why a thread-local is sound here (every test in this
+/// crate uses the default current-thread `#[tokio::test]` runtime, which
+/// pins a test's entire execution to one OS thread). Production builds are
+/// entirely unaffected — this whole check compiles out.
 /// Test: `listeners::store::tests::*` (migrated off `$HOME` entirely, so
-/// never reach this branch); `listeners::poll::tests::*` (still sandbox via
-/// `HOME_LOCK` and must keep passing under this guard).
+/// never reach this branch); `listeners::poll::tests::*` /
+/// `api::server::tests::listener_events::*` / `slack::tests::eventstream_tests::*`
+/// (migrated to `lock_home()`, must keep passing under this guard);
+/// `listeners::store::tests::events_dir_panics_when_a_different_thread_holds_home_lock`
+/// (pins the masking scenario the critic found, now fixed).
 pub fn events_dir() -> Result<PathBuf> {
     #[cfg(test)]
-    if crate::test_env::HOME_LOCK.try_lock().is_ok() {
+    if !crate::test_env::home_lock_held_by_this_thread() {
         panic!(
-            "listeners::store::events_dir(): about to resolve $HOME in a test with \
-             `crate::test_env::HOME_LOCK` NOT held (issue #3922) — either hold the lock for \
-             the duration of this test (see `listeners::poll`'s cursor tests) or, preferably, \
-             use `EventStore::*_at(dir, ..)` with an injected tempdir so this test never \
-             touches the process-global $HOME at all (see `listeners::store::tests`)."
+            "listeners::store::events_dir(): about to resolve $HOME in a test where THIS \
+             thread does not hold `crate::test_env::HOME_LOCK` (issue #3922) — either acquire \
+             it via `crate::test_env::lock_home()` for the duration of this test (see \
+             `listeners::poll`'s cursor tests) or, preferably, use `EventStore::*_at(dir, ..)` \
+             with an injected tempdir so this test never touches the process-global $HOME at \
+             all (see `listeners::store::tests`)."
         );
     }
     let home = dirs::home_dir().context("could not determine $HOME directory")?;
@@ -179,6 +193,20 @@ impl EventStore {
         file.write_all(line.as_bytes())
             .await
             .context("append event line")?;
+        // `tokio::fs::File` can report `write_all` complete before the
+        // background blocking write has actually landed — `flush` (not
+        // merely a buffering nicety here; it's what forces the pending
+        // write to finish) is required before any OTHER call site (e.g.
+        // `read_events_at`, opening a fresh handle to the same path) can
+        // rely on seeing this line. Found via stress-looping this exact
+        // function under heavy concurrent test load while validating the
+        // #3922 fix: `append_and_read_round_trips` intermittently observed
+        // 0 events immediately after appending 1, at ~2% under
+        // `--test-threads=16` with several other async-heavy test suites
+        // running concurrently (never observed at low background load,
+        // consistent with a background-task-completion race rather than a
+        // logic bug in the read path).
+        file.flush().await.context("flush appended event line")?;
         Ok(())
     }
 
@@ -468,9 +496,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn concurrent_event_store_scenarios_survive_home_env_hammering() {
-        let _guard = crate::test_env::HOME_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::lock_home();
         let prev_home = std::env::var_os("HOME");
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -538,5 +564,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// (code-critic HIGH on PR #3943) Pins the exact masking scenario the
+    /// critic found in the FIRST version of `events_dir`'s recurrence guard:
+    /// that version checked `crate::test_env::HOME_LOCK.try_lock().is_ok()`,
+    /// which only detects GLOBAL contention (is `HOME_LOCK` held by ANY
+    /// thread right now?), not whether the CALLING thread is the holder. The
+    /// critic showed a background thread taking `HOME_LOCK` for an unrelated
+    /// reason, held for the duration, while a second, completely lock-less
+    /// thread calls `events_dir()` — the old guard read `try_lock()`
+    /// reporting "busy" as "the convention is honoured" and did NOT panic,
+    /// even though the actual caller was not participating in the lock at
+    /// all. This test reproduces exactly that shape and asserts the FIXED
+    /// guard (`crate::test_env::home_lock_held_by_this_thread()`, a
+    /// thread-local ownership flag rather than a global contention check)
+    /// still panics.
+    ///
+    /// What: spawns a background thread that acquires the raw
+    /// `crate::test_env::HOME_LOCK` directly (deliberately NOT via
+    /// `crate::test_env::lock_home()` — simulating some OTHER, unrelated
+    /// test elsewhere in the crate that still uses the crate's long-standing
+    /// convention), holds it until signalled, and only THEN — from the
+    /// calling thread, which never acquired anything — calls `events_dir()`
+    /// inside `std::panic::catch_unwind`. Asserts it panics.
+    #[test]
+    fn events_dir_panics_when_a_different_thread_holds_home_lock() {
+        let (holder_ready_tx, holder_ready_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        let holder = std::thread::spawn(move || {
+            // Deliberately the RAW lock, not `crate::test_env::lock_home()`
+            // — this thread holds `HOME_LOCK` for a reason entirely
+            // unrelated to `events_dir()`, exactly like the critic's report.
+            let _guard = crate::test_env::HOME_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            holder_ready_tx.send(()).ok();
+            release_rx.recv().ok();
+        });
+
+        // Wait until the OTHER thread genuinely holds the lock before
+        // making the call under test — otherwise this test would race its
+        // own setup.
+        holder_ready_rx.recv().expect("holder thread ready");
+
+        let result = std::panic::catch_unwind(events_dir);
+
+        release_tx.send(()).ok();
+        holder.join().expect("holder thread joins cleanly");
+
+        assert!(
+            result.is_err(),
+            "events_dir() must panic when THIS thread does not hold HOME_LOCK, even \
+             while a DIFFERENT thread holds it for an unrelated reason — global \
+             contention must never be mistaken for per-caller ownership"
+        );
     }
 }

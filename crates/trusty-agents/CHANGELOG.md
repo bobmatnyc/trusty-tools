@@ -204,13 +204,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   behaviour is unchanged (the plain, non-`_at` methods still resolve
   `events_dir()` from `$HOME` exactly as before). A `#[cfg(test)]`-only guard
   in `events_dir()` now panics on the first run of any FUTURE test that
-  reaches it without holding `HOME_LOCK`, turning the next instance of this
-  omission into a deterministic failure instead of a flake. A new standing
-  regression guard, `concurrent_event_store_scenarios_survive_home_env_hammering`
-  (issue #3925), runs four `EventStore` scenarios concurrently against a
+  reaches it without the CALLING thread holding `HOME_LOCK`, turning the
+  next instance of this omission into a deterministic failure instead of a
+  flake. A new standing regression guard,
+  `concurrent_event_store_scenarios_survive_home_env_hammering` (issue
+  #3925), runs four `EventStore` scenarios concurrently against a
   background task that hammers `$HOME` with zero synchronization — the exact
   #3922 attack shape — and asserts none lose data; validated to fail
   deterministically (not probabilistically) when the DI seam is reverted.
+  **Code-critic follow-up (HIGH, fixed):** the guard's first version checked
+  `HOME_LOCK.try_lock().is_ok()` — global contention, not per-caller
+  ownership — so a background thread holding the lock for an unrelated
+  reason masked a genuinely unguarded caller on a different thread (the
+  critic reproduced this directly). New `crate::test_env::lock_home()` /
+  `home_lock_held_by_this_thread()` track ownership via a thread-local flag
+  instead (sound because every test in this crate uses the default
+  current-thread `#[tokio::test]` runtime), and `listeners::poll`'s cursor
+  tests plus the `api::server`/`slack` handler-level tests that still
+  sandbox `$HOME` directly were migrated to the new helper. A new test,
+  `events_dir_panics_when_a_different_thread_holds_home_lock`, pins the
+  exact masking scenario the critic found. Stress-testing this fix (60+
+  loop iterations of the full affected test set under `--test-threads=16`)
+  also surfaced an unrelated, pre-existing bug: `EventStore::append_at`
+  never called `.flush()` after `write_all`, so `tokio::fs::File`'s
+  background write could still be in flight when a separate `read_events_at`
+  call opened a fresh handle to the same path — observed as an intermittent
+  "0 events immediately after appending 1" under heavy concurrent test load.
+  Fixed with an explicit `.flush().await`.
 - **Instructions editor is a first-class editing surface (#3894, GUI).**
   #3862's `55vh`/`70vh` clamp fixed a 2-line strip by trading it for a field
   capped independently of the space available — dead area below it on a tall
