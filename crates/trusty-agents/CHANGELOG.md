@@ -9,6 +9,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Agent configuration takes over the pane (#3894, GUI):** opening the gear no
+  longer wedges the agent–OKG–tool–listener surface into a 320px strip above
+  the chat scrollback — it now takes over the entire content area (chat column
+  *and* recap rail), giving the concept centerpiece the room it needs. Chat is
+  covered, never unmounted: the takeover is an absolutely-positioned sibling of
+  a still-mounted, `inert` chat subtree, so leaving configuration returns to
+  chat exactly as it was — same scroll offset, same half-typed message in the
+  composer. Exits: a "Back to chat" button, a close button, and <kbd>Esc</kbd>
+  (unmodified only, so platform chords like Cmd+Esc are left alone); switching
+  to the Events tab also drops the takeover. Every existing section — OKG
+  Stores, Tools, Permissions, Listeners scaffolding, and the per-section save
+  flow — is unchanged. Unsaved Personality/Tools edits are never discarded
+  silently: every exit path (Esc, Back, Close, and the Chat→Events tab switch)
+  stops on a confirm offering Save and close / Discard / Keep editing. The
+  agent being configured is pinned when the takeover opens, so a background
+  agent switch (the Sidebar's resume-workstream flow) can no longer retarget an
+  open panel or throw away what is typed in it.
+
 - **Live OKG store bindings — the FIRST leg of the agent-config triple
   (#3816, DOC-54 SPEC-AGENTS-04 §5.1):** `agent.toml` gains `[[stores]]`,
   declaring what an agent KNOWS alongside how it ACTS (`[tools]`) and REACTS
@@ -92,6 +110,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Instructions editor is a first-class editing surface (#3894, GUI).**
+  #3862's `55vh`/`70vh` clamp fixed a 2-line strip by trading it for a field
+  capped independently of the space available — dead area below it on a tall
+  window. In the full-pane takeover the persona editor now grows into every
+  remaining pixel (`flex-1`/`min-h-0`, no `rows`, no viewport clamp) and is the
+  only scroll container in its tab, so there are no nested double scrollbars.
+  Measured in a real browser: 26 visible lines at a 900px viewport, 52 at
+  1400px. The Tools allowlist textarea gets the same treatment, and a
+  Playwright spec (`ui/tests/config-takeover.spec.ts`) now measures the
+  rendered height at two viewports so a third regression cannot ship quietly.
+- **Chat no longer yanks you back to the newest message.** `ChatView` forced
+  `scrollTop = scrollHeight` after every render, so a streaming delta pulled a
+  reader who had scrolled up back to the bottom — and reset the scroll offset
+  of the chat sitting behind the config takeover, which is supposed to be left
+  exactly as it was. It now re-anchors only while the reader is already at the
+  bottom (`lib/chatScroll.ts`).
 - **Bulk backfills are bounded and resumable.** `max_messages`/`max_files` were
   taken from the model with no ceiling, and every fetched item accumulated in
   memory with the ledger committed only after the whole batch — so a large pull

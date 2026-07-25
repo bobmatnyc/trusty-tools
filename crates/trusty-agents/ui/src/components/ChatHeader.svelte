@@ -25,13 +25,17 @@
    * Assistant; the base `assistant` template never appears here at all,
    * it's `hidden` server-side and only ever instantiated via Concierge or
    * the add-agent template flow, `AddAgentForm`); a "+ Add agent" row; and
-   * a gear button toggling `AgentConfigPanel` for whichever agent is
-   * selected.
-   * Test: Manual — open the app, confirm "Concierge" is the default title
-   * and appears exactly once in the open dropdown (System Tool section);
-   * switch to Izzie via the Assistants section, confirm the title updates;
-   * click the gear, confirm `AgentConfigPanel` opens scoped to the selected
-   * agent.
+   * a gear button toggling the agent-configuration takeover (#3894) for
+   * whichever agent is selected. The gear only flips
+   * `stores/configPane.ts`'s `configPaneOpen`: the config surface covers the
+   * recap rail as well as this column, so it is rendered by `ChatPane` as a
+   * SIBLING of the whole chat column rather than mounted here — which is
+   * also what lets the chat stay mounted (scroll offset + half-typed
+   * message) behind it instead of being unmounted and rebuilt on exit.
+   * Test: `ChatPane.test.ts` (the gear opens the takeover). Manual — open the
+   * app, confirm "Concierge" is the default title and appears exactly once in
+   * the open dropdown (System Tool section); switch to Izzie via the
+   * Assistants section, confirm the title updates.
    */
   import { onMount } from 'svelte';
   import { ChevronDown, Settings2, Plus, Bot } from 'lucide-svelte';
@@ -41,22 +45,19 @@
     fetchAgentCatalog,
     refreshOverlayAgents,
   } from '../stores/app';
-  import { rosterDisplayName } from '../lib/roster';
-  import AgentConfigPanel from './AgentConfigPanel.svelte';
+  // `CONCIERGE_AGENT_ID` — the one agent id Concierge's dedicated row
+  // represents — is excluded from the roster-driven "Assistants" section to
+  // avoid the duplicate. Both constants moved to `lib/roster.ts` in #3894 so
+  // the config takeover resolves the same identity from the same place.
+  import { CONCIERGE_AGENT_ID, CONCIERGE_LABEL, rosterDisplayName } from '../lib/roster';
+  import { configPaneOpen, openConfigPane, requestExitConfigPane } from '../stores/configPane';
   import AddAgentForm from './AddAgentForm.svelte';
 
-  const CONCIERGE_LABEL = 'Concierge';
-  /** The one agent id Concierge's dedicated row represents — excluded from
-   * the roster-driven "Assistants" section to avoid the duplicate. */
-  const CONCIERGE_AGENT_ID = 'ctrl';
-
   let open = false;
-  let configOpen = false;
   let addingAgent = false;
 
   $: isConcierge = $activeAgentId === null;
   $: title = isConcierge ? CONCIERGE_LABEL : rosterDisplayName($agentRoster, $activeAgentId);
-  $: configAgentName = isConcierge ? CONCIERGE_AGENT_ID : ($activeAgentId ?? 'assistant');
   // #3819 roster-typing: "Assistants" section is everything the roster
   // returns EXCEPT ctrl (Concierge has its own dedicated System Tool row).
   $: assistantEntries = $agentRoster.filter((e) => e.id !== CONCIERGE_AGENT_ID);
@@ -64,6 +65,28 @@
   function toggleDropdown() {
     open = !open;
     if (open) addingAgent = false;
+  }
+
+  /**
+   * Why (PR #3895 re-review): the gear is an EXIT affordance too — pressing it
+   * while the takeover is up leaves configuration — so it must pass the same
+   * unsaved-edits guard as Esc/Back/Close. A plain `toggleConfigPane()` here
+   * flipped `configPaneOpen` straight to false, silently discarding a dirty
+   * panel. `inert` on the covered chat makes that click unreachable in a
+   * standards-compliant browser, but a data-loss guard cannot rest on a CSS/DOM
+   * property whose behavior in the Tauri WKWebView is unverified — it belongs
+   * in the state logic. (`toggleConfigPane` was deleted with this change so no
+   * future caller can reintroduce the bypass.)
+   * What: Opens directly; leaves via `requestExitConfigPane`, which raises the
+   * panel's confirm when there is something unsaved to lose.
+   * Test: `ChatPane.test.ts` — "the gear cannot silently discard a dirty panel".
+   */
+  function handleGear() {
+    if ($configPaneOpen) {
+      requestExitConfigPane();
+    } else {
+      openConfigPane();
+    }
   }
 
   function selectConcierge() {
@@ -74,10 +97,6 @@
   function selectRosterEntry(id: string) {
     activeAgentId.set(id);
     open = false;
-  }
-
-  function toggleConfig() {
-    configOpen = !configOpen;
   }
 
   function handleWindowClick(event: MouseEvent) {
@@ -198,15 +217,9 @@
     type="button"
     class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
     aria-label="Configure agent"
-    aria-pressed={configOpen}
-    on:click={toggleConfig}
+    aria-pressed={$configPaneOpen}
+    on:click={handleGear}
   >
     <Settings2 class="h-4 w-4" />
   </button>
 </div>
-
-{#if configOpen}
-  <div class="h-80 shrink-0 border-b border-foundry-light-border dark:border-foundry-border">
-    <AgentConfigPanel agentName={configAgentName} isConcierge={isConcierge} />
-  </div>
-{/if}
