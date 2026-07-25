@@ -523,41 +523,6 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
     if url.is_empty() { None } else { Some(url) }
 }
 
-/// Collect the MCP server names declared in a workspace's `.mcp.json`.
-///
-/// Why (issue #1296): Claude Code blocks a freshly-spawned session on a "new MCP
-/// servers found" approval dialog whenever `<workspace>/.mcp.json` registers a
-/// server the project entry has not yet approved. [`preseed_workspace_trust`]
-/// pre-approves them via `enabledMcpjsonServers`, and to do that it needs the
-/// list of server names the project actually ships. The list is derived from the
-/// on-disk `.mcp.json` (rather than a hard-coded set) so it covers BOTH the
-/// servers trusty-mpm injects (`trusty-memory`, `trusty-search`) AND any servers
-/// the cloned project shipped of its own — every one of which would otherwise
-/// trigger the dialog.
-/// What: reads `<workspace>/.mcp.json`, parses it, and returns the sorted keys of
-/// its `mcpServers` object. A missing, unreadable, malformed, or server-less file
-/// yields an empty vector — this never fails, so a degenerate `.mcp.json` cannot
-/// crash launch preparation. Sorting makes the result deterministic so the
-/// written settings are stable across runs (supporting idempotency).
-/// Test: covered via `preseed_trust_enables_mcp_servers_from_mcp_json` and
-/// `preseed_trust_enables_empty_when_no_mcp_json`.
-fn mcp_server_names(workspace: &Path) -> Vec<String> {
-    let mcp_path = workspace.join(".mcp.json");
-    let Ok(text) = std::fs::read_to_string(&mcp_path) else {
-        return Vec::new();
-    };
-    let Ok(config) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = config
-        .get("mcpServers")
-        .and_then(|servers| servers.as_object())
-        .map(|servers| servers.keys().cloned().collect())
-        .unwrap_or_default();
-    names.sort_unstable();
-    names
-}
-
 /// Pre-seed per-directory trust acceptance for `workspace` in `~/.claude.json`.
 ///
 /// Why (issue #1269): trusty-mpm launches Claude Code inside an *interactive*
@@ -579,7 +544,7 @@ fn mcp_server_names(workspace: &Path) -> Vec<String> {
 /// `projects.<workspace>` carries `hasTrustDialogAccepted: true`,
 /// `hasCompletedProjectOnboarding: true`, `projectOnboardingSeenCount >= 1`, and
 /// `enabledMcpjsonServers` listing every server name from
-/// `<workspace>/.mcp.json` (see [`mcp_server_names`]; an empty array when the
+/// `<workspace>/.mcp.json` (see [`crate::core::mcp_config::mcp_server_names`]; an empty array when the
 /// project ships none), then writes it back pretty-printed preserving every
 /// other key. Idempotent. The OAuth fields elsewhere in the file are never
 /// touched.
@@ -653,10 +618,10 @@ pub(super) fn preseed_workspace_trust(
     // follow-up security fix) — a project-scope custom MCP bridge target ships
     // with the cloned repo, so it must still surface Claude Code's own "new
     // MCP servers found" consent dialog rather than being silently
-    // pre-approved. Sorted (via `mcp_server_names`) for a deterministic,
+    // pre-approved. Sorted (via `mcp_config::mcp_server_names`) for a deterministic,
     // idempotency-friendly result.
     let enabled_mcp = Value::Array(
-        mcp_server_names(workspace)
+        crate::core::mcp_config::mcp_server_names(workspace)
             .into_iter()
             .filter(|name| !exclude_mcp_names.contains(name))
             .map(Value::String)

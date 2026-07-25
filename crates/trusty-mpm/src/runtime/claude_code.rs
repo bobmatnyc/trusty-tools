@@ -559,6 +559,16 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// `None` (home unresolved): falls back to the legacy
 /// [`crate::core::home_trust_seed::preseed_home_trust`] and returns `None`
 /// (no `CLAUDE_CONFIG_DIR` to inject).
+///
+/// Issue #3918: [`crate::core::standalone::preseed_managed_trust`] derives the
+/// `enabledMcpjsonServers` it writes here from `cwd`'s own `.mcp.json` — which
+/// `session_launch::prepare_session` has already populated by the time this
+/// runs (it runs earlier in every daemon spawn/resume/relaunch call chain that
+/// reaches here). Before #3918 this trust seed used a hardcoded three-server
+/// list that structurally excluded `trusty-mpm`, so a managed session's OWN
+/// MCP server could end up genuinely untrusted in the one file Claude Code
+/// actually reads for a managed session (`<config_dir>/.claude.json` — never
+/// `~/.claude.json`, per the isolation invariant above).
 /// Test: exercised via `spawn_sends_env_scrub_when_binary_available` and the
 /// `spawn_command`/`resume_command` config-dir tests (the command-string layer);
 /// the provisioning itself is covered in `core::managed_config`.
