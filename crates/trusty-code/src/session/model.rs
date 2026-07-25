@@ -48,9 +48,7 @@ pub enum SessionStatus {
     Finished,
     Failed,
     DeadlineExceeded,
-    /// This call's turn budget (`AgentLoopConfig::max_turns`) was exhausted
-    /// before the PM reached a natural stop. Not a failure — resumable via
-    /// `task.run` exactly like `Finished` (#3888).
+    /// This call's turn budget was exhausted — see the enum doc above (#3888).
     TurnCapExceeded,
 }
 
@@ -81,12 +79,9 @@ impl SessionStatus {
     ///
     /// Why: `session.cancel` and any future completion handler need to
     /// reject transitions out of a terminal-per-call state (e.g. cancelling
-    /// an already-finished session is a no-op, not a silent overwrite).
-    /// This is deliberately a WIDER notion than "can never resume" —
-    /// `Finished` and `TurnCapExceeded` are both terminal here (this call is
-    /// over) yet both remain resumable via `SessionRegistry::begin_execution`,
-    /// whose own narrower reject-list (`Cancelled`/`Failed`/
-    /// `DeadlineExceeded`) is the actual "dead forever" gate (#3888).
+    /// an already-finished session is a no-op, not a silent overwrite). This
+    /// is deliberately WIDER than "can never resume" — see [`Self::is_resumable`]
+    /// for the narrower "dead forever" gate (#3888).
     /// What: `true` for `Cancelled`/`Finished`/`Failed`/`DeadlineExceeded`/
     /// `TurnCapExceeded`; `false` otherwise.
     /// Test: `model::tests::is_terminal_covers_terminal_states`.
@@ -98,6 +93,21 @@ impl SessionStatus {
                 | SessionStatus::Failed
                 | SessionStatus::DeadlineExceeded
                 | SessionStatus::TurnCapExceeded
+        )
+    }
+
+    /// Returns `true` when a session at this status may accept another
+    /// `task.run` via `SessionRegistry::begin_execution` — the single
+    /// authoritative "still resumable" gate (#2344 `Finished` + #3888
+    /// `TurnCapExceeded`): both mean only THIS CALL ended, not the session,
+    /// and `pm_transcript` is fully persisted either way, so the next call
+    /// continues the same conversation. `Cancelled`/`Failed`/
+    /// `DeadlineExceeded` are the genuinely dead-forever states.
+    /// Test: `model::tests::is_resumable_matches_finished_and_turn_cap_exceeded`.
+    pub fn is_resumable(&self) -> bool {
+        matches!(
+            self,
+            SessionStatus::Finished | SessionStatus::TurnCapExceeded
         )
     }
 }
@@ -226,6 +236,19 @@ mod tests {
         assert!(SessionStatus::Failed.is_terminal());
         assert!(SessionStatus::DeadlineExceeded.is_terminal());
         assert!(SessionStatus::TurnCapExceeded.is_terminal());
+    }
+
+    /// Only `Finished` and `TurnCapExceeded` are resumable (#3888) — the
+    /// authoritative gate `SessionRegistry::begin_execution` defers to.
+    #[test]
+    fn is_resumable_matches_finished_and_turn_cap_exceeded() {
+        assert!(!SessionStatus::Created.is_resumable());
+        assert!(!SessionStatus::Running.is_resumable());
+        assert!(!SessionStatus::Cancelled.is_resumable());
+        assert!(SessionStatus::Finished.is_resumable());
+        assert!(!SessionStatus::Failed.is_resumable());
+        assert!(!SessionStatus::DeadlineExceeded.is_resumable());
+        assert!(SessionStatus::TurnCapExceeded.is_resumable());
     }
 
     /// A `Session` must round-trip through JSON with the expected shape.

@@ -645,11 +645,16 @@ async fn spawn_task_run_turn_cap_exceeded_is_resumable() {
     );
     wait_for_terminal(&registry, &session.id).await;
 
+    // `EchoLlmClient`'s script deterministically ends in a natural stop
+    // (`task::mock_llm::EchoLlmClient`'s own docs), so a correctly-resumed
+    // run must reach `Finished` exactly — not merely "not Failed", which
+    // would also pass if resumption silently regressed to e.g. another
+    // `TurnCapExceeded`/`DeadlineExceeded`/`Cancelled`.
     let final_status = registry.status(&session.id).unwrap().status;
-    assert_ne!(
+    assert_eq!(
         final_status,
-        SessionStatus::Failed,
-        "the resumed run must not itself be rejected/aborted"
+        SessionStatus::Finished,
+        "the resumed run must reach its own natural Finished terminal state"
     );
 }
 

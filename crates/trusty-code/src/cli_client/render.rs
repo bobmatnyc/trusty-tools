@@ -560,5 +560,10 @@ mod tests {
             exit_code_for_status(SessionStatus::DeadlineExceeded).code(),
             ExitCode::DeadlineExceeded.code()
         );
+        assert_eq!(
+            exit_code_for_status(SessionStatus::TurnCapExceeded).code(),
+            ExitCode::Partial.code(),
+            "a turn-cap-exceeded (resumable) session must exit Partial, not RunFailure (#3888)"
+        );
     }
 }
