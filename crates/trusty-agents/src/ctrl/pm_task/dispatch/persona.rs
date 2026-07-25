@@ -30,6 +30,7 @@ use super::super::super::handlers::{
 use super::super::super::state::ConversationTurn;
 use super::super::helpers::match_any_glob;
 use super::classification;
+use super::persona_memory;
 
 /// Narrow a persona's full candidate tool-name list down to what it may
 /// actually reach on this turn (#3285).
@@ -248,6 +249,22 @@ pub async fn run_pm_task_with_persona(
         persona_cfg.workstreams.recent_window,
         persona_cfg.workstreams.enabled,
         &workstreams_base_url,
+    )
+    .await;
+
+    // Issue #3928: recall the agent's OWN bound palace (`[[stores]].palace`,
+    // #3878) for this turn. Until now that binding was inert on the chat path
+    // — only `default_search_index()` was read (for `vector_search` routing
+    // below) — so the runtime handed the model no memory at all and personas
+    // truthfully-but-wrongly reported themselves as stateless. Resolved here,
+    // alongside the DOC-54 turn context, so both land before the system
+    // prompt is assembled.
+    let memory_search_base = trusty_common::resolve_daemon_base_url("trusty-search");
+    let persona_memory = persona_memory::build_persona_memory(
+        &persona_cfg.stores,
+        Some(&workstreams_base_url),
+        memory_search_base.as_deref(),
+        user_input,
     )
     .await;
 
@@ -515,7 +532,7 @@ pub async fn run_pm_task_with_persona(
         } else {
             format!("{base}\n\n{}", turn_ctx.classification_block)
         };
-        if !persona_tool_names.is_empty() {
+        let base = if !persona_tool_names.is_empty() {
             format!(
                 "{}\n\n## Available tools\nYou have access to the following tools: {}.\nUse them when the user asks questions that require live data.",
                 base,
@@ -523,6 +540,18 @@ pub async fn run_pm_task_with_persona(
             )
         } else {
             base
+        };
+        // Issue #3928: the memory block goes LAST, after every block above it.
+        // Its recall section is the only part of this prompt that changes on
+        // EVERY turn (it is keyed to the user's query), so appending it keeps
+        // the whole preceding prefix — persona body, focused-mode block,
+        // classification block, tool list — cache-stable, preserving DOC-54
+        // §9.6.3's prompt-cache-prefix property rather than busting it once
+        // per turn. It also places the recalled facts closest to the user's
+        // message, where they are most likely to be attended to.
+        match persona_memory::render_memory_block(&persona_memory) {
+            Some(block) => format!("{base}\n\n{block}"),
+            None => base,
         }
     };
 
@@ -556,7 +585,7 @@ pub async fn run_pm_task_with_persona(
                     response_chars = assembly.content.len(),
                     "run_pm_task_with_persona: streamed LLM call complete"
                 );
-                return classification::finish_turn(
+                let display = classification::finish_turn(
                     project_path,
                     persona_name,
                     &client,
@@ -566,7 +595,19 @@ pub async fn run_pm_task_with_persona(
                     &turn_ctx,
                     &workstreams_base_url,
                 )
-                .await;
+                .await?;
+                // #3928: persist to the agent's OWN palace chat session (the
+                // `ws:`-tagged drawer `finish_turn` writes goes to the
+                // project-slug palace instead). Detached — the answer is
+                // already on its way.
+                persona_memory::spawn_persist_turn(
+                    &persona_cfg.stores,
+                    Some(&workstreams_base_url),
+                    persona_name,
+                    user_input,
+                    &display,
+                );
+                return Ok(display);
             }
             Err(e) => {
                 tracing::warn!(
@@ -642,7 +683,7 @@ pub async fn run_pm_task_with_persona(
         "run_pm_task_with_persona: LLM call complete"
     );
 
-    classification::finish_turn(
+    let display = classification::finish_turn(
         project_path,
         persona_name,
         &client,
@@ -652,7 +693,15 @@ pub async fn run_pm_task_with_persona(
         &turn_ctx,
         &workstreams_base_url,
     )
-    .await
+    .await?;
+    persona_memory::spawn_persist_turn(
+        &persona_cfg.stores,
+        Some(&workstreams_base_url),
+        persona_name,
+        user_input,
+        &display,
+    );
+    Ok(display)
 }
 
 #[cfg(test)]

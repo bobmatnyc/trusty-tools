@@ -11,6 +11,7 @@
 mod classification;
 mod history;
 mod persona;
+mod persona_memory;
 
 pub use history::run_pm_task_with_history;
 pub use persona::run_pm_task_with_persona;
