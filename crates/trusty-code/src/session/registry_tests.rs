@@ -864,6 +864,53 @@ async fn begin_execution_resumes_a_finished_session() {
     );
 }
 
+/// (#3888) A session whose call landed in `TurnCapExceeded` (this call's
+/// `AgentLoopConfig::max_turns` budget ran out, not a real failure) must be
+/// resumable via `begin_execution` exactly like a `Finished` session —
+/// mirrors `begin_execution_resumes_a_finished_session` above, proving the
+/// regression reported in #3888 ("TurnCapExceeded permanently un-resumes a
+/// session") is fixed: before this fix, `TurnCapExceeded` sessions fell
+/// through `task::executor::run_and_record`'s catch-all into
+/// `SessionStatus::Failed`, which `begin_execution` rejects outright.
+///
+/// Why: this is the concrete acceptance proof for #3888 — without the
+/// `SessionStatus::TurnCapExceeded` variant and `begin_execution`'s updated
+/// resume condition, this session would stay permanently unresumable,
+/// directly regressing epic #2343's infinite-sessions goal.
+#[tokio::test]
+async fn begin_execution_resumes_a_turn_cap_exceeded_session() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+
+    let _first = registry.begin_execution(&session.id).unwrap();
+    registry.finish_execution(&session.id);
+    registry
+        .finish(&session.id, SessionStatus::TurnCapExceeded)
+        .unwrap();
+    assert_eq!(
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::TurnCapExceeded,
+        "a session whose call exhausted its turn budget must land in TurnCapExceeded, not Failed"
+    );
+
+    let mut events = crate::events::subscribe();
+    assert!(
+        registry.begin_execution(&session.id).is_ok(),
+        "a TurnCapExceeded session must be resumable for its next task.run (#3888)"
+    );
+    assert_eq!(
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::Running,
+        "resuming must transition the session back to Running"
+    );
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert!(
+        matches!(envelope.event, Event::SessionStatusChanged { status, .. } if status == "running"),
+        "resuming must publish the SAME SessionStatusChanged event other transitions do"
+    );
+}
+
 /// `begin_execution` must still reject `Cancelled`/`Failed`/
 /// `DeadlineExceeded` sessions even after the #2344 `Finished`-resumption
 /// change — only a successful finish is resumable.

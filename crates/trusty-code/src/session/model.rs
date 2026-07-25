@@ -25,13 +25,19 @@ use serde::{Deserialize, Serialize};
 /// What: `Created` -> `Running` happens immediately on `session.create` in
 /// M1 (there is no queue to sit in ahead of real task execution, which
 /// lands with `task.*` in #2056). `Cancelled`/`Finished`/`Failed`/
-/// `DeadlineExceeded` are the four terminal states; `session.cancel` is the
-/// only one #2054 can drive directly (`Finished`/`Failed`/`DeadlineExceeded`
-/// are set by `task::executor::run_and_record` when the PM's `AgentLoop`
-/// resolves). `DeadlineExceeded` (#2207) is distinct from `Failed`: it means
-/// the run's configured wall-clock budget elapsed before the PM reached a
-/// terminal state, NOT that the loop or LLM call errored — a run that hit
-/// this status may have made real, useful progress.
+/// `DeadlineExceeded`/`TurnCapExceeded` are the five terminal-per-call
+/// states; `session.cancel` is the only one #2054 can drive directly
+/// (`Finished`/`Failed`/`DeadlineExceeded`/`TurnCapExceeded` are set by
+/// `task::executor::run_and_record` when the PM's `AgentLoop` resolves).
+/// `DeadlineExceeded` (#2207) is distinct from `Failed`: it means the run's
+/// configured wall-clock budget elapsed before the PM reached a terminal
+/// state, NOT that the loop or LLM call errored — a run that hit this
+/// status may have made real, useful progress. `TurnCapExceeded` (#3888) is
+/// likewise distinct from `Failed`: it means this ONE `task.run` call
+/// exhausted its `AgentLoopConfig::max_turns` budget, not that the session
+/// itself failed — per epic #2343's infinite-sessions goal, the PM
+/// transcript is fully persisted and the session is resumable exactly like
+/// `Finished` (see `SessionRegistry::begin_execution`'s resume condition).
 /// Test: `model::tests::session_status_serialises_snake_case`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +48,10 @@ pub enum SessionStatus {
     Finished,
     Failed,
     DeadlineExceeded,
+    /// This call's turn budget (`AgentLoopConfig::max_turns`) was exhausted
+    /// before the PM reached a natural stop. Not a failure — resumable via
+    /// `task.run` exactly like `Finished` (#3888).
+    TurnCapExceeded,
 }
 
 impl SessionStatus {
@@ -61,17 +71,24 @@ impl SessionStatus {
             SessionStatus::Finished => "finished",
             SessionStatus::Failed => "failed",
             SessionStatus::DeadlineExceeded => "deadline_exceeded",
+            SessionStatus::TurnCapExceeded => "turn_cap_exceeded",
         }
     }
 
-    /// Returns `true` when this status is terminal (the session will never
-    /// transition again).
+    /// Returns `true` when this status is terminal FOR THIS CALL (the
+    /// current `task.run` invocation will never transition again without a
+    /// fresh `begin_execution`).
     ///
     /// Why: `session.cancel` and any future completion handler need to
-    /// reject transitions out of a terminal state (e.g. cancelling an
-    /// already-finished session is a no-op error, not a silent overwrite).
-    /// What: `true` for `Cancelled`/`Finished`/`Failed`/`DeadlineExceeded`;
-    /// `false` otherwise.
+    /// reject transitions out of a terminal-per-call state (e.g. cancelling
+    /// an already-finished session is a no-op, not a silent overwrite).
+    /// This is deliberately a WIDER notion than "can never resume" —
+    /// `Finished` and `TurnCapExceeded` are both terminal here (this call is
+    /// over) yet both remain resumable via `SessionRegistry::begin_execution`,
+    /// whose own narrower reject-list (`Cancelled`/`Failed`/
+    /// `DeadlineExceeded`) is the actual "dead forever" gate (#3888).
+    /// What: `true` for `Cancelled`/`Finished`/`Failed`/`DeadlineExceeded`/
+    /// `TurnCapExceeded`; `false` otherwise.
     /// Test: `model::tests::is_terminal_covers_terminal_states`.
     pub fn is_terminal(&self) -> bool {
         matches!(
@@ -80,6 +97,7 @@ impl SessionStatus {
                 | SessionStatus::Finished
                 | SessionStatus::Failed
                 | SessionStatus::DeadlineExceeded
+                | SessionStatus::TurnCapExceeded
         )
     }
 }
@@ -171,6 +189,10 @@ mod tests {
             serde_json::to_value(SessionStatus::DeadlineExceeded).unwrap(),
             json!("deadline_exceeded")
         );
+        assert_eq!(
+            serde_json::to_value(SessionStatus::TurnCapExceeded).unwrap(),
+            json!("turn_cap_exceeded")
+        );
     }
 
     /// `as_str` must match the serde wire representation exactly.
@@ -183,6 +205,7 @@ mod tests {
             SessionStatus::Finished,
             SessionStatus::Failed,
             SessionStatus::DeadlineExceeded,
+            SessionStatus::TurnCapExceeded,
         ] {
             let via_str = status.as_str();
             let via_serde = serde_json::to_value(status).unwrap();
@@ -190,7 +213,10 @@ mod tests {
         }
     }
 
-    /// Only `Cancelled`/`Finished`/`Failed`/`DeadlineExceeded` are terminal.
+    /// `Cancelled`/`Finished`/`Failed`/`DeadlineExceeded`/`TurnCapExceeded`
+    /// are terminal-per-call; `Finished` and `TurnCapExceeded` remain
+    /// resumable through `SessionRegistry::begin_execution`'s narrower gate
+    /// (#3888) despite being terminal here.
     #[test]
     fn is_terminal_covers_terminal_states() {
         assert!(!SessionStatus::Created.is_terminal());
@@ -199,6 +225,7 @@ mod tests {
         assert!(SessionStatus::Finished.is_terminal());
         assert!(SessionStatus::Failed.is_terminal());
         assert!(SessionStatus::DeadlineExceeded.is_terminal());
+        assert!(SessionStatus::TurnCapExceeded.is_terminal());
     }
 
     /// A `Session` must round-trip through JSON with the expected shape.

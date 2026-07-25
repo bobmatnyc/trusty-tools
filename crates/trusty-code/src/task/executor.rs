@@ -522,12 +522,25 @@ async fn run_and_record(
     // #2207: a wall-clock deadline is distinct from a genuine run failure —
     // `SessionStatus::DeadlineExceeded` lets a `session.status`/`task.run`
     // consumer tell "timed out, possibly close to done" from "errored".
+    // #3888: likewise, exhausting THIS call's turn budget
+    // (`AgentLoopError::TurnCapExceeded`) is a budget pause, not a genuine
+    // failure — `pm_transcript` was already persisted unconditionally above,
+    // so the next `task.run` on this session continues right where this one
+    // left off. Mapping it into the `Err(e) => Failed` catch-all (as it did
+    // before this fix) made `SessionRegistry::begin_execution` permanently
+    // reject the session, directly regressing epic #2343's infinite-sessions
+    // goal — see issue #3888.
     let terminal_status = match result {
         Ok(_output) => SessionStatus::Finished,
         Err(crate::agent_loop::AgentLoopError::Cancelled { .. }) => SessionStatus::Cancelled,
         Err(e @ crate::agent_loop::AgentLoopError::Timeout { .. }) => {
             let _ = registry.record_log(&session_id, "error", &format!("run failed: {e}"));
             SessionStatus::DeadlineExceeded
+        }
+        Err(e @ crate::agent_loop::AgentLoopError::TurnCapExceeded { .. }) => {
+            let _ =
+                registry.record_log(&session_id, "info", &format!("run paused (resumable): {e}"));
+            SessionStatus::TurnCapExceeded
         }
         Err(e) => {
             let _ = registry.record_log(&session_id, "error", &format!("run failed: {e}"));

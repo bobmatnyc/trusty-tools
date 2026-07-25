@@ -281,15 +281,21 @@ fn humanize_age(at: chrono::DateTime<chrono::Utc>) -> String {
 /// `ExitCode::RunFailure`; `DeadlineExceeded` (#2207) -> its own distinct
 /// `ExitCode::DeadlineExceeded`, so a script can tell "timed out" from
 /// "errored" the same way the legacy path's `RunReport::exit` does;
-/// `Created`/`Running` (should never be passed here — the caller only calls
-/// this once a run has reached a terminal status) also map to `RunFailure`
-/// defensively rather than panicking.
+/// `TurnCapExceeded` (#3888) -> the pre-existing `ExitCode::Partial`, the
+/// same code the legacy `run_task::report` path already uses for "the PM's
+/// turn cap was exhausted" — this call didn't reach a natural stop, but the
+/// session is resumable (unlike `RunFailure`), matching that code's
+/// existing "not done, not dead" semantics; `Created`/`Running` (should
+/// never be passed here — the caller only calls this once a run has reached
+/// a terminal status) also map to `RunFailure` defensively rather than
+/// panicking.
 /// Test: `tests::exit_code_for_status_maps_terminal_states`.
 pub fn exit_code_for_status(status: SessionStatus) -> ExitCode {
     match status {
         SessionStatus::Finished => ExitCode::Success,
         SessionStatus::Cancelled | SessionStatus::Failed => ExitCode::RunFailure,
         SessionStatus::DeadlineExceeded => ExitCode::DeadlineExceeded,
+        SessionStatus::TurnCapExceeded => ExitCode::Partial,
         SessionStatus::Created | SessionStatus::Running => ExitCode::RunFailure,
     }
 }

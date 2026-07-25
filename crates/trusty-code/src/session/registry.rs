@@ -593,9 +593,16 @@ impl SessionRegistry {
     /// (#2344) A session that already `Finished` a previous run is NOT dead —
     /// per the infinite-sessions design, it is simply idle and ready for its
     /// next `task.run` to continue the SAME persistent conversation
-    /// (`Self::begin_pm_transcript`). Only `Cancelled`/`Failed`/
-    /// `DeadlineExceeded` remain genuinely terminal: those represent a broken
-    /// run, and resuming one still requires a fresh session.
+    /// (`Self::begin_pm_transcript`). (#3888) A session that hit
+    /// `TurnCapExceeded` is the SAME situation: that call's `max_turns`
+    /// budget ran out, not the session — `pm_transcript` is fully persisted
+    /// (`task::executor::run_and_record` stores it unconditionally), so it
+    /// is resumable exactly like `Finished`, matching epic #2343's
+    /// infinite-sessions goal (a session must never permanently die just
+    /// because one call used its whole per-call turn allowance). Only
+    /// `Cancelled`/`Failed`/`DeadlineExceeded` remain genuinely terminal:
+    /// those represent a broken run, and resuming one still requires a fresh
+    /// session.
     /// What: errors with `session_not_found` if `id` is unknown,
     /// `invalid_argument` if the session is `Cancelled`/`Failed`/
     /// `DeadlineExceeded`, or already has an execution in flight — this
@@ -607,13 +614,15 @@ impl SessionRegistry {
     /// `handle: None` — the caller attaches the real `JoinHandle` via
     /// [`Self::attach_execution_handle`] immediately after spawning, since
     /// the handle cannot exist before that — and returns the flag. If the
-    /// session was `Finished` (resuming), transitions it back to `Running`
-    /// and publishes `Event::SessionStatusChanged` — matching the transition
-    /// every other status change in this module publishes.
+    /// session was `Finished` or `TurnCapExceeded` (resuming), transitions
+    /// it back to `Running` and publishes `Event::SessionStatusChanged` —
+    /// matching the transition every other status change in this module
+    /// publishes.
     /// Test: `registry_tests::begin_execution_rejects_second_overlapping_run`,
     /// `registry_tests::begin_execution_rejects_terminal_session`,
     /// `registry_tests::begin_execution_unknown_session_errors`,
-    /// `registry_tests::begin_execution_resumes_a_finished_session`.
+    /// `registry_tests::begin_execution_resumes_a_finished_session`,
+    /// `registry_tests::begin_execution_resumes_a_turn_cap_exceeded_session`.
     pub fn begin_execution(&self, id: &str) -> Result<Arc<AtomicBool>, RpcError> {
         let (cancel, resumed) = {
             let mut sessions = self.lock();
@@ -633,7 +642,10 @@ impl SessionRegistry {
                     "session {id} already has a task running"
                 )));
             }
-            let resumed = entry.session.status == SessionStatus::Finished;
+            let resumed = matches!(
+                entry.session.status,
+                SessionStatus::Finished | SessionStatus::TurnCapExceeded
+            );
             if resumed {
                 entry.session.status = SessionStatus::Running;
             }
