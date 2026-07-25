@@ -50,7 +50,7 @@
   // avoid the duplicate. Both constants moved to `lib/roster.ts` in #3894 so
   // the config takeover resolves the same identity from the same place.
   import { CONCIERGE_AGENT_ID, CONCIERGE_LABEL, rosterDisplayName } from '../lib/roster';
-  import { configPaneOpen, toggleConfigPane } from '../stores/configPane';
+  import { configPaneOpen, openConfigPane, requestExitConfigPane } from '../stores/configPane';
   import AddAgentForm from './AddAgentForm.svelte';
 
   let open = false;
@@ -65,6 +65,28 @@
   function toggleDropdown() {
     open = !open;
     if (open) addingAgent = false;
+  }
+
+  /**
+   * Why (PR #3895 re-review): the gear is an EXIT affordance too — pressing it
+   * while the takeover is up leaves configuration — so it must pass the same
+   * unsaved-edits guard as Esc/Back/Close. A plain `toggleConfigPane()` here
+   * flipped `configPaneOpen` straight to false, silently discarding a dirty
+   * panel. `inert` on the covered chat makes that click unreachable in a
+   * standards-compliant browser, but a data-loss guard cannot rest on a CSS/DOM
+   * property whose behavior in the Tauri WKWebView is unverified — it belongs
+   * in the state logic. (`toggleConfigPane` was deleted with this change so no
+   * future caller can reintroduce the bypass.)
+   * What: Opens directly; leaves via `requestExitConfigPane`, which raises the
+   * panel's confirm when there is something unsaved to lose.
+   * Test: `ChatPane.test.ts` — "the gear cannot silently discard a dirty panel".
+   */
+  function handleGear() {
+    if ($configPaneOpen) {
+      requestExitConfigPane();
+    } else {
+      openConfigPane();
+    }
   }
 
   function selectConcierge() {
@@ -196,7 +218,7 @@
     class="rounded-md p-1.5 text-foundry-light-muted dark:text-foundry-text/60 hover:bg-foundry-light-primary/10 dark:hover:bg-foundry-primary/10 hover:text-foundry-light-primary dark:hover:text-foundry-primary"
     aria-label="Configure agent"
     aria-pressed={$configPaneOpen}
-    on:click={toggleConfigPane}
+    on:click={handleGear}
   >
     <Settings2 class="h-4 w-4" />
   </button>

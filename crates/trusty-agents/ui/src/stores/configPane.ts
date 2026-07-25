@@ -73,9 +73,11 @@ export function closeConfigPane(): void {
   configPaneOpen.set(false);
 }
 
-export function toggleConfigPane(): void {
-  configPaneOpen.update((open) => !open);
-}
+// NB (PR #3895 re-review): there is deliberately NO `toggleConfigPane()`. It
+// existed, the gear button bound to it, and it flipped `configPaneOpen` false
+// without consulting `configPaneDirty` — a silent-discard bypass around the
+// guard below. Leaving the pane goes through `requestExitConfigPane()`, always;
+// `ChatHeader.handleGear` shows the open-vs-leave split a toggle would hide.
 
 /**
  * Why: Esc must exit the takeover (Bob: "provide an obvious exit

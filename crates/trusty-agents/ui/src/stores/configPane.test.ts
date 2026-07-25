@@ -10,7 +10,6 @@ import {
   isConfigExitKey,
   openConfigPane,
   requestExitConfigPane,
-  toggleConfigPane,
 } from './configPane';
 
 beforeEach(() => {
@@ -23,7 +22,7 @@ describe('configPaneOpen', () => {
     expect(get(configPaneOpen)).toBe(false);
   });
 
-  it('open/close/toggle move the takeover between its two states', () => {
+  it('open/close move the takeover between its two states', () => {
     openConfigPane();
     expect(get(configPaneOpen)).toBe(true);
 
@@ -34,11 +33,15 @@ describe('configPaneOpen', () => {
 
     closeConfigPane();
     expect(get(configPaneOpen)).toBe(false);
+  });
 
-    toggleConfigPane();
-    expect(get(configPaneOpen)).toBe(true);
-    toggleConfigPane();
-    expect(get(configPaneOpen)).toBe(false);
+  it('exposes no unguarded toggle — leaving always goes through the exit guard', async () => {
+    // PR #3895 re-review: a `toggleConfigPane()` used to exist and the gear
+    // bound to it, flipping the pane closed with no dirty check. Its absence
+    // is the invariant; a future re-add would resurrect the silent-discard
+    // bypass.
+    const mod = await import('./configPane');
+    expect(Object.keys(mod)).not.toContain('toggleConfigPane');
   });
 });
 

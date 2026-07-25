@@ -181,9 +181,10 @@ describe('ChatPane — agent configuration takeover (#3894)', () => {
     await waitFor(() => takeover() !== null);
     expect(gearButton().getAttribute('aria-pressed')).toBe('true');
 
-    // NB: the gear cannot be the way BACK — it sits inside the `inert` chat
-    // while the takeover is up, so a real browser ignores clicks on it. That
-    // is exactly why the takeover carries its own Back/Close/Esc exits.
+    // The gear does close a CLEAN panel (it routes through the exit guard,
+    // which finds nothing to lose) — though in a real browser it also sits
+    // inside the `inert` chat, so the takeover's own Back/Close/Esc are the
+    // reachable exits.
     pressEscape();
     await waitFor(() => takeover() === null);
     expect(gearButton().getAttribute('aria-pressed')).toBe('false');
@@ -279,6 +280,25 @@ describe('ChatPane — unsaved edits are never discarded silently (HIGH-1)', () 
       personality: 'saved before exit',
     });
     expect(get(configPaneOpen)).toBe(false);
+  });
+
+  it('the gear cannot silently discard a dirty panel', async () => {
+    // PR #3895 re-review: the gear is an exit affordance too. It used to bind a
+    // raw toggle, so a second press closed a dirty panel with no confirm — its
+    // only protection was `inert` on the covered chat, which is a rendering
+    // property, not a data-loss guard (and unverified in Tauri's WKWebView).
+    await openAndDirty('typed, then the gear was pressed again');
+
+    gearButton().click();
+    await waitFor(() => confirmDialog() !== null);
+
+    expect(takeover()).not.toBeNull();
+    expect(get(configPaneOpen)).toBe(true);
+
+    button('Keep editing').click();
+    await waitFor(() => confirmDialog() === null);
+    expect(takeover()).not.toBeNull();
+    expect(editor()?.value).toBe('typed, then the gear was pressed again');
   });
 
   it('a clean panel still exits on the first press — the guard is not a nag', async () => {
