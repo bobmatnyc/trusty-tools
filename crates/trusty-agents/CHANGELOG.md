@@ -41,6 +41,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   counterpart, would otherwise fail silently. `izzie`'s `[tools].allow` now
   grants `vector_search` so her binding is actually reachable.
 - **Durable compression-effectiveness telemetry — RTK + agents-ws-summary surfaces (closes [#3870](https://github.com/bobmatnyc/trusty-tools/issues/3870), refs [#3867](https://github.com/bobmatnyc/trusty-tools/issues/3867), epic [#3866](https://github.com/bobmatnyc/trusty-tools/issues/3866) Slices D + A):** a new `compression` module (`CompressionRecord`, `rtk_compression_record`, `ws_summary_compression_record`, `append_compression`) appends one JSONL line per event to `<project_dir>/.trusty-agents/state/compression.jsonl`, mirroring `usage::append_usage`'s append-only convention. Two call sites feed it: `llm::tool_loop`'s per-tool-result compression step now uses `compress_tool_output_async_with_path` (issue #1959) instead of the stats-free wrapper, so the bytes-before/after and RTK-vs-native-fallback signal are no longer discarded (best-effort, spawned off the hot path so a slow disk never stalls a tool result from reaching the model); `ctrl::pm_task::dispatch::classification::maybe_summarize_workstream`'s per-workstream summary refresh now records its own token-shrinkage and LLM round-trip duration (`surface: "agents-ws-summary"`) into the same sink — one writer, two surfaces.
+- **OKG builder tools — the base assistant can now BUILD its own knowledge
+  graph (epic #3052):** four tools registered into the assistant tier, backed by
+  the new `trusty-kb::okg` engine (which owns every idempotency guarantee and
+  stays pure and network-free).
+  - `okg_ingest_docstore` — point the KB at a directory of text documents.
+    Unchanged files skip on a content hash, edited files replace their prior
+    entry, binary files are skipped and reported, deletions are surfaced (or
+    tombstoned with content preserved).
+  - `okg_ingest_gmail` — query + date-window ingestion. The ledger is consulted
+    BEFORE the body fetch, so a message is pulled exactly once, ever; widening
+    `after` further back in time re-lists the covered window but only pays for
+    the genuinely older messages. Deletion detection is off — a windowed pull
+    can never prove a message is gone.
+  - `okg_ingest_drive` — folder-scoped and revision-aware. The list call
+    carries `version`, so an unchanged file is skipped without downloading and
+    a new revision re-ingests. Deletion detection is enabled only for a
+    complete recursive listing.
+  - `okg_sources` — read-only status view: kind, locator, destination
+    collection, item and tombstone counts, oldest/newest coverage, last run.
+  Registration is folded into ingestion, so "point at this directory" and
+  "reach further back in time" are the same idempotent call and a window can
+  never desync from its ledger. All four are added to the base `assistant`
+  persona's `[tools].allow` and registered into BOTH assistant dispatch paths
+  (`build_assistant_tier_registry` and the persona-chat path), avoiding the
+  divergence #3745 item C had to fix for the izzie tools.
+- Gmail and Drive fetching reuses `trusty-gworkspace`'s authenticated
+  `BaseClient` — no second OAuth path, no browser prompt. List calls go through
+  `BaseClient::get` with our own field sets because the crate's convenience
+  wrappers hardcode `fields` and drop `nextPageToken` (Drive's does not even
+  request it), which makes a bulk backfill impossible through them. Google's
+  soft-error responses (403/404 arrive as a success value carrying an `error`
+  key) are detected and raised rather than silently reported as an empty page.
 
 ### Fixed
 
@@ -67,7 +99,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   "Scaffolding — `agent.toml` has no OKG store binding field yet" placeholder
   and the client-side `scaffoldOkgStores()` fabricator are deleted; an agent
   that binds nothing now says so explicitly instead of showing a fake row.
-
 - **First real eventstream listener: Gmail history-poll + agent wake (#3820,
   DOC-54 SPEC-AGENTS-04/06):** the third leg of the agent-config triple
   (stores / tools / **listeners**) lands with a working Gmail connector.

@@ -385,6 +385,16 @@ pub async fn run_pm_task_with_persona(
                 registry.register(tool);
             }
 
+            // OKG builder tools — same posture as the izzie block above: added
+            // to the platform-hosted superset here, admitted per-persona by
+            // `filter_persona_tool_names` against `[tools].allow`. Keeping both
+            // assistant dispatch paths (this one and
+            // `runtime::tool_registry::build_assistant_tier_registry`) in sync
+            // is what #3745 item C fixed for izzie; do not register in only one.
+            for tool in crate::tools::okg::okg_tools() {
+                registry.register(tool);
+            }
+
             for plugin in crate::tools::agent_plugin::plugins_for_persona(persona_name) {
                 for tool in &plugin.tools {
                     registry.register(std::sync::Arc::clone(tool));

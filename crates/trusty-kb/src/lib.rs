@@ -23,6 +23,10 @@
 //!   - [`structure`]   — idempotent dir + generated-README maintenance.
 //!   - [`validate`]    — full-tree lint.
 //!   - [`convert`]     — arbitrary-tree → collection-model converter.
+//!   - [`okg`]         — OKG builder: source registry, per-item ledger, and the
+//!     idempotent additive ingest engine that grows a tree from doc stores
+//!     (in-crate) and Gmail/Drive (fetched by `trusty-agents`, which owns the
+//!     authenticated client).
 //!   - [`mcp`]         — the JSON-RPC dispatch seam + [`mcp::ServerConfig`].
 //!   - [`tooldefs`]    — the static `tools/list` descriptors.
 //!
@@ -34,6 +38,7 @@ pub mod convert;
 pub mod entity;
 pub mod frontmatter;
 pub mod mcp;
+pub mod okg;
 pub mod put;
 pub mod reconcile;
 pub mod roots;
