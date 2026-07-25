@@ -523,19 +523,24 @@ async fn run_and_record(
     // (not a catch-all) so the compiler forces a decision the next time that
     // enum grows one — a catch-all is exactly how #3888 happened the first
     // time (`TurnCapExceeded` silently absorbed into `Failed`). `Llm` is a
-    // genuine failure. `Timeout`/`TurnCapExceeded`/`StoppedBySignal` are all
-    // cooperative pauses, not failures — `pm_transcript` was already
-    // persisted unconditionally above, so the next `task.run` continues
-    // right where this one left off; `DeadlineExceeded`/`TurnCapExceeded`
-    // are distinct resumable statuses so a consumer can tell "timed out" from
-    // "used its turn budget". `StoppedBySignal` is not wired into this
-    // `pm_loop` today (no `.with_stop_signal(...)` call below — only
-    // `run_task`'s PM loop wires a `RedelegationCapSignal` through it), but
-    // per its own doc it is the SAME "cooperative pause" class as
-    // `TurnCapExceeded` (an external caller decided continuing is pointless,
-    // not that anything errored) — so it maps to the SAME resumable
-    // `TurnCapExceeded` status rather than `Failed`, the instant it does get
-    // wired here.
+    // genuine failure. `Timeout`/`TurnCapExceeded` are cooperative pauses,
+    // not failures — `pm_transcript` was already persisted unconditionally
+    // above, so the next `task.run` continues right where this one left off;
+    // `DeadlineExceeded`/`TurnCapExceeded` are distinct resumable statuses so
+    // a consumer can tell "timed out" from "used its turn budget".
+    // `StoppedBySignal` is NOT wired into this `pm_loop` today (no
+    // `.with_stop_signal(...)` call below), so this arm is dead code for now
+    // — but its mapping still matters for whoever wires it in later.
+    // Deliberately grouped with `Llm` as `Failed` rather than assumed
+    // resumable: `AgentLoop::with_stop_signal` has exactly one caller in the
+    // crate today (`run_task::mod`, wired to
+    // `RedelegationCapSignal::is_cap_reached()`), and that signal's own doc
+    // (`run_task::redelegation`) is explicit that it fires for "a genuinely
+    // broken run whose delegations keep failing" and "stopping really is
+    // correct" at that point — a stop-and-stay-stopped condition, not a
+    // cooperative pause like the turn cap. Whoever wires a DIFFERENT signal
+    // into this loop must revisit this arm on its own merits rather than
+    // inherit this default.
     let terminal_status = match result {
         Ok(_output) => SessionStatus::Finished,
         Err(crate::agent_loop::AgentLoopError::Cancelled { .. }) => SessionStatus::Cancelled,
@@ -543,15 +548,15 @@ async fn run_and_record(
             let _ = registry.record_log(&session_id, "error", &format!("run failed: {e}"));
             SessionStatus::DeadlineExceeded
         }
-        Err(
-            e @ (crate::agent_loop::AgentLoopError::TurnCapExceeded { .. }
-            | crate::agent_loop::AgentLoopError::StoppedBySignal { .. }),
-        ) => {
+        Err(e @ crate::agent_loop::AgentLoopError::TurnCapExceeded { .. }) => {
             let _ =
                 registry.record_log(&session_id, "info", &format!("run paused (resumable): {e}"));
             SessionStatus::TurnCapExceeded
         }
-        Err(e @ crate::agent_loop::AgentLoopError::Llm(_)) => {
+        Err(
+            e @ (crate::agent_loop::AgentLoopError::Llm(_)
+            | crate::agent_loop::AgentLoopError::StoppedBySignal { .. }),
+        ) => {
             let _ = registry.record_log(&session_id, "error", &format!("run failed: {e}"));
             SessionStatus::Failed
         }
