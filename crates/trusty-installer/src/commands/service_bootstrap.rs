@@ -450,12 +450,7 @@ impl ServiceEnv for RealServiceEnv {
 /// child's exact stderr text, which is only possible if that stderr was
 /// CAPTURED via `.output()`; `.status()`, the pre-fix call, gives no access
 /// to it at all).
-///
-/// `pub(crate)` (#3821): `prereqs::phase`'s prereq auto-installer (e.g.
-/// `brew install tmux`) reuses this SAME captured-exec primitive rather than
-/// re-implementing its own `.status()`-based runner — one call site fewer
-/// that could regress into the #3830 inherited-stdio bug.
-pub(crate) fn run_captured(mut cmd: std::process::Command, label: &str) -> anyhow::Result<()> {
+fn run_captured(mut cmd: std::process::Command, label: &str) -> anyhow::Result<()> {
     let output = cmd
         .output()
         .map_err(|e| anyhow::anyhow!("spawn {label}: {e}"))?;

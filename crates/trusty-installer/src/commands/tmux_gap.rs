@@ -119,6 +119,33 @@ pub fn decide_tmux_gap_action(inputs: TmuxGapInputs) -> TmuxGapAction {
     TmuxGapAction::None
 }
 
+/// Build the `--json` error payload for a [`TmuxGapAction::FailEarly`].
+///
+/// Why (#3821 finding 2, code-critic MEDIUM on PR #3879): when a package
+/// manager IS present but the auto-install attempt itself fails
+/// (network/disk/permissions), the static `hint` alone ("Homebrew
+/// required...") is misleading — it reads as "no brew found" even though
+/// brew ran and failed for some other reason. The captured error
+/// (`Missing.detail`) must reach `--json` consumers as a field DISTINCT from
+/// `hint`, never silently dropped.
+///
+/// What: `hint` is always the static, platform-appropriate manual note;
+/// `detail` is `Some(captured stderr)` only when an auto-install attempt was
+/// actually made and failed, `None` when no attempt was possible at all
+/// (e.g. no package manager detected) — serialised as JSON `null` in that
+/// case, never conflated with `hint`.
+///
+/// Test: `tests::fail_early_json_no_package_manager_has_null_detail`,
+/// `tests::fail_early_json_attempt_failed_carries_detail`.
+pub fn fail_early_json_payload(error: &str, hint: &str, detail: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "command": "install",
+        "error": error,
+        "hint": hint,
+        "detail": detail,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,6 +254,53 @@ mod tests {
         assert_eq!(
             decide_tmux_gap_action(mpm_not_selected),
             TmuxGapAction::None
+        );
+    }
+
+    /// Why (#3821 finding 2): the no-package-manager case must carry a
+    /// `null` `detail` — never a fabricated or reused-`hint` value — so a
+    /// `--json` consumer can tell "no attempt was possible" apart from "an
+    /// attempt was made and failed".
+    /// What: `detail: None` in; asserts `hint` is set and `detail` is JSON
+    /// `null`.
+    /// Test: This is the test.
+    #[test]
+    fn fail_early_json_no_package_manager_has_null_detail() {
+        let payload = fail_early_json_payload(
+            "tmux is required for trusty-mpm",
+            "Install tmux: `brew install tmux` (Homebrew required — https://brew.sh)",
+            None,
+        );
+        assert_eq!(
+            payload["hint"],
+            "Install tmux: `brew install tmux` (Homebrew required — https://brew.sh)"
+        );
+        assert!(
+            payload["detail"].is_null(),
+            "expected null detail, got: {payload}"
+        );
+    }
+
+    /// Why (#3821 finding 2 — the core fix): when an auto-install attempt
+    /// WAS made and failed, the real captured error must reach `--json`
+    /// output as a field distinct from the static `hint`, never dropped.
+    /// What: `detail: Some(captured stderr)` in; asserts `detail` carries it
+    /// verbatim and is NOT equal to `hint`.
+    /// Test: This is the test.
+    #[test]
+    fn fail_early_json_attempt_failed_carries_detail() {
+        let payload = fail_early_json_payload(
+            "tmux is required for trusty-mpm",
+            "Install tmux: `brew install tmux` (Homebrew required — https://brew.sh)",
+            Some("brew install tmux: Permission denied @ dir_s_mkdir - /usr/local/Cellar"),
+        );
+        assert_eq!(
+            payload["detail"],
+            "brew install tmux: Permission denied @ dir_s_mkdir - /usr/local/Cellar"
+        );
+        assert_ne!(
+            payload["detail"], payload["hint"],
+            "detail must never be conflated with the static hint"
         );
     }
 }

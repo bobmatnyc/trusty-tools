@@ -208,6 +208,7 @@ pub fn run_prereq_phase_with(
                                     still_missing.push(Missing {
                                         binary: prereq.binary.to_owned(),
                                         hint: hint.manual_note.clone(),
+                                        detail: None,
                                     });
                                 }
                             }
@@ -219,9 +220,16 @@ pub fn run_prereq_phase_with(
                                     hint.manual_note
                                 ));
                             }
+                            // #3821 finding 2: keep the ACTUAL captured error
+                            // (e.g. brew's stderr — network/disk/permissions)
+                            // distinct from the static `hint` so a `--json`
+                            // consumer can tell "no auto-install was even
+                            // possible" apart from "an attempt was made and
+                            // failed".
                             still_missing.push(Missing {
                                 binary: prereq.binary.to_owned(),
                                 hint: hint.manual_note.clone(),
+                                detail: Some(e.to_string()),
                             });
                         }
                     }
@@ -237,6 +245,7 @@ pub fn run_prereq_phase_with(
                     still_missing.push(Missing {
                         binary: prereq.binary.to_owned(),
                         hint: hint.manual_note,
+                        detail: None,
                     });
                 }
             }
@@ -250,30 +259,33 @@ pub fn run_prereq_phase_with(
 }
 
 /// Run a prereq auto-install command (e.g. `brew install tmux`) with its
-/// output CAPTURED, never inherited.
+/// output CAPTURED, never inherited — AND a periodic heartbeat while it runs.
 ///
-/// Why (#3821, reusing the #3830 fix): an earlier version of this function
-/// inherited stdout/stderr so brew/apt progress streamed live. That is safe
-/// only as long as no [`trusty_progress::LiveChecklist`] is animating at the
-/// same time — true today (this phase runs before `install_all` starts one),
-/// but fragile: any future reordering would silently reintroduce the exact
-/// interleaved-line corruption #3830 fixed elsewhere in this same command
-/// (`install.rs`'s `perform_upgrade_captured` call, `service_bootstrap`'s
-/// `run_captured`). Delegating to the SAME shared `run_captured` primitive
-/// those call sites use removes that footgun entirely rather than relying on
-/// call-order discipline.
-/// What: Builds `sh -c <cmd>` and runs it via
-/// [`super::super::service_bootstrap::run_captured`], which uses
-/// `Command::output()` and folds captured stderr into the error on failure.
-/// Test: `tests::real_exec_captures_not_inherits` (asserts the failure path
-/// carries the child's captured stderr, which is only possible when the
-/// command was run via `.output()` — `.status()` has no access to it); the
-/// stdout-never-leaks-to-parent-fd guarantee itself is proven once, at the
-/// shared primitive, by `service_bootstrap::tests::run_captured_never_leaks_to_parent_stdio`.
+/// Why (#3821): a first-run `brew install tmux` can legitimately take
+/// several minutes (Homebrew self-update, a non-bottled build) with zero
+/// output — exactly on the piped `curl | sh -s -- -y` demo path this exists
+/// to support. A plain blocking captured call (this crate's #3830-safe
+/// default elsewhere) would sit silent that whole time, reading as a hang
+/// (code-critic HIGH finding on PR #3879). Delegating to
+/// [`super::exec_heartbeat::run_captured_with_heartbeat`] keeps the exact
+/// same captured-not-inherited guarantee while adding an installer-emitted
+/// "still running" line every [`super::exec_heartbeat::DEFAULT_HEARTBEAT`].
+/// What: Builds `sh -c <cmd>` and runs it with a heartbeat callback that
+/// prints one `eprintln!` line per tick (this function is only ever reached
+/// under `!json` — see `auto_yes`/`should_offer` above — so writing directly
+/// to stderr can never corrupt `--json` output).
+/// Test: The captured-exec + heartbeat primitive itself is exhaustively
+/// tested in `exec_heartbeat::tests`; this thin wrapper only needs to prove
+/// the command is actually built and run — see `tests::real_exec_*` below.
 fn real_exec(cmd: &str) -> anyhow::Result<()> {
     let mut command = std::process::Command::new("sh");
     command.arg("-c").arg(cmd);
-    super::super::service_bootstrap::run_captured(command, &format!("`{cmd}`"))
+    super::exec_heartbeat::run_captured_with_heartbeat(
+        command,
+        &format!("`{cmd}`"),
+        super::exec_heartbeat::DEFAULT_HEARTBEAT,
+        |elapsed| eprintln!("  still running: `{cmd}` ({elapsed}s elapsed)..."),
+    )
 }
 
 #[cfg(test)]
@@ -650,9 +662,12 @@ mod tests {
     }
 
     /// Why: under `--yes`, exec failure must still land the binary in
-    /// `still_missing` (not silently `installed`).
+    /// `still_missing` (not silently `installed`) — AND (#3821 finding 2)
+    /// the real captured error must be threaded onto `Missing.detail`,
+    /// distinct from the static `hint`, so `--json` consumers don't lose it.
     /// What: `yes: true, json: false`; exec_fn returns Err; asserts tmux ends
-    /// up in `still_missing`.
+    /// up in `still_missing` with `detail` carrying the exec error and
+    /// `hint` unchanged from the static manual note.
     /// Test: This is the test.
     #[test]
     fn phase_yes_exec_failure_adds_to_still_missing() {
@@ -671,39 +686,34 @@ mod tests {
             &|| false,
             &|_| false,
         );
-        assert!(result.still_missing.iter().any(|m| m.binary == "tmux"));
+        let tmux = result
+            .still_missing
+            .iter()
+            .find(|m| m.binary == "tmux")
+            .expect("tmux must be missing");
+        assert_eq!(tmux.detail.as_deref(), Some("fake failure"));
+        assert_ne!(Some(tmux.hint.as_str()), tmux.detail.as_deref());
     }
 
     /// Why (#3821): `real_exec` — the production `exec_fn` wired up by
-    /// `run_prereq_phase` for `brew install tmux` and friends — must run
-    /// CAPTURED, not inherited, mirroring the #3830 fix already applied to
-    /// every other shell-out in this crate. A `.status()`-based
-    /// implementation has no access to the child's stderr at all, so it
-    /// physically cannot satisfy this assertion; only a `.output()`-based
-    /// (captured) implementation can.
-    /// What: Runs a command that writes a distinctive marker to stderr and
-    /// exits non-zero through the real (non-injected) `real_exec`; asserts
-    /// the returned error's message contains that exact marker.
+    /// `run_prereq_phase` for `brew install tmux` and friends — is a thin
+    /// `sh -c` wrapper around `exec_heartbeat::run_captured_with_heartbeat`
+    /// (whose captured-not-inherited + heartbeat guarantees are exhaustively
+    /// tested in `exec_heartbeat::tests`); this only needs to prove the
+    /// wrapper itself round-trips both outcomes correctly.
+    /// What: A failing command's error carries the child's captured stderr
+    /// (proving `sh -c` + the shared primitive are actually wired up, not a
+    /// no-op); a trivially successful command returns `Ok(())`.
     /// Test: This is the test.
     #[test]
-    fn real_exec_captures_not_inherits() {
+    fn real_exec_wraps_command_and_captures_stderr() {
+        assert!(real_exec("exit 0").is_ok());
         let err = real_exec("echo 'DISTINCTIVE_MARKER_3821: brew install tmux failed' >&2; exit 7")
             .expect_err("expected Err");
-        let msg = err.to_string();
         assert!(
-            msg.contains("DISTINCTIVE_MARKER_3821: brew install tmux failed"),
-            "error message did not fold in captured stderr (implies inherited, \
-             not captured, execution): {msg}"
+            err.to_string()
+                .contains("DISTINCTIVE_MARKER_3821: brew install tmux failed"),
+            "error message did not fold in captured stderr: {err}"
         );
-    }
-
-    /// Why: the success path must also go through `real_exec` (not a
-    /// hand-rolled duplicate), proving the delegation to the shared captured
-    /// primitive round-trips correctly for the common case too.
-    /// What: Runs a trivially successful command; asserts `Ok(())`.
-    /// Test: This is the test.
-    #[test]
-    fn real_exec_success_returns_ok() {
-        assert!(real_exec("exit 0").is_ok());
     }
 }

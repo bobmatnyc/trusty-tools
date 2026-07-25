@@ -180,7 +180,9 @@ pub fn run(
     // Prints ✓ lines for found tools and offers interactive install for missing ones.
     {
         use super::prereqs::phase::{run_prereq_phase, PrereqPhaseConfig};
-        use super::tmux_gap::{decide_tmux_gap_action, TmuxGapAction, TmuxGapInputs};
+        use super::tmux_gap::{
+            decide_tmux_gap_action, fail_early_json_payload, TmuxGapAction, TmuxGapInputs,
+        };
         let crate_names: Vec<String> = selected.iter().map(|m| m.crate_name.clone()).collect();
         let phase_result = run_prereq_phase(&PrereqPhaseConfig {
             selected: &crate_names,
@@ -227,17 +229,23 @@ pub fn run(
                 let hint = tmux_missing
                     .map(|m| m.hint.as_str())
                     .unwrap_or("Install tmux, then re-run `tctl install`.");
+                // #3821 finding 2: `detail` is the REAL captured error from a
+                // failed auto-install attempt (network/disk/permissions),
+                // kept distinct from the static `hint` — `None` when no
+                // attempt was even possible (no package manager detected).
+                let detail = tmux_missing.and_then(|m| m.detail.as_deref());
+                let extra = detail
+                    .map(|d| format!(" Install attempt failed: {d}."))
+                    .unwrap_or_default();
                 let msg = format!(
                     "tctl install: tmux is required for trusty-mpm and could not be \
-                     auto-installed on this machine. {hint} Re-run `tctl install` once \
-                     tmux is available, or install without trusty-mpm's session \
+                     auto-installed on this machine.{extra} {hint} Re-run `tctl install` \
+                     once tmux is available, or install without trusty-mpm's session \
                      management by omitting it from the member list. Nothing has been \
                      installed."
                 );
                 if json {
-                    if render_json(&serde_json::json!({"command": "install", "error": msg}))
-                        .is_err()
-                    {
+                    if render_json(&fail_early_json_payload(&msg, hint, detail)).is_err() {
                         eprintln!("tctl install: failed to write JSON output");
                         return 1;
                     }
