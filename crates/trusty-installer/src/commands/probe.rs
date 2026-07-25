@@ -55,11 +55,15 @@ const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// What: spawns `cmd` with piped stdout/stderr, drains both pipes
 /// concurrently on background threads (so a chatty child can never deadlock
 /// on a full pipe buffer while we're only polling `try_wait`), and polls
-/// `try_wait` every 25ms. On timeout, kills + reaps the child and returns
-/// `Err(ErrorKind::TimedOut)`. On normal exit, joins the reader threads and
-/// returns the collected `Output`.
+/// `try_wait` every 25ms. On timeout, kills + reaps the child, then gives the
+/// reader threads a short (200ms) bounded grace period to observe EOF (killing
+/// the child closes our end of its pipes, so this is normally near-instant)
+/// before giving up and detaching them — a genuinely stuck grandchild-held
+/// pipe never turns a bounded probe into an unbounded one. On normal exit,
+/// joins the reader threads and returns the collected `Output`.
 /// Test: `tests::output_with_timeout_returns_output_for_fast_command`,
-/// `tests::output_with_timeout_kills_hung_command`.
+/// `tests::output_with_timeout_kills_hung_command`,
+/// `tests::output_with_timeout_repeated_timeouts_stay_bounded`.
 fn output_with_timeout(
     mut cmd: Command,
     timeout: Duration,
@@ -93,6 +97,33 @@ fn output_with_timeout(
         if start.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
+            // #3897 code-critic LOW: reclaim the reader threads on the
+            // timeout path too, not just the success path below — otherwise
+            // every timed-out probe silently detaches two threads. `kill` +
+            // `wait` above closes OUR end of the pipes; in the overwhelmingly
+            // common case (no grandchild inherited the fd) that alone makes
+            // the readers' `read_to_end` see EOF within microseconds, so a
+            // short bounded grace period reclaims them without making the
+            // timeout path itself block noticeably longer. If a grandchild
+            // somehow still holds the pipe open past the grace period, we
+            // deliberately stop waiting (never turn a bounded probe into an
+            // unbounded one) — the readers are dropped/detached and the
+            // process is short-lived (`tctl` exits once verify_tail
+            // finishes), so the worst case is a handful of stray threads for
+            // the remainder of THIS invocation, never an unbounded
+            // accumulation across probes.
+            let join_deadline = Instant::now() + Duration::from_millis(200);
+            while Instant::now() < join_deadline
+                && (!stdout_handle.is_finished() || !stderr_handle.is_finished())
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if stdout_handle.is_finished() {
+                let _ = stdout_handle.join();
+            }
+            if stderr_handle.is_finished() {
+                let _ = stderr_handle.join();
+            }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!("command timed out after {timeout:?}"),
@@ -408,6 +439,36 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "timeout wrapper took far longer than its 1s bound: {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// Why (#3897 code-critic LOW): a timed-out probe must reclaim its
+    /// reader threads within a small bounded grace period, not just detach
+    /// them forever — otherwise every kickstart/verify probe against a
+    /// genuinely-dead daemon leaks two threads. Killing the child closes our
+    /// end of its pipes, so (absent a grandchild inheriting the fd) the
+    /// readers see EOF almost immediately; running several timeouts back to
+    /// back proves the per-call grace period isn't itself compounding into
+    /// unbounded wall-clock growth.
+    /// What: runs 3 back-to-back 1s-bound timeouts against `sleep 60`;
+    /// asserts each is `TimedOut` and the TOTAL elapsed stays well under
+    /// `3 * (timeout + grace-period + overhead)`, i.e. no call is silently
+    /// blocking on the previous call's reader threads.
+    /// Test: This is the test.
+    #[test]
+    fn output_with_timeout_repeated_timeouts_stay_bounded() {
+        let start = Instant::now();
+        for _ in 0..3 {
+            let mut cmd = Command::new("sleep");
+            cmd.arg("60");
+            let err = output_with_timeout(cmd, Duration::from_secs(1))
+                .expect_err("a 60s sleep must not complete within a 1s timeout");
+            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "3 sequential 1s timeouts took far longer than expected: {:?}",
             start.elapsed()
         );
     }

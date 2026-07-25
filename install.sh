@@ -339,15 +339,29 @@ confirm() {
 # PATH handling
 # ---------------------------------------------------------------------------
 
-# Why (#3874): a repeat install run must not accumulate duplicate `export
-#      PATH=...` lines in the same RC file.
+# Why (#3874; broadened per #3897 code-critic WARN): a repeat install run
+#      must not accumulate duplicate `export PATH=...` lines in the same RC
+#      file — but the original check only matched OUR OWN exact single-quote
+#      format (`PATH='<dir>'`), so a user's pre-existing hand-written entry in
+#      a different style (e.g. `export PATH="$HOME/.local/bin:$PATH"`, or no
+#      quotes at all) went undetected and got a redundant second entry
+#      appended anyway. Matching `PATH=` followed anywhere on the same line by
+#      the literal directory (regex-escaped; the caller's allowlist already
+#      restricts `_pdir` to `A-Za-z0-9/_.~-`, of which only `.` is an ERE
+#      metacharacter) catches any reasonable quoting/spacing style, not just
+#      this script's own.
 # What: returns 0 (already present) iff `_pfile` exists and already contains
-#      an export line for `_pdir`; 1 otherwise (including a missing file).
-# Test: appending twice via `_append_path_export` leaves exactly one line.
+#      a `PATH=` line naming `_pdir`, in ANY quoting style; 1 otherwise
+#      (including a missing file).
+# Test: appending twice via `_append_path_export` leaves exactly one line;
+#      a pre-existing differently-quoted entry is also detected (no second
+#      entry appended).
 _path_export_present_in() {
     _pdir="$1"
     _pfile="$2"
-    [ -f "${_pfile}" ] && grep -qF "PATH='${_pdir}'" "${_pfile}" 2>/dev/null
+    [ -f "${_pfile}" ] || return 1
+    _pdir_esc=$(printf '%s' "${_pdir}" | sed 's/[.]/\\&/g')
+    grep -Eq "PATH=.*${_pdir_esc}" "${_pfile}" 2>/dev/null
 }
 
 # Why (#3874): shared by every RC file `maybe_update_path` writes so the
@@ -402,18 +416,25 @@ maybe_update_path() {
 
     # Detect the RC file(s) from the login shell; default to ~/.profile.
     #
-    # Why (#3874): writing only to .zshrc misses non-interactive/non-login
-    # invocations (e.g. a plain `ssh host 'cmd'`), which zsh never sources
-    # .zshrc (or .zprofile) for — only .zshenv is sourced unconditionally on
-    # every zsh invocation. Writing PATH to all three covers interactive
-    # (.zshrc), login (.zprofile), and non-interactive/non-login (.zshenv)
-    # shells. bash similarly gets both its interactive (.bashrc) and login
-    # (.bash_profile) file.
+    # Why (#3874, revised per #3897 code-critic WARN): writing only to
+    # .zshrc misses non-interactive/non-login invocations (e.g. a plain
+    # `ssh host 'cmd'`), which zsh never sources .zshrc (or .zprofile) for.
+    # The FIRST fix here wrote all three of .zshenv/.zprofile/.zshrc, but a
+    # normal login+interactive session (the default for a new Terminal.app
+    # window) sources ALL THREE in one shell — .zshenv, then .zprofile (it's
+    # a login shell), then .zshrc (it's interactive) — so the install dir
+    # landed in PATH three times from a single fresh install. `.zshenv` is
+    # sourced UNCONDITIONALLY by every zsh invocation type (interactive,
+    # login, non-interactive, script), so it alone is sufficient to fix
+    # #3874's actual gap; writing the other two only added duplication risk
+    # without covering any invocation .zshenv doesn't already cover. Kept
+    # zsh on the same idempotent single-directory append machinery as
+    # bash/profile below, just pointed at one file.
     _shell_name="$(basename "${SHELL:-/bin/sh}")"
     case "${_shell_name}" in
         zsh)
-            _rc_files="${HOME}/.zshenv ${HOME}/.zprofile ${HOME}/.zshrc"
-            _rc_display="${HOME}/.zshenv, ${HOME}/.zprofile, and ${HOME}/.zshrc"
+            _rc_files="${HOME}/.zshenv"
+            _rc_display="${HOME}/.zshenv"
             ;;
         bash)
             _rc_files="${HOME}/.bashrc ${HOME}/.bash_profile"
