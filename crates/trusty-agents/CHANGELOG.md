@@ -40,6 +40,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   edit that updated the package but not its load-bearing `extends`-shadow
   counterpart, would otherwise fail silently. `izzie`'s `[tools].allow` now
   grants `vector_search` so her binding is actually reachable.
+- **Durable compression-effectiveness telemetry — RTK + agents-ws-summary surfaces (closes [#3870](https://github.com/bobmatnyc/trusty-tools/issues/3870), refs [#3867](https://github.com/bobmatnyc/trusty-tools/issues/3867), epic [#3866](https://github.com/bobmatnyc/trusty-tools/issues/3866) Slices D + A):** a new `compression` module (`CompressionRecord`, `rtk_compression_record`, `ws_summary_compression_record`, `append_compression`) appends one JSONL line per event to `<project_dir>/.trusty-agents/state/compression.jsonl`, mirroring `usage::append_usage`'s append-only convention. Two call sites feed it: `llm::tool_loop`'s per-tool-result compression step now uses `compress_tool_output_async_with_path` (issue #1959) instead of the stats-free wrapper, so the bytes-before/after and RTK-vs-native-fallback signal are no longer discarded (best-effort, spawned off the hot path so a slow disk never stalls a tool result from reaching the model); `ctrl::pm_task::dispatch::classification::maybe_summarize_workstream`'s per-workstream summary refresh now records its own token-shrinkage and LLM round-trip duration (`surface: "agents-ws-summary"`) into the same sink — one writer, two surfaces.
 
 ### Fixed
 

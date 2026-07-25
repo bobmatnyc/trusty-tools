@@ -10,6 +10,7 @@
 //! Test: `tests::parallel_tool_dispatch_does_not_cancel_peers` covers the
 //! concurrent-dispatch contract without a live LLM.
 
+mod compression_hook;
 #[cfg(test)]
 mod tests;
 mod turn;
@@ -41,6 +42,7 @@ use super::helpers::{
 use crate::context::ContextManager;
 use crate::perf::TokenUsage;
 use crate::tools::{ToolRegistry, ToolResult};
+use compression_hook::compress_success_result;
 use turn::{TurnRouting, dispatch_turn};
 
 /// Multi-turn chat loop with tool-calling support.
@@ -475,10 +477,16 @@ pub async fn chat_with_tools_gated(
             // directly (rather than via the `crate::compress` re-export) now
             // that `trusty-mpm`'s `tm compress` subcommand shares the same
             // dependency for its own PreToolUse Bash rewrite spike (#1956).
+            // #3870 (epic #3866 Slice D): uses `compress_success_result`
+            // instead of the stats-free `compress_tool_output_async` wrapper
+            // so the bytes-before/after and RTK-vs-native-fallback signal are
+            // no longer discarded — durably recorded to
+            // `.trusty-agents/state/compression.jsonl` instead.
             let content_str = match &result {
                 ToolResult::Success(_) => {
-                    trusty_agents_common::compress::compress_tool_output_async(&name, &raw_str)
-                        .await
+                    let (compressed, _append_handle) =
+                        compress_success_result(&name, &raw_str, crate::usage::project_dir()).await;
+                    compressed
                 }
                 ToolResult::Error { .. } => raw_str,
             };

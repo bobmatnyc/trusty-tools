@@ -23,6 +23,18 @@ fn test_client() -> Client<OpenAIConfig> {
     Client::with_config(OpenAIConfig::new())
 }
 
+/// A client pointed at a local mock daemon's `/chat/completions` route
+/// (#3867) — `with_api_base` deliberately omits `/v1` so
+/// `create_chat_completion_lenient`'s `config.url("/chat/completions")`
+/// lands exactly on `mock_daemon`'s route, matching the raw-stub pattern in
+/// `workflow::resolver_tests::serve_once`.
+fn test_client_with_base(base: &str) -> Client<OpenAIConfig> {
+    let cfg = OpenAIConfig::new()
+        .with_api_key("test-key")
+        .with_api_base(base);
+    Client::with_config(cfg)
+}
+
 fn test_persona_cfg() -> AgentConfig {
     let toml_str = r#"
 [agent]
@@ -451,6 +463,73 @@ async fn finish_turn_persists_via_detached_task() {
 }
 
 // ---------------------------------------------------------------------
+// #3867 (epic #3866 Slice A): agents-ws-summary compression telemetry
+// ---------------------------------------------------------------------
+
+/// Why: issue #3867's acceptance criteria requires a
+/// `summarize_every`-cadence-boundary turn to produce exactly one
+/// `compression.jsonl` line under `<project_dir>/.trusty-agents/state/`,
+/// with `surface_detail` equal to the workstream label — proving the new
+/// instrumentation in `maybe_summarize_workstream` (not just the pure
+/// `ws_summary_compression_record` builder tested in `compression.rs`) is
+/// actually wired at the real call site. Drives `maybe_summarize_workstream`
+/// directly (the exact seam classification.rs offers — see this module's
+/// doc comment) against a mock daemon serving both the drawers-listing HTTP
+/// route and a stubbed `/chat/completions` endpoint.
+/// What: seeds exactly one drawer under `ws:feat-x` with
+/// `summarize_every = 1` so `should_refresh_summary` fires on the very
+/// first call (`count == 1`, `1 % 1 == 0`) — i.e. "driving past the cadence
+/// boundary" in the smallest possible step. Asserts the resulting
+/// `compression.jsonl` has exactly one line, `surface ==
+/// "agents-ws-summary"`, `surface_detail == "feat-x"`, and
+/// `tokens_before > tokens_after` (the common-case shrinkage the issue
+/// requires be asserted, not just hoped for).
+/// Test: this IS the test.
+#[tokio::test]
+async fn maybe_summarize_workstream_emits_exactly_one_compression_event() {
+    let (addr, state) = mock_daemon::spawn().await;
+    let base_url = format!("http://{addr}");
+    state.seed_drawers(
+        "ws:feat-x",
+        &["Did substantial work on feat-x: wired the new endpoint, added tests, updated docs."],
+    );
+    state.set_chat_reply("Summary: feat-x endpoint shipped.");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+
+    let client = test_client_with_base(&base_url);
+    let mut cfg = test_persona_cfg();
+    cfg.workstreams.enabled = true;
+    cfg.workstreams.summarize_every = 1;
+
+    maybe_summarize_workstream(tmp.path(), &base_url, "feat-x", &client, &cfg)
+        .await
+        .expect("summary refresh should succeed against the mock daemon");
+
+    let jsonl_path = tmp.path().join(".trusty-agents/state/compression.jsonl");
+    let contents = tokio::fs::read_to_string(&jsonl_path)
+        .await
+        .expect("compression.jsonl should exist after one cadence-boundary refresh");
+    let lines: Vec<&str> = contents.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one compression event for one cadence-boundary refresh"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(parsed["surface"], "agents-ws-summary");
+    assert_eq!(parsed["surface_detail"], "feat-x");
+    assert!(parsed["compression_path"].is_null());
+    let tokens_before = parsed["tokens_before"].as_u64().unwrap();
+    let tokens_after = parsed["tokens_after"].as_u64().unwrap();
+    assert!(
+        tokens_before > tokens_after,
+        "expected the summary to be shorter than the source window: before={tokens_before} after={tokens_after}"
+    );
+}
+
+// ---------------------------------------------------------------------
 // should_refresh_summary — pure cadence decision (DOC-54 §9.6.2)
 // ---------------------------------------------------------------------
 
@@ -494,15 +573,26 @@ fn should_refresh_summary_true_on_cadence_boundary() {
 // `MockState` is inspected directly instead.
 // -----------------------------------------------------------------
 mod mock_daemon {
-    use axum::extract::{Path as AxumPath, State};
+    use axum::extract::{Path as AxumPath, Query, State};
     use axum::routing::post;
     use axum::{Json, Router};
+    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex as StdMutex};
 
     #[derive(Default)]
     pub(super) struct MockState {
         tags: StdMutex<Vec<Vec<String>>>,
+        // #3867: drawers returned by the GET .../drawers listing endpoint,
+        // seeded by `seed_drawers` before a `maybe_summarize_workstream`
+        // call — separate from `tags` (which only records what got WRITTEN
+        // via `create_drawer`) since the summary test needs to seed what
+        // gets READ back as the pre-summary turn window.
+        seeded_drawers: StdMutex<Vec<serde_json::Value>>,
+        // #3867: canned assistant content the mock `/chat/completions`
+        // endpoint returns for `maybe_summarize_workstream`'s one-shot
+        // summary call.
+        chat_reply: StdMutex<String>,
     }
 
     impl MockState {
@@ -516,6 +606,29 @@ mod mock_daemon {
                 .unwrap()
                 .iter()
                 .any(|tags| tags.iter().any(|t| t == tag))
+        }
+
+        /// Seed the drawers `drawers_by_tag_at` reads back — the pre-summary
+        /// turn window `maybe_summarize_workstream` scans for its cadence
+        /// decision and summary input.
+        pub(super) fn seed_drawers(&self, tag: &str, contents: &[&str]) {
+            let rows: Vec<serde_json::Value> = contents
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "content": c,
+                        "tags": [tag],
+                        "created_at": "2026-07-24T00:00:00Z",
+                    })
+                })
+                .collect();
+            *self.seeded_drawers.lock().unwrap() = rows;
+        }
+
+        /// Set the canned assistant reply the mock chat-completions endpoint
+        /// returns.
+        pub(super) fn set_chat_reply(&self, reply: &str) {
+            *self.chat_reply.lock().unwrap() = reply.to_string();
         }
     }
 
@@ -538,11 +651,51 @@ mod mock_daemon {
         Json(serde_json::json!({"ok": true}))
     }
 
+    /// GET `/api/v1/palaces/{id}/drawers` — `workstreams::drawers_by_tag_at`'s
+    /// read path (#3867). Query params (`tag`/`sort`/`limit`) are accepted
+    /// but ignored — tests seed exactly the rows a given call needs via
+    /// `MockState::seed_drawers`, so no server-side filtering is required.
+    async fn list_drawers(
+        State(state): State<Arc<MockState>>,
+        AxumPath(_palace_id): AxumPath<String>,
+        Query(_params): Query<HashMap<String, String>>,
+    ) -> Json<Vec<serde_json::Value>> {
+        Json(state.seeded_drawers.lock().unwrap().clone())
+    }
+
+    /// POST `/chat/completions` — stands in for the OpenAI-compatible
+    /// endpoint `llm::chat_adapter_aware`/`create_chat_completion_lenient`
+    /// hits (`OpenAIConfig::url("/chat/completions")`, matching the
+    /// `api_base` this module's `test_client_with_base` sets, which
+    /// deliberately omits the `/v1` segment).
+    async fn chat_completions(
+        State(state): State<Arc<MockState>>,
+        Json(_body): Json<serde_json::Value>,
+    ) -> Json<serde_json::Value> {
+        let content = state.chat_reply.lock().unwrap().clone();
+        Json(serde_json::json!({
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "x",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }))
+    }
+
     pub(super) async fn spawn() -> (SocketAddr, Arc<MockState>) {
         let state = Arc::new(MockState::default());
         let app = Router::new()
             .route("/api/v1/palaces", post(create_palace))
-            .route("/api/v1/palaces/{id}/drawers", post(create_drawer))
+            .route(
+                "/api/v1/palaces/{id}/drawers",
+                post(create_drawer).get(list_drawers),
+            )
+            .route("/chat/completions", post(chat_completions))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

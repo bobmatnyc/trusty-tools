@@ -72,6 +72,7 @@ pub mod bus;
 pub mod cli;
 #[allow(dead_code)]
 pub mod compress;
+pub mod compression;
 pub mod context;
 pub mod ctrl;
 pub mod ctrl_session;

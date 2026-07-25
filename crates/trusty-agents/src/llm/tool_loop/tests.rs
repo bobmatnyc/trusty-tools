@@ -100,3 +100,50 @@ async fn parallel_tool_dispatch_does_not_cancel_peers() {
         "dispatch appears sequential; elapsed = {elapsed:?}"
     );
 }
+
+/// Why: issue #3870 (epic #3866 Slice D) — the `tool_loop` RTK call site
+/// previously discarded compression stats via the stats-free
+/// `compress_tool_output_async` wrapper. This proves the extracted
+/// `compress_success_result` helper (a) still compresses using the
+/// `_with_path` variant, and (b) durably appends a `compression.jsonl` line
+/// under the given project dir with the correct `surface`/`surface_detail`/
+/// `compression_path` fields — i.e. the stats are no longer discarded at the
+/// real call site, not just in the pure builder unit tests in
+/// `compression.rs`.
+/// What: Drives repetitive `cargo test`-shaped input (known to compress via
+/// the native fallback chain, since `rtk` is never installed in CI) through
+/// `super::compress_success_result`, awaits the returned `JoinHandle` for a
+/// deterministic (non-sleep-based) wait on the spawned append, then reads
+/// back the JSONL file.
+/// Test: This IS the test.
+#[tokio::test]
+async fn compress_success_result_appends_rtk_record_with_correct_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut input = String::new();
+    for i in 0..50 {
+        input.push_str(&format!("test mod::t{i} ... ok\n"));
+    }
+    input.push_str("test result: ok. 50 passed; 0 failed\n");
+
+    let (compressed, handle) =
+        super::compress_success_result("cargo test", &input, dir.path().to_path_buf()).await;
+    assert!(
+        compressed.len() < input.len(),
+        "expected compression to shrink repetitive passing-test output"
+    );
+    handle.await.expect("append task should not panic");
+
+    let path = dir.path().join(".trusty-agents/state/compression.jsonl");
+    let contents = tokio::fs::read_to_string(&path)
+        .await
+        .expect("compression.jsonl should exist after the append task completes");
+    let lines: Vec<&str> = contents.lines().collect();
+    assert_eq!(lines.len(), 1, "exactly one compression record");
+    let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(parsed["surface"], "rtk");
+    assert_eq!(parsed["surface_detail"], "cargo test");
+    // `rtk` is never on PATH in CI, so this call site must report the
+    // native-fallback path, not silently omit `compression_path`.
+    assert_eq!(parsed["compression_path"], "native_fallback");
+    assert!(parsed["tokens_before"].as_u64().unwrap() > 0);
+}
