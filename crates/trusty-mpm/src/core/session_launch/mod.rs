@@ -187,11 +187,11 @@ pub struct PrepReport {
     /// name must NOT enter `enabledMcpjsonServers` for it (see
     /// `trusted_mcp_names`'s computation below), since its content was never
     /// re-pinned to the framework-controlled command this run.
-    /// Test: `prepare_session_excludes_trusty_mpm_from_trust_when_pin_write_fails`.
+    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
     pub trusty_mpm_injected: bool,
     /// Whether the `trusty-review` MCP server entry was ACTUALLY
     /// force-written to `.mcp.json` this run — see [`Self::trusty_mpm_injected`].
-    /// Test: `prepare_session_excludes_trusty_mpm_from_trust_when_pin_write_fails`.
+    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
     pub trusty_review_injected: bool,
     /// Whether the `trusty-memory` MCP server entry was ACTUALLY
     /// force-written to `.mcp.json` this run.
@@ -199,12 +199,12 @@ pub struct PrepReport {
     /// `false` when the manifest toggle disabled the injector, OR the toggle
     /// was on but [`inject_trusty_memory_mcp`] failed — either way this name
     /// must NOT enter `enabledMcpjsonServers` (issue #3945).
-    /// Test: `prepare_session_excludes_trusty_memory_from_trust_when_pin_write_fails`.
+    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
     pub trusty_memory_injected: bool,
     /// Whether the `trusty-search` MCP server entry was ACTUALLY
     /// force-written to `.mcp.json` this run — see
     /// [`Self::trusty_memory_injected`].
-    /// Test: `prepare_session_excludes_trusty_search_from_trust_when_pin_write_fails`.
+    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
     pub trusty_search_injected: bool,
     /// Incremental catch-up context to inject as seed context for this session.
     ///

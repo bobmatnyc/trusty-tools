@@ -237,8 +237,9 @@ fn pull_ff_only(repo_dir: &Path) {
 /// Test: `run_prepare_session_pins_palace_from_clone_url`,
 /// `run_prepare_session_bare_stub_when_no_identity`,
 /// `run_prepare_session_never_writes_real_home_claude_dirs`,
-/// `run_prepare_session_reports_injected_pins`; `prepare_session` itself is
-/// covered in session_launch/tests.rs.
+/// `run_prepare_session_reports_all_pins_true_on_success`,
+/// `load_alias_excludes_builtins_from_managed_trust_when_mcp_json_write_fails`;
+/// `prepare_session` itself is covered in session_launch/tests.rs.
 fn run_prepare_session(
     repo_dir: &Path,
     repo_url: Option<&str>,
