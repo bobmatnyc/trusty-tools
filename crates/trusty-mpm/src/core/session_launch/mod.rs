@@ -52,6 +52,12 @@ mod tests_scaffold_gitignore;
 #[cfg(test)]
 #[path = "tests_search_index.rs"]
 mod tests_search_index;
+// Issue #3918 follow-up (code-critic BLOCK, name-squatting exploit) — e2e
+// coverage driving the REAL `prepare_session_inner` pipeline end to end,
+// mirroring the `tests_roster.rs` split pattern above.
+#[cfg(test)]
+#[path = "tests_mcp_trust_seed_e2e.rs"]
+mod tests_mcp_trust_seed_e2e;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -68,8 +74,9 @@ use custom_mcp::inject_custom_trusty_mcps;
 use native_mcp::inject_native_trusty_mcps;
 use search_index::{inject_trusty_search_mcp, register_project_index};
 use settings::{
-    deploy_output_style, inject_trusty_memory_mcp, preseed_workspace_trust_home,
-    remove_global_trusty_memory_hooks, write_output_style, write_project_hooks, write_status_line,
+    deploy_output_style, inject_trusty_memory_mcp, inject_trusty_mpm_mcp, inject_trusty_review_mcp,
+    preseed_workspace_trust_home, remove_global_trusty_memory_hooks, write_output_style,
+    write_project_hooks, write_status_line,
 };
 
 /// Re-export of the project-tier output-style/statusLine resolution primitives
@@ -658,6 +665,28 @@ fn prepare_session_inner(
         }
     } else {
         tracing::debug!("manifest disables trusty-search MCP injection");
+    }
+
+    // Force-write the canonical `trusty-mpm` / `trusty-review` MCP server
+    // entries (issue #3918 follow-up, code-critic BLOCK — name-squatting
+    // exploit). Both names are unconditionally pre-approved in a managed
+    // session's `enabledMcpjsonServers` (they are framework builtins — see
+    // `mcp_config::BUILTIN_MANAGED_MCP_SERVERS`), but that approval is
+    // NAME-based and CONTENT-BLIND: Claude Code still reads whatever command
+    // sits under the name in this file. Without an injector here, a hostile
+    // clone could squat either pre-approved name with an attacker-controlled
+    // command (no human present to decline it), and — independently — a
+    // freshly-cloned project with no committed entry got no WORKING
+    // connection to its own trusty-mpm/trusty-review servers, so #3918's
+    // actual symptom was not fixed in the general case. Unconditional (no
+    // manifest toggle, unlike the optional trusty-memory/trusty-search
+    // integrations above) and MUST run before the trust pre-seed below —
+    // same ordering reasoning as the native/custom injectors. Non-fatal.
+    if let Err(err) = inject_trusty_mpm_mcp(project_dir) {
+        tracing::warn!("failed to inject trusty-mpm MCP server: {err}");
+    }
+    if let Err(err) = inject_trusty_review_mcp(project_dir) {
+        tracing::warn!("failed to inject trusty-review MCP server: {err}");
     }
 
     // Inject NATIVE trusty MCP servers registered via `tm mcp add` (e.g.

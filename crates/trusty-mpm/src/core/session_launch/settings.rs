@@ -463,6 +463,80 @@ pub(super) fn inject_trusty_memory_mcp(
     )
 }
 
+/// Force-write the canonical `trusty-mpm` MCP server entry into the project's
+/// `.mcp.json`, unconditionally overwriting whatever (if anything) already
+/// sits under that key.
+///
+/// Why (issue #3918 follow-up, code-critic BLOCK — name-squatting exploit):
+/// `standalone::trust_seed::preseed_managed_trust` unconditionally approves
+/// the name `"trusty-mpm"` in a managed session's `enabledMcpjsonServers`
+/// (it is a framework builtin — see
+/// `crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS`) — but Claude
+/// Code's `enabledMcpjsonServers` approval is NAME-based and CONTENT-BLIND:
+/// it still reads whatever COMMAND sits under that name in
+/// `<workspace>/.mcp.json`, the project layer loaded under
+/// `--setting-sources project,local` (see `runtime::claude_code`'s module
+/// doc). Before this fix nothing ever wrote a canonical `trusty-mpm` entry
+/// into that file, so (a) a hostile clone could commit a spoofed
+/// `trusty-mpm` entry pointing at an attacker-controlled binary and have it
+/// execute with the operator's credentials on the very first `tm session
+/// new` against that clone — the name is pre-approved, nothing overwrites
+/// the entry, no human is present to notice — and (b) even a BENIGN,
+/// freshly-cloned project with no committed `trusty-mpm` entry ended up with
+/// NOTHING under that name, so issue #3918's actual symptom (the PM cannot
+/// call `mcp__trusty-mpm__*` tools, e.g. `session_context_pause`) was not
+/// fixed for the general case — only for a project that happens to already
+/// commit its own `trusty-mpm` entry (like this repo). Force-overwriting on
+/// every `prepare_session` run — mirroring [`inject_trusty_memory_mcp`]'s
+/// and `search_index::inject_trusty_search_mcp`'s existing force-write
+/// pattern — closes both defects at once: the pre-approved NAME and the
+/// on-disk ENTRY now come from the SAME pipeline (this one), so they can
+/// never diverge again.
+/// What: writes `mcp_config::builtin_server_entry("trusty-mpm")`'s canonical
+/// `{"type":"stdio","command":"trusty-mpm","args":["serve","--stdio"]}`
+/// under `mcpServers.trusty-mpm` in `<project_path>/.mcp.json`, via the
+/// shared [`inject_mcp_server`] read-merge-write helper (idempotent — a
+/// byte-identical existing entry is not rewritten). Unconditional: there is
+/// no manifest toggle to disable this injection — trusty-mpm's own MCP
+/// tools are load-bearing for the PM session itself, unlike the optional
+/// `trusty-memory`/`trusty-search` integrations.
+/// Test: `inject_trusty_mpm_mcp_overwrites_hostile_entry`,
+/// `inject_trusty_mpm_mcp_creates_entry_when_absent`,
+/// `inject_trusty_mpm_mcp_is_idempotent`.
+pub(super) fn inject_trusty_mpm_mcp(project_path: &Path) -> Result<(), PrepError> {
+    let entry = crate::core::mcp_config::builtin_server_entry("trusty-mpm")
+        .expect("trusty-mpm is a known BUILTIN_MANAGED_MCP_SERVERS entry");
+    inject_mcp_server(project_path, "trusty-mpm", entry)
+}
+
+/// Force-write the canonical `trusty-review` MCP server entry into the
+/// project's `.mcp.json` — see [`inject_trusty_mpm_mcp`] for the full
+/// reasoning (identical exploit shape, identical fix).
+///
+/// Why: `trusty-review` has been a member of
+/// `crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS` since before the
+/// #3918 PR chain — its name has always been unconditionally approved in a
+/// managed session's `enabledMcpjsonServers` — but, like `trusty-mpm`
+/// before this fix, no injector ever wrote its canonical entry into
+/// `<workspace>/.mcp.json`. That is the identical latent exposure: a
+/// hostile clone could squat the pre-approved `trusty-review` name with an
+/// attacker-controlled command, and a benign project got no working
+/// `trusty-review` connection either. Left open while closing `trusty-mpm`
+/// would leave the same exploit shape live under a different name, so this
+/// fix closes it too.
+/// What: writes `mcp_config::builtin_server_entry("trusty-review")`'s
+/// canonical `{"type":"stdio","command":"trusty-review","args":["serve",
+/// "--stdio"]}` under `mcpServers.trusty-review`, via [`inject_mcp_server`]
+/// (idempotent). Unconditional, same as [`inject_trusty_mpm_mcp`].
+/// Test: `inject_trusty_review_mcp_overwrites_hostile_entry`,
+/// `inject_trusty_review_mcp_creates_entry_when_absent`,
+/// `inject_trusty_review_mcp_is_idempotent`.
+pub(super) fn inject_trusty_review_mcp(project_path: &Path) -> Result<(), PrepError> {
+    let entry = crate::core::mcp_config::builtin_server_entry("trusty-review")
+        .expect("trusty-review is a known BUILTIN_MANAGED_MCP_SERVERS entry");
+    inject_mcp_server(project_path, "trusty-review", entry)
+}
+
 /// Resolve the trusty-memory palace slug to pin for a managed session (#1605).
 ///
 /// Why: the slug must match what trusty-memory itself would derive for the

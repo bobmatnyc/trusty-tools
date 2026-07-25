@@ -1437,8 +1437,15 @@ fn preseed_trust_enables_empty_when_no_mcp_json() {
 fn prepare_session_preseeds_enabled_mcp_servers() {
     // Why (#1296): the single launch-prep entry point injects trusty-memory and
     // trusty-search into `.mcp.json`, then seeds trust. The pre-seeded trust
-    // entry in ~/.claude.json must list BOTH injected servers under
+    // entry in ~/.claude.json must list every injected server under
     // `enabledMcpjsonServers` so the spawned session runs non-interactively.
+    //
+    // #3918 follow-up: `prepare_session_inner` now ALSO force-injects
+    // `trusty-mpm` and `trusty-review` (see `inject_trusty_mpm_mcp` /
+    // `inject_trusty_review_mcp`), so they legitimately land in `.mcp.json`
+    // (framework-controlled content, not repo-sourced) and therefore in the
+    // `tm launch` path's derived approval list too — this is the correct,
+    // intended widening, not a regression.
     //
     // #2756: `inject_native_trusty_mcps` now resolves the managed registry from
     // the REAL `$HOME` (not `fw`), and `preseed_workspace_trust_home` writes to
@@ -1464,6 +1471,8 @@ fn prepare_session_preseeds_enabled_mcp_servers() {
     let servers = mcp["mcpServers"].as_object().expect("mcpServers object");
     assert!(servers.contains_key("trusty-memory"));
     assert!(servers.contains_key("trusty-search"));
+    assert!(servers.contains_key("trusty-mpm"));
+    assert!(servers.contains_key("trusty-review"));
 
     // Seed an isolated ~/.claude.json to assert the approval list is derived
     // from the now-populated .mcp.json.
@@ -1477,7 +1486,15 @@ fn prepare_session_preseeds_enabled_mcp_servers() {
         .expect("enabledMcpjsonServers is an array");
     let mut names: Vec<&str> = enabled.iter().filter_map(|v| v.as_str()).collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["trusty-memory", "trusty-search"]);
+    assert_eq!(
+        names,
+        vec![
+            "trusty-memory",
+            "trusty-mpm",
+            "trusty-review",
+            "trusty-search"
+        ]
+    );
 }
 
 #[test]
