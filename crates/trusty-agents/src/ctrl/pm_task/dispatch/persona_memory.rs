@@ -484,7 +484,8 @@ pub(crate) fn render_memory_block(memory: &PersonaMemory) -> Option<String> {
 /// What: no-op unless the agent binds a palace. Uses trusty-memory's RPC
 /// surface — `chat_turn_append` has no REST route, and RPC `chat_session_create`
 /// is the only path accepting a caller-supplied (hence resumable) session id.
-/// Test: `spawn_persist_turn_writes_both_messages` (mock-daemon),
+/// Test: `persist_turn_creates_session_then_appends` (mock-daemon),
+/// `persist_turn_surfaces_rpc_envelope_errors`,
 /// `spawn_persist_turn_is_noop_without_palace`.
 pub(crate) fn spawn_persist_turn(
     stores: &StoresConfig,
