@@ -208,6 +208,30 @@ impl TmuxDriver {
         Self::discover().is_ok()
     }
 
+    /// Confirm the tmux SERVER exists, starting it if necessary (#3823).
+    ///
+    /// Why: on a machine where tmux has never run, the socket directory
+    /// itself does not exist yet — `list-sessions` fails with a raw "No such
+    /// file or directory"/"error connecting to" message that
+    /// [`Self::list_sessions`]'s "no server running"/"no sessions" empty-list
+    /// classification does not recognize, so it propagates as an `Err`. The
+    /// session-creation flow's FIRST tmux call is exactly this
+    /// `list-sessions` (`SessionManager::resolve_session_name` →
+    /// `names_for_serial_allocation` and `SessionManager::dedupe_session_name`,
+    /// both called before the #3386/#3722 `create_managed_session` choke
+    /// point is ever reached), so that choke point's own `ensure_server_up`
+    /// call comes too late to help — the caller already 500'd. This method
+    /// lets `SessionManager::create_with_id`/`create_with_reserved_name`/
+    /// `resume` (`session_manager/create.rs`, `session_manager/manager.rs`)
+    /// guarantee the server is up BEFORE issuing that first `list-sessions`.
+    /// What: delegates to [`crate::core::tmux::ensure_server_up`] (the same
+    /// retried-with-backoff `tmux start-server` primitive #3722 added),
+    /// mapping its `Err(String)` to `Error::Protocol`.
+    /// Test: `ensure_server_up_does_not_panic_on_missing_binary`.
+    pub fn ensure_server_up(&self) -> Result<()> {
+        crate::core::tmux::ensure_server_up(&self.tmux_path).map_err(Error::Protocol)
+    }
+
     /// Run a typed tmux command, returning captured stdout on success.
     ///
     /// Why: every other method routes through here so exit-status handling

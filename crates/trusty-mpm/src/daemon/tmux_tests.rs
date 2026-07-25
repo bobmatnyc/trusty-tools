@@ -202,3 +202,69 @@ fn driver_reports_availability() {
         assert!(TmuxDriver::discover().is_err());
     }
 }
+
+// ── #3823: ensure_server_up starts the tmux server before the caller's
+// first tmux call, on a machine where tmux has never run ────────────────
+
+/// Write an executable shell script at `dir/name` with body `body`.
+///
+/// Why: mirrors `core::tmux`'s own `write_fake_tmux` test helper — a
+/// deterministic scripted `tmux` binary, no live tmux server required.
+fn write_fake_tmux(dir: &std::path::Path, name: &str, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, body).expect("write fake tmux script");
+    let mut perms = std::fs::metadata(&path)
+        .expect("stat fake tmux script")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod fake tmux script");
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn ensure_server_up_issues_start_server_on_a_fresh_socket() {
+    // Simulates a machine where tmux has never run: the fake binary logs
+    // which sub-command it was invoked with and always succeeds. The FIRST
+    // (and only) call `ensure_server_up` should make is `start-server`.
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("calls.log");
+    let script = format!(
+        "#!/bin/sh\necho \"$1\" >> '{log}'\nexit 0\n",
+        log = log.display()
+    );
+    let bin = write_fake_tmux(dir.path(), "fake-tmux-fresh-socket", &script);
+    let driver = TmuxDriver { tmux_path: bin };
+
+    driver
+        .ensure_server_up()
+        .expect("a succeeding fake tmux must report the server as up");
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.trim(),
+        "start-server",
+        "ensure_server_up must issue exactly one start-server call: {calls:?}"
+    );
+}
+
+#[test]
+fn ensure_server_up_fails_loudly_when_the_server_never_comes_up() {
+    // The fake tmux ALWAYS fails with the exact "no such file" style stderr
+    // real tmux emits on a machine where the socket directory itself does
+    // not exist yet (distinct from "no server running", which list_sessions
+    // already tolerates) — ensure_server_up must surface this as a loud
+    // Err, never a silent Ok.
+    let dir = tempfile::tempdir().unwrap();
+    let script = "#!/bin/sh\necho 'error connecting to /tmp/tmux-502/default (No such file or directory)' >&2\nexit 1\n";
+    let bin = write_fake_tmux(dir.path(), "fake-tmux-always-fails", script);
+    let driver = TmuxDriver { tmux_path: bin };
+
+    let err = driver
+        .ensure_server_up()
+        .expect_err("an always-failing tmux must error loudly, never report success");
+    assert!(
+        matches!(err, Error::Protocol(_)),
+        "must surface as a Protocol error: {err:?}"
+    );
+}
