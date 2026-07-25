@@ -530,6 +530,12 @@ async fn maybe_summarize_workstream(
         .join("\n\n---\n\n");
     let system = "Summarize this workstream's recent turns in 3-5 sentences: capture decisions \
                   made, open questions, and current status. Plain prose only, no preamble.";
+    // #3867 (epic #3866 Slice A, instrumentation point 3): time the LLM
+    // round-trip for the durable `agents-ws-summary` compression record
+    // below — `duration_ms` is this call's wall-clock, not the whole
+    // function's (drawer read/write I/O is excluded, matching the issue's
+    // "duration_ms: ... the LLM round-trip for agents-ws-summary" spec).
+    let summary_started = std::time::Instant::now();
     let resp = llm::chat_adapter_aware(
         client,
         &persona_cfg.agent.model,
@@ -540,6 +546,8 @@ async fn maybe_summarize_workstream(
         Vec::new(),
     )
     .await?;
+    let summary_duration_ms =
+        u64::try_from(summary_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let Some(summary_text) = resp.content else {
         anyhow::bail!("workstream summary call returned no content");
     };
@@ -552,8 +560,25 @@ async fn maybe_summarize_workstream(
     )
     .await?;
     tracing::info!(label = %label, turn_count = count, "workstream summary refreshed");
+
+    // #3867 (epic #3866 Slice A): durable compression-effectiveness record
+    // for the agents-ws-summary surface, sharing RTK's `compression.jsonl`
+    // sink — one writer, two surfaces. See `classification_ws_summary`'s
+    // doc comment for the full rationale.
+    classification_ws_summary::record(
+        project_path,
+        label,
+        &joined,
+        &summary_text,
+        summary_duration_ms,
+    )
+    .await;
+
     Ok(())
 }
+
+#[path = "classification_ws_summary.rs"]
+mod classification_ws_summary;
 
 #[cfg(test)]
 #[path = "classification_tests.rs"]
