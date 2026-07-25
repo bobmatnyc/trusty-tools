@@ -20,8 +20,23 @@
 //! ERROR-level regression signal (with its `cadence: None` negative
 //! control).
 //! Test: this module is itself the test surface.
+//!
+//! Isolation (issue #3902): every test below that reaches a turn boundary
+//! where cadence or threshold compaction actually FIRES injects
+//! `AgentLoopConfig::telemetry_data_dir` with its own `telemetry::test_temp_dir`
+//! rather than leaving it `None` — an un-isolated fire would call
+//! `telemetry::default_data_dir()`, which (outside a `with_data_dir_env`/
+//! `with_data_dir_env_fut` critical section) reads whatever the process-global
+//! `TCODE_TELEMETRY_DATA_DIR` happens to be at that instant. Under parallel
+//! `cargo test` scheduling that is a DIFFERENT concurrently-running test's
+//! locked temp directory, so an un-isolated fire here would write a spurious
+//! record into that other test's directory — the exact mechanism behind
+//! #3902's `compression_telemetry_tests::cadence_disabled_writes_no_cadence_telemetry`
+//! CI failure. Injecting the field removes the shared mutable state, so no
+//! lock is needed here at all.
 
 use super::*;
+use crate::agent_loop::telemetry;
 
 // ── #2346: cadence-compressor turn-boundary wiring ──────────────────────────
 
@@ -121,6 +136,7 @@ async fn cadence_fires_in_daily_driver_when_configured() {
     let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
     let registry = registry_with_echo(false);
 
+    let dir = telemetry::test_temp_dir("cadence-fires-daily-driver");
     let agent = make_loop(
         llm,
         registry,
@@ -135,6 +151,7 @@ async fn cadence_fires_in_daily_driver_when_configured() {
                 cadence_turns: 1,
                 max_overhead_fraction_pct: 99,
             }),
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     );
@@ -149,6 +166,8 @@ async fn cadence_fires_in_daily_driver_when_configured() {
         transcript.cadence_fire_count() > 0,
         "expected at least one cadence fire to actually compact something"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// A cadence fire emits an INFO-level log naming the round count (#2857).
@@ -173,6 +192,7 @@ async fn cadence_fire_logs_info() {
     let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
     let registry = registry_with_echo(false);
 
+    let dir = telemetry::test_temp_dir("cadence-fire-logs-info");
     let agent = make_loop(
         llm,
         registry,
@@ -187,6 +207,7 @@ async fn cadence_fire_logs_info() {
                 cadence_turns: 1,
                 max_overhead_fraction_pct: 99,
             }),
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     );
@@ -203,6 +224,8 @@ async fn cadence_fire_logs_info() {
             .any(|m| m.contains("cadence compression fired")),
         "expected an info-level cadence-fire log, got: {messages:?}"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 // ── #2349: threshold compaction becomes a never-event regression signal ────
@@ -239,11 +262,11 @@ fn overwhelmed_cadence() -> CadenceConfig {
 /// What: Runs a 3-tool-call-then-stop script under `mode: DailyDriver` with
 /// both `compaction: aggressive_compaction()` and
 /// `cadence: Some(overwhelmed_cadence())` attached, with
-/// `telemetry::DATA_DIR_ENV_VAR` pointed at an isolated temp dir for the
-/// whole run. Asserts `transcript.compaction_events() > 0`, the captured
-/// ERROR-level log text, a `tcode-threshold`/`compaction_event: true` JSONL
-/// line, AND `lifetime_compaction_alarm_count >= 1` — all from this one
-/// fire.
+/// `AgentLoopConfig::telemetry_data_dir` (issue #3902) pointed at an isolated
+/// temp dir for the whole run. Asserts `transcript.compaction_events() > 0`,
+/// the captured ERROR-level log text, a `tcode-threshold`/
+/// `compaction_event: true` JSONL line, AND `lifetime_compaction_alarm_count
+/// >= 1` — all from this one fire.
 /// Test: this test.
 #[tokio::test]
 async fn forced_degradation_increments_counter_and_logs_error() {
@@ -256,6 +279,7 @@ async fn forced_degradation_increments_counter_and_logs_error() {
     let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
     let registry = registry_with_echo(false);
 
+    let dir = telemetry::test_temp_dir("forced-degradation");
     let agent = make_loop(
         llm,
         registry,
@@ -264,28 +288,16 @@ async fn forced_degradation_increments_counter_and_logs_error() {
             mode: crate::mode::HarnessMode::DailyDriver,
             compaction: aggressive_compaction(),
             cadence: Some(overwhelmed_cadence()),
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     );
     let mut transcript = Transcript::seed("system prompt", "the task");
 
-    let dir = std::env::temp_dir().join(format!(
-        "tcode-forced-degradation-telemetry-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-
-    crate::agent_loop::telemetry::with_data_dir_env_fut(&dir, async {
-        agent
-            .run_with_transcript(&mut transcript, "the task")
-            .await
-            .expect("run completes");
-    })
-    .await;
+    agent
+        .run_with_transcript(&mut transcript, "the task")
+        .await
+        .expect("run completes");
 
     assert!(
         transcript.compaction_events() > 0,
@@ -354,6 +366,7 @@ async fn cadence_none_threshold_fire_does_not_log_error() {
     let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
     let registry = registry_with_echo(false);
 
+    let dir = telemetry::test_temp_dir("cadence-none-threshold-fire");
     let agent = make_loop(
         llm,
         registry,
@@ -362,6 +375,7 @@ async fn cadence_none_threshold_fire_does_not_log_error() {
             mode: crate::mode::HarnessMode::DailyDriver,
             compaction: aggressive_compaction(),
             cadence: None,
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     );
@@ -380,4 +394,6 @@ async fn cadence_none_threshold_fire_does_not_log_error() {
         messages.is_empty(),
         "cadence: None must never emit the error-level regression signal, got: {messages:?}"
     );
+
+    std::fs::remove_dir_all(&dir).ok();
 }

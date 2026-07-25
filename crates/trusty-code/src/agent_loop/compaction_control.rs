@@ -17,6 +17,57 @@
 use super::*;
 
 impl AgentLoop {
+    /// Resolve the write target for this loop's own compression-telemetry
+    /// calls: `self.config.telemetry_data_dir` when injected (test-only DI,
+    /// issue #3902), otherwise `telemetry::default_data_dir()` — identical
+    /// to production behaviour before this field existed.
+    ///
+    /// (#3902 recurrence guard) `#[cfg(test)]`-only: panics if a test is
+    /// about to write real telemetry (this method is only ever called from
+    /// an ACTUAL fire — see both call sites below) with neither
+    /// `telemetry_data_dir` injected nor `telemetry::DATA_DIR_ENV_VAR` set.
+    /// Why: DI closed the five tests that omitted isolation THIS time, but
+    /// nothing stopped a SIXTH new test from making the exact same
+    /// omission and reintroducing the race at ~5% flake — silently, since
+    /// an un-isolated write either races a concurrently-locked test's
+    /// directory (the #3902 failure mode) or lands in the real
+    /// `~/.trusty-code` with no assertion to catch it. This turns that
+    /// omission into a 100%-reproducing panic on the FIRST run instead of
+    /// an occasional CI flake. The env-var branch is not dead: any test
+    /// still using `telemetry::with_data_dir_env_fut`/`with_data_dir_env`
+    /// (e.g. `session::protocol_budget`'s tests, which call
+    /// `SessionRegistry::get_context_budget` — a path with no
+    /// `AgentLoopConfig` to inject through — rather than driving an
+    /// `AgentLoop` directly) sets the env var for the run's duration, so
+    /// this guard accepts that path too. Production builds are entirely
+    /// unaffected — this whole check compiles out.
+    /// Test: `agent_loop::tests::compression_telemetry_tests::*`,
+    /// `agent_loop::tests::cadence::*`,
+    /// `agent_loop::budget_tests::cadence_emits_context_budget_snapshot`,
+    /// `agent_loop::tests::daily_driver_mode_compacts_long_running_loop` —
+    /// every one of these now injects `telemetry_data_dir` and must keep
+    /// passing under this guard; a run with the injection removed from any
+    /// of them must panic here rather than flake.
+    fn telemetry_data_dir(&self) -> std::path::PathBuf {
+        #[cfg(test)]
+        if self.config.telemetry_data_dir.is_none()
+            && std::env::var(telemetry::DATA_DIR_ENV_VAR).is_err()
+        {
+            panic!(
+                "agent_loop: about to write real compression telemetry with no isolated data \
+                 dir (issue #3902) — inject `AgentLoopConfig::telemetry_data_dir` (see \
+                 `telemetry::test_temp_dir`) before triggering a real cadence/threshold fire in \
+                 a test, or wrap the run in `telemetry::with_data_dir_env_fut`/`with_data_dir_env`. \
+                 An un-isolated write here either races a concurrently-locked test's directory or \
+                 lands in the real ~/.trusty-code on whatever machine runs this test."
+            );
+        }
+        self.config
+            .telemetry_data_dir
+            .clone()
+            .unwrap_or_else(telemetry::default_data_dir)
+    }
+
     /// Apply non-destructive context compaction to `transcript`, gated on mode
     /// (#2070, §5.4; reconciled with §5.9's D2 the same way `tool_definitions`
     /// is).
@@ -73,7 +124,7 @@ impl AgentLoop {
         let estimated_tokens = compaction::estimate_total_tokens(&transcript.to_messages());
         let cadence_enabled = self.config.cadence.is_some();
         telemetry::record_threshold_event(
-            &telemetry::default_data_dir(),
+            &self.telemetry_data_dir(),
             self.session_id.clone(),
             tokens_before,
             estimated_tokens,
@@ -163,7 +214,7 @@ impl AgentLoop {
 
         if outcome.rounds > 0 {
             telemetry::record_cadence_event(
-                &telemetry::default_data_dir(),
+                &self.telemetry_data_dir(),
                 self.session_id.clone(),
                 tokens_before,
                 outcome.overhead_tokens,

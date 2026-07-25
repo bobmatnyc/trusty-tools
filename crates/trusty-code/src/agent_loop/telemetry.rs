@@ -412,6 +412,37 @@ pub(crate) async fn with_data_dir_env_fut<T>(
     result
 }
 
+/// Test-only helper: a fresh, uniquely-named, already-created temp directory
+/// under `std::env::temp_dir()`, for tests that need an isolated telemetry
+/// write target.
+///
+/// Why: every loop-integration test that isolates its telemetry writes
+/// previously duplicated this exact `process_id + nanosecond-timestamp`
+/// naming scheme at its own call site (`compression_telemetry_tests.rs`,
+/// `telemetry_tests.rs`, `tests/cadence.rs`'s `forced_degradation_*` test).
+/// `pub(crate)` so every `agent_loop` test submodule can share ONE
+/// implementation instead of re-deriving the same uniqueness scheme —
+/// consolidating them is also what makes issue #3902's fix
+/// (`AgentLoopConfig::telemetry_data_dir` injection replacing the raced
+/// `TCODE_TELEMETRY_DATA_DIR` env var) a one-line call at each of the
+/// newly-isolated call sites instead of a repeated inline block.
+/// What: `label` only needs to distinguish this call site from sibling
+/// calls in the same test binary — the pid + nanosecond timestamp already
+/// guarantees cross-process and cross-call uniqueness on its own.
+#[cfg(test)]
+pub(crate) fn test_temp_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "tcode-telemetry-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 #[cfg(test)]
 #[path = "telemetry_tests.rs"]
 mod tests;

@@ -11,26 +11,17 @@
 //! half — that `AgentLoop::maybe_compact_transcript`/`maybe_cadence_compress`
 //! actually call them at the right turn boundary with the right values,
 //! through a real (scripted) loop run, using
-//! `telemetry::with_data_dir_env_fut` to point every write at an isolated
-//! temp directory instead of the real `~/.trusty-code`.
+//! `AgentLoopConfig::telemetry_data_dir` (issue #3902) to point every write
+//! at an isolated temp directory instead of the real `~/.trusty-code` — a
+//! plain per-instance config field, not the raced `TCODE_TELEMETRY_DATA_DIR`
+//! process-global env var these tests used before.
 
 use std::io::Read as _;
 
 use super::*;
 use crate::agent_loop::telemetry;
 
-fn temp_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "tcode-compression-telemetry-loop-test-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
+use telemetry::test_temp_dir as temp_dir;
 
 fn read_jsonl(dir: &std::path::Path) -> Vec<telemetry::CompressionEvent> {
     let path = telemetry::compression_log_path(dir);
@@ -85,17 +76,15 @@ async fn threshold_fire_under_cadence_writes_jsonl_and_alarm() {
                 cadence_turns: 1_000_000,
                 max_overhead_fraction_pct: 100,
             }),
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     );
 
-    telemetry::with_data_dir_env_fut(&dir, async {
-        agent
-            .run("system prompt", "the original task")
-            .await
-            .expect("run completes");
-    })
-    .await;
+    agent
+        .run("system prompt", "the original task")
+        .await
+        .expect("run completes");
 
     let events = read_jsonl(&dir);
     let threshold_events: Vec<_> = events
@@ -158,17 +147,15 @@ async fn threshold_fire_under_no_cadence_writes_jsonl_but_no_alarm() {
             mode: crate::mode::HarnessMode::DailyDriver,
             compaction: aggressive_compaction(),
             cadence: None,
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     );
 
-    telemetry::with_data_dir_env_fut(&dir, async {
-        agent
-            .run("system prompt", "the original task")
-            .await
-            .expect("run completes");
-    })
-    .await;
+    agent
+        .run("system prompt", "the original task")
+        .await
+        .expect("run completes");
 
     let events = read_jsonl(&dir);
     let threshold_events: Vec<_> = events
@@ -214,17 +201,15 @@ async fn cadence_fire_writes_compression_telemetry() {
                 cadence_turns: 1,
                 ..CadenceConfig::default()
             }),
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     );
 
-    telemetry::with_data_dir_env_fut(&dir, async {
-        agent
-            .run("system prompt", "the task")
-            .await
-            .expect("run completes");
-    })
-    .await;
+    agent
+        .run("system prompt", "the task")
+        .await
+        .expect("run completes");
 
     let events = read_jsonl(&dir);
     let cadence_events: Vec<_> = events
@@ -272,15 +257,19 @@ async fn cadence_disabled_writes_no_cadence_telemetry() {
     let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
     let registry = registry_with_echo(false);
 
-    let agent = make_loop(llm, registry, AgentLoopConfig::default());
+    let agent = make_loop(
+        llm,
+        registry,
+        AgentLoopConfig {
+            telemetry_data_dir: Some(dir.clone()),
+            ..AgentLoopConfig::default()
+        },
+    );
 
-    telemetry::with_data_dir_env_fut(&dir, async {
-        agent
-            .run("system prompt", "the task")
-            .await
-            .expect("run completes");
-    })
-    .await;
+    agent
+        .run("system prompt", "the task")
+        .await
+        .expect("run completes");
 
     let events = read_jsonl(&dir);
     assert!(
@@ -305,17 +294,14 @@ async fn cadence_disabled_writes_no_cadence_telemetry() {
 /// platform this crate targets — appending a path segment under it makes
 /// EVERY `create_dir_all`/`open` call underneath fail with `ENOTDIR`,
 /// simulating "every telemetry write fails" without touching real
-/// filesystem permissions bits (unreliable to assert portably in CI) or an
-/// embedded NUL byte (which `std::env::set_var` itself rejects with a
-/// panic, since this path must round-trip through `TCODE_TELEMETRY_DATA_DIR`
-/// — unlike `telemetry_tests.rs`'s writer-only tests, which never go
-/// through the env var and can use a NUL-byte path directly).
+/// filesystem permissions bits (unreliable to assert portably in CI).
 /// What: runs the SAME aggressive-compaction + cadence:Some(_) scenario as
-/// `threshold_fire_under_cadence_writes_jsonl_and_alarm`, but points
-/// `TCODE_TELEMETRY_DATA_DIR` at an unwritable path. Asserts `agent.run`
-/// still completes `Ok`, and that the loop's own state (turn count via
-/// `llm.calls()`) reflects a normal run — the compaction/cadence outcome
-/// itself must be unaffected by telemetry's failure.
+/// `threshold_fire_under_cadence_writes_jsonl_and_alarm`, but injects
+/// `AgentLoopConfig::telemetry_data_dir` pointing at an unwritable path.
+/// Asserts `agent.run` still completes `Ok`, and that the loop's own state
+/// (turn count via `llm.calls()`) reflects a normal run — the
+/// compaction/cadence outcome itself must be unaffected by telemetry's
+/// failure.
 #[tokio::test]
 async fn unwritable_data_dir_does_not_fail_the_loop() {
     let bogus = std::path::PathBuf::from("/dev/null/not-a-real-dir-segment");
@@ -337,15 +323,15 @@ async fn unwritable_data_dir_does_not_fail_the_loop() {
                 cadence_turns: 1,
                 ..CadenceConfig::default()
             }),
+            telemetry_data_dir: Some(bogus),
             ..AgentLoopConfig::default()
         },
     );
 
-    let output = telemetry::with_data_dir_env_fut(&bogus, async {
-        agent.run("system prompt", "the original task").await
-    })
-    .await
-    .expect("an unwritable telemetry dir must not fail the run");
+    let output = agent
+        .run("system prompt", "the original task")
+        .await
+        .expect("an unwritable telemetry dir must not fail the run");
 
     assert!(
         !output.content.is_empty() || output.summary.is_some(),

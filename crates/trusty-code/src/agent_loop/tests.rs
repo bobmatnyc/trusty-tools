@@ -591,6 +591,17 @@ async fn daily_driver_mode_compacts_long_running_loop() {
     let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
     let registry = registry_with_echo(false);
 
+    // Issue #3902: this test's `aggressive_compaction()` guarantees a
+    // threshold-compaction fire, which unconditionally writes durable
+    // telemetry (`compaction_control::maybe_compact_transcript`) regardless
+    // of `cadence`. Isolate the write target via
+    // `AgentLoopConfig::telemetry_data_dir` instead of leaving it `None` —
+    // un-isolated, this test would resolve `telemetry::default_data_dir()`
+    // at write time, which (racing a concurrently-running locked test's
+    // `TCODE_TELEMETRY_DATA_DIR`) could write into that OTHER test's
+    // directory, or — with no such test running — silently write into the
+    // real `~/.trusty-code` on the machine running the tests.
+    let dir = crate::agent_loop::telemetry::test_temp_dir("daily-driver-compacts");
     let agent = make_loop(
         llm.clone(),
         registry,
@@ -598,6 +609,7 @@ async fn daily_driver_mode_compacts_long_running_loop() {
             max_turns: 10,
             mode: crate::mode::HarnessMode::DailyDriver,
             compaction: aggressive_compaction(),
+            telemetry_data_dir: Some(dir.clone()),
             ..AgentLoopConfig::default()
         },
     );
@@ -606,6 +618,7 @@ async fn daily_driver_mode_compacts_long_running_loop() {
         .run("system prompt", "the original task")
         .await
         .expect("run completes");
+    std::fs::remove_dir_all(&dir).ok();
 
     let requests = llm.requests();
     let last_request = requests.last().expect("at least one request");

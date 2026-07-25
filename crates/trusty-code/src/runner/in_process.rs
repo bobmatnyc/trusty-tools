@@ -379,6 +379,10 @@ impl InProcessAgentRunner {
             // (`task::executor::run_and_record`'s persistent-session path);
             // delegated engineer loops stay bounded/ephemeral per-delegation.
             cadence: None,
+            // #3902: no test-only override for this production call site —
+            // falls back to `telemetry::default_data_dir()` exactly as
+            // before this field existed.
+            telemetry_data_dir: None,
         };
 
         // Assemble the mode-branched system prompt (BASE + agent prompt +
