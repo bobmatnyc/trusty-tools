@@ -63,7 +63,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   var; every loop-integration test that needs isolation now sets it, so
   concurrent test runs can no longer race each other over telemetry writes.
   Production behaviour is unchanged (`None` falls back to
-  `telemetry::default_data_dir()` exactly as before).
+  `telemetry::default_data_dir()` exactly as before). A `#[cfg(test)]`-only
+  guard in `AgentLoop::telemetry_data_dir()` now panics on the FIRST run of
+  any FUTURE test that reaches a real telemetry write with neither
+  `telemetry_data_dir` injected nor the env var set, turning the next
+  instance of this omission into a deterministic failure instead of a ~5%
+  flake.
 
 - **Test-only ambient-daemon leaks closed for two `run_task` tests (issue
   #2914).** `spawns_indexing_thread_for_non_git_project_path` and
