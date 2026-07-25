@@ -530,6 +530,134 @@ async fn spawn_task_run_deadline_exceeded_is_distinct_and_preserves_usage() {
     );
 }
 
+/// A response in which the assistant calls `set_goal` and never stops —
+/// used to drive a scripted LLM through `max_turns` consecutive tool-call
+/// turns without ever reaching a natural `stop`/`finish_task` terminal state
+/// (#3888's `TurnCapExceeded` regression test below).
+fn set_goal_tool_call_response(call_id: &str) -> Value {
+    json!({
+        "id": format!("gen-{call_id}"),
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": crate::tools::goals::SET_GOAL_TOOL_NAME,
+                        "arguments": json!({"slot": 1, "text": "keep going"}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    })
+}
+
+/// An `LlmClientTrait` that replays a fixed script, erroring past the end —
+/// mirrors `agent_loop::tests::ScriptedLlm` but scoped to this module so the
+/// daemon-path executor tests don't need to reach into `agent_loop`'s
+/// `#[cfg(test)]`-private fixtures.
+struct ScriptedLlm {
+    responses: Vec<ChatResponse>,
+    cursor: AtomicUsize,
+}
+
+impl ScriptedLlm {
+    fn from_json(fixtures: &[Value]) -> Self {
+        let responses = fixtures
+            .iter()
+            .map(|v| serde_json::from_value(v.clone()).expect("valid ChatResponse fixture"))
+            .collect();
+        Self {
+            responses,
+            cursor: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClientTrait for ScriptedLlm {
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
+        match self.responses.get(idx) {
+            Some(resp) => Ok(resp.clone()),
+            None => Err(LlmError::MissingConfig(format!(
+                "scripted LLM exhausted at call {idx}"
+            ))),
+        }
+    }
+}
+
+/// (#3888) Exhausting the PM's per-call `max_turns` budget must map to
+/// `SessionStatus::TurnCapExceeded`, NOT `SessionStatus::Failed` — and the
+/// session must remain resumable via a SECOND `spawn_task_run` against the
+/// same `session_id`, exactly like a naturally `Finished` session (#2344).
+///
+/// Why: this is the exact regression reported in #3888 — before this fix,
+/// `task::executor::run_and_record`'s terminal-status match had no
+/// `TurnCapExceeded` arm, so `AgentLoopError::TurnCapExceeded` fell through
+/// the catch-all into `SessionStatus::Failed`, which
+/// `SessionRegistry::begin_execution` permanently rejects — directly
+/// regressing epic #2343's infinite-sessions goal (a session must never die
+/// just because one call used its whole per-call turn allowance).
+/// What: scripts `AgentLoopConfig::default().max_turns` (8) consecutive
+/// `set_goal` tool-call turns — the PM never calls `finish_task` or emits a
+/// bare `stop`, so the loop can only terminate via the turn cap. Asserts the
+/// session lands in `TurnCapExceeded` (not `Failed`), then issues a SECOND
+/// `spawn_task_run` against the SAME session and asserts it is accepted (not
+/// the `-32003` terminal-session rejection) and reaches a fresh terminal
+/// state.
+/// Test: this test.
+#[tokio::test]
+async fn spawn_task_run_turn_cap_exceeded_is_resumable() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, crate::binding::ProjectBinding::None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    // 8 responses = `AgentLoopConfig::default().max_turns`; none stop or
+    // call `finish_task`, so the PM loop can only end via `TurnCapExceeded`.
+    let scripts: Vec<Value> = (0..8)
+        .map(|i| set_goal_tool_call_response(&format!("call_{i}")))
+        .collect();
+    let llm: Arc<dyn LlmClientTrait> = Arc::new(ScriptedLlm::from_json(&scripts));
+
+    let p1 = params(&agents, &project, &session.id);
+    spawn_task_run(Arc::clone(&registry), llm, p1).expect("run 1 must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    assert_eq!(
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::TurnCapExceeded,
+        "exhausting max_turns must map to TurnCapExceeded, not Failed (#3888)"
+    );
+
+    // The regression: a second `task.run` on this session must be ACCEPTED,
+    // not rejected with "session ... is already terminal" (-32003).
+    let llm2: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
+    let p2 = params(&agents, &project, &session.id);
+    spawn_task_run(Arc::clone(&registry), llm2, p2).expect(
+        "a TurnCapExceeded session must accept a resuming task.run, \
+         not be permanently unresumable (#3888)",
+    );
+    wait_for_terminal(&registry, &session.id).await;
+
+    // `EchoLlmClient`'s script deterministically ends in a natural stop
+    // (`task::mock_llm::EchoLlmClient`'s own docs), so a correctly-resumed
+    // run must reach `Finished` exactly — not merely "not Failed", which
+    // would also pass if resumption silently regressed to e.g. another
+    // `TurnCapExceeded`/`DeadlineExceeded`/`Cancelled`.
+    let final_status = registry.status(&session.id).unwrap().status;
+    assert_eq!(
+        final_status,
+        SessionStatus::Finished,
+        "the resumed run must reach its own natural Finished terminal state"
+    );
+}
+
 // ── #2344: persistent session-scoped transcript across task.run calls ──────────
 
 /// Poll `registry.status(id)` until it reaches a terminal state, bounded by

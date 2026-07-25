@@ -8,6 +8,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`TurnCapExceeded` permanently un-resumed a session (#3888).** A
+  session whose `task.run` call exhausted its per-call
+  `AgentLoopConfig::max_turns` budget fell through
+  `task::executor::run_and_record`'s terminal-status match into
+  `SessionStatus::Failed`, which `SessionRegistry::begin_execution`
+  permanently rejects — directly regressing epic #2343's infinite-sessions
+  goal. Added a new resumable `SessionStatus::TurnCapExceeded` status
+  (wire value `turn_cap_exceeded`), mapped `AgentLoopError::TurnCapExceeded`
+  onto it instead of the `Failed` catch-all, and extended
+  `begin_execution`'s resume condition to accept it exactly like
+  `Finished` — a capped session's PM transcript (already persisted
+  unconditionally) now continues on its next `task.run`.
+
 ### Added
 
 - **Compression-effectiveness soak harness + scored report (epic #3866,
