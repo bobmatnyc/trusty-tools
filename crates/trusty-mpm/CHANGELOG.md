@@ -9,6 +9,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A toggle being on was treated as proof of a successful MCP-server pin,
+  even when the force-overwrite write itself failed** (closes
+  [#3950](https://github.com/bobmatnyc/trusty-tools/issues/3950), fifth
+  instance of the name-approval/content-pinning class after
+  [#3918](https://github.com/bobmatnyc/trusty-tools/issues/3918)/
+  [#3924](https://github.com/bobmatnyc/trusty-tools/issues/3924)/
+  [#3926](https://github.com/bobmatnyc/trusty-tools/issues/3926)/
+  [#3934](https://github.com/bobmatnyc/trusty-tools/issues/3934)): a disk-full,
+  permission, or transient I/O fault during `inject_trusty_memory_mcp`/
+  `inject_trusty_search_mcp`/`inject_trusty_mpm_mcp`/`inject_trusty_review_mcp`
+  is non-fatal to launch, but the toggle/attempted-injection value was still
+  used to approve the name in `enabledMcpjsonServers` regardless of whether
+  the write actually succeeded — leaving a spoofed or stale `.mcp.json` entry
+  pre-approved with unverified content behind it. `mcp_config::managed_mcp_server_names`/
+  `launch_trusted_mcp_names`/`launch_trusted_mcp_names_from` and
+  `standalone::trust_seed::preseed_managed_trust` now take each of the four
+  builtins' actual per-run pin result as an explicit `_pinned` bool (not a
+  toggle); `session_launch::PrepReport` gained
+  `trusty_mpm_injected`/`trusty_review_injected`/`trusty_memory_injected`/
+  `trusty_search_injected` fields so `standalone::load::load_alias` (the `tm
+  load`/`tm run` daemon-managed driver) can read the SAME run's actual
+  outcome instead of re-deriving from the manifest toggle alone.
+  `runtime::claude_code::prepare_managed_config` (the tmux daemon-spawn
+  adapter behind `RuntimeAdapter::spawn`/`spawn_resume`) now pins all four
+  builtins itself and derives trust membership from their real `Result`s
+  too — critic follow-up review found this call site reachable with ZERO
+  same-run evidence at all on the headless `spawn_resume`/`session_resume`
+  path (no `prepare_session*` call anywhere in that request's chain), the
+  sharpest case across all five instances of this vulnerability class.
+
 - **An untrusted project manifest could disable the `trusty-memory`/
   `trusty-search` force-overwrite injector while the name stayed
   pre-approved, reopening builtin-name-squatting** (closes

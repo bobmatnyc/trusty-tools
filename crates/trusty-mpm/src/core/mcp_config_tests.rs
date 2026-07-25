@@ -8,7 +8,9 @@
 //! [`super::launch_trusted_mcp_names_from`], and
 //! [`super::resolve_conditional_mcp_toggles`] — including the issue #3934
 //! regression (a conditional builtin must drop out of the trust list when its
-//! injector toggle is off).
+//! injector toggle is off) and the issue #3950 regression (either builtin —
+//! conditional OR unconditional — must drop out when its pin write fails,
+//! not merely when a toggle is off).
 //! Test: this file IS the test module.
 
 use super::*;
@@ -225,7 +227,7 @@ fn builtin_mcp_server_split_unions_to_full_set() {
 
 #[test]
 fn managed_mcp_server_names_defaults_to_builtin() {
-    let names = managed_mcp_server_names(&serde_json::json!({}), true, true);
+    let names = managed_mcp_server_names(&serde_json::json!({}), true, true, true, true);
     assert_eq!(
         names,
         vec![
@@ -245,7 +247,7 @@ fn managed_mcp_server_names_unions_builtin_with_configured() {
             "trusty-memory": { "type": "stdio", "command": "trusty-memory", "args": [] }
         }
     });
-    let names = managed_mcp_server_names(&config, true, true);
+    let names = managed_mcp_server_names(&config, true, true, true, true);
     // Built-in four + the custom server, sorted + deduped (trusty-memory
     // appears once despite being in both the builtin list and the config).
     assert_eq!(
@@ -272,15 +274,44 @@ fn managed_mcp_server_names_excludes_disabled_conditional_builtins() {
             "aaa-custom": { "type": "stdio", "command": "x", "args": [] }
         }
     });
-    let names = managed_mcp_server_names(&config, false, false);
+    let names = managed_mcp_server_names(&config, true, true, false, false);
     assert!(
         !names.contains(&"trusty-memory".to_string()),
         "trusty-memory must be excluded when its injector did not run: {names:?}"
     );
     assert!(!names.contains(&"trusty-search".to_string()));
-    // The unconditional two are always present regardless.
+    // The unconditional two are present when THEIR pin succeeded.
     assert!(names.contains(&"trusty-mpm".to_string()));
     assert!(names.contains(&"trusty-review".to_string()));
+}
+
+#[test]
+fn managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed() {
+    // Issue #3950 (fifth instance): the two UNCONDITIONAL builtins
+    // (`trusty-mpm`/`trusty-review`) have no manifest toggle, but their
+    // force-overwrite WRITE can still fail (disk full, permission error,
+    // transient I/O fault). Before this fix `managed_mcp_server_names` had
+    // no parameter for this at all — it unconditionally trusted both names
+    // regardless of whether prepare_session_inner's injectors actually
+    // succeeded this run. A failed pin must drop the name from the trust
+    // list exactly like a disabled conditional injector does.
+    let config = serde_json::json!({
+        "mcpServers": {
+            "aaa-custom": { "type": "stdio", "command": "x", "args": [] }
+        }
+    });
+    let names = managed_mcp_server_names(&config, false, false, true, true);
+    assert!(
+        !names.contains(&"trusty-mpm".to_string()),
+        "trusty-mpm must be excluded when its pin write failed this run: {names:?}"
+    );
+    assert!(
+        !names.contains(&"trusty-review".to_string()),
+        "trusty-review must be excluded when its pin write failed this run: {names:?}"
+    );
+    // The conditional two are unaffected by the unconditional pair's result.
+    assert!(names.contains(&"trusty-memory".to_string()));
+    assert!(names.contains(&"trusty-search".to_string()));
 }
 
 #[test]
@@ -299,7 +330,7 @@ fn managed_mcp_server_names_registry_collision_is_a_separate_trusted_source() {
             "trusty-memory": { "type": "stdio", "command": "trusty-memory", "args": [] }
         }
     });
-    let names = managed_mcp_server_names(&config, false, false);
+    let names = managed_mcp_server_names(&config, true, true, false, false);
     assert!(
         names.contains(&"trusty-memory".to_string()),
         "a registry-sourced name is trusted independently of the conditional-builtin toggle: {names:?}"
@@ -309,7 +340,7 @@ fn managed_mcp_server_names_registry_collision_is_a_separate_trusted_source() {
 #[test]
 fn managed_mcp_server_names_partial_conditional_toggle() {
     // Only trusty_search disabled: trusty-memory still trusted, trusty-search not.
-    let names = managed_mcp_server_names(&serde_json::json!({}), true, false);
+    let names = managed_mcp_server_names(&serde_json::json!({}), true, true, true, false);
     assert!(names.contains(&"trusty-memory".to_string()));
     assert!(!names.contains(&"trusty-search".to_string()));
 }
@@ -352,7 +383,7 @@ fn launch_trusted_mcp_names_from_unions_registry() {
     let cfg = tmp.path().join("claude-config");
     add_server(&cfg, "slack-mcp", stdio("slack-mcp", &["serve"])).unwrap();
 
-    let names = launch_trusted_mcp_names_from(&cfg, true, true);
+    let names = launch_trusted_mcp_names_from(&cfg, true, true, true, true);
     assert_eq!(
         names,
         vec![
@@ -374,7 +405,7 @@ fn launch_trusted_mcp_names_from_defaults_to_builtin_when_absent() {
     let tmp = TempDir::new().unwrap();
     let cfg = tmp.path().join("does-not-exist");
 
-    let names = launch_trusted_mcp_names_from(&cfg, true, true);
+    let names = launch_trusted_mcp_names_from(&cfg, true, true, true, true);
     assert_eq!(
         names,
         vec![
@@ -396,11 +427,27 @@ fn launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins() {
     let tmp = TempDir::new().unwrap();
     let cfg = tmp.path().join("claude-config");
 
-    let names = launch_trusted_mcp_names_from(&cfg, false, false);
+    let names = launch_trusted_mcp_names_from(&cfg, true, true, false, false);
     assert!(!names.contains(&"trusty-memory".to_string()));
     assert!(!names.contains(&"trusty-search".to_string()));
     assert!(names.contains(&"trusty-mpm".to_string()));
     assert!(names.contains(&"trusty-review".to_string()));
+}
+
+#[test]
+fn launch_trusted_mcp_names_from_excludes_unconditional_builtin_when_pin_failed() {
+    // Issue #3950 (fifth instance): mirrors
+    // `managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed`
+    // one layer up — a failed `trusty-mpm`/`trusty-review` pin write must
+    // drop the name from the interactive-path trust derivation too.
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("claude-config");
+
+    let names = launch_trusted_mcp_names_from(&cfg, false, false, true, true);
+    assert!(!names.contains(&"trusty-mpm".to_string()));
+    assert!(!names.contains(&"trusty-review".to_string()));
+    assert!(names.contains(&"trusty-memory".to_string()));
+    assert!(names.contains(&"trusty-search".to_string()));
 }
 
 #[test]

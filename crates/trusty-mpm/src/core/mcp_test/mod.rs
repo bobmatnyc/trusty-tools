@@ -277,7 +277,7 @@ pub fn select_targets(
             // Reuse the exact union semantics `managed_mcp_server_names` applies
             // when seeding trust, so the sweep and the trust list never diverge.
             let config = json!({ "mcpServers": Value::Object(servers.clone()) });
-            let names = managed_mcp_server_names(&config, true, true);
+            let names = managed_mcp_server_names(&config, true, true, true, true);
             let targets = names
                 .into_iter()
                 .map(|n| {

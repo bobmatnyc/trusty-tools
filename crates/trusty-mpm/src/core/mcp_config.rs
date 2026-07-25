@@ -75,9 +75,24 @@ pub const BUILTIN_MANAGED_MCP_SERVERS: &[&str] = &[
 /// `enabledMcpjsonServers` approval is safe for a builtin name ONLY when
 /// something in the SAME run is guaranteed to have pinned its content to the
 /// framework-controlled command — see that function's security doc. These two
-/// names have no manifest escape hatch, so that guarantee always holds.
+/// names have no manifest escape hatch (unlike the conditional pair, they
+/// cannot be individually disabled), but the FORCE-OVERWRITE ITSELF can still
+/// fail (disk full, permission error, transient I/O fault — issue #3950, the
+/// fifth instance of this vulnerability class). [`managed_mcp_server_names`]
+/// therefore takes each name's actual per-run pin result as an explicit
+/// caller-supplied bool (`trusty_mpm_pinned` / `trusty_review_pinned`)
+/// rather than assuming success unconditionally.
 /// Test: `builtin_mcp_server_split_unions_to_full_set`.
-pub const UNCONDITIONAL_BUILTIN_MCP_SERVERS: &[&str] = &["trusty-mpm", "trusty-review"];
+pub const UNCONDITIONAL_BUILTIN_MCP_SERVERS: &[&str] = &[
+    UNCONDITIONAL_BUILTIN_TRUSTY_MPM,
+    UNCONDITIONAL_BUILTIN_TRUSTY_REVIEW,
+];
+
+/// The `trusty-mpm` builtin name — see [`UNCONDITIONAL_BUILTIN_MCP_SERVERS`].
+pub const UNCONDITIONAL_BUILTIN_TRUSTY_MPM: &str = "trusty-mpm";
+
+/// The `trusty-review` builtin name — see [`UNCONDITIONAL_BUILTIN_MCP_SERVERS`].
+pub const UNCONDITIONAL_BUILTIN_TRUSTY_REVIEW: &str = "trusty-review";
 
 /// The `trusty-memory` builtin name — see [`CONDITIONAL_BUILTIN_MCP_SERVERS`].
 pub const CONDITIONAL_BUILTIN_TRUSTY_MEMORY: &str = "trusty-memory";
@@ -353,9 +368,11 @@ pub fn list_servers(config_dir: &Path) -> Result<Map<String, Value>> {
 /// identical `.mcp.json`-trusting behavior for the interactive path predates
 /// this fix and was NOT in scope here — reported separately.)
 /// What: takes an already-parsed `.claude.json` value, collects the top-level
-/// `mcpServers` object keys, unions them with [`UNCONDITIONAL_BUILTIN_MCP_SERVERS`]
-/// (always) and [`CONDITIONAL_BUILTIN_MCP_SERVERS`] (only the names whose
-/// `inject_trusty_memory` / `inject_trusty_search` flag is `true`), then sorts
+/// `mcpServers` object keys, unions them with the two names in
+/// [`UNCONDITIONAL_BUILTIN_MCP_SERVERS`] (only the ones whose
+/// `trusty_mpm_pinned` / `trusty_review_pinned` flag is `true`) and
+/// [`CONDITIONAL_BUILTIN_MCP_SERVERS`] (only the names whose
+/// `trusty_memory_pinned` / `trusty_search_pinned` flag is `true`), then sorts
 /// + dedups for a deterministic (idempotency-friendly) result.
 ///
 /// **Security (issue #3934):** `trusty-memory`/`trusty-search` must NOT be
@@ -364,26 +381,46 @@ pub fn list_servers(config_dir: &Path) -> Result<Map<String, Value>> {
 /// actually in effect for the workspace this trust list is being computed
 /// for — either the in-memory `HarnessPlan` already resolved earlier in the
 /// SAME `prepare_session` run, or a fresh [`resolve_conditional_mcp_toggles`]
-/// call when no such plan is in scope. Passing `true, true` unconditionally
-/// (e.g. a diagnostic sweep unrelated to any one project, like `tm mcp test`)
-/// is safe ONLY when the caller does not use the result as an
-/// `enabledMcpjsonServers` approval list.
+/// call when no such plan is in scope.
+///
+/// **Security (issue #3950 — fifth instance of this vulnerability class):**
+/// a `true` toggle is necessary but NOT sufficient — the force-overwrite
+/// injector for that name must have actually SUCCEEDED this run (or, for a
+/// caller with no fresh injector result in scope, the best available proxy
+/// for that — see each call site's own doc). All four parameters name their
+/// semantics as `_pinned` (not `_enabled`/`_inject`) for exactly this reason:
+/// passing a manifest toggle or a "the injector was attempted" flag when the
+/// write itself may have failed (disk full, permission error, transient I/O
+/// fault) reopens the write-failure variant of the #3934 exploit — a name
+/// whose `.mcp.json` entry was never actually re-pinned to the
+/// framework-controlled command this run must NOT enter the approved set,
+/// even when its toggle was on. Passing `true, true, true, true`
+/// unconditionally (e.g. a diagnostic sweep unrelated to any one project,
+/// like `tm mcp test`) is safe ONLY when the caller does not use the result
+/// as an `enabledMcpjsonServers` approval list.
 /// Test: `managed_mcp_server_names_unions_builtin_with_configured`,
 /// `managed_mcp_server_names_defaults_to_builtin`,
-/// `managed_mcp_server_names_excludes_disabled_conditional_builtins`.
+/// `managed_mcp_server_names_excludes_disabled_conditional_builtins`,
+/// `managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed`
+/// (issue #3950 regression).
 pub fn managed_mcp_server_names(
     config: &Value,
-    inject_trusty_memory: bool,
-    inject_trusty_search: bool,
+    trusty_mpm_pinned: bool,
+    trusty_review_pinned: bool,
+    trusty_memory_pinned: bool,
+    trusty_search_pinned: bool,
 ) -> Vec<String> {
-    let mut names: Vec<String> = UNCONDITIONAL_BUILTIN_MCP_SERVERS
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    if inject_trusty_memory {
+    let mut names: Vec<String> = Vec::new();
+    if trusty_mpm_pinned {
+        names.push(UNCONDITIONAL_BUILTIN_TRUSTY_MPM.to_string());
+    }
+    if trusty_review_pinned {
+        names.push(UNCONDITIONAL_BUILTIN_TRUSTY_REVIEW.to_string());
+    }
+    if trusty_memory_pinned {
         names.push(CONDITIONAL_BUILTIN_TRUSTY_MEMORY.to_string());
     }
-    if inject_trusty_search {
+    if trusty_search_pinned {
         names.push(CONDITIONAL_BUILTIN_TRUSTY_SEARCH.to_string());
     }
     if let Some(servers) = config.get("mcpServers").and_then(Value::as_object) {
@@ -499,27 +536,41 @@ pub fn mcp_server_names(workspace: &Path) -> Vec<String> {
 /// stripped environment) falls back to just the builtin four (never fails —
 /// trust-seeding must never abort a launch).
 ///
-/// **Issue #3934:** `inject_trusty_memory` / `inject_trusty_search` MUST be the
-/// toggle values actually resolved for THIS workspace this run (the caller's
-/// in-memory `HarnessPlan`, or [`resolve_conditional_mcp_toggles`] when none is
-/// in scope) — never a hardcoded `true, true` — otherwise a manifest that
-/// disables the force-overwrite injector reopens the name-squatting exploit
-/// [`CONDITIONAL_BUILTIN_MCP_SERVERS`] documents.
+/// **Issue #3934:** `trusty_memory_pinned` / `trusty_search_pinned` MUST
+/// reflect the toggle values actually resolved for THIS workspace this run
+/// (the caller's in-memory `HarnessPlan`, or [`resolve_conditional_mcp_toggles`]
+/// when none is in scope) — never a hardcoded `true, true` — otherwise a
+/// manifest that disables the force-overwrite injector reopens the
+/// name-squatting exploit [`CONDITIONAL_BUILTIN_MCP_SERVERS`] documents.
+///
+/// **Issue #3950 (fifth instance):** ALL FOUR parameters must reflect actual
+/// per-run pin success, not merely "the injector was attempted" — see
+/// [`managed_mcp_server_names`]'s doc. The production call site
+/// (`session_launch::mod::prepare_session_inner`) derives all four from the
+/// injectors' own `Result`s in the SAME run.
 /// Test: `launch_trusted_mcp_names_from_unions_registry`,
 /// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`,
 /// `launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins`.
 pub fn launch_trusted_mcp_names(
-    inject_trusty_memory: bool,
-    inject_trusty_search: bool,
+    trusty_mpm_pinned: bool,
+    trusty_review_pinned: bool,
+    trusty_memory_pinned: bool,
+    trusty_search_pinned: bool,
 ) -> Vec<String> {
     match crate::core::trusty_tools_config::managed_claude_config_dir() {
-        Some(dir) => {
-            launch_trusted_mcp_names_from(&dir, inject_trusty_memory, inject_trusty_search)
-        }
+        Some(dir) => launch_trusted_mcp_names_from(
+            &dir,
+            trusty_mpm_pinned,
+            trusty_review_pinned,
+            trusty_memory_pinned,
+            trusty_search_pinned,
+        ),
         None => managed_mcp_server_names(
             &Value::Object(Map::new()),
-            inject_trusty_memory,
-            inject_trusty_search,
+            trusty_mpm_pinned,
+            trusty_review_pinned,
+            trusty_memory_pinned,
+            trusty_search_pinned,
         ),
     }
 }
@@ -536,23 +587,27 @@ pub fn launch_trusted_mcp_names(
 /// What: reads `config_dir` via [`list_servers`] (quarantines a malformed
 /// file, empty map when absent or unreadable — never fails) and returns
 /// [`managed_mcp_server_names`] over the resulting `{"mcpServers": ...}`
-/// value, gated by `inject_trusty_memory` / `inject_trusty_search` (issue
-/// #3934 — see [`launch_trusted_mcp_names`]'s doc).
+/// value, gated by all four `_pinned` flags (issues #3934/#3950 — see
+/// [`launch_trusted_mcp_names`]'s doc).
 /// Test: `launch_trusted_mcp_names_from_unions_registry`,
 /// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`,
 /// `launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins`.
 pub fn launch_trusted_mcp_names_from(
     config_dir: &Path,
-    inject_trusty_memory: bool,
-    inject_trusty_search: bool,
+    trusty_mpm_pinned: bool,
+    trusty_review_pinned: bool,
+    trusty_memory_pinned: bool,
+    trusty_search_pinned: bool,
 ) -> Vec<String> {
     let servers = list_servers(config_dir).unwrap_or_default();
     let mut config = Map::new();
     config.insert("mcpServers".to_string(), Value::Object(servers));
     managed_mcp_server_names(
         &Value::Object(config),
-        inject_trusty_memory,
-        inject_trusty_search,
+        trusty_mpm_pinned,
+        trusty_review_pinned,
+        trusty_memory_pinned,
+        trusty_search_pinned,
     )
 }
 

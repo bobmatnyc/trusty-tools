@@ -69,7 +69,7 @@ pub(super) fn trusty_search_mcp_value(index_id: Option<&str>) -> serde_json::Val
 /// `inject_trusty_search_mcp_is_idempotent`,
 /// `inject_trusty_search_mcp_pins_index`,
 /// `inject_both_mcp_servers_coexist`.
-pub(super) fn inject_trusty_search_mcp(
+pub(crate) fn inject_trusty_search_mcp(
     project_path: &Path,
     index_id: Option<&str>,
 ) -> Result<(), PrepError> {
@@ -110,6 +110,6 @@ pub(super) fn inject_trusty_search_mcp(
 /// graceful path) and `register_project_index_never_bypasses_sensitive_path_denylist`
 /// (issue #2914 regression) in `tests.rs`; the promoted logic is unit-tested in
 /// `trusty_common::search_index::tests`.
-pub(super) fn register_project_index(project_root: &Path) -> Option<String> {
+pub(crate) fn register_project_index(project_root: &Path) -> Option<String> {
     trusty_common::search_index::ensure_project_indexed(project_root, false)
 }

@@ -85,11 +85,9 @@ use crate::core::skill_tiers::{
 };
 use custom_mcp::inject_custom_trusty_mcps;
 use native_mcp::inject_native_trusty_mcps;
-use search_index::{inject_trusty_search_mcp, register_project_index};
 use settings::{
-    deploy_output_style, inject_trusty_memory_mcp, inject_trusty_mpm_mcp, inject_trusty_review_mcp,
-    preseed_workspace_trust_home, remove_global_trusty_memory_hooks, write_output_style,
-    write_project_hooks, write_status_line,
+    deploy_output_style, preseed_workspace_trust_home, remove_global_trusty_memory_hooks,
+    write_output_style, write_project_hooks, write_status_line,
 };
 
 /// Re-export of the project-tier output-style/statusLine resolution primitives
@@ -110,6 +108,48 @@ use settings::{
 /// `core::standalone::settings_defaults` tests (this is a plain re-export, no
 /// logic of its own).
 pub(crate) use settings::{OUTPUT_STYLE, is_stale_statusline_command, resolve_statusline_command};
+
+/// Re-export of the four framework-builtin MCP-server force-overwrite
+/// injectors, and the trusty-search index derivation they depend on, for
+/// reuse by `runtime::claude_code::prepare_managed_config` (issue #3950
+/// residual-gap fix).
+///
+/// Why: `mod settings`/`mod search_index` above are private, so a
+/// `pub(crate)` item inside either is still unreachable from outside
+/// `session_launch` without a re-export at this (public) module boundary —
+/// mirroring the `OUTPUT_STYLE` re-export just above.
+/// `runtime::claude_code::prepare_managed_config` (the tmux daemon-spawn
+/// adapter behind `RuntimeAdapter::spawn`/`spawn_resume`) is a genuinely
+/// disjoint call chain from wherever `prepare_session_with_repo_url` last
+/// ran the injectors for a given workspace — `spawn_resume` in particular
+/// reaches it with NO corresponding `prepare_session*` call anywhere in its
+/// own request chain (see `daemon::managed_routes::lifecycle::resume_managed`'s
+/// doc). Before #3950's follow-up fix, that call site derived
+/// `enabledMcpjsonServers` membership from a hardcoded `true` (the two
+/// unconditional builtins) or a bare manifest-toggle read (the two
+/// conditional builtins) — exactly the "toggle/attempt ≠ write success"
+/// defect this issue closes everywhere else, left open on the headless
+/// resume path with no same-run evidence at all. Exposing the injectors
+/// themselves (rather than only the higher-level `prepare_session_inner`
+/// pipeline, which also redeploys agents/skills/CLAUDE.md — unwanted,
+/// heavier work for a mere resume) lets that call site run the SAME
+/// idempotent read-merge-write ([`settings::inject_mcp_server`]'s own doc:
+/// "skip the write when the entry already matches") and derive real,
+/// this-run pin results exactly like `session_launch::prepare_session_inner`
+/// and `standalone::load::load_alias` do.
+/// What: re-exports [`settings::inject_trusty_mpm_mcp`],
+/// [`settings::inject_trusty_review_mcp`], [`settings::inject_trusty_memory_mcp`],
+/// [`search_index::inject_trusty_search_mcp`], and
+/// [`search_index::register_project_index`] (the find-or-create index
+/// lookup `inject_trusty_search_mcp`'s `index_id` pin depends on).
+/// Test: covered by each injector's own unit tests in `tests_mcp_trust_seed_e2e.rs`
+/// / `native_mcp_tests.rs` / `tests.rs` (this is a plain re-export, no logic
+/// of its own); the new call site is covered by
+/// `runtime::claude_code::tests::prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`.
+pub(crate) use search_index::{inject_trusty_search_mcp, register_project_index};
+pub(crate) use settings::{
+    inject_trusty_memory_mcp, inject_trusty_mpm_mcp, inject_trusty_review_mcp,
+};
 
 /// Re-export of the resume-time worktree/upstream sync primitives (issue
 /// #2647) for reuse by `daemon::managed_routes::lifecycle::resume_managed`.
@@ -178,6 +218,34 @@ pub struct PrepReport {
     /// `false` when writing the project hooks failed; the session still
     /// launches, it just won't fire the trusty-memory hooks.
     pub hooks_written: bool,
+    /// Whether the `trusty-mpm` MCP server entry was ACTUALLY force-written
+    /// to `.mcp.json` this run (issue #3950 — fifth instance of the
+    /// name-approval/content-pinning vulnerability class).
+    ///
+    /// `false` when [`inject_trusty_mpm_mcp`] failed (disk full, permission
+    /// error, transient I/O fault) — the session still launches, but this
+    /// name must NOT enter `enabledMcpjsonServers` for it (see
+    /// `trusted_mcp_names`'s computation below), since its content was never
+    /// re-pinned to the framework-controlled command this run.
+    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
+    pub trusty_mpm_injected: bool,
+    /// Whether the `trusty-review` MCP server entry was ACTUALLY
+    /// force-written to `.mcp.json` this run — see [`Self::trusty_mpm_injected`].
+    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
+    pub trusty_review_injected: bool,
+    /// Whether the `trusty-memory` MCP server entry was ACTUALLY
+    /// force-written to `.mcp.json` this run.
+    ///
+    /// `false` when the manifest toggle disabled the injector, OR the toggle
+    /// was on but [`inject_trusty_memory_mcp`] failed — either way this name
+    /// must NOT enter `enabledMcpjsonServers` (issue #3950).
+    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
+    pub trusty_memory_injected: bool,
+    /// Whether the `trusty-search` MCP server entry was ACTUALLY
+    /// force-written to `.mcp.json` this run — see
+    /// [`Self::trusty_memory_injected`].
+    /// Test: `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`.
+    pub trusty_search_injected: bool,
     /// Incremental catch-up context to inject as seed context for this session.
     ///
     /// Populated when `config.catchup.auto` is true; `None` otherwise or when
@@ -644,17 +712,26 @@ fn prepare_session_inner(
     // `memory_note`, …). Gated by the manifest's `[mcp] trusty_memory` toggle
     // (default on). Non-fatal: the session still launches, it just lacks the
     // memory tools.
+    //
+    // `trusty_memory_injected` (issue #3950 — fifth instance of the
+    // name-approval/content-pinning vulnerability class): tracks whether the
+    // entry was ACTUALLY force-written this run, not merely whether the
+    // toggle was on. A toggle that is on but a write that fails (disk full,
+    // permission error, transient I/O fault) must NOT count as "pinned" —
+    // see this variable's use in `trusted_mcp_names` below.
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::ConfiguringMcp,
     );
+    let mut trusty_memory_injected = false;
     if plan.inject_trusty_memory {
         // Pin the project's palace via `env.TRUSTY_MEMORY_PALACE` (issue #1605).
         // `repo_url` (the cloned-from URL, threaded from LaunchParams) is the
         // authoritative identity for repo_url-cloned sessions; the injector
         // falls back to the workspace's own git origin remote when it is `None`,
         // and to the bare stub when no slug can be derived (fail-open).
-        if let Err(err) = inject_trusty_memory_mcp(project_dir, repo_url) {
-            tracing::warn!("failed to inject trusty-memory MCP server: {err}");
+        match inject_trusty_memory_mcp(project_dir, repo_url) {
+            Ok(()) => trusty_memory_injected = true,
+            Err(err) => tracing::warn!("failed to inject trusty-memory MCP server: {err}"),
         }
     } else {
         tracing::debug!("manifest disables trusty-memory MCP injection");
@@ -671,10 +748,13 @@ fn prepare_session_inner(
     // returns the id so the stub is pinned; a `None` id (empty derivation) falls
     // back to the unpinned stub. Either way the session launches.
     // Gated by the manifest's `[mcp] trusty_search` toggle (default on).
+    // `trusty_search_injected` mirrors `trusty_memory_injected` above (#3950).
+    let mut trusty_search_injected = false;
     if plan.inject_trusty_search {
         let pinned_index = register_project_index(project_dir);
-        if let Err(err) = inject_trusty_search_mcp(project_dir, pinned_index.as_deref()) {
-            tracing::warn!("failed to inject trusty-search MCP server: {err}");
+        match inject_trusty_search_mcp(project_dir, pinned_index.as_deref()) {
+            Ok(()) => trusty_search_injected = true,
+            Err(err) => tracing::warn!("failed to inject trusty-search MCP server: {err}"),
         }
     } else {
         tracing::debug!("manifest disables trusty-search MCP injection");
@@ -695,12 +775,27 @@ fn prepare_session_inner(
     // manifest toggle, unlike the optional trusty-memory/trusty-search
     // integrations above) and MUST run before the trust pre-seed below —
     // same ordering reasoning as the native/custom injectors. Non-fatal.
-    if let Err(err) = inject_trusty_mpm_mcp(project_dir) {
-        tracing::warn!("failed to inject trusty-mpm MCP server: {err}");
-    }
-    if let Err(err) = inject_trusty_review_mcp(project_dir) {
-        tracing::warn!("failed to inject trusty-review MCP server: {err}");
-    }
+    //
+    // `trusty_mpm_injected`/`trusty_review_injected` (issue #3950): these two
+    // have no manifest escape hatch, but the WRITE itself can still fail —
+    // before this fix, either name was unconditionally added to
+    // `enabledMcpjsonServers` regardless of whether this force-overwrite
+    // actually succeeded, reopening the identical vulnerability for the
+    // "unconditional" pair. See `trusted_mcp_names` below.
+    let trusty_mpm_injected = match inject_trusty_mpm_mcp(project_dir) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!("failed to inject trusty-mpm MCP server: {err}");
+            false
+        }
+    };
+    let trusty_review_injected = match inject_trusty_review_mcp(project_dir) {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::warn!("failed to inject trusty-review MCP server: {err}");
+            false
+        }
+    };
 
     // Inject NATIVE trusty MCP servers registered via `tm mcp add` (e.g.
     // slack-mcp, gworkspace-mcp, trusty-analyze) into the workspace `.mcp.json`
@@ -747,15 +842,16 @@ fn prepare_session_inner(
     // by reading the workspace's own `.mcp.json` (that file is git-tracked and
     // travels WITH a cloned repo — see `mcp_config::mcp_server_names`'s
     // SECURITY doc for the vulnerability this closes). `launch_trusted_mcp_names`
-    // returns the two unconditional framework builtins (force-overwritten to
-    // their canonical entry by the injectors above, every run) UNION the two
-    // conditional builtins ONLY when `plan.inject_trusty_memory`/
-    // `inject_trusty_search` are true THIS run (issue #3934 — passing a
-    // hardcoded "always trust" here is exactly the vulnerability: a manifest
-    // that disables the force-overwrite injector above must also drop the
-    // name from this approval list, or a spoofed `.mcp.json` entry surviving
-    // that disabled injector gets pre-approved anyway) UNION the operator's
-    // own `tm mcp add` registry (also force-overwritten above, by the
+    // returns each of the framework builtin four ONLY when its own
+    // `trusty_*_injected` bool is true THIS run — i.e. its force-overwrite
+    // injector actually SUCCEEDED writing the framework-controlled command,
+    // not merely that a manifest toggle was on (issue #3950 — fifth
+    // instance: a toggle on but a write that fails, e.g. disk full,
+    // permission error, or transient I/O fault, must NOT leave a spoofed or
+    // stale `.mcp.json` entry pre-approved; issue #3934's earlier fix closed
+    // the toggle-off case but still passed the toggle value directly,
+    // ignoring the injector's own `Result`) — UNION the operator's own
+    // `tm mcp add` registry (also force-overwritten above, by the
     // native/custom injectors, whenever a registry name matches) —
     // provenance the operator or the framework controls, mirroring
     // `mcp_config::managed_mcp_server_names`'s already-fixed derivation for
@@ -766,13 +862,16 @@ fn prepare_session_inner(
     // found" consent dialog even after `tm project trust` — see
     // `session_launch::custom_mcp`'s "Consent gate" docs. A name that
     // reaches neither source — e.g. one a cloned repo merely committed to
-    // `.mcp.json` directly, or a conditional builtin whose injector was
-    // disabled — now correctly falls through to that same dialog instead of
-    // being silently pre-approved. Non-fatal: a trust-seed failure only
-    // means the operator may see the dialog.
+    // `.mcp.json` directly, a conditional builtin whose injector was
+    // disabled, or ANY of the four builtins whose force-overwrite write
+    // failed this run — now correctly falls through to that same dialog
+    // instead of being silently pre-approved. Non-fatal: a trust-seed
+    // failure only means the operator may see the dialog.
     let trusted_mcp_names: BTreeSet<String> = crate::core::mcp_config::launch_trusted_mcp_names(
-        plan.inject_trusty_memory,
-        plan.inject_trusty_search,
+        trusty_mpm_injected,
+        trusty_review_injected,
+        trusty_memory_injected,
+        trusty_search_injected,
     )
     .into_iter()
     .filter(|name| !project_scope_mcp_names.contains(name))
@@ -863,6 +962,10 @@ fn prepare_session_inner(
         stash,
         output_style,
         hooks_written,
+        trusty_mpm_injected,
+        trusty_review_injected,
+        trusty_memory_injected,
+        trusty_search_injected,
         catchup_context,
         roster_errors,
     })
