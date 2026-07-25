@@ -37,7 +37,16 @@
 //! the floor down to 48% — a genuine breach of the 60% target — while the
 //! independent threshold/fallback compactor still never fired and session
 //! fidelity (goal state, transcript, resumability) still held; see the
-//! evidence doc for the full writeup of both runs.
+//! evidence doc for the full writeup of both runs. On that "independent":
+//! the zero-fire signals this client's soak observes (JSONL, `TranscriptRecord.
+//! compaction_events`, `lifetime_compaction_alarm_count`) all derive from one
+//! shared detection call site in `agent_loop::compaction_control` — see
+//! `crates/trusty-code/scripts/compression_load_soak.py`'s fidelity-check
+//! comment and the evidence doc's Driver section for what that does and does
+//! not rule out. [`synthetic_tool_output`]'s payload text is shaped to look
+//! like a real diff/log for a human reading the evidence, but text SHAPE is
+//! not itself a measured variable here — only `payload_bytes` is; see that
+//! function's docs.
 //! Test: `tests::soak_load_script_ends_in_a_resumable_stop_and_sums_past_the_default_cap`.
 
 use super::*;
@@ -51,6 +60,44 @@ use super::*;
 /// the epic's target boundary).
 const LOAD_PAYLOAD_BYTES: [usize; 3] = [160_000, 230_000, 300_000];
 
+/// Escape-hatch env var overriding [`LOAD_PAYLOAD_BYTES`] for one process —
+/// three comma-separated `usize` values, e.g.
+/// `TCODE_SOAK_LOAD_PAYLOAD_BYTES=220000,300000,400000` to reproduce this
+/// soak's exploratory FAIL profile without hand-editing this file and
+/// rebuilding (issue raised in epic #3866 load-soak review: a future soak
+/// against #3911's backstop will need to re-run this heavier profile). An
+/// unset var, or a value that doesn't parse as exactly three
+/// comma-separated `usize`s, silently falls back to
+/// [`LOAD_PAYLOAD_BYTES`] — never an error, matching every other escape
+/// hatch in this crate's mock-LLM/cadence config
+/// (`cadence::CADENCE_TURNS_ENV_VAR`'s identical graceful-degrade
+/// convention).
+/// Test: `tests::payload_bytes_env_override_parses_three_values_or_falls_back_to_default`.
+pub const LOAD_PAYLOAD_BYTES_ENV_VAR: &str = "TCODE_SOAK_LOAD_PAYLOAD_BYTES";
+
+/// Resolve the per-turn payload sizes: [`LOAD_PAYLOAD_BYTES_ENV_VAR`] when
+/// set to three valid comma-separated `usize`s, otherwise
+/// [`LOAD_PAYLOAD_BYTES`]. See [`LOAD_PAYLOAD_BYTES_ENV_VAR`]'s docs.
+fn resolve_payload_bytes() -> [usize; 3] {
+    let Ok(raw) = std::env::var(LOAD_PAYLOAD_BYTES_ENV_VAR) else {
+        return LOAD_PAYLOAD_BYTES;
+    };
+    let parsed: Vec<usize> = raw
+        .split(',')
+        .filter_map(|s| s.trim().parse::<usize>().ok())
+        .collect();
+    match parsed.as_slice() {
+        [a, b, c] => [*a, *b, *c],
+        _ => {
+            tracing::warn!(
+                "{LOAD_PAYLOAD_BYTES_ENV_VAR}={raw:?} did not parse as three comma-separated \
+                 usize values; keeping the default {LOAD_PAYLOAD_BYTES:?}"
+            );
+            LOAD_PAYLOAD_BYTES
+        }
+    }
+}
+
 /// A deterministic, offline `LlmClientTrait` driving load-realistic
 /// per-turn payload sizes for the compression-effectiveness follow-up soak
 /// (epic #3866).
@@ -61,13 +108,19 @@ const LOAD_PAYLOAD_BYTES: [usize; 3] = [160_000, 230_000, 300_000];
 /// Test: `tests::soak_load_script_ends_in_a_resumable_stop_and_sums_past_the_default_cap`.
 pub struct SoakLoadEchoLlmClient {
     cursor: AtomicUsize,
+    /// Resolved once at construction via [`resolve_payload_bytes`] — see
+    /// [`LOAD_PAYLOAD_BYTES_ENV_VAR`]'s docs for the override.
+    payload_bytes: [usize; 3],
 }
 
 impl SoakLoadEchoLlmClient {
-    /// Construct a fresh client at the start of its script.
+    /// Construct a fresh client at the start of its script, resolving
+    /// per-turn payload sizes from [`LOAD_PAYLOAD_BYTES_ENV_VAR`]
+    /// (falling back to [`LOAD_PAYLOAD_BYTES`]).
     pub fn new() -> Self {
         Self {
             cursor: AtomicUsize::new(0),
+            payload_bytes: resolve_payload_bytes(),
         }
     }
 }
@@ -83,11 +136,11 @@ impl LlmClientTrait for SoakLoadEchoLlmClient {
     async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         let fixture = match idx {
-            0 => load_goal_tool_call(idx, 1, LOAD_PAYLOAD_BYTES[0]),
+            0 => load_goal_tool_call(idx, 1, self.payload_bytes[0]),
             1 => load_clear_goal_tool_call(idx, 1),
-            2 => load_goal_tool_call(idx, 2, LOAD_PAYLOAD_BYTES[1]),
+            2 => load_goal_tool_call(idx, 2, self.payload_bytes[1]),
             3 => load_clear_goal_tool_call(idx, 2),
-            4 => load_goal_tool_call(idx, 3, LOAD_PAYLOAD_BYTES[2]),
+            4 => load_goal_tool_call(idx, 3, self.payload_bytes[2]),
             5 => load_clear_goal_tool_call(idx, 3),
             6 => load_stop_fixture(),
             _ => {
@@ -105,10 +158,10 @@ impl LlmClientTrait for SoakLoadEchoLlmClient {
 }
 
 /// Build a `set_goal(slot, text)` tool-call fixture carrying a
-/// `payload_bytes`-sized, realistically-shaped body (mimics a real tool
-/// output's line-oriented structure rather than a single repeated
-/// character, matching how compressible a REAL diff/grep/test-log body
-/// actually is — see [`synthetic_tool_output`]).
+/// `payload_bytes`-sized body shaped to visually resemble a real tool
+/// output (readable evidence, not a measurement variable — see
+/// [`synthetic_tool_output`]'s docs for why byte count, not text shape, is
+/// what actually drives every number this soak reports).
 fn load_goal_tool_call(idx: usize, slot: usize, payload_bytes: usize) -> Value {
     let text = synthetic_tool_output(payload_bytes);
     json!({
@@ -172,21 +225,31 @@ fn load_stop_fixture() -> Value {
     })
 }
 
-/// Synthesize `target_bytes` of line-oriented text approximating a real
-/// tool output's shape (`diff`/`grep`/test-log lines average well under 200
-/// chars each, with real repetition across lines — e.g. the same file path
-/// or `FAIL`/`+`/`-` prefix recurring) rather than one giant repeated-
-/// character blob.
+/// Synthesize `target_bytes` of line-oriented text visually resembling a
+/// real tool output (unified-diff hunks, `grep path:line:match` rows,
+/// `cargo test` `FAILED`/panic/assertion lines), cycling a handful of
+/// realistic line templates until `target_bytes` is reached, rather than one
+/// giant repeated-character blob.
 ///
-/// Why: a single-character-repeated string (`"x".repeat(n)`, the ORIGINAL
-/// `SoakEchoLlmClient`'s ~8 KB oversized-turn approach) is maximally
-/// UNREPRESENTATIVE of what `estimate_tokens`'s chars/4 heuristic sees from
-/// a real diff/log — real tool output is highly structured, line-oriented
-/// text. This generator interleaves a handful of realistic line shapes
-/// (unified-diff hunks, grep `path:line:match` rows, cargo test `FAILED`/
-/// `assertion` lines) cycling deterministically until `target_bytes` is
-/// reached, so the soak's payload has the same rough token-per-byte
-/// character as the load profile it's meant to approximate.
+/// **Text shape is NOT a validated variable in this soak — only
+/// `payload_bytes` (`LOAD_PAYLOAD_BYTES`) is.** Every measurement this soak
+/// reports comes from a path that is content-blind: `estimate_tokens` is
+/// `text.chars().count() / 4` (`agent_loop::compaction::estimate_tokens`) —
+/// pure byte/char count, no parsing; `enforce_budget`/`resolve_keep_from`
+/// evict whole messages by position, never by content; and
+/// `summarize_span` replaces an evicted span with a small fixed-format
+/// placeholder regardless of what was in it. A `"x".repeat(target_bytes)`
+/// blob of the same length would produce byte-for-byte identical
+/// `tokens_before`/`tokens_after`/`ratio`/floor numbers to what this
+/// generator produces. The realistic line shapes exist purely so a human
+/// reading the committed JSONL/evidence sees plausible-looking content
+/// instead of a wall of `x` — a readability choice for this soak's evidence
+/// artifacts, not something that changes, or was measured to change, any
+/// reported result. This also bounds what the soak does and does not test:
+/// it says nothing about whether a content-AWARE compaction strategy (e.g.
+/// one that tried to preserve high-signal diff lines over boilerplate)
+/// would behave differently — this crate's actual compaction path has no
+/// such strategy to test.
 fn synthetic_tool_output(target_bytes: usize) -> String {
     const LINE_TEMPLATES: [&str; 6] = [
         "+    let result = compute_budget(&transcript, cadence_cfg, keep_last_messages);\n",
@@ -209,6 +272,58 @@ fn synthetic_tool_output(target_bytes: usize) -> String {
 mod tests {
     use super::*;
     use crate::agent_loop::CadenceConfig;
+
+    /// Serializes every test in this module that mutates
+    /// [`LOAD_PAYLOAD_BYTES_ENV_VAR`], mirroring `telemetry::DATA_DIR_ENV_LOCK`'s
+    /// identical rationale (`cargo test` runs this crate's tests in
+    /// parallel within one process, so concurrent env mutation of the same
+    /// var would race).
+    static PAYLOAD_BYTES_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// [`LOAD_PAYLOAD_BYTES_ENV_VAR`] set to three valid comma-separated
+    /// `usize`s overrides [`LOAD_PAYLOAD_BYTES`]; unset, or set to garbage,
+    /// falls back to the default rather than erroring — the documented
+    /// graceful-degrade contract new callers (e.g. a future soak re-running
+    /// the exploratory FAIL profile against #3911's backstop) rely on.
+    #[tokio::test]
+    async fn payload_bytes_env_override_parses_three_values_or_falls_back_to_default() {
+        let _guard = PAYLOAD_BYTES_ENV_LOCK.lock().await;
+
+        // SAFETY: test-only env mutation; serialized by `PAYLOAD_BYTES_ENV_LOCK`.
+        unsafe {
+            std::env::remove_var(LOAD_PAYLOAD_BYTES_ENV_VAR);
+        }
+        assert_eq!(
+            resolve_payload_bytes(),
+            LOAD_PAYLOAD_BYTES,
+            "unset falls back"
+        );
+
+        // SAFETY: test-only env mutation; serialized by `PAYLOAD_BYTES_ENV_LOCK`.
+        unsafe {
+            std::env::set_var(LOAD_PAYLOAD_BYTES_ENV_VAR, "220000,300000,400000");
+        }
+        assert_eq!(
+            resolve_payload_bytes(),
+            [220_000, 300_000, 400_000],
+            "three valid comma-separated values override the default"
+        );
+
+        // SAFETY: test-only env mutation; serialized by `PAYLOAD_BYTES_ENV_LOCK`.
+        unsafe {
+            std::env::set_var(LOAD_PAYLOAD_BYTES_ENV_VAR, "not-a-number");
+        }
+        assert_eq!(
+            resolve_payload_bytes(),
+            LOAD_PAYLOAD_BYTES,
+            "unparseable value falls back to the default, never panics/errors"
+        );
+
+        // SAFETY: test-only env mutation; serialized by `PAYLOAD_BYTES_ENV_LOCK`.
+        unsafe {
+            std::env::remove_var(LOAD_PAYLOAD_BYTES_ENV_VAR);
+        }
+    }
 
     /// The script must be 7 calls long, ending in a bare `stop`, with the
     /// three `set_goal` payloads' estimated tokens (chars/4, this crate's

@@ -87,26 +87,37 @@ def build_project_fixture(root: Path) -> None:
 
 
 def spawn_daemon(
-    tcode_bin: Path, project: Path, data_dir: Path, mock_llm: str = "echo-soak"
+    tcode_bin: Path,
+    project: Path,
+    data_dir: Path,
+    mock_llm: str = "echo-soak",
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.Popen, str]:
     """Spawn `tcode serve --http --port 0` and discover its bound address
     from stderr, mirroring `tests/support/mod.rs::spawn_http_daemon_with_env`.
 
     `mock_llm` selects the `TCODE_MOCK_LLM` scripted client (default
     `echo-soak`; `compression_load_soak.py` passes `echo-soak-load` — see
-    that script's docs for why a load-realistic variant exists).
+    that script's docs for why a load-realistic variant exists). `extra_env`
+    merges additional env vars into the daemon's environment (e.g.
+    `compression_load_soak.py`'s `--payload-bytes` passes
+    `TCODE_SOAK_LOAD_PAYLOAD_BYTES` this way, rather than every future
+    variant needing its own `spawn_daemon` parameter).
     """
+    env = {
+        "TCODE_MOCK_LLM": mock_llm,
+        "TCODE_TELEMETRY_DATA_DIR": str(data_dir),
+        "PATH": _inherited_path(),
+        "HOME": str(Path.home()),
+    }
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(
         [str(tcode_bin), "serve", "--project", str(project), "--http", "--port", "0"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
-        env={
-            "TCODE_MOCK_LLM": mock_llm,
-            "TCODE_TELEMETRY_DATA_DIR": str(data_dir),
-            "PATH": _inherited_path(),
-            "HOME": str(Path.home()),
-        },
+        env=env,
     )
     assert proc.stderr is not None
     base_url = None

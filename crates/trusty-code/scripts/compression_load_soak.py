@@ -11,12 +11,18 @@ measured overhead was ~7% of a 200K window, nowhere near the 80K-token/40%
 cap the epic's guarantee is actually about. This script is the load-realistic
 follow-up that report called for: it drives `TCODE_MOCK_LLM=echo-soak-load`
 (`crates/trusty-code/src/task/mock_llm_soak_load.rs`), whose every `set_goal`
-turn carries a payload sized to approximate a real tool-output magnitude — a
-medium `git diff` (~90 KB), a `grep`-style result dump (~130 KB), a `cargo
-test` failure log (~160 KB) — chosen so their SUM per call (~95K estimated
-tokens) already exceeds the default 80K-token overhead cap on a 200K-window
-model, forcing `cadence::enforce_budget`'s continuous per-turn enforcement to
-actually do real work on most turns, not fire once across the whole soak.
+turn carries a payload sized to approximate a real tool-output magnitude — by
+default a large `git diff` (160 KB), a `grep`-style result dump (230 KB), a
+`cargo test` failure log (300 KB) — chosen so their SUM per call (~172K
+estimated tokens) already exceeds the default 80K-token overhead cap on a
+200K-window model, forcing `cadence::enforce_budget`'s continuous per-turn
+enforcement to actually do real work on most turns, not fire once across the
+whole soak. Empirically this default drives the measured working-context
+floor down to exactly the 60% target boundary (60-61%); `--payload-bytes`
+lets a caller dial past it — see that flag's help text and
+`docs/research/tcode-compression-load-soak-2026-07-25.md`'s "exploratory
+FAIL run" for the heavier profile (220/300/400 KB) that reproducibly
+breaches the target.
 
 What: reuses every piece of `compression_soak.py`'s daemon-lifecycle/RPC
 plumbing (`spawn_daemon`, `rpc_call`, `wait_for_terminal_status`) unchanged —
@@ -29,15 +35,22 @@ passes fired), (1) `session.get_goals` must report all three goal slots this
 run ever touched as EMPTY (every `set_goal` in the script is immediately
 followed by a `clear_goal` — if compaction corrupted or silently dropped a
 clear, a slot would still show a stale value); (2) `session.get_transcript`
-must still return a well-formed transcript (no RPC error, no empty array)
-with a message count far below the raw turn count (proof compaction actually
-shrank it); (3) one MORE `task.run` call against the SAME session, after all
-that compaction pressure, must still complete via `SessionStatus::Finished`
-(proof the loop is still healthy post-compaction, not silently wedged or
-erroring).
+must still return a well-formed transcript (no RPC error, non-empty `turns`)
+with `compaction_events == 0` (`TranscriptRecord`'s own durable counter —
+NOTE: this is a second recording of the same threshold-compaction detection
+the JSONL's `tcode-threshold` count already reports, not an independent
+detection path — see that field's inline comment below for what this can
+and cannot rule out); (3) one MORE `task.run` call against the SAME session,
+after all that compaction pressure, must still complete via
+`SessionStatus::Finished` (proof the loop is still healthy post-compaction,
+not silently wedged or erroring). Note: `turns` itself does NOT shrink with
+compaction — it is the full per-turn audit/cost-tracking record, not the
+model-facing transcript compaction actually thins; empirically it equals
+the raw cumulative turn count every run.
 
 Usage:
   python3 compression_load_soak.py --tcode-bin <path/to/tcode> --calls 40
+  python3 compression_load_soak.py --calls 20 --payload-bytes 220000,300000,400000
 """
 
 from __future__ import annotations
@@ -71,18 +84,28 @@ TOUCHED_SLOTS = (1, 2, 3)
 
 MOCK_LLM_VARIANT = "echo-soak-load"
 
+# Mirrors `SoakLoadEchoLlmClient::LOAD_PAYLOAD_BYTES_ENV_VAR`
+# (crates/trusty-code/src/task/mock_llm_soak_load.rs) — the escape hatch
+# `--payload-bytes` below sets so a caller can reproduce the exploratory
+# FAIL profile (or any other) without hand-editing Rust and rebuilding.
+PAYLOAD_BYTES_ENV_VAR = "TCODE_SOAK_LOAD_PAYLOAD_BYTES"
 
-def run_load_soak(tcode_bin: Path, calls: int, out_dir: Path) -> dict:
+
+def run_load_soak(
+    tcode_bin: Path, calls: int, out_dir: Path, payload_bytes: str | None = None
+) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     data_dir = out_dir / "telemetry"
     data_dir.mkdir(parents=True, exist_ok=True)
+
+    extra_env = {PAYLOAD_BYTES_ENV_VAR: payload_bytes} if payload_bytes else None
 
     with tempfile.TemporaryDirectory(prefix="tcode-load-soak-project-") as project_dir:
         project = Path(project_dir)
         build_project_fixture(project)
 
         proc, base_url = spawn_daemon(
-            tcode_bin, project, data_dir, mock_llm=MOCK_LLM_VARIANT
+            tcode_bin, project, data_dir, mock_llm=MOCK_LLM_VARIANT, extra_env=extra_env
         )
         budget_samples = []
         call_wall_times_ms: list[float] = []
@@ -170,7 +193,15 @@ def run_fidelity_checks(base_url: str, session_id: str) -> dict:
     # transcript.rs): `turns` (the surviving, post-compaction turn list —
     # NOT the raw cumulative turn count), plus `compaction_events` (the
     # #2070 threshold/fallback compactor's OWN durable counter — a second,
-    # independent corroboration of the JSONL's `tcode-threshold` count).
+    # independently-RECORDED signal for the JSONL's `tcode-threshold` count.
+    # NOT independent detection: both this counter and the JSONL row are
+    # written from the SAME `if !transcript.maybe_compact(...) { return; }`
+    # call site (agent_loop/compaction_control.rs), so they corroborate each
+    # other against a recording failure (e.g. best-effort JSONL write
+    # silently dropping a row) but NOT against a logic bug in
+    # `Transcript::maybe_compact`'s own threshold detection — if that
+    # function should have returned true and didn't, every signal derived
+    # from it reads 0 together.
     transcript = rpc_call(base_url, "session.get_transcript", {"session_id": session_id})
     turns = transcript.get("turns", [])
     result["transcript_turn_count"] = len(turns) if isinstance(turns, list) else None
@@ -214,6 +245,18 @@ def main(argv: list[str] | None = None) -> int:
         f"40 * {TURNS_PER_CALL} = {40 * TURNS_PER_CALL} turns",
     )
     parser.add_argument("--out-dir", type=Path, default=None)
+    parser.add_argument(
+        "--payload-bytes",
+        type=str,
+        default=None,
+        metavar="A,B,C",
+        help="Override the three per-call set_goal payload sizes (bytes), "
+        f"e.g. 220000,300000,400000 to reproduce this soak's exploratory "
+        "FAIL profile without hand-editing "
+        "mock_llm_soak_load.rs and rebuilding. Forwarded to the daemon as "
+        f"{PAYLOAD_BYTES_ENV_VAR}; default (unset) is the shipped "
+        "160000,230000,300000 (SoakLoadEchoLlmClient::LOAD_PAYLOAD_BYTES).",
+    )
     args = parser.parse_args(argv)
 
     tcode_bin = args.tcode_bin
@@ -230,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = args.out_dir or Path(tempfile.mkdtemp(prefix="tcode-compression-load-soak-"))
 
-    result = run_load_soak(tcode_bin, args.calls, out_dir)
+    result = run_load_soak(tcode_bin, args.calls, out_dir, payload_bytes=args.payload_bytes)
     print(json.dumps(result, indent=2))
     return 0 if result["fidelity_pass"] else 1
 

@@ -6,7 +6,7 @@ Targets (epic #2343): working context >= 60% at all times; `compaction_events ==
 
 ## Source
 
-- File: `/private/tmp/claude-502/-Users-masa-trusty-mpm-projects-bobmatnyc-trusty-tools--base--worktrees-2eb72dca-de08-481b-8dfa-22ab7f81b1f9/66306ece-6625-43d4-ad98-f8f0a322c7a7/scratchpad/load-soak-final/telemetry/compression.jsonl`
+- File: `docs/research/evidence/tcode-compression-load-soak-2026-07-25/primary-run/compression.jsonl`
 - Session id filter: `aba1109f-9a3a-4634-9d2c-a42992293f06`
 - Total events scored: 126
 
