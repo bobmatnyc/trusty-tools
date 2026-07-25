@@ -713,6 +713,76 @@ async fn reap_dead_managed_sessions_marks_stopped() {
     );
 }
 
+/// #3822 hardening (code-critic review): `project_registry()`'s session-
+/// history seed must not depend on some OTHER call site having already
+/// warmed `managed_sessions` first — it must warm `session_manager()` itself.
+///
+/// Why: the pre-hardening code peeked at `self.managed_sessions.get()`,
+/// which is `None` unless another caller happened to race ahead and
+/// `get_or_init` it first. That made the seed's completeness an unenforced
+/// startup-ordering invariant: on a daemon restart, if `project_registry()`
+/// is the FIRST thing anything touches (plausible — an MCP `project_list`
+/// call, or any of its 15+ other call sites, arriving before a session-list
+/// call), a session persisted by an EARLIER daemon process would silently
+/// stay unregistered — resurrecting #3822 for pre-existing sessions even
+/// after `register_from_session` closed the gap for newly-spawned ones.
+/// What: seeds a session record directly into the on-disk session-manager
+/// store (the SAME `<framework_root>/session-manager` path
+/// `DaemonState::session_manager()` itself uses) via a throwaway
+/// `SessionManager` instance — simulating a session left behind by an
+/// earlier process — WITHOUT ever calling `DaemonState::session_manager()`
+/// on the state under test. A fresh `DaemonState` pointed at that same
+/// `framework_root` (whose `managed_sessions` `OnceCell` has therefore never
+/// been touched by anything) then calls `project_registry()` FIRST, and the
+/// session's implied project must still be visible.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn project_registry_seeds_session_history_without_prewarmed_managed_sessions() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let paths = FrameworkPaths::under(dir.path());
+
+    // Seed the on-disk store directly — mirrors what an EARLIER daemon
+    // process would have left behind. Uses `FakeNoopTmuxDriver` so this
+    // never touches real tmux or spawns a real session.
+    let data_dir = paths.root.join("session-manager");
+    tokio::fs::create_dir_all(&data_dir)
+        .await
+        .expect("mkdir session-manager data dir");
+    let fake_tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
+        std::sync::Arc::new(crate::session_manager::FakeNoopTmuxDriver);
+    let seed_mgr = crate::session_manager::SessionManager::new(&data_dir, fake_tmux)
+        .await
+        .expect("seed session manager");
+    seed_mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt-3822-hardening")),
+            None,
+            None,
+            Some("https://github.com/octocat/Hello-World.git".into()),
+            Some("main".into()),
+        )
+        .await
+        .expect("seed session record");
+    drop(seed_mgr);
+
+    // Fresh DaemonState pointed at the SAME framework_root — its OWN
+    // `managed_sessions` OnceCell has never been touched by anything,
+    // reproducing the #3822 ordering hazard: `project_registry()` is the
+    // very first thing to touch this state.
+    let fresh = DaemonState::with_paths(&paths);
+    let registry = fresh.project_registry().await;
+    let all = registry.list().await.expect("list");
+    assert!(
+        all.iter()
+            .any(|p| p.repo_url == "https://github.com/octocat/Hello-World.git"),
+        "a session persisted by an earlier process must be registered at the FIRST \
+         project_registry() touch, even though nothing warmed managed_sessions first \
+         (#3822 hardening — project_registry() must warm session_manager() itself, \
+         not merely peek at whether something else already did): {all:?}"
+    );
+}
+
 /// The Layer-3 manager state is provisioned at daemon construction and reachable
 /// via the shared accessor (#2578) — the palace handle it threads through always
 /// carries the stable portfolio id, regardless of whether the memory engine is

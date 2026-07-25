@@ -843,11 +843,35 @@ impl DaemonState {
     /// construction to first use (like `session_manager()`) keeps the synchronous
     /// `new()` constructors unblocked. At startup the daemon seeds the registry
     /// from `config.yaml`'s `projects:` list and from session history.
+    ///
+    /// #3822 hardening (code-critic review): the session-history seed used to
+    /// read `self.managed_sessions.get()` — a bare peek that returns `None`
+    /// unless SOME other call site had already raced ahead and warmed the
+    /// session-manager `OnceCell` first. That made the boot-time seed's
+    /// completeness an unenforced ordering invariant ("whichever of
+    /// `project_registry()`'s 15+ call sites fires first must not be the
+    /// first thing that touches the daemon" — easy to silently violate on
+    /// any future startup-sequence reorder, resurrecting #3822 for
+    /// PRE-EXISTING sessions even after `register_from_session` closed the
+    /// gap for newly-spawned ones). Calling `self.session_manager().await`
+    /// instead `get_or_init`s it right here if nothing has touched it yet —
+    /// the seed is now correct regardless of call order, structurally, not
+    /// by accident of which caller happened to run first.
     /// What: on first call loads the registry from `<framework_root>/project-registry/`,
-    /// seeds it from config and session history, and caches the `Arc`. Subsequent
-    /// calls return the cached handle.
-    /// Test: `mcp_project` dispatch tests exercise this via the mock backend path.
+    /// seeds it from config and session history (via `self.session_manager()`,
+    /// which is safe to call from inside this `OnceCell::get_or_init` closure —
+    /// a DIFFERENT `OnceCell` than `self.project_registry`, so no self-deadlock),
+    /// and caches the `Arc`. Subsequent calls return the cached handle.
+    /// Test: `mcp_project` dispatch tests exercise this via the mock backend
+    /// path; `project_registry_seeds_session_history_without_prewarmed_managed_sessions`
+    /// pins that pre-existing sessions are registered at first `project_registry()`
+    /// touch even when nothing warmed `managed_sessions` first (the #3822
+    /// ordering-invariant regression this hardening closes).
     pub async fn project_registry(&self) -> std::sync::Arc<crate::project::ProjectRegistry> {
+        // Warm (or reuse) the session manager BEFORE entering
+        // `project_registry`'s own `get_or_init` — see the doc comment above
+        // for why this replaces the old `self.managed_sessions.get()` peek.
+        let sm = self.session_manager().await;
         self.project_registry
             .get_or_init(|| async {
                 let data_dir = self.framework_root.join("project-registry");
@@ -871,10 +895,8 @@ impl DaemonState {
                     registry.seed_from_config(&config.projects).await;
                 }
                 // Auto-register projects from existing session history.
-                if let Some(sm) = self.managed_sessions.get() {
-                    let records = sm.list().await;
-                    registry.auto_register_from_sessions(&records).await;
-                }
+                let records = sm.list().await;
+                registry.auto_register_from_sessions(&records).await;
                 std::sync::Arc::new(registry)
             })
             .await
