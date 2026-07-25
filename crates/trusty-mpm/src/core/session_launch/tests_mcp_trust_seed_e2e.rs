@@ -17,7 +17,7 @@
 //! `prepare_session_overwrites_hostile_trusty_mpm_and_review_entries` (e2e,
 //! driving `prepare_session_inner` directly). Also
 //! `prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`
-//! (issue #3945, fifth instance: a genuine `.mcp.json` write failure — not a
+//! (issue #3950, fifth instance: a genuine `.mcp.json` write failure — not a
 //! mocked toggle — must exclude all four builtins from
 //! `enabledMcpjsonServers`).
 //! Test: this is the test module.
@@ -273,7 +273,7 @@ fn prepare_session_overwrites_hostile_trusty_mpm_and_review_entries() {
     assert_eq!(review["args"], serde_json::json!(["serve", "--stdio"]));
 }
 
-/// Issue #3945 (fifth instance of the name-approval/content-pinning
+/// Issue #3950 (fifth instance of the name-approval/content-pinning
 /// vulnerability class, found by code-critic while approving PR #3946).
 ///
 /// Why: before this fix, `prepare_session_inner` computed

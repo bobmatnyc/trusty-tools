@@ -95,7 +95,7 @@ pub fn load_alias(
     let pins = run_prepare_session(&repo_dir, Some(&url), managed_root)?;
     write_marker(&repo_dir, alias, &url, &git_ref, claude_config_dir)?;
 
-    // Issue #3945 (fifth instance, follow-up to #3934): `pins` carries each
+    // Issue #3950 (fifth instance, follow-up to #3934): `pins` carries each
     // builtin's ACTUAL per-run pin result — read straight off the
     // `PrepReport` the `run_prepare_session` call above already produced —
     // rather than re-deriving from the manifest toggle alone. A previous
@@ -131,7 +131,7 @@ pub fn load_alias(
 
 /// Each framework builtin's ACTUAL per-run `.mcp.json` pin result, as
 /// observed by [`run_prepare_session`]'s `prepare_session_with_repo_url` call
-/// (issue #3945).
+/// (issue #3950).
 ///
 /// Why: a bare `(bool, bool, bool, bool)` tuple returned across a function
 /// boundary is easy to mis-order (e.g. swapping `trusty_mpm`/`trusty_review`
@@ -231,7 +231,7 @@ fn pull_ff_only(repo_dir: &Path) {
 /// and calls `crate::core::session_launch::prepare_session_with_repo_url`,
 /// forwarding `repo_url` to the trusty-memory MCP palace-slug derivation.
 /// Returns the [`InjectedMcpPins`] the resulting `PrepReport` actually
-/// observed (issue #3945) so the caller can gate `enabledMcpjsonServers`
+/// observed (issue #3950) so the caller can gate `enabledMcpjsonServers`
 /// membership on real per-run write success instead of re-deriving from the
 /// manifest toggle alone.
 /// Test: `run_prepare_session_pins_palace_from_clone_url`,
@@ -524,7 +524,7 @@ mod tests {
         );
     }
 
-    /// Why (issue #3945 — fifth instance, sanity/no-over-correction check):
+    /// Why (issue #3950 — fifth instance, sanity/no-over-correction check):
     /// on a normal, unobstructed run every builtin's write succeeds, so
     /// `run_prepare_session` must report all four as pinned — proving the
     /// fix does not over-correct into never trusting them.
@@ -569,7 +569,7 @@ mod tests {
         );
     }
 
-    /// Issue #3945 (fifth instance of the name-approval/content-pinning
+    /// Issue #3950 (fifth instance of the name-approval/content-pinning
     /// vulnerability class, found by code-critic while approving PR #3946).
     ///
     /// Why: `load_alias` (the `tm load`/`tm run` daemon-managed driver) is

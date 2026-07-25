@@ -1594,3 +1594,144 @@ fn build_inplace_resume_command_carries_oauth_token_when_available() {
         Some("sk-ant-oat01-fake-token")
     );
 }
+
+/// Issue #3950 residual-gap fix, critic follow-up: `prepare_managed_config`
+/// used to trust `trusty-mpm`/`trusty-review` unconditionally and
+/// `trusty-memory`/`trusty-search` off a bare manifest-toggle read — none of
+/// the four reflected whether this run's write actually succeeded. It now
+/// pins all four itself and derives `enabledMcpjsonServers` from their real
+/// `Result`s (mirroring `session_launch::prepare_session_inner`).
+///
+/// Why: this is the complementary non-regression case for
+/// `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`
+/// below — a normal, unobstructed run must still pin and approve all four,
+/// proving the fix does not over-correct into never trusting them. `HOME` is
+/// redirected (serial) so the managed `<config_dir>/.claude.json` this
+/// exercises is a throwaway tempdir, not the developer's real
+/// `~/.trusty-tools`.
+/// What: calls `prepare_managed_config` directly against a clean `cwd` and
+/// asserts (1) all four canonical entries are written to `cwd/.mcp.json`,
+/// and (2) all four names appear in the resolved config dir's
+/// `.claude.json` `enabledMcpjsonServers` for `cwd`.
+/// Test: itself; `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails`
+/// covers the write-failure regression.
+#[serial_test::serial]
+#[test]
+fn prepare_managed_config_pins_all_builtins_on_success() {
+    let _home = HomeGuard::set();
+    let cwd_root = tempfile::tempdir().expect("tempdir");
+    let cwd = cwd_root.path();
+
+    let config_dir = prepare_managed_config("test-session", cwd)
+        .expect("prepare_managed_config must resolve a config dir under the redirected HOME");
+
+    let mcp: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(cwd.join(".mcp.json"))
+            .expect("prepare_managed_config must write cwd/.mcp.json"),
+    )
+    .expect("cwd/.mcp.json must be valid JSON");
+    for name in [
+        "trusty-mpm",
+        "trusty-review",
+        "trusty-memory",
+        "trusty-search",
+    ] {
+        assert_eq!(
+            mcp["mcpServers"][name]["command"],
+            serde_json::json!(name),
+            "{name} must be pinned to its canonical command on a clean run: {mcp}"
+        );
+    }
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config_dir.join(".claude.json"))
+            .expect("prepare_managed_config must write <config_dir>/.claude.json"),
+    )
+    .expect("<config_dir>/.claude.json must be valid JSON");
+    let key = cwd.to_string_lossy().to_string();
+    let enabled: Vec<&str> = value["projects"][&key]["enabledMcpjsonServers"]
+        .as_array()
+        .expect("enabledMcpjsonServers is an array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for name in [
+        "trusty-mpm",
+        "trusty-review",
+        "trusty-memory",
+        "trusty-search",
+    ] {
+        assert!(
+            enabled.contains(&name),
+            "{name} must be approved when its pin succeeds on a clean run: {enabled:?}"
+        );
+    }
+}
+
+/// Issue #3950 residual-gap fix (code-critic HIGH follow-up on PR #3951).
+///
+/// Why: the critic traced every production caller of `RuntimeAdapter::spawn`/
+/// `spawn_resume` and found `resume_managed`/`spawn_resume` reaches
+/// `prepare_managed_config` with ZERO `prepare_session*` call anywhere in
+/// that request's chain (see that function's own doc: "the broader prep
+/// pipeline … is intentionally NOT re-run here") — so the pre-fix hardcoded
+/// `true, true` (unconditional pair) and bare manifest-toggle read
+/// (conditional pair) asserted pinning with NO same-run evidence at all on
+/// the headless resume path, the sharpest case across all five instances of
+/// this vulnerability class. This test forces a REAL write failure — not a
+/// mocked boolean — by making `cwd/.mcp.json` an existing DIRECTORY before
+/// calling `prepare_managed_config`: `settings::inject_mcp_server`'s shared
+/// `std::fs::write` then fails with a genuine IO error (`Is a directory`)
+/// regardless of permission bits, exactly mirroring
+/// `session_launch::tests_mcp_trust_seed_e2e::prepare_session_excludes_all_builtins_from_trust_when_mcp_json_write_fails`
+/// and `standalone::load::tests::load_alias_excludes_builtins_from_managed_trust_when_mcp_json_write_fails`
+/// — this is the third and last of the three call sites that derive
+/// `enabledMcpjsonServers` membership, now all covered by the identical
+/// regression shape.
+/// What: asserts none of the four builtin names appear in the resolved
+/// config dir's `.claude.json` `enabledMcpjsonServers` for `cwd` after a
+/// forced write failure — `prepare_managed_config` itself must still
+/// succeed (return `Some(config_dir)`), since a pin failure is non-fatal to
+/// launch.
+/// Test: itself; `prepare_managed_config_pins_all_builtins_on_success`
+/// covers the complementary non-regression case.
+#[serial_test::serial]
+#[test]
+fn prepare_managed_config_excludes_builtins_when_mcp_json_write_fails() {
+    let _home = HomeGuard::set();
+    let cwd_root = tempfile::tempdir().expect("tempdir");
+    let cwd = cwd_root.path();
+    // Force EVERY builtin injector's write to fail: `.mcp.json` is a
+    // directory, not a file — all four share this one file via
+    // `settings::inject_mcp_server`'s read-merge-write helper.
+    std::fs::create_dir_all(cwd.join(".mcp.json")).expect("mkdir .mcp.json");
+
+    let config_dir = prepare_managed_config("test-session", cwd).expect(
+        "prepare_managed_config must still resolve a config dir even when every pin write fails",
+    );
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config_dir.join(".claude.json"))
+            .expect("prepare_managed_config must write <config_dir>/.claude.json"),
+    )
+    .expect("<config_dir>/.claude.json must be valid JSON");
+    let key = cwd.to_string_lossy().to_string();
+    let enabled: Vec<&str> = value["projects"][&key]["enabledMcpjsonServers"]
+        .as_array()
+        .expect("enabledMcpjsonServers is an array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    for name in [
+        "trusty-mpm",
+        "trusty-review",
+        "trusty-memory",
+        "trusty-search",
+    ] {
+        assert!(
+            !enabled.contains(&name),
+            "{name} must not be approved when its pin write failed this run \
+             (headless resume path, no human to decline a consent dialog): {enabled:?}"
+        );
+    }
+}

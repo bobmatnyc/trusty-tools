@@ -31,6 +31,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `trusty_search_injected` fields so `standalone::load::load_alias` (the `tm
   load`/`tm run` daemon-managed driver) can read the SAME run's actual
   outcome instead of re-deriving from the manifest toggle alone.
+  `runtime::claude_code::prepare_managed_config` (the tmux daemon-spawn
+  adapter behind `RuntimeAdapter::spawn`/`spawn_resume`) now pins all four
+  builtins itself and derives trust membership from their real `Result`s
+  too — critic follow-up review found this call site reachable with ZERO
+  same-run evidence at all on the headless `spawn_resume`/`session_resume`
+  path (no `prepare_session*` call anywhere in that request's chain), the
+  sharpest case across all five instances of this vulnerability class.
 
 - **An untrusted project manifest could disable the `trusty-memory`/
   `trusty-search` force-overwrite injector while the name stayed

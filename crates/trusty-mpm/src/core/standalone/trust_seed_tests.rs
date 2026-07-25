@@ -632,7 +632,7 @@ fn test_preseed_managed_trust_legitimate_toggle_disable_is_harmless() {
     );
 }
 
-// Issue #3945 (fifth instance): the two UNCONDITIONAL builtins have no
+// Issue #3950 (fifth instance): the two UNCONDITIONAL builtins have no
 // manifest toggle, but the caller must still pass their ACTUAL per-run pin
 // result — not a hardcoded `true, true` — because the force-overwrite WRITE
 // itself can fail (disk full, permission error, transient I/O fault) even

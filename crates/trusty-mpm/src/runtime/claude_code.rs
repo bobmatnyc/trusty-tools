@@ -569,18 +569,46 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// constant (`mcp_config::BUILTIN_MANAGED_MCP_SERVERS`) instead. An earlier
 /// version of this fix derived the trust list from `cwd`'s own `.mcp.json`
 /// (which `session_launch::prepare_session` populates earlier in this call
-/// chain) — a code-critic review rejected that: `.mcp.json` is git-tracked
-/// content that arrives with a cloned repo, so trusting it unconditionally in
-/// a headless managed session (no human to decline a consent dialog) would
-/// let a hostile clone smuggle an arbitrary MCP server past approval on the
-/// very first `tm session new`. See `standalone::trust_seed`'s module doc for
-/// the corrected derivation and its security reasoning. Consequently this
-/// function has NO ordering dependency on `session_launch::prepare_session`
-/// having run for `cwd` — the trust list depends only on the framework
-/// constant and the managed config dir's own `tm mcp add` registry.
+/// chain, WHEN it has run for `cwd` in this request — see the #3950 note
+/// below for why that is not guaranteed) — a code-critic review rejected
+/// that: `.mcp.json` is git-tracked content that arrives with a cloned repo,
+/// so trusting it unconditionally in a headless managed session (no human
+/// to decline a consent dialog) would let a hostile clone smuggle an
+/// arbitrary MCP server past approval on the very first `tm session new`.
+/// See `standalone::trust_seed`'s module doc for the corrected derivation
+/// and its security reasoning.
+///
+/// **Issue #3950 (fifth instance of the name-approval/content-pinning
+/// vulnerability class) — this function now PINS the four builtins itself,
+/// rather than trusting a manifest toggle or a hardcoded `true` as proof of
+/// pinning.** This function has NO ordering dependency on
+/// `session_launch::prepare_session` having run for `cwd` — that was true
+/// before and remains true now, but for a different reason: previously the
+/// trust list was simply assumed safe regardless (a hardcoded `true` for the
+/// unconditional pair, a bare manifest-toggle read for the conditional
+/// pair); now this function does not need that earlier run to have happened
+/// because it re-runs the SAME idempotent injectors
+/// (`session_launch::inject_trusty_mpm_mcp`/`inject_trusty_review_mcp`/
+/// `inject_trusty_memory_mcp`/`inject_trusty_search_mcp`) itself and derives
+/// trust-set membership from what THEY actually returned this run. This
+/// matters because `spawn_resume` reaches this function with NO
+/// corresponding `prepare_session*` call anywhere in its own request chain
+/// (see `daemon::managed_routes::lifecycle::resume_managed`'s doc: "the
+/// broader prep pipeline … is intentionally NOT re-run here") — the
+/// headless resume path, the sharpest case across all five instances of
+/// this vulnerability class, previously asserted pinning with zero same-run
+/// evidence and never re-verified it on any subsequent resume. Each injector
+/// is idempotent (`settings::inject_mcp_server`'s own doc: "skip the write
+/// when the entry already matches"), so re-running them here on every
+/// spawn/resume is cheap and self-healing rather than wasteful: a healthy
+/// entry costs one read-and-compare, a missing/spoofed/previously-failed one
+/// gets repaired in place.
 /// Test: exercised via `spawn_sends_env_scrub_when_binary_available` and the
 /// `spawn_command`/`resume_command` config-dir tests (the command-string layer);
-/// the provisioning itself is covered in `core::managed_config`.
+/// the provisioning itself is covered in `core::managed_config`;
+/// `prepare_managed_config_excludes_builtins_when_mcp_json_write_fails` and
+/// `prepare_managed_config_pins_all_builtins_on_success` cover this
+/// function's own pin derivation directly.
 fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::PathBuf> {
     let Some(config_dir) = crate::core::trusty_tools_config::managed_claude_config_dir() else {
         // Home unresolved (stripped env): no config dir to point at. Fall back
@@ -607,45 +635,84 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
         );
     }
 
+    // Force-write the two unconditional framework builtins into `cwd`'s
+    // `.mcp.json` and track whether the write ACTUALLY succeeded this run
+    // (issue #3950) — mirroring `session_launch::prepare_session_inner`'s
+    // identical injector sequence exactly, so the trust-set membership below
+    // reflects a real per-run pin result rather than an assumed one.
+    let mpm_pinned = match crate::core::session_launch::inject_trusty_mpm_mcp(cwd) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                session = %tmux_name,
+                cwd = %cwd.display(),
+                "failed to pin trusty-mpm MCP entry (non-fatal): {e}"
+            );
+            false
+        }
+    };
+    let review_pinned = match crate::core::session_launch::inject_trusty_review_mcp(cwd) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                session = %tmux_name,
+                cwd = %cwd.display(),
+                "failed to pin trusty-review MCP entry (non-fatal): {e}"
+            );
+            false
+        }
+    };
+
     // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
     // NEVER ~/.claude.json) so the session starts without the trust/MCP dialogs.
     //
-    // Issue #3934: re-resolve whether `cwd`'s manifest currently enables the
-    // `trusty-memory`/`trusty-search` force-overwrite injectors — a pure,
-    // side-effect-free read of files `session_launch::prepare_session`
-    // already populated earlier in this call chain. `preseed_managed_trust`
-    // must never assume both are unconditionally trustworthy: a manifest that
-    // disabled one, paired with a spoofed `.mcp.json` entry the injector
-    // therefore never overwrote, must not have that name pre-approved.
-    //
-    // Known residual gap (issue #3945, filed not fixed here): this toggle
-    // re-resolution — like the pre-#3945 code for every call site — reflects
-    // whether the injector was ATTEMPTED, not whether its write actually
-    // SUCCEEDED this run, and this function has no way to observe that: it
-    // runs behind the `RuntimeAdapter` trait (also reached by `spawn_resume`,
-    // which may have no corresponding fresh `prepare_session` call in this
-    // exact request at all), a genuinely disjoint call chain from wherever
-    // `session_launch::prepare_session_with_repo_url` last ran for `cwd`
-    // — unlike `standalone::load::load_alias`, which #3945 fixed because its
-    // `prepare_session_with_repo_url` call and this trust-seed call are
-    // in the SAME function, so the actual `PrepReport` is available to
-    // thread through. Closing this call site's residual gap would need
-    // either a `RuntimeAdapter` trait signature change to carry the actual
-    // per-run pin result across that boundary, or content-verifying `cwd`'s
-    // own `.mcp.json` against the framework-controlled command at this call
-    // site directly — both larger, separately-scoped changes. The two
-    // unconditional builtins are passed `true, true` here, preserving this
-    // call site's pre-existing (unchanged, not newly introduced) behavior.
+    // Issue #3934/#3950: re-resolve whether `cwd`'s manifest currently
+    // enables the `trusty-memory`/`trusty-search` force-overwrite
+    // injectors, then — when enabled — actually RUN them here and use their
+    // real `Result`, exactly like the unconditional pair above. A toggle
+    // being on is necessary but not sufficient: the write itself can still
+    // fail (disk full, permission error, transient I/O fault), and a
+    // manifest that disabled the injector must drop the name regardless of
+    // what a stale/spoofed `.mcp.json` entry claims.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(cwd);
     let (inject_trusty_memory, inject_trusty_search) =
         crate::core::mcp_config::resolve_conditional_mcp_toggles(&fw, cwd);
+    let memory_pinned = inject_trusty_memory
+        && match crate::core::session_launch::inject_trusty_memory_mcp(cwd, None) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    session = %tmux_name,
+                    cwd = %cwd.display(),
+                    "failed to pin trusty-memory MCP entry (non-fatal): {e}"
+                );
+                false
+            }
+        };
+    let search_pinned = inject_trusty_search && {
+        // Same index-lookup-then-pin sequence `session_launch` itself uses
+        // (`register_project_index` finds-or-creates the project's trusty-search
+        // index; best-effort, daemon-unreachable handled internally, never fails).
+        let pinned_index = crate::core::session_launch::register_project_index(cwd);
+        match crate::core::session_launch::inject_trusty_search_mcp(cwd, pinned_index.as_deref()) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    session = %tmux_name,
+                    cwd = %cwd.display(),
+                    "failed to pin trusty-search MCP entry (non-fatal): {e}"
+                );
+                false
+            }
+        }
+    };
     if let Err(e) = crate::core::standalone::preseed_managed_trust(
         &config_dir,
         cwd,
-        true,
-        true,
-        inject_trusty_memory,
-        inject_trusty_search,
+        mpm_pinned,
+        review_pinned,
+        memory_pinned,
+        search_pinned,
     ) {
         tracing::warn!(
             session = %tmux_name,

@@ -77,7 +77,7 @@ pub const BUILTIN_MANAGED_MCP_SERVERS: &[&str] = &[
 /// framework-controlled command — see that function's security doc. These two
 /// names have no manifest escape hatch (unlike the conditional pair, they
 /// cannot be individually disabled), but the FORCE-OVERWRITE ITSELF can still
-/// fail (disk full, permission error, transient I/O fault — issue #3945, the
+/// fail (disk full, permission error, transient I/O fault — issue #3950, the
 /// fifth instance of this vulnerability class). [`managed_mcp_server_names`]
 /// therefore takes each name's actual per-run pin result as an explicit
 /// caller-supplied bool (`trusty_mpm_pinned` / `trusty_review_pinned`)
@@ -383,7 +383,7 @@ pub fn list_servers(config_dir: &Path) -> Result<Map<String, Value>> {
 /// SAME `prepare_session` run, or a fresh [`resolve_conditional_mcp_toggles`]
 /// call when no such plan is in scope.
 ///
-/// **Security (issue #3945 — fifth instance of this vulnerability class):**
+/// **Security (issue #3950 — fifth instance of this vulnerability class):**
 /// a `true` toggle is necessary but NOT sufficient — the force-overwrite
 /// injector for that name must have actually SUCCEEDED this run (or, for a
 /// caller with no fresh injector result in scope, the best available proxy
@@ -402,7 +402,7 @@ pub fn list_servers(config_dir: &Path) -> Result<Map<String, Value>> {
 /// `managed_mcp_server_names_defaults_to_builtin`,
 /// `managed_mcp_server_names_excludes_disabled_conditional_builtins`,
 /// `managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed`
-/// (issue #3945 regression).
+/// (issue #3950 regression).
 pub fn managed_mcp_server_names(
     config: &Value,
     trusty_mpm_pinned: bool,
@@ -543,7 +543,7 @@ pub fn mcp_server_names(workspace: &Path) -> Vec<String> {
 /// manifest that disables the force-overwrite injector reopens the
 /// name-squatting exploit [`CONDITIONAL_BUILTIN_MCP_SERVERS`] documents.
 ///
-/// **Issue #3945 (fifth instance):** ALL FOUR parameters must reflect actual
+/// **Issue #3950 (fifth instance):** ALL FOUR parameters must reflect actual
 /// per-run pin success, not merely "the injector was attempted" — see
 /// [`managed_mcp_server_names`]'s doc. The production call site
 /// (`session_launch::mod::prepare_session_inner`) derives all four from the
@@ -587,7 +587,7 @@ pub fn launch_trusted_mcp_names(
 /// What: reads `config_dir` via [`list_servers`] (quarantines a malformed
 /// file, empty map when absent or unreadable — never fails) and returns
 /// [`managed_mcp_server_names`] over the resulting `{"mcpServers": ...}`
-/// value, gated by all four `_pinned` flags (issues #3934/#3945 — see
+/// value, gated by all four `_pinned` flags (issues #3934/#3950 — see
 /// [`launch_trusted_mcp_names`]'s doc).
 /// Test: `launch_trusted_mcp_names_from_unions_registry`,
 /// `launch_trusted_mcp_names_from_defaults_to_builtin_when_absent`,

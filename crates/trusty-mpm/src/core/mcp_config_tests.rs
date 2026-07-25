@@ -8,7 +8,7 @@
 //! [`super::launch_trusted_mcp_names_from`], and
 //! [`super::resolve_conditional_mcp_toggles`] — including the issue #3934
 //! regression (a conditional builtin must drop out of the trust list when its
-//! injector toggle is off) and the issue #3945 regression (either builtin —
+//! injector toggle is off) and the issue #3950 regression (either builtin —
 //! conditional OR unconditional — must drop out when its pin write fails,
 //! not merely when a toggle is off).
 //! Test: this file IS the test module.
@@ -287,7 +287,7 @@ fn managed_mcp_server_names_excludes_disabled_conditional_builtins() {
 
 #[test]
 fn managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed() {
-    // Issue #3945 (fifth instance): the two UNCONDITIONAL builtins
+    // Issue #3950 (fifth instance): the two UNCONDITIONAL builtins
     // (`trusty-mpm`/`trusty-review`) have no manifest toggle, but their
     // force-overwrite WRITE can still fail (disk full, permission error,
     // transient I/O fault). Before this fix `managed_mcp_server_names` had
@@ -436,7 +436,7 @@ fn launch_trusted_mcp_names_from_excludes_disabled_conditional_builtins() {
 
 #[test]
 fn launch_trusted_mcp_names_from_excludes_unconditional_builtin_when_pin_failed() {
-    // Issue #3945 (fifth instance): mirrors
+    // Issue #3950 (fifth instance): mirrors
     // `managed_mcp_server_names_excludes_unconditional_builtin_when_pin_failed`
     // one layer up — a failed `trusty-mpm`/`trusty-review` pin write must
     // drop the name from the interactive-path trust derivation too.

@@ -42,7 +42,7 @@
 //! full exploit). [`preseed_managed_trust`] takes the resolved toggle values
 //! as explicit parameters instead of assuming them.
 //!
-//! **Security note (issue #3945 follow-up — fifth instance):** a toggle
+//! **Security note (issue #3950 follow-up — fifth instance):** a toggle
 //! being on is necessary but not sufficient — the force-overwrite injector's
 //! WRITE can itself fail (disk full, permission error, transient I/O fault)
 //! while a spoofed or stale `.mcp.json` entry is already present, in which
@@ -67,7 +67,7 @@
 //!   `test_preseed_managed_trust_legitimate_toggle_disable_is_harmless`
 //!   (#3934 — legitimate operator toggle still launches cleanly),
 //!   `test_preseed_managed_trust_excludes_unconditional_builtin_when_pin_failed`
-//!   (#3945 regression — write-failure reproduction).
+//!   (#3950 regression — write-failure reproduction).
 
 use std::path::Path;
 
@@ -102,14 +102,14 @@ use crate::core::mcp_config::managed_mcp_server_names;
 /// `projects.<workspace>` trust key.
 ///
 /// **`trusty_mpm_pinned` / `trusty_review_pinned` / `trusty_memory_pinned` /
-/// `trusty_search_pinned` (issues #3934/#3945):** each MUST reflect whether
+/// `trusty_search_pinned` (issues #3934/#3950):** each MUST reflect whether
 /// that name's force-overwrite injector actually SUCCEEDED writing the
 /// framework-controlled entry for `workspace` this run — not merely that its
 /// manifest toggle (where one exists) was on. Passing a hardcoded
 /// `true, true, true, true` reopens the exact vulnerability these parameters
 /// close: a manifest that disabled a conditional injector, OR a write that
 /// failed for any of the four (disk full, permission error, transient I/O
-/// fault — issue #3945, the fifth instance of this class), would then have
+/// fault — issue #3950, the fifth instance of this class), would then have
 /// its (possibly attacker-spoofed) `.mcp.json` entry pre-approved anyway.
 /// [`super::load::load_alias`] derives all four from the
 /// [`crate::core::session_launch::PrepReport`] the SAME run's
@@ -124,7 +124,7 @@ use crate::core::mcp_config::managed_mcp_server_names;
 ///   `test_preseed_managed_trust_quarantines_malformed_json`,
 ///   `test_preseed_managed_trust_excludes_conditional_builtin_when_toggle_off`,
 ///   `test_preseed_managed_trust_excludes_unconditional_builtin_when_pin_failed`
-///   (issue #3945 regression).
+///   (issue #3950 regression).
 pub fn preseed_managed_trust(
     claude_config_dir: &Path,
     workspace: &Path,
@@ -188,7 +188,7 @@ pub fn preseed_managed_trust(
     // Build the expected enabledMcpjsonServers list from the two
     // unconditional framework builtins and the two conditional builtins,
     // EACH gated by whether its injector actually pinned the entry this run
-    // (issues #3934/#3945), UNION the operator's own `tm mcp add` registry —
+    // (issues #3934/#3950), UNION the operator's own `tm mcp add` registry —
     // computed from the immutable config BEFORE the mutable navigation below
     // borrows it. Deliberately NOT derived from `workspace`'s own
     // `.mcp.json` — see the module doc's security note (issue #3918
