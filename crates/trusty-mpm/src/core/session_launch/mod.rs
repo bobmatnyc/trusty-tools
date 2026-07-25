@@ -64,6 +64,13 @@ mod tests_mcp_trust_seed_e2e;
 #[cfg(test)]
 #[path = "tests_launch_trust_3926.rs"]
 mod tests_launch_trust_3926;
+// Issue #3934 — e2e coverage for the manifest-toggle name-squatting fix
+// (the `[mcp]` toggle disabling trusty-memory/trusty-search's force-overwrite
+// injector reopened the #3926/#3918 exploit class), mirroring the
+// `tests_launch_trust_3926.rs` split pattern immediately above.
+#[cfg(test)]
+#[path = "tests_manifest_toggle_trust_3934.rs"]
+mod tests_manifest_toggle_trust_3934;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -740,25 +747,36 @@ fn prepare_session_inner(
     // by reading the workspace's own `.mcp.json` (that file is git-tracked and
     // travels WITH a cloned repo — see `mcp_config::mcp_server_names`'s
     // SECURITY doc for the vulnerability this closes). `launch_trusted_mcp_names`
-    // returns the framework builtin four (force-overwritten to their canonical
-    // entry by the injectors above, every run) UNION the operator's own `tm
-    // mcp add` registry (also force-overwritten above, by the native/custom
-    // injectors, whenever a registry name matches) — provenance the operator
-    // or the framework controls, mirroring `mcp_config::managed_mcp_server_names`'s
-    // already-fixed derivation for the daemon-managed path (#3918/#3924).
-    // `project_scope_mcp_names` is then subtracted (issue #2739's existing
-    // defense-in-depth, preserved unchanged): a project-scope `[mcp.custom]`
-    // entry ships with the cloned repo itself, so it still surfaces Claude
-    // Code's "new MCP servers found" consent dialog even after `tm project
-    // trust` — see `session_launch::custom_mcp`'s "Consent gate" docs. A name
-    // that reaches neither source — e.g. one a cloned repo merely committed
-    // to `.mcp.json` directly — now correctly falls through to that same
-    // dialog instead of being silently pre-approved. Non-fatal: a trust-seed
-    // failure only means the operator may see the dialog.
-    let trusted_mcp_names: BTreeSet<String> = crate::core::mcp_config::launch_trusted_mcp_names()
-        .into_iter()
-        .filter(|name| !project_scope_mcp_names.contains(name))
-        .collect();
+    // returns the two unconditional framework builtins (force-overwritten to
+    // their canonical entry by the injectors above, every run) UNION the two
+    // conditional builtins ONLY when `plan.inject_trusty_memory`/
+    // `inject_trusty_search` are true THIS run (issue #3934 — passing a
+    // hardcoded "always trust" here is exactly the vulnerability: a manifest
+    // that disables the force-overwrite injector above must also drop the
+    // name from this approval list, or a spoofed `.mcp.json` entry surviving
+    // that disabled injector gets pre-approved anyway) UNION the operator's
+    // own `tm mcp add` registry (also force-overwritten above, by the
+    // native/custom injectors, whenever a registry name matches) —
+    // provenance the operator or the framework controls, mirroring
+    // `mcp_config::managed_mcp_server_names`'s already-fixed derivation for
+    // the daemon-managed path (#3918/#3924). `project_scope_mcp_names` is
+    // then subtracted (issue #2739's existing defense-in-depth, preserved
+    // unchanged): a project-scope `[mcp.custom]` entry ships with the cloned
+    // repo itself, so it still surfaces Claude Code's "new MCP servers
+    // found" consent dialog even after `tm project trust` — see
+    // `session_launch::custom_mcp`'s "Consent gate" docs. A name that
+    // reaches neither source — e.g. one a cloned repo merely committed to
+    // `.mcp.json` directly, or a conditional builtin whose injector was
+    // disabled — now correctly falls through to that same dialog instead of
+    // being silently pre-approved. Non-fatal: a trust-seed failure only
+    // means the operator may see the dialog.
+    let trusted_mcp_names: BTreeSet<String> = crate::core::mcp_config::launch_trusted_mcp_names(
+        plan.inject_trusty_memory,
+        plan.inject_trusty_search,
+    )
+    .into_iter()
+    .filter(|name| !project_scope_mcp_names.contains(name))
+    .collect();
     if let Err(err) = preseed_workspace_trust_home(project_dir, &trusted_mcp_names) {
         tracing::warn!("failed to pre-seed workspace trust: {err}");
     }

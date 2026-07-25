@@ -540,7 +540,7 @@ fn inject_native_trust_preseed_covers_injected() {
 
     inject_native_trusty_mcps_from(&workspace, cfg.path()).expect("injection succeeds");
     let trusted: BTreeSet<String> =
-        crate::core::mcp_config::launch_trusted_mcp_names_from(cfg.path())
+        crate::core::mcp_config::launch_trusted_mcp_names_from(cfg.path(), true, true)
             .into_iter()
             .collect();
     preseed_workspace_trust(&claude_json, &workspace, &trusted).expect("trust preseed succeeds");

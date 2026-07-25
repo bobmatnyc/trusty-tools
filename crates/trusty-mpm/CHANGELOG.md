@@ -9,6 +9,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **An untrusted project manifest could disable the `trusty-memory`/
+  `trusty-search` force-overwrite injector while the name stayed
+  pre-approved, reopening builtin-name-squatting** (closes
+  [#3934](https://github.com/bobmatnyc/trusty-tools/issues/3934)):
+  `mcp_config::managed_mcp_server_names`/`launch_trusted_mcp_names` trusted
+  the two conditionally-injected builtins unconditionally, on the assumption
+  their force-overwrite injector always ran. That assumption was controlled
+  by the manifest's `[mcp] trusty_memory`/`trusty_search` toggle — untrusted,
+  project-scope, cloned-with-the-repo content, unlike `[mcp.custom]` (gated
+  by `is_project_trusted` since #2739). Combining a manifest that disabled
+  the injector with a spoofed `.mcp.json` entry under the same name left the
+  attacker's command pre-approved with no human present to decline it
+  (empirically confirmed while attack-testing
+  [#3940](https://github.com/bobmatnyc/trusty-tools/pull/3940)). Trust-set
+  membership for `trusty-memory`/`trusty-search` is now CONDITIONAL on the
+  toggle actually being on for the workspace this run — the tm-launch path
+  reads the already-resolved `HarnessPlan` in memory, and the two
+  daemon-managed callers re-resolve it via the new
+  `mcp_config::resolve_conditional_mcp_toggles` (a pure, side-effect-free
+  re-read of the same manifest layering). A disabled injector now correctly
+  drops the name from `enabledMcpjsonServers` instead of leaving it approved
+  with unverified content behind it; a legitimate operator toggle still
+  launches cleanly. Completes the vulnerability-class lineage started by
+  [#3918](https://github.com/bobmatnyc/trusty-tools/issues/3918)/[#3924](https://github.com/bobmatnyc/trusty-tools/pull/3924)/[#3926](https://github.com/bobmatnyc/trusty-tools/issues/3926).
+
 - **`tm launch` no longer auto-trusts every MCP server name a repo's
   committed `.mcp.json` declares** (closes [#3926](https://github.com/bobmatnyc/trusty-tools/issues/3926)):
   `preseed_workspace_trust` derived `enabledMcpjsonServers` from the raw key

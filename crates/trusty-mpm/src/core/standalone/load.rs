@@ -95,11 +95,30 @@ pub fn load_alias(
     run_prepare_session(&repo_dir, Some(&url), managed_root)?;
     write_marker(&repo_dir, alias, &url, &git_ref, claude_config_dir)?;
 
+    // Issue #3934: re-resolve the SAME manifest layering `run_prepare_session`
+    // (via `prepare_session_with_repo_url`) just used to decide whether to
+    // force-overwrite the `trusty-memory`/`trusty-search` `.mcp.json` entries.
+    // This is a pure, side-effect-free re-read (no I/O beyond parsing files
+    // already on disk), so calling it again here — after the injectors have
+    // already run — cannot diverge from what actually happened above. Passing
+    // a hardcoded `true, true` to the trust-seed call below would reopen the
+    // exact vulnerability this fixes: a manifest disabling the injector, paired
+    // with a spoofed `.mcp.json` entry, would then get the name pre-approved
+    // with unverified content behind it.
+    let fw = crate::core::paths::FrameworkPaths::for_managed_project(managed_root, &repo_dir);
+    let (inject_trusty_memory, inject_trusty_search) =
+        crate::core::mcp_config::resolve_conditional_mcp_toggles(&fw, &repo_dir);
+
     // WI-3 sub-parts 2+3: pre-seed project trust + MCP-server approval into
     // <claude_config_dir>/.claude.json so managed sessions start without dialogs.
     // Writes ONLY to <claude_config_dir>/.claude.json — never to ~/.claude.json.
     // Non-fatal: a seed failure only means the operator may see the trust dialog.
-    if let Err(err) = super::trust_seed::preseed_managed_trust(claude_config_dir, &repo_dir) {
+    if let Err(err) = super::trust_seed::preseed_managed_trust(
+        claude_config_dir,
+        &repo_dir,
+        inject_trusty_memory,
+        inject_trusty_search,
+    ) {
         tracing::warn!("failed to pre-seed managed trust for '{alias}': {err}");
     }
 

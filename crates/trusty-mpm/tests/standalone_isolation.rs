@@ -129,7 +129,8 @@ fn full_assembly_writes_nothing_to_real_home() {
     ensure_global_config_dir(&managed_root, &claude_config)
         .expect("ensure_global_config_dir must not fail");
     ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks must not fail");
-    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&claude_config, &workspace, true, true)
+        .expect("preseed_managed_trust must not fail");
 
     // --- Positive assertion: output must exist inside claude_config ---
     assert!(
@@ -309,7 +310,8 @@ fn trust_seed_sets_trust_and_mcp_servers() {
     let workspace = tmp.path().join("projects").join("my-repo");
     std::fs::create_dir_all(&workspace).expect("create workspace");
 
-    preseed_managed_trust(&cfg, &workspace).expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&cfg, &workspace, true, true)
+        .expect("preseed_managed_trust must not fail");
 
     let text = std::fs::read_to_string(cfg.join(".claude.json"))
         .expect(".claude.json must exist after preseed_managed_trust");
@@ -377,7 +379,8 @@ fn trust_seed_does_not_land_in_workspace() {
     let workspace = tmp.path().join("my-workspace");
     std::fs::create_dir_all(&workspace).expect("create workspace");
 
-    preseed_managed_trust(&cfg, &workspace).expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&cfg, &workspace, true, true)
+        .expect("preseed_managed_trust must not fail");
 
     assert!(
         !workspace.join(".claude.json").exists(),
@@ -510,7 +513,8 @@ fn ide_attach_boundary_config_dir_vs_workspace() {
 
     ensure_global_config_dir(&managed_root, &cfg).expect("ensure_global_config_dir must not fail");
     ensure_managed_hooks(&cfg).expect("ensure_managed_hooks must not fail");
-    preseed_managed_trust(&cfg, &workspace).expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&cfg, &workspace, true, true)
+        .expect("preseed_managed_trust must not fail");
 
     // (a) Managed config dir must have the hook triad in settings.json.
     let settings_text = std::fs::read_to_string(cfg.join("settings.json"))
@@ -587,7 +591,8 @@ fn teardown_leaves_no_stray_artifacts_outside_temp_roots() {
     ensure_global_config_dir(&managed_root, &claude_config)
         .expect("ensure_global_config_dir must not fail");
     ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks must not fail");
-    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&claude_config, &workspace, true, true)
+        .expect("preseed_managed_trust must not fail");
 
     // Verify no writes leaked to fake home.
     assert_no_real_claude_writes(fake_home.path());
@@ -815,7 +820,8 @@ fn regression_guard_version_capture_and_isolation_invariant() {
     ensure_global_config_dir(&managed_root, &claude_config)
         .expect("ensure_global_config_dir must not fail");
     ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks must not fail");
-    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust must not fail");
+    preseed_managed_trust(&claude_config, &workspace, true, true)
+        .expect("preseed_managed_trust must not fail");
 
     // Step 3: isolation assertions.
     // If any of these panic the message names the exact violating path,
@@ -881,7 +887,7 @@ fn regression_guard_config_write_paths_never_escape_to_home() {
     // Run every public config-assembly entry point.
     ensure_global_config_dir(&managed_root, &claude_config).expect("ensure_global_config_dir");
     ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks");
-    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust");
+    preseed_managed_trust(&claude_config, &workspace, true, true).expect("preseed_managed_trust");
 
     // All writes must be confined to claude_config (or managed_root).
     // None must escape to fake_home.
