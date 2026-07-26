@@ -17,9 +17,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   normally landed first — up to a poll interval ahead — wiping freshly streamed
   prose mid-read. `session_done` now stays off the web bus entirely (its status
   bookkeeping already flowed through the workflow store and the Events log), so
-  a task's narrative has exactly one emitter per transport. As a side effect, a
-  foreign session finishing mid-turn — the `/api/events` stream is a
-  process-wide broadcast — no longer clears this tab's spinner.
+  a task's narrative has exactly one emitter per transport. Two consequences,
+  both deliberate: a foreign session finishing mid-turn — the `/api/events`
+  stream is a process-wide broadcast — no longer clears this tab's spinner; and
+  the spinner now stops on the poll-driven completion rather than on the SSE
+  event, so it runs up to one poll interval longer (250ms for the first ~5s of
+  a turn, 500ms after). That bound is the price of a single narrative emitter
+  and errs the safe way — a spinner that over-runs reads as "still working",
+  where stopping early reads as "done" over text that has not arrived.
 
 - **Streamed chat turns now send the same sampling parameters as the blocking
   path** (issue #3758): `llm::stream::stream_reply` built its

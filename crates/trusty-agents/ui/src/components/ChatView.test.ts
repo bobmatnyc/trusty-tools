@@ -51,6 +51,11 @@ function bubbleText(): string {
   return paras.map((p) => p.textContent ?? '').join('\n');
 }
 
+/** Whether the "Assistant is responding" spinner is on screen (`$isRunning`). */
+function spinnerVisible(): boolean {
+  return target.querySelector('[role="status"]') !== null;
+}
+
 /** Settle Svelte's render queue so `bubbleText()` reflects the last emit. */
 async function rendered(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -110,10 +115,25 @@ describe('task-complete race (#3759)', () => {
     expect(bubbleText()).toContain(STREAMED);
     expect(bubbleText()).not.toContain('(no narrative)');
 
+    // ACCEPTED, BOUNDED TIMING TRADE-OFF (#3759 code-critic MEDIUM-1) — pinned
+    // deliberately, not incidental. The spinner used to stop on `session_done`;
+    // it now stops only when the poll-driven `task-complete` fires, so it keeps
+    // spinning across this gap: at most one poll interval (250ms for the first
+    // 20 polls, then 500ms — `transport.ts::pollIntervalMs`). That is the price
+    // of a single narrative emitter, and it errs the safe way (a spinner that
+    // over-runs by 250ms reads as "still working", where stopping early reads
+    // as "done" over text that has not arrived). This assertion exists so a
+    // future change cannot silently WIDEN the gap — if the spinner starts
+    // outliving the poll result, the next assertion fails.
+    expect(spinnerVisible()).toBe(true);
+
     pollComplete();
     await rendered();
 
     expect(bubbleText()).toContain(REAL);
+    // The gap closes here, and nowhere later: completion still stops the
+    // spinner in exactly one place.
+    expect(spinnerVisible()).toBe(false);
   });
 
   it('real narrative first: a following session_done does not overwrite it', async () => {
@@ -144,7 +164,7 @@ describe('task-complete race (#3759)', () => {
     await rendered();
 
     expect(bubbleText()).toContain(STREAMED);
-    expect(target.querySelector('[role="status"]')).not.toBeNull();
+    expect(spinnerVisible()).toBe(true);
   });
 
   it('an empty narrative from the authoritative emitter is still reported', async () => {
