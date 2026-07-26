@@ -9,6 +9,86 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Skill-wrapping runtime — one named skill per tool (#3933, DOC-57 §5, epic
+  #3931):** a skill had no binding to the tool it described. `web-search.md`
+  documented `web_search` while `[tools].allow` granted it separately, so
+  deleting either half left the other silently lying. Skills now wrap tools 1:1
+  (owner decision 2026-07-25, resolving DOC-57 OQ-2), each with a human,
+  provider-recognisable name — `get_train_schedule` is "MTA Train Time",
+  `search_gmail_messages` is "Gmail Search". Ships a compile-time catalog of
+  ~180 rows covering every in-process tool plus the Google Workspace surface and
+  the platform tools the checked-in roster grants, three deliberately tool-less
+  skills (guidance with no executable member, which the owner's model admits
+  explicitly), and a coverage test that FAILS when a tool is added without a
+  skill — that failure is the mechanism, not a nuisance.
+- **`[skills].allow` in `agent.toml`:** a list of skill ids that compiles down to
+  the exact tool names it wraps and is UNIONED with `[tools].allow`, so adding a
+  `[skills]` line can never remove a capability the agent already had. The
+  compiled list feeds the EXISTING `filter_persona_tool_names` gate on the
+  persona-chat path and the existing `scope_assistant_allowed_tools` gate on the
+  `--direct`/subprocess path — no enforcement moved, so the RBAC tier filter, the
+  scope gate, and `persona_allowed_tools`'s never-`None` behaviour are untouched.
+  An unknown skill id expands to zero tools and is reported, never to "all
+  tools": resolution can narrow capability, never widen it. Union-merged across
+  `extends`, matching `[tools].allow`.
+- **`GET /api/agents/:name/skills`:** the agent's resolved capability set — every
+  catalog skill with a `granted` flag computed by the same matcher dispatch uses,
+  the one tool it wraps, its provider requirement, `unresolved[]` for dangling
+  skill ids, and `unmatched_patterns[]` for allow-globs no catalog skill claims
+  (reported with the honest reason that they may still resolve to a live-
+  discovered MCP tool). Read-only; editing arrives as `PATCH { skills_allow }`.
+- **`tools:` / `kind:` / `display_name:` in skill frontmatter:** an authored
+  `.md` in any skill source can now bind itself to the tool it documents and
+  supersede the built-in row. `.trusty-agents/skills/web-search.md` is the
+  migration exemplar. `name` is deliberately unchanged there — it is the key the
+  prompt-injection registry indexes by, so renaming it would break
+  `load_skill("web-search")`; `display_name` carries the pane's name instead, and
+  the built-in row's credential requirement is inherited rather than dropped.
+
+### Security
+
+- **A skill manifest can no longer launder a wildcard tool grant (#3933):**
+  `tools:` entries in an authored `.md` were taken verbatim and merged into the
+  patterns `match_any_glob` consumes, which reads a trailing `*` as a prefix
+  wildcard. A skill file declaring `tools: ["*"]` — ordinary content in any
+  skill source, not reviewed like `agent.toml` — would therefore let one
+  innocuous `[skills].allow` id carry `[tools].allow = ["*"]` authority behind a
+  card rendering as a single narrow capability. That is strictly worse than the
+  raw glob it replaces, because the reviewer reading `agent.toml` sees a tidy
+  skill id and no wildcard at all. DOC-57 S-1 already required exact names;
+  nothing enforced it. Glob metacharacters (`*`, `?`, `[`, `]`), empty names and
+  padded names are now rejected at three independent layers — manifest parse,
+  catalog insert, and expansion — and a manifest with any invalid entry is
+  dropped whole (loudly logged) rather than silently narrowed to its valid half.
+  Found by code-critic on PR #3964; mutation-verified.
+
+### Fixed
+
+- **`GET /api/agents/:name/skills` read a narrower catalog than dispatch
+  (#3933):** the route built a built-in-only catalog while both dispatch paths
+  built built-in + authored, so an authored-only skill id was reported to the
+  user as a dangling `unresolved[]` reference even though it resolved and
+  granted at runtime, and authored overrides (`web-search.md`'s name) never
+  reached the pane. The route now builds the catalog exactly as dispatch does.
+- **Skill-source precedence was silently inverted (#3933):**
+  `skills/sources/mod.rs` documents "higher-priority sources scanned first,
+  first writer wins", but the authored-overlay loop let a later (lower-priority)
+  manifest evict an earlier (higher-priority) one. Conflicts now displace only
+  built-in rows, so among authored manifests the first source wins while
+  authored still beats built-in.
+
+### Changed
+
+- **Skills pane renders resolved capability instead of glob prefixes (#3933):**
+  #3932's placeholder grouped `[tools].allow` by the substring before the first
+  `_` and badged every card `synthetic`. It was honest about being a guess, but
+  it showed the user prefix fragments and could not say whether anything
+  resolved. The pane now reads `GET …/skills`: human-named cards grouped by kind,
+  each showing the single tool it wraps and its credential state. A credential
+  reads CONFIGURED only when an environment variable actually resolved; an OAuth
+  grant reads "not verified" rather than a green chip nobody checked. The
+  client-side `synthesizeSkills` derivation is removed with its tests.
+
 - **OKG ingestion feeds the bound search index (#3892, remediation (a)):** an
   `okg_ingest_*` call used to write markdown into the KB tree and stop there,
   while `vector_search` queried an index built over an unrelated root — so an

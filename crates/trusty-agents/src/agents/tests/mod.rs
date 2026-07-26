@@ -392,6 +392,68 @@ allow = ["mcp_*", "git_log", "git_status"]
 }
 
 #[test]
+fn skills_config_parses_allow() {
+    // `[skills] allow = [...]` (#3933) — capability grants by skill id, parsed
+    // alongside `[tools].allow` rather than replacing it. The two are unioned
+    // downstream by `skills::manifest::effective_tool_patterns`; here we only
+    // pin that BOTH survive deserialization independently, since a `[skills]`
+    // table that silently swallowed `[tools]` would be the migration hazard
+    // DOC-57 §9.3 exists to prevent.
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+
+[tools]
+allow = ["git_log"]
+
+[skills]
+allow = ["mta-train-time", "handoff-protocol"]
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert_eq!(
+        cfg.skills.allow.expect("skills.allow present"),
+        vec!["mta-train-time".to_string(), "handoff-protocol".to_string()]
+    );
+    assert_eq!(
+        cfg.tools.allow.expect("tools.allow present"),
+        vec!["git_log".to_string()]
+    );
+}
+
+#[test]
+fn skills_config_absent_is_none_not_empty() {
+    // The distinction matters: `None` means "no skill grants declared", which
+    // leaves `[tools].allow` as the sole source and keeps behaviour byte-
+    // identical to pre-#3933. `Some(vec![])` would mean "grants no skills".
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert!(cfg.skills.allow.is_none());
+}
+
+#[test]
 fn skills_section_is_ignored_gracefully() {
     // MIN-8 (#105): The `[skills]` section was removed because it was
     // never consumed. Existing TOMLs in the wild may still contain the

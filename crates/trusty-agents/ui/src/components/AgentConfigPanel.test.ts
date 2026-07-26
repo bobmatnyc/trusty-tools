@@ -38,6 +38,57 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 
 const PERSONA = 'You are Izzie.\n'.repeat(300);
 
+/**
+ * `GET /api/agents/:name/skills` (#3933) — one skill per tool, human-named.
+ * Mirrors the real route's shape so the pane test exercises the same parse the
+ * sidecar feeds it.
+ */
+const SKILLS_PAYLOAD = {
+  skills: [
+    {
+      id: 'git-history',
+      name: 'Git Commit History',
+      description: 'Read recent commits with author, date and subject.',
+      kind: 'action',
+      origin: { kind: 'builtin' },
+      granted: true,
+      tools: ['git_log'],
+      provider: null,
+    },
+    {
+      id: 'knowledge-search',
+      name: 'Knowledge Search',
+      description: "Search this agent's bound knowledge store.",
+      kind: 'knowledge',
+      origin: { kind: 'builtin' },
+      granted: true,
+      tools: ['vector_search'],
+      provider: null,
+    },
+    {
+      id: 'gmail-search',
+      name: 'Gmail Search',
+      description: 'Find messages in Gmail using Gmail query syntax.',
+      kind: 'action',
+      origin: { kind: 'builtin' },
+      granted: false,
+      tools: ['search_gmail_messages'],
+      provider: {
+        provider: 'Google Workspace',
+        requirement: 'An authorized Google account profile.',
+        env_var: null,
+        configured: null,
+      },
+    },
+  ],
+  granted_count: 2,
+  unresolved: [],
+  unmatched_patterns: [
+    { pattern: 'gworkspace_*', reason: 'may resolve to an MCP tool at dispatch time' },
+  ],
+  declares_capability: true,
+};
+
 function stubApi() {
   vi.stubGlobal(
     'fetch',
@@ -45,7 +96,9 @@ function stubApi() {
       const url = String(input);
       const json = url.includes('/persona')
         ? { content: PERSONA, editable: true }
-        : url.includes('/stores')
+        : url.includes('/skills')
+          ? SKILLS_PAYLOAD
+          : url.includes('/stores')
           ? { stores: [{ name: 'izzie-kb', tree: 'okg://izzie', index: 'izzie', connected: true }], issues: [] }
           : {
               name: 'izzie',
@@ -71,7 +124,15 @@ function stubBareApiWithFailingStores() {
       if (url.includes('/stores')) return { ok: false, status: 503, json: async () => ({}) } as Response;
       const json = url.includes('/persona')
         ? { content: '', editable: false }
-        : { name: 'bare', display_name: 'Bare', tools_allow: [], scopes: [] };
+        : url.includes('/skills')
+          ? {
+              skills: [],
+              granted_count: 0,
+              unresolved: [],
+              unmatched_patterns: [],
+              declares_capability: false,
+            }
+          : { name: 'bare', display_name: 'Bare', tools_allow: [], scopes: [] };
       return { ok: true, status: 200, json: async () => json } as Response;
     }),
   );
@@ -227,13 +288,16 @@ describe('AgentConfigPanel — five sections (#3932, DOC-57 §8.2)', () => {
     expect(target.textContent).toContain('vector_search');
     expect(target.textContent).toContain('trusty-memory');
 
-    // Skills replaced the raw-glob textarea with cards (G-3), grouped by tool
-    // prefix (S-8) and badged synthetic (S-10).
+    // Skills renders RESOLVED capability (#3933): one human-named card per
+    // granted tool, kind-grouped, with the ungranted remainder counted rather
+    // than listed.
     tabButton('Skills').click();
-    await waitFor(() => target.textContent?.includes('gworkspace') ?? false);
+    await waitFor(() => target.textContent?.includes('Git Commit History') ?? false);
     expect(target.querySelector('textarea')).toBeNull();
-    expect(target.textContent).toContain('git');
-    expect(target.textContent).toContain('synthetic');
+    expect(target.textContent).toContain('git_log');
+    expect(target.textContent).toContain('Knowledge Search');
+    expect(target.textContent).not.toContain('Gmail Search');
+    expect(target.textContent).toContain('2 of 3 known skills granted');
 
     tabButton('Listeners').click();
     await waitFor(() => target.textContent?.includes('Gmail') ?? false);
@@ -276,7 +340,7 @@ describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
     expect(target.textContent).toContain('disabled');
 
     tabButton('Skills').click();
-    await waitFor(() => target.textContent?.includes('declares no') ?? false);
+    await waitFor(() => target.textContent?.includes('declares neither') ?? false);
     // An absent allow-list denies; the pane must not read as "unrestricted".
     expect(target.textContent).toContain('not "unrestricted"');
 

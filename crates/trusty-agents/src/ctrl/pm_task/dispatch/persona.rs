@@ -268,8 +268,35 @@ pub async fn run_pm_task_with_persona(
     )
     .await;
 
+    // #3933: compile `[skills].allow` down to exact tool names and UNION them
+    // with `[tools].allow` before the gate below. This is a resolver in front
+    // of the enforcement path, not a change to it — `patterns` still feeds the
+    // same `filter_persona_tool_names` call it always did, so the RBAC tier
+    // filter, the scope gate and `persona_allowed_tools`'s never-`None`
+    // behaviour are untouched. With no `[skills]` section the returned value is
+    // `persona_cfg.tools.allow` verbatim, which is why this is invisible to
+    // every existing agent. A dangling skill id resolves to nothing and is
+    // logged here rather than silently dropped (DOC-57 S-11).
+    let skill_catalog = crate::skills::manifest::SkillCatalog::builtin().with_authored(
+        crate::skills::manifest::authored::load_from_paths(
+            &crate::skills::sources::SkillSourceRegistry::load(project_path).resolved_paths(),
+        ),
+    );
+    let (effective_patterns, unresolved_skills) = crate::skills::manifest::effective_tool_patterns(
+        persona_cfg.tools.allow.as_ref(),
+        persona_cfg.skills.allow.as_ref(),
+        &skill_catalog,
+    );
+    if !unresolved_skills.is_empty() {
+        tracing::warn!(
+            persona = %persona_name,
+            unresolved = ?unresolved_skills,
+            "[skills].allow names skills that resolved to nothing; they grant no tools"
+        );
+    }
+
     let (persona_registry, persona_tool_names): (ToolRegistry, Vec<String>) =
-        if let Some(patterns) = persona_cfg.tools.allow.clone() {
+        if let Some(patterns) = effective_patterns {
             let mut registry = ToolRegistry::new();
             for tool in crate::tools::mcp_tools::mcp_tool_executors() {
                 registry.register(tool);

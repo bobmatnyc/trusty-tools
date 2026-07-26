@@ -104,6 +104,7 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
         adapter: Arc::new(crate::llm::adapter::GenericAdapter),
         listeners: Vec::new(),
         stores: crate::stores::StoresConfig::default(),
+        skills: crate::agents::SkillsConfig::default(),
     }
 }
 
