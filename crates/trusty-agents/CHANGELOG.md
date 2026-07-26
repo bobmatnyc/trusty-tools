@@ -7,6 +7,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **Streamed chat turns now send the same sampling parameters as the blocking
+  path** (issue #3758): `llm::stream::stream_reply` built its
+  `OpenRouterProvider` with no temperature, token ceiling, or stop sequences, so
+  a streamed conversational/persona reply ran on provider defaults while the
+  blocking fallback for the SAME turn sent `llm.temperature`, `llm.max_tokens`,
+  and `llm.stop_sequences` — the streamed and fallback answers could differ in
+  style, verbosity, and where they stopped. Both call sites (the persona turn
+  and the conversational fast path) now forward their turn's exact values,
+  including the conversational path's `effective_max_tokens`, which the
+  local-route branch may override.
+
+- **A truncated stream no longer renders as a complete answer** (issue #3757):
+  `stream_with_provider`'s empty-stream guard only caught a stream that produced
+  NOTHING, so a partial-then-truncated stream returned its cut-off text as a
+  success and the blocking fallback never engaged. The upstream pump now emits
+  `ChatEvent::Error` for a mid-stream error frame, a truncated EOF, and an
+  unusable non-SSE 200, so those surface through `assembly.error` and the caller
+  falls back to the blocking chat path.
+
 ### Added
 
 - **Skill-wrapping runtime — one named skill per tool (#3933, DOC-57 §5, epic

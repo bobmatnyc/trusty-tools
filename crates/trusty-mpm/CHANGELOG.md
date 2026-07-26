@@ -48,6 +48,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Activity monitor no longer misreports a provider stream failure as a
+  serialization error** (issue #3757): `LlmActivityClassifier::classify`
+  matched only `ChatEvent::Delta` and discarded `ChatEvent::Error`, so once the
+  shared SSE pump began reporting mid-stream error frames, truncated EOFs, and
+  unusable non-SSE bodies, the truncated text still reached `serde_json` and
+  surfaced as `ActivityError::Serialization` — blaming our own parser for
+  someone else's outage. The error arm now maps to `ActivityError::Llm`.
+
 - **`prune-worktrees` never scanned `.claude/worktrees`, so Claude Code's
   native agent worktrees were never reclaimed** (closes
   [#3971](https://github.com/bobmatnyc/trusty-tools/issues/3971)):

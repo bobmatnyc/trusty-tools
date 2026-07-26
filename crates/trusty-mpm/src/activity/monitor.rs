@@ -484,16 +484,27 @@ impl LlmClassifier for OpenRouterClassifier {
 
         let send_fut = provider.chat_stream(messages, vec![], tx);
         let mut full_text = String::new();
+        // #3757: the pump now reports a mid-stream error frame, a truncated
+        // EOF, and an unusable non-SSE body as `ChatEvent::Error`. Dropping it
+        // here would feed truncated text to the JSON parse below and misreport
+        // a provider failure as `Serialization` — a misleading diagnosis of
+        // someone else's outage.
+        let mut stream_error: Option<String> = None;
 
         let (send_result, ()) = tokio::join!(send_fut, async {
             while let Some(event) = rx.recv().await {
-                if let ChatEvent::Delta(d) = event {
-                    full_text.push_str(&d);
+                match event {
+                    ChatEvent::Delta(d) => full_text.push_str(&d),
+                    ChatEvent::Error(e) => stream_error = Some(e),
+                    ChatEvent::ToolCall(_) | ChatEvent::Done => {}
                 }
             }
         });
 
         send_result.map_err(|e| ActivityError::Llm(e.to_string()))?;
+        if let Some(e) = stream_error {
+            return Err(ActivityError::Llm(e));
+        }
 
         // Parse the JSON verdict from the accumulated text.
         let json_str = extract_json(&full_text).unwrap_or(&full_text);

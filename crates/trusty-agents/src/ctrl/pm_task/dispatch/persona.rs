@@ -602,6 +602,13 @@ pub async fn run_pm_task_with_persona(
             &sid,
             &persona_cfg.agent.name,
             llm::stream::DEFAULT_STREAM_CADENCE,
+            // #3758: the SAME sampling knobs the blocking tool-loop call below
+            // sends, so a streamed reply's style/verbosity/stopping matches.
+            trusty_common::chat::SamplingParams {
+                temperature: Some(persona_cfg.llm.temperature),
+                max_tokens: Some(persona_cfg.llm.max_tokens),
+                stop: persona_cfg.llm.stop_sequences.clone(),
+            },
         )
         .await
         {

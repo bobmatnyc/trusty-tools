@@ -31,6 +31,17 @@ pub(super) struct OpenAiFunctionWire<'a> {
 }
 
 /// OpenAI-compatible streaming chat request body.
+///
+/// Why: #3758 — the sampling fields below were missing, so a streamed turn
+/// silently ran on provider defaults while the blocking path for the SAME turn
+/// sent the caller's configured temperature, token ceiling, and stop
+/// sequences. Every one of them is `skip_serializing_if`-gated, so a caller
+/// that supplies nothing produces byte-identical JSON to the pre-#3758 body.
+/// What: `stream` is always sent; `tools`, `temperature`, `max_tokens`, and
+/// `stop` are omitted when absent (an empty array is NOT sent — some servers
+/// reject `"stop": []`, mirroring the empty-`tools` trap).
+/// Test: `sampling_params_serialize_into_request_body`,
+/// `default_sampling_omits_fields`.
 #[derive(Debug, Serialize)]
 pub(super) struct ChatRequestWire<'a> {
     pub(super) model: &'a str,
@@ -38,6 +49,16 @@ pub(super) struct ChatRequestWire<'a> {
     pub(super) stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) tools: Option<Vec<OpenAiToolWire<'a>>>,
+    // #3758: sampling parity with the blocking path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) temperature: Option<f32>,
+    // #3758: sampling parity with the blocking path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) max_tokens: Option<u32>,
+    // #3758: OpenAI spells this `stop`; the direct-Anthropic dialect calls the
+    // same parameter `stop_sequences`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) stop: Option<&'a [String]>,
 }
 
 /// Map a `ToolDef` slice to the OpenAI `tools` array, or `None` when empty.

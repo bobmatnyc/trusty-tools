@@ -655,7 +655,8 @@ pub mod tmux;
 
 pub use chat::{
     BedrockProvider, ChatEvent, ChatProvider, DEFAULT_BEDROCK_MODEL, LocalModelConfig,
-    OllamaProvider, OpenRouterProvider, ToolCall, ToolDef, auto_detect_local_provider,
+    OllamaProvider, OpenRouterProvider, SamplingParams, ToolCall, ToolDef,
+    auto_detect_local_provider,
 };
 
 // Port
