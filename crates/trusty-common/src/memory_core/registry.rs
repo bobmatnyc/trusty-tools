@@ -123,12 +123,49 @@ pub struct PalaceRegistry {
     /// just-evicted palace would double-open and the loser would error. A tiny
     /// per-id sync mutex makes the second racer wait, re-check the cache, and
     /// share the winner's handle instead.
+    ///
+    /// Why bounded (issue #3992): a FAILED `Writer` open is never cached (a
+    /// nonexistent handle must not be), so under *sustained* cross-process
+    /// contention every caller queued behind this mutex repeats the full
+    /// bounded (~1.55 s) `try_open_or_snapshot` dance from scratch once it is
+    /// finally its turn. Each individual redb-open attempt is bounded, but
+    /// the mutex acquisition itself previously was not: the Nth queued
+    /// caller waited for N-1 earlier callers' own ~1.55 s attempts to finish
+    /// first, so a caller's *total* wait scaled with queue depth with no
+    /// ceiling -- reproduced live (issue #3992: 5 concurrent openers against
+    /// a held lock made the 5th caller wait 10 s; sustained contention across
+    /// many requests over a long window is exactly how a single
+    /// `memory_remember` call was observed to hang for 1800 s). The reader
+    /// path has no analogous queue-depth problem to mirror: a `ReadOnlyClient`
+    /// open always resolves quickly via the snapshot fallback (issue #59) and
+    /// therefore never queues for long. So `open_palace` bounds this wait
+    /// with a dedicated
+    /// [`crate::memory_core::timeouts::open_queue_timeout`] (issue #3992,
+    /// default 60 s, `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS`) -- a sibling of the
+    /// established `write_lock_timeout` (issue #906) that governs the
+    /// per-palace write mutex once a palace is already open, kept as its own
+    /// knob since the two protect different pipelines and operators may need
+    /// to tune them independently. A caller stuck behind persistent
+    /// contention gets a clear, actionable ERROR within one bounded window
+    /// instead of hanging indefinitely.
     /// What: `DashMap<PalaceId, Arc<parking_lot::Mutex<()>>>`. Held only across
     /// the (rare) open pipeline — never across an `.await` — so a
     /// `parking_lot::Mutex` is safe. Entries are lightweight and left in place
-    /// (bounded by palace count) rather than reference-counted out.
-    /// Test: `registry_tests::evict_idle_then_reopen_preserves_recall`.
+    /// (bounded by palace count) rather than reference-counted out. Acquired
+    /// via `try_lock_for(open_queue_timeout())` in `open_palace`.
+    /// Test: `registry_tests::evict_idle_then_reopen_preserves_recall`,
+    /// `registry_tests::writer_open_queue_wait_is_bounded_under_sustained_contention`
+    /// (issue #3992 — proves the bound against real multi-writer contention).
     open_locks: Arc<DashMap<PalaceId, Arc<Mutex<()>>>>,
+    /// Bound applied to `open_lock.try_lock_for` in `open_palace` (issue
+    /// #3992). Defaults to
+    /// [`crate::memory_core::timeouts::open_queue_timeout`] (process-wide env
+    /// override) but is stored per-instance — rather than re-read from the
+    /// environment on every call — so [`PalaceRegistry::with_open_queue_timeout`]
+    /// can inject a short deadline in tests without mutating global process
+    /// state (which would race other tests running in parallel).
+    /// Test: `registry_tests::writer_open_queue_wait_is_bounded_under_sustained_contention`.
+    open_queue_timeout: Duration,
 }
 
 impl Default for PalaceRegistry {
@@ -166,7 +203,24 @@ impl PalaceRegistry {
             // daemon overrides this via `with_writer_intent` (issue #1487).
             open_intent: OpenIntent::ReadOnlyClient,
             open_locks: Arc::new(DashMap::new()),
+            open_queue_timeout: crate::memory_core::timeouts::open_queue_timeout(),
         }
+    }
+
+    /// Override the per-palace open-queue timeout (issue #3992).
+    ///
+    /// Why: production callers get a sane env-configurable default (see the
+    /// `open_locks` field doc); tests that need to prove the bound against
+    /// real multi-writer contention within a fast, deterministic wall-clock
+    /// budget inject a short deadline here instead of mutating the
+    /// process-wide `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS` env var (which would
+    /// race any other test running in parallel).
+    /// What: Consuming builder that overwrites `open_queue_timeout`.
+    /// Test: `registry_tests::writer_open_queue_wait_is_bounded_under_sustained_contention`.
+    #[must_use]
+    pub fn with_open_queue_timeout(mut self, timeout: Duration) -> Self {
+        self.open_queue_timeout = timeout;
+        self
     }
 
     /// Create a registry whose open-handle cap comes from the environment.
@@ -363,10 +417,16 @@ impl PalaceRegistry {
     /// is silently evicted (its fds close); the data is safe on disk.
     /// What: Returns the cached `Arc<PalaceHandle>` if present (promotes to MRU);
     /// otherwise loads metadata via `PalaceStore::load_palace`, calls
-    /// `PalaceHandle::open`, and inserts the handle (may evict LRU).
+    /// `PalaceHandle::open`, and inserts the handle (may evict LRU). The
+    /// per-palace open-lock acquisition is bounded (issue #3992) — see the
+    /// `open_locks` field doc for why an unbounded wait there let sustained
+    /// writer contention hang a caller indefinitely even though every
+    /// individual redb-open attempt underneath is itself bounded.
     /// Test: `registry_create_and_open` round-trips create -> drop -> reopen;
     /// `lru_evicted_handle_reopens` verifies evicted handles are transparently
-    /// reopened; `open_palace_follows_alias` covers the alias redirect.
+    /// reopened; `open_palace_follows_alias` covers the alias redirect;
+    /// `writer_open_queue_wait_is_bounded_under_sustained_contention` proves the bound
+    /// against real multi-writer contention.
     pub fn open_palace(&self, data_root: &Path, palace_id: &PalaceId) -> Result<Arc<PalaceHandle>> {
         // Fast path: an already-open handle under the requested id.
         if let Some(h) = self.get(palace_id) {
@@ -388,12 +448,28 @@ impl PalaceRegistry {
         // double-open the redb files — under `Writer` intent the loser would
         // otherwise fail loud after the flock handoff-retry window. The winner
         // opens + registers; the loser re-checks the cache below and shares it.
+        //
+        // Bounded (issue #3992): a failed `Writer` open is never cached, so
+        // under sustained cross-process contention every queued caller repeats
+        // the full bounded (~1.55 s) open dance in turn — the Nth caller waits
+        // for N-1 earlier callers' own attempts first, with no ceiling on the
+        // total. `try_lock_for` caps that total wait so a caller stuck behind
+        // persistent contention gets a clear ERROR instead of hanging (proved
+        // live by `writer_open_queue_wait_is_bounded_under_sustained_contention`).
         let open_lock = self
             .open_locks
             .entry(effective_id.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
-        let _open_guard = open_lock.lock();
+        let open_queue_timeout = self.open_queue_timeout;
+        let _open_guard = open_lock.try_lock_for(open_queue_timeout).ok_or_else(|| {
+            anyhow::anyhow!(
+                "palace '{effective_id}' open queue timed out after {open_queue_timeout:?} \
+                 waiting behind other callers retrying a redb write-lock conflict (issue #3992); \
+                 another process may be holding the lock persistently — stop it, or raise \
+                 TRUSTY_OPEN_QUEUE_TIMEOUT_SECS if this is expected under heavy contention"
+            )
+        })?;
         // Re-check under the open lock: another racer may have opened it while
         // we waited for the lock.
         if let Some(h) = self.get(&effective_id) {

@@ -24,6 +24,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`PalaceRegistry::open_palace` no longer queues callers indefinitely
+  behind sustained redb writer-lock contention** (issue #3992): the
+  per-palace `open_lock` that serialises concurrent opens of the same
+  palace id was acquired with an unbounded `Mutex::lock()`. Each individual
+  `try_open_or_snapshot` retry under `OpenIntent::Writer` was already
+  bounded (~1.55s), but a failed Writer open is never cached, so every
+  caller queued behind the lock repeated that bounded dance from scratch —
+  the Nth queued caller waited for N-1 earlier callers' own attempts to
+  finish first, with no ceiling on the total. Reproduced live: 5 concurrent
+  openers against a genuinely held lock made the 5th caller wait 9.86s, and
+  this exact linear-with-queue-depth pattern is how a single
+  `memory_remember` call was observed to hang for 1800s under sustained
+  multi-process contention. `open_palace` now acquires the lock via
+  `try_lock_for` with a new, independently-tunable
+  `memory_core::timeouts::open_queue_timeout()` (default 60s,
+  `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS`), returning a clear error instead of
+  hanging once the deadline elapses.
+
 - **`default_model_matches_sentence_transformers_reference` no longer
   misreports a wrong-model load as an fp32 accuracy failure** (issue #3711):
   the merge-gate flake that failed at `mean_cosine=0.990649` vs `>= 0.999` was
