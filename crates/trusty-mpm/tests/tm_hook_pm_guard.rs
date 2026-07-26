@@ -310,6 +310,40 @@ fn pm_guard_sub_agent_env_allows_all() {
 }
 
 #[test]
+fn pm_guard_claude_mpm_sub_agent_env_still_allows_forbidden_bash_verb() {
+    // Round 3 (code-critic MEDIUM on PR #3978): the round-2 reorder moved
+    // Guard 1 (`CLAUDE_MPM_SUB_AGENT`) to AFTER the worktree-tmp guard, but
+    // no test previously covered a plain forbidden-Bash-verb case under that
+    // env var post-reorder —
+    // `pm_guard_claude_mpm_sub_agent_env_still_allows_everything_else` only
+    // used an in-project `git worktree add`, which `evaluate_bash_command`
+    // would allow even with NO exemption at all, making it a weak proxy.
+    // Mirrors `pm_guard_native_subagent_dispatch_allows_bash`: `sed -i` is
+    // denied unconditionally for the PM's own shell, so it must still be
+    // exempt here to prove Guard 1's original "exempt everything else"
+    // behavior survived the reorder intact.
+    let sed = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ f"}}"#,
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_eq!(
+        sed.trim(),
+        "",
+        "a nested MPM sub-agent's sed -i call must still be allowed post-reorder"
+    );
+
+    let make = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"make build"}}"#,
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_eq!(
+        make.trim(),
+        "",
+        "a nested MPM sub-agent's make build call must still be allowed post-reorder"
+    );
+}
+
+#[test]
 fn pm_guard_native_subagent_dispatch_allows_edit() {
     // Native Task/Agent-tool dispatch (issue #2014): Claude Code stamps
     // `agent_id` on the PreToolUse payload when the hook fires inside a

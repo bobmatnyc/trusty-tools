@@ -61,13 +61,23 @@
 //! round 2 code-critic review (PR #3978) established that Guards 1/4 are
 //! automatic markers a spawn helper stamps on every nested/dispatched
 //! subagent process (no human decides per-invocation whether they're set),
-//! while Guards 2/3 are operator-set escape hatches nothing in this codebase
-//! ever sets programmatically — see [`pm_guard`]'s body for the exact
-//! reordering this required (Guard 1's check moved after the stdin payload
-//! read, specifically so this worktree check — which needs the payload — can
-//! run first). This is the one place in the file that pierces an
-//! automatic-marker exemption; see that call site's comment for why it must
-//! never be routed through [`evaluate_tool`] instead.
+//! while nothing in this codebase's Rust source ever sets
+//! `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` programmatically via
+//! `std::env::var` — see [`pm_guard`]'s body for the exact reordering this
+//! required (Guard 1's check moved after the stdin payload read, specifically
+//! so this worktree check — which needs the payload — can run first). **This
+//! is NOT the same as "operator-only"**: Claude Code's `settings.json`
+//! supports a top-level `env` object applied to every session/subprocess it
+//! spawns (hooks included, live-reloaded mid-session), and a `Write`/`Edit`
+//! to `.claude/settings.json` is not itself blocked by this guard (`.json` is
+//! not in [`SOURCE_CODE_EXTENSIONS`], so [`evaluate_edit_tool`] falls through
+//! to an unconditional ALLOW) — so the PM, or any Guard-4-exempt subagent,
+//! can set either var there and self-exempt from this entire guard. That gap
+//! predates this PR by many issues and is NOT introduced or widened by it;
+//! tracked separately as issue #3981, not fixed here. This is the one place
+//! in the file that pierces an automatic-marker exemption; see that call
+//! site's comment for why it must never be routed through [`evaluate_tool`]
+//! instead.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
@@ -181,18 +191,24 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // Guard 2: universal opt-out for CI / build shells that can't edit
     // settings.json without a restart. Checked FIRST (ahead of Guard 1, a
     // reordering from this function's original shape — see the code-critic
-    // round 2 finding on PR #3978): this and Guard 3 below are genuine
-    // operator-set escape hatches — nothing in this codebase ever sets
-    // `TRUSTY_MPM_DISABLE_HOOKS` or `TRUSTY_MPM_PM_UNRESTRICTED`
-    // programmatically (verified: no occurrence outside doc comments and
-    // this module) — so they must keep working exactly as before, including
-    // against the ABSOLUTE worktree-tmp guard below: an operator who
-    // deliberately disables the hook, or says "you do it this time", gets
-    // exactly that, no exceptions. Guard 1 (`SUB_AGENT_ENV`), by contrast, is
-    // an AUTOMATIC marker a spawn helper stamps on every nested MPM subagent
-    // process with no per-invocation human decision involved — see Guard 1's
-    // own comment below for why it is checked LATER, after the worktree
-    // guard, instead of here.
+    // round 2 finding on PR #3978): this and Guard 3 below are never SET
+    // programmatically anywhere in this codebase's Rust source (verified: no
+    // `std::env::var`/`set_var` occurrence outside doc comments and this
+    // module) — so they must keep working exactly as before, including
+    // against the ABSOLUTE worktree-tmp guard below: whoever sets
+    // `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` gets exactly
+    // that, no exceptions. That is a narrower claim than "operator-only",
+    // though: Claude Code's `settings.json` `env` object can set either var
+    // for every hook invocation, and a write to `.claude/settings.json` is
+    // not itself blocked by this guard (see the module doc above, "This is
+    // NOT the same as 'operator-only'") — so the PM or an exempt subagent CAN
+    // self-exempt via that path. That gap predates this PR by many issues and
+    // is out of scope here; tracked as issue #3981. Guard 1 (`SUB_AGENT_ENV`),
+    // by contrast, is an
+    // AUTOMATIC marker a spawn helper stamps on every nested MPM subagent
+    // process with no per-invocation env-write decision involved — see
+    // Guard 1's own comment below for why it is checked LATER, after the
+    // worktree guard, instead of here.
     if std::env::var_os(DISABLE_HOOKS_ENV).is_some() {
         return Ok(());
     }

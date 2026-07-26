@@ -34,10 +34,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Guard 1 short-circuited to ALLOW before the stdin payload was even read, so
   a `CLAUDE_MPM_SUB_AGENT=1`-tagged `git worktree add /tmp/...` call was
   silently allowed. Guards 2/3 (`TRUSTY_MPM_DISABLE_HOOKS` /
-  `TRUSTY_MPM_PM_UNRESTRICTED`) are deliberately left UN-pierced — both are
-  genuine operator-set escape hatches never set programmatically anywhere in
-  this codebase, so an operator who disables the hook or invokes the
-  unrestricted bypass still gets exactly that, including for this guard.
+  `TRUSTY_MPM_PM_UNRESTRICTED`) are deliberately left UN-pierced — neither is
+  ever set programmatically anywhere in this codebase's Rust source, so
+  whoever sets them still gets exactly that, including for this guard.
+  **Round 3 correction:** that is narrower than "operator-only" — Claude
+  Code's `settings.json` `env` object can set either var for every hook
+  invocation (live-reloaded mid-session), and a write to
+  `.claude/settings.json` is not itself blocked by `pm_guard` today, so the
+  PM or an exempt subagent can self-exempt from this entire guard via that
+  pre-existing, unrelated gap. Not introduced or widened by this change; not
+  fixed here; tracked as
+  [#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981).
 
 ### Fixed
 
