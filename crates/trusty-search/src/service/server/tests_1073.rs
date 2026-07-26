@@ -75,22 +75,11 @@ async fn relocate_index_updates_root_path() {
     state.install_embedder(embedder).await;
     let state_arc = Arc::new(state);
 
-    // Build the initial and target directories under target/ (never in the
-    // denylist), using RAII TempDir for cleanup.
-    let cwd = std::env::current_dir().expect("cwd");
-    let base = cwd.join("target");
-    std::fs::create_dir_all(&base).expect("create target/");
-    let old_dir = tempfile::Builder::new()
-        .prefix("ts-relocate-old-")
-        .tempdir_in(&base)
-        .expect("create old_dir");
-    let new_dir = tempfile::Builder::new()
-        .prefix("ts-relocate-new-")
-        .tempdir_in(&base)
-        .expect("create new_dir");
-
-    let old_root = old_dir.path().canonicalize().expect("canonicalize old_dir");
-    let new_root = new_dir.path().canonicalize().expect("canonicalize new_dir");
+    // Build the initial and target directories under an allowlist-safe base
+    // (see `test_support::allowlisted_index_root`), using RAII TempDir for
+    // cleanup.
+    let (_old_dir, old_root) = super::test_support::allowlisted_index_root("ts-relocate-old-");
+    let (_new_dir, new_root) = super::test_support::allowlisted_index_root("ts-relocate-new-");
 
     // Step 1: register the index at old_root.
     let create_resp = super::indexes::create_index_handler(

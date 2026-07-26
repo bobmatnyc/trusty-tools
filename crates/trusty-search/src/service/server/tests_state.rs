@@ -39,19 +39,15 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
     // Use a real non-denied directory so the `validate_root_path` guard
     // (issue #63 + index-denylist) accepts the path and the handler
     // proceeds to the embedder-error branch we're asserting on.
-    // Note: `tempfile::tempdir()` creates dirs under /tmp which is now
-    // in the sensitive-root denylist — use target/ under the workspace root.
-    let base = std::env::current_dir().expect("cwd").join("target");
-    std::fs::create_dir_all(&base).ok();
-    let test_dir = tempfile::Builder::new()
-        .prefix("ts-embedder-fail-")
-        .tempdir_in(&base)
-        .expect("create test_dir under target/");
+    // Note: `tempfile::tempdir()` creates dirs under /tmp which is now in
+    // the sensitive-root denylist — use `test_support::allowlisted_index_root`
+    // instead (issue #3955).
+    let (_test_dir, test_root) = super::test_support::allowlisted_index_root("ts-embedder-fail-");
     let resp = create_index_handler(
         State(state_arc),
         Json(CreateIndexRequest {
             id: "demo".to_string(),
-            root_path: test_dir.path().to_path_buf(),
+            root_path: test_root,
             include_paths: None,
             exclude_globs: None,
             extensions: None,

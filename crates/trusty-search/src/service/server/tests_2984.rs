@@ -66,23 +66,9 @@ fn create_req_with_skip_kg(
     }
 }
 
-/// Create a temp directory under `target/` (never in the hard denylist) with
-/// RAII cleanup, returning its canonical path.
-///
-/// Why: identical helper to `tests_2336::temp_root` — duplicated rather than
-/// shared because `tests_2336` is itself a `#[cfg(test)]`-only sibling
-/// module with no public surface to import from.
-fn temp_root(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let cwd = std::env::current_dir().expect("cwd");
-    let base = cwd.join("target");
-    std::fs::create_dir_all(&base).expect("create target/");
-    let dir = tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir_in(&base)
-        .expect("create tempdir");
-    let canonical = dir.path().canonicalize().expect("canonicalize tempdir");
-    (dir, canonical)
-}
+// Allowlist-safe temp roots come from `super::test_support::allowlisted_index_root`
+// — see that module for why a checkout-relative `target/` dir is not enough
+// (issue #3955).
 
 /// Build a fresh, empty registry with a mock embedder installed — enough for
 /// `create_index_handler` to run without a live daemon or network.
@@ -99,7 +85,7 @@ async fn mock_state_async() -> Arc<SearchAppState> {
 #[tokio::test]
 async fn create_index_handler_honors_skip_kg_on_reregister() {
     let state = mock_state_async().await;
-    let (_dir, root) = temp_root("ts-2984-skip-kg-");
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-2984-skip-kg-");
     let id = IndexId::new("skip-kg-reregister");
 
     // Phase 1: create the index with skip_kg=false and index real content
