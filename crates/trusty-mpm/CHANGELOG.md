@@ -7,6 +7,24 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
+  `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
+  (worktree-hygiene follow-up to
+  [#3955](https://github.com/bobmatnyc/trusty-tools/issues/3955)): worktrees
+  provisioned there silently fail unrelated tests (trusty-search's
+  `SENSITIVE_PATH_PREFIXES` denylist) and can be reaped mid-task by the OS or
+  harness. The check is called directly from `pm_guard()` BEFORE Guard 4's
+  native-subagent-dispatch exemption, and is unconditional — including for
+  Task/Agent-dispatched subagents, which is who actually provisions these
+  worktrees in practice. `pm_guard_bash::evaluate_worktree_add_command`
+  resolves the target (relative paths, `cd`/`git -C` tracking, `~`/`$TMPDIR`/
+  `$TMP` expansion, lexical `.`/`..` normalization) without touching the
+  filesystem; only the exact `worktree add` subcommand is affected —
+  `list`/`remove`/`prune`/`lock`/… and ordinary temp usage (`mktemp`, temp
+  files, cargo build artifacts) are untouched.
+
 ### Fixed
 
 - **`prune-worktrees` never scanned `.claude/worktrees`, so Claude Code's
