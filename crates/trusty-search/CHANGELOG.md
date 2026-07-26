@@ -9,6 +9,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A legacy/colocated index whose storage path could not be resolved at
+  warm-boot no longer silently restores as a healthy 0-chunk store (issue
+  #2847).** `build_indexer_from_entry` / `build_store_for_entry` previously
+  only logged a WARN when `corpus_redb_path_for_entry` / `hnsw_path_for_entry`
+  failed (e.g. a colocated `.trusty-search` shadow path that could not be
+  created — missing/broken symlink, permission denied) and otherwise
+  proceeded as if the index had simply never been populated —
+  `corpus_open_failed` stayed `false` and `hnsw_load_failed` stayed `false`,
+  so the daemon reported the index as healthy while it served zero results.
+  Both resolution failures now flag `corpus_open_failed` / `hnsw_load_failed`
+  so the existing warm-boot stage classifier reports the index as degraded
+  instead — a genuinely empty, never-indexed index is unaffected and still
+  reports as pending, not failed.
 - **Warm-boot's colocated-root discovery scan now honors `--no-auto-discover`
   / `TRUSTY_NO_AUTO_DISCOVER` (issue #3929).** Previously the flag only gated
   the unrelated `auto_discover_and_index()` git-repo scan; `restore_indexes`

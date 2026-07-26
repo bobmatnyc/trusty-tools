@@ -436,6 +436,179 @@ async fn warm_boot_shared_root_double_open_is_prevented_by_dedup() {
     );
 }
 
+// ── Issue #2847 regression: unresolvable colocated shadow path must not ───
+// ── silently report success with a 0-chunk store ───────────────────────────
+
+/// Block colocated storage-path resolution for `root` by placing a regular
+/// FILE at the exact `<root>/.trusty-search` location.
+///
+/// Why: `colocated_storage_dir` calls `std::fs::create_dir_all` on that path
+/// every time it resolves a colocated path (`hnsw_path_for_entry`,
+/// `corpus_redb_path_for_entry`, `schema_version_path_for_entry`). When a
+/// non-directory entry already occupies that path, `create_dir_all` fails
+/// (`AlreadyExists`/`NotADirectory` depending on platform) and every one of
+/// those resolvers returns `Err` — the same observable failure mode as the
+/// production report's dangling `<repos>/.trusty-search` symlink pointing at
+/// a missing target (a broken symlink also occupies the dirent without being
+/// a usable directory). This is a portable, deterministic stand-in that does
+/// not depend on symlink semantics.
+/// What: writes an ordinary file at `<root>/.trusty-search`.
+/// Test: used by the #2847 regression tests below.
+fn block_colocated_storage_path(root: &Path) {
+    std::fs::write(root.join(".trusty-search"), b"not a directory").unwrap();
+}
+
+/// THE failing-test-first regression for issue #2847: reproduces the
+/// production outage where a legacy/colocated index's shadow storage path
+/// could not be resolved at warm-boot, and the loader silently restored a
+/// 0-chunk store while reporting `corpus_open_failed=false` — `/health`
+/// then reported `status: ok` while the index served nothing.
+///
+/// Why: before the fix, `build_indexer_from_entry`'s `Err` arm for
+/// `corpus_redb_path_for_entry` only logged a WARN and left
+/// `corpus_open_failed` at its default `false` — the exact silent-failure
+/// mechanism from the bug report. This test asserts the CORRECT behavior
+/// (`corpus_open_failed == true`, 0 chunks); against pre-fix code it fails
+/// with `corpus_open_failed == false`, proving the bug.
+/// What: builds a colocated entry whose `.trusty-search` path is blocked by
+/// [`block_colocated_storage_path`], calls `build_indexer_from_entry`, and
+/// asserts both that the corpus reports 0 chunks AND that the failure is
+/// surfaced via `corpus_open_failed` rather than silently swallowed.
+/// Test: this IS the test.
+#[tokio::test]
+async fn build_indexer_from_entry_flags_corpus_open_failed_when_storage_path_unresolvable() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    block_colocated_storage_path(&root);
+    let embedder = mock_embedder();
+
+    let entry = PersistedIndex {
+        id: "test-idx-2847-corpus-unresolvable".to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+
+    let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+
+    // The silent-empty symptom: no corpus store got wired, so the chunk
+    // count is 0 — this alone is legitimate for a fresh index, which is
+    // exactly why the flag below is the load-bearing assertion.
+    assert!(
+        !indexer.has_corpus_store(),
+        "#2847: an unresolvable storage path must not silently produce a \
+         wired-but-empty corpus store"
+    );
+    let chunk_count = indexer
+        .corpus_store()
+        .map(|c| c.chunk_count().unwrap_or(0))
+        .unwrap_or(0);
+    assert_eq!(chunk_count, 0, "#2847: silent-empty symptom — 0 chunks");
+
+    // The actual bug: this failure must be OBSERVABLE, not silent.
+    assert!(
+        indexer.corpus_open_failed,
+        "#2847: a colocated storage path that cannot be resolved must set \
+         corpus_open_failed=true so the warm-boot stage classifier (and, via \
+         the existing corpus_open_failed -> Failed aggregation, /health) \
+         reports this index as degraded instead of falsely healthy"
+    );
+}
+
+/// Companion #2847 regression for the HNSW half of the same defect: the
+/// vector-store loader must likewise flag `hnsw_load_failed=true` (not
+/// `false`) when the storage path itself cannot be resolved, so semantic
+/// search readiness is never derived from an unresolvable store.
+///
+/// Why: mirrors `build_store_for_entry_flags_load_failure_on_corrupt_snapshot`
+/// (issue #2922) but for path-resolution failure rather than on-disk
+/// corruption — before the fix, `build_store_for_entry`'s path-resolution
+/// `Err` arm returned `load_failed=false`, indistinguishable from ordinary
+/// first-boot.
+/// What: builds a colocated entry with a blocked `.trusty-search` path,
+/// calls `build_store_for_entry` directly, and asserts `load_failed`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn build_store_for_entry_flags_load_failure_when_storage_path_unresolvable() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    block_colocated_storage_path(&root);
+    let embedder = mock_embedder();
+    let dim = embedder.dimension();
+
+    let entry = PersistedIndex {
+        id: "test-idx-2847-hnsw-unresolvable".to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+
+    let (store, load_failed): (Arc<dyn VectorStore>, bool) =
+        build_store_for_entry(&entry, dim).await.unwrap();
+    assert_eq!(
+        store.len().await.unwrap(),
+        0,
+        "#2847: an unresolvable hnsw path must fall back to an empty store"
+    );
+    assert!(
+        load_failed,
+        "#2847: an unresolvable hnsw storage path must set load_failed=true, \
+         not be treated as ordinary first-boot"
+    );
+}
+
+/// The required counterpart: a genuinely first-boot / never-populated
+/// colocated index (storage path resolves fine, nothing has been indexed
+/// yet) must NOT be reported as failed by either signal. This is the
+/// "legitimately empty" case the #2847 fix must not over-report.
+///
+/// Why: the fix must distinguish "empty because the store could not be
+/// resolved" (#2847 — now `corpus_open_failed`/`hnsw_load_failed = true`)
+/// from "empty because nothing was indexed yet" (ordinary first boot,
+/// resolvable path, no content). Both produce `chunk_count == 0`, so the
+/// distinguishing signal has to be these flags, not the chunk count itself.
+/// What: builds a colocated entry at a normal (unblocked) fresh tmp dir and
+/// asserts both flags stay `false` despite 0 chunks / no snapshot.
+/// Test: this IS the test.
+#[tokio::test]
+async fn build_indexer_from_entry_does_not_flag_legitimately_empty_index_as_failed() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let embedder = mock_embedder();
+
+    let entry = PersistedIndex {
+        id: "test-idx-2847-legit-empty".to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+
+    let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+
+    assert!(
+        indexer.has_corpus_store(),
+        "#2847: a resolvable colocated path must still wire a (empty) corpus store"
+    );
+    let chunk_count = indexer
+        .corpus_store()
+        .expect("corpus store must be set")
+        .chunk_count()
+        .expect("chunk_count must succeed");
+    assert_eq!(chunk_count, 0, "sanity: nothing has been indexed yet");
+
+    assert!(
+        !indexer.corpus_open_failed,
+        "#2847: a legitimately empty (never-indexed) colocated index must \
+         NOT be flagged corpus_open_failed — that would over-report failure \
+         for the ordinary first-boot case"
+    );
+    assert!(
+        !indexer.hnsw_load_failed,
+        "#2847: a legitimately empty (never-indexed) colocated index must \
+         NOT be flagged hnsw_load_failed either"
+    );
+}
+
 /// Why: the fix must not merge indexes that live in different redb files.
 /// Two colocated indexes at distinct roots must open independent corpora
 /// simultaneously with zero `DatabaseAlreadyOpen`, and dedup must keep both.

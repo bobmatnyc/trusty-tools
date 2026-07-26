@@ -113,7 +113,9 @@ pub async fn build_indexer_with_persisted_state(
 /// Test: `colocated_create_path_wires_corpus_store_for_schema_version` and
 /// `colocated_create_handler_path_survives_simulated_reload` cover the
 /// colocated path; `legacy_non_colocated_path_does_not_panic` covers the
-/// legacy path.
+/// legacy path; `build_indexer_from_entry_flags_corpus_open_failed_when_storage_path_unresolvable`
+/// and `build_indexer_from_entry_does_not_flag_legitimately_empty_index_as_failed`
+/// cover the #2847 silent-empty-store regression.
 pub async fn build_indexer_from_entry(
     entry: &PersistedIndex,
     embedder: &Arc<dyn Embedder>,
@@ -161,7 +163,25 @@ pub async fn build_indexer_from_entry(
                 }
             }
         }
-        Err(e) => tracing::warn!("cannot resolve redb corpus path for '{index_id}': {e}"),
+        Err(e) => {
+            // Issue #2847: an unresolvable storage path (e.g. a colocated
+            // shadow dir that cannot be created — missing/broken symlink,
+            // permission denied) is indistinguishable in effect from a
+            // failed open: no corpus store gets wired, `restore_corpus_for_entry`
+            // below will report 0 chunks, and — before this fix — nothing
+            // told the caller. Treat it the same as the open-failure branch
+            // above so the stage-classifier fails ALL stages instead of
+            // reporting `corpus_open_failed=false` while the index silently
+            // serves 0 chunks (the exact production outage in #2847).
+            tracing::error!(
+                "warm-boot: cannot resolve redb corpus path for '{index_id}': {e}. The \
+                 durable corpus store location could not be determined — the index will \
+                 restore with 0 chunks even though a real corpus may exist on disk. \
+                 Marking corpus_open_failed so /health reports this as degraded instead \
+                 of silently 'ok'. (refs #2847, #1158)"
+            );
+            indexer.corpus_open_failed = true;
+        }
     }
 
     restore_corpus_for_entry(&mut indexer, entry).await;
@@ -292,11 +312,15 @@ fn stamp_if_unversioned_for_entry(entry: &PersistedIndex) {
 /// Why: uses `hnsw_path_for_entry` so colocated indexes read from the project's
 /// `.trusty-search/hnsw.usearch`; propagates OOM as `Err` (closes #954).
 /// What: resolves path, checks for snapshot, loads (or falls back), returns
-/// `(store, load_failed)`. `load_failed` is `true` only when a snapshot file
-/// existed but could not be restored (issue #2922) — never for the ordinary
-/// "no snapshot yet" first-boot case — so callers can distinguish "never
-/// indexed" from "corrupt/truncated on-disk state" when deriving
-/// `hnsw_snapshot_ready` for `/health`.
+/// `(store, load_failed)`. `load_failed` is `true` when a snapshot file
+/// existed but could not be restored (issue #2922), OR when the storage path
+/// itself could not be resolved at all (issue #2847 — e.g. a colocated
+/// shadow dir that cannot be created) — never for the ordinary "no snapshot
+/// yet" first-boot case, where the path resolves cleanly and simply has
+/// nothing at it. This lets callers distinguish "never indexed" (legitimately
+/// empty) from "corrupt/truncated on-disk state" or "storage location
+/// unresolvable" (both real failures) when deriving `hnsw_snapshot_ready`
+/// for `/health`.
 /// Test: warm-boot integration tests (legacy) + colocated integration tests;
 /// `tests::build_store_for_entry_flags_load_failure_on_corrupt_snapshot`.
 async fn build_store_for_entry(
@@ -307,8 +331,21 @@ async fn build_store_for_entry(
     let path = match persistence::hnsw_path_for_entry(entry) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!("cannot resolve hnsw path for '{index_id}': {e}");
-            return Ok((fresh_store(dim)?, false));
+            // Issue #2847: a path-resolution failure (e.g. a colocated
+            // shadow dir that cannot be created) is NOT the ordinary
+            // "never indexed" first-boot case — we can't even determine
+            // whether a snapshot exists. Flag it as `load_failed=true` (not
+            // `false`) so `hnsw_snapshot_ready` — and therefore the
+            // warm-boot stage classifier / `/health` — never reports
+            // semantic search as ready off the back of an unresolvable
+            // store, mirroring the corrupt-snapshot handling below.
+            tracing::warn!(
+                "warm-boot: cannot resolve hnsw path for '{index_id}': {e} — starting fresh \
+                 (semantic search will report not-ready for '{index_id}' until reindexed; \
+                 treated as a load failure, not first-boot, since the storage location \
+                 itself could not be determined, refs #2847, #2922)"
+            );
+            return Ok((fresh_store(dim)?, true));
         }
     };
 
