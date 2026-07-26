@@ -94,7 +94,14 @@ attribution work.
 ### Changed
 
 - release trusty-common 0.22.2 + trusty-mpm 0.19.1 ([#2241](https://github.com/bobmatnyc/trusty-tools/pull/2241)) ([`f7ab5f4`](https://github.com/bobmatnyc/trusty-tools/commit/f7ab5f43c8a5cc41ed4d821e2a53800974e74207))
+
+---
+
 ## [Unreleased]
+
+---
+
+## [0.21.2] — 2026-07-26
 
 ### Fixed
 
