@@ -42,6 +42,23 @@ const DEFAULT_EMBED_BATCH_SECS: u64 = 30;
 /// above 1 s; 60 s is conservative without risking an indefinite cascade.
 const DEFAULT_WRITE_LOCK_SECS: u64 = 60;
 
+/// Default ceiling for the per-palace *open-queue* mutex in
+/// `PalaceRegistry::open_palace` (issue #3992).
+///
+/// Why: distinct from [`DEFAULT_WRITE_LOCK_SECS`] on purpose — that one
+/// bounds waiting for an *already-open* palace's write mutex (held for a
+/// sub-second embed+upsert+persist pipeline), while this one bounds waiting
+/// to become the next caller allowed to attempt *opening* a palace's redb
+/// files under sustained `OpenIntent::Writer` lock contention. Each queued
+/// opener's own attempt is separately bounded to ~1.55 s
+/// (`concurrent_open::WRITER_RETRY_ATTEMPTS` x `WRITER_RETRY_SLEEP_MS`), but
+/// a failed Writer open is never cached, so under persistent contention every
+/// new caller repeats that ~1.55 s dance — 60 s (the same order of magnitude
+/// as the write-mutex bound, chosen for the same reason: generous for a
+/// legitimate burst, still finite) caps roughly 30+ such attempts before
+/// giving up with a clear error rather than hanging indefinitely.
+const DEFAULT_OPEN_QUEUE_SECS: u64 = 60;
+
 /// Return the `FastEmbedder::new()` init timeout.
 ///
 /// Why: Overridable via `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` so operators on
@@ -74,6 +91,20 @@ pub fn embed_batch_timeout() -> Duration {
 /// Test: `write_lock_timeout_default`.
 pub fn write_lock_timeout() -> Duration {
     parse_secs_env("TRUSTY_WRITE_LOCK_TIMEOUT_SECS", DEFAULT_WRITE_LOCK_SECS)
+}
+
+/// Return the per-palace open-queue acquisition timeout (issue #3992).
+///
+/// Why: Overridable via `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS`, independently of
+/// [`write_lock_timeout`] — see [`DEFAULT_OPEN_QUEUE_SECS`] for why the two
+/// are deliberately separate knobs. Operators whose palace files sit on slow
+/// or contended storage (network mounts, many concurrent sessions hammering
+/// one freshly-evicted palace) can raise this without also loosening the
+/// unrelated write-mutex bound.
+/// What: Reads the env var; falls back to `DEFAULT_OPEN_QUEUE_SECS` (60).
+/// Test: `open_queue_timeout_default`.
+pub fn open_queue_timeout() -> Duration {
+    parse_secs_env("TRUSTY_OPEN_QUEUE_TIMEOUT_SECS", DEFAULT_OPEN_QUEUE_SECS)
 }
 
 /// Acquire a `tokio::sync::Mutex` with a bounded timeout, returning an error
@@ -253,5 +284,18 @@ mod tests {
         unsafe { std::env::remove_var("TRUSTY_WRITE_LOCK_TIMEOUT_SECS") };
         let t = write_lock_timeout();
         assert_eq!(t, Duration::from_secs(DEFAULT_WRITE_LOCK_SECS));
+    }
+
+    /// Why (issue #3992): Guard that the default is 60 s when the env var is
+    /// absent, and that it is a distinct knob from `write_lock_timeout`.
+    /// What: Hold the env mutex, unset the var, call `open_queue_timeout()`,
+    /// assert 60 s.
+    /// Test: itself.
+    #[test]
+    fn open_queue_timeout_default() {
+        let _guard = env_lock();
+        unsafe { std::env::remove_var("TRUSTY_OPEN_QUEUE_TIMEOUT_SECS") };
+        let t = open_queue_timeout();
+        assert_eq!(t, Duration::from_secs(DEFAULT_OPEN_QUEUE_SECS));
     }
 }

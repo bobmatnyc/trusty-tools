@@ -690,3 +690,135 @@ async fn evict_idle_then_reopen_preserves_recall() {
         "recall after idle-evict + rehydrate must match pre-eviction results"
     );
 }
+
+/// Why (issue #3992): reproduces the reported hang under REAL multi-writer
+/// contention, not a mocked one. `PalaceRegistry::open_palace` serialises
+/// concurrent opens of the SAME palace id behind a per-palace
+/// `open_lock: parking_lot::Mutex<()>` (see the `open_locks` field doc).
+/// Each individual `Database::create` retry inside `try_open_or_snapshot`
+/// IS already bounded (`WRITER_RETRY_ATTEMPTS` x `WRITER_RETRY_SLEEP_MS`,
+/// ~1.55s) — but a failed Writer open is never cached, so the NEXT caller
+/// repeats the same ~1.55s bounded dance from scratch. Under sustained
+/// contention (the redb file never becomes available), every caller queued
+/// behind `open_lock` pays its OWN ~1.55s bounded attempt AFTER waiting for
+/// every earlier queued caller's ~1.55s attempt to finish first — so the
+/// LAST caller's total wait scales with queue depth, not with any single
+/// constant. That is "unbounded" from any individual caller's point of
+/// view even though no single redb-open call exceeds ~1.55s. Live evidence
+/// before this fix: 5 concurrent openers against a genuinely held lock made
+/// the 5th caller wait 9.86s (and the pattern extrapolates linearly — this
+/// is exactly how a single `memory_remember` was observed to hang 1800s
+/// under sustained contention).
+/// What: holds a genuine flock conflict on the real backing file
+/// (`kg.redb` — `KnowledgeGraph::open_with_intent` translates the legacy
+/// `kg.db` path callers pass in), exactly like `concurrent_open::tests::
+/// writer_intent_fails_on_locked_file`, for the whole test. Uses
+/// `with_open_queue_timeout` to inject a short (2s) deadline instead of
+/// mutating the process-wide `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS` env var (which
+/// would race any other test running in parallel with this one). Fires
+/// `WRITER_COUNT` concurrent `open_palace` calls at a `with_writer_intent`
+/// registry for the SAME palace id and records each caller's wall-clock
+/// wait; asserts every caller returns within one bounded window
+/// (queue-timeout + one ~1.55-2.1s redb attempt) regardless of queue depth.
+/// Test: this test.
+#[test]
+fn writer_open_queue_wait_is_bounded_under_sustained_contention() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+    use redb::Database;
+
+    const WRITER_COUNT: usize = 5;
+    // Short enough that the test runs fast and deterministically; injected
+    // per-registry (not via env var) so it cannot race other parallel tests.
+    const OPEN_QUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let palace_id = PalaceId::new("contended");
+    let palace_dir = data_root.join(palace_id.as_str());
+    std::fs::create_dir_all(&palace_dir).unwrap();
+
+    // Persist palace.json so `open_palace` can load metadata.
+    let palace = Palace {
+        id: palace_id.clone(),
+        name: "Contended".to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: palace_dir.clone(),
+    };
+    crate::memory_core::store::palace_store::PalaceStore::save_palace(&palace)
+        .expect("save palace metadata");
+
+    // Hold a REAL, permanent flock conflict on the actual redb file for the
+    // whole test — mirrors `writer_intent_fails_on_locked_file` exactly,
+    // just held longer. This process never releases it, so every Writer
+    // open attempt genuinely exhausts its bounded retry window and fails.
+    let kg_path = palace_dir.join("kg.redb");
+    let _lock_holder = Database::create(&kg_path).expect("hold kg.redb lock for the test");
+
+    let reg = std::sync::Arc::new(
+        PalaceRegistry::new()
+            .with_writer_intent()
+            .with_open_queue_timeout(OPEN_QUEUE_TIMEOUT),
+    );
+    eprintln!("registry open_intent = {:?}", reg.open_intent());
+    let start = std::time::Instant::now();
+    let handles: Vec<_> = (0..WRITER_COUNT)
+        .map(|i| {
+            let reg = reg.clone();
+            let data_root = data_root.to_path_buf();
+            let palace_id = palace_id.clone();
+            std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                let result = reg.open_palace(&data_root, &palace_id);
+                let elapsed = t0.elapsed();
+                match &result {
+                    Ok(h) => eprintln!(
+                        "writer {i}: elapsed={elapsed:?} ok=true is_read_only={} (since test start: {:?})",
+                        h.is_read_only(),
+                        start.elapsed()
+                    ),
+                    Err(e) => eprintln!(
+                        "writer {i}: elapsed={elapsed:?} ok=false err={e:#} (since test start: {:?})",
+                        start.elapsed()
+                    ),
+                }
+                (result.is_ok(), elapsed)
+            })
+        })
+        .collect();
+
+    let results: Vec<(bool, std::time::Duration)> =
+        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let total = start.elapsed();
+    let max_wait = results.iter().map(|(_, d)| *d).max().unwrap();
+    eprintln!(
+        "writer_open_queue_depth: {WRITER_COUNT} concurrent writers, total={total:?}, \
+         max_single_caller_wait={max_wait:?}"
+    );
+
+    // Every attempt must fail (the lock is held for the whole test) — never
+    // a silent snapshot degrade for Writer intent.
+    assert!(
+        results.iter().all(|(ok, _)| !ok),
+        "every writer-intent open must fail while the lock is held, never succeed silently"
+    );
+
+    // The bounded-fix assertion: no single caller may wait longer than the
+    // injected open-queue timeout plus one bounded writer-open attempt
+    // (~1.55-2.1s in practice), REGARDLESS of how many other callers are
+    // queued ahead of it for the same palace. Pre-fix, `open_lock.lock()`
+    // was unbounded and callers queued behind every earlier caller's own
+    // attempt in turn, so `max_wait` scaled with `WRITER_COUNT` (measured
+    // live: 9.86s for 5 callers against a genuinely held lock — see the
+    // test doc comment). Post-fix it stays pinned near
+    // `OPEN_QUEUE_TIMEOUT` regardless of `WRITER_COUNT`.
+    let slack = std::time::Duration::from_millis(2_500);
+    assert!(
+        max_wait < OPEN_QUEUE_TIMEOUT + slack,
+        "a queued caller must not wait longer than the open-queue timeout plus \
+         one bounded writer-open attempt, regardless of queue depth; got \
+         {max_wait:?} (bound {OPEN_QUEUE_TIMEOUT:?} + {slack:?} slack) for \
+         {WRITER_COUNT} concurrent callers (issue #3992)"
+    );
+}
