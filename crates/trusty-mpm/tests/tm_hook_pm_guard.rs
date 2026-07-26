@@ -683,6 +683,205 @@ fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
     }
 }
 
+// ─── trust-anchor denylist (issue #3981) ───────────────────────────────────
+
+#[test]
+fn pm_guard_denies_settings_json_write_for_pm_direct_call() {
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/some/repo/.claude/settings.json","content":"{}"}}"#,
+        &[],
+    );
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("3981"),
+        "deny message must cite issue #3981: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_settings_local_json_write() {
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/some/repo/.claude/settings.local.json","old_string":"a","new_string":"b"}}"#,
+        &[],
+    );
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_subagent_payload() {
+    // THE case the whole task turns on: a native Task/Agent-dispatched
+    // subagent (agent_id present) writing pm_guard's own trust anchor must
+    // ALSO be denied — Guard 4's exemption must not reach this call.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","agent_type":"rust-engineer","tool_name":"Write","tool_input":{"file_path":"/some/repo/.claude/settings.json","content":"{\"env\":{\"TRUSTY_MPM_PM_UNRESTRICTED\":\"1\"}}"}}"#,
+        &[],
+    );
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("3981"),
+        "deny message must cite issue #3981: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_claude_mpm_sub_agent_env() {
+    // Same requirement under the OTHER subagent-exemption marker
+    // (CLAUDE_MPM_SUB_AGENT=1, Guard 1) — Guard 1 must not reach this call
+    // either.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/some/repo/.claude/settings.json","content":"{}"}}"#,
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("3981"),
+        "deny message must cite issue #3981: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_settings_json_denial_is_not_budget_eligible() {
+    // Unlike a source-code Edit/Write, a trust-anchor write must be an
+    // ABSOLUTE prohibition — repeating the call must deny every time, never
+    // sliding through on the per-turn file-change budget (issue #2918).
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/some/repo/.claude/settings.json","content":"{}"}}"#;
+    for _ in 1..=4 {
+        assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_bash_redirect() {
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo '{\"env\":{\"TRUSTY_MPM_PM_UNRESTRICTED\":\"1\"}}' > /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_bash_tee() {
+    // `tee` writes to a file ARGUMENT, not a `>` redirect — a distinct code
+    // path from the redirection test above.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo x | tee /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_sed_in_place() {
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/false/true/ /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_bash_under_subagent_payload() {
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","tool_name":"Bash","tool_input":{"command":"echo x > /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_bash_under_claude_mpm_sub_agent_env() {
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo x > /some/repo/.claude/settings.json"}}"#;
+    let stdout = run_pm_guard(payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]);
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_bash_settings_json_denial_is_not_budget_eligible() {
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo x > /some/repo/.claude/settings.json"}}"#;
+    for _ in 1..=4 {
+        assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_parent_traversal() {
+    // `.claude/../.claude/settings.json` must lexically collapse to the same
+    // resolved trust-anchor path — the raw string differs, the resolved path
+    // does not.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/some/repo/.claude/../.claude/settings.json","content":"{}"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+#[cfg(unix)]
+fn pm_guard_denies_settings_json_write_via_symlinked_claude_dir() {
+    // A `.claude`-named ancestor reached only through a symlink must not
+    // bypass the structural check — the target file does not exist yet
+    // (this is a `Write` call), only the symlinked directory does.
+    let tmp = tempfile::tempdir().unwrap();
+    let real_claude = tmp.path().join("real/.claude");
+    std::fs::create_dir_all(&real_claude).unwrap();
+    let link = tmp.path().join("link_dir");
+    std::os::unix::fs::symlink(&real_claude, &link).unwrap();
+    let target = link.join("settings.json");
+    let payload = format!(
+        r#"{{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{{"file_path":"{}","content":"{{}}"}}}}"#,
+        target.to_string_lossy()
+    );
+    assert_denied(&run_pm_guard(&payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_global_claude_config_dir_settings_write() {
+    // The managed-session global equivalent: `settings.json` sits directly
+    // under `$CLAUDE_CONFIG_DIR`, with NO nested `.claude/` component.
+    let tmp = tempfile::tempdir().unwrap();
+    let config_dir = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let target = config_dir.join("settings.json");
+    let payload = format!(
+        r#"{{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{{"file_path":"{}","content":"{{}}"}}}}"#,
+        target.to_string_lossy()
+    );
+    let config_dir_s = config_dir.to_string_lossy().to_string();
+    let stdout = run_pm_guard(&payload, &[("CLAUDE_CONFIG_DIR", &config_dir_s)]);
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_allows_ordinary_non_source_writes_unaffected_by_trust_anchor_guard() {
+    // The trust-anchor denylist must be narrow: ordinary non-source writes
+    // (a README, a data JSON file elsewhere, a sibling `.claude/` file that
+    // is NOT the trust anchor itself) must all remain allowed.
+    let readme = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"README.md","content":"x"}}"#,
+        &[],
+    );
+    assert_eq!(readme.trim(), "", "README.md must remain allowed");
+
+    let data_json = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"data/config.json","content":"{}"}}"#,
+        &[],
+    );
+    assert_eq!(
+        data_json.trim(),
+        "",
+        "a data JSON file elsewhere must remain allowed"
+    );
+
+    let agent_md = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/repo/.claude/agents/foo.md","content":"x"}}"#,
+        &[],
+    );
+    assert_eq!(
+        agent_md.trim(),
+        "",
+        "a sibling .claude/ file that is not the trust anchor must remain allowed"
+    );
+
+    let config_toml = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/repo/.claude/config.toml","content":"x"}}"#,
+        &[],
+    );
+    assert_eq!(
+        config_toml.trim(),
+        "",
+        "a non-settings file directly in .claude/ must remain allowed"
+    );
+}
+
 #[test]
 fn pm_guard_allows_benign_pipes_and_dev_null() {
     // Composition with no forbidden segment must still allow.

@@ -9,6 +9,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`tm hook --pm-guard` now denies any write to its own trust anchor**
+  ([#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981)): a direct
+  `Write`/`Edit`/`MultiEdit`/`NotebookEdit` targeting `.claude/settings.json`,
+  `.claude/settings.local.json`, or the `$CLAUDE_CONFIG_DIR` global
+  equivalent was previously an unconditional, unbudgeted ALLOW (`.json` is
+  not a source-code extension) — letting the PM, or any Guard-4-exempt
+  subagent, set `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` in
+  that file's `env` block and silently disable every pm_guard rule in one
+  ordinary permitted write. New `pm_guard_trust_anchor` module resolves the
+  target path (relative, `~`, `..` traversal, and symlinked ancestors — all
+  without requiring the target file to exist) and matches it structurally
+  (any `.claude/settings*.json`, plus the exact `$CLAUDE_CONFIG_DIR`
+  equivalent, which has NO `.claude/` nesting). Checked from THREE places:
+  `pm_guard()`'s body directly, before Guards 1/4's subagent-exemption early
+  returns (matching the worktree-tmp guard's placement, for the same
+  reason — a dispatched subagent's write is exactly as dangerous as the PM's
+  own); `evaluate_edit_tool`, as defense in depth; and
+  `pm_guard_bash::evaluate_bash_command`/`bash_targets_trust_anchor`, closing
+  the equivalent shell route (`echo … > .claude/settings.json`, `tee`,
+  `sed -i`, `awk`, `patch`, `git apply`) as an absolute,
+  non-budget-eligible deny rather than the ordinary budget-eligible
+  `SHELL_EDIT_REASON`. The deny message does not suggest delegating via the
+  Task/Agent tool (a dispatched subagent is denied identically) — the only
+  remedies are a human operator editing the file directly outside the
+  guarded session, or setting `TRUSTY_MPM_PM_UNRESTRICTED=1` in their own
+  shell. Known residual gap: a trust-anchor write hidden inside a `$(…)`/
+  backtick Bash command substitution is not specially detected by the new
+  absolute check (it still denies, via the pre-existing substitution scan,
+  but as the budget-eligible `SHELL_EDIT_REASON`).
+
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
   (worktree-hygiene follow-up to

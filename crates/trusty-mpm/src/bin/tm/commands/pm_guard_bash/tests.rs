@@ -809,3 +809,144 @@ fn evaluate_worktree_add_command_normalizes_dot_dot_traversal() {
         Some(WORKTREE_TMP_REASON)
     );
 }
+
+// ─── trust-anchor Bash-route coverage (issue #3981) ────────────────────────
+
+#[test]
+fn bash_targets_trust_anchor_detects_redirection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    for cmd in [
+        format!("echo '{{\"env\":{{\"TRUSTY_MPM_PM_UNRESTRICTED\":\"1\"}}}}' > {target_s}"),
+        format!("cat >> {target_s}"),
+        format!("printf 'x' >{target_s}"),
+    ] {
+        assert!(
+            bash_targets_trust_anchor(&cmd),
+            "expected trust-anchor detection for: {cmd}"
+        );
+    }
+
+    // A benign redirect elsewhere must not trip it.
+    assert!(!bash_targets_trust_anchor("echo hi > /tmp/out.txt"));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_tee() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    for cmd in [
+        format!("echo x | tee {target_s}"),
+        format!("tee {target_s}"),
+        format!("sudo tee -a {target_s}"),
+        format!("tee /tmp/other.json {target_s}"),
+    ] {
+        assert!(
+            bash_targets_trust_anchor(&cmd),
+            "expected tee to be caught for: {cmd}"
+        );
+    }
+
+    assert!(!bash_targets_trust_anchor("echo x | tee /tmp/notes.txt"));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_sed_awk_patch_git_apply() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    for cmd in [
+        format!("sed -i s/a/b/ {target_s}"),
+        format!("patch -p1 {target_s}"),
+        format!("git apply {target_s}"),
+    ] {
+        assert!(
+            bash_targets_trust_anchor(&cmd),
+            "expected trailing-token detection for: {cmd}"
+        );
+    }
+
+    assert!(!bash_targets_trust_anchor("sed -i s/a/b/ src/lib.rs"));
+}
+
+#[test]
+#[serial_test::serial(claude_config_dir_env)]
+fn bash_targets_trust_anchor_detects_claude_config_dir_target() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("claude-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let target = config_dir.join("settings.json");
+    let target_s = target.to_string_lossy().to_string();
+
+    // Serialized (see the attribute above) under the SAME key
+    // `pm_guard_trust_anchor`'s own `CLAUDE_CONFIG_DIR`-mutating test uses, so
+    // the two never interleave and race the process-wide env var. Scoped
+    // set/remove around the single assertion, mirroring this file's other
+    // env-mutating tests
+    // (`evaluate_worktree_add_command_resolves_env_and_tilde_expansion`
+    // above, which predates this pattern and is intentionally left as-is).
+    let prior = std::env::var_os("CLAUDE_CONFIG_DIR");
+    unsafe {
+        std::env::set_var("CLAUDE_CONFIG_DIR", &config_dir);
+    }
+    let result = bash_targets_trust_anchor(&format!("echo x > {target_s}"));
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+    }
+    assert!(result);
+}
+
+#[test]
+fn bash_targets_trust_anchor_allows_benign_commands() {
+    for cmd in [
+        "git status",
+        "cargo test",
+        "echo hi",
+        "sed -i s/a/b/ src/lib.rs",
+        "cat .claude/agents/foo.md",
+    ] {
+        assert!(
+            !bash_targets_trust_anchor(cmd),
+            "expected no trust-anchor detection for: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn tee_target_tokens_extracts_all_non_flag_args() {
+    assert_eq!(tee_target_tokens("tee f1 f2"), vec!["f1", "f2"]);
+    assert_eq!(tee_target_tokens("tee -a f1"), vec!["f1"]);
+    assert_eq!(tee_target_tokens("sudo tee -a f1"), vec!["f1"]);
+    assert_eq!(tee_target_tokens("/usr/bin/tee f1"), vec!["f1"]);
+    assert_eq!(tee_target_tokens("echo x | tee f1"), vec!["f1"]);
+    assert!(tee_target_tokens("git status").is_empty());
+}
+
+#[test]
+fn evaluate_bash_command_returns_trust_anchor_reason_not_shell_edit_reason() {
+    // The whole point of issue #3981's Bash-side fix: a trust-anchor write
+    // must classify as the absolute TRUST_ANCHOR_DENY_REASON, NOT the
+    // budget-eligible SHELL_EDIT_REASON a plain redirect would otherwise get.
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let cmd = format!("echo x > {}", target.to_string_lossy());
+
+    let reason = evaluate_bash_command(&cmd);
+    assert_eq!(
+        reason,
+        Some(crate::commands::pm_guard_trust_anchor::TRUST_ANCHOR_DENY_REASON)
+    );
+    assert_ne!(reason, Some(SHELL_EDIT_REASON));
+}

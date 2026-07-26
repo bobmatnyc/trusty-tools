@@ -29,6 +29,7 @@ mod shell_lex;
 use std::path::{Path, PathBuf};
 
 use crate::commands::hook_rewrite::{effective_tool_name, first_command_token};
+use crate::commands::pm_guard_trust_anchor::is_trust_anchor_path;
 use shell_lex::QuoteScan;
 
 /// Deny reason for editing files through a shell tool (sed/awk/patch/git apply/redirection).
@@ -67,7 +68,109 @@ const MAX_SUBSTITUTION_DEPTH: usize = 32;
 /// Test: `evaluate_bash_command_denies_*`, `evaluate_bash_command_allows_*`,
 /// `evaluate_bash_command_denies_composition_*`.
 pub(crate) fn evaluate_bash_command(command: &str) -> Option<&'static str> {
+    // Trust-anchor check (issue #3981) — deliberately runs FIRST and
+    // unconditionally, ahead of the ordinary verb/redirection classification
+    // below. `pm_guard::pm_guard` already calls [`bash_targets_trust_anchor`]
+    // directly, ahead of the Guard 1/Guard 4 subagent exemptions that never
+    // reach this function at all — so for THAT caller this check is
+    // redundant by construction. It is kept here too as defense in depth for
+    // any OTHER caller of this pure classifier (e.g. `evaluate_tool`, used by
+    // the opt-in deny-by-default persona gate to ask "would this call be
+    // guarded at all") and so a trust-anchor write is never misreported as
+    // the ordinary, budget-eligible [`SHELL_EDIT_REASON`] regardless of call
+    // site.
+    if bash_targets_trust_anchor(command) {
+        return Some(crate::commands::pm_guard_trust_anchor::TRUST_ANCHOR_DENY_REASON);
+    }
     evaluate_bash_command_inner(command, 0)
+}
+
+/// Whether `command` writes, via any Bash mechanism this module recognizes,
+/// to pm_guard's own trust-anchor settings file (issue #3981).
+///
+/// Why: a shell redirect (`echo … > .claude/settings.json`, `cat >>`), `tee`
+/// (which takes its output file as an ARGUMENT, not a `>` redirect — invisible
+/// to [`has_file_write_redirection`]/[`redirection_target`]), or `sed -i`/
+/// `awk`/`patch`/`git apply` (whose target is conventionally their trailing
+/// non-flag argument, per [`trailing_file_token`]) can all write the trust
+/// anchor exactly as surely as the `Write`/`Edit` tool. Without this check
+/// those would classify as the ordinary [`SHELL_EDIT_REASON`] — which
+/// `pm_guard`'s per-turn budget (issue #2918) allows up to 3 times BEFORE
+/// hard-blocking — silently reopening the exact hole the Edit/Write-side
+/// trust-anchor denylist closes.
+/// What: scans every composition segment ([`split_shell_segments`]) for a
+/// real file-write redirect target ([`redirection_target`]), a `tee`
+/// argument ([`tee_target_tokens`]), or — for the sed/awk-family/`patch`/
+/// `git apply` verbs — the trailing file token ([`trailing_file_token`]),
+/// and returns `true` on the first one [`is_trust_anchor_path`] confirms.
+/// Known residual gap: a trust-anchor write hidden inside a `$(…)`/backtick
+/// command substitution is NOT specially detected by this function (it scans
+/// top-level segments only) — such a call still denies, but as the ordinary
+/// budget-eligible `SHELL_EDIT_REASON` via [`classify_command_substitutions`]'s
+/// existing recursive scan, not this absolute deny. Documented, not silently
+/// swept under the rug — see the PR description for the same note.
+/// Test: `bash_targets_trust_anchor_*` below.
+pub(crate) fn bash_targets_trust_anchor(command: &str) -> bool {
+    for segment in split_shell_segments(command) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(target) = redirection_target(trimmed)
+            && is_trust_anchor_path(&target)
+        {
+            return true;
+        }
+        let Some(program) = first_command_token(trimmed) else {
+            continue;
+        };
+        if program == "tee" {
+            for target in tee_target_tokens(trimmed) {
+                if is_trust_anchor_path(target) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        let is_sed_awk_family =
+            matches!(program, "patch" | "sed" | "awk" | "gawk" | "nawk" | "mawk");
+        let is_git_apply =
+            program == "git" && shell_lex::git_subcommand(trimmed).as_deref() == Some("apply");
+        if (is_sed_awk_family || is_git_apply)
+            && let Some(target) = trailing_file_token(trimmed)
+            && is_trust_anchor_path(&target)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The non-flag argument tokens of a `tee`-headed segment.
+///
+/// Why: `tee` writes its output to file ARGUMENTS, not a `>` redirect, so it
+/// is invisible to [`has_file_write_redirection`]/[`redirection_target`]; a
+/// dedicated scan is the only way [`bash_targets_trust_anchor`] can see
+/// `tee .claude/settings.json` or `sudo tee -a .claude/settings.json`.
+/// What: finds the first whitespace token equal to `tee` (or ending in
+/// `/tee`, covering an absolute-path invocation), then returns every
+/// remaining whitespace-separated token that does not start with `-` (an
+/// option flag) — `tee` accepts multiple output files, so ALL of them are
+/// returned, not just the first/last.
+/// Test: `tee_target_tokens_*`.
+fn tee_target_tokens(command: &str) -> Vec<&str> {
+    let all: Vec<&str> = command.split_whitespace().collect();
+    let Some(pos) = all
+        .iter()
+        .position(|t| *t == "tee" || t.rsplit('/').next() == Some("tee"))
+    else {
+        return Vec::new();
+    };
+    all[pos + 1..]
+        .iter()
+        .filter(|t| !t.starts_with('-'))
+        .copied()
+        .collect()
 }
 
 /// Depth-aware core of [`evaluate_bash_command`].
@@ -734,11 +837,16 @@ fn resolve_target_path(token: &str, base: &Path) -> PathBuf {
 /// Why: [`resolve_target_path`] must not call `fs::canonicalize` (the target
 /// usually doesn't exist yet), but a purely textual join like
 /// `/repo/../tmp/wt` must still be recognized as resolving under `/tmp`.
+/// `pub(crate)` (rather than private) so
+/// [`crate::commands::pm_guard_trust_anchor`] reuses the SAME lexical-collapse
+/// rule (issue #3981) instead of a second, potentially-drifting
+/// implementation — that module layers its own filesystem-touching symlink
+/// resolution on top, which this function deliberately does not attempt.
 /// What: walks `path`'s components, popping the accumulator on `..` and
 /// dropping `.`, otherwise appending. Does not consult the filesystem, so it
-/// cannot see through symlinks (see the residual-bypass note on
+/// cannot see through symlinks on its own (see the residual-bypass note on
 /// [`evaluate_worktree_add_command`]).
-fn normalize_lexically(path: &Path) -> PathBuf {
+pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
     for component in path.components() {

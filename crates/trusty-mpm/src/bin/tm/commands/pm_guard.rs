@@ -68,16 +68,35 @@
 //! so this worktree check — which needs the payload — can run first). **This
 //! is NOT the same as "operator-only"**: Claude Code's `settings.json`
 //! supports a top-level `env` object applied to every session/subprocess it
-//! spawns (hooks included, live-reloaded mid-session), and a `Write`/`Edit`
-//! to `.claude/settings.json` is not itself blocked by this guard (`.json` is
-//! not in [`SOURCE_CODE_EXTENSIONS`], so [`evaluate_edit_tool`] falls through
-//! to an unconditional ALLOW) — so the PM, or any Guard-4-exempt subagent,
-//! can set either var there and self-exempt from this entire guard. That gap
-//! predates this PR by many issues and is NOT introduced or widened by it;
-//! tracked separately as issue #3981, not fixed here. This is the one place
-//! in the file that pierces an automatic-marker exemption; see that call
-//! site's comment for why it must never be routed through [`evaluate_tool`]
-//! instead.
+//! spawns (hooks included, live-reloaded mid-session), so a `Write`/`Edit` to
+//! `.claude/settings.json` could otherwise set either var and self-exempt
+//! from this entire guard (`.json` is not in [`SOURCE_CODE_EXTENSIONS`], so
+//! without an explicit check [`evaluate_edit_tool`] would fall through to an
+//! unconditional ALLOW). **Trust-anchor denylist (issue #3981):** a
+//! dispatched sub-agent's write to `.claude/settings.json` is EXACTLY as
+//! dangerous as the PM's own (it can self-exempt from every rule in this
+//! file just the same), so — like the worktree-tmp guard immediately above,
+//! and for the identical reason — [`pm_guard`] calls
+//! [`crate::commands::pm_guard_trust_anchor::is_trust_anchor_path`] DIRECTLY
+//! from its body, right after the worktree check, BEFORE Guard 1 and Guard
+//! 4's exemption early-returns. [`evaluate_edit_tool`] ALSO checks it (before
+//! even the PM-orchestration allow-list) as a second, pure-function layer of
+//! defense in depth for any other caller of [`evaluate_tool`] (e.g. the
+//! opt-in deny-by-default persona gate below, which calls `evaluate_tool` to
+//! ask "would this call be guarded at all"); for the PM's own direct calls
+//! that second layer is reachable, but for a dispatched sub-agent the direct
+//! check in [`pm_guard`]'s body always fires first, exactly like the
+//! worktree guard. [`crate::commands::pm_guard_bash::evaluate_bash_command`]
+//! applies the SAME check unconditionally too, ahead of its ordinary verb/
+//! redirection classification, so a shell redirect/`tee`/`sed -i`/`patch`
+//! targeting the same file is an absolute (non-budget-eligible) deny — see
+//! that module's doc comment for why the Bash-side check has to be a
+//! separate, unconditional pass rather than an upgrade of an
+//! already-computed [`SHELL_EDIT_REASON`]. Because delegation does NOT help
+//! here (a dispatched sub-agent is denied identically), the deny message
+//! does not suggest it — see
+//! [`crate::commands::pm_guard_trust_anchor::TRUST_ANCHOR_DENY_REASON`]'s own
+//! doc comment for the actual (human-only) remedies.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
@@ -97,6 +116,7 @@ use crate::commands::pm_guard_bash::{
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
+use crate::commands::pm_guard_trust_anchor::{TRUST_ANCHOR_DENY_REASON, is_trust_anchor_path};
 
 /// Escape-hatch env var: `TRUSTY_MPM_PM_UNRESTRICTED=1` disables all PM
 /// enforcement for the invocation.
@@ -195,20 +215,22 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // programmatically anywhere in this codebase's Rust source (verified: no
     // `std::env::var`/`set_var` occurrence outside doc comments and this
     // module) — so they must keep working exactly as before, including
-    // against the ABSOLUTE worktree-tmp guard below: whoever sets
-    // `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` gets exactly
-    // that, no exceptions. That is a narrower claim than "operator-only",
-    // though: Claude Code's `settings.json` `env` object can set either var
-    // for every hook invocation, and a write to `.claude/settings.json` is
-    // not itself blocked by this guard (see the module doc above, "This is
-    // NOT the same as 'operator-only'") — so the PM or an exempt subagent CAN
-    // self-exempt via that path. That gap predates this PR by many issues and
-    // is out of scope here; tracked as issue #3981. Guard 1 (`SUB_AGENT_ENV`),
-    // by contrast, is an
-    // AUTOMATIC marker a spawn helper stamps on every nested MPM subagent
-    // process with no per-invocation env-write decision involved — see
-    // Guard 1's own comment below for why it is checked LATER, after the
-    // worktree guard, instead of here.
+    // against the ABSOLUTE worktree-tmp AND trust-anchor guards below:
+    // whoever sets `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED`
+    // directly in their OWN shell environment gets exactly that, no
+    // exceptions — that is the documented, intended operator escape hatch.
+    // The gap issue #3981 identified was narrower: Claude Code's
+    // `settings.json` `env` object can ALSO set either var for every hook
+    // invocation, and — before the trust-anchor guard below existed — a
+    // Write/Edit to `.claude/settings.json` was not itself blocked by this
+    // guard at all, so the PM or an exempt subagent could self-exempt via
+    // that file-write path with no human involved. The trust-anchor guard
+    // below closes that specific gap; it does not and must not touch these
+    // two genuine human-operated bypasses. Guard 1 (`SUB_AGENT_ENV`), by
+    // contrast, is an AUTOMATIC marker a spawn helper stamps on every nested
+    // MPM subagent process with no per-invocation env-write decision
+    // involved — see Guard 1's own comment below for why it is checked
+    // LATER, after the worktree and trust-anchor guards, instead of here.
     if std::env::var_os(DISABLE_HOOKS_ENV).is_some() {
         return Ok(());
     }
@@ -269,6 +291,44 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
             println!("{}", build_pretooluse_deny_response(reason));
             return Ok(());
         }
+    }
+
+    // ABSOLUTE guard (issue #3981) — pm_guard's own trust anchor. Placed
+    // here for the EXACT same reason as the worktree-tmp guard immediately
+    // above (see its comment): a native Task/Agent-dispatched subagent
+    // (`agent_id` present, Guard 4) or a trusty-agents-spawned nested
+    // subagent (`CLAUDE_MPM_SUB_AGENT` set, Guard 1) writing
+    // `.claude/settings.json` is EXACTLY as dangerous as the PM doing it
+    // directly — it can set `TRUSTY_MPM_DISABLE_HOOKS`/
+    // `TRUSTY_MPM_PM_UNRESTRICTED` in that file's `env` block and disable
+    // every rule in this file for every future invocation, subagent or not.
+    // A check routed through `evaluate_tool` (as `evaluate_edit_tool` and
+    // `evaluate_bash_command` also independently apply, for defense in depth
+    // on the direct-PM-call path) would never fire for either exemption, so
+    // this direct, unconditional call is required. Covers both write routes
+    // in one place: the Edit/Write/MultiEdit/NotebookEdit tools via
+    // [`edit_tool_target_path`], and `Bash` (redirects/`tee`/`sed`-`awk`/
+    // `patch`/`git apply`) via
+    // [`crate::commands::pm_guard_bash::bash_targets_trust_anchor`]. DO NOT
+    // move this after Guard 1 or Guard 4.
+    let trust_anchor_target = if EDIT_TOOLS.contains(&tool_name) {
+        edit_tool_target_path(tool_input).is_some_and(is_trust_anchor_path)
+    } else if tool_name == "Bash" {
+        let command = tool_input
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        crate::commands::pm_guard_bash::bash_targets_trust_anchor(command)
+    } else {
+        false
+    };
+    if trust_anchor_target {
+        audit_denied_tool(url, session_id, tool_name, TRUST_ANCHOR_DENY_REASON).await;
+        println!(
+            "{}",
+            build_pretooluse_deny_response(TRUST_ANCHOR_DENY_REASON)
+        );
+        return Ok(());
     }
 
     // Guard 1: never block a nested MPM sub-agent for anything else — it is
@@ -448,7 +508,10 @@ pub(crate) fn evaluate_tool(
 /// directive (live dogfooding): "the PM can write single files." The pre-#2604
 /// guard blocked *all* Edit/Write, which denied the PM its own session-pause
 /// snapshot write to `.trusty-mpm/sessions/session-*.md`.
-/// What: reads the target path; ALLOW (`None`) when it is PM-owned orchestration
+/// What: reads the target path; DENY ([`TRUST_ANCHOR_DENY_REASON`], issue
+/// #3981) FIRST — before any allow-list, including PM-orchestration state —
+/// when the resolved path is pm_guard's own trust anchor
+/// ([`is_trust_anchor_path`]); ALLOW (`None`) when it is PM-owned orchestration
 /// state ([`is_pm_orchestration_path`], the HARD always-allow set — this wins
 /// over the source-code rule); DENY ([`SOURCE_EDIT_REASON`]) when it is a
 /// source-code file ([`is_source_code_path`]); otherwise ALLOW (a single-file
@@ -457,9 +520,15 @@ pub(crate) fn evaluate_tool(
 /// Test: `evaluate_tool_denies_source_code_edits`,
 /// `evaluate_tool_allows_pm_orchestration_state`,
 /// `evaluate_tool_allows_non_source_single_file_writes`,
-/// `evaluate_edit_tool_fails_open_without_path`.
+/// `evaluate_edit_tool_fails_open_without_path`,
+/// `evaluate_tool_denies_trust_anchor_write` (see also
+/// `pm_guard_trust_anchor`'s own unit tests and
+/// `tests/tm_hook_pm_guard.rs::pm_guard_denies_settings_json_write_*`).
 fn evaluate_edit_tool(tool_input: Option<&serde_json::Value>) -> Option<&'static str> {
     let path = edit_tool_target_path(tool_input)?;
+    if is_trust_anchor_path(path) {
+        return Some(TRUST_ANCHOR_DENY_REASON);
+    }
     if is_pm_orchestration_path(path) {
         return None;
     }
@@ -623,6 +692,35 @@ mod tests {
                 Some(&serde_json::json!({"notebook_path": "/x/nb.ipynb"}))
             ),
             Some(SOURCE_EDIT_REASON)
+        );
+    }
+
+    #[test]
+    fn evaluate_tool_denies_trust_anchor_write() {
+        // Issue #3981: a direct write to `.claude/settings.json` (or
+        // `.local.json`) must be denied BEFORE the non-source-file fallback
+        // would otherwise allow it — this is the pure-function layer of the
+        // fix; `pm_guard`'s own absolute pre-Guard-1/4 check (see the body of
+        // `pm_guard()`) is what actually covers the subagent-bypass cases,
+        // exercised end to end in `tests/tm_hook_pm_guard.rs`.
+        for path in [
+            "/repo/.claude/settings.json",
+            "/repo/.claude/settings.local.json",
+        ] {
+            assert_eq!(
+                evaluate_tool("Write", Some(&serde_json::json!({"file_path": path}))),
+                Some(TRUST_ANCHOR_DENY_REASON),
+                "expected {path} to be denied as the trust anchor"
+            );
+        }
+        // A sibling `.claude/` file (not the trust anchor itself) is
+        // unaffected — still allowed as an ordinary non-source write.
+        assert_eq!(
+            evaluate_tool(
+                "Write",
+                Some(&serde_json::json!({"file_path": "/repo/.claude/config.toml"}))
+            ),
+            None
         );
     }
 

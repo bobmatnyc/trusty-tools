@@ -44,6 +44,7 @@ pub(crate) mod pm_guard_bash;
 pub(crate) mod pm_guard_budget;
 pub(crate) mod pm_guard_deny_by_default;
 pub(crate) mod pm_guard_routing;
+pub(crate) mod pm_guard_trust_anchor;
 pub(crate) mod project;
 pub(crate) mod projects;
 pub(crate) mod prune;
