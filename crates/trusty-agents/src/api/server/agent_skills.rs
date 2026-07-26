@@ -16,7 +16,9 @@
 //!
 //! **Honesty rules this route holds to** (#3945's discipline, restated):
 //! - `granted` is computed by the SAME `match_any_glob` the dispatch gate uses,
-//!   against the SAME compiled patterns — it is not a re-implementation.
+//!   against the SAME compiled patterns, from a catalog built the SAME way
+//!   (built-in + authored overlay) — it is not a re-implementation, and it does
+//!   not read a narrower catalog than the runtime it describes.
 //! - A credential is reported as present only when it is an environment
 //!   variable this process can actually read. An OAuth grant reports its
 //!   requirement with `configured: null` — unknown, never "yes".
@@ -26,7 +28,7 @@
 //!   either hiding it or claiming it is broken.
 //! Test: `super::tests::agent_skills`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::{
     Json,
@@ -44,14 +46,24 @@ use crate::skills::manifest::{SkillCatalog, SkillManifest, effective_tool_patter
 
 /// `GET /api/agents/:name/skills` — HTTP entry point.
 ///
-/// Why/What: see the module doc. The agents-dir list is discovered here and
-/// threaded into [`skills_at`] so tests can substitute a temp directory.
+/// Why/What: see the module doc. The agents-dir list and the skill-source root
+/// are discovered here and threaded into [`skills_at`] so tests can substitute
+/// temp directories. The root mirrors the dispatch call sites
+/// (`ctrl::pm_task::dispatch::persona` passes its `project_path`;
+/// `runtime::subagent_mode` passes its `cwd`), so the route resolves authored
+/// manifests from the same sources dispatch will.
 /// Test: `super::tests::agent_skills::skills_route_reports_granted_skills_with_human_names`.
 pub(super) async fn agent_skills_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
 ) -> Response {
-    skills_at(&crate::agents::agents_dir_candidates(), &name).await
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    skills_at(
+        &crate::agents::agents_dir_candidates(),
+        &name,
+        &project_root,
+    )
+    .await
 }
 
 /// Core skill-resolution logic against an explicit agents-dir list.
@@ -64,8 +76,9 @@ pub(super) async fn agent_skills_route(
 /// the resolved config file cannot be read.
 /// Test: `skills_route_reports_granted_skills_with_human_names`, `skills_route_unknown_agent_404`,
 /// `skills_route_degrades_on_malformed_toml`,
-/// `skills_route_surfaces_unresolved_skill_ids`.
-pub(super) async fn skills_at(dirs: &[PathBuf], name: &str) -> Response {
+/// `skills_route_surfaces_unresolved_skill_ids`,
+/// `skills_route_resolves_an_authored_only_skill_id`.
+pub(super) async fn skills_at(dirs: &[PathBuf], name: &str, project_root: &Path) -> Response {
     if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
         return (
             StatusCode::BAD_REQUEST,
@@ -93,7 +106,19 @@ pub(super) async fn skills_at(dirs: &[PathBuf], name: &str) -> Response {
     };
 
     let (tools, skills, config_error) = parse_capability_sections(&raw);
-    let catalog = SkillCatalog::builtin();
+    // The catalog MUST be built exactly as the dispatch paths build it
+    // (`persona.rs`, `subagent_mode.rs`), authored overlay included. Reading a
+    // built-in-only catalog here would make this route disagree with the runtime
+    // it reports on: an authored-only skill id would be listed as `unresolved`
+    // while dispatch resolved and granted it, and `web-search.md`'s authored
+    // name would never reach the pane. A display path that contradicts the
+    // enforcement path is the audit-surface form of the same
+    // capability-model-holds-on-one-path defect the two dispatch sites were
+    // wired together to avoid.
+    let catalog =
+        SkillCatalog::builtin().with_authored(crate::skills::manifest::authored::load_from_paths(
+            &crate::skills::sources::SkillSourceRegistry::load(project_root).resolved_paths(),
+        ));
     let (patterns, unresolved) =
         effective_tool_patterns(tools.allow.as_ref(), skills.allow.as_ref(), &catalog);
     let granted_ids = granted_skill_ids(&catalog, patterns.as_deref(), skills.allow.as_ref());

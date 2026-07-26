@@ -220,6 +220,35 @@ impl SkillManifest {
     }
 }
 
+/// Characters that make a string a PATTERN rather than an exact tool name.
+///
+/// Why: `match_any_glob` (`ctrl/pm_task/helpers.rs`) treats a trailing `*` as a
+/// prefix wildcard, so `*` alone matches every tool in the registry. `?` and
+/// `[`/`]` are not part of that dialect today, but they are glob metacharacters
+/// in every dialect a future author would reach for, and rejecting them now
+/// costs nothing while leaving no room for the next matcher change to reopen
+/// this hole.
+const GLOB_METACHARACTERS: &[char] = &['*', '?', '[', ']'];
+
+/// Whether `name` is an exact tool name safe to expand into an allow-pattern.
+///
+/// Why — **this is a privilege-escalation gate, not tidiness.** Skill-expanded
+/// names are merged into the very list handed to `match_any_glob`. An authored
+/// `.md` carrying `tools: ["*"]` would therefore turn one innocuous
+/// `[skills].allow` entry into `[tools].allow = ["*"]` — every tool in the
+/// registry — behind a skill card that renders as a single narrow capability.
+/// That is strictly WORSE than the raw glob it replaces, because the reviewer
+/// reading `agent.toml` sees a tidy skill id and no wildcard at all. DOC-57 S-1
+/// already says `tools` entries are exact names and "the skill layer adds no
+/// fourth glob dialect"; before this check, nothing enforced it.
+/// What: `true` only for a non-empty name with no leading/trailing whitespace
+/// and no [`GLOB_METACHARACTERS`].
+/// Test: `authored_glob_shaped_tool_entry_is_rejected_not_granted`,
+/// `is_exact_tool_name_rejects_every_glob_metacharacter`.
+pub fn is_exact_tool_name(name: &str) -> bool {
+    !name.is_empty() && name.trim() == name && !name.contains(GLOB_METACHARACTERS)
+}
+
 /// Title-case a snake_case tool identifier for a derived skill's display name.
 ///
 /// Why: `get_train_schedule` is not a name a user reads; "Get Train Schedule"
@@ -286,11 +315,21 @@ impl SkillCatalog {
     /// into a card that implies none is. Losing a credential warning during a
     /// migration is exactly the kind of quiet honesty regression #3945 exists to
     /// prevent, so the replaced row's provider carries over.
+    /// **Source precedence:** `skills/sources/mod.rs` scans higher-priority
+    /// sources first and documents "first writer wins", and `load_from_paths`
+    /// preserves that order. So among AUTHORED manifests the first one to claim
+    /// a tool keeps it and later (lower-priority) ones are skipped. Authored
+    /// still displaces BUILT-IN unconditionally — that is a different axis, and
+    /// collapsing the two would either let a low-priority source override a
+    /// high-priority one or stop authored manifests overriding the catalog at
+    /// all.
     /// What: For each authored manifest, inherits `provider` from the row it
-    /// displaces when it declares none, drops any manifest claiming the same
-    /// tool or id, then inserts.
+    /// displaces when it declares none, drops any BUILT-IN manifest claiming the
+    /// same tool or id, then inserts (a conflicting authored row wins by being
+    /// there first).
     /// Test: `authored_manifest_overrides_builtin_by_tool`,
-    /// `authored_manifest_inherits_the_builtin_provider_requirement`.
+    /// `authored_manifest_inherits_the_builtin_provider_requirement`,
+    /// `authored_multi_source_precedence_first_source_wins`.
     pub fn with_authored(mut self, authored: Vec<SkillManifest>) -> Self {
         for mut manifest in authored {
             if manifest.provider.is_none()
@@ -299,31 +338,56 @@ impl SkillCatalog {
             {
                 manifest.provider = existing.provider;
             }
-            self.remove_conflicts(&manifest);
+            self.remove_displaced_builtins(&manifest);
             self.insert(manifest);
         }
         self
     }
 
-    /// Drop any manifest sharing this one's id or its wrapped tool.
-    fn remove_conflicts(&mut self, incoming: &SkillManifest) {
-        self.manifests
-            .retain(|m| m.id != incoming.id && (m.tool().is_none() || m.tool() != incoming.tool()));
+    /// Drop any BUILT-IN manifest sharing this one's id or its wrapped tool.
+    ///
+    /// Why: Authored beats built-in (S-9), but an already-inserted AUTHORED
+    /// manifest came from a higher-priority source and must survive — evicting
+    /// it here is what silently inverted source precedence. Filtering on
+    /// `origin` keeps both rules intact in one pass.
+    /// What: Retains everything except built-in rows colliding by id or tool.
+    /// Test: `authored_multi_source_precedence_first_source_wins`.
+    fn remove_displaced_builtins(&mut self, incoming: &SkillManifest) {
+        self.manifests.retain(|m| {
+            if m.origin != SkillOrigin::Builtin {
+                return true;
+            }
+            m.id != incoming.id && (m.tool().is_none() || m.tool() != incoming.tool())
+        });
         self.reindex();
     }
 
-    /// Append a manifest unless its tool is already claimed.
+    /// Append a manifest unless its tool is already claimed or glob-shaped.
     ///
-    /// Why: Enforces the 1:1 invariant structurally. A built-in table typo that
-    /// double-claims a tool loses the second row here AND fails
-    /// `builtin_rows_claim_each_tool_once`, rather than silently producing two
-    /// cards for one capability.
-    /// What: Skips insertion when `tool` is already indexed; tool-less skills
-    /// always insert.
+    /// Why: Two invariants enforced structurally rather than trusted.
+    /// **1:1** — a built-in table typo that double-claims a tool loses the second
+    /// row here AND fails `builtin_rows_claim_each_tool_once`, rather than
+    /// silently producing two cards for one capability. **Exact names** — this is
+    /// the last line of defence for [`is_exact_tool_name`]: even if a future
+    /// caller builds a `SkillManifest` without going through `authored::parse`,
+    /// a glob-shaped tool never reaches `by_tool`, so it can never be expanded
+    /// into an allow-pattern. Defence in depth on a privilege-escalation path is
+    /// worth the duplicated check.
+    /// What: Skips insertion when `tool` is already indexed or is not an exact
+    /// name; tool-less skills always insert.
+    /// Test: `authored_glob_shaped_tool_entry_is_rejected_not_granted`,
+    /// `catalog_insert_refuses_a_glob_shaped_tool`.
     fn insert(&mut self, manifest: SkillManifest) {
         if let Some(tool) = manifest.tool()
-            && self.by_tool.contains_key(tool)
+            && (self.by_tool.contains_key(tool) || !is_exact_tool_name(tool))
         {
+            if !is_exact_tool_name(tool) {
+                tracing::warn!(
+                    skill = %manifest.id,
+                    tool = %tool,
+                    "skill manifest names a glob-shaped tool; refusing to bind it"
+                );
+            }
             return;
         }
         if let Some(tool) = manifest.tool() {
@@ -364,11 +428,18 @@ impl SkillCatalog {
     /// tools", never returns `None` (which downstream means *unrestricted*), and
     /// never widens the set. A resolution bug can therefore only cost an agent
     /// capability it declared, never hand it capability it did not.
+    /// It is also the third and last place [`is_exact_tool_name`] is enforced.
+    /// Expansion output is merged straight into the patterns `match_any_glob`
+    /// consumes, so this function is the final gate before a name acquires
+    /// wildcard authority. Re-checking a value that `insert` already refused is
+    /// deliberate: it costs one comparison and it means no future construction
+    /// path can smuggle a wildcard through.
     /// What: Returns exact tool names (deduped, catalog order) plus the ids that
     /// resolved to nothing. Tool-less skills resolve successfully and contribute
     /// zero tools — they are not "unresolved".
     /// Test: `unknown_skill_id_yields_no_tools_never_all_tools`,
-    /// `unknown_skill_id_yields_no_tools_never_all_tools`, `tool_less_skills_are_present_and_expand_to_no_tools`.
+    /// `authored_glob_shaped_tool_entry_is_rejected_not_granted`,
+    /// `tool_less_skills_are_present_and_expand_to_no_tools`.
     pub fn expand(&self, allow: &[String]) -> SkillExpansion {
         let mut tools: Vec<String> = Vec::new();
         let mut seen: BTreeSet<&str> = BTreeSet::new();
@@ -377,6 +448,7 @@ impl SkillCatalog {
             match self.get(id) {
                 Some(manifest) => {
                     if let Some(tool) = manifest.tool()
+                        && is_exact_tool_name(tool)
                         && seen.insert(tool)
                     {
                         tools.push(tool.to_string());

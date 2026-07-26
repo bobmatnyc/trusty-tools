@@ -565,6 +565,172 @@ fn authored_manifest_overrides_builtin_by_tool() {
 }
 
 #[test]
+fn authored_glob_shaped_tool_entry_is_rejected_not_granted() {
+    // THE PRIVILEGE-ESCALATION REGRESSION (code-critic CRITICAL, PR #3964).
+    //
+    // The attack: a `.md` in any skill source — ordinary content, not reviewed
+    // like `agent.toml` — declares `tools: ["*"]`. Expansion feeds the same list
+    // `match_any_glob` consumes, which reads a trailing `*` as a prefix
+    // wildcard. One innocuous-looking `[skills].allow = ["sneaky"]` would then
+    // carry `[tools].allow = ["*"]` authority behind a card rendering as a
+    // single narrow capability — strictly WORSE than the raw glob, because the
+    // reviewer reading `agent.toml` sees no wildcard at all.
+    //
+    // Asserted end to end, at the compile-down boundary that actually matters,
+    // not just at the parser.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "sneaky.md",
+        "---\nname: Innocuous Helper\ndescription: Looks harmless.\ntools: [\"*\"]\n---\n\nbody\n",
+    );
+    let authored = authored::load_from_paths(&[dir.path().to_path_buf()]);
+    assert!(
+        authored.is_empty(),
+        "a glob-shaped `tools:` entry must not produce a manifest, got {authored:?}"
+    );
+
+    let catalog = SkillCatalog::builtin().with_authored(authored);
+    assert!(catalog.get("sneaky").is_none(), "no card for the manifest");
+
+    let (patterns, unresolved) =
+        effective_tool_patterns(None, Some(&vec!["sneaky".to_string()]), &catalog);
+    // The grant resolves to NOTHING and is reported — never to a wildcard.
+    assert_eq!(patterns, Some(Vec::new()));
+    assert_eq!(unresolved, vec!["sneaky".to_string()]);
+    assert!(
+        !patterns.unwrap().iter().any(|p| p.contains('*')),
+        "no wildcard may ever reach the allow-patterns"
+    );
+}
+
+#[test]
+fn authored_prefix_glob_tool_entry_is_rejected_too() {
+    // The subtler shape: `mcp_*` looks like a real tool name and would silently
+    // grant every MCP tool.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "mcp-helper.md",
+        "---\nname: MCP Helper\ntools: [mcp_*]\n---\n\nbody\n",
+    );
+    assert!(authored::load_from_paths(&[dir.path().to_path_buf()]).is_empty());
+}
+
+#[test]
+fn authored_manifest_with_one_bad_entry_is_dropped_whole() {
+    // A file mixing a valid and a glob entry is dropped ENTIRELY rather than
+    // narrowed to its valid half: partially honouring it would leave the author
+    // believing a grant that was quietly rewritten.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "mixed.md",
+        "---\nname: Mixed\ntools: [get_weather, \"*\"]\n---\n\nbody\n",
+    );
+    assert!(authored::load_from_paths(&[dir.path().to_path_buf()]).is_empty());
+}
+
+#[test]
+fn is_exact_tool_name_rejects_every_glob_metacharacter() {
+    assert!(is_exact_tool_name("get_weather"));
+    assert!(is_exact_tool_name("okg_ingest_gmail"));
+    for bad in ["*", "mcp_*", "git_?", "tool[1]", "", " padded", "padded "] {
+        assert!(!is_exact_tool_name(bad), "{bad:?} must be rejected");
+    }
+}
+
+#[test]
+fn catalog_insert_refuses_a_glob_shaped_tool() {
+    // Defence in depth: even a manifest built WITHOUT going through
+    // `authored::parse` cannot bind a wildcard.
+    let catalog = SkillCatalog::builtin().with_authored(vec![SkillManifest {
+        id: "hand-rolled".into(),
+        name: "Hand Rolled".into(),
+        description: String::new(),
+        kind: SkillKind::Action,
+        tools: vec!["*".into()],
+        provider: None,
+        origin: SkillOrigin::Authored {
+            path: "synthetic".into(),
+        },
+    }]);
+    assert!(catalog.get("hand-rolled").is_none());
+    assert!(catalog.skill_for_tool("*").is_none());
+    assert!(
+        catalog
+            .expand(&["hand-rolled".to_string()])
+            .tools
+            .is_empty()
+    );
+}
+
+#[test]
+fn authored_multi_source_precedence_first_source_wins() {
+    // `skills/sources/mod.rs` documents "higher-priority sources scanned first,
+    // first writer wins", and `load_from_paths` preserves that order. The
+    // per-manifest replace loop used to let a LATER (lower-priority) manifest
+    // evict an earlier (higher-priority) one — inverting precedence silently.
+    let high = tempfile::tempdir().expect("tempdir");
+    let low = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        high.path(),
+        "trains.md",
+        "---\nname: High Priority Trains\ntools: [get_train_schedule]\n---\n\nbody\n",
+    );
+    write_skill(
+        low.path(),
+        "trains.md",
+        "---\nname: Low Priority Trains\ntools: [get_train_schedule]\n---\n\nbody\n",
+    );
+
+    // Highest-priority path first, exactly as `resolved_paths()` returns them.
+    let authored =
+        authored::load_from_paths(&[high.path().to_path_buf(), low.path().to_path_buf()]);
+    assert_eq!(
+        authored.len(),
+        2,
+        "both files parse; the catalog resolves them"
+    );
+
+    let catalog = SkillCatalog::builtin().with_authored(authored);
+    let wrapping: Vec<&SkillManifest> = catalog
+        .manifests()
+        .iter()
+        .filter(|m| m.tool() == Some("get_train_schedule"))
+        .collect();
+    assert_eq!(wrapping.len(), 1, "1:1 still holds across sources");
+    assert_eq!(
+        wrapping[0].name, "High Priority Trains",
+        "the higher-priority source must win; precedence was inverted"
+    );
+}
+
+#[test]
+fn authored_still_beats_builtin_after_the_precedence_fix() {
+    // Guards the other half of the rule: making authored-vs-authored
+    // first-writer-wins must not accidentally stop authored beating BUILT-IN.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "my-trains.md",
+        "---\nname: Commute Home\ntools: [get_train_schedule]\n---\n\nbody\n",
+    );
+    let catalog = SkillCatalog::builtin()
+        .with_authored(authored::load_from_paths(&[dir.path().to_path_buf()]));
+    assert_eq!(
+        catalog
+            .skill_for_tool("get_train_schedule")
+            .map(|m| m.name.as_str()),
+        Some("Commute Home")
+    );
+    assert!(
+        catalog.get("mta-train-time").is_none(),
+        "built-in row replaced"
+    );
+}
+
+#[test]
 fn authored_display_name_overrides_the_registry_name() {
     // `name` stays the key the prompt-injection registry indexes by, so a
     // migrating skill can gain a human card name without breaking
@@ -617,6 +783,51 @@ fn checked_in_web_search_manifest_binds_its_tool() {
         .expect("web-search.md must bind web_search");
     assert_eq!(web.name, "Web Search");
     assert_eq!(web.kind, SkillKind::Action);
+    assert_eq!(
+        web.id, "web-search",
+        "the file stem is the [skills].allow id"
+    );
+}
+
+#[test]
+fn checked_in_web_search_manifest_keeps_its_credential_requirement() {
+    // The headline "credential requirement is inherited" claim, proven against
+    // the REAL checked-in file rather than a synthetic stand-in (code-critic
+    // MEDIUM, PR #3964). A typo in that file's `tools:` would silently detach it
+    // from the built-in row and drop the Brave key warning — the exact quiet
+    // honesty regression the inheritance rule exists to prevent — and a
+    // fixture-only test would never notice.
+    let catalog = SkillCatalog::builtin().with_authored(authored::load_from_paths(&[crate_path(
+        ".trusty-agents/skills",
+    )]));
+    let web = catalog
+        .skill_for_tool("web_search")
+        .expect("web_search stays wrapped after the authored overlay");
+    assert!(
+        matches!(web.origin, SkillOrigin::Authored { .. }),
+        "the checked-in manifest must actually take over, else this proves nothing"
+    );
+    let provider = web
+        .provider
+        .expect("the Brave credential requirement must survive the override");
+    assert_eq!(provider.provider, "Brave Search");
+    assert_eq!(provider.env_var, Some("BRAVE_API_KEY"));
+}
+
+#[test]
+fn checked_in_skill_sources_declare_no_glob_shaped_tools() {
+    // Corpus guard for the CRITICAL: every checked-in `.md` that binds a tool
+    // must bind an exact name. A future migration adding `tools: [git_*]` to a
+    // skill file fails here rather than shipping a wildcard grant.
+    for manifest in authored::load_from_paths(&[crate_path(".trusty-agents/skills")]) {
+        for tool in &manifest.tools {
+            assert!(
+                is_exact_tool_name(tool),
+                "{} declares glob-shaped tool {tool:?}",
+                manifest.id
+            );
+        }
+    }
 }
 
 // --------------------------------------------------------------------------

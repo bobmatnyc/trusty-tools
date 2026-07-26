@@ -82,10 +82,33 @@ fn parse(path: &Path, content: &str) -> Vec<SkillManifest> {
         return Vec::new();
     };
     let name = value(fm, "display_name").unwrap_or(name);
-    let tools = list(fm, "tools");
-    if tools.is_empty() {
+    let declared = list(fm, "tools");
+    if declared.is_empty() {
         return Vec::new();
     }
+    // PRIVILEGE GATE (see `is_exact_tool_name`). A `.md` in any skill source is
+    // ordinary content — it is not reviewed like `agent.toml` — yet its `tools:`
+    // entries are merged into the patterns `match_any_glob` consumes. An entry
+    // of `*` or `mcp_*` would therefore let one innocuous `[skills].allow` id
+    // grant wildcard authority behind a card that renders as a single narrow
+    // capability: strictly worse than the raw glob, because `agent.toml` shows
+    // the reviewer no wildcard at all. DOC-57 S-1 already forbids globs here;
+    // this is the enforcement.
+    //
+    // The whole manifest is dropped rather than silently narrowed to its valid
+    // entries: a file asking for a wildcard is either hostile or badly wrong,
+    // and partially honouring it would leave an author believing a grant that
+    // was quietly rewritten. Loud in the log, absent from the catalog.
+    if let Some(bad) = declared.iter().find(|t| !super::is_exact_tool_name(t)) {
+        tracing::warn!(
+            path = %path.display(),
+            tool = %bad,
+            "skill manifest declares a glob-shaped `tools:` entry; entries must be \
+             exact tool names (DOC-57 S-1). Manifest ignored."
+        );
+        return Vec::new();
+    }
+    let tools = declared;
     let description = value(fm, "description").unwrap_or_default();
     let kind = match value(fm, "kind").as_deref() {
         Some("knowledge") => SkillKind::Knowledge,

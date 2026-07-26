@@ -45,6 +45,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `load_skill("web-search")`; `display_name` carries the pane's name instead, and
   the built-in row's credential requirement is inherited rather than dropped.
 
+### Security
+
+- **A skill manifest can no longer launder a wildcard tool grant (#3933):**
+  `tools:` entries in an authored `.md` were taken verbatim and merged into the
+  patterns `match_any_glob` consumes, which reads a trailing `*` as a prefix
+  wildcard. A skill file declaring `tools: ["*"]` — ordinary content in any
+  skill source, not reviewed like `agent.toml` — would therefore let one
+  innocuous `[skills].allow` id carry `[tools].allow = ["*"]` authority behind a
+  card rendering as a single narrow capability. That is strictly worse than the
+  raw glob it replaces, because the reviewer reading `agent.toml` sees a tidy
+  skill id and no wildcard at all. DOC-57 S-1 already required exact names;
+  nothing enforced it. Glob metacharacters (`*`, `?`, `[`, `]`), empty names and
+  padded names are now rejected at three independent layers — manifest parse,
+  catalog insert, and expansion — and a manifest with any invalid entry is
+  dropped whole (loudly logged) rather than silently narrowed to its valid half.
+  Found by code-critic on PR #3964; mutation-verified.
+
+### Fixed
+
+- **`GET /api/agents/:name/skills` read a narrower catalog than dispatch
+  (#3933):** the route built a built-in-only catalog while both dispatch paths
+  built built-in + authored, so an authored-only skill id was reported to the
+  user as a dangling `unresolved[]` reference even though it resolved and
+  granted at runtime, and authored overrides (`web-search.md`'s name) never
+  reached the pane. The route now builds the catalog exactly as dispatch does.
+- **Skill-source precedence was silently inverted (#3933):**
+  `skills/sources/mod.rs` documents "higher-priority sources scanned first,
+  first writer wins", but the authored-overlay loop let a later (lower-priority)
+  manifest evict an earlier (higher-priority) one. Conflicts now displace only
+  built-in rows, so among authored manifests the first source wins while
+  authored still beats built-in.
+
 ### Changed
 
 - **Skills pane renders resolved capability instead of glob prefixes (#3933):**

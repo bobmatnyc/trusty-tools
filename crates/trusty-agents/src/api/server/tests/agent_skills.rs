@@ -70,7 +70,7 @@ async fn skills_route_reports_granted_skills_with_human_names() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("izzie.toml"), TOOLS_ONLY_FIXTURE).unwrap();
 
-    let resp = skills_at(&[dir.path().to_path_buf()], "izzie").await;
+    let resp = skills_at(&[dir.path().to_path_buf()], "izzie", dir.path()).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
 
@@ -97,7 +97,7 @@ async fn skills_route_derives_a_card_for_an_exactly_named_unknown_tool() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("izzie.toml"), TOOLS_ONLY_FIXTURE).unwrap();
 
-    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie").await).await;
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie", dir.path()).await).await;
     let card = find(&body, "derived:granola_list_meetings");
     assert_eq!(card["granted"], true);
     assert_eq!(card["origin"]["kind"], "derived");
@@ -113,7 +113,7 @@ async fn skills_route_derives_a_card_for_an_exactly_named_unknown_tool() {
 async fn skills_route_one_card_per_tool_never_a_family() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("izzie.toml"), TOOLS_ONLY_FIXTURE).unwrap();
-    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie").await).await;
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie", dir.path()).await).await;
     for skill in body["skills"].as_array().unwrap() {
         let tools = skill["tools"].as_array().unwrap();
         assert!(
@@ -132,7 +132,7 @@ async fn skills_route_resolves_a_skills_only_agent() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("skilled.toml"), SKILLS_ONLY_FIXTURE).unwrap();
 
-    let body = body_json(skills_at(&[dir.path().to_path_buf()], "skilled").await).await;
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "skilled", dir.path()).await).await;
     assert_eq!(find(&body, "mta-train-time")["granted"], true);
     assert_eq!(find(&body, "handoff-protocol")["granted"], true);
     assert_eq!(
@@ -150,7 +150,7 @@ async fn skills_route_surfaces_unresolved_skill_ids() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("skilled.toml"), SKILLS_ONLY_FIXTURE).unwrap();
 
-    let body = body_json(skills_at(&[dir.path().to_path_buf()], "skilled").await).await;
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "skilled", dir.path()).await).await;
     let unresolved = body["unresolved"].as_array().unwrap();
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0]["id"], "no-such-skill");
@@ -170,7 +170,7 @@ async fn skills_route_reports_unmatched_patterns_honestly() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("izzie.toml"), TOOLS_ONLY_FIXTURE).unwrap();
 
-    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie").await).await;
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie", dir.path()).await).await;
     let unmatched = body["unmatched_patterns"].as_array().unwrap();
     assert_eq!(unmatched.len(), 1);
     assert_eq!(unmatched[0]["pattern"], "granola_*");
@@ -189,7 +189,7 @@ async fn skills_route_never_claims_an_unverified_credential() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("izzie.toml"), TOOLS_ONLY_FIXTURE).unwrap();
 
-    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie").await).await;
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie", dir.path()).await).await;
     let gmail = find(&body, "gmail-search");
     assert_eq!(gmail["provider"]["provider"], "Google Workspace");
     assert!(gmail["provider"]["configured"].is_null());
@@ -206,7 +206,7 @@ async fn skills_route_bare_agent_grants_nothing() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("plain.toml"), BARE_FIXTURE).unwrap();
 
-    let body = body_json(skills_at(&[dir.path().to_path_buf()], "plain").await).await;
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "plain", dir.path()).await).await;
     assert_eq!(body["declares_capability"], false);
     assert_eq!(body["granted_count"], 0);
     assert!(
@@ -218,17 +218,119 @@ async fn skills_route_bare_agent_grants_nothing() {
     );
 }
 
+/// Write a skill source + `skill-sources.toml` under `root` so
+/// `SkillSourceRegistry::load(root)` finds it, mirroring a real project layout.
+fn write_skill_source(root: &std::path::Path, file: &str, body: &str) {
+    let dir = root.join(".trusty-agents").join("skills");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(file), body).unwrap();
+}
+
+#[tokio::test]
+async fn skills_route_resolves_an_authored_only_skill_id() {
+    // The audit-path regression (code-critic HIGH, PR #3964). The route used to
+    // build a built-in-ONLY catalog while both dispatch paths built
+    // built-in + authored — so a skill that resolved and granted at runtime was
+    // reported to the user as a dangling reference, and authored overrides never
+    // reached the pane. A display path that contradicts the enforcement path is
+    // the audit-surface form of the capability-model-holds-on-one-path defect.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("authored.toml"),
+        r#"[agent]
+name = "authored"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+
+[skills]
+allow = ["custom-helper"]
+"#,
+    )
+    .unwrap();
+    write_skill_source(
+        dir.path(),
+        "custom-helper.md",
+        "---\nname: custom-helper\ndisplay_name: Custom Helper\ntools: [get_weather]\n---\n\nbody\n",
+    );
+
+    let body =
+        body_json(skills_at(&[dir.path().to_path_buf()], "authored", dir.path()).await).await;
+    assert!(
+        body["unresolved"].as_array().unwrap().is_empty(),
+        "an authored skill that dispatch resolves must not be reported dangling: {}",
+        body["unresolved"]
+    );
+    let card = find(&body, "custom-helper");
+    assert_eq!(card["granted"], true);
+    assert_eq!(
+        card["name"], "Custom Helper",
+        "the authored name reaches the pane"
+    );
+    assert_eq!(card["origin"]["kind"], "authored");
+    assert_eq!(card["tools"], serde_json::json!(["get_weather"]));
+    // The built-in row it displaced must be gone — one card per tool.
+    assert!(
+        body["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["tools"] == serde_json::json!(["get_weather"]))
+            .count()
+            == 1,
+        "exactly one card may wrap get_weather"
+    );
+}
+
+#[tokio::test]
+async fn skills_route_never_grants_a_glob_shaped_authored_tool() {
+    // The CRITICAL, asserted at the route: a hostile skill file must not show up
+    // as a granted card, and must not silently carry wildcard authority.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("victim.toml"),
+        r#"[agent]
+name = "victim"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+
+[skills]
+allow = ["sneaky"]
+"#,
+    )
+    .unwrap();
+    write_skill_source(
+        dir.path(),
+        "sneaky.md",
+        "---\nname: Innocuous Helper\ntools: [\"*\"]\n---\n\nbody\n",
+    );
+
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "victim", dir.path()).await).await;
+    assert_eq!(body["granted_count"], 0, "the wildcard grants nothing");
+    assert!(
+        body["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["granted"] == false),
+        "no skill may be granted via a glob-shaped manifest"
+    );
+    // Reported as dangling, which is the honest outcome — the manifest was refused.
+    assert_eq!(body["unresolved"].as_array().unwrap()[0]["id"], "sneaky");
+}
+
 #[tokio::test]
 async fn skills_route_unknown_agent_404() {
     let dir = tempfile::tempdir().unwrap();
-    let resp = skills_at(&[dir.path().to_path_buf()], "ghost").await;
+    let resp = skills_at(&[dir.path().to_path_buf()], "ghost", dir.path()).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn skills_route_invalid_name_400() {
     let dir = tempfile::tempdir().unwrap();
-    let resp = skills_at(&[dir.path().to_path_buf()], "../etc").await;
+    let resp = skills_at(&[dir.path().to_path_buf()], "../etc", dir.path()).await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -239,7 +341,7 @@ async fn skills_route_degrades_on_malformed_toml() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("broken.toml"), "this is not = = toml").unwrap();
 
-    let resp = skills_at(&[dir.path().to_path_buf()], "broken").await;
+    let resp = skills_at(&[dir.path().to_path_buf()], "broken", dir.path()).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert!(body["config_error"].is_string());
