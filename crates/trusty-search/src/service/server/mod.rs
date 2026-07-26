@@ -36,6 +36,8 @@ mod typeahead;
 #[cfg(test)]
 mod list_repo_identity_tests;
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests_1073;
 #[cfg(test)]
 mod tests_2336;
