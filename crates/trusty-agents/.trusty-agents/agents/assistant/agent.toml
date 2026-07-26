@@ -94,8 +94,13 @@ allow = [
   #     ~/.gnupg are refused without being enumerated). Widen it deliberately —
   #     anything reachable becomes searchable and quotable in chat, and
   #     ingested content is itself untrusted input.
-  # The Google-backed tools reuse the existing read-only `google.read`
-  # credentials and never prompt for auth.
+  # #3987: the Google-backed ingest tools reuse the credentials the
+  # gworkspace surface below already holds — which are WRITE-CAPABLE Google
+  # OAuth grants, not read-only ones (the "read-only `google.read`" this
+  # comment used to claim never existed; see the `[tools].scopes` note
+  # below). These three are in-process tools that return `None` from
+  # `ToolExecutor::scope()`, so they are not scope-gated at all; they read
+  # Gmail/Drive through the same credential the scoped tools use.
   "okg_ingest_docstore",
   "okg_ingest_gmail",
   "okg_ingest_drive",
@@ -175,12 +180,86 @@ allow = [
 ]
 # OpenRPC (https://spec.open-rpc.org/) over stdio scopes (#455, #454). The base
 # assistant remembers facts across sessions (memory.write), recalls them
-# (memory.read), and reads notes/snippets via search (search.read). Google
-# access defaults to READ-ONLY (`google.read`) on the base template per §5.5 —
-# a generic, un-personalized assistant should not mutate a user's mailbox /
-# calendar / drive by default. A personalization overlay opts into write
-# (`google.*`) explicitly (see `../izzie/agent.toml`).
-scopes = ["memory.read", "memory.write", "search.read", "google.read"]
+# (memory.read), and reads notes/snippets via search (search.read).
+#
+# #3987 (option B, Bob's explicit decision — see the issue's PM-recommendation
+# comment): the Google grants below REPLACE the former `google.read`.
+#
+# WHAT `google.read` ACTUALLY DID: nothing. It was a dead pattern. Discovery
+# maps every `x-google-scopes` OAuth URL to `google.<family>.<access>`
+# (`tools::registry::google_scope::FAMILY_TABLE`), so the vocabulary contains
+# `google.gmail.write`, `google.calendar.write`, … and never a bare
+# `google.read`; `ScopePattern::matches` takes the no-wildcard branch for it
+# and requires string equality. Every one of the ~60 gworkspace tools
+# allowlisted above was therefore scope-denied at dispatch on the persona-chat
+# path, and had been since the scopes line was written. There was no
+# read-only enforcement to preserve here — the posture was fictional, which is
+# why replacing it is a correction of the config to match reality and not a
+# widening of a boundary that was holding.
+#
+# HONEST POSTURE STATEMENT (replacing the old §5.5 read-only claim): a base
+# assistant granted the tools above holds WRITE-CAPABLE Google credentials.
+# Every OAuth scope `trusty-gworkspace` requests is the full-access variant of
+# its API, never a `.readonly` one (`trusty-gworkspace/src/openrpc.rs::scopes`),
+# so the same `gmail.modify` token a "search" tool uses can also delete mail.
+# A genuinely read-only tier is #3987's option A and is DEFERRED: it needs
+# `.readonly` OAuth variants, user re-consent, and either middle-wildcard
+# support in `ScopePattern` or a scope-naming redesign. If option A is built,
+# these grants shrink naturally.
+#
+# THE ALLOW-LIST REMAINS THE BINDING CONSTRAINT. `filter_persona_tool_names`
+# intersects `[tools].allow` (by NAME) AND `[tools].scopes` (by CAPABILITY) —
+# verified in #3985 — so these family grants do not expose a single tool the
+# curated allowlist above does not already name. Widening the reachable
+# surface means editing `allow`, not this line.
+#
+# ONE FAMILY PER SURFACE THE ALLOW-LIST ACTUALLY NAMES — audited tool-by-tool
+# against the real `rpc.discover` document, and pinned by
+# `base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool` (which
+# also fails if a family here has NO allowlisted tool, so this list cannot
+# quietly over-grant):
+#   google.gmail.*    — 9 tools: compose_email, download_gmail_attachment,
+#                       get_gmail_message_content, list_message_attachments,
+#                       manage_gmail_filters, manage_gmail_labels,
+#                       manage_gmail_settings, modify_gmail_messages,
+#                       search_gmail_messages
+#   google.calendar.* — 3 tools: manage_calendars, manage_events,
+#                       query_free_busy
+#   google.drive.*    — 6 tools: get_drive_file_content, list_drive_contents,
+#                       list_shared_drives, manage_drive_file,
+#                       manage_file_permissions, search_drive_files
+#   google.docs.*     — 25 tools: the whole `*_document` / `*_in_document` /
+#                       `*_table_*` cluster (Docs tools request `documents`
+#                       AND `drive`; the resource-specific scope wins, see
+#                       `google_scope`'s priority note)
+#   google.sheets.*   — 5 tools: create_chart, format_sheet, get_spreadsheet,
+#                       manage_spreadsheet, modify_sheet_values
+#   google.slides.*   — 3 tools: add_slide_content, get_slides, manage_slides
+#   google.tasks.*    — 2 tools: manage_task_lists, manage_tasks
+#   google.accounts.* — 1 tool: list_accounts (Google's one genuinely
+#                       read-only scope, `userinfo.profile`)
+# No family is granted speculatively: every one above has at least one
+# allowlisted tool, and no allowlisted scoped gworkspace tool lacks a family.
+#
+# Personalization overlays are UNIONED with this list (`extends::merge_extends`
+# -> `union_opt_vec`, deduped), so `../cto-assistant/`'s narrow
+# `google.gmail.*` / `google.tasks.*` (#3985) now collapse into these as exact
+# duplicates, and `../izzie/`'s blanket `google.*` remains a superset. Both are
+# deliberately left declared: an overlay whose whole purpose is Gmail should
+# say so itself rather than depend on the base keeping a grant forever.
+scopes = [
+  "memory.read",
+  "memory.write",
+  "search.read",
+  "google.gmail.*",
+  "google.calendar.*",
+  "google.drive.*",
+  "google.docs.*",
+  "google.sheets.*",
+  "google.slides.*",
+  "google.tasks.*",
+  "google.accounts.*",
+]
 
 [system_prompt]
 # Generic productivity skills only — resolved by name from the skill registry.

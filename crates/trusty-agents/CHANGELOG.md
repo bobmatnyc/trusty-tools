@@ -163,6 +163,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   as its own change even after that: it would also stop *user-authored* agents
   from loading, which deserves its own decision and release note.
 
+### Changed
+
+- **The base `assistant` template now declares explicit Google family scope
+  grants instead of the dead `google.read`** (issue #3987, option B — owner
+  decision, see the issue's PM-recommendation comment). All ~60 Google
+  Workspace tools the base allowlists were scope-denied at dispatch on the
+  persona-chat path, and had been since the line was written: no gworkspace
+  tool ever advertises `google.read` (discovery only emits
+  `google.<family>.<access>`) and `google.read` is a no-wildcard pattern
+  requiring string equality. The base now grants
+  `google.gmail.*`, `google.calendar.*`, `google.drive.*`, `google.docs.*`,
+  `google.sheets.*`, `google.slides.*`, `google.tasks.*` and
+  `google.accounts.*` — audited tool-by-tool against the real `rpc.discover`
+  document, one family per surface the allowlist actually names, with no
+  family granted that has no allowlisted tool behind it (a new test fails in
+  both directions).
+
+  **Posture note, stated plainly**: a base assistant granted these tools holds
+  WRITE-CAPABLE Google credentials. There was no read-only enforcement to
+  preserve — `google.read` granted nothing, so the read-only posture was
+  fictional — but the honest description of what the base can now do is
+  "read and mutate the user's Gmail, Calendar, Drive, Docs, Sheets, Slides and
+  Tasks", because every OAuth scope `trusty-gworkspace` requests is the
+  full-access variant of its API. A genuinely read-only tier (#3987 option A)
+  is deferred pending a product requirement; it needs `.readonly` OAuth
+  variants and user re-consent. The `[tools].allow` list remains the binding
+  constraint — scope and allow-list intersect at dispatch (verified in
+  #3985) — so this exposes no tool the curated allowlist does not already
+  name. Overlays are unaffected: `cto-assistant`'s narrow `google.gmail.*` /
+  `google.tasks.*` (#3985) collapse into the base's by the extends union's
+  dedup, and `izzie`'s blanket `google.*` remains a superset.
+
+  Consequently the base assistant, and every `extends = "assistant"` overlay,
+  is now clean under the #3987 option-C dead-grant diagnostic, which
+  discharges the sequencing constraint that forced that check to ship as a
+  warning rather than a load error.
+
 ### Fixed
 
 - **Streamed replies no longer flash blank or "(no narrative)" the moment a
