@@ -25,6 +25,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `list`/`remove`/`prune`/`lock`/… and ordinary temp usage (`mktemp`, temp
   files, cargo build artifacts) are untouched.
 
+  **Round 2 (code-critic BLOCK, PR #3978):** the guard also pierces Guard 1
+  (`CLAUDE_MPM_SUB_AGENT`) — the automatic marker trusty-agents' own
+  subprocess/runner spawn helpers stamp on every nested subagent process
+  (`crates/trusty-agents/src/subprocess/spawn.rs:189-192`,
+  `crates/trusty-agents/src/agents/claude_code_runner/run.rs:211-215`), which
+  is who actually provisions most of these worktrees. Before this round,
+  Guard 1 short-circuited to ALLOW before the stdin payload was even read, so
+  a `CLAUDE_MPM_SUB_AGENT=1`-tagged `git worktree add /tmp/...` call was
+  silently allowed. Guards 2/3 (`TRUSTY_MPM_DISABLE_HOOKS` /
+  `TRUSTY_MPM_PM_UNRESTRICTED`) are deliberately left UN-pierced — both are
+  genuine operator-set escape hatches never set programmatically anywhere in
+  this codebase, so an operator who disables the hook or invokes the
+  unrestricted bypass still gets exactly that, including for this guard.
+
 ### Fixed
 
 - **A toggle being on was treated as proof of a successful MCP-server pin,

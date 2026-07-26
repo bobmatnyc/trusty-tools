@@ -529,6 +529,79 @@ fn pm_guard_blocks_worktree_add_under_tmp_via_subagent_payload() {
 }
 
 #[test]
+fn pm_guard_blocks_worktree_add_under_tmp_via_claude_mpm_sub_agent_env() {
+    // Round 2 (code-critic BLOCK on PR #3978): `CLAUDE_MPM_SUB_AGENT=1` — the
+    // automatic marker trusty-agents' own subprocess/runner spawn helpers
+    // stamp on every nested subagent process (spawn.rs:189-192,
+    // claude_code_runner/run.rs:211-215) — must NOT exempt a `git worktree
+    // add /tmp/...` call, exactly like the `agent_id` case above. Before this
+    // fix, Guard 1 short-circuited to ALLOW before the stdin payload was even
+    // read, so this call was silently allowed. This is THE regression test
+    // for that finding.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#;
+    let stdout = run_pm_guard(payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("3955"),
+        "deny message must cite issue #3955: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_claude_mpm_sub_agent_env_still_allows_everything_else() {
+    // Companion to the above: Guard 1's original "exempt everything else for
+    // a nested MPM subagent" behavior must be unchanged for calls that are
+    // NOT `git worktree add` under a denylisted root — including source-code
+    // Edit, which `pm_guard_sub_agent_env_allows_all` already covers, and a
+    // worktree add targeting an in-project path.
+    let ok_worktree = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add .claude/worktrees/wt-x"}}"#,
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_eq!(
+        ok_worktree.trim(),
+        "",
+        "an in-project worktree target under CLAUDE_MPM_SUB_AGENT must stay allowed"
+    );
+}
+
+#[test]
+fn pm_guard_disable_hooks_env_still_allows_worktree_add_under_tmp() {
+    // `TRUSTY_MPM_DISABLE_HOOKS` is a genuine operator-set escape hatch (never
+    // set programmatically anywhere in this codebase) — unlike
+    // `CLAUDE_MPM_SUB_AGENT` above, it is deliberately NOT pierced: an
+    // operator who disables the hook entirely gets exactly that, including
+    // for the worktree-tmp guard.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#,
+        &[("TRUSTY_MPM_DISABLE_HOOKS", "1")],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "the disable-hooks operator escape hatch must still allow everything, \
+         including the worktree-tmp guard"
+    );
+}
+
+#[test]
+fn pm_guard_unrestricted_env_still_allows_worktree_add_under_tmp() {
+    // `TRUSTY_MPM_PM_UNRESTRICTED=1` — the explicit "the operator said you do
+    // it this time" override — is likewise a genuine human escape hatch and
+    // must still lift the worktree-tmp guard along with everything else.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#,
+        &[("TRUSTY_MPM_PM_UNRESTRICTED", "1")],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "the unrestricted operator bypass must still allow everything, \
+         including the worktree-tmp guard"
+    );
+}
+
+#[test]
 fn pm_guard_allows_worktree_add_under_project_dir_via_subagent_payload() {
     // The companion positive case: the SAME subagent payload shape, but
     // targeting the documented in-project convention, must be allowed.
