@@ -23,6 +23,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   computed fresh on every `session.get_context_budget` query — mirroring
   `lifetime_compaction_alarm_count`'s existing "read fresh at query time"
   pattern exactly.
+- **Standing regression guard for the #3902 `TCODE_TELEMETRY_DATA_DIR` race
+  class (issue #3925).** PR #3920's fix for #3902 was verified only by the
+  author's local 40x loop (2/40 failures pre-fix, 0/40 post-fix) — a manual
+  process that lived nowhere in CI, so a FUTURE loop-integration test could
+  reintroduce the same "forgot to inject `telemetry_data_dir`" omission and
+  pass a single ordinary `cargo test` run before flaking later (exactly how
+  #3902 reached `main` in the first place). New
+  `agent_loop::tests::compression_telemetry_tests::concurrent_agent_loops_survive_data_dir_env_hammering`
+  deterministically manufactures the exact attack instead of hoping a
+  repeat-loop trips it: while holding `telemetry::DATA_DIR_ENV_LOCK` for its
+  own body, it races a background task that rewrites
+  `TCODE_TELEMETRY_DATA_DIR` with zero synchronization against four
+  concurrent scripted `AgentLoop` runs, each injecting its own
+  `telemetry_data_dir`. Because an injected loop never consults the env var,
+  every run must see exactly its own cadence records regardless of how
+  aggressively the global churns — validated to fail deterministically (not
+  probabilistically) when one scenario's injection is reverted. Mirrors the
+  identical pattern applied to trusty-agents' `EventStore`/`$HOME` race
+  (issue #3922); kept as two crate-local tests rather than one shared
+  harness since the two crates have no shared test-support crate and the
+  domain types differ enough that sharing code would cost more than it
+  saves.
 
 - **A cadence-level 60%-floor breach now has a durable backstop alarm
   (#3911).** The load-realistic soak (epic #3866, PR #3909) proved that
