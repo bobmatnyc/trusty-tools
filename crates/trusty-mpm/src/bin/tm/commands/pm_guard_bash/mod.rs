@@ -567,6 +567,24 @@ const WORKTREE_ADD_FLAGS_WITH_ARG: &[&str] = &["-b", "-B", "--reason"];
 /// - A `cd`/`-C` argument built from command substitution
 ///   (`cd "$(mktemp -d)"`) is not resolved — this module classifies text
 ///   structurally, it does not execute the shell.
+/// - **Largest of this list, tracked separately as
+///   [issue #3981](https://github.com/bobmatnyc/trusty-tools/issues/3981):**
+///   `pm_guard`'s Guard 2/3 escape hatches
+///   (`TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED`) bypass this
+///   entire guard when set, and while neither is ever set programmatically
+///   in this codebase's Rust source, Claude Code's `settings.json` supports a
+///   top-level `env` object applied to every hook invocation (live-reloaded
+///   mid-session) — and a `Write`/`Edit` to `.claude/settings.json` is not
+///   itself blocked by `pm_guard` today (`.json` is not a source-code
+///   extension, so `evaluate_edit_tool` falls through to an unconditional
+///   ALLOW). So the PM, or any subagent Guard 4 already exempts, can set
+///   either var there and self-exempt from every rule in this module,
+///   including this one, in one ordinary already-permitted config write. This
+///   is a pre-existing gap (Guard 3 predates this worktree guard by many
+///   issues) that this change neither introduces nor widens; it guards
+///   against an agent going off-script, not a determined adversary, and is
+///   deliberately NOT fixed here — the remedy belongs in the edit-tool
+///   classifier, not this Bash classifier, and is the project owner's call.
 ///
 /// Test: `evaluate_worktree_add_command_*` below;
 /// `pm_guard_blocks_worktree_add_under_tmp_via_subagent_payload` and siblings
