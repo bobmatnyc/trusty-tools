@@ -63,7 +63,7 @@ impl ToolExecutor for OkgIngestDocstoreTool {
     }
 
     async fn execute(&self, args: Value) -> ToolResult {
-        match run(&args) {
+        match run(&args).await {
             Ok(result) => result,
             Err(e) => ToolResult::err(format!("okg_ingest_docstore failed: {e}")),
         }
@@ -71,7 +71,7 @@ impl ToolExecutor for OkgIngestDocstoreTool {
 }
 
 /// The fallible body — any `Err` becomes an error result.
-fn run(args: &Value) -> anyhow::Result<ToolResult> {
+async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     let store = resolve_store(args)?;
     let source_id = require_str(args, "source_id")?;
     let now = now_iso();
@@ -141,9 +141,20 @@ fn run(args: &Value) -> anyhow::Result<ToolResult> {
     spec.tombstone_deleted = tombstone;
     let registered = store.okg_register_source(spec)?;
     let report = store.okg_ingest_docstore(&registered.id, &policy, &now)?;
+    // Then make it findable. The tree write above is the durable record; this
+    // step is fail-open but never silent — see `tools::okg::index_feed`.
+    let spec = store.okg_source(&registered.id)?;
+    let index = crate::tools::okg::index_feed::feed_bound_index(
+        &store,
+        &spec,
+        arg_str(args, "agent"),
+        &now,
+    )
+    .await;
 
     Ok(ok_json(&json!({
         "source": registered,
         "ingest": report,
+        "index": index,
     })))
 }

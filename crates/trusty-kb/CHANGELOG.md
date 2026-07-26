@@ -8,6 +8,26 @@ independent semantic versioning per the workspace convention.
 
 ### Added
 
+- **OKG index journal + reconcile (`okg::index_journal`, #3892):** a second
+  append-only journal per source, `_sources/<id>.index.jsonl`, recording which
+  entities reached the store's bound trusty-search index and at what content
+  hash, plus `KbStore::okg_index_backlog` — the pure diff of that journal
+  against the item ledger. This is what makes "ingested" and "searchable" two
+  separately reportable facts instead of one silently-conflated claim. The item
+  ledger is deliberately NOT overloaded with index state: an index push failure
+  must not make ingestion non-convergent when the search daemon is merely down,
+  and an entity the ledger skips as unchanged must still be re-pushed if it
+  never landed. Staleness is decided by the entity file's content hash (a
+  `volatile` item's fingerprint carries no information), short-circuited by a
+  `(size, mtime)` check so a settled tree costs one `stat` per entity. The push
+  itself lives in `trusty-agents` — this crate stays deterministic and
+  network-free.
+- **`okg_sources` reports search coverage:** each row carries `index.synced` /
+  `index.pending` alongside its watermark, and `KbStore::okg_index_coverage`
+  folds the same numbers tree-wide. "Ingested but not yet searchable" is now a
+  visible state rather than an invisible one.
+
+
 - **OKG builder engine (`okg` module):** the machinery that GROWS a KB tree from
   real sources, idempotently and additively. Three durable guarantees, all
   unit-proved:

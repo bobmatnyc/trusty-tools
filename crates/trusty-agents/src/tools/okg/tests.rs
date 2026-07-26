@@ -15,18 +15,23 @@ use serde_json::{Value, json};
 use super::*;
 use crate::test_env::HOME_LOCK;
 
-/// Sandbox both the KB knowledge dir and `$HOME` into one tempdir.
+/// Sandbox the KB knowledge dir, `$HOME`, and daemon discovery into one
+/// tempdir.
 ///
 /// `$HOME` matters as much as `KB_KNOWLEDGE_DIR` here: it is what the
 /// doc-store read policy defaults to, so without sandboxing it a test corpus in
 /// a tempdir would be (correctly) refused, and a misconfigured test could reach
-/// the developer's real home. Both are process-global mutations, so every test
-/// holds `HOME_LOCK` (the crate's existing serializing mutex) and restores the
-/// prior values on drop.
+/// the developer's real home. `TRUSTY_DATA_DIR_OVERRIDE` sandboxes the third
+/// thing an ingest now touches (#3892): the trusty-search address file. Without
+/// it a test run on a developer machine would DISCOVER the live daemon and push
+/// test fixtures into a real index. Every one of these is a process-global
+/// mutation, so every test holds `HOME_LOCK` (the crate's existing serializing
+/// mutex) and restores the prior values on drop.
 struct KnowledgeDirGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     prior_knowledge: Option<std::ffi::OsString>,
     prior_home: Option<std::ffi::OsString>,
+    prior_data_dir: Option<std::ffi::OsString>,
     dir: tempfile::TempDir,
 }
 
@@ -36,18 +41,36 @@ impl KnowledgeDirGuard {
         let dir = tempfile::tempdir().expect("tempdir");
         let prior_knowledge = std::env::var_os("KB_KNOWLEDGE_DIR");
         let prior_home = std::env::var_os("HOME");
+        let prior_data_dir = std::env::var_os("TRUSTY_DATA_DIR_OVERRIDE");
         // SAFETY: guarded by HOME_LOCK — no other test mutates the env
         // concurrently, and the prior values are restored in Drop.
         unsafe {
             std::env::set_var("KB_KNOWLEDGE_DIR", dir.path());
             std::env::set_var("HOME", dir.path());
+            std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", dir.path());
         }
         Self {
             _lock: lock,
             prior_knowledge,
             prior_home,
+            prior_data_dir,
             dir,
         }
+    }
+
+    /// Write an agent that binds `index` to this tree, in the sandboxed
+    /// `$HOME/.trusty-agents/agents` tier `agents_dir_candidates()` searches.
+    fn bind_agent(&self, agent: &str, index: &str) {
+        let pkg = self.dir.path().join(".trusty-agents/agents").join(agent);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("agent.toml"),
+            format!(
+                "[agent]\nname = \"{agent}\"\n\n[[stores]]\nname = \"{agent}-kb\"\n\
+                 tree = \"okg://{agent}\"\nindex = \"{index}\"\n"
+            ),
+        )
+        .unwrap();
     }
 
     /// The tree root under the temp knowledge dir.
@@ -67,6 +90,10 @@ impl Drop for KnowledgeDirGuard {
             match &self.prior_home {
                 Some(v) => std::env::set_var("HOME", v),
                 None => std::env::remove_var("HOME"),
+            }
+            match &self.prior_data_dir {
+                Some(v) => std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", v),
+                None => std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE"),
             }
         }
     }
@@ -282,6 +309,119 @@ async fn sources_tool_reports_registered_sources() {
     );
     assert!(source["watermark"]["oldest"].is_null());
     assert!(source["watermark"]["last_ingest_at"].is_null());
+}
+
+// ─────────────────────── ingest → search index (#3892) ───────────────────────
+
+/// Why (#3892): the whole bug was an ingest reporting success while nothing
+/// became searchable. When no index can be resolved the tool must still say so
+/// — with a REASON and the size of the unsearchable backlog — instead of
+/// returning a report that reads like everything worked.
+/// What: ingests into a tree no agent binds and asserts the `index` block names
+/// the pending count and the reason, while the ingest itself still succeeded.
+/// Test: self-contained (no daemon; discovery is sandboxed by the guard).
+#[tokio::test]
+async fn docstore_tool_reports_the_unsearchable_backlog() {
+    let guard = KnowledgeDirGuard::new();
+    let corpus = guard.dir.path().join("corpus-unbound");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("note.md"), "an unbound note").unwrap();
+
+    let out = payload(
+        &OkgIngestDocstoreTool::new()
+            .execute(json!({
+                "root": guard.root().to_string_lossy(),
+                "source_id": "unbound",
+                "path": corpus.to_string_lossy(),
+                "collection": "notes",
+            }))
+            .await,
+    );
+    assert_eq!(out["ingest"]["ingested"], 1, "the tree write still happens");
+    assert_eq!(
+        out["index"]["pending"], 1,
+        "and the entity is reported as NOT searchable: {out}"
+    );
+    assert_eq!(out["index"]["indexed"], 0);
+    assert!(out["index"]["index"].is_null());
+    let reason = out["index"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("no agent binds"),
+        "the reason must be actionable: {reason}"
+    );
+}
+
+/// Why: the second half of the honesty contract — a store that IS bound but
+/// whose daemon is unreachable must not lose the work and must not claim it
+/// landed. The tree write is durable; the backlog is what a later run drains.
+/// What: binds an agent to the tree, ingests with no discoverable daemon, and
+/// asserts the reason names the daemon while `pending` counts the entities.
+/// Test: self-contained.
+#[tokio::test]
+async fn bound_store_reports_pending_when_the_daemon_is_down() {
+    let guard = KnowledgeDirGuard::new();
+    guard.bind_agent("okg-feed-test", "okg-feed-test-index");
+    let corpus = guard.dir.path().join("corpus-bound");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("one.md"), "a bound note").unwrap();
+    std::fs::write(corpus.join("two.md"), "another bound note").unwrap();
+
+    let out = payload(
+        &OkgIngestDocstoreTool::new()
+            .execute(json!({
+                "agent": "okg-feed-test",
+                "source_id": "bound",
+                "path": corpus.to_string_lossy(),
+                "collection": "notes",
+            }))
+            .await,
+    );
+    assert_eq!(out["ingest"]["ingested"], 2);
+    assert_eq!(out["index"]["pending"], 2, "{out}");
+    let reason = out["index"]["reason"].as_str().unwrap_or_default();
+    assert!(
+        reason.contains("not discoverable") && reason.contains("okg-feed-test-index"),
+        "the reason must name the daemon AND the bound index: {reason}"
+    );
+}
+
+/// Why: `okg_sources` is where an operator looks BEFORE re-running an ingest, so
+/// "ingested but not searchable" has to be visible there rather than only in the
+/// ingest that happened to produce it.
+/// What: ingests into a bound tree with no daemon, then asserts the status view
+/// reports the per-source index coverage and names the bound index.
+/// Test: self-contained.
+#[tokio::test]
+async fn sources_tool_reports_the_unsearchable_backlog() {
+    let guard = KnowledgeDirGuard::new();
+    guard.bind_agent("okg-status-test", "okg-status-index");
+    let corpus = guard.dir.path().join("corpus-status");
+    std::fs::create_dir_all(&corpus).unwrap();
+    std::fs::write(corpus.join("one.md"), "a note").unwrap();
+
+    OkgIngestDocstoreTool::new()
+        .execute(json!({
+            "agent": "okg-status-test",
+            "source_id": "status",
+            "path": corpus.to_string_lossy(),
+            "collection": "notes",
+        }))
+        .await;
+
+    let listed = payload(
+        &OkgSourcesTool::new()
+            .execute(json!({ "agent": "okg-status-test" }))
+            .await,
+    );
+    assert_eq!(
+        listed["bound_index"]["index"], "okg-status-index",
+        "{listed}"
+    );
+    assert_eq!(listed["bound_index"]["pending"], 1);
+    let source = &listed["sources"][0];
+    assert_eq!(source["watermark"]["items"], 1, "in the tree");
+    assert_eq!(source["index"]["synced"], 0, "but not in the index");
+    assert_eq!(source["index"]["pending"], 1);
 }
 
 // ───────────────────── doc-store read confinement ─────────────────────

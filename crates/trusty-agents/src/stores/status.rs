@@ -75,6 +75,23 @@ pub struct StoreStatus {
     pub palace_connected: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub palace_reason: Option<String>,
+    /// The `okg://` tree resolved to a real directory (#3892). `None` when the
+    /// URI does not resolve — the state that made the two facets independent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree_path: Option<String>,
+    /// Entities this store has INGESTED but not yet made SEARCHABLE (#3892).
+    ///
+    /// Why: `connected` says the index exists; it says nothing about whether the
+    /// tree's content is in it. A store can be connected, non-empty, and still
+    /// be missing everything the last ingest wrote — the failure this field
+    /// exists to make visible. `None` when the tree has no OKG source registry
+    /// (a hand-built tree), which is not the same as zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_index: Option<usize>,
+    /// Entities recorded as current in the index. Same nullability as
+    /// `pending_index`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synced_index: Option<usize>,
 }
 
 impl StoreStatus {
@@ -96,7 +113,53 @@ impl StoreStatus {
             index_status: None,
             palace_connected: None,
             palace_reason: None,
+            tree_path: None,
+            pending_index: None,
+            synced_index: None,
         }
+    }
+}
+
+/// The knowledge directory holding one KB tree per assistant.
+///
+/// Mirrors `trusty-kb`'s own default (and `tools::okg::knowledge_dir`) so every
+/// surface addresses the same trees: `$KB_KNOWLEDGE_DIR`, else
+/// `<home>/.trusty-agents/knowledge`.
+fn knowledge_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("KB_KNOWLEDGE_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".trusty-agents")
+        .join("knowledge")
+}
+
+/// Fill in the tree-side half of a store's status (#3892).
+///
+/// Why: the probe above answers "does the index exist?"; this answers "and does
+/// it hold what the tree holds?". Both halves are needed before a card can
+/// honestly say a store is working.
+/// What: resolves the `okg://` tree to a directory and, when that directory has
+/// an OKG source registry, folds its index coverage. Local filesystem work only
+/// — one `stat` per settled entity — and every failure leaves the fields `None`
+/// rather than degrading the connection verdict.
+/// Test: `reports_the_unsearchable_backlog_for_a_bound_tree`.
+fn attach_tree_coverage(status: &mut StoreStatus) {
+    let Some(tree_path) = super::binding::okg_tree_path(&knowledge_dir(), &status.tree) else {
+        return;
+    };
+    status.tree_path = Some(tree_path.display().to_string());
+    if !tree_path.is_dir() {
+        return;
+    }
+    let store =
+        trusty_kb::store::KbStore::new(tree_path, trusty_kb::schema::Profile::default_profile());
+    if let Ok(coverage) = store.okg_index_coverage() {
+        status.pending_index = Some(coverage.pending);
+        status.synced_index = Some(coverage.synced);
     }
 }
 
@@ -223,6 +286,9 @@ async fn resolve_one(
                     .map(str::to_string),
                 palace_connected: None,
                 palace_reason: None,
+                tree_path: None,
+                pending_index: None,
+                synced_index: None,
             },
         },
     };
@@ -232,6 +298,7 @@ async fn resolve_one(
         status.palace_connected = Some(ok);
         status.palace_reason = reason;
     }
+    attach_tree_coverage(&mut status);
 
     status
 }
@@ -425,6 +492,107 @@ palace = "owner-profile"
         let out = resolve_store_statuses("izzie", &stores, Some("http://127.0.0.1:1"), None).await;
         assert!(!out[0].connected);
         assert!(out[0].reason.as_deref().unwrap().contains("okg://"));
+    }
+
+    /// Why (#3892): "connected" only ever meant "the index exists". A store can
+    /// be connected, hold 200,090 chunks, and contain NOTHING the agent
+    /// ingested — the exact state the issue documents. The card must therefore
+    /// carry the tree side too: where `okg://` actually resolves, and how much
+    /// of that tree is not yet searchable.
+    /// What: sandboxes `KB_KNOWLEDGE_DIR`, builds a real ingested-but-unfed KB
+    /// tree at the bound `okg://` path, and asserts the resolved status reports
+    /// the tree path and the pending backlog alongside `connected`.
+    /// Test: self-contained.
+    /// Sandbox `KB_KNOWLEDGE_DIR` for one test, restoring it on drop.
+    ///
+    /// Why: the guard has to survive `.await` points (the probes are async), and
+    /// a bare `MutexGuard` held across an await is both a clippy error and a
+    /// genuine deadlock hazard. Owning the guard inside a struct — the same
+    /// shape as `tools::okg::tests::KnowledgeDirGuard` — keeps the critical
+    /// section scoped to the test body without hand-written restore paths.
+    struct KnowledgeDirGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prior: Option<std::ffi::OsString>,
+        dir: tempfile::TempDir,
+    }
+
+    impl KnowledgeDirGuard {
+        fn new() -> Self {
+            let lock = crate::test_env::HOME_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let prior = std::env::var_os("KB_KNOWLEDGE_DIR");
+            // SAFETY: guarded by HOME_LOCK; restored in Drop.
+            unsafe { std::env::set_var("KB_KNOWLEDGE_DIR", dir.path()) };
+            Self {
+                _lock: lock,
+                prior,
+                dir,
+            }
+        }
+    }
+
+    impl Drop for KnowledgeDirGuard {
+        fn drop(&mut self) {
+            // SAFETY: still holding HOME_LOCK for this guard's lifetime.
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var("KB_KNOWLEDGE_DIR", v),
+                    None => std::env::remove_var("KB_KNOWLEDGE_DIR"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reports_the_unsearchable_backlog_for_a_bound_tree() {
+        let guard = KnowledgeDirGuard::new();
+        let tmp = guard.dir.path();
+
+        // A tree at okg://izzie with one ingested, never-indexed entity.
+        let corpus = tmp.join("corpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("one.md"), "a note").unwrap();
+        let store = trusty_kb::store::KbStore::new(
+            tmp.join("izzie"),
+            trusty_kb::schema::Profile::default_profile(),
+        );
+        store
+            .okg_register_source(trusty_kb::okg::registry::SourceSpec::new(
+                "corpus",
+                Some("notes"),
+                trusty_kb::okg::registry::Locator::DocStore {
+                    path: corpus.to_string_lossy().to_string(),
+                    extensions: vec![],
+                    recursive: true,
+                },
+                "t0",
+            ))
+            .unwrap();
+        store
+            .okg_ingest_docstore(
+                "corpus",
+                &trusty_kb::okg::policy::DocStorePolicy::new(vec![tmp.canonicalize().unwrap()]),
+                "t0",
+            )
+            .unwrap();
+
+        let base = mock_daemon().await;
+        let stores = stores_toml("[[stores]]\nname = \"bob-kb\"\ntree = \"okg://izzie\"\n");
+        let out = resolve_store_statuses("izzie", &stores, Some(&base), None).await;
+
+        assert!(out[0].connected, "reason: {:?}", out[0].reason);
+        assert_eq!(
+            out[0].tree_path.as_deref(),
+            Some(tmp.join("izzie").display().to_string().as_str()),
+            "the okg:// URI must resolve to a real directory"
+        );
+        assert_eq!(
+            (out[0].pending_index, out[0].synced_index),
+            (Some(1), Some(0)),
+            "connected, and still holding nothing the tree holds"
+        );
     }
 
     #[tokio::test]
