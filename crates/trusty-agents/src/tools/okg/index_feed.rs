@@ -15,8 +15,9 @@
 //! `reason`, because the tree write is the durable record and a later run
 //! reconciles the backlog.
 //!
-//! Test: `super::tests::docstore_tool_reports_the_index_backlog`,
-//! `docstore_tool_feeds_the_bound_index`.
+//! Test: `super::tests::docstore_tool_reports_the_unsearchable_backlog`,
+//! `super::tests::bound_store_reports_pending_when_the_daemon_is_down`,
+//! `super::tests::sources_tool_reports_the_unsearchable_backlog`.
 
 use serde_json::{Value, json};
 use trusty_kb::okg::registry::SourceSpec;
