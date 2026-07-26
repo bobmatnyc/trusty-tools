@@ -9,9 +9,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **`tm hook --pm-guard` now denies the EASY, naive writes to its own trust
+- **`tm hook --pm-guard` now denies EVERY LITERAL write to its own trust
   anchor** ([#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981),
-  hardened per the [#3994](https://github.com/bobmatnyc/trusty-tools/pull/3994)
+  through three rounds of the [#3994](https://github.com/bobmatnyc/trusty-tools/pull/3994)
   adversarial review — see the honesty note below): a direct
   `Write`/`Edit`/`MultiEdit`/`NotebookEdit` targeting `.claude/settings.json`,
   `.claude/settings.local.json`, or the `$CLAUDE_CONFIG_DIR` global
@@ -29,53 +29,83 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reason — a dispatched subagent's write is exactly as dangerous as the PM's
   own); `evaluate_edit_tool`, as defense in depth; and
   `pm_guard_bash::evaluate_bash_command`/`bash_targets_trust_anchor`, closing
-  the equivalent shell route (`echo … > .claude/settings.json`, `tee`,
-  `sed -i`, `awk`, `patch`, `git apply`, `cp`/`mv`/`install`, `ln`/`ln -s`,
-  `git mv`, and an `xargs`-indirected verb whose target is spelled out
-  literally on the command line) as an absolute, non-budget-eligible deny
-  rather than the ordinary budget-eligible `SHELL_EDIT_REASON`. The deny
-  message does not suggest delegating via the Task/Agent tool (a dispatched
-  subagent is denied identically) — the only remedies are a human operator
-  editing the file directly outside the guarded session, or setting
+  the equivalent shell route as an absolute, non-budget-eligible deny rather
+  than the ordinary budget-eligible `SHELL_EDIT_REASON`. The deny message
+  does not suggest delegating via the Task/Agent tool (a dispatched subagent
+  is denied identically) — the only remedies are a human operator editing
+  the file directly outside the guarded session, or setting
   `TRUSTY_MPM_PM_UNRESTRICTED=1` in their own shell.
 
-  **Honesty note (this is not a hardened security boundary):** this closes
-  the easy/naive self-exemption paths — the ordinary shell verbs a PM would
-  reach for without specifically probing for a gap — and raises the bar
-  against accidental or unsophisticated self-exemption. It is **not** a
-  security boundary against a party with unrestricted Bash access.
-  Documented, tracked-open residual gaps: (1) a trust-anchor write hidden
-  inside a `$(…)`/backtick command substitution still denies, but only as the
-  budget-eligible `SHELL_EDIT_REASON`, not this absolute deny; (2) a write
-  performed by an interpreter's inline program text (`python3 -c "…"`,
-  `perl -e`, `node -e`, `dd of=…`, `rsync … dest`, a re-invoked
-  `bash -c "…"`) or a runtime-assembled path (concatenation, base64, an env
-  var) is not detected at all — no static token scan can enumerate these;
-  (3) `xargs` whose target arrives purely via stdin, rather than appearing
-  literally on the command line, is likewise invisible to the new `xargs`
-  handling. A determined actor with Bash access can defeat this guard; it is
-  a guardrail against going off-script, not a hardened boundary. Also
-  documented as a deliberate, accepted trade-off (not an oversight): because
-  the `cp`/`mv`/`install`/`ln` scan checks source AND destination positions,
-  `cp .claude/settings.json /tmp/backup.json` — a harmless read/backup — is
-  denied absolutely too; narrowing to destination-only risks miscounting
-  `cp`'s N-arg-plus-directory form in the dangerous direction, so the
-  over-inclusion is kept on purpose.
+  **Round 1** closed the direct Edit/Write route plus the obvious Bash
+  routes: `echo … > .claude/settings.json`, `tee`, `sed -i`/`awk`/`patch`/
+  `git apply`. **Round 2** closed `cp`/`mv`/`install` (a `non_flag_tokens`
+  helper scanning every positional argument of those verbs). **Round 3**
+  (code-critic BLOCK) closed `ln`/`ln -s` and `git mv` — the review's
+  CRITICAL finding was that `ln -sf /tmp/evil.json .claude/settings.json`
+  was a complete, zero-friction bypass: write attacker content anywhere,
+  symlink it over the trust anchor, and Claude Code reads through it on its
+  next config load.
 
-- **`pm_guard_bash::bash_targets_trust_anchor` now also catches `cp`/`mv`/
-  `install` writes to the trust anchor**
-  ([#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981) follow-up):
-  these verbs take their target as a plain positional argument rather than a
-  `>` redirect or a `sed`/`patch`-style trailing token, so `cp evil.json
-  .claude/settings.json`, `mv evil.json .claude/settings.json`, and
-  `install -m 644 evil.json .claude/settings.json` previously sailed straight
-  through as an unclassified allow. New `non_flag_tokens` helper checks EVERY
-  non-flag positional token of the segment (source and destination alike,
-  deliberately not attempting to pin down "the" destination token position —
-  over-inclusion only ever widens the deny, never narrows it), wired into the
-  same `bash_targets_trust_anchor` function already called unconditionally
-  from `pm_guard()`'s body, so it denies absolutely (not the budget-eligible
-  `SHELL_EDIT_REASON`) for both the PM's own call and a dispatched subagent's.
+  **Round 4 — the whack-a-mole pattern itself was the bug, not any one
+  verb (second #3994 BLOCK):** the re-review of round 3 found `rsync` and
+  `scp` completely unclassified — a full, unbudgeted ALLOW, identical in
+  shape to the just-closed `ln` gap — and caught the module doc actively
+  MIS-FILING `rsync SRC DST` as belonging to the "genuinely hard,
+  runtime-assembled" bucket alongside `python3 -c`/`dd`/`bash -c`, when its
+  destination is a plain literal argv token exactly like `cp`'s. Three
+  rounds of "enumerate the verb, add it to the match arm" each shipped with
+  the next unenumerated verb still open — an inherently losing, open-ended
+  list that fails OPEN on anything unlisted. `bash_targets_trust_anchor` is
+  now INVERTED: rather than matching a known-verb allowlist and scanning
+  only that verb's conventional argument positions, it splits the whole raw
+  command on a generous set of shell/quoting/punctuation delimiters
+  (whitespace, quotes, parens/braces/brackets, `,`/`;`, the redirect/pipe
+  operators, `=`, `$`) and denies if ANY resulting fragment resolves to the
+  trust anchor — regardless of which program that fragment is an argument
+  to. This closes `rsync`/`scp` in the same move as every verb closed in
+  rounds 1–3, PLUS `dd of=PATH` (the `=` delimiter isolates the value), a
+  literal path inside `bash -c "…"`/`sh -c "…"`, a literal path inside an
+  interpreter one-liner (`python3 -c`, `perl -e`, `node -e`, `ruby -e`), and
+  a literal path inside a `$(…)`/backtick command substitution — none of
+  which required naming a verb, and none of which required naming the NEXT
+  verb nobody has thought of yet either, since the scan no longer depends on
+  verb recognition at all. The prior verb-specific helpers
+  (`non_flag_tokens`, `tee_target_tokens`, and the `git mv`-specific tail
+  scan) are removed as dead code, superseded by the single generic scan.
+
+  **The accepted cost of the inversion, stated plainly (product decision,
+  not an oversight):** because the scan no longer knows or cares what a
+  token's role is, it now also denies a pure READ (`cat
+  .claude/settings.json`, `grep`, `diff`, `less`) and a MERE TEXTUAL MENTION
+  of the path in an argument that isn't a write target at all (e.g. a commit
+  message: `git commit -m "fixes .claude/settings.json handling"`). This is
+  the same trade-off the round-2 `cp .claude/settings.json /tmp/backup.json`
+  case already established and documented — over-denying a harmless read is
+  a workflow annoyance with a working remedy (a human operator, or
+  `TRUSTY_MPM_PM_UNRESTRICTED=1`); a missed write is a silent, total guard
+  bypass. Narrowing the scan to "only when this token is really being
+  written to" would reintroduce exactly the position-by-position,
+  verb-by-verb reasoning that just failed three rounds in a row.
+
+  **Honesty note (this is not a hardened security boundary):** this closes
+  every LITERAL, spelled-out-on-the-command-line occurrence of the trust
+  anchor path, and raises the bar against accidental or unsophisticated
+  self-exemption. It is **not** a security boundary against a party with
+  unrestricted Bash access. What remains open is now narrowed to ONLY what a
+  static token scan structurally cannot see, because the path never appears
+  as literal text on the command line: (1) a path assembled at RUNTIME —
+  string concatenation, base64/hex decoding, or indirection through an
+  intermediate shell variable (`X=.claude/settings.json; cp evil "$X"`);
+  (2) an environment-variable-relative path where only the variable's NAME
+  appears literally, not its resolved value
+  (`cp evil "$CLAUDE_CONFIG_DIR/settings.json"`); (3) `xargs`/any command
+  whose target arrives purely via STDIN rather than appearing literally on
+  the command line (`echo .claude/settings.json | xargs rm`). None of these
+  three are specific to the trust anchor, nor introduced by this function —
+  they are pre-existing properties of any static command-line classifier. A
+  determined actor with Bash access can still defeat this guard via one of
+  those three; it is a guardrail against going off-script, not a hardened
+  boundary.
 
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**

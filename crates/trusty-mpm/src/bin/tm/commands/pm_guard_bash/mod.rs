@@ -85,231 +85,124 @@ pub(crate) fn evaluate_bash_command(command: &str) -> Option<&'static str> {
     evaluate_bash_command_inner(command, 0)
 }
 
-/// Whether `command` writes, via any Bash mechanism this module recognizes,
-/// to pm_guard's own trust-anchor settings file (issue #3981/#3994).
+/// Punctuation/whitespace characters that separate a literal path from
+/// surrounding shell or interpreter syntax, for [`bash_targets_trust_anchor`]'s
+/// verb-agnostic token scan (issue #3981/#3994 — the round-3 inversion).
 ///
-/// **Honesty note (added in response to the #3994 adversarial review): this
-/// function closes the EASY, naive self-exemption paths — the ordinary,
-/// always-visible shell verbs a PM would reach for without specifically
-/// probing for a gap. It is NOT a hardened security boundary.** A determined
-/// actor with unrestricted Bash access still has multiple ways through (see
-/// the residual-gap list below), some closeable in principle (more verbs to
-/// enumerate) and some not (runtime-assembled paths, an interpreter's inline
-/// program text). Treat this as raising the bar against accidental/naive
-/// self-exemption, not as "the PM can no longer disable pm_guard."
+/// Why: whitespace alone is not enough — a literal path can be glued to
+/// adjacent syntax with no space at all (`cat>.claude/settings.json`,
+/// `dd of=.claude/settings.json`, `'.claude/settings.json'` inside a quoted
+/// interpreter one-liner). Each character here is something a path is
+/// commonly wrapped in or separated from: quotes (`'`, `"`, `` ` ``),
+/// grouping/expansion punctuation (`(`, `)`, `{`, `}`, `[`, `]`), argument
+/// separators (`,`, `;`), the shell redirection/pipe/background operators
+/// (`<`, `>`, `|`, `&`), `=` (isolates `dd of=PATH`, `--file=PATH`, and
+/// `KEY=PATH` env-assignment values as their own fragment), and `$` (so a
+/// `$(...)`/`${...}` boundary never glues onto an adjacent literal path).
+/// Splitting on a superset of "real" delimiters is safe by construction: an
+/// extra split point can only ever produce MORE, smaller candidate fragments
+/// to check — never fewer — so it can only widen the deny, never narrow it.
+const TRUST_ANCHOR_FRAGMENT_DELIMITERS: &[char] = &[
+    ' ', '\t', '\n', '\r', '\'', '"', '`', '(', ')', '{', '}', '[', ']', ',', ';', '|', '&', '<',
+    '>', '=', '$',
+];
+
+/// Whether `command` contains ANY token that resolves to pm_guard's own
+/// trust-anchor settings file, regardless of which program that token is an
+/// argument to (issue #3981/#3994).
 ///
-/// Why: a shell redirect (`echo … > .claude/settings.json`, `cat >>`), `tee`
-/// (which takes its output file as an ARGUMENT, not a `>` redirect — invisible
-/// to [`has_file_write_redirection`]/[`redirection_target`]), `sed -i`/`awk`/
-/// `patch`/`git apply` (whose target is conventionally their trailing
-/// non-flag argument, per [`trailing_file_token`]), `cp`/`mv`/`install`/`ln`
-/// (whose source AND destination are both plain positional arguments, per
-/// [`non_flag_tokens`] — `ln`'s destination/linkname argument is exactly
-/// where the danger is: `ln -sf /tmp/evil.json .claude/settings.json` makes
-/// Claude Code read the attacker-controlled file on its next config load, a
-/// full bypass if left unclassified, per the #3994 review), `git mv` (a
-/// two-token verb whose subcommand shifts the positional layout — scanned via
-/// [`shell_lex::git_subcommand_with_args`]'s tail rather than
-/// [`non_flag_tokens`], since the latter only skips ONE leading token and
-/// `git` is not the argument-bearing verb), or `xargs` invoking any of the
-/// above with the trust-anchor path spelled out LITERALLY on the command line
-/// (`… | xargs -I{} cp {} .claude/settings.json`) can all write the trust
-/// anchor exactly as surely as the `Write`/`Edit` tool. Without this check
-/// those would classify as the ordinary [`SHELL_EDIT_REASON`] (or, for the
-/// verbs above, would not be classified as a file-edit AT ALL) —
-/// `pm_guard`'s per-turn budget (issue #2918) allows a `SHELL_EDIT_REASON`
-/// deny up to 3 times BEFORE hard-blocking, silently reopening the exact hole
-/// the Edit/Write-side trust-anchor denylist closes.
-/// What: scans every composition segment ([`split_shell_segments`]) for a
-/// real file-write redirect target ([`redirection_target`]), a `tee`
-/// argument ([`tee_target_tokens`]), a `cp`/`mv`/`install`/`ln` argument
-/// ([`non_flag_tokens`] — checks EVERY positional token, source included, not
-/// just the destination: `cp .claude/settings.json /tmp/x` reads the trust
-/// anchor into an attacker-controlled sibling path, and being conservative
-/// about ambiguous positional order costs nothing since this check only ever
-/// widens a deny, never an allow), a `git mv` argument
-/// ([`shell_lex::git_subcommand_with_args`]'s tail, same every-positional-token
-/// scan as `non_flag_tokens`), an `xargs` argument (also [`non_flag_tokens`] —
-/// deliberately generic rather than verb-aware: it scans every non-flag token
-/// following `xargs` for the trust-anchor path regardless of which command
-/// `xargs` invokes, since the point is only "does the trust anchor's path
-/// appear literally on this line", not "is xargs's target verb one we
-/// recognize"), or — for the sed/awk-family/`patch`/`git apply` verbs — the
-/// trailing file token ([`trailing_file_token`]), and returns `true` on the
-/// first one [`is_trust_anchor_path`] confirms.
+/// **Why this is a verb-agnostic scan, not a verb allowlist (round 3 of the
+/// #3994 review):** the prior design matched a known-verb allowlist
+/// (`cp`/`mv`/`install`/`ln`/`tee`/`sed`/`awk`/`patch`/`git apply`/`git mv`/
+/// `xargs`) and scanned only THAT verb's conventional argument positions.
+/// Each review round found the next verb nobody had enumerated yet
+/// completely unclassified — `cp`/`mv`/`install` closed round 1, `ln`/
+/// `git mv` closed round 2, and round 2's own re-review then found `rsync`
+/// and `scp` wide open with a full, unbudgeted ALLOW, because they were
+/// never added to the match arm. Enumerating verbs is an open-ended list
+/// that fails OPEN on anything unlisted — a structurally losing game. This
+/// function inverts the question: instead of "is this a known write verb,
+/// and if so where is its destination argument", it asks "does ANY token on
+/// this command line — split without regard to which program it belongs to
+/// — resolve to the trust anchor". That closes every verb above in one
+/// move, plus `rsync`, `scp`, `dd of=`, a literal path inside `bash -c "…"`/
+/// `sh -c "…"`, and a literal path inside an interpreter one-liner
+/// (`python3 -c`, `perl -e`, `node -e`, `ruby -e`) or a `$(…)`/backtick
+/// command substitution — none of which require recognizing a verb at all,
+/// and none of which this function needs to name to close. It also closes
+/// every verb nobody has thought of yet: a program this module has never
+/// heard of, invoked with the trust-anchor path as a literal argument, is
+/// caught exactly the same way.
 ///
-/// **Documented false-positive trade-off (named explicitly per the #3994
-/// review, not left implicit):** because [`non_flag_tokens`] scans source AND
-/// destination alike, `cp .claude/settings.json /tmp/backup.json` — a
-/// harmless read/backup of the trust anchor to an unrelated destination — is
-/// denied absolutely, with no self-service remedy (only a human operator
-/// setting `TRUSTY_MPM_PM_UNRESTRICTED=1` unblocks it). This is a deliberate,
-/// accepted trade-off, not an oversight: narrowing to destination-only risks
-/// getting `cp`'s N-arg-plus-directory form (`cp SRC1 SRC2 DIR/`,
-/// `cp -t DIR SRC1 SRC2`) subtly wrong in the dangerous direction (excluding
-/// a real destination token by miscounting), and the failure mode of
-/// over-denying a backup is a rare workflow annoyance while the failure mode
-/// of a missed real write is silent total guard bypass. Safety over
-/// convenience; kept over-inclusive on purpose.
+/// **Honesty note (unchanged in spirit from the prior rounds): this closes
+/// every LITERAL, spelled-out-on-the-command-line occurrence of the trust
+/// anchor path. It is NOT a hardened security boundary.** A determined actor
+/// with unrestricted Bash access still has ways through — see the residual-gap
+/// list below — but all of them now require the path to be assembled or
+/// supplied at RUNTIME rather than appearing as plain text anywhere on the
+/// command line; there is no longer a "just pick an unlisted verb" bypass.
 ///
-/// Known residual gaps, deliberately NOT attempted here because a textual
-/// classifier cannot close them without becoming trivially evadable (a false
-/// sense of security is worse than an honest gap — see the PR description):
-/// (1) a trust-anchor write hidden inside a `$(…)`/backtick command
-/// substitution is not specially detected by this function (it scans
-/// top-level segments only) — such a call still denies, but as the ordinary
-/// budget-eligible `SHELL_EDIT_REASON` via [`classify_command_substitutions`]'s
-/// existing recursive scan, not this absolute deny; (2) a write performed by
-/// an interpreter's *inline program text* rather than the shell itself —
-/// `python3 -c "open('.claude/settings.json','w')…"`, `perl -e …`, `node -e
-/// …`, `ruby -e …`, `dd of=…`, `rsync … dest`, or a re-invoked shell
-/// (`bash -c "…"`, `sh -c "…"`) whose quoted body this function does not
-/// recursively parse — is not detected at all; the path can be assembled at
-/// runtime (concatenation, base64, an env var) in ways no static prefix/token
-/// scan can enumerate; (3) `xargs` whose target path arrives via STDIN rather
-/// than appearing literally on the command line
-/// (`echo .claude/settings.json | xargs rm`) is invisible to the `xargs`
-/// handling added here — that handling only sees literal argv tokens on the
-/// line itself, the same fundamental limit as (2). None of these three gaps
-/// are specific to the trust anchor, nor introduced by this function — they
-/// are pre-existing properties of [`evaluate_bash_command`]'s whole
-/// classification strategy — tracked for a possible follow-up
-/// allowlist-based Bash gate rather than papered over with a brittle
-/// heuristic here. See also the strategic caveat at the top of this doc
-/// comment: this list is illustrative, not exhaustive — any renaming/copying/
-/// linking verb this module does not yet enumerate is presumptively open
-/// until proven otherwise.
+/// **The accepted cost, stated plainly (per explicit product direction, not
+/// an oversight): this over-blocks.** Because the scan does not know or care
+/// what a token's role is, THREE new categories of harmless command are now
+/// denied absolutely, on top of the pre-existing `cp <anchor> <dest>`
+/// backup/read trade-off documented below:
+/// - A pure READ: `cat .claude/settings.json`, `grep foo
+///   .claude/settings.json`, `diff a.json .claude/settings.json`,
+///   `less .claude/settings.json`.
+/// - A MERE TEXTUAL MENTION of the path in an argument that isn't a target at
+///   all — e.g. a commit message (`git commit -m "fixes .claude/settings.json
+///   handling"`) or an `echo` string — because the scan checks every token
+///   regardless of quoting or position, not just "the" destination argument.
+/// - Command-substitution bodies that merely READ the file
+///   (`` X=$(cat .claude/settings.json) ``) rather than write it.
+///
+/// This is a deliberate continuation of the trade-off the `cp <anchor>
+/// <dest>` case already established one round ago: narrowing the scan to
+/// "only when this token is really being written to" would require
+/// re-introducing exactly the verb-by-verb, position-by-position reasoning
+/// that just failed three times in a row (most recently for `rsync`/`scp`).
+/// A textual classifier that tries to be clever about "read vs. write intent"
+/// is a textual classifier an attacker can find the un-enumerated gap in.
+/// Over-denying a `cat`/`grep`/commit-message is a workflow annoyance with a
+/// working remedy (a human operator, or `TRUSTY_MPM_PM_UNRESTRICTED=1`); a
+/// missed write is a silent, total guard bypass. Safety over convenience,
+/// applied consistently rather than re-litigated per verb.
+///
+/// What: splits `command` on [`TRUST_ANCHOR_FRAGMENT_DELIMITERS`] (a superset
+/// of whitespace) into candidate fragments, and returns `true` the first time
+/// [`is_trust_anchor_path`] confirms one resolves to the trust anchor. No
+/// verb recognition, no argument-position reasoning, no per-segment
+/// composition splitting ([`split_shell_segments`]) — none of that machinery
+/// is needed because the scan runs directly over the whole raw command text.
+///
+/// Known residual gaps — now narrowed to ONLY what a static token scan
+/// structurally cannot see, because it requires the path to not appear as
+/// literal text anywhere on the command line:
+/// (1) a path assembled at RUNTIME — string concatenation
+/// (`"$A$B"`/`printf -v`), base64/hex decoding, or indirection through an
+/// intermediate shell variable (`X=.claude/settings.json; cp evil "$X"`) —
+/// has no literal occurrence of the trust-anchor path for this function to
+/// find; this module classifies text structurally, it does not execute or
+/// simulate the shell; (2) an environment-variable-relative path where the
+/// variable's NAME appears literally but its resolved VALUE does not
+/// (`cp evil "$CLAUDE_CONFIG_DIR/settings.json"` — the fragment
+/// `CLAUDE_CONFIG_DIR/settings.json` does not textually equal a resolvable
+/// trust-anchor path, and this function does not read env vars to resolve
+/// it); (3) `xargs`/any command whose target path arrives purely via STDIN
+/// rather than appearing literally on the command line
+/// (`echo .claude/settings.json | xargs rm`) is invisible by construction —
+/// there is no argv token to find. None of these three are specific to the
+/// trust anchor, nor introduced by this function — they are pre-existing
+/// properties of any static command-line classifier, tracked for a possible
+/// follow-up allowlist-based Bash gate rather than papered over with a
+/// brittle heuristic here.
 /// Test: `bash_targets_trust_anchor_*` below.
 pub(crate) fn bash_targets_trust_anchor(command: &str) -> bool {
-    for segment in split_shell_segments(command) {
-        let trimmed = segment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(target) = redirection_target(trimmed)
-            && is_trust_anchor_path(&target)
-        {
-            return true;
-        }
-        let Some(program) = first_command_token(trimmed) else {
-            continue;
-        };
-        if program == "tee" {
-            for target in tee_target_tokens(trimmed) {
-                if is_trust_anchor_path(target) {
-                    return true;
-                }
-            }
-            continue;
-        }
-        if matches!(program, "cp" | "mv" | "install" | "ln" | "xargs") {
-            for target in non_flag_tokens(trimmed) {
-                if is_trust_anchor_path(target) {
-                    return true;
-                }
-            }
-            continue;
-        }
-        if program == "git" {
-            if let Some((sub, rest)) = shell_lex::git_subcommand_with_args(trimmed) {
-                match sub.as_str() {
-                    "apply" => {
-                        if let Some(target) = trailing_file_token(trimmed)
-                            && is_trust_anchor_path(&target)
-                        {
-                            return true;
-                        }
-                    }
-                    "mv" => {
-                        for tok in &rest {
-                            if !tok.starts_with('-') && is_trust_anchor_path(tok) {
-                                return true;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            continue;
-        }
-        let is_sed_awk_family =
-            matches!(program, "patch" | "sed" | "awk" | "gawk" | "nawk" | "mawk");
-        if is_sed_awk_family
-            && let Some(target) = trailing_file_token(trimmed)
-            && is_trust_anchor_path(&target)
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Every non-flag positional argument of a `cp`/`mv`/`install`/`ln`/`xargs`-
-/// headed segment, source AND destination alike (issue #3981/#3994).
-///
-/// Why: unlike `tee` (output-only arguments) or `sed`/`patch` (a single
-/// trailing target), `cp`/`mv`/`install`/`ln` take BOTH a source and a
-/// destination as plain positional arguments in either the 2-arg
-/// (`cp SRC DST`, `ln TARGET LINKNAME`) or N-arg-plus-directory
-/// (`cp SRC1 SRC2 DIR/`, `cp -t DIR SRC1 SRC2`) forms — there is no single
-/// reliable "the target is always token N" rule cheap enough to be worth
-/// getting subtly wrong. `xargs` reuses the same scan for a different reason:
-/// it is not itself a file-write verb, so this deliberately does NOT try to
-/// parse `xargs`'s own flags (`-I{}`, `-n`, `-P`) to find where ITS embedded
-/// command begins — it just asks "does the trust-anchor path appear literally
-/// anywhere on this line", which is enough to catch the realistic bypass
-/// (`… | xargs -I{} cp {} .claude/settings.json`, where the destination is
-/// written out in full) while honestly NOT catching a target fed purely
-/// through stdin (see the residual-gap list on [`bash_targets_trust_anchor`]).
-/// Checking every positional token is simpler and can only widen the deny,
-/// never narrow it.
-/// What: the program token (index 0) is skipped; every remaining
-/// whitespace-separated token that does not start with `-` is returned. This
-/// deliberately does NOT track which flags consume a following value token
-/// (`install -m 644 …`, `cp -t DIR …`) — the value token (`644`, `DIR`) is
-/// returned right alongside the real source/destination tokens, exactly as
-/// if it were itself positional. That is harmless, not merely tolerated: the
-/// caller only ever asks "does ANY of these tokens match the trust-anchor
-/// path", so an extra, unrelated candidate token (a numeric mode, a
-/// directory name) can only ever be checked and rejected — it can never
-/// suppress a real match. Trying to enumerate every verb's flag arity so
-/// only the "true" positionals remain would add real complexity for zero
-/// added safety, and would risk getting it subtly wrong in the dangerous
-/// direction (excluding a real destination token by miscounting).
-/// Test: `non_flag_tokens_*`.
-fn non_flag_tokens(command: &str) -> Vec<&str> {
     command
-        .split_whitespace()
-        .skip(1)
-        .filter(|t| !t.starts_with('-'))
-        .collect()
-}
-
-/// The non-flag argument tokens of a `tee`-headed segment.
-///
-/// Why: `tee` writes its output to file ARGUMENTS, not a `>` redirect, so it
-/// is invisible to [`has_file_write_redirection`]/[`redirection_target`]; a
-/// dedicated scan is the only way [`bash_targets_trust_anchor`] can see
-/// `tee .claude/settings.json` or `sudo tee -a .claude/settings.json`.
-/// What: finds the first whitespace token equal to `tee` (or ending in
-/// `/tee`, covering an absolute-path invocation), then returns every
-/// remaining whitespace-separated token that does not start with `-` (an
-/// option flag) — `tee` accepts multiple output files, so ALL of them are
-/// returned, not just the first/last.
-/// Test: `tee_target_tokens_*`.
-fn tee_target_tokens(command: &str) -> Vec<&str> {
-    let all: Vec<&str> = command.split_whitespace().collect();
-    let Some(pos) = all
-        .iter()
-        .position(|t| *t == "tee" || t.rsplit('/').next() == Some("tee"))
-    else {
-        return Vec::new();
-    };
-    all[pos + 1..]
-        .iter()
-        .filter(|t| !t.starts_with('-'))
-        .copied()
-        .collect()
+        .split(TRUST_ANCHOR_FRAGMENT_DELIMITERS)
+        .filter(|fragment| !fragment.is_empty())
+        .any(is_trust_anchor_path)
 }
 
 /// Depth-aware core of [`evaluate_bash_command`].

@@ -892,7 +892,8 @@ fn bash_targets_trust_anchor_detects_cp_mv_install() {
         // still be caught even though it isn't the trailing token.
         format!("cp -t {target_s} backup.json"),
         // Reading the trust anchor as a SOURCE (not the last token) is also
-        // caught — deliberately conservative, see `non_flag_tokens`'s doc.
+        // caught — deliberately conservative, see `bash_targets_trust_anchor`'s
+        // doc (the "accepted cost" section).
         format!("cp {target_s} /tmp/exfil.json"),
     ] {
         assert!(
@@ -987,18 +988,120 @@ fn bash_targets_trust_anchor_detects_xargs_indirection() {
     assert!(!bash_targets_trust_anchor("cat paths.txt | xargs rm"));
 }
 
+// ─── round-3 inversion coverage (issue #3981/#3994, second BLOCK) ─────────
+// `rsync`/`scp` were found completely unclassified (full, unbudgeted ALLOW)
+// under the prior verb-allowlist design. These tests exercise the
+// verb-agnostic scan directly against the verbs the review named, PLUS the
+// "any future verb" claim itself via a made-up program name.
+
 #[test]
-fn non_flag_tokens_skips_program_and_flags() {
-    assert_eq!(non_flag_tokens("cp a b"), vec!["a", "b"]);
-    assert_eq!(non_flag_tokens("cp -r a b"), vec!["a", "b"]);
-    // A value-taking flag's value token (`644`) is NOT specially filtered
-    // out — it is returned right alongside the real positional tokens. See
-    // the function's doc for why that over-inclusion is safe rather than a
-    // bug: the caller only ever checks membership against the trust-anchor
-    // path, so an extra candidate token can only ever be checked and
-    // rejected, never suppress a real match.
-    assert_eq!(non_flag_tokens("install -m 644 a b"), vec!["644", "a", "b"]);
-    assert!(non_flag_tokens("cp -r").is_empty());
+fn bash_targets_trust_anchor_detects_rsync() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    assert!(bash_targets_trust_anchor(&format!(
+        "rsync /tmp/evil.json {target_s}"
+    )));
+    assert!(!bash_targets_trust_anchor("rsync /tmp/a.txt /tmp/b.txt"));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_scp() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    assert!(bash_targets_trust_anchor(&format!(
+        "scp /tmp/evil.json {target_s}"
+    )));
+    assert!(!bash_targets_trust_anchor("scp /tmp/a.txt /tmp/b.txt"));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_dd_of_equals() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    // `dd of=PATH` carries the target glued to the flag with `=`, no space —
+    // the `=` delimiter isolates it as its own fragment.
+    assert!(bash_targets_trust_anchor(&format!(
+        "dd if=/tmp/evil.json of={target_s}"
+    )));
+    assert!(!bash_targets_trust_anchor("dd if=/tmp/a.txt of=/tmp/b.txt"));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_bash_c_literal_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    // A re-invoked shell with the target spelled out literally inside its
+    // quoted `-c` body — previously bucketed as "genuinely hard" alongside
+    // interpreter inline program text; now closed because the scan runs over
+    // the raw command text, quotes included.
+    assert!(bash_targets_trust_anchor(&format!(
+        "bash -c \"cp /tmp/evil.json {target_s}\""
+    )));
+    assert!(!bash_targets_trust_anchor(
+        "bash -c \"cp /tmp/a.txt /tmp/b.txt\""
+    ));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_python_c_literal_path() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    assert!(bash_targets_trust_anchor(&format!(
+        "python3 -c \"import shutil; shutil.copy('/tmp/evil.json', '{target_s}')\""
+    )));
+    assert!(!bash_targets_trust_anchor(
+        "python3 -c \"import shutil; shutil.copy('/tmp/a.txt', '/tmp/b.txt')\""
+    ));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_unenumerated_program() {
+    // The core claim of the inversion: a program this module has NEVER heard
+    // of (no verb-match arm names it, now or ever) is still caught, because
+    // the scan does not depend on recognizing the verb at all.
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    assert!(bash_targets_trust_anchor(&format!(
+        "some-future-sync-tool --mirror /tmp/evil.json {target_s}"
+    )));
+}
+
+#[test]
+fn bash_targets_trust_anchor_accepted_cost_blocks_reads_and_prose_mentions() {
+    // Documents the accepted over-blocking cost explicitly (per product
+    // direction): a pure read, and a mere textual mention of the path in an
+    // argument that isn't a write target at all, both now deny. This is
+    // asserted as EXPECTED behavior, not a bug to fix.
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    // A pure read.
+    assert!(bash_targets_trust_anchor(&format!("cat {target_s}")));
+    // A mere textual mention inside a commit message — not a write to the
+    // file at all, but the fragment still appears literally on the line.
+    assert!(bash_targets_trust_anchor(&format!(
+        "git commit -m \"fixes {target_s} handling\""
+    )));
 }
 
 #[test]
@@ -1045,16 +1148,6 @@ fn bash_targets_trust_anchor_allows_benign_commands() {
             "expected no trust-anchor detection for: {cmd}"
         );
     }
-}
-
-#[test]
-fn tee_target_tokens_extracts_all_non_flag_args() {
-    assert_eq!(tee_target_tokens("tee f1 f2"), vec!["f1", "f2"]);
-    assert_eq!(tee_target_tokens("tee -a f1"), vec!["f1"]);
-    assert_eq!(tee_target_tokens("sudo tee -a f1"), vec!["f1"]);
-    assert_eq!(tee_target_tokens("/usr/bin/tee f1"), vec!["f1"]);
-    assert_eq!(tee_target_tokens("echo x | tee f1"), vec!["f1"]);
-    assert!(tee_target_tokens("git status").is_empty());
 }
 
 #[test]

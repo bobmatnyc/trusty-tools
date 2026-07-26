@@ -187,13 +187,24 @@ pub(super) fn git_subcommand(segment: &str) -> Option<String> {
 /// remaining argv tail (everything after the subcommand token, flags
 /// included) — issue #3981/#3994.
 ///
-/// Why: `git apply`'s target is conventionally its trailing token
-/// ([`trailing_file_token`] in the parent module handles that), but `git mv
-/// SRC DST` takes two POSITIONAL arguments after the subcommand, the same
-/// shape `cp`/`mv`/`install`/`ln` do — a caller needs the subcommand's own
-/// argv slice (not the whole segment's whitespace tokens, which would still
-/// include any leading `git -C <path>` global-flag noise) to scan those
-/// positions the same way [`super::non_flag_tokens`] scans `cp`/`mv`.
+/// Why: originally added so a caller could scan `git mv SRC DST`'s two
+/// POSITIONAL arguments (the subcommand's own argv slice, not the whole
+/// segment's whitespace tokens, which would still include any leading
+/// `git -C <path>` global-flag noise) the same way the parent module's
+/// former verb-allowlist scanned `cp`/`mv`. **Status note (round 3 of the
+/// #3994 review):** `bash_targets_trust_anchor` was inverted to a
+/// verb-agnostic literal-token scan over the whole raw command (see its doc
+/// in the parent module) that no longer calls this function at all — a plain
+/// `git mv SRC .claude/settings.json` is now caught by the generic scan
+/// finding `.claude/settings.json` as its own whitespace token, without
+/// needing to know it followed a `git mv`. This function is NOT dead code —
+/// [`git_subcommand`] still wraps it and is still called from
+/// `classify_bash_segment` (the `git apply` shell-edit check),
+/// `evaluate_worktree_add_command`, and `extract_shell_edit_target` — but its
+/// distinguishing feature, the argv tail, is currently exercised only by this
+/// module's own unit tests, not by any production caller. Left unchanged
+/// rather than collapsed back into a bare subcommand-only lookup, since it is
+/// still correct, still tested, and a future caller may yet want the tail.
 /// What: identical parse to [`git_subcommand`] but returns
 /// `(subcommand, argv[after_subcommand..])` instead of discarding the tail.
 /// Test: `git_subcommand_with_args_returns_tail`,
