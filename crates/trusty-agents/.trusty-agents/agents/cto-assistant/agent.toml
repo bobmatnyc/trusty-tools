@@ -98,6 +98,30 @@ allow = [
     # are already granted by the base's Gmail surface).
     "create_draft",
 ]
+# #3938: OpenRPC scopes (#3208) for the Gmail/Tasks surface above. These are
+# NOT a delta the base can supply and they are NOT redundant with `allow`:
+# `allow` gates by tool NAME, `scopes` gates by the capability the tool's
+# credential actually holds, and BOTH must pass in
+# `ctrl::pm_task::dispatch::persona::filter_persona_tool_names` (#3208).
+#
+# The base `assistant` deliberately declares read-only `google.read`
+# (`../assistant/agent.toml`, §5.5) — but no gworkspace tool ever advertises
+# that scope: `registry::google_scope` maps every `x-google-scopes` OAuth URL
+# to `google.<family>.<access>` (e.g. `google.gmail.write`,
+# `google.tasks.write`), and `ScopePattern::matches` compares on segment
+# boundaries, so `google.read` matches nothing. Inheriting it by union was
+# therefore inheriting NO Google capability at all, and every Gmail/Tasks tool
+# allowlisted above was silently dropped before the model ever saw it.
+#
+# This overlay is a single named user's private assistant (Masa/Duetto) whose
+# whole point is Gmail triage (#473) and Granola->Google Tasks sync (#472/#485),
+# so it opts in EXPLICITLY and NARROWLY to exactly those two families —
+# deliberately not izzie's blanket `google.*`, which would also hand this
+# persona Calendar/Drive/Docs write. This restores, verbatim, the scope line
+# the flat `../cto-assistant.toml` has always carried (its own comment there
+# predicted this exact failure); converting that file into this directory
+# package dropped it, and the package WINS the loader's resolution order.
+scopes = ["google.gmail.*", "google.tasks.*"]
 
 [system_prompt]
 # CTO-specific skill DELTAS only — `gworkspace-calendar` is already granted
