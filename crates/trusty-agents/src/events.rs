@@ -371,9 +371,79 @@ impl Event {
             // Slack-mirror and listener events are conversation/harness-scoped,
             // not task-scoped: like `Ping` they carry no `session_id`, so they
             // always pass the SSE session filter and reach the GUI's
-            // app-lifetime EventSource.
+            // app-lifetime EventSource. #3760: the Slack pair is instead
+            // scoped by `slack_channel()` below.
             Event::SlackMessageReceived { .. }
             | Event::SlackReplySent { .. }
+            | Event::ListenerEventReceived { .. }
+            | Event::Ping => None,
+        }
+    }
+
+    /// #3760: Return the Slack channel id this event belongs to, if any. Used
+    /// by the SSE handler to scope the Slack conversation mirror to one
+    /// channel instead of broadcasting it to every connected client.
+    ///
+    /// Why: `session_id()` returns `None` for the Slack-mirror pair, which the
+    /// SSE filter reads as "always include" — so with several viewers attached
+    /// to `/api/events`, every one of them received every channel's inbound
+    /// message and reply text. The mirror events already carry the only key
+    /// that can separate them (`channel`, the Slack channel id the gateway
+    /// itself keys its session state by), so exposing it here gives the SSE
+    /// filter a scoping dimension without inventing a new correlation id or
+    /// changing the wire format.
+    /// What: `Some(&str)` for `SlackMessageReceived` / `SlackReplySent`;
+    /// `None` for everything else, which the SSE filter treats as "always
+    /// include" — exactly as it treats `session_id() == None`.
+    ///
+    /// `ListenerEventReceived` deliberately returns `None`, and the reason is
+    /// narrower than "it has no channel". It has no channel FIELD: the variant
+    /// is provider-generic (Gmail, Calendar, and the Slack gateway all emit it
+    /// keyed only by `listener_id`, and the gateway's rows use the fixed id
+    /// `"slack"` for the whole workspace). A Slack-emitted row does embed the
+    /// channel — but only as free text inside the human-facing `summary`
+    /// display string (`slack::handlers` formats it as `"{channel}: {snippet}"`).
+    /// Parsing a display string to recover a security-scoping key is not an
+    /// acceptable filter input: the format exists to be read by a human and can
+    /// be changed by anyone editing that line, and a channel id is not
+    /// distinguishable from a snippet that merely contains a colon. The real
+    /// scoping axis for the Events pane is `listener_id`, which is a structured
+    /// field; that axis is tracked as a follow-up rather than overloaded onto
+    /// the `channel` parameter here.
+    ///
+    /// Deliberately NOT a `_ => None` wildcard: this is the one function whose
+    /// entire job is deciding the scoping key, so a future `SlackReactionAdded`
+    /// / `SlackThreadReply` must fail to compile until someone decides whether
+    /// it is channel-scoped, rather than defaulting to the broadcast-to-all
+    /// behaviour that caused #3760 in the first place.
+    pub fn slack_channel(&self) -> Option<&str> {
+        match self {
+            Event::SlackMessageReceived { channel, .. } | Event::SlackReplySent { channel, .. } => {
+                Some(channel)
+            }
+            Event::SessionStarted { .. }
+            | Event::SessionDone { .. }
+            | Event::SessionCancelled { .. }
+            | Event::PmThinking { .. }
+            | Event::PmDelegating { .. }
+            | Event::AgentSpawned { .. }
+            | Event::AgentMessage { .. }
+            | Event::AgentMessageDelta { .. }
+            | Event::AgentDone { .. }
+            | Event::AgentFailed { .. }
+            | Event::ToolCalled { .. }
+            | Event::ToolResult { .. }
+            | Event::AstOperation { .. }
+            | Event::PhaseStarted { .. }
+            | Event::PhaseDone { .. }
+            | Event::PhaseSkipped { .. }
+            | Event::PersonaDetected { .. }
+            | Event::RunResumed { .. }
+            | Event::LlmRequested { .. }
+            | Event::LlmResponded { .. }
+            | Event::AgentStarted { .. }
+            | Event::ReportGenerated { .. }
+            | Event::RecapGenerated { .. }
             | Event::ListenerEventReceived { .. }
             | Event::Ping => None,
         }

@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use subtle::ConstantTimeEq;
 
 /// Server configuration. (#181, #3329)
 ///
@@ -65,6 +66,28 @@ pub(super) struct AuthState {
     pub(super) token: String,
 }
 
+/// Whether a presented bearer token matches the configured one. (#3761)
+///
+/// Why: Plain `==` short-circuits on the first differing byte, so an attacker
+/// who can time their own requests learns the length of the matching prefix and
+/// can recover the token byte-by-byte instead of brute-forcing it whole. This
+/// is the HIGHER-value of the two secrets the server holds — it gates every
+/// `/api/*` route, not just the internal relay — so it gets the same
+/// constant-time treatment `relay::relay_authorized` does.
+/// What: Rejects on differing length (a token's length is not secret; it is
+/// already observable from the request frame, and `ct_eq` needs equal-length
+/// slices), then compares the bytes in constant time. An empty configured token
+/// is not special-cased here — `auth_middleware` only runs when the operator
+/// configured one (see `routes::build_router_with_config`).
+/// Test: `bearer_token_matches_is_exact`, `auth_middleware_accepts_valid_token`,
+/// `auth_middleware_rejects_wrong_token`.
+pub(super) fn bearer_token_matches(expected: &str, provided: &str) -> bool {
+    if expected.len() != provided.len() {
+        return false;
+    }
+    expected.as_bytes().ct_eq(provided.as_bytes()).into()
+}
+
 /// Bearer-token authentication middleware. (#181)
 ///
 /// Why: The server binds `0.0.0.0`, so any process on the LAN can reach the
@@ -75,9 +98,12 @@ pub(super) struct AuthState {
 /// the token via `/api/config` before issuing authenticated requests.
 /// What: For requests under `/api/*` (other than `/api/health`), checks
 /// `Authorization: Bearer <token>` and returns 401 JSON
-/// `{"error":"unauthorized"}` on mismatch.
+/// `{"error":"unauthorized"}` on mismatch. #3761: the comparison is
+/// constant-time (`bearer_token_matches`) — this is the higher-value secret of
+/// the two the server holds, so it gets the same treatment as the relay token.
 /// Test: `auth_middleware_rejects_missing_token`,
-/// `auth_middleware_accepts_valid_token`, `auth_middleware_allows_health`.
+/// `auth_middleware_accepts_valid_token`, `auth_middleware_allows_health`,
+/// `bearer_token_matches_is_exact`.
 pub(super) async fn auth_middleware(
     State(auth): State<AuthState>,
     req: Request<axum::body::Body>,
@@ -110,7 +136,8 @@ pub(super) async fn auth_middleware(
         .map(str::trim);
 
     match header_val {
-        Some(t) if t == auth.token => next.run(req).await,
+        // #3761: constant-time compare — see `bearer_token_matches`.
+        Some(t) if bearer_token_matches(&auth.token, t) => next.run(req).await,
         _ => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "unauthorized" })),

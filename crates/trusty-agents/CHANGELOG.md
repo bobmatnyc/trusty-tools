@@ -26,6 +26,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and errs the safe way — a spinner that over-runs reads as "still working",
   where stopping early reads as "done" over text that has not arrived.
 
+- **Relay token compared in constant time; reply identity validated
+  server-side** (issue #3761): `POST /api/internal/relay-event` compared its
+  shared secret with `==`, which short-circuits on the first differing byte and
+  leaks the matching-prefix length to a caller able to time its own requests —
+  now a constant-time byte comparison via `subtle::ConstantTimeEq` (length is
+  still checked first; a token's length is not secret). The same treatment is
+  applied to the API bearer token in `auth_middleware`, which is the
+  higher-value of the two secrets since it gates every `/api/*` route. The
+  `SlackReplySent` arm also published `identity` completely unchecked, so any
+  holder of the relay token could stamp a reply with a fabricated speaker such
+  as "CTO Bot (as Bob)" and the mirror pane would render it as truth. The
+  server knows the one honest value (`slack::BOT_IDENTITY`) and now rejects
+  anything else with `422`, mirroring the existing closed-set RBAC tier check
+  on the inbound half.
+
 - **Streamed chat turns now send the same sampling parameters as the blocking
   path** (issue #3758): `llm::stream::stream_reply` built its
   `OpenRouterProvider` with no temperature, token ceiling, or stop sequences, so
@@ -46,6 +61,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   falls back to the blocking chat path.
 
 ### Added
+
+- **`GET /api/events` can scope the Slack mirror to one channel** (refs #3760):
+  `SlackMessageReceived` / `SlackReplySent` carry no `session_id`, and
+  `/api/events` treats a missing session as "always include", so every
+  connected client receives every Slack channel's inbound message text and bot
+  reply — harmless for the single-operator demo, a cross-viewer leak the moment
+  a second client attaches. The stream now accepts an optional `channel` query
+  parameter that scopes the mirror to one Slack channel id (the same key the
+  gateway already keys its session state by, exposed as
+  `Event::slack_channel()`). **This is the server-side capability only.** No
+  client passes `channel=` yet and the mirror pane has no viewer→channel
+  binding, so the leak #3760 describes persists in the product until the client
+  side lands — tracked separately. **Compatibility: the parameter is optional
+  and absent means no filtering**, so an existing client — including the
+  shipped GUI, which opens the stream with no query params — receives exactly
+  what it received before. Events with no channel (keepalives, task telemetry,
+  and `ListenerEventReceived`, which is provider-generic and carries a
+  `listener_id` rather than a channel) always pass a channel filter rather than
+  being suppressed. `EventsQuery` is `deny_unknown_fields`, so a typo'd
+  `?channel_id=` is rejected instead of silently returning an unfiltered
+  stream — these filters fail open when absent, so a misspelling must be loud.
 
 - **Skill-wrapping runtime — one named skill per tool (#3933, DOC-57 §5, epic
   #3931):** a skill had no binding to the tool it described. `web-search.md`

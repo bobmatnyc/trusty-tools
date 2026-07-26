@@ -11,6 +11,7 @@ mod agent_skills;
 mod agent_stores;
 mod cancel;
 mod ctrl_sessions;
+mod events_sse;
 mod guard;
 mod listener_events;
 mod listing;
@@ -217,6 +218,38 @@ async fn auth_middleware_rejects_wrong_token() {
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn auth_middleware_rejects_same_length_wrong_token() {
+    // #3761: the compare is now length-check-then-`ct_eq`. The pre-existing
+    // wrong-token case ("wrong" vs "secret") differs in LENGTH, so it only
+    // exercises the shortcut; this one is equal-length and must still 401.
+    let app = auth_router("secret");
+    let req = Request::builder()
+        .uri("/api/tasks")
+        .header(header::AUTHORIZATION, "Bearer secreT")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn bearer_token_matches_is_exact() {
+    use super::auth::bearer_token_matches;
+    // #3761: constant-time, but behaviourally identical to the `==` it
+    // replaced. Pin the cases a length-first / byte-loop compare could break.
+    assert!(bearer_token_matches("secret", "secret"));
+    assert!(!bearer_token_matches("secret", "secreT")); // last byte
+    assert!(!bearer_token_matches("secret", "Secret")); // first byte
+    assert!(!bearer_token_matches("secret", "secre")); // shorter
+    assert!(!bearer_token_matches("secret", "secrets")); // longer
+    assert!(!bearer_token_matches("secret", "")); // empty
+    // Multi-byte UTF-8 of equal byte length: compared as bytes, no panic on a
+    // char boundary.
+    assert!(bearer_token_matches("tökén-π", "tökén-π"));
+    assert!(!bearer_token_matches("tökén-π", "tökén-ω"));
 }
 
 #[tokio::test]

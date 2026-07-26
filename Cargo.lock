@@ -11183,6 +11183,7 @@ dependencies = [
  "similar",
  "stop-words",
  "strip-ansi-escapes",
+ "subtle",
  "teloxide",
  "tempfile",
  "thiserror 1.0.69",

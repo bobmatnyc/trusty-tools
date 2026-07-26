@@ -122,6 +122,12 @@ shlex = { workspace = true }
 stop-words = "0.8"
 dirs = "5"
 sha2 = "0.10"
+# subtle (#3761): constant-time byte equality for the internal relay's shared
+# secret (`api::server::relay::relay_authorized`). Plain `==` short-circuits on
+# the first differing byte, leaking the matching-prefix length to a caller that
+# can time its own requests. Already present in the lockfile as a transitive
+# dependency of the TLS stack, so declaring it directly adds no new compilation.
+subtle = "2"
 comrak = { workspace = true }
 serde_yaml = { workspace = true }
 toml_edit = "0.22"
