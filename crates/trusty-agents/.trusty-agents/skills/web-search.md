@@ -1,9 +1,29 @@
 ---
 name: web-search
+display_name: Web Search
 description: Real-time web search via Tavily/Brave Search
 tags: [search, web, tavily, brave, izzie]
 agents: [izzie, personal-assistant]
+kind: action
+tools: [web_search]
 ---
+
+<!--
+#3933 migration exemplar (DOC-57 §5.6). Before the `tools:` key existed, this
+file documented `web_search`, its backends and its API keys while `[tools].allow`
+granted the tool independently — two declarations with no link, either one able
+to go silently wrong. `tools: [web_search]` IS the link: this manifest now
+supersedes the built-in `web-search` catalog row, so the prose and the binding
+come from one file.
+
+`name` is deliberately UNCHANGED. It is the key the existing prompt-injection
+registry indexes by (`skills/registry/scan.rs`), so renaming it would break
+`load_skill("web-search")` for any agent that calls it — a behaviour change this
+migration has no reason to make. `display_name` carries the human name the
+Skills pane renders instead. The provider/credential requirement is inherited
+from the built-in row this manifest replaces; the `.md` frontmatter dialect has
+no key for it.
+-->
 
 # Web Search — Live Web Lookups
 

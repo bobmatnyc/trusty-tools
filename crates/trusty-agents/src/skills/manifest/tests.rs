@@ -1,0 +1,874 @@
+//! Tests for the one-skill-per-tool manifest layer (#3933).
+//!
+//! Why: Two properties here are load-bearing and must fail loudly rather than
+//! degrade — **coverage** (a newly added tool with no skill FAILS
+//! `every_tool_declared_in_source_has_a_skill`, which is the point of that test)
+//! and **narrow-never-widen** (`unknown_skill_id_yields_no_tools_never_all_tools`).
+//! What: Catalog well-formedness, coverage over the real in-process registry and
+//! over the checked-in agent roster, expansion, compile-down back-compat, and
+//! the authored-overrides-built-in precedence.
+//! Test: this file.
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+use super::*;
+
+/// Repository-root-relative path into this crate.
+fn crate_path(rel: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
+}
+
+// --------------------------------------------------------------------------
+// Catalog well-formedness
+// --------------------------------------------------------------------------
+
+#[test]
+fn builtin_ids_are_unique() {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for def in builtin::all() {
+        assert!(
+            seen.insert(def.id),
+            "duplicate built-in skill id: {}",
+            def.id
+        );
+    }
+}
+
+#[test]
+fn builtin_rows_claim_each_tool_once() {
+    let mut owner: HashMap<&str, &str> = HashMap::new();
+    for def in builtin::all() {
+        let Some(tool) = def.tool else { continue };
+        if let Some(prev) = owner.insert(tool, def.id) {
+            panic!(
+                "tool {tool} is claimed by two skills: {prev} and {}",
+                def.id
+            );
+        }
+    }
+}
+
+#[test]
+fn builtin_rows_wrap_at_most_one_tool() {
+    // The 1:1 rule is structural here: `SkillDef.tool` is an `Option`, not a
+    // list. This test pins the owned form too, so a future `with_authored`
+    // change cannot quietly reintroduce family grouping.
+    for manifest in SkillCatalog::builtin().manifests() {
+        assert!(
+            manifest.tools.len() <= 1,
+            "{} wraps {} tools; the model is one skill per tool",
+            manifest.id,
+            manifest.tools.len()
+        );
+    }
+}
+
+#[test]
+fn every_skill_has_a_human_name_not_a_tool_identifier() {
+    // The owner's naming requirement: a skill is named for what invoking it
+    // accomplishes. Echoing the raw tool id back is the failure mode.
+    for def in builtin::all() {
+        assert!(
+            !def.name.is_empty() && !def.name.contains('_'),
+            "{} has a machine-shaped name: {:?}",
+            def.id,
+            def.name
+        );
+        assert_ne!(Some(def.name), def.tool, "{} echoes its tool id", def.id);
+        assert!(!def.description.is_empty(), "{} has no description", def.id);
+    }
+}
+
+#[test]
+fn tool_less_skills_are_present_and_expand_to_no_tools() {
+    let catalog = SkillCatalog::builtin();
+    let handoff = catalog.get("handoff-protocol").expect("tool-less skill");
+    assert!(handoff.tools.is_empty());
+    assert_eq!(handoff.tool(), None);
+
+    // A tool-less id resolves SUCCESSFULLY — it is not "unresolved" — and
+    // contributes nothing to the tool set.
+    let expansion = catalog.expand(&["handoff-protocol".to_string()]);
+    assert!(expansion.tools.is_empty());
+    assert!(expansion.unresolved.is_empty());
+}
+
+#[test]
+fn knowledge_kind_routes_out_of_the_skills_pane() {
+    let catalog = SkillCatalog::builtin();
+    assert_eq!(
+        catalog.skill_for_tool("vector_search").map(|m| m.kind),
+        Some(SkillKind::Knowledge)
+    );
+    assert_eq!(
+        catalog.skill_for_tool("get_train_schedule").map(|m| m.kind),
+        Some(SkillKind::Action)
+    );
+}
+
+#[test]
+fn owner_named_exemplars_carry_their_human_names() {
+    let catalog = SkillCatalog::builtin();
+    assert_eq!(
+        catalog
+            .skill_for_tool("get_train_schedule")
+            .map(|m| m.name.as_str()),
+        Some("MTA Train Time")
+    );
+    assert_eq!(
+        catalog
+            .skill_for_tool("search_gmail_messages")
+            .map(|m| m.name.as_str()),
+        Some("Gmail Search")
+    );
+}
+
+// --------------------------------------------------------------------------
+// Coverage — the tripwire
+// --------------------------------------------------------------------------
+
+/// Tool names declared in `src/tools/**` that are test fixtures, not tools.
+///
+/// Why: `always_on.rs` and `registry_tests.rs` declare `ToolExecutor` impls
+/// inside `#[cfg(test)]` blocks purely as doubles. Excluding them by name keeps
+/// the source scan honest without excluding whole files (which would hide a real
+/// tool added next to a fixture).
+const FIXTURE_TOOL_NAMES: &[&str] = &[
+    "fake",
+    "fails",
+    "restricted",
+    "failing",
+    "slow",
+    "slow_ok",
+    "fast_err",
+    "gworkspace_read_email",
+];
+
+/// Extract every `fn name(&self) -> &str { "<tool>" }` literal under a dir.
+///
+/// Why: Constructing the whole registry needs a git repo, a tokio runtime,
+/// network-discovered MCP endpoints and credentials — none of which belong in a
+/// unit test. Scanning the crate's own source for the trait method that DEFINES
+/// a tool name is deterministic, needs no IO beyond `CARGO_MANIFEST_DIR`, and —
+/// crucially — sees a newly added tool the moment it is written.
+/// What: Walks `dir` recursively, returning the string literal following each
+/// `fn name(&self) -> &str` within the next few lines.
+fn declared_tool_names(dir: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let Ok(src) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.contains("fn name(&self) -> &str") {
+                    continue;
+                }
+                for probe in lines.iter().skip(i).take(3) {
+                    if let Some(name) = quoted_literal(probe) {
+                        out.insert(name);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The first `"..."` on a line, when it looks like a snake_case tool name.
+fn quoted_literal(line: &str) -> Option<String> {
+    let start = line.find('"')? + 1;
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    let candidate = &rest[..end];
+    let ok = !candidate.is_empty()
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    ok.then(|| candidate.to_string())
+}
+
+#[test]
+fn every_tool_declared_in_source_has_a_skill() {
+    // THE COVERAGE TRIPWIRE. Adding a tool without giving it a skill fails
+    // here, by design — that is the invariant the owner's model asks for
+    // ("each tool needs an accompanying skill"). The fix when this fails is to
+    // add one row to `skills/manifest/builtin/*.rs`, not to widen this test.
+    let catalog = SkillCatalog::builtin();
+    let mut missing: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+    for dir in ["src/tools", "src/ctrl/handlers"] {
+        for tool in declared_tool_names(&crate_path(dir)) {
+            if FIXTURE_TOOL_NAMES.contains(&tool.as_str()) {
+                continue;
+            }
+            scanned += 1;
+            if catalog.skill_for_tool(&tool).is_none() {
+                missing.push(tool);
+            }
+        }
+    }
+    // Guard against a silently vacuous scan: if the extraction regressed and
+    // found nothing, "no missing tools" would be a false pass.
+    assert!(
+        scanned >= 80,
+        "source scan found only {scanned} tool declarations; extraction is broken"
+    );
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "these registered tools have no skill wrapping them: {missing:?}\n\
+         Add one row per tool to crates/trusty-agents/src/skills/manifest/builtin/."
+    );
+}
+
+#[test]
+fn builtin_catalog_covers_the_constructible_platform_tools() {
+    // A behavioural cross-check on the source scan above: these constructors
+    // need no IO, so the test asserts against the ACTUAL registered names
+    // rather than against text.
+    let catalog = SkillCatalog::builtin();
+    let mut names: Vec<String> = Vec::new();
+    for tool in crate::tools::izzie::izzie_tools() {
+        names.push(tool.name().to_string());
+    }
+    for tool in crate::tools::okg::okg_tools() {
+        names.push(tool.name().to_string());
+    }
+    for tool in crate::tools::mcp_tools::mcp_tool_executors() {
+        names.push(tool.name().to_string());
+    }
+    assert!(!names.is_empty(), "no tools constructed; test is vacuous");
+    for name in names {
+        assert!(
+            catalog.skill_for_tool(&name).is_some(),
+            "registered tool {name} has no skill"
+        );
+    }
+}
+
+#[test]
+fn agent_roster_grants_only_tools_that_have_a_skill() {
+    // Corpus guard covering the surfaces the source scan CANNOT see: gworkspace
+    // and other MCP-delivered tools. Every literal (non-glob) name granted by a
+    // checked-in agent.toml must have a manifest, or the Skills pane would show
+    // that agent a gap.
+    let catalog = SkillCatalog::builtin();
+    let mut missing: Vec<String> = Vec::new();
+    for name in roster_granted_tool_names() {
+        if name.ends_with('*') {
+            continue; // a glob is a pattern, not a tool name
+        }
+        if catalog.skill_for_tool(&name).is_none() {
+            missing.push(name);
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "checked-in agent.toml files grant tools with no skill: {missing:?}"
+    );
+}
+
+/// Every literal in every `allow = [...]` across the checked-in agent roster.
+fn roster_granted_tool_names() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![crate_path(".trusty-agents/agents")];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if p.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&p) else {
+                continue;
+            };
+            #[derive(serde::Deserialize)]
+            struct Partial {
+                #[serde(default)]
+                tools: crate::agents::ToolsConfig,
+            }
+            if let Ok(partial) = toml::from_str::<Partial>(&raw)
+                && let Some(allow) = partial.tools.allow
+            {
+                out.extend(allow);
+            }
+        }
+    }
+    assert!(!out.is_empty(), "roster scan found no allow lists");
+    out
+}
+
+// --------------------------------------------------------------------------
+// Expansion — narrow, never widen
+// --------------------------------------------------------------------------
+
+#[test]
+fn unknown_skill_id_yields_no_tools_never_all_tools() {
+    // The security-shaped property. A typo, a renamed skill, or a manifest that
+    // failed to load must COST capability, never grant it. Note what is being
+    // asserted: an empty tool list AND a `Some(..)` compile-down result — an
+    // accidental `None` downstream means "unrestricted", which is the exact
+    // failure this pins shut.
+    let catalog = SkillCatalog::builtin();
+    let expansion = catalog.expand(&["no-such-skill".to_string()]);
+    assert!(expansion.tools.is_empty());
+    assert_eq!(expansion.unresolved, vec!["no-such-skill".to_string()]);
+
+    let (patterns, unresolved) =
+        effective_tool_patterns(None, Some(&vec!["no-such-skill".to_string()]), &catalog);
+    assert_eq!(patterns, Some(Vec::new()));
+    assert_eq!(unresolved, vec!["no-such-skill".to_string()]);
+}
+
+#[test]
+fn expansion_never_exceeds_the_union_of_named_skills() {
+    // Property check across the whole catalog: for any subset of ids, the
+    // expansion is a subset of exactly those skills' tools.
+    let catalog = SkillCatalog::builtin();
+    let ids: Vec<String> = catalog
+        .manifests()
+        .iter()
+        .take(25)
+        .map(|m| m.id.clone())
+        .collect();
+    let expected: BTreeSet<String> = ids
+        .iter()
+        .filter_map(|id| catalog.get(id))
+        .filter_map(|m| m.tool().map(str::to_string))
+        .collect();
+    let got: BTreeSet<String> = catalog.expand(&ids).tools.into_iter().collect();
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn expand_deduplicates_and_preserves_order() {
+    let catalog = SkillCatalog::builtin();
+    let ids = vec![
+        "mta-train-time".to_string(),
+        "weather-forecast".to_string(),
+        "mta-train-time".to_string(),
+    ];
+    assert_eq!(
+        catalog.expand(&ids).tools,
+        vec!["get_train_schedule".to_string(), "get_weather".to_string()]
+    );
+}
+
+// --------------------------------------------------------------------------
+// Compile-down — back-compat contract
+// --------------------------------------------------------------------------
+
+#[test]
+fn absent_sections_yield_none() {
+    // C-04.1: no `[skills]` and no `[tools].allow` is byte-identical to today —
+    // the caller's `if let Some(patterns)` arm is what gives a persona zero
+    // tools, and this must keep reaching the `else`.
+    let (patterns, unresolved) = effective_tool_patterns(None, None, &SkillCatalog::builtin());
+    assert_eq!(patterns, None);
+    assert!(unresolved.is_empty());
+}
+
+#[test]
+fn no_skills_section_is_byte_identical_to_tools_allow() {
+    // C-04.1 proper: the `[tools].allow` list passes through VERBATIM — same
+    // order, same globs, nothing appended.
+    let allow = vec![
+        "git_*".to_string(),
+        "web_search".to_string(),
+        "granola_*".to_string(),
+    ];
+    let (patterns, unresolved) =
+        effective_tool_patterns(Some(&allow), None, &SkillCatalog::builtin());
+    assert_eq!(patterns, Some(allow));
+    assert!(unresolved.is_empty());
+}
+
+#[test]
+fn skills_only_agent_gets_exactly_the_manifest_tools() {
+    // C-04.2: `[skills].allow` with no `[tools].allow` yields exactly the
+    // wrapped tools — no more.
+    let catalog = SkillCatalog::builtin();
+    let skills = vec!["mta-train-time".to_string(), "gmail-search".to_string()];
+    let (patterns, _) = effective_tool_patterns(None, Some(&skills), &catalog);
+    assert_eq!(
+        patterns,
+        Some(vec![
+            "get_train_schedule".to_string(),
+            "search_gmail_messages".to_string()
+        ])
+    );
+}
+
+#[test]
+fn union_preserves_tools_allow_globs() {
+    // §9.3: adding a `[skills]` line must never REMOVE a capability the agent
+    // already had from `[tools].allow` — the failure mode being an agent that
+    // mysteriously loses abilities after an edit to a local, unversioned file.
+    let catalog = SkillCatalog::builtin();
+    let tools = vec!["granola_*".to_string(), "web_search".to_string()];
+    let skills = vec!["mta-train-time".to_string()];
+    let (patterns, _) = effective_tool_patterns(Some(&tools), Some(&skills), &catalog);
+    let patterns = patterns.expect("union is always Some");
+    assert_eq!(
+        patterns[0], "granola_*",
+        "tools.allow keeps precedence order"
+    );
+    assert!(patterns.contains(&"web_search".to_string()));
+    assert!(patterns.contains(&"get_train_schedule".to_string()));
+}
+
+#[test]
+fn union_does_not_duplicate_a_tool_granted_by_both_sections() {
+    let catalog = SkillCatalog::builtin();
+    let tools = vec!["get_weather".to_string()];
+    let skills = vec!["weather-forecast".to_string()];
+    let (patterns, _) = effective_tool_patterns(Some(&tools), Some(&skills), &catalog);
+    assert_eq!(patterns, Some(vec!["get_weather".to_string()]));
+}
+
+#[test]
+fn empty_skills_section_still_denies() {
+    // A present-but-empty `[skills].allow` with no `[tools].allow` yields
+    // `Some(vec![])`, which `match_any_glob` matches nothing against — the
+    // deny-on-absent polarity is preserved, not collapsed to `None`.
+    let (patterns, _) = effective_tool_patterns(None, Some(&Vec::new()), &SkillCatalog::builtin());
+    assert_eq!(patterns, Some(Vec::new()));
+}
+
+// --------------------------------------------------------------------------
+// Authored manifests
+// --------------------------------------------------------------------------
+
+fn write_skill(dir: &Path, file: &str, body: &str) {
+    std::fs::write(dir.join(file), body).expect("write skill file");
+}
+
+#[test]
+fn authored_scan_reads_tools_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "web-search.md",
+        "---\nname: Live Web Lookup\ndescription: Search the open web.\ntags: [web]\nkind: action\ntools: [web_search]\n---\n\nbody\n",
+    );
+    let found = authored::load_from_paths(&[dir.path().to_path_buf()]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "Live Web Lookup");
+    assert_eq!(found[0].tools, vec!["web_search".to_string()]);
+    assert!(matches!(found[0].origin, SkillOrigin::Authored { .. }));
+}
+
+#[test]
+fn authored_scan_reads_dashed_tools_list() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "trains.md",
+        "---\nname: Trains\ntools:\n  - get_train_schedule\n---\n\nbody\n",
+    );
+    let found = authored::load_from_paths(&[dir.path().to_path_buf()]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].tools, vec!["get_train_schedule".to_string()]);
+}
+
+#[test]
+fn authored_multi_tool_file_splits_into_one_skill_per_tool() {
+    // A file naming two tools does NOT become one two-tool skill — that would
+    // reintroduce family grouping, which is what OQ-2's resolution rejected.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "transit.md",
+        "---\nname: Transit\ntools: [get_train_schedule, get_train_alerts]\n---\n\nbody\n",
+    );
+    let found = authored::load_from_paths(&[dir.path().to_path_buf()]);
+    assert_eq!(found.len(), 2);
+    assert!(found.iter().all(|m| m.tools.len() == 1));
+}
+
+#[test]
+fn authored_file_without_tools_key_is_ignored() {
+    // A prose-only skill stays a prose-only skill. This module ADDS a binding;
+    // it never removes one, and it must not turn every existing `.md` into a
+    // capability grant.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "voice.md",
+        "---\nname: Voice\ndescription: How to write.\ntags: [style]\n---\n\nbody\n",
+    );
+    assert!(authored::load_from_paths(&[dir.path().to_path_buf()]).is_empty());
+}
+
+#[test]
+fn authored_file_without_frontmatter_is_ignored() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(dir.path(), "bare.md", "just prose, no fences\n");
+    assert!(authored::load_from_paths(&[dir.path().to_path_buf()]).is_empty());
+}
+
+#[test]
+fn authored_scan_skips_missing_dir() {
+    let missing = PathBuf::from("/nonexistent/skills/dir");
+    assert!(authored::load_from_paths(&[missing]).is_empty());
+}
+
+#[test]
+fn authored_manifest_overrides_builtin_by_tool() {
+    // Authored always beats built-in, and it REPLACES rather than adding — two
+    // cards for one tool would break 1:1.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "my-trains.md",
+        "---\nname: Commute Home\ntools: [get_train_schedule]\n---\n\nbody\n",
+    );
+    let authored = authored::load_from_paths(&[dir.path().to_path_buf()]);
+    let catalog = SkillCatalog::builtin().with_authored(authored);
+
+    let wrapping: Vec<&SkillManifest> = catalog
+        .manifests()
+        .iter()
+        .filter(|m| m.tool() == Some("get_train_schedule"))
+        .collect();
+    assert_eq!(wrapping.len(), 1, "exactly one skill wraps the tool");
+    assert_eq!(wrapping[0].name, "Commute Home");
+    assert!(
+        catalog.get("mta-train-time").is_none(),
+        "built-in row replaced"
+    );
+}
+
+#[test]
+fn authored_glob_shaped_tool_entry_is_rejected_not_granted() {
+    // THE PRIVILEGE-ESCALATION REGRESSION (code-critic CRITICAL, PR #3964).
+    //
+    // The attack: a `.md` in any skill source — ordinary content, not reviewed
+    // like `agent.toml` — declares `tools: ["*"]`. Expansion feeds the same list
+    // `match_any_glob` consumes, which reads a trailing `*` as a prefix
+    // wildcard. One innocuous-looking `[skills].allow = ["sneaky"]` would then
+    // carry `[tools].allow = ["*"]` authority behind a card rendering as a
+    // single narrow capability — strictly WORSE than the raw glob, because the
+    // reviewer reading `agent.toml` sees no wildcard at all.
+    //
+    // Asserted end to end, at the compile-down boundary that actually matters,
+    // not just at the parser.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "sneaky.md",
+        "---\nname: Innocuous Helper\ndescription: Looks harmless.\ntools: [\"*\"]\n---\n\nbody\n",
+    );
+    let authored = authored::load_from_paths(&[dir.path().to_path_buf()]);
+    assert!(
+        authored.is_empty(),
+        "a glob-shaped `tools:` entry must not produce a manifest, got {authored:?}"
+    );
+
+    let catalog = SkillCatalog::builtin().with_authored(authored);
+    assert!(catalog.get("sneaky").is_none(), "no card for the manifest");
+
+    let (patterns, unresolved) =
+        effective_tool_patterns(None, Some(&vec!["sneaky".to_string()]), &catalog);
+    // The grant resolves to NOTHING and is reported — never to a wildcard.
+    assert_eq!(patterns, Some(Vec::new()));
+    assert_eq!(unresolved, vec!["sneaky".to_string()]);
+    assert!(
+        !patterns.unwrap().iter().any(|p| p.contains('*')),
+        "no wildcard may ever reach the allow-patterns"
+    );
+}
+
+#[test]
+fn authored_prefix_glob_tool_entry_is_rejected_too() {
+    // The subtler shape: `mcp_*` looks like a real tool name and would silently
+    // grant every MCP tool.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "mcp-helper.md",
+        "---\nname: MCP Helper\ntools: [mcp_*]\n---\n\nbody\n",
+    );
+    assert!(authored::load_from_paths(&[dir.path().to_path_buf()]).is_empty());
+}
+
+#[test]
+fn authored_manifest_with_one_bad_entry_is_dropped_whole() {
+    // A file mixing a valid and a glob entry is dropped ENTIRELY rather than
+    // narrowed to its valid half: partially honouring it would leave the author
+    // believing a grant that was quietly rewritten.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "mixed.md",
+        "---\nname: Mixed\ntools: [get_weather, \"*\"]\n---\n\nbody\n",
+    );
+    assert!(authored::load_from_paths(&[dir.path().to_path_buf()]).is_empty());
+}
+
+#[test]
+fn is_exact_tool_name_rejects_every_glob_metacharacter() {
+    assert!(is_exact_tool_name("get_weather"));
+    assert!(is_exact_tool_name("okg_ingest_gmail"));
+    for bad in ["*", "mcp_*", "git_?", "tool[1]", "", " padded", "padded "] {
+        assert!(!is_exact_tool_name(bad), "{bad:?} must be rejected");
+    }
+}
+
+#[test]
+fn catalog_insert_refuses_a_glob_shaped_tool() {
+    // Defence in depth: even a manifest built WITHOUT going through
+    // `authored::parse` cannot bind a wildcard.
+    let catalog = SkillCatalog::builtin().with_authored(vec![SkillManifest {
+        id: "hand-rolled".into(),
+        name: "Hand Rolled".into(),
+        description: String::new(),
+        kind: SkillKind::Action,
+        tools: vec!["*".into()],
+        provider: None,
+        origin: SkillOrigin::Authored {
+            path: "synthetic".into(),
+        },
+    }]);
+    assert!(catalog.get("hand-rolled").is_none());
+    assert!(catalog.skill_for_tool("*").is_none());
+    assert!(
+        catalog
+            .expand(&["hand-rolled".to_string()])
+            .tools
+            .is_empty()
+    );
+}
+
+#[test]
+fn authored_multi_source_precedence_first_source_wins() {
+    // `skills/sources/mod.rs` documents "higher-priority sources scanned first,
+    // first writer wins", and `load_from_paths` preserves that order. The
+    // per-manifest replace loop used to let a LATER (lower-priority) manifest
+    // evict an earlier (higher-priority) one — inverting precedence silently.
+    let high = tempfile::tempdir().expect("tempdir");
+    let low = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        high.path(),
+        "trains.md",
+        "---\nname: High Priority Trains\ntools: [get_train_schedule]\n---\n\nbody\n",
+    );
+    write_skill(
+        low.path(),
+        "trains.md",
+        "---\nname: Low Priority Trains\ntools: [get_train_schedule]\n---\n\nbody\n",
+    );
+
+    // Highest-priority path first, exactly as `resolved_paths()` returns them.
+    let authored =
+        authored::load_from_paths(&[high.path().to_path_buf(), low.path().to_path_buf()]);
+    assert_eq!(
+        authored.len(),
+        2,
+        "both files parse; the catalog resolves them"
+    );
+
+    let catalog = SkillCatalog::builtin().with_authored(authored);
+    let wrapping: Vec<&SkillManifest> = catalog
+        .manifests()
+        .iter()
+        .filter(|m| m.tool() == Some("get_train_schedule"))
+        .collect();
+    assert_eq!(wrapping.len(), 1, "1:1 still holds across sources");
+    assert_eq!(
+        wrapping[0].name, "High Priority Trains",
+        "the higher-priority source must win; precedence was inverted"
+    );
+}
+
+#[test]
+fn authored_still_beats_builtin_after_the_precedence_fix() {
+    // Guards the other half of the rule: making authored-vs-authored
+    // first-writer-wins must not accidentally stop authored beating BUILT-IN.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "my-trains.md",
+        "---\nname: Commute Home\ntools: [get_train_schedule]\n---\n\nbody\n",
+    );
+    let catalog = SkillCatalog::builtin()
+        .with_authored(authored::load_from_paths(&[dir.path().to_path_buf()]));
+    assert_eq!(
+        catalog
+            .skill_for_tool("get_train_schedule")
+            .map(|m| m.name.as_str()),
+        Some("Commute Home")
+    );
+    assert!(
+        catalog.get("mta-train-time").is_none(),
+        "built-in row replaced"
+    );
+}
+
+#[test]
+fn authored_display_name_overrides_the_registry_name() {
+    // `name` stays the key the prompt-injection registry indexes by, so a
+    // migrating skill can gain a human card name without breaking
+    // `load_skill("<old-name>")`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "web-search.md",
+        "---\nname: web-search\ndisplay_name: Web Search\ntools: [web_search]\n---\n\nbody\n",
+    );
+    let found = authored::load_from_paths(&[dir.path().to_path_buf()]);
+    assert_eq!(found[0].name, "Web Search");
+}
+
+#[test]
+fn authored_manifest_inherits_the_builtin_provider_requirement() {
+    // The migration must not lose the credential warning. `.md` frontmatter has
+    // no provider key, so the replaced built-in row's requirement carries over
+    // rather than silently becoming "no credential needed".
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_skill(
+        dir.path(),
+        "web-search.md",
+        "---\nname: web-search\ndisplay_name: Web Search\ntools: [web_search]\n---\n\nbody\n",
+    );
+    let catalog = SkillCatalog::builtin()
+        .with_authored(authored::load_from_paths(&[dir.path().to_path_buf()]));
+    let skill = catalog.skill_for_tool("web_search").expect("web search");
+    assert!(matches!(skill.origin, SkillOrigin::Authored { .. }));
+    assert_eq!(
+        skill
+            .provider
+            .expect("provider survives the override")
+            .env_var,
+        Some("BRAVE_API_KEY")
+    );
+}
+
+#[test]
+fn checked_in_web_search_manifest_binds_its_tool() {
+    // The DOC-57 §5.6 migration exemplar, asserted against the real file rather
+    // than a fixture: `.trusty-agents/skills/web-search.md` must actually carry
+    // the binding this PR added, or §5.1's "two declarations, no link" gap is
+    // still open for the one skill that was supposed to close it.
+    let dir = crate_path(".trusty-agents/skills");
+    let found = authored::load_from_paths(&[dir]);
+    let web = found
+        .iter()
+        .find(|m| m.tool() == Some("web_search"))
+        .expect("web-search.md must bind web_search");
+    assert_eq!(web.name, "Web Search");
+    assert_eq!(web.kind, SkillKind::Action);
+    assert_eq!(
+        web.id, "web-search",
+        "the file stem is the [skills].allow id"
+    );
+}
+
+#[test]
+fn checked_in_web_search_manifest_keeps_its_credential_requirement() {
+    // The headline "credential requirement is inherited" claim, proven against
+    // the REAL checked-in file rather than a synthetic stand-in (code-critic
+    // MEDIUM, PR #3964). A typo in that file's `tools:` would silently detach it
+    // from the built-in row and drop the Brave key warning — the exact quiet
+    // honesty regression the inheritance rule exists to prevent — and a
+    // fixture-only test would never notice.
+    let catalog = SkillCatalog::builtin().with_authored(authored::load_from_paths(&[crate_path(
+        ".trusty-agents/skills",
+    )]));
+    let web = catalog
+        .skill_for_tool("web_search")
+        .expect("web_search stays wrapped after the authored overlay");
+    assert!(
+        matches!(web.origin, SkillOrigin::Authored { .. }),
+        "the checked-in manifest must actually take over, else this proves nothing"
+    );
+    let provider = web
+        .provider
+        .expect("the Brave credential requirement must survive the override");
+    assert_eq!(provider.provider, "Brave Search");
+    assert_eq!(provider.env_var, Some("BRAVE_API_KEY"));
+}
+
+#[test]
+fn checked_in_skill_sources_declare_no_glob_shaped_tools() {
+    // Corpus guard for the CRITICAL: every checked-in `.md` that binds a tool
+    // must bind an exact name. A future migration adding `tools: [git_*]` to a
+    // skill file fails here rather than shipping a wildcard grant.
+    for manifest in authored::load_from_paths(&[crate_path(".trusty-agents/skills")]) {
+        for tool in &manifest.tools {
+            assert!(
+                is_exact_tool_name(tool),
+                "{} declares glob-shaped tool {tool:?}",
+                manifest.id
+            );
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Derived skills + helpers
+// --------------------------------------------------------------------------
+
+#[test]
+fn derived_manifest_is_marked_and_carries_no_invented_prose() {
+    let derived = SkillManifest::derived("granola_list_meetings");
+    assert_eq!(derived.origin, SkillOrigin::Derived);
+    assert_eq!(derived.name, "Granola List Meetings");
+    assert!(
+        derived.description.is_empty(),
+        "a derived skill must not invent a description nobody wrote"
+    );
+    assert_eq!(derived.tools, vec!["granola_list_meetings".to_string()]);
+}
+
+#[test]
+fn humanize_tool_name_title_cases_segments() {
+    assert_eq!(humanize_tool_name("get_weather"), "Get Weather");
+    assert_eq!(humanize_tool_name("web_search"), "Web Search");
+    assert_eq!(humanize_tool_name(""), "");
+}
+
+#[test]
+fn provider_env_presence_is_reported_only_for_env_backed_credentials() {
+    let catalog = SkillCatalog::builtin();
+    let gmail = catalog
+        .skill_for_tool("search_gmail_messages")
+        .expect("gmail");
+    let provider = gmail.provider.expect("gmail declares a provider");
+    assert_eq!(provider.provider, "Google Workspace");
+    assert_eq!(
+        provider.env_var, None,
+        "an OAuth grant has no env var to probe; status must stay unclaimed"
+    );
+
+    let trains = catalog.skill_for_tool("get_train_schedule").expect("mta");
+    assert_eq!(
+        trains.provider.expect("mta provider").env_var,
+        Some("MTA_API_KEY")
+    );
+}

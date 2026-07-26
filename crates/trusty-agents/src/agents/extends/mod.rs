@@ -290,6 +290,10 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     merged.tools.allowed = union_opt_vec(merged.tools.allowed, child.tools.allowed);
     merged.tools.allow = union_opt_vec(merged.tools.allow, child.tools.allow);
     merged.tools.scopes = union_opt_vec(merged.tools.scopes, child.tools.scopes);
+    // `[skills].allow` (#3933): same base-first union as `[tools].allow`, for
+    // the same reason — an overlay ADDS capability to its base and must never
+    // silently remove what the base granted.
+    merged.skills.allow = union_opt_vec(merged.skills.allow, child.skills.allow);
     merged.system_prompt.skills =
         union_opt_vec(merged.system_prompt.skills, child.system_prompt.skills);
     merged.agent.capabilities =

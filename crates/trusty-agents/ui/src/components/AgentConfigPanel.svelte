@@ -52,10 +52,11 @@
     fetchAgentPersona,
     patchAgent,
     fetchAgentStores,
+    fetchAgentSkills,
     matchesToolGlob,
-    synthesizeSkills,
     STORE_BOUND_KNOWLEDGE_TOOLS,
     type AgentDetail,
+    type AgentSkills,
     type OkgStoreBinding,
   } from '../lib/agentConfig';
   import AgentConfigPersonality from './AgentConfigPersonality.svelte';
@@ -108,6 +109,10 @@
   let okgIssues: string[] = [];
   let okgError = '';
 
+  /** Resolved one-skill-per-tool capability set (#3933) — `null` until loaded. */
+  let skills: AgentSkills | null = null;
+  let skillsError = '';
+
   let saving = false;
   let saveError = '';
   let justSavedPersonality = false;
@@ -116,13 +121,12 @@
   $: personalityDirty = personaContent !== savedPersonaContent;
 
   /**
-   * DOC-57 §5.5/§8.5: Skills and the Knowledge pane's tool linkage are DERIVED
-   * from `AgentDetail.tools_allow` — the only capability data this phase has.
-   * Note `parse_agent_toml` reads a single file with no `extends` merge, so
-   * this is what the agent DECLARES; the panes say so rather than presenting it
-   * as the resolved effective set.
+   * DOC-57 §8.5: the Knowledge pane's tool linkage is still DERIVED from
+   * `AgentDetail.tools_allow`. Note `parse_agent_toml` reads a single file with
+   * no `extends` merge, so this is what the agent DECLARES; the pane says so
+   * rather than presenting it as the resolved effective set. Skills no longer
+   * derive anything — `GET …/skills` (#3933) resolves them server-side.
    */
-  $: skills = synthesizeSkills(detail?.tools_allow ?? []);
   $: storeBoundTools = STORE_BOUND_KNOWLEDGE_TOOLS.filter((tool) =>
     (detail?.tools_allow ?? []).some((pattern) => matchesToolGlob(pattern, tool)),
   );
@@ -219,6 +223,15 @@
     } catch (e) {
       okgStores = [];
       okgError = `${e}`;
+    }
+    // Fetched separately from `/stores` so one degraded route never blanks the
+    // other pane — the same per-surface degradation posture C-07.2 requires.
+    try {
+      skillsError = '';
+      skills = await fetchAgentSkills(name);
+    } catch (e) {
+      skills = null;
+      skillsError = `${e}`;
     }
   }
 
@@ -332,7 +345,7 @@
         {storeBoundTools}
       />
     {:else if tab === 'skills'}
-      <AgentConfigSkills {skills} />
+      <AgentConfigSkills data={skills} error={skillsError} />
     {:else if tab === 'listeners'}
       <AgentConfigListeners />
     {:else if tab === 'permissions'}

@@ -13,6 +13,10 @@
 .mcp.json
 .trusty-search
 
+# trusty-mpm shared-base-checkout clone + per-session worktrees (machine-local
+# session-manager state, never a deliverable — issue #3972)
+.base/
+
 # Ignore all of .claude/ and .claude-mpm/ by default, then re-include what we want
 .claude/
 .claude-mpm/*
@@ -26,6 +30,24 @@
 # Exclude agent runtime-state dot-files (not source-controlled)
 .claude/agents/.dependency_cache
 .claude/agents/.mpm_deployment_state
+
+# Claude Code's native `isolation: "worktree"` agent worktrees are
+# machine-local, not a deliverable (issue #3972). `.claude/` is broadly
+# re-included just above for the paths we DO want tracked (settings.json,
+# agents/) — worktrees/ must be explicitly re-excluded here or it falls
+# through as untracked noise, since `!.claude/` un-ignores the whole
+# directory and only the listed subpaths are re-added.
+.claude/worktrees/
+
+# trusty-mpm session/worktree runtime state is machine-local (issue #3972),
+# except the one intentionally-tracked file. Uses `.trusty-mpm/*` (ignore
+# immediate children only), NOT `.trusty-mpm/` + `!.trusty-mpm/` — the latter
+# un-ignores the directory itself and reproduces the exact `.claude/` bug
+# this issue is about (only the explicitly re-included children survive;
+# every other child falls through as untracked). Mirrors the existing
+# `.claude-mpm/*` + re-include pattern above.
+.trusty-mpm/*
+!.trusty-mpm/INSTRUCTIONS.md
 
 # Re-include tracked files from .claude-mpm/
 !.claude-mpm/INSTRUCTIONS.md

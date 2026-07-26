@@ -310,6 +310,40 @@ fn pm_guard_sub_agent_env_allows_all() {
 }
 
 #[test]
+fn pm_guard_claude_mpm_sub_agent_env_still_allows_forbidden_bash_verb() {
+    // Round 3 (code-critic MEDIUM on PR #3978): the round-2 reorder moved
+    // Guard 1 (`CLAUDE_MPM_SUB_AGENT`) to AFTER the worktree-tmp guard, but
+    // no test previously covered a plain forbidden-Bash-verb case under that
+    // env var post-reorder —
+    // `pm_guard_claude_mpm_sub_agent_env_still_allows_everything_else` only
+    // used an in-project `git worktree add`, which `evaluate_bash_command`
+    // would allow even with NO exemption at all, making it a weak proxy.
+    // Mirrors `pm_guard_native_subagent_dispatch_allows_bash`: `sed -i` is
+    // denied unconditionally for the PM's own shell, so it must still be
+    // exempt here to prove Guard 1's original "exempt everything else"
+    // behavior survived the reorder intact.
+    let sed = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ f"}}"#,
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_eq!(
+        sed.trim(),
+        "",
+        "a nested MPM sub-agent's sed -i call must still be allowed post-reorder"
+    );
+
+    let make = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"make build"}}"#,
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_eq!(
+        make.trim(),
+        "",
+        "a nested MPM sub-agent's make build call must still be allowed post-reorder"
+    );
+}
+
+#[test]
 fn pm_guard_native_subagent_dispatch_allows_edit() {
     // Native Task/Agent-tool dispatch (issue #2014): Claude Code stamps
     // `agent_id` on the PreToolUse payload when the hook fires inside a
@@ -474,6 +508,179 @@ fn pm_guard_denies_composition_hidden_verb() {
         assert_eq!(run_pm_guard(redirect, &[("HOME", &home2_s)]).trim(), "");
     }
     assert_denied(&run_pm_guard(redirect, &[("HOME", &home2_s)]));
+}
+
+#[test]
+fn pm_guard_blocks_worktree_add_under_tmp_for_pm_own_call() {
+    // The PM's own (non-subagent) `git worktree add /tmp/...` must be denied
+    // — this is the baseline the subagent case (below) is compared against.
+    for target in [
+        "/tmp/wt-x",
+        "/private/tmp/wt-x",
+        "/var/folders/x1/abc/T/wt-x",
+    ] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"git worktree add {target}"}}}}"#
+        );
+        let stdout = run_pm_guard(&payload, &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("3955"),
+            "deny message must cite issue #3955: {stdout}"
+        );
+        assert!(
+            stdout.contains(".claude/worktrees"),
+            "deny message must name the correct location: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_blocks_worktree_add_under_scratchpad_for_pm_own_call() {
+    // The harness scratchpad is the subtle case: agents are told to prefer it
+    // "instead of /tmp", so it looks compliant while still landing under the
+    // denylisted /private/tmp root.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /private/tmp/claude-502/some-session/scratchpad/wt-x"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_blocks_worktree_add_under_tmp_via_subagent_payload() {
+    // THE case the whole task turns on: a native Task/Agent-dispatched
+    // subagent (agent_id present) attempting `git worktree add` under /tmp
+    // must ALSO be denied. Guard 4's subagent exemption would normally allow
+    // an arbitrary Bash call from this payload shape (see
+    // `pm_guard_native_subagent_dispatch_allows_bash` above) — proving this
+    // case denies proves the worktree-tmp check fires BEFORE that exemption,
+    // not through the ordinary `evaluate_tool`/`evaluate_bash_command` path.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","agent_type":"rust-engineer","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#;
+    let stdout = run_pm_guard(payload, &[]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("3955"),
+        "deny message must cite issue #3955: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_blocks_worktree_add_under_tmp_via_claude_mpm_sub_agent_env() {
+    // Round 2 (code-critic BLOCK on PR #3978): `CLAUDE_MPM_SUB_AGENT=1` — the
+    // automatic marker trusty-agents' own subprocess/runner spawn helpers
+    // stamp on every nested subagent process (spawn.rs:189-192,
+    // claude_code_runner/run.rs:211-215) — must NOT exempt a `git worktree
+    // add /tmp/...` call, exactly like the `agent_id` case above. Before this
+    // fix, Guard 1 short-circuited to ALLOW before the stdin payload was even
+    // read, so this call was silently allowed. This is THE regression test
+    // for that finding.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#;
+    let stdout = run_pm_guard(payload, &[("CLAUDE_MPM_SUB_AGENT", "1")]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("3955"),
+        "deny message must cite issue #3955: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_claude_mpm_sub_agent_env_still_allows_everything_else() {
+    // Companion to the above: Guard 1's original "exempt everything else for
+    // a nested MPM subagent" behavior must be unchanged for calls that are
+    // NOT `git worktree add` under a denylisted root — including source-code
+    // Edit, which `pm_guard_sub_agent_env_allows_all` already covers, and a
+    // worktree add targeting an in-project path.
+    let ok_worktree = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add .claude/worktrees/wt-x"}}"#,
+        &[("CLAUDE_MPM_SUB_AGENT", "1")],
+    );
+    assert_eq!(
+        ok_worktree.trim(),
+        "",
+        "an in-project worktree target under CLAUDE_MPM_SUB_AGENT must stay allowed"
+    );
+}
+
+#[test]
+fn pm_guard_disable_hooks_env_still_allows_worktree_add_under_tmp() {
+    // `TRUSTY_MPM_DISABLE_HOOKS` is a genuine operator-set escape hatch (never
+    // set programmatically anywhere in this codebase) — unlike
+    // `CLAUDE_MPM_SUB_AGENT` above, it is deliberately NOT pierced: an
+    // operator who disables the hook entirely gets exactly that, including
+    // for the worktree-tmp guard.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#,
+        &[("TRUSTY_MPM_DISABLE_HOOKS", "1")],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "the disable-hooks operator escape hatch must still allow everything, \
+         including the worktree-tmp guard"
+    );
+}
+
+#[test]
+fn pm_guard_unrestricted_env_still_allows_worktree_add_under_tmp() {
+    // `TRUSTY_MPM_PM_UNRESTRICTED=1` — the explicit "the operator said you do
+    // it this time" override — is likewise a genuine human escape hatch and
+    // must still lift the worktree-tmp guard along with everything else.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#,
+        &[("TRUSTY_MPM_PM_UNRESTRICTED", "1")],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "the unrestricted operator bypass must still allow everything, \
+         including the worktree-tmp guard"
+    );
+}
+
+#[test]
+fn pm_guard_allows_worktree_add_under_project_dir_via_subagent_payload() {
+    // The companion positive case: the SAME subagent payload shape, but
+    // targeting the documented in-project convention, must be allowed.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","tool_name":"Bash","tool_input":{"command":"git worktree add .claude/worktrees/wt-x"}}"#;
+    assert_eq!(
+        run_pm_guard(payload, &[]).trim(),
+        "",
+        "an in-project worktree target must be allowed even unbudgeted \
+         (worktree add is not a budget-eligible file-change deny)"
+    );
+}
+
+#[test]
+fn pm_guard_worktree_add_denial_is_not_budget_eligible() {
+    // Unlike source-code Edit/Write or shell file edits, a worktree-tmp deny
+    // must be an ABSOLUTE prohibition, not consumed against/gated by the
+    // per-turn file-change budget — repeating the call must deny every time.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#;
+    for _ in 1..=4 {
+        assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
+fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
+    // list/remove/prune must never be blocked, and ordinary temp usage
+    // (mktemp, temp-file writes, cargo build artifacts) must keep working.
+    for command in [
+        "git worktree list",
+        "git worktree remove /tmp/wt-x",
+        "git worktree prune",
+        "mktemp -d",
+        "cargo build --target-dir /tmp/build-cache",
+    ] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
+        );
+        assert_eq!(
+            run_pm_guard(&payload, &[]).trim(),
+            "",
+            "expected allow for: {command}"
+        );
+    }
 }
 
 #[test]

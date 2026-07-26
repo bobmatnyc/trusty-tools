@@ -13,7 +13,11 @@
 //! `shutdown_flush_deadline_scales_with_snapshot_size`, and
 //! `shutdown_flush_empty_registry_returns_immediately` in this module.
 
+use crate::core::registry::IndexId;
+use crate::service::reindex::{ReindexProgress, ReindexStatus};
 use crate::service::server::SearchAppState;
+use dashmap::DashMap;
+use std::sync::Arc;
 
 /// Floor applied to every computed flush deadline, even for a missing or
 /// empty snapshot (issue #2922 — the prior flat 10 s default was far too
@@ -113,7 +117,8 @@ fn shutdown_flush_concurrency() -> usize {
 /// so they snapshot under read locks and never block writers indefinitely.
 ///
 /// Issue #874 — three fixes to prevent shutdown from hanging with many indexes;
-/// issue #2922 adds a fourth (size-scaled deadline + bounded parallelism):
+/// issue #2922 adds a fourth (size-scaled deadline + bounded parallelism);
+/// issue #1717 adds a fifth (skip while a reindex is in progress, below):
 ///
 /// 1. **Per-index flush timeout, scaled by snapshot size**: each index's
 ///    flush is wrapped in `tokio::time::timeout(shutdown_flush_deadline_for(..))`
@@ -151,9 +156,30 @@ fn shutdown_flush_concurrency() -> usize {
 ///    `spawn_blocking` (issue #1746), so this only bounds how many blocking
 ///    saves are in flight at once — it does not fight that fix, it uses it.
 ///
-/// What: iterates `state.registry.list()`, applying the above four mitigations
+/// 5. **Skip while a reindex is in progress** (issue #1717): before deriving
+///    any paths, each index's `ReindexStatus` (from `state.reindex_progress`)
+///    is checked; a `Running` reindex means the in-memory HNSW store is, by
+///    definition, not yet the reindex's final output, so the flush for that
+///    index is skipped entirely rather than published. This is an *exact*
+///    check (no size/ratio heuristic), so it closes the data-loss race — for
+///    THIS graceful-shutdown flush path specifically — at ANY completion
+///    percentage, not just the sub-50% window a magnitude comparison could
+///    catch. It does NOT protect against ungraceful termination
+///    (SIGKILL/OOM-kill/process abort/power loss): the periodic incremental
+///    persister (`core::indexer::persist_hnsw::spawn_incremental_persist`)
+///    calls `UsearchStore::save()` directly on its own schedule, outside this
+///    function entirely, guarded only by the retained ratio guard — tracked
+///    separately as issue #3970 (a crash-safety hole independent of
+///    shutdown; see [`flush_one_index_on_shutdown`] for the full rationale
+///    and `SHRINK_GUARD_RATIO_DIVISOR`'s doc for why that guard provides
+///    essentially no protection there either, on any reindex large enough to
+///    matter).
+///
+/// What: iterates `state.registry.list()`, applying the above five mitigations
 /// per index, running up to `shutdown_flush_concurrency()` flushes at a time.
-/// Test: `shutdown_flush_empty_registry_returns_immediately` in this module.
+/// Test: `shutdown_flush_empty_registry_returns_immediately`,
+/// `shutdown_flush_skips_index_with_reindex_in_progress`,
+/// `shutdown_flush_proceeds_when_reindex_complete` in this module.
 pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
     let ids = state.registry.list();
     if ids.is_empty() {
@@ -169,6 +195,7 @@ pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
         .into_iter()
         .map(|id| {
             let state_registry = state.registry.clone();
+            let reindex_progress = state.reindex_progress.clone();
             let semaphore = semaphore.clone();
             async move {
                 // Issue #2922: bound how many indexes flush at once so a
@@ -176,7 +203,7 @@ pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
                 // blocking thread pool simultaneously. `acquire_owned` is
                 // dropped (releasing the permit) when this future completes.
                 let _permit = semaphore.acquire_owned().await;
-                flush_one_index_on_shutdown(&state_registry, id).await;
+                flush_one_index_on_shutdown(&state_registry, &reindex_progress, id).await;
             }
         })
         .collect();
@@ -184,16 +211,83 @@ pub async fn flush_all_indexes_on_shutdown(state: &SearchAppState) {
 }
 
 /// Flush a single index's HNSW + chunk corpus to disk during shutdown,
-/// applying the external-volume skip and the size-scaled bounded timeout.
-/// Extracted from [`flush_all_indexes_on_shutdown`] so that function can run
-/// one of these per index concurrently (issue #2922).
+/// applying the reindex-in-progress skip, the external-volume skip, and the
+/// size-scaled bounded timeout. Extracted from [`flush_all_indexes_on_shutdown`]
+/// so that function can run one of these per index concurrently (issue #2922).
 async fn flush_one_index_on_shutdown(
     registry: &crate::core::registry::IndexRegistry,
+    reindex_progress: &Arc<DashMap<IndexId, Arc<ReindexProgress>>>,
     id: crate::core::registry::IndexId,
 ) {
     let Some(handle) = registry.get(&id) else {
         return;
     };
+
+    // Issue #1717: never publish a shutdown flush while a background reindex
+    // for this index is still `Running`. This is the exact fix for the
+    // reported race — a reindex interrupted by a GRACEFUL SIGTERM SHUTDOWN at
+    // ANY completion percentage (not just the sub-50% window a size-ratio
+    // heuristic could catch) leaves the in-memory HNSW store in a state that
+    // is, by definition, not yet the reindex's final output. Skipping the
+    // flush here means the on-disk snapshot stays at whatever the last
+    // periodic incremental persist wrote (see `core::indexer::persist_hnsw`'s
+    // `spawn_incremental_persist`, called every
+    // `HNSW_SNAPSHOT_BATCH_INTERVAL` batches during the reindex, plus a
+    // forced final call after the batch loop).
+    //
+    // This mirrors the identical guard already used by the residency-park
+    // sweep (`service::server::tickers`, "never park an index with an
+    // in-flight reindex") — the same `state.reindex_progress` map, the same
+    // `ReindexStatus::Running` check, applied to a second operation that
+    // must not race a live reindex.
+    //
+    // Scope, stated plainly: this check only runs on the GRACEFUL shutdown
+    // path (`run_daemon`'s axum graceful-shutdown future resolving, then this
+    // function). It does NOT protect against ungraceful termination —
+    // SIGKILL, an OOM-kill, a process abort, or power loss — because none of
+    // those execute this code at all. In that scenario the "last periodic
+    // incremental persist" baseline this comment describes above is itself
+    // only as safe as `spawn_incremental_persist`'s own caller,
+    // `UsearchStore::save()`, which outside of this function has ONLY the
+    // ratio guard (`core::store::usearch_store::SHRINK_GUARD_RATIO_DIVISOR`)
+    // protecting it — and that guard provides essentially no protection on
+    // any reindex large enough to cross its 50% threshold before finishing,
+    // since ordinary healthy progress crosses it every time. Tracked
+    // separately as issue #3970 (periodic-persister crash-safety hole; the
+    // recommended fix is a staged-write-then-swap for the HNSW snapshot,
+    // mirroring what the redb corpus already has via #603/#839 — #3970
+    // explicitly rules out routing the periodic save through a
+    // skip-while-`Running` gate like this one, since that would disable
+    // incremental checkpointing, whose entire purpose is durability during a
+    // long-running reindex) — not fixed here.
+    //
+    // Residual gap (issue #1717 follow-up, tracked separately): this closes
+    // the shutdown-publish race, but does not make an interrupted reindex
+    // retry automatically on the next boot in every case. `indexed_head_sha`
+    // is only stamped on `ReindexStatus::Complete`
+    // (`service::reindex::finish::finish_reindex`), so a HEAD-driven reindex
+    // interrupted here is correctly retried by `reconcile_git_path` on the
+    // next boot (stored SHA stays stale). A `--force` reindex or any reindex
+    // not driven by a HEAD change has no equivalent staleness signal, so an
+    // interruption there leaves the index at its pre-reindex state with no
+    // automatic retry — an operator-visible "stuck" index, not silent
+    // corruption, but still a gap (tracked as issue #3969). Not fixed here:
+    // doing so needs a distinct in-progress marker independent of
+    // `indexed_head_sha`, which touches more of the reindex lifecycle than
+    // this shutdown-safety fix should.
+    if reindex_progress
+        .get(&id)
+        .is_some_and(|p| p.status.load() == ReindexStatus::Running)
+    {
+        tracing::warn!(
+            "shutdown: skipping flush for '{}' — a background reindex is still \
+             in progress (issue #1717 — refusing to publish a possibly-partial \
+             in-memory state). On-disk snapshot is from the last incremental \
+             persist.",
+            id.0,
+        );
+        return;
+    }
 
     // Fix #874 (3): skip indexes on external volumes to avoid TCC I/O stalls.
     if crate::service::warm_boot::scan::is_likely_external_volume(&handle.root_path) {
@@ -562,5 +656,185 @@ mod tests {
             "a completed flush must return immediately; elapsed: {:?}",
             start.elapsed()
         );
+    }
+
+    // ── Issue #1717 regression tests — exact reindex-in-progress skip ────────
+
+    /// Build a fresh `(IndexId, hnsw_path, IndexHandle)` triple isolated under
+    /// the currently-active `TRUSTY_DATA_DIR` override, with `handle`'s
+    /// indexer wired to `store`. Callers seed/inspect the on-disk snapshot at
+    /// `hnsw_path` directly.
+    fn build_test_handle(
+        id_str: &str,
+        root: &std::path::Path,
+        store: crate::core::store::UsearchStore,
+    ) -> (
+        crate::core::registry::IndexId,
+        std::path::PathBuf,
+        crate::core::registry::IndexHandle,
+    ) {
+        let id = crate::core::registry::IndexId::new(id_str.to_string());
+        let hnsw_path = crate::service::persistence::hnsw_path(&id.0).expect("hnsw_path");
+        let mut indexer = crate::core::CodeIndexer::new(id.0.clone(), root);
+        indexer.set_store(std::sync::Arc::new(store));
+        let handle = crate::core::registry::IndexHandle::bare(
+            id.clone(),
+            std::sync::Arc::new(tokio::sync::RwLock::new(indexer)),
+            root.to_path_buf(),
+        );
+        (id, hnsw_path, handle)
+    }
+
+    /// Upsert `count` distinct, never-all-zero vectors into a fresh
+    /// `UsearchStore` (dim 4) and return it.
+    async fn store_with_vectors(count: usize) -> crate::core::store::UsearchStore {
+        use crate::core::store::VectorStore;
+        let store = crate::core::store::UsearchStore::new(4).unwrap();
+        let items: Vec<(String, Vec<f32>)> = (0..count)
+            .map(|i| (format!("chunk:{i}"), vec![i as f32 + 1.0, 0.0, 0.0, 0.0]))
+            .collect();
+        store.upsert_batch(&items).await.unwrap();
+        store
+    }
+
+    /// Why (issue #1717 — the exact fix this test proves): a size-ratio
+    /// heuristic alone cannot close the full data-loss window — an interrupted
+    /// reindex at, say, 64% completion is not caught by a "refuse below 50%"
+    /// threshold. This test exercises exactly that gap using the reviewer's
+    /// own numbers (2,000 on-disk, 1,280 in-memory = 64% complete, well above
+    /// any 50% ratio guard) and proves the exact `ReindexStatus::Running`
+    /// check in `flush_one_index_on_shutdown` — not a ratio — is what closes
+    /// it: the flush must be skipped entirely regardless of how close to
+    /// "complete" the partial state looks.
+    /// What: seeds a complete 2,000-vector on-disk snapshot, then registers a
+    /// handle whose indexer holds only 1,280 vectors (64%), marks a `Running`
+    /// reindex for this index in `reindex_progress`, and calls
+    /// `flush_one_index_on_shutdown`. Asserts the on-disk file is
+    /// byte-for-byte unchanged — the flush never ran.
+    /// Test: this IS the test.
+    #[tokio::test]
+    #[serial]
+    async fn shutdown_flush_skips_index_with_reindex_in_progress() {
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+        let root_dir = tempfile::tempdir().expect("tempdir");
+
+        // Seed a "complete" on-disk snapshot: 2,000 vectors, at the path this
+        // index id resolves to.
+        let hnsw_path =
+            crate::service::persistence::hnsw_path("shutdown-1717-partial").expect("hnsw_path");
+        store_with_vectors(2000)
+            .await
+            .save(&hnsw_path)
+            .await
+            .expect("seed save");
+        let hnsw_before = std::fs::read(&hnsw_path).expect("read seeded hnsw");
+
+        // Register a handle whose indexer holds a FRESH store at 64%
+        // completion — simulating a reindex interrupted well past the
+        // sub-50% window a ratio guard could catch.
+        let partial = store_with_vectors(1280).await;
+        let (id, hnsw_path, handle) =
+            build_test_handle("shutdown-1717-partial", root_dir.path(), partial);
+        assert_eq!(
+            hnsw_path,
+            crate::service::persistence::hnsw_path("shutdown-1717-partial").unwrap(),
+            "sanity: helper must resolve the same path used to seed the snapshot"
+        );
+
+        let registry = crate::core::registry::IndexRegistry::new();
+        registry.register(handle);
+
+        let reindex_progress: std::sync::Arc<
+            dashmap::DashMap<crate::core::registry::IndexId, std::sync::Arc<ReindexProgress>>,
+        > = std::sync::Arc::new(dashmap::DashMap::new());
+        // `ReindexProgress::new()` starts life as `Running` — exactly the
+        // in-flight state this test needs.
+        reindex_progress.insert(id.clone(), std::sync::Arc::new(ReindexProgress::new()));
+
+        flush_one_index_on_shutdown(&registry, &reindex_progress, id).await;
+
+        let hnsw_after = std::fs::read(&hnsw_path).expect("read hnsw after guarded flush");
+        assert_eq!(
+            hnsw_after, hnsw_before,
+            "shutdown flush must be skipped entirely while a reindex is Running — \
+             if this fails the partial 64%-complete state was published over the \
+             complete on-disk snapshot (issue #1717 regression, exact-skip variant)"
+        );
+
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+    }
+
+    /// Why (issue #1717): the exact skip must not become a permanent block —
+    /// once a reindex reaches a terminal state (`Complete`), the shutdown
+    /// flush must proceed normally and publish the new state.
+    /// What: same setup as the skip test, but the `reindex_progress` entry is
+    /// marked `Complete` before the flush, and the new in-memory state (500
+    /// vectors, down from 2,000 — a legitimate finished shrink) is what ends
+    /// up on disk. Asserts the on-disk snapshot reflects the smaller
+    /// in-memory count — proving the flush actually ran, not that it is
+    /// permanently blocked.
+    /// Test: this IS the test.
+    ///
+    /// Note: the "finished, genuinely shrunk" store below is built by pruning
+    /// the SAME store instance that seeded the on-disk snapshot (via tracked
+    /// `remove()` calls), not a disconnected fresh store — that mirrors how a
+    /// real reindex actually shrinks a corpus (retain + prune deleted files,
+    /// see `core::indexer::files::remove_chunks_from_stores`) and keeps this
+    /// test isolated from the unrelated `save()`-level shrink guard (issue
+    /// #1717's OTHER guard, covered by `core::store::tests`), which would
+    /// otherwise itself refuse a same-sized drop from a disconnected store
+    /// with no tracked removals to explain it.
+    #[tokio::test]
+    #[serial]
+    async fn shutdown_flush_proceeds_when_reindex_complete() {
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+        let root_dir = tempfile::tempdir().expect("tempdir");
+
+        let hnsw_path =
+            crate::service::persistence::hnsw_path("shutdown-1717-complete").expect("hnsw_path");
+        let seed = store_with_vectors(2000).await;
+        seed.save(&hnsw_path).await.expect("seed save");
+
+        // A finished reindex that genuinely shrank the corpus (e.g. a deleted
+        // subtree) — prune 1,500 of the SAME store's vectors via tracked
+        // `remove()`, leaving 500, well under the old snapshot's 2,000.
+        {
+            use crate::core::store::VectorStore as _;
+            for i in 0..1500 {
+                seed.remove(&format!("chunk:{i}")).await.unwrap();
+            }
+        }
+        let (id, hnsw_path, handle) =
+            build_test_handle("shutdown-1717-complete", root_dir.path(), seed);
+
+        let registry = crate::core::registry::IndexRegistry::new();
+        registry.register(handle);
+
+        let reindex_progress: std::sync::Arc<
+            dashmap::DashMap<crate::core::registry::IndexId, std::sync::Arc<ReindexProgress>>,
+        > = std::sync::Arc::new(dashmap::DashMap::new());
+        let progress = ReindexProgress::new();
+        progress.status.store(ReindexStatus::Complete);
+        reindex_progress.insert(id.clone(), std::sync::Arc::new(progress));
+
+        flush_one_index_on_shutdown(&registry, &reindex_progress, id).await;
+
+        use crate::core::store::VectorStore as _;
+        let reloaded = crate::core::store::UsearchStore::load_from(&hnsw_path)
+            .await
+            .expect("load ok")
+            .expect("load returned Some");
+        assert_eq!(
+            reloaded.len().await.unwrap(),
+            500,
+            "with status=Complete the flush must proceed and publish the new \
+             (correct, smaller) state — the skip must not be permanent"
+        );
+
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
     }
 }

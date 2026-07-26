@@ -163,10 +163,41 @@ pub struct AgentConfig {
     /// `crate::stores::status` covers live resolution.
     #[serde(default)]
     pub stores: crate::stores::StoresConfig,
+
+    /// Optional `[skills]` section (#3933, DOC-57 §5.4) — capability grants by
+    /// skill id instead of raw tool name.
+    ///
+    /// Why: A skill is the unit a user reasons about ("MTA Train Time"); a tool
+    /// name is an implementation detail beneath it. Granting by skill lets the
+    /// GUI edit capability in the same vocabulary it renders. Absent = today's
+    /// behaviour exactly: the effective tool set is `[tools].allow` verbatim.
+    /// What: [`SkillsConfig`], whose `allow` list is expanded to exact tool
+    /// names by `skills::manifest::effective_tool_patterns` and UNIONED with
+    /// `[tools].allow` before reaching the existing dispatch gate. An id that
+    /// resolves to nothing contributes nothing and is reported — never widened
+    /// to "all tools".
+    /// Test: `skills::manifest::tests`.
+    #[serde(default)]
+    pub skills: SkillsConfig,
 }
 
 fn default_adapter() -> Arc<dyn ModelAdapter> {
     Arc::new(crate::llm::adapter::GenericAdapter)
+}
+
+/// Optional `[skills]` section in agent TOML (#3933).
+///
+/// Why: Kept as its own struct rather than a bare `Vec` so the section can gain
+/// `deny`/`kind` filters later without a breaking config change.
+/// What: `allow` is a list of skill ids. `None` (missing section) and
+/// `Some(vec![])` are deliberately different: the first means "this agent does
+/// not use skill grants", the second means "this agent grants no skills", and
+/// only the first leaves `[tools].allow` untouched as the sole source.
+/// Test: `skills_config_parses_allow`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkillsConfig {
+    #[serde(default)]
+    pub allow: Option<Vec<String>>,
 }
 
 /// Optional `[tools]` section in agent TOML.

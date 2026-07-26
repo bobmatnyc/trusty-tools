@@ -19,6 +19,7 @@
 
 pub mod global_cache;
 pub mod index;
+pub mod manifest;
 pub mod rating;
 pub mod registry;
 pub mod sources;

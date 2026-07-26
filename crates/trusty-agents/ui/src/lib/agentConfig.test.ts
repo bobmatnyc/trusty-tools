@@ -13,7 +13,7 @@ import {
   STORE_BOUND_KNOWLEDGE_TOOLS,
   fetchAgentStores,
   matchesToolGlob,
-  synthesizeSkills,
+  fetchAgentSkills,
   type AgentStores,
 } from './agentConfig';
 
@@ -123,27 +123,54 @@ describe('matchesToolGlob', () => {
   });
 });
 
-describe('synthesizeSkills', () => {
-  it('groups allow-list patterns by tool-name prefix (S-8)', () => {
-    const skills = synthesizeSkills(['git_status', 'gworkspace_*', 'git_log']);
-    expect(skills.map((s) => s.name)).toEqual(['git', 'gworkspace']);
-    expect(skills[0].patterns).toEqual(['git_log', 'git_status']);
-    expect(skills.every((s) => s.synthetic)).toBe(true);
+describe('fetchAgentSkills', () => {
+  // Why: a stale roster selection produces a 404, and that is a normal outcome
+  // the pane branches on — not an exception the shell has to catch. Same
+  // contract as `fetchAgentStores`.
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
   });
 
-  it('keeps an unprefixed pattern as its own single-pattern skill (S-8)', () => {
-    const skills = synthesizeSkills(['*']);
-    expect(skills).toEqual([{ name: '*', synthetic: true, patterns: ['*'] }]);
+  it('returns null on 404 rather than throwing', async () => {
+    globalThis.fetch = (async () =>
+      new Response('{}', { status: 404 })) as unknown as typeof fetch;
+    await expect(fetchAgentSkills('ghost')).resolves.toBeNull();
   });
 
-  it('drops blanks and collapses duplicates', () => {
-    const skills = synthesizeSkills(['  ', 'git_log', 'git_log', ' git_status ']);
-    expect(skills).toHaveLength(1);
-    expect(skills[0].patterns).toEqual(['git_log', 'git_status']);
+  it('parses the resolved one-skill-per-tool payload', async () => {
+    const body = {
+      skills: [
+        {
+          id: 'mta-train-time',
+          name: 'MTA Train Time',
+          description: 'Next Metro-North departures.',
+          kind: 'action',
+          origin: { kind: 'builtin' },
+          granted: true,
+          tools: ['get_train_schedule'],
+          provider: null,
+        },
+      ],
+      granted_count: 1,
+      unresolved: [],
+      unmatched_patterns: [],
+      declares_capability: true,
+    };
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+    const got = await fetchAgentSkills('izzie');
+    expect(got?.skills[0].name).toBe('MTA Train Time');
+    expect(got?.skills[0].tools).toEqual(['get_train_schedule']);
   });
 
-  it('returns nothing for an empty allow-list', () => {
-    expect(synthesizeSkills([])).toEqual([]);
+  it('throws on a non-404 failure so the pane can say the route is down', async () => {
+    globalThis.fetch = (async () =>
+      new Response('{}', { status: 503 })) as unknown as typeof fetch;
+    await expect(fetchAgentSkills('izzie')).rejects.toThrow('503');
   });
 });
 

@@ -13,11 +13,12 @@
 // — thin REST wrappers; `DEFINED_LISTENERS` — the two listener bindings from
 // the (not yet implemented) listener spec, rendered as honest scaffolding;
 // and the DOC-57 Phase-1 derivations the five-section panes read from
-// already-served data (`synthesizeSkills`, `matchesToolGlob`,
-// `KNOWLEDGE_MCP_ENDPOINTS`).
+// already-served data (`matchesToolGlob`, `KNOWLEDGE_MCP_ENDPOINTS`) plus
+// `fetchAgentSkills` — the resolved one-skill-per-tool catalog (#3933).
 // Test: `agentConfig.test.ts`.
-// Spec: docs/specs/agent-config-five-sections.md (DOC-57) §5.5 (synthetic
-// skills), §4.4 (MCP knowledge connections), §8.5 (Phase-1 data mapping).
+// Spec: docs/specs/agent-config-five-sections.md (DOC-57) §5 (skills, with
+// OQ-2 resolved to 1:1 granularity), §4.4 (MCP knowledge connections),
+// §8.5 (Phase-1 data mapping).
 
 import { apiBase } from './api-config';
 import { getCurrentApiToken } from '../stores/app';
@@ -306,61 +307,75 @@ export const KNOWLEDGE_MCP_ENDPOINTS: KnowledgeEndpoint[] = [
 ];
 
 /**
- * One synthetic skill card — a capability family derived from `[tools].allow`
- * rather than from an authored manifest (DOC-57 §5.5).
+ * One resolved skill card from `GET /api/agents/:name/skills` (#3933).
+ *
+ * Owner decision (2026-07-25, resolving DOC-57 OQ-2): **one skill per tool**,
+ * each with a human, provider-recognisable name — "MTA Train Time", not
+ * `get_train_schedule`. `tools` therefore holds exactly zero or one entry; a
+ * zero-entry skill is a first-class TOOL-LESS skill (guidance with no
+ * executable member), not a broken card.
  */
-export interface SyntheticSkill {
-  /** S-8's grouping key: the pattern's prefix before the first `_`. */
+export interface AgentSkill {
+  /** Stable id — the unit `[skills].allow` names. */
+  id: string;
+  /** Human name. Never an echo of the tool identifier. */
   name: string;
-  /**
-   * Always `true` here. Phase 1 has no manifest carrying `tools:`, so every
-   * card is synthetic and badged as such (S-10) — which is the point: the
-   * unwrapped surface stays visible, and wrapping progress is measurable.
-   */
-  synthetic: boolean;
-  /**
-   * The `[tools].allow` entries grouped under `name`, deduped and sorted.
-   * Deliberately NOT called `tools`: these are GLOBS, and a skill manifest's
-   * `tools:` are exact names (S-1). Calling them tools would assert a
-   * resolution this phase cannot perform.
-   */
-  patterns: string[];
+  /** One line on what invoking it accomplishes. Empty for a derived skill. */
+  description: string;
+  kind: 'action' | 'knowledge' | 'system';
+  /** `builtin` | `authored` (with `path`) | `derived`. */
+  origin: { kind: string; path?: string };
+  /** Whether THIS agent is granted the skill, per the real dispatch gate. */
+  granted: boolean;
+  /** The wrapped tool — zero or one name (1:1). */
+  tools: string[];
+  /** Credential this skill needs, when it needs one. */
+  provider: AgentSkillProvider | null;
 }
 
 /**
- * Why (DOC-57 §5.5, S-7/S-8): the Skills pane must be complete on day one, and
- * requiring an authored manifest for every tool before it renders anything
- * would block the GUI slice on a large content project. So any capability not
- * claimed by a skill is wrapped in a synthetic one, grouped by the tool-name
- * prefix — the same heuristic S-8 specifies for the backend, applied here to
- * the allow-list patterns Phase 1 actually has.
- * What: Groups `[tools].allow` by the substring before the first `_`
- * (`gworkspace_*` → `gworkspace`; `git_log` + `git_status` → `git`), falling
- * back to the whole pattern when it carries no `_` (`*`, `web_search`'s
- * unprefixed cousins). Blank entries are dropped, duplicates collapse, and
- * both the groups and the patterns inside them come back sorted so the pane
- * has a stable order. S-9 applies: this is a heuristic, never a taxonomy — an
- * authored manifest supersedes it in Phase 2.
- * Test: `synthesizeSkills_groups_by_tool_name_prefix`,
- * `synthesizeSkills_keeps_unprefixed_patterns_as_their_own_skill`,
- * `synthesizeSkills_returns_nothing_for_an_empty_allow_list`.
+ * A skill's provider/credential requirement.
+ *
+ * `configured` is deliberately tri-state: `true`/`false` when an environment
+ * variable backs the credential and the sidecar can read it, and `null` when
+ * the credential is an OAuth grant or MCP wiring the route does NOT verify.
+ * Render `null` as "not verified" — never as a green check, which would assert
+ * a check nobody ran.
  */
-export function synthesizeSkills(toolsAllow: string[]): SyntheticSkill[] {
-  const groups = new Map<string, Set<string>>();
-  for (const raw of toolsAllow) {
-    const pattern = raw.trim();
-    if (!pattern) continue;
-    const cut = pattern.indexOf('_');
-    const name = cut > 0 ? pattern.slice(0, cut) : pattern;
-    const bucket = groups.get(name) ?? new Set<string>();
-    bucket.add(pattern);
-    groups.set(name, bucket);
-  }
-  return Array.from(groups.entries())
-    .map(([name, patterns]) => ({
-      name,
-      synthetic: true,
-      patterns: Array.from(patterns).sort(),
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+export interface AgentSkillProvider {
+  provider: string;
+  requirement: string;
+  env_var: string | null;
+  configured: boolean | null;
+}
+
+/** `GET /api/agents/:name/skills`'s wire shape. */
+export interface AgentSkills {
+  skills: AgentSkill[];
+  granted_count: number;
+  /** `[skills].allow` ids that resolved to nothing (DOC-57 S-11). */
+  unresolved: { id: string; reason: string }[];
+  /** Allow-patterns no catalog tool matches — may still resolve over MCP. */
+  unmatched_patterns: { pattern: string; reason: string }[];
+  /** `false` when the agent declares no capability at all (grants nothing). */
+  declares_capability: boolean;
+  config_error?: string;
+}
+
+/**
+ * Why: The Skills pane's whole value is showing RESOLVED capability. Phase 1
+ * had no route, so it grouped allow-list globs by their `_` prefix and badged
+ * every card synthetic; that showed the user prefix fragments and could not say
+ * whether anything resolved. This is the route that replaces the guess.
+ * What: `null` on 404 (unknown agent) so a stale roster selection is a normal
+ * outcome, not a thrown error — same contract as `fetchAgentStores`.
+ * Test: `fetchAgentSkills_returns_null_on_404`.
+ */
+export async function fetchAgentSkills(name: string): Promise<AgentSkills | null> {
+  const r = await fetch(`${apiBase()}/api/agents/${encodeURIComponent(name)}/skills`, {
+    headers: authHeaders(),
+  });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GET /api/agents/${name}/skills failed: ${r.status}`);
+  return (await r.json()) as AgentSkills;
 }

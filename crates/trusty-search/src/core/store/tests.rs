@@ -344,6 +344,56 @@ async fn test_load_undersized_hnsw_binary_with_valid_sidecar_returns_none_withou
     );
 }
 
+/// Why (issue #3970 round-2 review, CRITICAL 1 defense-in-depth): a binary
+/// reporting MORE vectors than its paired sidecar's key map describes is
+/// never legitimate under normal operation (every write path inserts the
+/// `id_to_key` entry at-or-before the matching HNSW `add` — see
+/// `UsearchStore::upsert`/`remove`'s doc comments) — it is the exact
+/// signature of a torn `service::reindex::hnsw_swap` staging→live swap whose
+/// binary rename landed without its sidecar rename (the direction the
+/// round-2 fix's sidecar-first rename ordering no longer produces from a
+/// mid-swap crash, but this guard catches it regardless of source). Loading
+/// such a pairing without this guard would restore a `next_key` value that
+/// sits BEHIND vectors already occupying the binary, letting a later
+/// `upsert`'s newly-allocated key collide with — and silently overwrite —
+/// an existing, unrelated vector.
+/// What: saves a small matched (binary, sidecar) pair, keeps that sidecar's
+/// bytes aside, then saves a BIGGER matched pair over the same path, then
+/// restores the SMALL sidecar over the (now bigger) binary — reproducing the
+/// dangerous torn-pairing direction directly. Asserts `load_from` refuses
+/// (`Ok(None)`) rather than silently restoring a corrupt state.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_load_refuses_binary_reporting_more_vectors_than_sidecar_describes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let sidecar_path = path.with_extension("keys.json");
+
+    // A small matched pair first — keep its sidecar bytes aside.
+    let small = UsearchStore::new(4).unwrap();
+    small.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    small.save(&path).await.unwrap();
+    let small_sidecar_bytes = std::fs::read(&sidecar_path).unwrap();
+
+    // A bigger matched pair saved normally over the same path.
+    let big = UsearchStore::new(4).unwrap();
+    big.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    big.upsert("b", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    big.upsert("c", vec![0.0, 0.0, 1.0, 0.0]).await.unwrap();
+    big.save(&path).await.unwrap();
+
+    // Tear the pairing: restore the OLD, smaller sidecar over the CURRENT
+    // (bigger) binary — the dangerous direction.
+    std::fs::write(&sidecar_path, &small_sidecar_bytes).unwrap();
+
+    let loaded = UsearchStore::load_from(&path).await.unwrap();
+    assert!(
+        loaded.is_none(),
+        "a binary reporting MORE vectors than its sidecar describes must never be \
+         trusted — issue #3970 round-2 CRITICAL 1 defense-in-depth guard"
+    );
+}
+
 /// Why (issue #2922 guard precision — the false-positive risk): the
 /// size-floor guard scales with the sidecar's own claimed vector count/dim
 /// specifically so it never rejects a genuinely tiny, valid snapshot — this
@@ -693,6 +743,143 @@ async fn test_save_populated_index_writes_correctly() {
     assert_eq!(
         hits[0].chunk_id, "vec-a",
         "top hit for vec-a direction must be vec-a"
+    );
+}
+
+// ── Issue #1717 regression tests — shrink guard in save() ────────────────────
+
+/// Why (issue #1717 — the #1711 follow-up): the #1711 guard only catches the
+/// exact-0-vector case. A background reindex that is only partially complete
+/// when SIGTERM lands (e.g. "5,000 of 312,000 vectors upserted") is non-zero,
+/// so that guard does NOT fire, and the partial in-memory state silently
+/// overwrites a complete on-disk snapshot — the exact scenario reported in
+/// #1717.
+///
+/// What: builds a "complete" on-disk snapshot (2,000 vectors), then simulates
+/// a fresh, newly-promoted-but-not-yet-populated `UsearchStore` (mirroring the
+/// #1711/#1716 restart race) that only got through 50 of the same corpus
+/// before being asked to save to the SAME path. Asserts:
+/// (a) `save()` returns `Ok(())` — the guard fires silently, same contract as
+///     the #1711 guard, so shutdown can still complete gracefully.
+/// (b) BOTH on-disk files (`hnsw.usearch` and its `keys.json` sidecar) are
+///     byte-for-byte unchanged — the guard preserved the complete snapshot
+///     and never wrote the partial one.
+///
+/// Before the #1717 fix this test FAILS at (b): the partial 50-vector index
+/// clobbers the on-disk 2,000-vector snapshot, reproducing the reported bug.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_save_refuses_unexplained_catastrophic_shrink() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+
+    // Step 1: build the "complete" on-disk snapshot — 2,000 vectors, well
+    // above SHRINK_GUARD_MIN_ON_DISK_VECTORS.
+    let complete = UsearchStore::new(4).unwrap();
+    let items: Vec<(String, Vec<f32>)> = (0..2000)
+        .map(|i| (format!("chunk:{i}"), vec![i as f32 + 1.0, 0.0, 0.0, 0.0]))
+        .collect();
+    complete.upsert_batch(&items).await.unwrap();
+    complete.save(&path).await.expect("seed save must succeed");
+    assert_eq!(complete.len().await.unwrap(), 2000);
+
+    let sidecar = path.with_extension("keys.json");
+    let hnsw_before = std::fs::read(&path).expect("read seeded hnsw");
+    let sidecar_before = std::fs::read(&sidecar).expect("read seeded sidecar");
+
+    // Step 2: a FRESH store — never loaded from disk, `removed_since_save` is
+    // 0 — simulates the newly-promoted-but-not-yet-populated store from
+    // #1711/#1716. Only 50 of the 2,000 chunks have been upserted when
+    // SIGTERM lands mid-reindex.
+    let partial = UsearchStore::new(4).unwrap();
+    for i in 0..50 {
+        partial
+            .upsert(&format!("chunk:{i}"), vec![i as f32 + 1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+    }
+    assert_eq!(partial.len().await.unwrap(), 50);
+
+    // Step 3: shutdown flush attempts to save the partial store over the
+    // complete on-disk snapshot.
+    partial
+        .save(&path)
+        .await
+        .expect("save must return Ok(()) even when the shrink guard fires");
+
+    // THE KEY ASSERTION: both on-disk files must be byte-for-byte unchanged.
+    let hnsw_after = std::fs::read(&path).expect("read hnsw after guarded save");
+    let sidecar_after = std::fs::read(&sidecar).expect("read sidecar after guarded save");
+    assert_eq!(
+        hnsw_after, hnsw_before,
+        "shrink guard must preserve the complete on-disk HNSW snapshot; if this \
+         fails the guard did not fire and the partial reindex clobbered the \
+         snapshot (issue #1717 regression)"
+    );
+    assert_eq!(
+        sidecar_after, sidecar_before,
+        "shrink guard must preserve the complete on-disk key sidecar unchanged"
+    );
+
+    // Reloading from disk must still show all 2,000 original vectors.
+    let reloaded = UsearchStore::load_from(&path)
+        .await
+        .expect("load ok")
+        .expect("load returned Some");
+    assert_eq!(
+        reloaded.len().await.unwrap(),
+        2000,
+        "on-disk snapshot must still report all 2,000 original vectors"
+    );
+}
+
+/// Why (issue #1717): the shrink guard must NEVER block legitimate data
+/// reduction — deleting documents must always be persistable, no matter how
+/// large the reduction, as long as it is driven by tracked `remove()` calls.
+///
+/// What: builds a 2,000-vector on-disk snapshot, then on the SAME store
+/// instance removes 1,600 of them (an 80% reduction — far past the 50%
+/// shrink-guard ratio) via `VectorStore::remove`, and saves again to the same
+/// path. Asserts the save succeeds and the on-disk snapshot reflects the
+/// smaller, correct count — the guard must not have refused it.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_save_allows_legitimate_shrink_after_deletions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+
+    let store = UsearchStore::new(4).unwrap();
+    let items: Vec<(String, Vec<f32>)> = (0..2000)
+        .map(|i| (format!("chunk:{i}"), vec![i as f32 + 1.0, 0.0, 0.0, 0.0]))
+        .collect();
+    store.upsert_batch(&items).await.unwrap();
+    store.save(&path).await.expect("seed save must succeed");
+    assert_eq!(store.len().await.unwrap(), 2000);
+
+    // Legitimately delete 1,600 of the 2,000 chunks (e.g. a large deleted
+    // subtree being pruned). Each `remove()` call increments
+    // `removed_since_save`, "explaining" the shrink.
+    for i in 0..1600 {
+        store.remove(&format!("chunk:{i}")).await.unwrap();
+    }
+    assert_eq!(store.len().await.unwrap(), 400);
+
+    // The save must succeed — this reduction is fully explained by tracked
+    // removals, however large it is relative to the on-disk baseline.
+    store
+        .save(&path)
+        .await
+        .expect("save must NOT be blocked by legitimate, tracked deletions");
+
+    let reloaded = UsearchStore::load_from(&path)
+        .await
+        .expect("load ok")
+        .expect("load returned Some");
+    assert_eq!(
+        reloaded.len().await.unwrap(),
+        400,
+        "on-disk snapshot must reflect the legitimate 1,600-vector deletion, \
+         proving the shrink guard did not block it"
     );
 }
 

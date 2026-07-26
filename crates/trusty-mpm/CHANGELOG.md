@@ -7,7 +7,66 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
+  `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
+  (worktree-hygiene follow-up to
+  [#3955](https://github.com/bobmatnyc/trusty-tools/issues/3955)): worktrees
+  provisioned there silently fail unrelated tests (trusty-search's
+  `SENSITIVE_PATH_PREFIXES` denylist) and can be reaped mid-task by the OS or
+  harness. The check is called directly from `pm_guard()` BEFORE Guard 4's
+  native-subagent-dispatch exemption, and is unconditional — including for
+  Task/Agent-dispatched subagents, which is who actually provisions these
+  worktrees in practice. `pm_guard_bash::evaluate_worktree_add_command`
+  resolves the target (relative paths, `cd`/`git -C` tracking, `~`/`$TMPDIR`/
+  `$TMP` expansion, lexical `.`/`..` normalization) without touching the
+  filesystem; only the exact `worktree add` subcommand is affected —
+  `list`/`remove`/`prune`/`lock`/… and ordinary temp usage (`mktemp`, temp
+  files, cargo build artifacts) are untouched.
+
+  **Round 2 (code-critic BLOCK, PR #3978):** the guard also pierces Guard 1
+  (`CLAUDE_MPM_SUB_AGENT`) — the automatic marker trusty-agents' own
+  subprocess/runner spawn helpers stamp on every nested subagent process
+  (`crates/trusty-agents/src/subprocess/spawn.rs:189-192`,
+  `crates/trusty-agents/src/agents/claude_code_runner/run.rs:211-215`), which
+  is who actually provisions most of these worktrees. Before this round,
+  Guard 1 short-circuited to ALLOW before the stdin payload was even read, so
+  a `CLAUDE_MPM_SUB_AGENT=1`-tagged `git worktree add /tmp/...` call was
+  silently allowed. Guards 2/3 (`TRUSTY_MPM_DISABLE_HOOKS` /
+  `TRUSTY_MPM_PM_UNRESTRICTED`) are deliberately left UN-pierced — neither is
+  ever set programmatically anywhere in this codebase's Rust source, so
+  whoever sets them still gets exactly that, including for this guard.
+  **Round 3 correction:** that is narrower than "operator-only" — Claude
+  Code's `settings.json` `env` object can set either var for every hook
+  invocation (live-reloaded mid-session), and a write to
+  `.claude/settings.json` is not itself blocked by `pm_guard` today, so the
+  PM or an exempt subagent can self-exempt from this entire guard via that
+  pre-existing, unrelated gap. Not introduced or widened by this change; not
+  fixed here; tracked as
+  [#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981).
+
 ### Fixed
+
+- **`prune-worktrees` never scanned `.claude/worktrees`, so Claude Code's
+  native agent worktrees were never reclaimed** (closes
+  [#3971](https://github.com/bobmatnyc/trusty-tools/issues/3971)):
+  `find_orphaned_worktrees` walked only the two trusty-mpm-owned shapes
+  (`.worktrees/<name>`, `.base/.worktrees/<session-id>`) and never
+  `.claude/worktrees/<name>` — the path Claude Code's native
+  `isolation: "worktree"` mechanism uses — so those worktrees accumulated
+  silently, invisible to `tm session prune-worktrees` and `tm doctor`. Now
+  scanned as a third shape via the same `scan_worktree_shape` walk; the
+  existing #3649 ownership-sentinel gate already treats a
+  Claude-Code-created worktree (which never carries trusty-mpm's
+  `.trusty-mpm-worktree` sentinel) as owner-unknown, so newly-discovered
+  candidates are surfaced for `tm doctor`/`--dry-run` review, never
+  auto-deleted. Follow-up review found the initial fix anchored only at
+  `<repo>/.claude/worktrees`, missing two sibling locations confirmed live
+  with real entries: `<repo>/.base/.claude/worktrees` (agent worktrees
+  created directly inside the bare `.base` clone checkout) and
+  `<repo>/.base/.worktrees/<session-id>/.claude/worktrees` (agent worktrees
+  nested inside a per-session checkout) — both are now scanned too.
 
 - **A toggle being on was treated as proof of a successful MCP-server pin,
   even when the force-overwrite write itself failed** (closes

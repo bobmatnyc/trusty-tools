@@ -188,6 +188,20 @@ impl VectorStore for UsearchStore {
                 .map_err(|e| anyhow!("usearch remove failed: {e}"))?;
             // Graph changed — see the `dirty` note in `upsert` (issue #2164).
             self.dirty.store(true, Ordering::Release);
+            // Issue #1717: credit this removal against the shrink guard in
+            // `save()` ONLY when the HNSW graph actually lost a vector — not
+            // merely when `id_to_key` lost an entry. `upsert()` inserts into
+            // `id_to_key`/`key_to_id` before calling `index.add()` and does
+            // NOT roll those maps back if `add()` fails (dim mismatch,
+            // capacity error) — so a dangling `id_to_key` entry with no
+            // matching HNSW vector is possible, and `index.contains(key)` is
+            // the authoritative check for whether the graph actually shrank.
+            // Crediting on the wrong condition (a bare `id_to_key.remove`
+            // success) would inflate `removed_since_save` for ids that were
+            // never really in the graph, silently weakening the shrink
+            // guard's refusal threshold in exactly the borderline cases it
+            // exists to catch.
+            self.removed_since_save.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }

@@ -51,6 +51,33 @@
 //! the specialist matching the target file's content type instead of a
 //! hardcoded `rust-engineer`.
 //! Build/test and network denials are NOT budget-eligible and stay absolute.
+//! **Worktree-tmp guard (issue #3977, follow-up to #3955):** [`pm_guard`] calls
+//! [`crate::commands::pm_guard_bash::evaluate_worktree_add_command`] DIRECTLY,
+//! before Guard 4's early return, denying any `git worktree add` whose target
+//! resolves under `/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR`, or the
+//! harness scratchpad. It also pierces Guard 1 (`CLAUDE_MPM_SUB_AGENT`) —
+//! Guard 2 (`TRUSTY_MPM_DISABLE_HOOKS`) and Guard 3
+//! (`TRUSTY_MPM_PM_UNRESTRICTED`) run first and are UNAFFECTED, since a
+//! round 2 code-critic review (PR #3978) established that Guards 1/4 are
+//! automatic markers a spawn helper stamps on every nested/dispatched
+//! subagent process (no human decides per-invocation whether they're set),
+//! while nothing in this codebase's Rust source ever sets
+//! `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` programmatically via
+//! `std::env::var` — see [`pm_guard`]'s body for the exact reordering this
+//! required (Guard 1's check moved after the stdin payload read, specifically
+//! so this worktree check — which needs the payload — can run first). **This
+//! is NOT the same as "operator-only"**: Claude Code's `settings.json`
+//! supports a top-level `env` object applied to every session/subprocess it
+//! spawns (hooks included, live-reloaded mid-session), and a `Write`/`Edit`
+//! to `.claude/settings.json` is not itself blocked by this guard (`.json` is
+//! not in [`SOURCE_CODE_EXTENSIONS`], so [`evaluate_edit_tool`] falls through
+//! to an unconditional ALLOW) — so the PM, or any Guard-4-exempt subagent,
+//! can set either var there and self-exempt from this entire guard. That gap
+//! predates this PR by many issues and is NOT introduced or widened by it;
+//! tracked separately as issue #3981, not fixed here. This is the one place
+//! in the file that pierces an automatic-marker exemption; see that call
+//! site's comment for why it must never be routed through [`evaluate_tool`]
+//! instead.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
@@ -60,9 +87,12 @@
 //! exercises the stdin→decision→stdout path (and the env bypasses / sub-agent
 //! exemption / fail-open) end to end through the real binary.
 
+use std::path::PathBuf;
+
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::{
-    SHELL_EDIT_REASON, evaluate_bash_command, extract_shell_edit_target,
+    SHELL_EDIT_REASON, evaluate_bash_command, evaluate_worktree_add_command,
+    extract_shell_edit_target,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
@@ -135,13 +165,19 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 ///
 /// Why: this is the load-bearing integration point wired into every managed
 /// session's `PreToolUse` hook (see `session_launch::settings::write_project_hooks`).
-/// It must be fast and fail-open: guard env vars short-circuit to ALLOW so
-/// nested sub-agents (`CLAUDE_MPM_SUB_AGENT`) and CI / build shells
-/// (`TRUSTY_MPM_DISABLE_HOOKS`) are never blocked, and the explicit
-/// `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass lets the operator lift enforcement on
-/// demand. Any missing/malformed input degrades to ALLOW rather than wedging
-/// the PM. The decision is computed purely from the static tool classification
-/// — never a daemon call — so a down daemon can never hard-block a tool call.
+/// It must be fast and fail-open: CI/build shells (`TRUSTY_MPM_DISABLE_HOOKS`)
+/// and the explicit `TRUSTY_MPM_PM_UNRESTRICTED=1` operator bypass short-circuit
+/// to ALLOW before the stdin payload is even read — both are genuine
+/// human-operated escape hatches (nothing in this codebase sets either
+/// programmatically), so they lift EVERY check below, including the absolute
+/// worktree-tmp guard. Nested MPM sub-agents (`CLAUDE_MPM_SUB_AGENT`) are
+/// different: that marker is stamped automatically by a spawn helper, not
+/// operator-decided per call, so it is checked LATER — after the worktree-tmp
+/// guard has already had a chance to fire (issue #3977; PR #3978 round 2) —
+/// and exempts everything else, matching the pre-#3977 behavior. Any missing/
+/// malformed input degrades to ALLOW rather than wedging the PM. The decision
+/// is computed purely from the static tool classification — never a daemon
+/// call — so a down daemon can never hard-block a tool call.
 /// What: returns `Ok(())` (ALLOW, no stdout) for every short-circuit, a payload
 /// with no `tool_name`, or an [`evaluate_tool`] verdict of ALLOW. On DENY it
 /// fires a best-effort audit POST to `<url>/hooks` (tight timeout, result
@@ -152,13 +188,27 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 /// `tests/tm_hook_pm_guard.rs`; the pure policy is covered by this module's
 /// unit tests.
 pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
-    // Guard 1: never block a nested MPM sub-agent — it is doing the delegated
-    // work the PM is being steered toward.
-    if std::env::var_os(SUB_AGENT_ENV).is_some() {
-        return Ok(());
-    }
     // Guard 2: universal opt-out for CI / build shells that can't edit
-    // settings.json without a restart.
+    // settings.json without a restart. Checked FIRST (ahead of Guard 1, a
+    // reordering from this function's original shape — see the code-critic
+    // round 2 finding on PR #3978): this and Guard 3 below are never SET
+    // programmatically anywhere in this codebase's Rust source (verified: no
+    // `std::env::var`/`set_var` occurrence outside doc comments and this
+    // module) — so they must keep working exactly as before, including
+    // against the ABSOLUTE worktree-tmp guard below: whoever sets
+    // `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` gets exactly
+    // that, no exceptions. That is a narrower claim than "operator-only",
+    // though: Claude Code's `settings.json` `env` object can set either var
+    // for every hook invocation, and a write to `.claude/settings.json` is
+    // not itself blocked by this guard (see the module doc above, "This is
+    // NOT the same as 'operator-only'") — so the PM or an exempt subagent CAN
+    // self-exempt via that path. That gap predates this PR by many issues and
+    // is out of scope here; tracked as issue #3981. Guard 1 (`SUB_AGENT_ENV`),
+    // by contrast, is an
+    // AUTOMATIC marker a spawn helper stamps on every nested MPM subagent
+    // process with no per-invocation env-write decision involved — see
+    // Guard 1's own comment below for why it is checked LATER, after the
+    // worktree guard, instead of here.
     if std::env::var_os(DISABLE_HOOKS_ENV).is_some() {
         return Ok(());
     }
@@ -180,6 +230,58 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         .get("session_id")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
+
+    // ABSOLUTE guard (issue #3977, worktree-hygiene follow-up to #3955) —
+    // deliberately placed BEFORE Guard 1's and Guard 4's subagent-exemption
+    // early returns, and called DIRECTLY rather than routed through
+    // `evaluate_tool`. Two prior investigations (PR #3978 rounds 1 and 2)
+    // established that BOTH exemptions must be pierced, for the same
+    // underlying reason: `evaluate_tool` (and therefore
+    // `pm_guard_bash::evaluate_bash_command`, its only Bash-classifying
+    // callee) is NEVER reached for a payload carrying a non-empty `agent_id`
+    // (Guard 4 returns first) NOR for a process with `CLAUDE_MPM_SUB_AGENT`
+    // set (Guard 1, formerly the very first check in this function, returned
+    // before the stdin payload was even read) — so a `git worktree add` rule
+    // placed inside the ordinary Bash classifier, or checked only after
+    // either exemption, would be a silent no-op for the calling patterns
+    // (native Task/Agent dispatch AND trusty-agents' own subprocess-spawned
+    // subagents — `crates/trusty-agents/src/subprocess/spawn.rs:189-192`,
+    // `crates/trusty-agents/src/agents/claude_code_runner/run.rs:211-215`)
+    // that actually provision these worktrees in practice. Guards 2/3 above
+    // are DELIBERATELY still checked earlier (before this) — they are human
+    // escape hatches, not automatic markers; see their comments. DO NOT move
+    // this block after Guard 1 or Guard 4, and do NOT fold it into
+    // `evaluate_tool`/`evaluate_bash_command` — doing so re-introduces the
+    // no-op this comment exists to prevent.
+    if tool_name == "Bash" {
+        let command = tool_input
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let hook_cwd = payload
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        if let Some(reason) = evaluate_worktree_add_command(command, &hook_cwd) {
+            audit_denied_tool(url, session_id, tool_name, reason).await;
+            println!("{}", build_pretooluse_deny_response(reason));
+            return Ok(());
+        }
+    }
+
+    // Guard 1: never block a nested MPM sub-agent for anything else — it is
+    // doing the delegated work the PM is being steered toward. Moved here
+    // (originally the first line of this function, short-circuiting before
+    // any stdin read) specifically so the ABSOLUTE worktree guard above —
+    // which needs the payload — runs first and cannot be silently bypassed
+    // by this automatic marker. See that guard's comment for the full
+    // rationale; see Guards 2/3 above for why THOSE stayed in their original
+    // position instead.
+    if std::env::var_os(SUB_AGENT_ENV).is_some() {
+        return Ok(());
+    }
 
     // Guard 4: native Claude Code sub-agent dispatch (issue #2014). A
     // Task/Agent-dispatched sub-agent is doing exactly the delegated work the

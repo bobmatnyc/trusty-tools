@@ -657,3 +657,155 @@ fn evaluate_bash_command_allows_quoted_substitution_prose() {
         "double-quoted substitution is still live"
     );
 }
+
+#[test]
+fn evaluate_worktree_add_command_denies_direct_tmp_targets() {
+    let cwd = Path::new("/Users/x/proj");
+    for cmd in [
+        "git worktree add /tmp/wt-x",
+        "git worktree add /private/tmp/wt-x",
+        "git worktree add /var/folders/x1/abc/T/wt-x",
+        "git worktree add -b feat-x /tmp/wt-x",
+        "git worktree add --lock --reason busy /tmp/wt-x",
+    ] {
+        assert_eq!(
+            evaluate_worktree_add_command(cmd, cwd),
+            Some(WORKTREE_TMP_REASON),
+            "expected deny for: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn evaluate_worktree_add_command_allows_project_targets() {
+    let cwd = Path::new("/Users/x/proj");
+    for cmd in [
+        "git worktree add .claude/worktrees/wt-x",
+        "git worktree add /Users/x/proj/.claude/worktrees/wt-x",
+        "git worktree add ../sibling-wt",
+        "git worktree add -b feat-x .claude/worktrees/wt-x",
+    ] {
+        assert_eq!(
+            evaluate_worktree_add_command(cmd, cwd),
+            None,
+            "expected allow for: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn evaluate_worktree_add_command_only_matches_add_subcommand() {
+    let cwd = Path::new("/Users/x/proj");
+    for cmd in [
+        "git worktree list",
+        "git worktree remove /tmp/wt-x",
+        "git worktree prune",
+        "git worktree lock /tmp/wt-x",
+    ] {
+        assert_eq!(
+            evaluate_worktree_add_command(cmd, cwd),
+            None,
+            "non-add worktree subcommand must never be blocked: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn evaluate_worktree_add_command_ignores_ordinary_temp_usage() {
+    let cwd = Path::new("/Users/x/proj");
+    for cmd in [
+        "mktemp -d",
+        "echo x > /tmp/scratch.txt",
+        "cargo build --target-dir /tmp/build",
+        "git status",
+        "git commit -m 'add worktree support'",
+    ] {
+        assert_eq!(
+            evaluate_worktree_add_command(cmd, cwd),
+            None,
+            "ordinary temp usage must not be blocked: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn evaluate_worktree_add_command_resolves_relative_target_against_cwd() {
+    // A relative target under a cwd that is ITSELF under /tmp must resolve
+    // (and deny) even though the argument text never spells "/tmp".
+    let cwd = Path::new("/tmp/some-repo");
+    assert_eq!(
+        evaluate_worktree_add_command("git worktree add wt-x", cwd),
+        Some(WORKTREE_TMP_REASON)
+    );
+    // The same relative target from a project cwd is fine.
+    let ok_cwd = Path::new("/Users/x/proj");
+    assert_eq!(
+        evaluate_worktree_add_command("git worktree add wt-x", ok_cwd),
+        None
+    );
+}
+
+#[test]
+fn evaluate_worktree_add_command_follows_cd_prefix() {
+    // `cd /tmp && git worktree add wt-foo` — the cwd change must be tracked
+    // across composition segments (documented partial mitigation).
+    let cwd = Path::new("/Users/x/proj");
+    assert_eq!(
+        evaluate_worktree_add_command("cd /tmp && git worktree add wt-foo", cwd),
+        Some(WORKTREE_TMP_REASON)
+    );
+    assert_eq!(
+        evaluate_worktree_add_command("cd .claude/worktrees && git worktree add wt-foo", cwd),
+        None
+    );
+}
+
+#[test]
+fn evaluate_worktree_add_command_follows_git_dash_c_override() {
+    let cwd = Path::new("/Users/x/proj");
+    assert_eq!(
+        evaluate_worktree_add_command("git -C /tmp worktree add wt-foo", cwd),
+        Some(WORKTREE_TMP_REASON)
+    );
+    assert_eq!(
+        evaluate_worktree_add_command("git -C /tmp worktree add /Users/x/proj/wt-foo", cwd),
+        None,
+        "an absolute in-project target overrides the -C base"
+    );
+}
+
+#[test]
+fn evaluate_worktree_add_command_expands_tmpdir_and_home() {
+    let cwd = Path::new("/Users/x/proj");
+    // SAFETY: test-only env mutation, no concurrent access to these vars in
+    // this process's test execution of this specific test.
+    unsafe {
+        std::env::set_var("TMPDIR", "/private/tmp/claude-502/scratch");
+        std::env::set_var("HOME", "/Users/x");
+    }
+    assert_eq!(
+        evaluate_worktree_add_command("git worktree add $TMPDIR/wt-foo", cwd),
+        Some(WORKTREE_TMP_REASON),
+        "$TMPDIR indirection must resolve to the harness scratchpad, still denylisted"
+    );
+    assert_eq!(
+        evaluate_worktree_add_command("git worktree add ~/proj/.claude/worktrees/wt-foo", cwd),
+        None,
+        "~ expansion to an in-project target must be allowed"
+    );
+    unsafe {
+        std::env::remove_var("TMPDIR");
+    }
+}
+
+#[test]
+fn evaluate_worktree_add_command_normalizes_dot_dot_traversal() {
+    // A purely textual `..` escape must be recognized without touching the fs.
+    // cwd has exactly 2 name components (Users, proj), so 2 `..` pops back to
+    // root before descending into `tmp`.
+    let cwd = Path::new("/Users/proj");
+    assert_eq!(
+        evaluate_worktree_add_command("git worktree add ../../tmp/wt-x", cwd),
+        Some(WORKTREE_TMP_REASON)
+    );
+}

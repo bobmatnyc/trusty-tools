@@ -254,7 +254,7 @@ response, so the pane makes one call and cannot render a half-correlated view:
 ```jsonc
 {
   "stores":   [ /* StoreStatus, unchanged shape from /stores */ ],
-  "tools":    [ { "tool": "vector_search", "skill": "semantic-search",
+  "tools":    [ { "tool": "vector_search", "skill": "knowledge-search",
                   "bound_store": "cto-assistant-kb", "available": true,
                   "reason": null } ],
   "mcp":      [ { "name": "trusty-memory", "kind": "openrpc",
@@ -338,23 +338,18 @@ records dialect convergence as an owner decision (OQ-3, §12).
 ### 5.2 The wrapping model (NORMATIVE)
 
 **A skill is the unit of capability. A tool is an implementation detail beneath a
-skill.**
+skill.** Granularity is **one skill per tool** (OQ-2, resolved 2026-07-25).
 
 A skill manifest gains one new frontmatter key, `tools:`, plus two classifiers:
 
 ```yaml
 ---
-name: gmail
-description: Read, search, draft and send mail on the user's Gmail account.
+name: Gmail Search                 # HUMAN name — never the tool identifier
+description: Find messages in Gmail using Gmail query syntax.
 tags: [gmail, email, gworkspace]
 kind: action                       # NEW — action | knowledge | system
-tools:                             # NEW — the tools this skill wraps
-  - search_gmail_messages
-  - get_gmail_message_content
-  - modify_gmail_messages
-  - compose_email
-  - create_draft
-scopes: [google.gmail.*]           # NEW, optional — scopes these tools require
+tools: [search_gmail_messages]     # NEW — the ONE tool this skill wraps
+scopes: [google.gmail.*]           # NEW, optional — scopes that tool requires
 ---
 ```
 
@@ -364,7 +359,7 @@ scopes: [google.gmail.*]           # NEW, optional — scopes these tools requir
 | `description` | yes | Existing. Rendered as the skill card's subtitle. |
 | `tags` | yes | Existing, and **already required** by `scan.rs:204-206`. |
 | `kind` | no, default `action` | `action` \| `knowledge` \| `system`. `knowledge` routes the skill's tools into the Knowledge pane (§4.3) **instead of** the Skills pane. |
-| `tools` | no, default `[]` | Exact tool names this skill wraps. A skill with no `tools` is a **pure-prompt skill** — today's behavior, still valid. |
+| `tools` | no, default `[]` | The exact tool name this skill wraps — **at most one** (OQ-2). A skill with no `tools` is a **tool-less skill**: pure procedure or guidance with no executable member, a first-class shape and today's behavior, still valid. A manifest listing several tools is split into one skill per tool at load time rather than being rejected. |
 | `scopes` | no | Scopes the wrapped tools require. Advisory in Phase 2, enforcement input in Phase 4 (§10). |
 
 - **S-1** `tools` entries are **exact tool names, never globs.** The three glob
@@ -372,8 +367,13 @@ scopes: [google.gmail.*]           # NEW, optional — scopes these tools requir
   `helpers.rs:146`; listener `from` leading-or-trailing, `wake.rs:62`; scope
   patterns trailing `.*` on a segment boundary, `scope.rs:68`) are a standing
   source of confusion. The skill layer adds no fourth dialect.
-- **S-2** A tool MAY be wrapped by more than one skill. The effective tool set is
-  the union over resolved skills; membership, not uniqueness, is what matters.
+- **S-2** A tool is wrapped by **exactly one** skill (OQ-2). Uniqueness is
+  enforced structurally at catalog-build time — a second manifest claiming an
+  already-claimed tool does not create a second card; an authored manifest
+  REPLACES the built-in one for that tool (S-9).
+- **S-2b** A skill's `name` MUST be human and provider-recognisable, describing
+  what invoking it accomplishes — *"MTA Train Time"*, not `get_train_schedule`.
+  A name that echoes the tool identifier is a conformance failure (C-04.7).
 - **S-3** A skill naming a tool that does not exist in the registry is **not** an
   error. It resolves to an unavailable capability, reported with a reason —
   matching how a missing store degrades rather than blocking boot
@@ -385,9 +385,9 @@ scopes: [google.gmail.*]           # NEW, optional — scopes these tools requir
 
 | `kind` | Renders in | Examples |
 |---|---|---|
-| `knowledge` | Knowledge pane (§4.3) | `semantic-search`, `memory`, `okg-ingest` |
-| `action` | Skills pane | `gmail`, `calendar`, `git`, `ticketing` |
-| `system` | Skills pane, collapsed under "System" | `delegate`, `session-control` |
+| `knowledge` | Knowledge pane (§4.3) | `knowledge-search`, `memory-recall`, `okg-ingest-gmail` |
+| `action` | Skills pane | `gmail-search`, `gcal-events`, `git-status`, `ticket-create` |
+| `system` | Skills pane, collapsed under "System" | `delegate-specialist`, `tmux-session-new` |
 
 `kind` is the *only* mechanism routing capability between the Knowledge and
 Skills panes. Both panes read one resolved skill set; neither hardcodes tool
@@ -399,8 +399,12 @@ New `agent.toml` section:
 
 ```toml
 [skills]
-allow = ["gmail", "calendar", "semantic-search", "memory", "git", "ticketing"]
+allow = ["gmail-search", "gmail-compose", "gcal-events", "knowledge-search",
+         "memory-recall", "git-status", "handoff-protocol"]
 ```
+
+Entries are skill **ids** — stable, hyphenated, one per wrapped tool (plus the
+tool-less ones, `handoff-protocol` above).
 
 **Resolution (NORMATIVE):**
 
@@ -427,39 +431,47 @@ what the existing three gates permit.
 - **S-6** The `[skills].allow`-absent case MUST be indistinguishable from today:
   `effective_tools == [tools].allow`, verbatim.
 
-### 5.5 Synthetic skills — covering the unwrapped surface
+### 5.5 The built-in catalog, and derived skills for what it cannot see
 
-The owner's directive is that *every* tool is wrapped. Requiring an authored
-manifest for all ~80 in-process tools plus every discovered MCP tool before the
-Skills pane can render anything would block the GUI slice on a large content
-project. Instead:
+The owner's directive is that *every* tool is wrapped, 1:1. Authoring ~170
+Markdown files before the Skills pane can render a single honest card would
+block the GUI slice on a content project. Two mechanisms close that gap without
+grouping anything:
 
-- **S-7** Any tool in an agent's effective set not claimed by a resolved skill is
-  wrapped in a **synthetic skill**, derived at load time from the tool registry.
-- **S-8** Synthetic-skill naming: an OpenRPC/MCP tool groups under its **endpoint
-  name** (`gworkspace`, `trusty-mpm`); an in-process tool groups under its
-  **name prefix before the first `_`** (`git_log`/`git_status` → `git`;
-  `ticket_search`/`list_tickets` → see S-9); an unprefixed tool forms a
-  single-tool skill under its own name.
-- **S-9** Prefix grouping is a heuristic and MUST NOT be treated as taxonomy.
-  Where it produces a poor grouping (`list_tickets` vs `ticket_search`), an
-  authored manifest supersedes it — authored always beats synthetic.
-- **S-10** Synthetic skills are marked `"synthetic": true` in API responses. The
-  GUI badges them (§8.3) so an unwrapped surface is *visible* rather than
-  indistinguishable from curated capability. Wrapping progress is thereby
-  measurable.
+- **S-7** The crate ships a **compile-time catalog** — one named row per tool,
+  covering every in-process tool trusty-agents registers plus the first-party
+  `trusty-gworkspace` surface and the platform tools the checked-in roster
+  grants. Rows are `&'static str` data, not files, so a tool gets a real human
+  name at zero runtime cost.
+- **S-8** A tool that no built-in or authored manifest claims — a live-discovered
+  MCP/OpenRPC tool, which by definition is not knowable at compile time — is
+  wrapped in a **derived skill**, 1:1, whose display name is the tool identifier
+  title-cased. A derived skill carries **no description and no provider**:
+  inventing plausible prose nobody wrote is the fabrication G-4 forbids. There is
+  no prefix grouping anywhere in this model.
+- **S-9** Authored always beats built-in, and built-in always beats derived. An
+  authored manifest naming an already-wrapped tool REPLACES that skill rather
+  than adding a second one (S-2).
+- **S-10** Derived skills are marked `"origin": {"kind": "derived"}` in API
+  responses. The GUI badges them (§8.3) so an unnamed surface is *visible* rather
+  than indistinguishable from curated capability. Wrapping progress is thereby
+  measurable, and the fix for a badge is one catalog row.
 
-This makes the Skills pane complete on day one and turns tool-wrapping into
+This makes the Skills pane complete on day one and turns naming into
 incremental, independently-shippable content work.
 
 ### 5.6 Seeded manifests
 
-Phase 2 (§10) ships authored manifests for the capability families the demo
-roster actually uses, replacing their synthetic equivalents: `gmail`, `calendar`,
-`drive`, `docs-sheets-slides`, `tasks`, `git`, `ticketing`, `semantic-search`,
-`memory`, `okg-ingest`, `web-search`, `delegate`. `web-search` is the migration
-exemplar — an existing prose skill that gains `tools: [web_search]` and thereby
-stops being a promise the config does not keep (§5.1).
+Phase 2 (§10) ships the built-in catalog described in S-7 — one named skill per
+tool across filesystem, shell, git, AST, static analysis, timers, delegation and
+workflow, session/tmux control, ticketing, MCP administration, memory and
+semantic search, OKG ingestion, the Google Workspace surface, web search, and the
+platform-hosted personal tools (weather, MTA). It also ships a small set of
+**tool-less** skills, since OQ-2 admits them explicitly.
+
+`.trusty-agents/skills/web-search.md` is the migration exemplar — an existing
+prose skill that gains `tools: [web_search]` and thereby stops being a promise
+the config does not keep (§5.1).
 
 ### 5.7 Backend contract (NEW)
 
@@ -468,20 +480,39 @@ stops being a promise the config does not keep (§5.1).
 ```jsonc
 {
   "skills": [
-    { "name": "gmail", "description": "…", "kind": "action",
-      "synthetic": false, "source": "project",
-      "tools": [ { "name": "compose_email", "available": true, "reason": null } ],
-      "scopes": ["google.gmail.*"],
-      "allowed": true }
+    { "id": "gmail-search", "name": "Gmail Search",
+      "description": "Find messages in Gmail using Gmail query syntax.",
+      "kind": "action",
+      "origin": { "kind": "builtin" },      // builtin | authored{path} | derived
+      "granted": true,
+      "tools": ["search_gmail_messages"],   // exactly 0 or 1 (OQ-2)
+      "provider": { "provider": "Google Workspace",
+                    "requirement": "An authorized Google account profile…",
+                    "env_var": null,
+                    "configured": null } }  // tri-state; null = NOT verified
   ],
-  "unresolved": [ { "name": "typo-skill", "reason": "not found in any source" } ],
+  "granted_count": 1,
+  "unresolved": [ { "id": "typo-skill", "reason": "no skill with this id…" } ],
+  "unmatched_patterns": [ { "pattern": "granola_*", "reason": "…may still resolve
+                            to an MCP tool discovered at dispatch time" } ],
+  "declares_capability": true,
   "config_error": null
 }
 ```
 
+Every catalog skill is returned with a `granted` flag rather than only the
+granted subset, so the Phase-3 editor renders the full choice from one route.
+
 - **S-11** `unresolved[]` reports `[skills].allow` entries that resolved to
   nothing — a dangling reference is *surfaced*, never silently dropped. This is
   the trusty-agents analogue of DOC-42 §SPEC-AGENTSKILLS-03's doctor check.
+  `unmatched_patterns[]` is its mirror for `[tools].allow`: a pattern no catalog
+  skill matches is reported **with the honest reason** that it may still resolve
+  to a live-discovered MCP tool, not as a broken grant.
+- **S-11b** A credential is reported as configured only from evidence. `provider
+  .configured` is `true`/`false` only when an environment variable backs it and
+  the sidecar read it; it is `null` for an OAuth grant or MCP wiring the route
+  does not verify, and `null` MUST render as "not verified", never as a check.
 - **S-12** Write contract: `PATCH /api/agents/:name { skills_allow: [...] }`,
   mirroring the existing `tools_allow` field on `PatchAgentRequest`
   (`agent_patch.rs:128-148`), including its empty-array-clears semantics. Ships
@@ -522,14 +553,23 @@ stands.
 - **C-04.2** An agent declaring `[skills] allow = ["gmail"]` and no
   `[tools].allow` receives exactly the tools listed in the `gmail` manifest, and
   the dispatch gate rejects any tool outside that set.
-- **C-04.3** Every tool in the effective set maps to exactly one **authored or
-  synthetic** skill in `GET /api/agents/:name/skills` — the pane has no gaps.
-- **C-04.4** A skill naming a nonexistent tool renders `available: false` with a
+- **C-04.3** Every registered tool maps to exactly one **authored, built-in or
+  derived** skill — the pane has no gaps. A newly added tool with no catalog row
+  FAILS this test; that failure is the mechanism, not a nuisance.
+- **C-04.4** A skill naming a nonexistent tool renders as ungranted with a
   reason; the agent still boots (S-3).
 - **C-04.5** A directory package containing an executable file fails to load with
   `PackageContainsForeignFile` (DOC-41 §2.6 regression guard, S-13).
-- **C-04.6** An authored manifest named identically to a synthetic grouping wins
-  (S-9).
+- **C-04.6** An authored manifest naming an already-wrapped tool REPLACES the
+  built-in skill rather than adding a second card for that tool (S-2, S-9).
+- **C-04.7** No skill's `name` equals or machine-echoes its tool identifier
+  (S-2b).
+- **C-04.8** An unknown `[skills].allow` id expands to **zero** tools and is
+  reported in `unresolved[]` — never to "all tools", and never to `None`
+  (which downstream means *unrestricted*). Skill resolution can narrow an
+  agent's capability; it can never widen it.
+- **C-04.9** A manifest wrapping zero tools resolves successfully, grants no
+  tools, and is NOT reported as unresolved (tool-less skills, OQ-2).
 
 ---
 
@@ -997,12 +1037,31 @@ server (the existing sanctioned carve-out); **(b)** amend DOC-41 §2.6 with a
 security-reviewed carve-out for skill packages.
 *Recommendation: (a) for M1.* Blocks: §5.8, Phase 2 scope.
 
-**OQ-2 — Skill granularity: per tool, or per capability family?**
-"Each tool should be wrapped in a skill" read literally gives ~80+ single-tool
-cards for a well-equipped agent. Family grouping (`gmail` = 6 tools) gives ~12
-cards with tools listed inside each. This spec assumes families (§5.5, S-8).
-*Recommendation: families, with the tool list visible inside the card.*
-Blocks: §5.6 seeded manifests, §8.3 card design.
+**OQ-2 — Skill granularity: per tool, or per capability family? — RESOLVED
+2026-07-25 (owner): PER TOOL.**
+The question was whether "each tool should be wrapped in a skill" meant ~80+
+single-tool cards or ~12 family cards (`gmail` = 6 tools). The owner ruled
+first on *naming* — *"gworkspace is a Google Workspace skill, MTA Train Time is
+that skill"* — and then, correcting the reading that this implied grouping:
+
+> *"One skill per tool. There can be other skills without tools, but each
+> [tool] needs an accompanying skill."*
+
+The decision therefore has three parts, and the naming note is about **names**,
+not about grouping:
+
+1. **1:1.** Every registered tool is wrapped by exactly one skill. A tool with
+   no skill is a defect, enforced by a coverage test that FAILS when a new tool
+   is added without one (§5.9 C-04.3).
+2. **Tool-less skills are first-class.** A skill MAY wrap zero tools — pure
+   procedure or guidance with no executable member. This is a declared shape,
+   not a degenerate case.
+3. **Names are human and provider-recognisable.** `get_train_schedule` is
+   named *"MTA Train Time"*; `search_gmail_messages` is named *"Gmail Search"*.
+   A skill whose name echoes its tool identifier fails §5.9 C-04.7.
+
+Implemented by #3933. This supersedes the family assumption this spec carried
+in §5.5/S-8; those sections are rewritten accordingly.
 
 **OQ-3 — Converge the two skill implementations, or keep them separate?**
 trusty-agents (flat `<name>.md`, **`tags` required**) vs trusty-mpm

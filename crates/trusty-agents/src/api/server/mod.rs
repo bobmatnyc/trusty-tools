@@ -31,6 +31,7 @@
 
 mod agent_create;
 mod agent_patch;
+mod agent_skills;
 mod agent_stores;
 mod auth;
 mod cancel;

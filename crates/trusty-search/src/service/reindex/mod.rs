@@ -16,6 +16,7 @@
 //! - `batch`       — single-batch parse/embed/commit cycle.
 //! - `completion`  — KG rebuild + terminal `complete` SSE event builder.
 //! - `corpus_swap` — atomic `index.redb.tmp` → `index.redb` swap.
+//! - `hnsw_swap`   — staged-write-then-swap for the periodic HNSW snapshot (issue #3970).
 //! - `guard`       — `ReindexTerminationGuard` RAII safety guard.
 //! - `orchestrator`— top-level `spawn_reindex` / `spawn_reindex_with_cleanup` + file walk.
 //! - `pollers`     — background RSS poller tasks (daemon + embedderd sidecar).
@@ -44,6 +45,7 @@ mod corpus_swap;
 mod finish;
 mod guard;
 mod hash;
+mod hnsw_swap;
 mod orchestrator;
 mod pollers;
 mod progress;
