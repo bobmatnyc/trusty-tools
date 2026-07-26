@@ -14,7 +14,7 @@ spec_refs:
 **Spec ID:** `SPEC-KDIDX-01~draft` … `SPEC-KDIDX-06~draft` (DOC-58)
 **Epic:** #4007 (Two-tier knowledge architecture: curated OKG stores vs arbitrary attached search indexes)
 **Builds on:** DOC-57 [Five-Section Agent Configuration](./agent-config-five-sections.md) §4 `SPEC-AGENTCFG-03~draft` (the Knowledge section this addendum extends with a fourth sub-surface, K-d, alongside K-a/K-b/K-c); the backend ticket #3935 (`GET /api/agents/:name/knowledge`), whose scope this addendum amends rather than forks (§1)
-**Cross-ref:** `crates/trusty-agents/src/agents/config.rs` (`ToolsConfig`, `.scopes` at :246-263 — the category-level `search.read` gate; `.search_indexes` to be added by #3232); `crates/trusty-agents/src/agents/extends/mod.rs` (`merge_extends`, `union_opt_vec` at :359, applied to `tools.allow`/`tools.scopes` at :290-292); `crates/trusty-agents/src/stores/config.rs` (`AgentStoreBinding` at :49-62, single-binding `validate()`); `crates/trusty-agents/src/tools/memory/vector_search.rs` (`effective_index_id` at :131-138, `daemon_query` at :265-288); `crates/trusty-search/src/service/server/indexes.rs` (`create_index`); `crates/trusty-search/src/mcp/tools/descriptors.rs` (`list_indexes`, `create_index` schemas at :195-208)
+**Cross-ref:** `crates/trusty-agents/src/agents/config.rs` (`ToolsConfig`, `.scopes` at :246-263 — the category-level `search.read` gate; `.search_indexes`/`.enforce_search_indexes` per the `feat-3232-4009-attached-search-indexes` branch, commit `7dc401dd`, at :288/:309, `resolved_search_indexes()`/`search_indexes_enforced()` at :323/:339); `crates/trusty-agents/src/agents/extends/mod.rs` (`merge_extends`, `union_opt_vec` at :359, applied to `tools.allow`/`tools.scopes` at :290-292); `crates/trusty-agents/src/stores/config.rs` (`AgentStoreBinding` at :49-62, single-binding `validate()`); `crates/trusty-agents/src/api/server/agent_stores.rs` (`GET /api/agents/:name/stores` response, `search_indexes`/`enforce_search_indexes` fields at :115-116 — the §5.3 interim raw surface); `crates/trusty-agents/src/tools/memory/vector_search.rs` (`effective_index_id` at :131-138, `daemon_query` at :265-288); `crates/trusty-search/src/service/server/indexes.rs` (`create_index`); `crates/trusty-search/src/mcp/tools/descriptors.rs` (`list_indexes`, `create_index` schemas at :195-208)
 **Related issues:** #4007 (epic), #4008 (this ticket), #3232 (`tools.search_indexes` primitive — depended on), #3935 (Knowledge backend — amended, not reopened), #3890 (store-PATCH pattern, referenced for its read-only-until posture), #3936 (permissions backend, referenced not duplicated), #4009 (vector_search schema enrichment + optional allowlist enforcement), #4010 (Knowledge pane GUI: K-d sub-surface), #4011 (ops runbook + guardrail for `create_index` over an external/cross-org directory), #4012 (memory↔search M1), #4013/#4014 (memory↔search stretch tiers — out of scope here), #4015 (concrete driver: attach APEX to `cto-assistant`)
 
 ---
@@ -93,6 +93,8 @@ search_indexes = ["trusty-tools", "cto-projects"]
 
 A K-d entry carries **no** `tree`, **no** `palace`, and **no** curation requirement — just an `index_id`. It is not a degenerate or shorthand store binding; it is a different config key entirely, read by a different code path, with no cardinality ceiling. §2's table is the normative comparison; this subsection exists only to block the natural misreading that K-d is "`[[stores]]` without the tree field."
 
+- **KD-21 (legal overlap, dedupe-and-present-once)** An `index_id` MAY legally appear in both `[[stores]]` (bound, K-a) and `tools.search_indexes` (attached, K-d) — this is ordinary manual operator overlap, not a conflict or a configuration error. Surfaces (`/knowledge`, the GUI) MUST **dedupe by id** and present it exactly once, under its **bound (K-a) role**: an id that is both bound and attached renders as a K-a store card, never additionally as a K-d chip.
+
 ---
 
 ## 4. SPEC-KDIDX-03 — Enforcement Posture {#SPEC-KDIDX-03~draft}
@@ -153,10 +155,51 @@ A K-d entry carries **no** `tree`, **no** `palace`, and **no** curation requirem
 ### 5.2 Posture, restated for K-d (not a new rule — #3935's own K-1/K-2/K-3 applied here)
 
 - **KD-7 (= K-1 applied to K-d)** The route MUST NOT fail because `attached_indexes` resolution is degraded. Each of `stores`, `tools`, `mcp`, `attached_indexes` resolves independently; a daemon timeout while probing an attached index populates that entry's `reason` and leaves the other three sub-surfaces intact.
-- **KD-8 (= K-2 applied to K-d)** No existing route changes shape or behavior. `GET /api/agents/:name/stores` and #3935's `stores`/`tools`/`mcp` fields are byte-identical to their pre-K-d definition.
+- **KD-8 (= K-2 applied to K-d)** No **pre-existing** field of `GET /api/agents/:name/stores` changes shape or meaning, and #3935's `stores`/`tools`/`mcp` fields in `/knowledge` are byte-identical to their pre-K-d definition. `/stores` MAY gain the two new top-level fields §5.3 licenses (`search_indexes`, `enforce_search_indexes`) — an **addition**, not a change to any field that existed before this addendum.
 - **KD-9 (= K-3 applied to K-d)** K-d ships **read-only** in M1 — `attached_indexes` is populated from `tools.search_indexes` in `agent.toml`; there is no `PATCH` in this document. Attach/detach as a write path is #4010's GUI concern layered on a future config-write route, exactly as K-3 defers store editing to #3890.
 
-### 5.3 Backward compatibility (explicit, testable)
+### 5.3 Interim raw surface on `/stores` (#3232/#4009)
+
+The concurrent implementation branch landing #3232 and #4009
+(`feat-3232-4009-attached-search-indexes`, commit `7dc401dd`) adds two
+top-level fields directly to the existing `GET /api/agents/:name/stores`
+route (`crates/trusty-agents/src/api/server/agent_stores.rs:115-116`), ahead
+of `/knowledge` (#3935) shipping:
+
+| Field | Type | Source | Meaning |
+|---|---|---|---|
+| `search_indexes` | `string[]` | `ToolsConfig::resolved_search_indexes()` (`config.rs:323`) | The agent's resolved `tools.search_indexes` list (§3.2) — trimmed, blank-dropped, deduped, **after `extends` union-merge** (KD-3). **No daemon connectivity probe.** |
+| `enforce_search_indexes` | `bool` | `ToolsConfig::search_indexes_enforced()` (`config.rs:339`) | Whether #4009's optional allowlist enforcement is active for this agent (§4.2). |
+
+- **KD-17 (licensed, not a violation)** `/stores` MAY carry these two fields
+  ahead of `/knowledge` shipping. This is a **licensed interim raw surface**,
+  not a violation of KD-8/C-KD.7 (§5.2/§10, reworded below to say so
+  explicitly) — index attachment needs *some* introspection point before
+  #3935/#4010 land, and `/stores` is the existing route with the config
+  already parsed and the daemon session already open.
+- **KD-18 (relationship to `/knowledge.attached_indexes[]`)** The two
+  surfaces describe the **same id set**, at two different fidelities:
+  - `/stores.search_indexes` = declared ids, no probe (table above).
+  - `/knowledge.attached_indexes[]` = the **same** ids, **after a daemon
+    connectivity probe**, enriched with `{label, connected, chunk_count,
+    reason}` (§5.1).
+  - The two MUST stay **value-consistent on the id set**: every id present in
+    an agent's `/stores.search_indexes` MUST appear as exactly one entry in
+    that same agent's `/knowledge.attached_indexes[]`, and vice versa.
+    Connectivity truth may legitimately differ between an unprobed list and a
+    freshly probed one; id *membership* may not.
+- **KD-19 (GUI reads `/knowledge`, never `/stores`, for K-d)** **#4010's GUI
+  MUST read from `/knowledge`, never re-probe or re-derive attached-index
+  status from `/stores`.** `/stores.search_indexes` /
+  `enforce_search_indexes` are raw introspection fields (CLI inspection,
+  debugging, `#4009`'s own enforcement decision), not a second rendering
+  path for the Knowledge pane.
+- **KD-20 (deprecation posture)** Once `/knowledge` ships, `/stores`'s two
+  fields are **not deprecated** — they remain available as raw introspection
+  — but they become **non-authoritative for UI**. `/knowledge` is the
+  authoritative surface for anything a human-facing display renders.
+
+### 5.4 Backward compatibility (explicit, testable)
 
 - **KD-10** An agent with no `tools.search_indexes` declared renders `"attached_indexes": []`, **byte-identical** to today's total absence of the K-d concept. No existing `/knowledge` consumer (were #3935 already shipped) observes any difference until an operator opts an agent in by adding `tools.search_indexes`.
 
@@ -222,7 +265,8 @@ This walks the two-tier principle (§2) and K-d (§3–§7) through epic #4007's
 - **C-KD.4** `tools.search_indexes` across `extends` resolves by UNION, base-first, deduped — never REPLACE (KD-3). A regression test asserts this against `merge_extends` once #3232 lands.
 - **C-KD.5** No `PATCH` route or GUI action in the current phase creates or deletes a trusty-search index; the attach-picker's candidate list is sourced from `list_indexes`, never from a free-text "new index" field (KD-12).
 - **C-KD.6** An agent lacking `search.read` cannot invoke `vector_search` regardless of what `tools.search_indexes` declares — K-d adds no bypass of the existing category-level gate (KD-14).
-- **C-KD.7** `GET /api/agents/:name/stores` and #3935's `stores`/`tools`/`mcp` fields are unchanged in shape and content by this addendum (KD-8).
+- **C-KD.7** No field of `GET /api/agents/:name/stores` present **before this addendum** changes shape or meaning; `search_indexes` and `enforce_search_indexes` (§5.3) are additive, licensed exceptions and do not violate this criterion. #3935's `stores`/`tools`/`mcp` fields in `/knowledge` are unchanged in shape and content by this addendum (KD-8).
+- **C-KD.8** Every id in an agent's `/stores.search_indexes` appears as exactly one entry in that agent's `/knowledge.attached_indexes[]`, and vice versa — the two surfaces never diverge on id membership (KD-18).
 
 ---
 
@@ -233,7 +277,7 @@ This walks the two-tier principle (§2) and K-d (§3–§7) through epic #4007's
 - #3935 — the `GET /api/agents/:name/knowledge` backend ticket; this addendum amends its scope with a fourth array (§5), per #4008's explicit "amend not fork" instruction.
 
 **Depended on:**
-- #3232 — `tools.search_indexes: Option<Vec<String>>` + union-extends merge, the core config primitive this addendum specifies the semantics of (§3.2, KD-4).
+- #3232 — `tools.search_indexes: Option<Vec<String>>` + union-extends merge, the core config primitive this addendum specifies the semantics of (§3.2, KD-4). Implemented together with #4009 on branch `feat-3232-4009-attached-search-indexes` (commit `7dc401dd`), which also adds the `/stores` interim raw surface this addendum licenses in §5.3.
 
 **Referenced, not duplicated:**
 - #3890 — store-PATCH contract; K-d's read-only-until-PATCH posture (KD-9) mirrors its pattern rather than reopening it.
@@ -255,4 +299,5 @@ This walks the two-tier principle (§2) and K-d (§3–§7) through epic #4007's
 
 ## 12. Change Log
 
+- **2026-07-26 (revision)** — Amended per code-critic review of PR #4017 (WARN, one HIGH): the concurrent `feat-3232-4009-attached-search-indexes` implementation branch (commit `7dc401dd`) already adds `search_indexes`/`enforce_search_indexes` to `GET /api/agents/:name/stores`, which contradicted the original KD-8/C-KD.7 "byte-identical" wording. Added §5.3 ("Interim raw surface on `/stores`") licensing those two fields as an interim, non-authoritative-for-UI raw surface, and defining the id-set consistency relationship to the future `/knowledge.attached_indexes[]` (KD-17…KD-20, C-KD.8). Reworded KD-8 and C-KD.7 to scope the "unchanged" guarantee to *pre-existing* fields rather than to the whole route, so they no longer contradict the licensed addition. Added KD-21 resolving the reviewer's minor note: an id legally overlapping both `[[stores]]` (K-a) and `tools.search_indexes` (K-d) MUST be deduped and presented once, under its bound (K-a) role.
 - **2026-07-26** — Initial addendum (DOC-58, `SPEC-KDIDX-01~draft` … `-06~draft`). Introduces K-d (attached search indexes) as a fourth Knowledge sub-surface alongside DOC-57 §4's K-a/K-b/K-c, backed by `tools.search_indexes` (#3232) with union-extends merge semantics. Specifies the `attached_indexes[]` addition to #3935's `/knowledge` route (declarative, degrade-never-fail, read-only), an M1 enforcement posture of opt-in-allowlist-declared-but-not-enforced, GUI expectations for #4010 (attach/detach existing indexes only, creation stays CLI-only per #4011), and the permissions interaction with `search.read` (category-level, unchanged). Records the APEX/`cto-assistant` driver (#4015) as a worked example and lists explicit non-goals, including the #4013/#4014 stretch tiers. Amends #3935's scope per #4008's acceptance criteria; does not edit DOC-57's or #3935's existing text.
