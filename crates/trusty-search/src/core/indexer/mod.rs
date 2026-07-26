@@ -419,7 +419,7 @@ pub(crate) struct PersistState {
     /// checkpointing during the reindex is fully preserved (the explicitly
     /// rejected alternative was a skip-while-`Running` gate, which would have
     /// disabled that checkpointing entirely).
-    /// Test: `persist_hnsw::tests::test_incremental_persist_redirects_to_staging_while_reindexing`.
+    /// Test: `tests::persistence_and_search::test_incremental_persist_redirects_to_staging_while_reindexing`.
     pub(crate) reindexing: AtomicBool,
 }
 

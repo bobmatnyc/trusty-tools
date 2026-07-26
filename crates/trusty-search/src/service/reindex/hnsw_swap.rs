@@ -19,12 +19,14 @@
 //! - [`begin_staged_hnsw_swap`] — resolve the (live, staging) HNSW path pair
 //!   and flip the indexer's `reindexing` flag so
 //!   `spawn_incremental_persist`'s periodic checkpoints redirect to staging.
-//! - [`commit_staged_hnsw_swap`] — force one final, AWAITED save to staging
-//!   (so the tail batches the throttle skipped are captured), then atomically
-//!   rename staging → live (binary + sidecar).
-//! - [`abort_staged_hnsw_swap`] — clear the `reindexing` flag and
-//!   best-effort delete the staging files; the live snapshot is left
-//!   untouched.
+//! - [`commit_staged_hnsw_swap`] — waits for any still-coalescing periodic
+//!   persist task to quiesce, forces one final AWAITED save to staging (so
+//!   the tail batches the throttle skipped are captured), renames the
+//!   staging sidecar then the staging binary over the live ones, and only
+//!   then clears `reindexing`.
+//! - [`abort_staged_hnsw_swap`] — same quiesce-wait, then best-effort
+//!   deletes the staging files (the live snapshot is left untouched), and
+//!   only then clears `reindexing`.
 //!
 //! Deliberately does NOT route the periodic save through a
 //! skip-while-`Running` gate (the shutdown path's fix) — that would disable
@@ -32,6 +34,22 @@
 //! crash-safety hole for another (loses ALL progress, not just the tail).
 //! The periodic persister keeps checkpointing throughout the reindex; only
 //! its *destination* changes.
+//!
+//! Round-2 adversarial review (two CRITICALs, fixed below — read the doc
+//! comments on [`commit_staged_hnsw_swap`] / [`abort_staged_hnsw_swap`] for
+//! the full mechanics of each):
+//! 1. The staging→live swap is two renames, not one — sidecar is now renamed
+//!    BEFORE the binary so a crash strictly between them can only leave a
+//!    live pairing whose `next_key` is ahead of (never behind) actual usage,
+//!    which cannot collide on the next write; `UsearchStore::load_from` also
+//!    now refuses a binary reporting MORE vectors than its sidecar describes,
+//!    as additional defense-in-depth against a torn pairing from any source.
+//! 2. `end_reindex_staging()` is no longer the first thing either function
+//!    does — both now wait for `CodeIndexer::wait_for_incremental_persist_drain`
+//!    before touching anything, and only clear the flag after the swap (or
+//!    abort cleanup) has fully resolved, closing a race where a detached
+//!    periodic-persist task that outlived the reindex's batch loop could
+//!    still observe the flag flip and write partial state straight to live.
 //!
 //! Test: `tests` submodule below.
 
@@ -105,47 +123,96 @@ pub(super) async fn begin_staged_hnsw_swap(
     Some(HnswSwapPaths { live, staging })
 }
 
+/// Bound on how long [`commit_staged_hnsw_swap`] / [`abort_staged_hnsw_swap`]
+/// wait for a still-coalescing periodic persist task to quiesce before
+/// resolving the swap (issue #3970 round-2 review, CRITICAL finding 2).
+///
+/// Why: bounded so a pathological stall in the periodic persister (e.g. a
+/// stuck disk) cannot hang the reindex's terminal event forever — matches
+/// the order of magnitude of other bounded persistence waits in this crate
+/// (`service::shutdown_flush::MIN_FLUSH_TIMEOUT_SECS`).
+const PERSIST_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Finalize (commit) the staged HNSW swap after a successful reindex
 /// (issue #3970).
 ///
 /// Why: publishes the reindex's final HNSW state to the live path in exactly
-/// one atomic step, mirroring `commit_staged_corpus_swap`.
-/// What: forces one last, AWAITED save to `paths.staging` (capturing any tail
-/// batches the throttle skipped since the last periodic checkpoint), clears
-/// the indexer's `reindexing` flag, then renames the staging binary and
-/// sidecar over the live ones. Both renames are same-directory (same
-/// filesystem) and individually atomic at the syscall level; a crash
-/// strictly between them can leave a live binary/sidecar pair that no longer
-/// match — `UsearchStore::load_from`'s existing corruption/mismatch guards
-/// (issue #2922) already treat that as "discard and fall back to a fresh
-/// store", so a botched swap loses this reindex's gains rather than
-/// corrupting or crashing. A failure at any step is logged and leaves the
-/// live snapshot at whatever it already was — never partially written.
-/// Test: `tests::commit_staged_hnsw_swap_publishes_final_state`.
+/// one step, mirroring `commit_staged_corpus_swap`.
+/// What:
+/// 1. Waits (bounded, [`PERSIST_DRAIN_TIMEOUT`]) for any still-coalescing
+///    periodic persist task to fully quiesce — see
+///    [`crate::core::CodeIndexer::wait_for_incremental_persist_drain`] for
+///    why this must happen BEFORE anything else (round-2 CRITICAL 2: without
+///    it, a task that outlives the batch loop could still write partial
+///    state straight to the live path after the flag below is cleared).
+/// 2. Forces one last, AWAITED save to `paths.staging` (capturing any tail
+///    batches the throttle skipped), now guaranteed uncontended.
+/// 3. Renames the staging sidecar THEN the staging binary over the live
+///    ones (round-2 CRITICAL 1 — see the ordering rationale below).
+/// 4. ONLY NOW clears the indexer's `reindexing` flag, once the swap is
+///    fully resolved — never before.
+///
+/// Rename ordering (round-2 CRITICAL 1): both renames are same-directory
+/// (same filesystem) and individually atomic at the syscall level, but the
+/// PAIR is not atomic — a crash strictly between them leaves a "torn" live
+/// pair. Renaming the SIDECAR first means the only possible torn state is
+/// OLD binary + NEW sidecar (never the reverse): `next_key` restored from
+/// that newer sidecar is then guaranteed >= every key ever allocated on this
+/// store (`next_key` only ever increases — see `UsearchStore::next_key`'s
+/// doc), so a subsequent `upsert` of a genuinely new chunk can never be
+/// allocated a key that collides with an existing occupied slot in whichever
+/// binary ends up live. The reverse order (binary-first, the pre-round-2
+/// shape of this function) can leave NEW binary + OLD sidecar instead — a
+/// stale, BEHIND-actual-usage `next_key` that CAN collide, silently
+/// overwriting an unrelated live vector on the next write. As additional
+/// defense-in-depth, `UsearchStore::load_from` now refuses to load a binary
+/// that reports MORE vectors than its paired sidecar's key map describes
+/// (the direction only a torn pairing — never legitimate operation — can
+/// produce; see that guard's doc), so even a torn pairing from some other
+/// source is caught rather than silently trusted.
+/// A failure at any step is logged and leaves the live snapshot at whatever
+/// it already was — never partially written.
+/// Test: `tests::commit_staged_hnsw_swap_publishes_final_state`,
+/// `tests::commit_staged_hnsw_swap_waits_for_in_flight_persist_before_clearing_flag`.
 pub(super) async fn commit_staged_hnsw_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
     paths: &HnswSwapPaths,
 ) {
+    // Round-2 CRITICAL 2: quiesce BEFORE touching anything else. While we
+    // wait, `reindexing` stays `true`, so any still-running task keeps
+    // correctly targeting staging.
+    if !handle
+        .indexer
+        .read()
+        .await
+        .wait_for_incremental_persist_drain(PERSIST_DRAIN_TIMEOUT)
+        .await
+    {
+        tracing::warn!(
+            "staged hnsw swap: a periodic persist task for '{}' did not quiesce within {:?} — \
+             proceeding with the swap anyway (issue #3970 round-2); if that task is still \
+             running it will keep targeting staging (reindexing is still set), not live",
+            index_id.0,
+            PERSIST_DRAIN_TIMEOUT,
+        );
+    }
+
     // Issue #29 analogue: force a final checkpoint so the tail batches since
     // the last throttled save are durable — but AWAITED (unlike
     // `force_incremental_persist`, which only spawns a detached task) so the
     // rename below is guaranteed to publish this up-to-date state, not a
-    // stale periodic one. `UsearchStore::save`'s own `save_lock` serializes
-    // this against any in-flight periodic checkpoint task, so this call
-    // simply waits its turn and then writes the truly-final state.
+    // stale periodic one. Uncontended now that the drain-wait above has
+    // returned (or timed out).
     let save_result = {
         let indexer = handle.indexer.read().await;
         indexer.save_vector_store(&paths.staging).await
     };
 
-    // Clear the reindexing flag regardless of outcome so any future commit
-    // (outside this reindex) resumes checkpointing straight to the live path.
-    handle.indexer.read().await.end_reindex_staging();
-
     match save_result {
         Ok(false) => {
             // No vector store wired (BM25-only index) — nothing to swap.
+            handle.indexer.read().await.end_reindex_staging();
             return;
         }
         Err(e) => {
@@ -154,6 +221,7 @@ pub(super) async fn commit_staged_hnsw_swap(
                  left at its last periodic-persist state (issue #3970)",
                 index_id.0
             );
+            handle.indexer.read().await.end_reindex_staging();
             return;
         }
         Ok(true) => {}
@@ -162,6 +230,7 @@ pub(super) async fn commit_staged_hnsw_swap(
     if !paths.staging.exists() {
         // Nothing was ever written to staging this run (e.g. the index had
         // zero vectors throughout) — no swap needed.
+        handle.indexer.read().await.end_reindex_staging();
         return;
     }
 
@@ -170,15 +239,19 @@ pub(super) async fn commit_staged_hnsw_swap(
     let live = paths.live.clone();
     let staging = paths.staging.clone();
     let index_id_for_task = index_id.0.clone();
+    // Round-2 CRITICAL 1: sidecar renamed FIRST — see this function's doc
+    // for why that ordering is the direction a torn swap can safely fail
+    // into, rather than the collision-prone direction the reverse order
+    // risks.
     let rename_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        std::fs::rename(&staging, &live)?;
         // The sidecar may be missing only in a degenerate empty-index case;
-        // tolerate `NotFound` so it doesn't mask the binary rename's success.
+        // tolerate `NotFound` so it doesn't mask the binary rename below.
         match std::fs::rename(&staging_sidecar, &live_sidecar) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
-        }
+        }?;
+        std::fs::rename(&staging, &live)
     })
     .await;
 
@@ -201,6 +274,10 @@ pub(super) async fn commit_staged_hnsw_swap(
             index_id_for_task
         ),
     }
+
+    // Round-2 CRITICAL 2: only clear the flag once the swap has fully
+    // resolved (rename attempted and settled either way) — never before.
+    handle.indexer.read().await.end_reindex_staging();
 }
 
 /// Discard the staged HNSW snapshot after an aborted / failed / memory-
@@ -209,19 +286,44 @@ pub(super) async fn commit_staged_hnsw_swap(
 /// Why: mirrors `abort_staged_corpus_swap` — a reindex that does not reach a
 /// `Ready` outcome must never publish its (by definition incomplete or
 /// invalid) staged snapshot over the live one.
-/// What: clears the indexer's `reindexing` flag so future commits resume
-/// writing to the live path, then best-effort deletes the staging binary +
-/// sidecar. The live snapshot is never touched. A left-behind staging file
-/// (e.g. delete failed) is harmlessly overwritten by the next reindex
-/// attempt's periodic checkpoints — same accepted trade-off the redb corpus
-/// tmp path already has.
-/// Test: `tests::abort_staged_hnsw_swap_leaves_live_untouched_and_cleans_staging`.
+/// What:
+/// 1. Waits (bounded, [`PERSIST_DRAIN_TIMEOUT`]) for any still-coalescing
+///    periodic persist task to quiesce — round-2 CRITICAL 2, see
+///    [`commit_staged_hnsw_swap`]'s doc for the full race this closes. It
+///    matters just as much here: the in-memory store at abort time is, by
+///    definition, partial/invalid, so a stale task racing past a
+///    too-early flag-clear would write exactly that partial state to LIVE.
+/// 2. Best-effort deletes the staging binary + sidecar. The live snapshot is
+///    never touched.
+/// 3. ONLY NOW clears the indexer's `reindexing` flag so future commits
+///    (outside this reindex) resume writing to the live path.
+///
+/// A left-behind staging file (e.g. delete failed) is harmlessly overwritten
+/// by the next reindex attempt's periodic checkpoints — same accepted
+/// trade-off the redb corpus tmp path already has.
+/// Test: `tests::abort_staged_hnsw_swap_leaves_live_untouched_and_cleans_staging`,
+/// `tests::abort_staged_hnsw_swap_waits_for_in_flight_persist_before_clearing_flag`.
 pub(super) async fn abort_staged_hnsw_swap(
     handle: &IndexHandle,
     index_id: &IndexId,
     paths: &HnswSwapPaths,
 ) {
-    handle.indexer.read().await.end_reindex_staging();
+    // Round-2 CRITICAL 2: see `commit_staged_hnsw_swap`'s identical guard.
+    if !handle
+        .indexer
+        .read()
+        .await
+        .wait_for_incremental_persist_drain(PERSIST_DRAIN_TIMEOUT)
+        .await
+    {
+        tracing::warn!(
+            "staged hnsw swap: a periodic persist task for '{}' did not quiesce within {:?} \
+             before abort — proceeding anyway (issue #3970 round-2); if that task is still \
+             running it will keep targeting staging (reindexing is still set), not live",
+            index_id.0,
+            PERSIST_DRAIN_TIMEOUT,
+        );
+    }
 
     let staging = paths.staging.clone();
     let staging_sidecar = paths.staging.with_extension("keys.json");
@@ -244,6 +346,10 @@ pub(super) async fn abort_staged_hnsw_swap(
             index_id_for_task
         ),
     }
+
+    // Round-2 CRITICAL 2: only clear the flag once staging cleanup has fully
+    // resolved — never before.
+    handle.indexer.read().await.end_reindex_staging();
 }
 
 /// Remove `path` if present, treating `NotFound` as success.
@@ -256,243 +362,5 @@ fn remove_if_exists(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::store::{UsearchStore, VectorStore as _};
-    use crate::core::CodeIndexer;
-
-    fn build_test_handle(
-        id_str: &str,
-        root: &std::path::Path,
-        store: Option<UsearchStore>,
-    ) -> (IndexId, IndexHandle) {
-        let id = IndexId::new(id_str.to_string());
-        let mut indexer = CodeIndexer::new(id.0.clone(), root);
-        if let Some(store) = store {
-            indexer.set_store(std::sync::Arc::new(store));
-        }
-        let handle = IndexHandle::bare(
-            id.clone(),
-            std::sync::Arc::new(tokio::sync::RwLock::new(indexer)),
-            root.to_path_buf(),
-        );
-        (id, handle)
-    }
-
-    async fn store_with_vectors(count: usize) -> UsearchStore {
-        let store = UsearchStore::new(4).unwrap();
-        let items: Vec<(String, Vec<f32>)> = (0..count)
-            .map(|i| (format!("chunk:{i}"), vec![i as f32 + 1.0, 0.0, 0.0, 0.0]))
-            .collect();
-        store.upsert_batch(&items).await.unwrap();
-        store
-    }
-
-    /// Why: `begin_staged_hnsw_swap` must resolve two distinct, correctly
-    /// suffixed paths and flip the indexer's `reindexing` flag.
-    /// Test: this test.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn begin_staged_hnsw_swap_resolves_legacy_paths() {
-        let data_dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
-        let root_dir = tempfile::tempdir().unwrap();
-
-        let (id, handle) = build_test_handle("hnsw-swap-begin", root_dir.path(), None);
-        let paths = begin_staged_hnsw_swap(&handle, &id)
-            .await
-            .expect("resolves");
-
-        assert_ne!(paths.live, paths.staging, "live and staging must differ");
-        assert!(
-            paths.staging.to_string_lossy().contains("reindex-staging"),
-            "staging path must be distinguishable: {}",
-            paths.staging.display()
-        );
-        assert!(
-            handle.indexer.read().await.is_reindex_staging(),
-            "begin must flip the reindexing flag"
-        );
-
-        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-    }
-
-    /// Why (the core #3970 fix, proven end-to-end): committing must publish
-    /// the CURRENT in-memory state to the live path via the staged swap, and
-    /// clear the reindexing flag so later commits resume direct-to-live.
-    /// Test: this test.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn commit_staged_hnsw_swap_publishes_final_state() {
-        let data_dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
-        let root_dir = tempfile::tempdir().unwrap();
-
-        let store = store_with_vectors(50).await;
-        let (id, handle) = build_test_handle("hnsw-swap-commit", root_dir.path(), Some(store));
-        let paths = begin_staged_hnsw_swap(&handle, &id)
-            .await
-            .expect("resolves");
-
-        commit_staged_hnsw_swap(&handle, &id, &paths).await;
-
-        assert!(
-            !handle.indexer.read().await.is_reindex_staging(),
-            "commit must clear the reindexing flag"
-        );
-        assert!(paths.live.exists(), "commit must publish to the live path");
-        assert!(
-            !paths.staging.exists(),
-            "commit must rename staging away (no leftover staging file)"
-        );
-        let reloaded = UsearchStore::load_from(&paths.live)
-            .await
-            .expect("load ok")
-            .expect("some");
-        assert_eq!(reloaded.len().await.unwrap(), 50);
-
-        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-    }
-
-    /// Why: an aborted/rolled-back reindex must never publish its staged
-    /// (incomplete or invalid) snapshot — the live snapshot must be exactly
-    /// what it was before the reindex began, and staging must be cleaned up.
-    /// Test: this test.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn abort_staged_hnsw_swap_leaves_live_untouched_and_cleans_staging() {
-        let data_dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
-        let root_dir = tempfile::tempdir().unwrap();
-
-        // Seed a complete live snapshot BEFORE the reindex begins.
-        let seed = store_with_vectors(200).await;
-        let (id, handle) = build_test_handle("hnsw-swap-abort", root_dir.path(), None);
-        let paths = begin_staged_hnsw_swap(&handle, &id)
-            .await
-            .expect("resolves");
-        seed.save(&paths.live).await.expect("seed save");
-        let live_before = std::fs::read(&paths.live).expect("read seeded live");
-
-        // Simulate a partial reindex checkpoint landing in staging.
-        let partial = store_with_vectors(30).await;
-        partial.save(&paths.staging).await.expect("partial save");
-        assert!(paths.staging.exists());
-
-        abort_staged_hnsw_swap(&handle, &id, &paths).await;
-
-        assert!(
-            !handle.indexer.read().await.is_reindex_staging(),
-            "abort must clear the reindexing flag"
-        );
-        let live_after = std::fs::read(&paths.live).expect("read live after abort");
-        assert_eq!(
-            live_after, live_before,
-            "abort must leave the live snapshot byte-for-byte unchanged"
-        );
-        assert!(
-            !paths.staging.exists(),
-            "abort must delete the staging snapshot"
-        );
-
-        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-    }
-
-    /// Why (issue #3970 — staging cleanup / restart behavior after an
-    /// UNGRACEFUL interruption): an ungraceful crash (SIGKILL/OOM-kill/abort/
-    /// power loss) mid-reindex runs neither `commit_staged_hnsw_swap` nor
-    /// `abort_staged_hnsw_swap` — there is no boot-time sweep for a stale
-    /// staging file, the same accepted trade-off the redb corpus tmp path
-    /// already has. This test proves that leftover staging file is inert
-    /// (never mistaken for a live/loadable snapshot) and self-cleaning: the
-    /// NEXT reindex attempt's own staging writes simply overwrite it, and a
-    /// successful commit from that next attempt publishes correctly despite
-    /// the orphaned leftover.
-    /// What: seeds a live snapshot, simulates an interrupted first reindex
-    /// attempt (`begin` + a partial checkpoint written straight to the
-    /// staging path, mimicking `spawn_incremental_persist`, then NEITHER
-    /// commit nor abort — the crash). Asserts a `load_from(live)` at that
-    /// point (simulating a warm-boot right after the crash) restores the
-    /// pre-crash complete state, completely unaffected by the orphaned
-    /// staging file. Then simulates a second, successful reindex attempt
-    /// (`begin` again + a full checkpoint + `commit`) and asserts the final
-    /// live state is that second attempt's data, with no leftover staging
-    /// file remaining.
-    /// Test: this test.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn interrupted_reindex_leaves_inert_staging_that_next_attempt_overwrites() {
-        let data_dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
-        let root_dir = tempfile::tempdir().unwrap();
-
-        // Seed the pre-crash complete live snapshot.
-        let seed = store_with_vectors(100).await;
-        let (id, handle) = build_test_handle("hnsw-swap-restart", root_dir.path(), None);
-        let paths = begin_staged_hnsw_swap(&handle, &id)
-            .await
-            .expect("resolves");
-        seed.save(&paths.live).await.expect("seed save");
-
-        // First reindex attempt: begin staging, write ONE partial checkpoint
-        // straight to the staging path (mirrors what
-        // `spawn_incremental_persist` does mid-reindex) — then simulate an
-        // ungraceful crash: neither commit nor abort ever runs.
-        let attempt_one_partial = store_with_vectors(40).await;
-        attempt_one_partial
-            .save(&paths.staging)
-            .await
-            .expect("attempt-1 partial checkpoint");
-        assert!(
-            paths.staging.exists(),
-            "orphaned staging file must exist post-crash"
-        );
-
-        // Simulate a warm-boot immediately after the crash: only the LIVE
-        // path is ever loaded at boot — the orphaned staging file must be
-        // completely inert and never consulted.
-        let post_crash_boot = UsearchStore::load_from(&paths.live)
-            .await
-            .expect("load ok")
-            .expect("some");
-        assert_eq!(
-            post_crash_boot.len().await.unwrap(),
-            100,
-            "warm-boot after an ungraceful crash must restore the last COMPLETE \
-             live snapshot, unaffected by the orphaned partial staging file"
-        );
-
-        // Second reindex attempt for the SAME index: begin again (as the
-        // orchestrator does for every reindex, retried or not), write a
-        // fresh full checkpoint — overwriting the orphaned leftover, proving
-        // it does not accumulate — and commit successfully this time.
-        let paths_attempt_two = begin_staged_hnsw_swap(&handle, &id)
-            .await
-            .expect("resolves");
-        let attempt_two_full = store_with_vectors(150).await;
-        handle
-            .indexer
-            .write()
-            .await
-            .set_store(std::sync::Arc::new(attempt_two_full));
-        commit_staged_hnsw_swap(&handle, &id, &paths_attempt_two).await;
-
-        assert!(
-            !paths_attempt_two.staging.exists(),
-            "a successful next attempt must leave no leftover staging file — \
-             the orphan from the crashed attempt does not accumulate"
-        );
-        let final_live = UsearchStore::load_from(&paths_attempt_two.live)
-            .await
-            .expect("load ok")
-            .expect("some");
-        assert_eq!(
-            final_live.len().await.unwrap(),
-            150,
-            "the retried reindex's complete state must be what's live, not the \
-             crashed attempt's partial state nor the pre-crash seed"
-        );
-
-        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-    }
-}
+#[path = "hnsw_swap_tests.rs"]
+mod tests;

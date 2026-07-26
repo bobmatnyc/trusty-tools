@@ -32,6 +32,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   skipped, only its destination changes, deliberately avoiding a
   skip-while-`Running` gate (which would have traded this hole for the loss
   of ALL in-reindex progress instead of just the tail).
+  Round-2 adversarial review found and fixed two further issues in the swap
+  itself: (1) the staging→live swap is two renames, not one — the sidecar is
+  now renamed BEFORE the binary so an interruption between them can only
+  leave a live pairing whose `next_key` sits ahead of (never behind) actual
+  usage, which cannot collide on a subsequent write, and `UsearchStore::load_from`
+  now additionally refuses to load a binary reporting MORE vectors than its
+  paired sidecar describes, as defense-in-depth against a torn pairing from
+  any source; (2) `CodeIndexer::end_reindex_staging` is no longer called
+  before the swap (or abort cleanup) fully resolves — both now wait for any
+  still-running periodic-persist task to quiesce first
+  (`CodeIndexer::wait_for_incremental_persist_drain`), closing a race where a
+  detached task that outlived the reindex's batch loop could otherwise
+  observe the flag clear early and write partial state straight to the live
+  path.
+  **Scope correction:** what this fix buys is (a) bounded memory, by
+  flushing vectors out of RAM during a long reindex, and (b) a safe,
+  complete crash-recovery baseline — the live snapshot always reflects the
+  last complete pre-reindex state, never a partial one. It does NOT enable
+  resuming an interrupted reindex from its partial progress; after any
+  crash mid-reindex, the next reindex attempt redoes the entire
+  walk/parse/embed from scratch. That pre-existing gap is NOT #3969 (which
+  is the different problem of a reindex never automatically restarting at
+  all for non-HEAD-driven runs) — it is tracked separately as **issue
+  #3979**.
 - **Shutdown no longer publishes a partial in-flight reindex over a complete
   on-disk HNSW snapshot, closing the residual data-loss race the #1711 guard
   left open (issue #1717).** The #1711 guard (PR #1716) only catches an

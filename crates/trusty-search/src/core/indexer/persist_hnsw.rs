@@ -103,7 +103,7 @@ impl CodeIndexer {
     /// `service::reindex::hnsw_swap::begin_staged_hnsw_swap`) instead of the
     /// live snapshot, until [`Self::end_reindex_staging`] is called.
     /// What: sets the flag with `Release` ordering.
-    /// Test: `persist_hnsw::tests::test_incremental_persist_redirects_to_staging_while_reindexing`.
+    /// Test: `tests::persistence_and_search::test_incremental_persist_redirects_to_staging_while_reindexing`.
     pub fn begin_reindex_staging(&self) {
         self.persist_state.reindexing.store(true, Ordering::Release);
     }
@@ -115,7 +115,7 @@ impl CodeIndexer {
     /// staged snapshot, so subsequent commits (outside this reindex) resume
     /// checkpointing straight to the live path as before.
     /// What: clears the flag with `Release` ordering.
-    /// Test: `persist_hnsw::tests::test_incremental_persist_redirects_to_staging_while_reindexing`.
+    /// Test: `tests::persistence_and_search::test_incremental_persist_redirects_to_staging_while_reindexing`.
     pub fn end_reindex_staging(&self) {
         self.persist_state
             .reindexing
@@ -127,6 +127,61 @@ impl CodeIndexer {
     #[doc(hidden)]
     pub fn is_reindex_staging(&self) -> bool {
         self.persist_state.reindexing.load(Ordering::Acquire)
+    }
+
+    /// Wait for any in-flight/queued [`Self::spawn_incremental_persist`] task
+    /// to fully quiesce (issue #3970 round-2 review, CRITICAL finding 2).
+    ///
+    /// Why: `spawn_incremental_persist` is a bare detached `tokio::spawn` —
+    /// no `JoinHandle` is tracked or awaited anywhere in the reindex module.
+    /// A periodic checkpoint that started during the tail of a reindex's
+    /// batch loop (the last `HNSW_SNAPSHOT_BATCH_INTERVAL`-th batch) can
+    /// still be mid-coalescing-loop when the batch loop ends and the reindex
+    /// orchestrator (`service::reindex::hnsw_swap`) resolves the staged swap.
+    /// If [`Self::end_reindex_staging`] cleared the flag while that task was
+    /// still running, its NEXT loop iteration (re-reading `reindexing` fresh
+    /// every iteration — see [`Self::spawn_incremental_persist`]) would
+    /// observe `reindexing == false` and write the in-memory store — for an
+    /// ABORTED reindex, by definition still partial — straight to the LIVE
+    /// path, reproducing #3970 through a race the direct-write fix alone
+    /// does not close. Callers must await this BEFORE clearing the flag.
+    /// What: polls [`PersistState::in_flight`] / [`PersistState::dirty`]
+    /// until both are `false` — `in_flight` is set exactly once before a
+    /// task is spawned and cleared exactly once, at the very end of that
+    /// task's coalescing loop, never mid-loop (see
+    /// [`Self::spawn_incremental_persist`]'s protocol doc), so
+    /// `!in_flight && !dirty` is an authoritative "no task is running and
+    /// none is about to restart" signal — or until `timeout` elapses.
+    /// Returns `true` once drained, `false` on timeout. A timeout does not
+    /// block the caller forever, but the caller MUST still treat it as "not
+    /// yet safe" and log loudly — see call sites.
+    /// Test: `tests::persistence_and_search::wait_for_incremental_persist_drain_waits_for_in_flight_task`,
+    /// `tests::persistence_and_search::wait_for_incremental_persist_drain_returns_immediately_when_idle`.
+    pub async fn wait_for_incremental_persist_drain(&self, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let in_flight = self.persist_state.in_flight.load(Ordering::Acquire);
+            let dirty = self.persist_state.dirty.load(Ordering::Acquire);
+            if !in_flight && !dirty {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Test-only: directly set [`PersistState::in_flight`], simulating a
+    /// still-running periodic persist task without needing to spawn and time
+    /// a real one (issue #3970 round-2 regression coverage for CRITICAL 2 —
+    /// mirrors the existing `UsearchStore::in_view_mode` test-accessor
+    /// pattern). Never called from production code.
+    #[doc(hidden)]
+    pub fn simulate_persist_in_flight_for_tests(&self, in_flight: bool) {
+        self.persist_state
+            .in_flight
+            .store(in_flight, Ordering::Release);
     }
 
     /// Force an HNSW snapshot now, bypassing the per-batch throttle

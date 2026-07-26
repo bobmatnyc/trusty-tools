@@ -773,6 +773,44 @@ impl UsearchStore {
                 );
                 return Ok(None);
             }
+
+            // Torn-pairing guard (issue #3970 round-2 review, CRITICAL 1
+            // defense-in-depth): a binary reporting MORE vectors than its
+            // paired sidecar's key map describes is never legitimate under
+            // normal operation. Every write path (`upsert`, `upsert_batch`)
+            // inserts the `id_to_key` entry AT OR BEFORE the matching HNSW
+            // `add`, and `remove` deletes both together — so the sidecar's
+            // map can only ever be equal to, or (via the documented
+            // dangling-entry case in `remove`'s doc, when a single `upsert`'s
+            // `add` fails after the map insert) AHEAD of, the binary's true
+            // vector count. It can never legitimately be BEHIND. A binary
+            // that IS ahead of its sidecar is the exact signature of a torn
+            // staging→live swap (`service::reindex::hnsw_swap`) whose two
+            // renames landed newer-binary-paired-with-older-sidecar — which
+            // would otherwise restore a stale, BEHIND-actual-usage
+            // `next_key` that a subsequent `upsert` could allocate and
+            // collide with an already-occupied key, silently overwriting an
+            // unrelated vector. `hnsw_swap`'s rename ordering (sidecar
+            // first) is the primary fix and makes this the DIRECTION a torn
+            // swap can no longer produce; this guard is the safety net for
+            // any other way a torn pairing could arise (e.g. manual disk
+            // manipulation, a future caller that doesn't order renames the
+            // same way).
+            if restored_size > expected_chunks {
+                tracing::error!(
+                    "usearch: snapshot {} reports {} vectors but its sidecar {} only \
+                     describes {} — a binary with MORE vectors than its own sidecar's key \
+                     map is never legitimate; treating as a torn binary/sidecar pairing \
+                     (issue #3970) and discarding rather than risk a stale `next_key` \
+                     colliding with an already-occupied key on the next write. Falling back \
+                     to a fresh (BM25-only until reindex) store.",
+                    hnsw_path.display(),
+                    restored_size,
+                    sidecar.display(),
+                    expected_chunks,
+                );
+                return Ok(None);
+            }
         }
         store.is_view.store(true, Ordering::Release);
         *store.hnsw_path.write().await = Some(hnsw_path.to_path_buf());
