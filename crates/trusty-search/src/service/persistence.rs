@@ -493,6 +493,29 @@ pub fn corpus_redb_tmp_path(index_id: &str) -> Result<PathBuf> {
     Ok(index_data_dir(index_id)?.join("index.redb.tmp"))
 }
 
+/// Path to the staging HNSW snapshot written by the periodic incremental
+/// persister while a reindex is `Running` (issue #3970).
+///
+/// Why: mirrors [`corpus_redb_tmp_path`] — every periodic HNSW checkpoint
+/// during a reindex writes here instead of the live [`hnsw_path`], so the
+/// live snapshot is never overwritten with partial state. Fixed filename
+/// (not per-run-unique), matching the redb corpus tmp path's convention: the
+/// NEXT reindex attempt's periodic saves simply overwrite this file again, so
+/// staging never accumulates across retries. If a reindex is interrupted and
+/// never retried, this file is left on disk until the next reindex attempt —
+/// the same accepted trade-off [`corpus_redb_tmp_path`] already has (no
+/// boot-time sweep exists for either).
+/// What: returns `<data_dir>/indexes/<id>/hnsw.reindex-staging.usearch`. The
+/// filename is deliberately ordered so `Path::with_extension("keys.json")`
+/// (the same idiom `UsearchStore::save` uses to derive a sidecar from its
+/// binary path) yields the matching staging sidecar
+/// `hnsw.reindex-staging.keys.json` — putting `.usearch` last, as the live
+/// `hnsw.usearch` path does, rather than appending a suffix after it.
+/// Test: `service::reindex::hnsw_swap::tests`.
+pub fn hnsw_staging_path(index_id: &str) -> Result<PathBuf> {
+    Ok(index_data_dir(index_id)?.join("hnsw.reindex-staging.usearch"))
+}
+
 /// Resolve the HNSW snapshot path for `entry`, routing to colocated or legacy
 /// storage based on `entry.colocated`.
 ///

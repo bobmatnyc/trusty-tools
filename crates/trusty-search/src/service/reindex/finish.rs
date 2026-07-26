@@ -31,6 +31,7 @@ use super::completion::{
 use super::corpus_swap::{abort_staged_corpus_swap, commit_staged_corpus_swap};
 use super::defer_embed::spawn_deferred_embed_pass;
 use super::guard::ReindexTerminationGuard;
+use super::hnsw_swap::{abort_staged_hnsw_swap, commit_staged_hnsw_swap, HnswSwapPaths};
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::stages::{
@@ -85,6 +86,7 @@ pub(super) struct FinishCtx {
     pub(super) started: Instant,
     pub(super) defer_embed: bool,
     pub(super) corpus_swap_tmp: Option<PathBuf>,
+    pub(super) hnsw_swap_paths: Option<HnswSwapPaths>,
     pub(super) mem_abort: Arc<AtomicBool>,
     pub(super) peak_rss_atomic: Arc<AtomicU64>,
     pub(super) peak_embedderd_rss_atomic: Arc<AtomicU64>,
@@ -122,6 +124,7 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         started,
         defer_embed,
         corpus_swap_tmp,
+        hnsw_swap_paths,
         mem_abort,
         peak_rss_atomic,
         peak_embedderd_rss_atomic,
@@ -210,11 +213,26 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         .await;
     }
 
-    // Issue #29: force a final HNSW snapshot so tail batches are durable.
-    {
+    // Issue #29 / #3970: force a final HNSW snapshot so tail batches are
+    // durable, and resolve the staged HNSW swap. When `hnsw_swap_paths` is
+    // `Some` (the common case), `resolve_hnsw_swap` below performs an AWAITED
+    // final save straight to the staging path and — only on a `Commit`
+    // resolution — atomically publishes it to the live path; that awaited
+    // save subsumes the old fire-and-forget `force_incremental_persist()`
+    // call for this codepath. When staging was never begun (path
+    // unresolvable at reindex start), fall back to the original detached
+    // forced save direct-to-live, exactly as before this fix.
+    if hnsw_swap_paths.is_none() {
         let indexer = handle.indexer.read().await;
         indexer.force_incremental_persist();
     }
+    resolve_hnsw_swap(
+        &handle,
+        &index_id,
+        hnsw_swap_paths.as_ref(),
+        &staging_resolution,
+    )
+    .await;
 
     // Issue #603: resolve the atomic corpus swap.
     resolve_corpus_swap(
@@ -532,6 +550,40 @@ async fn resolve_corpus_swap(
                 index_id.0,
             );
         }
+    }
+}
+
+/// Resolve the staged HNSW swap: commit or roll back (issue #3970).
+///
+/// Why: extracted so `finish_reindex` stays readable — mirrors
+/// `resolve_corpus_swap`, reusing the SAME `staging_resolution` the corpus
+/// swap already computed (a `Ready` outcome with no memory-abort commits,
+/// anything else rolls back). No-op when `hnsw_swap_paths` is `None` (staging
+/// was never begun, e.g. an unresolvable path at reindex start) — the caller
+/// already fell back to the old detached forced-save-to-live in that case.
+/// What: `Commit` publishes the staged snapshot atomically to the live path;
+/// `Rollback` discards the staged snapshot and leaves the live one untouched.
+/// Test: `hnsw_swap::tests::commit_staged_hnsw_swap_publishes_final_state`,
+/// `hnsw_swap::tests::abort_staged_hnsw_swap_leaves_live_untouched_and_cleans_staging`.
+async fn resolve_hnsw_swap(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    hnsw_swap_paths: Option<&HnswSwapPaths>,
+    staging_resolution: &staging::StagingResolution,
+) {
+    let Some(paths) = hnsw_swap_paths else {
+        return;
+    };
+    if staging_resolution.is_commit() {
+        commit_staged_hnsw_swap(handle, index_id, paths).await;
+    } else {
+        if let staging::StagingResolution::Rollback { reason } = staging_resolution {
+            tracing::warn!(
+                "reindex[{}]: rolling back staged HNSW snapshot — {reason}",
+                index_id.0,
+            );
+        }
+        abort_staged_hnsw_swap(handle, index_id, paths).await;
     }
 }
 

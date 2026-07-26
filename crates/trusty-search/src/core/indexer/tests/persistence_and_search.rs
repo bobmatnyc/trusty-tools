@@ -210,6 +210,115 @@ async fn test_incremental_persist_throttles_to_interval() {
     }
 }
 
+/// Issue #3970 — the exact bug this issue reports, reproduced and proven
+/// fixed: a periodic incremental-persist checkpoint that lands WHILE a
+/// reindex is in progress (`begin_reindex_staging()`) must never publish
+/// partial state to the LIVE HNSW snapshot path. Before the #3970 fix,
+/// `spawn_incremental_persist`'s periodic checkpoint wrote straight to the
+/// live path unconditionally — reindex progress is monotonic, so any
+/// reasonably large reindex crossed `UsearchStore::save`'s shrink guard
+/// threshold as ordinary healthy progress, silently replacing a complete
+/// pre-reindex snapshot with a partial one well before the reindex finished.
+///
+/// Why: this is the FAILING-test-first acceptance criterion from the issue —
+/// with `begin_reindex_staging()` called (simulating a reindex in progress)
+/// and a periodic checkpoint forced, the live snapshot must remain
+/// byte-for-byte the complete pre-reindex state, and the checkpoint's partial
+/// state must land in the staging file instead.
+/// What: seeds a "complete" 500-vector live snapshot directly at the path
+/// `hnsw_path("reindex-3970-live-safety")` resolves to, then builds an
+/// indexer for the SAME index id wired to a FRESH store holding only 10
+/// vectors (simulating early reindex progress), marks it reindex-staging, and
+/// forces one periodic checkpoint (`spawn_incremental_persist(true)` — the
+/// exact call `commit_parsed_batch` makes every
+/// `HNSW_SNAPSHOT_BATCH_INTERVAL` batches). Asserts the live file is
+/// untouched and the staging file holds the 10-vector partial state.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn test_incremental_persist_redirects_to_staging_while_reindexing() {
+    let data_dir = tempfile::tempdir().unwrap();
+    // SAFETY: #[serial] excludes every other #[serial]-tagged test in this
+    // crate for the duration of this test, so no other test observes a
+    // different TRUSTY_DATA_DIR concurrently.
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", data_dir.path()) };
+
+    let index_id = "reindex-3970-live-safety";
+    let live_path = crate::service::persistence::hnsw_path(index_id).expect("hnsw_path");
+    let staging_path =
+        crate::service::persistence::hnsw_staging_path(index_id).expect("hnsw_staging_path");
+    assert_ne!(live_path, staging_path, "sanity: paths must differ");
+
+    // Seed a "complete" pre-reindex snapshot directly at the live path.
+    let complete = UsearchStore::new(4).unwrap();
+    let complete_items: Vec<(String, Vec<f32>)> = (0..500)
+        .map(|i| (format!("chunk:{i}"), vec![i as f32 + 1.0, 0.0, 0.0, 0.0]))
+        .collect();
+    complete.upsert_batch(&complete_items).await.unwrap();
+    complete.save(&live_path).await.expect("seed live save");
+    let live_before = std::fs::read(&live_path).expect("read seeded live");
+
+    // Build an indexer wired to a FRESH store holding only 10 vectors,
+    // simulating a reindex that has barely started.
+    let mut idx = CodeIndexer::new(index_id, "/tmp/reindex-3970-root");
+    let partial = UsearchStore::new(4).unwrap();
+    let partial_items: Vec<(String, Vec<f32>)> = (0..10)
+        .map(|i| {
+            (
+                format!("new-chunk:{i}"),
+                vec![i as f32 + 1.0, 0.0, 0.0, 0.0],
+            )
+        })
+        .collect();
+    partial.upsert_batch(&partial_items).await.unwrap();
+    idx.set_store(std::sync::Arc::new(partial));
+
+    // Mark the reindex in progress, then force a periodic checkpoint — this
+    // is exactly what `commit_parsed_batch` does via
+    // `spawn_incremental_persist` on every 16th batch during a real reindex.
+    idx.begin_reindex_staging();
+    idx.spawn_incremental_persist(true);
+
+    // Wait for the detached persist task to drain.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let in_flight = idx.persist_state.in_flight.load(Ordering::Acquire);
+        let dirty = idx.persist_state.dirty.load(Ordering::Acquire);
+        if !in_flight && !dirty {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("persist did not drain within 15s: in_flight={in_flight}, dirty={dirty}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    // THE CORE ASSERTION (issue #3970): the live snapshot must be untouched —
+    // still the complete 500-vector pre-reindex state.
+    let live_after = std::fs::read(&live_path).expect("read live after checkpoint");
+    assert_eq!(
+        live_after, live_before,
+        "issue #3970 regression: a periodic checkpoint during a reindex must \
+         NEVER publish partial state to the live snapshot path"
+    );
+
+    // The staging path must hold the partial (10-vector) state instead —
+    // proving the checkpoint still ran (crash-safety checkpointing is
+    // preserved), just redirected.
+    assert!(
+        staging_path.exists(),
+        "staging checkpoint must have been written"
+    );
+    let staged = UsearchStore::load_from(&staging_path)
+        .await
+        .expect("load staging ok")
+        .expect("staging present");
+    assert_eq!(staged.len().await.unwrap(), 10);
+
+    // SAFETY: see above.
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+}
+
 #[tokio::test]
 async fn test_search_integration_returns_relevant_chunk_first() {
     let idx = make_indexer();

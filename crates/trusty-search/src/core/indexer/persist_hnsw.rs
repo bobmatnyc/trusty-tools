@@ -95,6 +95,40 @@ impl CodeIndexer {
         }
     }
 
+    /// Begin staged HNSW persistence for a reindex (issue #3970).
+    ///
+    /// Why: flips [`PersistState::reindexing`] so every subsequent
+    /// [`Self::spawn_incremental_persist`] checkpoint redirects to the
+    /// staging path a caller resolves separately (see
+    /// `service::reindex::hnsw_swap::begin_staged_hnsw_swap`) instead of the
+    /// live snapshot, until [`Self::end_reindex_staging`] is called.
+    /// What: sets the flag with `Release` ordering.
+    /// Test: `persist_hnsw::tests::test_incremental_persist_redirects_to_staging_while_reindexing`.
+    pub fn begin_reindex_staging(&self) {
+        self.persist_state.reindexing.store(true, Ordering::Release);
+    }
+
+    /// End staged HNSW persistence (issue #3970).
+    ///
+    /// Why: counterpart of [`Self::begin_reindex_staging`] — called once the
+    /// reindex orchestrator has resolved (committed or rolled back) the
+    /// staged snapshot, so subsequent commits (outside this reindex) resume
+    /// checkpointing straight to the live path as before.
+    /// What: clears the flag with `Release` ordering.
+    /// Test: `persist_hnsw::tests::test_incremental_persist_redirects_to_staging_while_reindexing`.
+    pub fn end_reindex_staging(&self) {
+        self.persist_state
+            .reindexing
+            .store(false, Ordering::Release);
+    }
+
+    /// `true` while this indexer is in staged-reindex mode (issue #3970). See
+    /// [`Self::begin_reindex_staging`].
+    #[doc(hidden)]
+    pub fn is_reindex_staging(&self) -> bool {
+        self.persist_state.reindexing.load(Ordering::Acquire)
+    }
+
     /// Force an HNSW snapshot now, bypassing the per-batch throttle
     /// ([`crate::core::indexer::HNSW_SNAPSHOT_BATCH_INTERVAL`], issue #29).
     ///
@@ -237,6 +271,20 @@ impl CodeIndexer {
                     }
                 }
             };
+            // Issue #3970: while a reindex is staging (`PersistState::reindexing`),
+            // periodic checkpoints must never publish straight to the live
+            // snapshot — reindex progress is monotonic, so ordinary healthy
+            // progress on any reasonably large reindex WOULD otherwise cross
+            // the `save()` shrink guard's threshold and replace the complete
+            // pre-reindex snapshot with a still-partial one. Resolved once per
+            // coalescing-loop iteration (below), not just once up front, so a
+            // reindex that completes mid-loop is picked up on the very next
+            // iteration rather than staying pinned to a stale destination.
+            let hnsw_staging_path = if is_colocated {
+                crate::service::colocated_storage::colocated_hnsw_staging_path(&root_path)
+            } else {
+                crate::service::persistence::hnsw_staging_path(&index_id)
+            };
 
             // Coalescing loop: snapshot+save while `dirty` keeps being set.
             // Bound the loop so a pathological caller can't pin us forever
@@ -250,11 +298,31 @@ impl CodeIndexer {
                 // again — ensuring we don't miss it.
                 persist_state.dirty.store(false, Ordering::Release);
 
-                // Save HNSW first (large, parallel-friendly).
+                // Save HNSW first (large, parallel-friendly). Issue #3970:
+                // resolved fresh each iteration so a reindex that flips
+                // `reindexing` off mid-coalesce is observed promptly.
                 if let Some(store) = &store {
-                    if let Err(e) = store.save_to(&hnsw_path).await {
+                    let reindexing = persist_state.reindexing.load(Ordering::Acquire);
+                    let target: &std::path::Path = if reindexing {
+                        match &hnsw_staging_path {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::debug!(
+                                    "incremental persist: cannot resolve hnsw staging path \
+                                     for '{index_id}' ({e}) — falling back to the live path \
+                                     for this checkpoint"
+                                );
+                                &hnsw_path
+                            }
+                        }
+                    } else {
+                        &hnsw_path
+                    };
+                    if let Err(e) = store.save_to(target).await {
                         tracing::warn!(
-                            "incremental persist: failed to save HNSW for '{index_id}': {e}"
+                            "incremental persist: failed to save HNSW for '{index_id}' \
+                             (target={}, reindexing={reindexing}): {e}",
+                            target.display()
                         );
                     }
                 }

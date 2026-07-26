@@ -9,6 +9,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Staged-write-then-swap for the periodic HNSW incremental persister closes
+  a crash-safety hole independent of shutdown (issue #3970).**
+  `spawn_incremental_persist` used to checkpoint the in-memory HNSW graph
+  straight to the LIVE snapshot every `HNSW_SNAPSHOT_BATCH_INTERVAL` batches
+  during EVERY reindex. Reindex progress is monotonic, so any reasonably
+  large reindex crossed `UsearchStore::save`'s shrink guard threshold as
+  ordinary healthy progress — from that checkpoint on, the complete
+  pre-reindex snapshot was already overwritten by a partial, still-growing
+  one, and an ungraceful termination (SIGKILL, OOM-kill, process abort, power
+  loss) at any later point permanently stranded the index. This was the same
+  vulnerability class as #1717 but reached through a different, far more
+  frequently exercised path, and was NOT fixed by PR #3968 (which closes only
+  the graceful-shutdown flush path). The periodic persister now redirects
+  every checkpoint during a reindex to a staging path
+  (`service::reindex::hnsw_swap`, mirroring the redb corpus's existing
+  atomic staged-swap, #603/#839) and publishes to the live path in one
+  atomic rename only when the reindex reaches a terminal `Ready` outcome;
+  any other outcome (failure, memory-abort) discards the staged snapshot and
+  leaves the live one untouched. Incremental crash-safety checkpointing
+  during the reindex is fully preserved — the periodic persister is never
+  skipped, only its destination changes, deliberately avoiding a
+  skip-while-`Running` gate (which would have traded this hole for the loss
+  of ALL in-reindex progress instead of just the tail).
 - **Shutdown no longer publishes a partial in-flight reindex over a complete
   on-disk HNSW snapshot, closing the residual data-loss race the #1711 guard
   left open (issue #1717).** The #1711 guard (PR #1716) only catches an
