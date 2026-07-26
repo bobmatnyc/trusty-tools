@@ -142,11 +142,19 @@ pub(super) async fn relocate_index_handler(
     // live registrations sharing one colocated root resolve to the SAME
     // on-disk redb corpus. (This index's own root is handled by the no-op
     // short-circuit above, so `exclude_id` here is defense-in-depth only.)
+    //
+    // Issue #3993 second round (adversarial BLOCK): also check
+    // `state.cold_store` — relocating onto a cold entry's parked root is the
+    // same root-theft as `create_index_handler`'s cold blind spot, just via
+    // the PATCH path instead. One shared primitive, one shared fix.
     let handles = state.registry.list_handles();
-    if let Some(existing_id) = find_root_path_collision(&handles, &new_root, Some(&index_id)) {
+    let cold_entries = state.cold_store.snapshot();
+    if let Some(existing_id) =
+        find_root_path_collision(&handles, &cold_entries, &new_root, Some(&index_id))
+    {
         tracing::warn!(
             "relocate[{id}]: refusing to relocate to {} — root_path already owned by '{}' \
-             (issue #2336)",
+             (issues #2336, #3993)",
             new_root.display(),
             existing_id,
         );

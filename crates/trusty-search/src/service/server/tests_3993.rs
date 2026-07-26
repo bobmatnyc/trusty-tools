@@ -23,14 +23,37 @@
 //! What: both fixes reuse the existing `find_root_path_collision` primitive
 //! (no fourth collision mechanism). Gap E calls it in `reindex_handler`
 //! before re-registering. Gap F calls it in `restore_index_on_demand`
-//! against `state.registry.list_handles()` — the live handle that stole the
-//! cold entry's root is, by construction, already registered by the time the
-//! cold entry's first query triggers the on-demand restore, so checking
-//! against live handles at that point (rather than teaching the create-time
-//! guard about cold entries) closes the actual crash site.
+//! against `state.registry.list_handles()`.
 //!
 //! Test: `reindex_root_override_rejects_collision_with_live_sibling` (Gap E),
 //! `lazy_restore_rejects_cold_entry_colliding_with_live_root_path` (Gap F).
+//!
+//! ## Second round (adversarial re-review, BLOCK)
+//!
+//! The first round's Gap F fix (above) only caught the collision from the
+//! FAR side: once a cold entry's root_path had already been stolen by a new
+//! live registration, the cold entry's eventual restore attempt detected the
+//! live collision and marked ITSELF failed — punishing the pre-existing,
+//! legitimate entry instead of rejecting the interloper. Worse, the write
+//! side (`create_index_handler`, `relocate_index_handler`, and Gap E's
+//! `reindex_handler` override) never consulted `state.cold_store` at all, so
+//! the theft required NO race whatsoever: a cold entry could sit parked,
+//! untouched, and a later `create_index`/`relocate_index`/reindex-override
+//! at the same root would silently succeed.
+//!
+//! Fix: `find_root_path_collision` (`helpers.rs`) now takes a `cold_entries`
+//! slice alongside `handles`, and all three write-side call sites pass
+//! `state.cold_store.snapshot()`. First-claimant-wins now holds regardless
+//! of whether the first claimant is live or cold. `restore_index_on_demand`
+//! additionally gained a `corpus_open_failed` ground-truth backstop
+//! (mirroring `create_index_handler`/`relocate_index_handler`) for the
+//! residual genuine race — two different cold entries, sharing a root_path
+//! only through pre-existing on-disk corruption, restored concurrently.
+//!
+//! Test (second round): `create_index_rejects_root_path_owned_by_cold_entry`,
+//! `relocate_index_rejects_root_path_owned_by_cold_entry`,
+//! `reindex_root_override_rejects_collision_with_cold_entry`,
+//! `lazy_restore_concurrent_cold_entries_at_same_root_only_one_wins`.
 
 use super::*;
 use crate::core::embed::{Embedder, MockEmbedder};
@@ -310,5 +333,272 @@ async fn lazy_restore_succeeds_for_non_colliding_cold_entry() {
     assert!(
         !state.cold_store.is_failed(&IndexId::new("index-b")),
         "a non-colliding restore must not be marked failed"
+    );
+}
+
+// ── Second round (adversarial BLOCK): write-side guards must also see cold
+//    entries, not just live handles ────────────────────────────────────────
+
+/// Adversarial-review reproduction, executed exactly as reported: park a
+/// cold entry FIRST (a pre-existing index that survived a daemon restart and
+/// has not been queried yet this session), THEN call `create_index_handler`
+/// with a DIFFERENT id at the SAME root. No race is involved — the cold
+/// entry sits parked, untouched, before the create call ever arrives.
+///
+/// Without the fix this assertion fails: the handler returns `200
+/// {"created": true}`, silently letting `index-new` claim `index-old`'s
+/// on-disk corpus.
+#[tokio::test]
+async fn create_index_rejects_root_path_owned_by_cold_entry() {
+    let state = mock_state_async().await;
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-3993-r2-create-vs-cold-");
+
+    let cold_entry = PersistedIndex {
+        id: "index-old".to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    state.cold_store.register_cold_entries(vec![cold_entry]);
+    assert!(
+        state.cold_store.contains(&IndexId::new("index-old")),
+        "cold entry must be parked before the create attempt"
+    );
+
+    let created = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("index-new", root.clone())),
+    )
+    .await;
+
+    assert_eq!(
+        created.status(),
+        StatusCode::CONFLICT,
+        "create_index must reject a root_path already parked by a cold entry \
+         (issue #3993 second round) instead of silently registering a live \
+         sibling over it"
+    );
+    assert!(
+        state.registry.get(&IndexId::new("index-new")).is_none(),
+        "the interloping create must never have registered a live handle"
+    );
+    assert!(
+        state.cold_store.contains(&IndexId::new("index-old")),
+        "the pre-existing cold entry must remain parked, untouched — \
+         first-claimant-wins even when the first claimant is cold"
+    );
+}
+
+/// A `create_index` at a root NOT claimed by any cold entry must still
+/// succeed — the widened guard must not over-trigger against unrelated cold
+/// entries.
+#[tokio::test]
+async fn create_index_distinct_root_succeeds_with_unrelated_cold_entry_present() {
+    let state = mock_state_async().await;
+    let (_dir_cold, root_cold) =
+        super::test_support::allowlisted_index_root("ts-3993-r2-create-cold-other-");
+    let (_dir_new, root_new) =
+        super::test_support::allowlisted_index_root("ts-3993-r2-create-new-");
+
+    let cold_entry = PersistedIndex {
+        id: "index-old".to_string(),
+        root_path: root_cold.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    state.cold_store.register_cold_entries(vec![cold_entry]);
+
+    let created = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("index-new", root_new.clone())),
+    )
+    .await;
+    assert_eq!(
+        created.status(),
+        StatusCode::OK,
+        "an unrelated cold entry at a different root must not block a genuinely \
+         distinct create_index"
+    );
+}
+
+/// Relocating a LIVE index onto a cold entry's parked root must be rejected
+/// — the identical root-theft as the create_index case above, via the PATCH
+/// path instead.
+///
+/// Without the fix this assertion fails: `relocate_index_handler` returns
+/// `200 {"relocated": true}`, re-pointing `index-a` onto `index-cold`'s root.
+#[tokio::test]
+async fn relocate_index_rejects_root_path_owned_by_cold_entry() {
+    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
+
+    let state = mock_state_async().await;
+    let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-3993-r2-relocate-a-");
+    let (_dir_cold, root_cold) =
+        super::test_support::allowlisted_index_root("ts-3993-r2-relocate-cold-");
+
+    let created = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("index-a", root_a.clone())),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+
+    let cold_entry = PersistedIndex {
+        id: "index-cold".to_string(),
+        root_path: root_cold.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    state.cold_store.register_cold_entries(vec![cold_entry]);
+
+    let relocate = relocate_index_handler(
+        State(Arc::clone(&state)),
+        Path("index-a".to_string()),
+        Json(RelocateIndexRequest {
+            root_path: root_cold.clone(),
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        relocate.status(),
+        StatusCode::CONFLICT,
+        "relocating onto a cold entry's parked root_path must be rejected with 409"
+    );
+    let handle_a = state
+        .registry
+        .get(&IndexId::new("index-a"))
+        .expect("index-a must still be registered");
+    assert_eq!(
+        handle_a.root_path, root_a,
+        "a rejected relocation must not mutate the existing handle's root_path"
+    );
+    assert!(
+        state.cold_store.contains(&IndexId::new("index-cold")),
+        "the cold entry must remain parked, untouched"
+    );
+}
+
+/// A `POST /indexes/:id/reindex` `root_path` override pointed at a cold
+/// entry's parked root must be rejected with `409`, same as the live-sibling
+/// case Gap E already covers.
+///
+/// Without the fix this assertion fails: `reindex_handler` returns `200
+/// {"queued": true}` and re-points `index-b` onto `index-cold`'s root.
+#[tokio::test]
+async fn reindex_root_override_rejects_collision_with_cold_entry() {
+    let (_dir_b, root_b) = super::test_support::allowlisted_index_root("ts-3993-r2-reindex-b-");
+    let (_dir_cold, root_cold) =
+        super::test_support::allowlisted_index_root("ts-3993-r2-reindex-cold-");
+
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("index-b"),
+        Arc::new(RwLock::new(CodeIndexer::new("index-b", &root_b))),
+        root_b.clone(),
+    ));
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let cold_entry = PersistedIndex {
+        id: "index-cold".to_string(),
+        root_path: root_cold.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    state.cold_store.register_cold_entries(vec![cold_entry]);
+
+    let result = reindex_handler(
+        State(Arc::clone(&state)),
+        Path("index-b".to_string()),
+        Some(Json(ReindexRequest {
+            root_path: Some(root_cold.clone()),
+            force: None,
+            background: None,
+        })),
+    )
+    .await;
+
+    let err = result.expect_err(
+        "reindex root_path override colliding with a cold entry's root must be rejected",
+    );
+    assert_eq!(err.0, StatusCode::CONFLICT);
+    assert_eq!(
+        err.1 .0.get("existing_id").and_then(|v| v.as_str()),
+        Some("index-cold"),
+        "the 409 body must name the cold entry that already owns the root_path"
+    );
+
+    let b_root_after = state
+        .registry
+        .get(&IndexId::new("index-b"))
+        .expect("index-b still registered")
+        .root_path
+        .clone();
+    assert_eq!(
+        b_root_after, root_b,
+        "index-b's root_path must remain unchanged after a rejected collision override"
+    );
+}
+
+/// Genuine concurrent race: two DIFFERENT cold entries sharing one root_path
+/// (the only way this can arise post-fix is pre-existing on-disk corruption
+/// — the write-side guards above now prevent any NEW registration from
+/// creating this state) are restored via `restore_index_on_demand` at the
+/// same instant, so NEITHER sees the other as a live handle. The
+/// `corpus_open_failed` ground-truth backstop (mirroring
+/// `create_index_handler`/`relocate_index_handler`) must ensure redb's real
+/// single-open semantics decide the winner — exactly one of the two may end
+/// up live; both observing success would silently double-register one
+/// on-disk corpus (the exact #2305/#2336/#3993 hazard this whole issue
+/// chain is about).
+#[tokio::test]
+async fn lazy_restore_concurrent_cold_entries_at_same_root_only_one_wins() {
+    let state = mock_state_async().await;
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-3993-r2-concurrent-cold-");
+
+    let entry_a = PersistedIndex {
+        id: "racer-a".to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    let entry_b = PersistedIndex {
+        id: "racer-b".to_string(),
+        root_path: root.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    // Park both cold — mirrors the corrupted-on-disk-state precondition this
+    // scenario requires (see doc comment above).
+    state
+        .cold_store
+        .register_cold_entries(vec![entry_a.clone(), entry_b.clone()]);
+
+    let embedder = state
+        .current_embedder()
+        .await
+        .expect("mock embedder installed");
+
+    let state_a = Arc::clone(&state);
+    let embedder_a = Arc::clone(&embedder);
+    let state_b = Arc::clone(&state);
+    let embedder_b = Arc::clone(&embedder);
+
+    tokio::join!(
+        crate::service::lazy_restore::restore_index_on_demand(&state_a, &embedder_a, entry_a),
+        crate::service::lazy_restore::restore_index_on_demand(&state_b, &embedder_b, entry_b),
+    );
+
+    let live_count = [
+        state.registry.get(&IndexId::new("racer-a")).is_some(),
+        state.registry.get(&IndexId::new("racer-b")).is_some(),
+    ]
+    .into_iter()
+    .filter(|live| *live)
+    .count();
+    assert_eq!(
+        live_count, 1,
+        "exactly one of the two racing cold restores over the same root_path may \
+         end up live — both live would silently double-register one on-disk corpus"
     );
 }

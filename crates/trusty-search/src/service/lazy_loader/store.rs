@@ -200,6 +200,31 @@ impl ColdIndexStore {
             .count()
     }
 
+    /// Snapshot every currently-cold (pending) entry's persisted metadata.
+    ///
+    /// Why (issue #3993 second round — adversarial BLOCK): the write-side
+    /// `root_path` collision guard (`find_root_path_collision`, shared by
+    /// `create_index_handler`, `relocate_index_handler`, and the reindex
+    /// `root_path` override) must treat a cold/unloaded entry's root_path as
+    /// already claimed, exactly like a live handle's — otherwise a new
+    /// registration can silently steal a pre-existing but not-yet-restored
+    /// index's on-disk corpus with no race required at all (the cold entry
+    /// just sits parked, untouched, before the write call arrives).
+    /// What: clones every `entries` value out into a `Vec` (tens to low
+    /// hundreds of entries in practice — the same order of magnitude
+    /// `find_root_path_collision` already linear-scans for live handles, so
+    /// this adds no new complexity class). Does NOT include `failed_entries`
+    /// — a permanently-failed cold entry no longer owns a live claim on its
+    /// root_path (its restore will never be retried, and its on-disk corpus,
+    /// if any, is not held open by anything).
+    /// Test: `create_index_rejects_root_path_owned_by_cold_entry`,
+    /// `relocate_index_rejects_root_path_owned_by_cold_entry`,
+    /// `reindex_root_override_rejects_collision_with_cold_entry` in
+    /// `tests_3993.rs`.
+    pub fn snapshot(&self) -> Vec<PersistedIndex> {
+        self.entries.iter().map(|kv| kv.value().clone()).collect()
+    }
+
     /// Remove a cold entry after it has been successfully loaded into the hot registry.
     ///
     /// Why: once the index is in `IndexRegistry`, future `get_or_load_index` calls

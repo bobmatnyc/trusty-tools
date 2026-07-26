@@ -139,9 +139,15 @@ pub(super) async fn reindex_handler(
             // corpus) `create_index_handler` and `relocate_index_handler`
             // already guard against. Reuse the exact same primitive rather
             // than adding a fourth collision mechanism.
+            //
+            // Issue #3993 second round (adversarial BLOCK): also check
+            // `state.cold_store` — a reindex override onto a cold entry's
+            // parked root is the same root-theft as the other two write
+            // paths, so it must go through the same widened primitive.
             let live_handles = state.registry.list_handles();
+            let cold_entries = state.cold_store.snapshot();
             if let Some(existing_id) =
-                find_root_path_collision(&live_handles, &new_root, Some(&index_id))
+                find_root_path_collision(&live_handles, &cold_entries, &new_root, Some(&index_id))
             {
                 tracing::warn!(
                     "reindex_handler: refusing root_path override for '{}' to {} — \

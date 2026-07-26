@@ -17,16 +17,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   corpus. **Gap E:** `POST /indexes/:id/reindex` with a `root_path` override
   (`reindex_handlers.rs`) registered the new root with no collision check at
   all — now rejected with `409 Conflict` naming the existing owner, same as
-  `create_index`/`relocate_index`. **Gap F:** `find_root_path_collision` scans
+  `create_index`/`relocate_index`. **Gap F:** `find_root_path_collision` scanned
   only LIVE handles, so a cold (unloaded) index entry parked in
-  `state.cold_store` was invisible to it — a `create_index` whose root matched
-  an unloaded cold entry passed the guard cleanly, and the cold entry's later
-  on-demand restore (`restore_index_on_demand`, `lazy_restore.rs`) then opened
-  the same redb with no guard at all, a third source of the hazard. Fixed by
-  checking the candidate root against live sibling handles right before the
-  cold entry is ever built, reusing the same `find_root_path_collision`
-  primitive rather than adding a fourth collision mechanism; a colliding cold
-  entry is now marked permanently failed (existing #1106 semantics) instead of
+  `state.cold_store` was invisible to it; a colliding cold entry's later
+  on-demand restore (`restore_index_on_demand`, `lazy_restore.rs`) opened the
+  same redb with no guard at all, a third source of the hazard.
+
+  **Adversarial re-review (first round BLOCK) found the Gap F fix incomplete:**
+  checking only live handles from `restore_index_on_demand` closes the crash
+  from the cold entry's OWN restore, but the write side
+  (`create_index_handler`, `relocate_index_handler`, and Gap E's reindex
+  override) still never consulted `state.cold_store` — so a brand-new
+  registration could silently claim a pre-existing cold entry's root_path
+  with **no race required at all**, and the resulting live collision would
+  later mark the *pre-existing, legitimate* cold entry failed instead of
+  rejecting the interloper — inverting first-claimant-wins. Fixed for real
+  this round: `find_root_path_collision` now takes both `handles` (live) and
+  `cold_entries` (`state.cold_store.snapshot()`), and all three write-side
+  call sites pass both — still one shared primitive, no fourth (or fifth)
+  collision mechanism. `restore_index_on_demand` also gained a
+  `corpus_open_failed` ground-truth backstop mirroring
+  `create_index_handler`/`relocate_index_handler`, closing the residual
+  genuine race (two different cold entries sharing one root_path only through
+  pre-existing on-disk corruption, restored concurrently) that the best-effort
+  guard alone cannot. A colliding cold entry — live or cold on the losing
+  side — is marked permanently failed (existing #1106 semantics) instead of
   silently registered broken. Not gated on #1681 or #2611 (neither addresses
   collision safety).
 

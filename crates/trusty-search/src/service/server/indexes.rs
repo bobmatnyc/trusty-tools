@@ -250,11 +250,22 @@ pub(super) async fn create_index_handler(
     // corpus open while this handler still returned `200 {"created": true}`
     // — recreating the #2305 double-registration hazard at runtime instead
     // of only at warm-boot. Checked before the (expensive) indexer build.
+    //
+    // Issue #3993 second round (adversarial BLOCK): also check
+    // `state.cold_store` — a pre-existing but not-yet-restored cold entry's
+    // root_path is just as claimed as a live handle's. Without this, a
+    // `create_index` at a cold entry's root succeeded unchallenged with NO
+    // race required (the cold entry just sat parked); the collision only
+    // surfaced later, and on the wrong side, when the cold entry's first
+    // query hit `restore_index_on_demand`'s live-handle check.
     let handles = state.registry.list_handles();
-    if let Some(existing_id) = find_root_path_collision(&handles, &req.root_path, Some(&id)) {
+    let cold_entries = state.cold_store.snapshot();
+    if let Some(existing_id) =
+        find_root_path_collision(&handles, &cold_entries, &req.root_path, Some(&id))
+    {
         tracing::warn!(
             "create_index: refusing to register '{}' at {} — root_path already owned by \
-             '{}' (issue #2336)",
+             '{}' (issues #2336, #3993)",
             req.id,
             req.root_path.display(),
             existing_id,
