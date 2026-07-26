@@ -22,9 +22,10 @@
 
 #![cfg(test)]
 
+use std::cell::Cell;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 /// Process-wide mutex serializing tests that mutate `$HOME`.
 ///
@@ -36,8 +37,84 @@ use std::sync::Mutex;
 /// What: Use `let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());`
 /// at the top of any test that calls `std::env::set_var("HOME", ...)`.
 /// `unwrap_or_else(into_inner)` ensures a panic in one test doesn't poison
-/// the lock for siblings.
+/// the lock for siblings. Prefer [`lock_home`] for any NEW test whose
+/// production code path is guarded by [`home_lock_held_by_this_thread`]
+/// (currently `listeners::store::events_dir`) — it does everything this
+/// raw acquisition does, plus marks per-thread ownership that guard needs.
 pub static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// Set for the lifetime of THIS thread's own [`HomeLockGuard`]. See
+    /// [`home_lock_held_by_this_thread`]'s docs for why per-thread ownership,
+    /// not global contention, is the question a recurrence guard needs
+    /// answered (issue #3922 follow-up).
+    static HOME_LOCK_HELD_HERE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// RAII guard returned by [`lock_home`]: holds `HOME_LOCK` for its scope AND
+/// marks this OS thread as the current holder, so
+/// [`home_lock_held_by_this_thread`] can answer "do *I* hold it?" instead of
+/// "is it contended by ANYONE?".
+pub struct HomeLockGuard {
+    _inner: MutexGuard<'static, ()>,
+}
+
+impl Drop for HomeLockGuard {
+    fn drop(&mut self) {
+        HOME_LOCK_HELD_HERE.with(|c| c.set(false));
+    }
+}
+
+/// Acquire [`HOME_LOCK`] AND mark this thread as the holder for
+/// [`home_lock_held_by_this_thread`].
+///
+/// Why (issue #3922 follow-up, code-critic HIGH on PR #3943): a
+/// `#[cfg(test)]` recurrence guard that wants to assert "the CALLING test
+/// currently honours the crate's `$HOME`-sandboxing convention" cannot
+/// answer that from `HOME_LOCK.try_lock()` alone — that only reports
+/// whether the mutex is CONTENDED, i.e. whether *some* thread holds it,
+/// which says nothing about whether the thread asking the question is that
+/// holder. The critic proved this concretely: a background thread takes
+/// `HOME_LOCK` for an unrelated reason and holds it; a second, completely
+/// lock-less thread then reaches the guarded code path, and
+/// `try_lock().is_ok()` reports `false` (busy) — read by the old guard as
+/// "the convention is being honoured" — even though the ACTUAL caller
+/// plainly is not participating at all. This function fixes that by
+/// marking per-thread ownership instead of relying on global contention.
+/// What: identical acquisition to the raw `HOME_LOCK.lock()` idiom used
+/// throughout this crate (`unwrap_or_else(into_inner)` so one test's panic
+/// never poisons the lock for siblings), wrapped in a guard that also flips
+/// a thread-local flag on acquire and clears it on drop.
+/// `cargo test`'s default current-thread `#[tokio::test]` runtime (used by
+/// every test in this crate — grep confirms no test opts into
+/// `flavor = "multi_thread"`) pins an async test's ENTIRE execution,
+/// including every `.await` point, to the one OS thread that `block_on`s
+/// it, so a thread-local set for this guard's lifetime correctly tracks
+/// "this test currently holds the lock" without needing a heavier
+/// `tokio::task_local!` (which would additionally force every call site to
+/// restructure its body into a `.scope(...)` future — a much larger,
+/// crate-wide change this fix does not need).
+/// Test: `listeners::store::tests::events_dir_panics_when_a_different_thread_holds_home_lock`
+/// (the exact masking scenario this seam exists to close) plus every
+/// migrated caller in `listeners::poll`, `api::server::tests::listener_events`,
+/// and `slack::tests::eventstream_tests`.
+pub fn lock_home() -> HomeLockGuard {
+    let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    HOME_LOCK_HELD_HERE.with(|c| c.set(true));
+    HomeLockGuard { _inner: guard }
+}
+
+/// Whether THIS thread currently holds `HOME_LOCK` via [`lock_home`].
+///
+/// Why: see [`lock_home`]'s docs for the full story — this is the narrower,
+/// per-caller question a recurrence guard actually needs answered, in place
+/// of `HOME_LOCK.try_lock().is_ok()`'s global-contention signal.
+/// What: `true` only while the CURRENT thread's own `lock_home()` guard is
+/// still alive; `false` in every other case, INCLUDING "some other thread
+/// holds `HOME_LOCK`" — that distinction is the entire point.
+pub fn home_lock_held_by_this_thread() -> bool {
+    HOME_LOCK_HELD_HERE.with(|c| c.get())
+}
 
 /// Process-wide mutex serializing tests that mutate LLM credential env vars
 /// (#250). Same rationale as `HOME_LOCK` — `std::env::set_var` is global so
