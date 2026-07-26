@@ -9,6 +9,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Test-side remediation for `create_index`/`relocate_index` tests spuriously
+  denied by the sensitive-path denylist (issue #3955).** `SENSITIVE_PATH_PREFIXES`
+  denies `/tmp/`, `/private/tmp`, and `/var/folders` — which on macOS is where
+  `std::env::temp_dir()` resolves by default, and on Linux CI it's `/tmp`
+  outright. A dozen-plus `create_index_*`/`relocate_index_*` tests allocated
+  their index roots via `tempfile::tempdir()`, so they intermittently got
+  HTTP 400 from the very denylist they weren't testing. The denylist itself is
+  correct and unchanged; the fix is a new shared test helper,
+  `service::server::test_support::allowlisted_index_root`, that roots test
+  index directories under `$HOME/.trusty-search-test-roots` — safe regardless
+  of `$TMPDIR` or where the checkout itself lives (unlike the ad hoc
+  `target/`-relative workaround some of these tests already had, which still
+  fails if the checkout is placed under a denylisted prefix). RAII `TempDir`
+  cleanup plus a best-effort 24h staleness sweep keep `$HOME` tidy.
 - **Staged-write-then-swap for the periodic HNSW incremental persister closes
   a crash-safety hole independent of shutdown (issue #3970).**
   `spawn_incremental_persist` used to checkpoint the in-memory HNSW graph

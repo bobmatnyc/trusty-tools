@@ -49,19 +49,9 @@ fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateI
     }
 }
 
-/// Create a temp directory under `target/` (never in the hard denylist) with
-/// RAII cleanup, returning its canonical path.
-fn temp_root(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let cwd = std::env::current_dir().expect("cwd");
-    let base = cwd.join("target");
-    std::fs::create_dir_all(&base).expect("create target/");
-    let dir = tempfile::Builder::new()
-        .prefix(prefix)
-        .tempdir_in(&base)
-        .expect("create tempdir");
-    let canonical = dir.path().canonicalize().expect("canonicalize tempdir");
-    (dir, canonical)
-}
+// Allowlist-safe temp roots come from `super::test_support::allowlisted_index_root`
+// — see that module for why a checkout-relative `target/` dir is not enough
+// (issue #3955).
 
 /// Build a fresh, empty registry with a mock embedder installed — enough for
 /// `create_index_handler` / `relocate_index_handler` to run without a live
@@ -81,7 +71,7 @@ async fn mock_state_async() -> Arc<SearchAppState> {
 #[tokio::test]
 async fn create_index_rejects_duplicate_root_path() {
     let state = mock_state_async().await;
-    let (_dir, root) = temp_root("ts-2336-dup-root-");
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-2336-dup-root-");
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
@@ -124,7 +114,7 @@ async fn create_index_rejects_duplicate_root_path() {
 #[tokio::test]
 async fn create_index_same_id_same_root_is_idempotent_not_a_collision() {
     let state = mock_state_async().await;
-    let (_dir, root) = temp_root("ts-2336-idempotent-");
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-2336-idempotent-");
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
@@ -153,8 +143,8 @@ async fn create_index_same_id_same_root_is_idempotent_not_a_collision() {
 #[tokio::test]
 async fn create_index_distinct_roots_both_succeed() {
     let state = mock_state_async().await;
-    let (_dir_a, root_a) = temp_root("ts-2336-distinct-a-");
-    let (_dir_b, root_b) = temp_root("ts-2336-distinct-b-");
+    let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-2336-distinct-a-");
+    let (_dir_b, root_b) = super::test_support::allowlisted_index_root("ts-2336-distinct-b-");
 
     let a = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
@@ -185,8 +175,8 @@ async fn relocate_index_rejects_root_path_owned_by_another_index() {
     use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
 
     let state = mock_state_async().await;
-    let (_dir_a, root_a) = temp_root("ts-2336-relocate-a-");
-    let (_dir_b, root_b) = temp_root("ts-2336-relocate-b-");
+    let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-2336-relocate-a-");
+    let (_dir_b, root_b) = super::test_support::allowlisted_index_root("ts-2336-relocate-b-");
 
     let create_a = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
@@ -242,7 +232,7 @@ async fn relocate_index_onto_own_current_root_is_not_a_collision() {
     use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
 
     let state = mock_state_async().await;
-    let (_dir, root) = temp_root("ts-2336-relocate-self-");
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-2336-relocate-self-");
 
     let create = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
@@ -280,7 +270,7 @@ async fn relocate_index_onto_own_current_root_is_not_a_collision() {
 #[tokio::test]
 async fn create_index_concurrent_same_root_only_one_wins() {
     let state = mock_state_async().await;
-    let (_dir, root) = temp_root("ts-2336-race-");
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-2336-race-");
 
     let state_a = Arc::clone(&state);
     let root_a = root.clone();
@@ -328,7 +318,7 @@ async fn create_index_concurrent_same_root_only_one_wins() {
 #[tokio::test]
 async fn create_index_rejects_case_variant_of_registered_root() {
     let state = mock_state_async().await;
-    let (_dir, root) = temp_root("TS-2336-CaseVariant-");
+    let (_dir, root) = super::test_support::allowlisted_index_root("TS-2336-CaseVariant-");
 
     let first = super::indexes::create_index_handler(
         State(Arc::clone(&state)),
