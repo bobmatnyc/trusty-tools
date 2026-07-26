@@ -906,6 +906,88 @@ fn bash_targets_trust_anchor_detects_cp_mv_install() {
 }
 
 #[test]
+fn bash_targets_trust_anchor_detects_ln() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    for cmd in [
+        // Symlink form — the LINKNAME (destination) is the dangerous
+        // position: Claude Code reads through the symlink on its next
+        // config load and applies the attacker/PM-controlled source's `env`
+        // block (issue #3994 critical finding).
+        format!("ln -sf /tmp/evil.json {target_s}"),
+        format!("ln -s /tmp/evil.json {target_s}"),
+        // Hardlink form.
+        format!("ln /tmp/evil.json {target_s}"),
+        // Reading the trust anchor as the symlink SOURCE is also caught
+        // (same deliberate over-inclusion as cp/mv/install).
+        format!("ln -sf {target_s} /tmp/exfil.json"),
+    ] {
+        assert!(
+            bash_targets_trust_anchor(&cmd),
+            "expected ln detection for: {cmd}"
+        );
+    }
+
+    assert!(!bash_targets_trust_anchor("ln -sf /tmp/a.txt /tmp/b.txt"));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_git_mv() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    for cmd in [
+        format!("git mv evil.json {target_s}"),
+        // Global `-C <path>` flag before the subcommand must not hide it.
+        format!("git -C /some/repo mv evil.json {target_s}"),
+        // Reading the trust anchor as the rename SOURCE is also caught.
+        format!("git mv {target_s} /tmp/exfil.json"),
+    ] {
+        assert!(
+            bash_targets_trust_anchor(&cmd),
+            "expected git mv detection for: {cmd}"
+        );
+    }
+
+    assert!(!bash_targets_trust_anchor("git mv src/a.rs src/b.rs"));
+    // `git apply`/other subcommands must not be mistaken for `mv`.
+    assert!(!bash_targets_trust_anchor("git status"));
+}
+
+#[test]
+fn bash_targets_trust_anchor_detects_xargs_indirection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    for cmd in [
+        format!("echo /tmp/evil.json | xargs -I{{}} cp {{}} {target_s}"),
+        format!("find /tmp -name evil.json | xargs -I{{}} cp {{}} {target_s}"),
+    ] {
+        assert!(
+            bash_targets_trust_anchor(&cmd),
+            "expected xargs indirection detection for: {cmd}"
+        );
+    }
+
+    // A benign xargs invocation with no trust-anchor token anywhere on the
+    // line must not be denied.
+    assert!(!bash_targets_trust_anchor(
+        "echo /tmp/a.txt | xargs -I{} cp {} /tmp/b.txt"
+    ));
+    // The known, documented residual gap: the path arriving purely via
+    // stdin (not spelled out literally on the command line) is NOT caught —
+    // this asserts the honest boundary rather than silently relying on it.
+    assert!(!bash_targets_trust_anchor("cat paths.txt | xargs rm"));
+}
+
+#[test]
 fn non_flag_tokens_skips_program_and_flags() {
     assert_eq!(non_flag_tokens("cp a b"), vec!["a", "b"]);
     assert_eq!(non_flag_tokens("cp -r a b"), vec!["a", "b"]);

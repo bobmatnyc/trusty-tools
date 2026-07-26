@@ -169,21 +169,36 @@ const GIT_GLOBAL_OPTS_WITH_ARG: &[&str] = &[
 /// Resolve the real `git` subcommand of a single pipeline segment.
 ///
 /// Why (issue #2734): the guard must recognise an allowlisted git subcommand
-/// (`commit`, `status`, …) — and the one forbidden one (`apply`) — through any
-/// leading git global flags, which the earlier two-token `effective_tool_name`
-/// matcher could not see past. Parsing the argv properly closes both the
-/// `git -C <path> commit` false positive and the `git -C <path> apply`
-/// false negative.
-/// What: shlex-splits `segment` (quote-aware; `None` on unbalanced quotes →
-/// caller falls back), skips leading `KEY=value`/`sudo`/`env` prefixes, requires
-/// the program basename to be `git`, then walks past global options — those in
-/// [`GIT_GLOBAL_OPTS_WITH_ARG`] consume an extra token, `=`-joined long options
-/// consume none, other dash-prefixed tokens are valueless global flags — and
-/// returns the first non-option token (the subcommand). `None` when the segment
-/// is not `git`, is unparseable, or has no subcommand after the options.
+/// (`commit`, `status`, …) — and the forbidden ones (`apply`, `mv` — issue
+/// #3981/#3994) — through any leading git global flags, which the earlier
+/// two-token `effective_tool_name` matcher could not see past. Parsing the
+/// argv properly closes both the `git -C <path> commit` false positive and
+/// the `git -C <path> apply` false negative.
+/// What: thin wrapper over [`git_subcommand_with_args`] that discards the
+/// remaining argv and keeps just the subcommand name, for the (still common)
+/// callers that only need to know WHICH subcommand ran.
 /// Test: `git_subcommand_skips_global_flags`, `git_subcommand_plain`,
 /// `git_subcommand_none_for_non_git`, `git_subcommand_none_when_unbalanced`.
 pub(super) fn git_subcommand(segment: &str) -> Option<String> {
+    git_subcommand_with_args(segment).map(|(sub, _)| sub)
+}
+
+/// Resolve the real `git` subcommand of a single pipeline segment AND its
+/// remaining argv tail (everything after the subcommand token, flags
+/// included) — issue #3981/#3994.
+///
+/// Why: `git apply`'s target is conventionally its trailing token
+/// ([`trailing_file_token`] in the parent module handles that), but `git mv
+/// SRC DST` takes two POSITIONAL arguments after the subcommand, the same
+/// shape `cp`/`mv`/`install`/`ln` do — a caller needs the subcommand's own
+/// argv slice (not the whole segment's whitespace tokens, which would still
+/// include any leading `git -C <path>` global-flag noise) to scan those
+/// positions the same way [`super::non_flag_tokens`] scans `cp`/`mv`.
+/// What: identical parse to [`git_subcommand`] but returns
+/// `(subcommand, argv[after_subcommand..])` instead of discarding the tail.
+/// Test: `git_subcommand_with_args_returns_tail`,
+/// `git_subcommand_with_args_skips_global_flags`.
+pub(super) fn git_subcommand_with_args(segment: &str) -> Option<(String, Vec<String>)> {
     let argv = shlex::split(segment)?;
     let mut i = 0;
     // Skip env-assignment / sudo / env prefixes (mirrors first_command_token).
@@ -239,7 +254,7 @@ pub(super) fn git_subcommand(segment: &str) -> Option<String> {
             i += 1;
             continue;
         }
-        return Some(tok.clone());
+        return Some((tok.clone(), argv[i + 1..].to_vec()));
     }
     None
 }
@@ -365,5 +380,24 @@ mod tests {
             git_subcommand("/usr/bin/git -C /p commit").as_deref(),
             Some("commit")
         );
+    }
+
+    #[test]
+    fn git_subcommand_with_args_returns_tail() {
+        let (sub, rest) = git_subcommand_with_args("git mv a.json b.json").unwrap();
+        assert_eq!(sub, "mv");
+        assert_eq!(rest, vec!["a.json".to_string(), "b.json".to_string()]);
+    }
+
+    #[test]
+    fn git_subcommand_with_args_skips_global_flags() {
+        let (sub, rest) = git_subcommand_with_args("git -C /repo mv a.json b.json").unwrap();
+        assert_eq!(sub, "mv");
+        assert_eq!(rest, vec!["a.json".to_string(), "b.json".to_string()]);
+    }
+
+    #[test]
+    fn git_subcommand_with_args_none_for_non_git() {
+        assert!(git_subcommand_with_args("mv a b").is_none());
     }
 }

@@ -822,6 +822,58 @@ fn pm_guard_cp_settings_json_denial_is_not_budget_eligible() {
 }
 
 #[test]
+fn pm_guard_denies_settings_json_write_via_bash_ln() {
+    // `ln -sf TARGET LINKNAME` writes its destination as a plain positional
+    // ARGUMENT (the LINKNAME, second token) — the #3994 review's critical
+    // finding: an unclassified `ln` was a complete, zero-friction bypass of
+    // the whole feature (write attacker content anywhere, then symlink it
+    // over the trust anchor so Claude Code reads through it next load).
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ln -sf /tmp/evil.json /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_bash_ln_under_subagent_payload() {
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","agent_type":"rust-engineer","tool_name":"Bash","tool_input":{"command":"ln -sf /tmp/evil.json /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_ln_settings_json_denial_is_not_budget_eligible() {
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ln -sf /tmp/evil.json /some/repo/.claude/settings.json"}}"#;
+    for _ in 1..=4 {
+        assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_git_mv() {
+    // `git mv SRC DST` — a two-token verb whose subcommand shifts the
+    // positional layout (issue #3994 HIGH finding, undisclosed in the
+    // original PR).
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git mv evil.json /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_git_mv_under_subagent_payload() {
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","agent_type":"rust-engineer","tool_name":"Bash","tool_input":{"command":"git mv evil.json /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_git_mv_settings_json_denial_is_not_budget_eligible() {
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git mv evil.json /some/repo/.claude/settings.json"}}"#;
+    for _ in 1..=4 {
+        assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
 fn pm_guard_denies_settings_json_write_via_bash_under_subagent_payload() {
     let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","tool_name":"Bash","tool_input":{"command":"echo x > /some/repo/.claude/settings.json"}}"#;
     assert_denied(&run_pm_guard(payload, &[]));

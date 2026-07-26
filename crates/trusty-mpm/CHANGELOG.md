@@ -9,8 +9,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **`tm hook --pm-guard` now denies any write to its own trust anchor**
-  ([#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981)): a direct
+- **`tm hook --pm-guard` now denies the EASY, naive writes to its own trust
+  anchor** ([#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981),
+  hardened per the [#3994](https://github.com/bobmatnyc/trusty-tools/pull/3994)
+  adversarial review — see the honesty note below): a direct
   `Write`/`Edit`/`MultiEdit`/`NotebookEdit` targeting `.claude/settings.json`,
   `.claude/settings.local.json`, or the `$CLAUDE_CONFIG_DIR` global
   equivalent was previously an unconditional, unbudgeted ALLOW (`.json` is
@@ -28,16 +30,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   own); `evaluate_edit_tool`, as defense in depth; and
   `pm_guard_bash::evaluate_bash_command`/`bash_targets_trust_anchor`, closing
   the equivalent shell route (`echo … > .claude/settings.json`, `tee`,
-  `sed -i`, `awk`, `patch`, `git apply`) as an absolute,
-  non-budget-eligible deny rather than the ordinary budget-eligible
-  `SHELL_EDIT_REASON`. The deny message does not suggest delegating via the
-  Task/Agent tool (a dispatched subagent is denied identically) — the only
-  remedies are a human operator editing the file directly outside the
-  guarded session, or setting `TRUSTY_MPM_PM_UNRESTRICTED=1` in their own
-  shell. Known residual gap: a trust-anchor write hidden inside a `$(…)`/
-  backtick Bash command substitution is not specially detected by the new
-  absolute check (it still denies, via the pre-existing substitution scan,
-  but as the budget-eligible `SHELL_EDIT_REASON`).
+  `sed -i`, `awk`, `patch`, `git apply`, `cp`/`mv`/`install`, `ln`/`ln -s`,
+  `git mv`, and an `xargs`-indirected verb whose target is spelled out
+  literally on the command line) as an absolute, non-budget-eligible deny
+  rather than the ordinary budget-eligible `SHELL_EDIT_REASON`. The deny
+  message does not suggest delegating via the Task/Agent tool (a dispatched
+  subagent is denied identically) — the only remedies are a human operator
+  editing the file directly outside the guarded session, or setting
+  `TRUSTY_MPM_PM_UNRESTRICTED=1` in their own shell.
+
+  **Honesty note (this is not a hardened security boundary):** this closes
+  the easy/naive self-exemption paths — the ordinary shell verbs a PM would
+  reach for without specifically probing for a gap — and raises the bar
+  against accidental or unsophisticated self-exemption. It is **not** a
+  security boundary against a party with unrestricted Bash access.
+  Documented, tracked-open residual gaps: (1) a trust-anchor write hidden
+  inside a `$(…)`/backtick command substitution still denies, but only as the
+  budget-eligible `SHELL_EDIT_REASON`, not this absolute deny; (2) a write
+  performed by an interpreter's inline program text (`python3 -c "…"`,
+  `perl -e`, `node -e`, `dd of=…`, `rsync … dest`, a re-invoked
+  `bash -c "…"`) or a runtime-assembled path (concatenation, base64, an env
+  var) is not detected at all — no static token scan can enumerate these;
+  (3) `xargs` whose target arrives purely via stdin, rather than appearing
+  literally on the command line, is likewise invisible to the new `xargs`
+  handling. A determined actor with Bash access can defeat this guard; it is
+  a guardrail against going off-script, not a hardened boundary. Also
+  documented as a deliberate, accepted trade-off (not an oversight): because
+  the `cp`/`mv`/`install`/`ln` scan checks source AND destination positions,
+  `cp .claude/settings.json /tmp/backup.json` — a harmless read/backup — is
+  denied absolutely too; narrowing to destination-only risks miscounting
+  `cp`'s N-arg-plus-directory form in the dangerous direction, so the
+  over-inclusion is kept on purpose.
 
 - **`pm_guard_bash::bash_targets_trust_anchor` now also catches `cp`/`mv`/
   `install` writes to the trust anchor**
