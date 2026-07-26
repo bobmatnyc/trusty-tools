@@ -44,7 +44,11 @@ const RELAY_TOKEN_HEADER: &str = "x-relay-token";
 
 /// Honest reply-speaker label. The bot always replies AS ITSELF — there is no
 /// "as-Bob" impersonation mode in code, so the mirror must never claim one.
-pub(super) const BOT_IDENTITY: &str = "CTO Bot (as itself)";
+///
+/// #3761: `pub(crate)` (re-exported as `crate::slack::BOT_IDENTITY`) because
+/// the `--api` process's relay endpoint validates every inbound
+/// `SlackReplySent.identity` against this exact value.
+pub(crate) const BOT_IDENTITY: &str = "CTO Bot (as itself)";
 
 /// Render an RBAC `ServiceTier` as its snake_case badge label.
 ///

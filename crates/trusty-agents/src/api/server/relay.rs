@@ -9,9 +9,11 @@
 //! re-publishes it locally — a minimal relay.
 //! What: `POST /api/internal/relay-event` accepts one JSON `Event` ONLY when the
 //! caller presents the shared relay secret (`x-relay-token` header matching the
-//! `TAGENT_RELAY_TOKEN` env on this process); it then rejects any kind that is
-//! not a `Slack*` mirror event (whitelist) and any `SlackMessageReceived` whose
-//! `tier` is not a known `ServiceTier`, and publishes what survives. The route
+//! `TAGENT_RELAY_TOKEN` env on this process, compared in constant time —
+//! #3761); it then rejects any kind that is not a `Slack*` mirror event
+//! (whitelist), any `SlackMessageReceived` whose `tier` is not a known
+//! `ServiceTier`, and any `SlackReplySent` whose `identity` is not the one
+//! honest bot label (#3761), and publishes what survives. The route
 //! also inherits the router-wide same-origin write guard + optional bearer auth
 //! from `routes::build_router_with_origins`, but the mandatory shared secret is
 //! the load-bearing control: the origin guard fails OPEN for absent-`Origin`
@@ -23,6 +25,7 @@
 //! `relay_rejects_wrong_token`, `relay_rejects_when_token_unset_server_side`,
 //! `relay_rejects_non_slack_kind`, `relay_rejects_unknown_tier`,
 //! `relay_rejects_malformed_body`, `relay_authorized_fails_closed_when_unset`,
+//! `relay_rejects_unknown_identity`, `relay_accepts_honest_identity`,
 //! `tier_is_known_accepts_the_closed_set` in `super::tests::relay`.
 
 use axum::{
@@ -30,6 +33,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
+use subtle::ConstantTimeEq;
 
 use crate::events::{self, Event};
 
@@ -48,14 +52,47 @@ pub(super) const RELAY_TOKEN_ENV: &str = "TAGENT_RELAY_TOKEN";
 /// of a configured secret must therefore DENY, never allow.
 /// What: Returns `true` only when `expected` is present and non-empty AND
 /// `provided` equals it exactly. Any `None`/empty `expected` (secret not
-/// configured server-side) → `false`.
+/// configured server-side) → `false`. #3761: the byte comparison is
+/// constant-time (`subtle::ConstantTimeEq`) rather than `==`, whose
+/// short-circuit on the first differing byte leaks the length of the matching
+/// prefix to a caller that can time its own requests. The length check that
+/// precedes it is deliberately NOT constant-time: a token's length is already
+/// observable from the request frame, so only its BYTES are secret.
 /// Test: `relay_authorized_fails_closed_when_unset`,
 /// `relay_authorized_requires_exact_match`.
 pub(super) fn relay_authorized(expected: Option<&str>, provided: Option<&str>) -> bool {
-    match expected {
-        Some(exp) if !exp.is_empty() => provided == Some(exp),
-        _ => false,
+    // #3761: fail closed on an unset/empty server-side secret before any
+    // comparison happens.
+    let Some(exp) = expected.filter(|e| !e.is_empty()) else {
+        return false;
+    };
+    let Some(got) = provided else {
+        return false;
+    };
+    // #3761: length is not secret; differing lengths can never be equal, and
+    // `ct_eq` requires equal-length slices anyway.
+    if exp.len() != got.len() {
+        return false;
     }
+    exp.as_bytes().ct_eq(got.as_bytes()).into()
+}
+
+/// Whether `identity` is the ONE honest reply-speaker label. (#3761)
+///
+/// Why: `identity` is rendered verbatim by the mirror pane as "who said this",
+/// and the relay published it unchecked — any holder of the shared token (or a
+/// buggy gateway build) could stamp a reply with a fabricated speaker such as
+/// "Masa" or "CTO Bot (as Bob)", which is exactly the impersonation the pane's
+/// honesty contract forbids. The server knows the only truthful value, so it
+/// validates rather than trusts, mirroring the closed-set `tier` check on the
+/// inbound half.
+/// What: `true` iff `identity` is exactly `slack::BOT_IDENTITY` — the bot
+/// always replies AS ITSELF; there is no impersonation mode in code, so there
+/// is no second legitimate value to admit.
+/// Test: `identity_is_honest_accepts_only_the_bot_label`,
+/// `relay_rejects_unknown_identity`, `relay_accepts_honest_identity`.
+pub(super) fn identity_is_honest(identity: &str) -> bool {
+    identity == crate::slack::BOT_IDENTITY
 }
 
 /// Whether `tier` names a known `ServiceTier` (the closed RBAC set).
@@ -76,14 +113,17 @@ pub(super) fn tier_is_known(tier: &str) -> bool {
 ///
 /// Why: See the module doc — the whitelist bounds WHICH events can be injected;
 /// the shared secret bounds WHO can inject them (fail closed); the tier check
-/// bounds what a badge can claim.
+/// bounds what an inbound badge can claim; the identity check (#3761) bounds
+/// what a reply can claim to be spoken by.
 /// What: `401` when the secret is unset server-side or the `x-relay-token`
 /// header is missing/wrong; `400` for a well-formed non-`Slack*` event; `422`
-/// for an unknown tier (or a body that does not deserialize to `Event`, via the
-/// `Json` extractor); `202 Accepted` + publish otherwise.
+/// for an unknown tier, a dishonest reply identity, or a body that does not
+/// deserialize to `Event` (via the `Json` extractor); `202 Accepted` + publish
+/// otherwise.
 /// Test: `relay_accepts_with_matching_token`, `relay_rejects_missing_token`,
 /// `relay_rejects_wrong_token`, `relay_rejects_when_token_unset_server_side`,
-/// `relay_rejects_non_slack_kind`, `relay_rejects_unknown_tier`.
+/// `relay_rejects_non_slack_kind`, `relay_rejects_unknown_tier`,
+/// `relay_rejects_unknown_identity`, `relay_accepts_honest_identity`.
 pub(super) async fn relay_event_handler(headers: HeaderMap, Json(event): Json<Event>) -> Response {
     // Mandatory shared-secret gate (fail closed).
     let expected = std::env::var(RELAY_TOKEN_ENV).ok();
@@ -114,7 +154,18 @@ pub(super) async fn relay_event_handler(headers: HeaderMap, Json(event): Json<Ev
             events::publish(event);
             StatusCode::ACCEPTED.into_response()
         }
-        Event::SlackReplySent { .. } => {
+        Event::SlackReplySent { identity, .. } => {
+            // #3761: the reply's speaker label was published unchecked; the
+            // server knows the single honest value, so reject anything else
+            // rather than let the pane render a forged identity. Mirrors the
+            // unknown-tier rejection above.
+            if !identity_is_honest(identity) {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({ "error": "unknown reply identity" })),
+                )
+                    .into_response();
+            }
             events::publish(event);
             StatusCode::ACCEPTED.into_response()
         }

@@ -5,7 +5,8 @@
 //! security-relevant: it is the load-bearing honesty control for the mirror
 //! pane, so it must FAIL CLOSED without the shared secret, reject a wrong/
 //! missing token, accept only with a matching token, then accept only the two
-//! `Slack*` kinds with a known RBAC tier. These cases lock that contract.
+//! `Slack*` kinds with a known RBAC tier and (#3761) an honest reply identity.
+//! These cases lock that contract.
 //! What: oneshots the endpoint on a default (loopback-only) router — the origin
 //! guard fails open on the absent `Origin` header (the real server-to-server
 //! posture), so the shared-secret gate is what actually protects the route.
@@ -20,7 +21,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
-use crate::api::server::relay::{relay_authorized, tier_is_known};
+use crate::api::server::relay::{identity_is_honest, relay_authorized, tier_is_known};
 use crate::api::server::routes::build_router;
 use crate::api::server::state::AppState;
 use crate::events;
@@ -67,6 +68,47 @@ fn inbound_body(tier: &str) -> String {
         tier: tier.into(),
     })
     .unwrap()
+}
+
+/// #3761: a reply-half body carrying an arbitrary speaker label.
+fn reply_body(channel: &str, identity: &str) -> String {
+    serde_json::to_string(&events::Event::SlackReplySent {
+        channel: channel.into(),
+        text: "all green".into(),
+        identity: identity.into(),
+    })
+    .unwrap()
+}
+
+/// Drain everything currently queued for `rx` on the process-global bus,
+/// reporting how many events the channel dropped underneath us.
+///
+/// Why: `while let Ok(ev) = rx.try_recv()` — the idiom these tests used — stops
+/// at the FIRST `Err`, and `TryRecvError::Lagged(n)` IS an `Err`. On a busy bus
+/// (every other test in this binary publishes to the same global channel) that
+/// silently truncates the drain. In a positive test that is a flake; in a
+/// negative test asserting "nothing reached the bus" it is worse — the
+/// assertion passes VACUOUSLY in exactly the case where events were dropped
+/// unseen. Continuing past `Lagged` and surfacing the count lets a caller
+/// refuse to conclude anything from a truncated view.
+/// What: Returns `(events, skipped)`; `skipped` totals the events the broadcast
+/// channel reported as dropped for this receiver. Stops on `Empty`/`Closed`.
+/// Test: used by `relay_accepts_with_matching_token`,
+/// `relay_accepts_honest_identity`, `relay_rejects_unknown_identity`.
+fn drain_bus(
+    rx: &mut tokio::sync::broadcast::Receiver<events::Event>,
+) -> (Vec<events::Event>, u64) {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut drained = Vec::new();
+    let mut skipped = 0u64;
+    loop {
+        match rx.try_recv() {
+            Ok(ev) => drained.push(ev),
+            Err(TryRecvError::Lagged(n)) => skipped += n,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+        }
+    }
+    (drained, skipped)
 }
 
 // -- shared-secret gate (fail closed) ---------------------------------------
@@ -121,19 +163,20 @@ async fn relay_accepts_with_matching_token() {
         StatusCode::ACCEPTED
     );
 
-    // The bus is process-global, so drain and find our unique event.
-    let mut found = false;
-    while let Ok(ev) = rx.try_recv() {
-        if let events::Event::SlackMessageReceived { channel, tier, .. } = ev
-            && channel == unique_channel
-        {
-            assert_eq!(tier, "all");
-            found = true;
-        }
-    }
+    // The bus is process-global, so drain and find our unique event. `drain_bus`
+    // survives a `Lagged` notice instead of stopping at it.
+    let (drained, skipped) = drain_bus(&mut rx);
+    let found = drained.iter().any(|ev| {
+        matches!(
+            ev,
+            events::Event::SlackMessageReceived { channel, tier, .. }
+                if channel == unique_channel && tier == "all"
+        )
+    });
     assert!(
         found,
-        "relay did not publish the injected event onto the bus"
+        "relay did not publish the injected event onto the bus \
+         ({skipped} event(s) were dropped by broadcast lag)"
     );
     set_relay_env(None);
 }
@@ -159,6 +202,80 @@ async fn relay_rejects_unknown_tier() {
     // A tier outside the closed ServiceTier set must not become a badge.
     let status = post_relay(&inbound_body("root"), Some("s3cret")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    set_relay_env(None);
+}
+
+// -- #3761: reply identity must be the one honest label --------------------
+
+#[tokio::test]
+async fn relay_rejects_unknown_identity() {
+    let _g = RELAY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_relay_env(Some("s3cret"));
+
+    // Subscribe first so we can prove NOTHING was published, not merely that
+    // the status was 422.
+    let mut rx = events::subscribe();
+    let unique_channel = "C_RELAY_FORGED_IDENTITY";
+
+    // A valid-token holder must still not be able to stamp a reply with a
+    // fabricated speaker — that is the impersonation the pane forbids.
+    for forged in ["CTO Bot (as Bob)", "Masa", "", "cto bot (as itself)"] {
+        assert_eq!(
+            post_relay(&reply_body(unique_channel, forged), Some("s3cret")).await,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "identity {forged:?} must be rejected"
+        );
+    }
+
+    let (drained, skipped) = drain_bus(&mut rx);
+    // A truncated view cannot prove absence. If the bus lagged, FAIL rather
+    // than let "nothing reached the bus" pass vacuously.
+    assert_eq!(
+        skipped, 0,
+        "the bus dropped {skipped} event(s); this test cannot prove the forged \
+         reply was absent from a truncated view"
+    );
+    for ev in &drained {
+        if let events::Event::SlackReplySent {
+            channel, identity, ..
+        } = ev
+        {
+            assert_ne!(
+                channel, unique_channel,
+                "a forged-identity reply reached the bus (identity {identity:?})"
+            );
+        }
+    }
+    set_relay_env(None);
+}
+
+#[tokio::test]
+async fn relay_accepts_honest_identity() {
+    let _g = RELAY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    set_relay_env(Some("s3cret"));
+
+    let mut rx = events::subscribe();
+    let unique_channel = "C_RELAY_HONEST_IDENTITY";
+    let body = reply_body(unique_channel, crate::slack::BOT_IDENTITY);
+
+    assert_eq!(
+        post_relay(&body, Some("s3cret")).await,
+        StatusCode::ACCEPTED
+    );
+
+    let (drained, skipped) = drain_bus(&mut rx);
+    let found = drained.iter().any(|ev| {
+        matches!(
+            ev,
+            events::Event::SlackReplySent { channel, identity, .. }
+                if channel == unique_channel && identity == crate::slack::BOT_IDENTITY
+        )
+    });
+    assert!(
+        found,
+        "the honest reply was not published onto the bus \
+         ({skipped} event(s) were dropped by broadcast lag)"
+    );
     set_relay_env(None);
 }
 
@@ -189,6 +306,44 @@ fn relay_authorized_requires_exact_match() {
     assert!(relay_authorized(Some("abc"), Some("abc")));
     assert!(!relay_authorized(Some("abc"), Some("abcd")));
     assert!(!relay_authorized(Some("abc"), None));
+
+    // #3761: the compare is now constant-time (`subtle::ConstantTimeEq`).
+    // Correctness must be identical to the `==` it replaced, so pin the cases
+    // a length-first / byte-loop implementation is most likely to get wrong.
+    // Shorter, longer, and equal-length-but-different provided values:
+    assert!(!relay_authorized(Some("abc"), Some("ab")));
+    assert!(!relay_authorized(Some("abc"), Some("abd")));
+    assert!(!relay_authorized(Some("abc"), Some("")));
+    // Differs only in the LAST byte (the case `==`'s short-circuit made
+    // slowest to reject) and only in the FIRST (the fastest):
+    assert!(!relay_authorized(
+        Some("s3cret-token"),
+        Some("s3cret-tokeN")
+    ));
+    assert!(!relay_authorized(
+        Some("s3cret-token"),
+        Some("S3cret-token")
+    ));
+    // Long exact match still succeeds, and multi-byte UTF-8 is compared by
+    // bytes without panicking on a char boundary.
+    assert!(relay_authorized(
+        Some("a-fairly-long-shared-secret-0123456789"),
+        Some("a-fairly-long-shared-secret-0123456789")
+    ));
+    assert!(relay_authorized(Some("tökén-π"), Some("tökén-π")));
+    assert!(!relay_authorized(Some("tökén-π"), Some("tökén-ω")));
+}
+
+#[test]
+fn identity_is_honest_accepts_only_the_bot_label() {
+    // #3761: exactly one honest value — the bot always speaks as itself.
+    assert!(identity_is_honest(crate::slack::BOT_IDENTITY));
+    assert!(!identity_is_honest("CTO Bot (as Bob)"));
+    assert!(!identity_is_honest("Masa"));
+    assert!(!identity_is_honest(""));
+    // No case- or whitespace-insensitive near-misses.
+    assert!(!identity_is_honest("cto bot (as itself)"));
+    assert!(!identity_is_honest(" CTO Bot (as itself) "));
 }
 
 #[test]

@@ -56,6 +56,12 @@ pub use pairing::{
     PendingPairs, SENTINEL_PAIRING_CHANNEL_ID, issue_repl_pairing_code, new_pending_pairs,
 };
 pub use rbac::{SlackRbacConfig, SlackUserConfig};
+// #3761: the API process's relay endpoint validates an incoming
+// `SlackReplySent.identity` against the ONE honest speaker label, so the
+// constant must be reachable outside this module. Re-exported (rather than
+// duplicated) so the gateway that stamps it and the server that checks it can
+// never drift apart.
+pub(crate) use relay::BOT_IDENTITY;
 
 /// Max processed envelopes tracked for dedup (LRU-style).
 ///
