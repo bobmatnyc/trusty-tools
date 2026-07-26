@@ -344,6 +344,56 @@ async fn test_load_undersized_hnsw_binary_with_valid_sidecar_returns_none_withou
     );
 }
 
+/// Why (issue #3970 round-2 review, CRITICAL 1 defense-in-depth): a binary
+/// reporting MORE vectors than its paired sidecar's key map describes is
+/// never legitimate under normal operation (every write path inserts the
+/// `id_to_key` entry at-or-before the matching HNSW `add` — see
+/// `UsearchStore::upsert`/`remove`'s doc comments) — it is the exact
+/// signature of a torn `service::reindex::hnsw_swap` staging→live swap whose
+/// binary rename landed without its sidecar rename (the direction the
+/// round-2 fix's sidecar-first rename ordering no longer produces from a
+/// mid-swap crash, but this guard catches it regardless of source). Loading
+/// such a pairing without this guard would restore a `next_key` value that
+/// sits BEHIND vectors already occupying the binary, letting a later
+/// `upsert`'s newly-allocated key collide with — and silently overwrite —
+/// an existing, unrelated vector.
+/// What: saves a small matched (binary, sidecar) pair, keeps that sidecar's
+/// bytes aside, then saves a BIGGER matched pair over the same path, then
+/// restores the SMALL sidecar over the (now bigger) binary — reproducing the
+/// dangerous torn-pairing direction directly. Asserts `load_from` refuses
+/// (`Ok(None)`) rather than silently restoring a corrupt state.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_load_refuses_binary_reporting_more_vectors_than_sidecar_describes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let sidecar_path = path.with_extension("keys.json");
+
+    // A small matched pair first — keep its sidecar bytes aside.
+    let small = UsearchStore::new(4).unwrap();
+    small.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    small.save(&path).await.unwrap();
+    let small_sidecar_bytes = std::fs::read(&sidecar_path).unwrap();
+
+    // A bigger matched pair saved normally over the same path.
+    let big = UsearchStore::new(4).unwrap();
+    big.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    big.upsert("b", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    big.upsert("c", vec![0.0, 0.0, 1.0, 0.0]).await.unwrap();
+    big.save(&path).await.unwrap();
+
+    // Tear the pairing: restore the OLD, smaller sidecar over the CURRENT
+    // (bigger) binary — the dangerous direction.
+    std::fs::write(&sidecar_path, &small_sidecar_bytes).unwrap();
+
+    let loaded = UsearchStore::load_from(&path).await.unwrap();
+    assert!(
+        loaded.is_none(),
+        "a binary reporting MORE vectors than its sidecar describes must never be \
+         trusted — issue #3970 round-2 CRITICAL 1 defense-in-depth guard"
+    );
+}
+
 /// Why (issue #2922 guard precision — the false-positive risk): the
 /// size-floor guard scales with the sidecar's own claimed vector count/dim
 /// specifically so it never rejects a genuinely tiny, valid snapshot — this

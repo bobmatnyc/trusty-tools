@@ -91,6 +91,17 @@ pub fn colocated_redb_tmp_path(root_path: &Path) -> Result<PathBuf> {
     Ok(colocated_storage_dir(root_path)?.join("index.redb.tmp"))
 }
 
+/// Path to the staging HNSW snapshot inside the colocated storage dir
+/// (issue #3970).
+///
+/// Why: mirrors `persistence::hnsw_staging_path` but under the project tree —
+/// see that function's doc for the full staged-write-then-swap rationale.
+/// What: returns `<root_path>/.trusty-search/hnsw.reindex-staging.usearch`.
+/// Test: covered indirectly by the colocated-index integration tests.
+pub fn colocated_hnsw_staging_path(root_path: &Path) -> Result<PathBuf> {
+    Ok(colocated_storage_dir(root_path)?.join("hnsw.reindex-staging.usearch"))
+}
+
 /// True iff a colocated storage dir exists for the given root.
 ///
 /// Why: used by the discovery scanner to identify project roots that have

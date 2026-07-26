@@ -28,6 +28,7 @@ use super::finish::{BatchTotals, FileHashes, FinishCtx};
 use super::guard::ReindexTerminationGuard;
 use super::hash::hashes_for;
 use super::hash_cache;
+use super::hnsw_swap::begin_staged_hnsw_swap;
 use super::progress::{ReindexProgress, ReindexStatus};
 use super::quarantine::ReindexQuarantine;
 use super::semaphore::{index_semaphore, reindex_semaphore_for, BACKGROUND_QUEUE_DEPTH};
@@ -332,6 +333,17 @@ pub(super) async fn run_reindex(
             None
         };
 
+    // Issue #3970: stage the periodic HNSW snapshot too, mirroring the redb
+    // corpus staging above. Unlike the corpus (staged only when a durable
+    // corpus store exists), this is unconditional — cheap (path resolution +
+    // one atomic flag flip) and safe even for a BM25-only indexer with no
+    // vector store, where the periodic persister's HNSW save is already a
+    // harmless no-op. A `None` here (path unresolvable) is a degraded-but-
+    // not-worse fallback: `spawn_incremental_persist` never learns
+    // `reindexing` was set, so it keeps writing straight to the live path
+    // exactly as it did before this fix.
+    let hnsw_swap_paths = begin_staged_hnsw_swap(&handle, &index_id).await;
+
     // Per-subsystem timing accumulators.
     let mut total_parse_ms: u64 = 0;
     let mut total_embed_ms: u64 = 0;
@@ -524,6 +536,7 @@ pub(super) async fn run_reindex(
         started,
         defer_embed: ctx.defer_embed,
         corpus_swap_tmp,
+        hnsw_swap_paths,
         mem_abort,
         peak_rss_atomic,
         peak_embedderd_rss_atomic,

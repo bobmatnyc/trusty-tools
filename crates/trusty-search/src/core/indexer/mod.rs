@@ -393,6 +393,34 @@ pub(crate) struct PersistState {
     /// (issue #29). Only every [`HNSW_SNAPSHOT_BATCH_INTERVAL`] batches is
     /// the HNSW snapshot actually spawned.
     pub(crate) batch_counter: AtomicU32,
+    /// `true` while a reindex batch loop is actively populating this indexer
+    /// (issue #3970 — staged-write-then-swap for the HNSW snapshot).
+    ///
+    /// Why: `spawn_incremental_persist`'s periodic checkpoint used to publish
+    /// straight to the LIVE HNSW snapshot on every call, including mid-reindex
+    /// ones where the in-memory graph is, by construction, not yet the
+    /// reindex's final output. Reindex progress is monotonic, so any
+    /// reasonably large reindex crossed the `save()` shrink guard's 50%
+    /// threshold as ordinary healthy progress — from that checkpoint on, the
+    /// complete pre-reindex snapshot was already gone, and an ungraceful
+    /// termination (SIGKILL/OOM-kill/abort/power loss) permanently stranded
+    /// the index. This flag lets the periodic persister redirect its
+    /// checkpoints to a staging path instead while it's set, so the live
+    /// snapshot is only ever replaced by one atomic rename, at the moment the
+    /// reindex orchestrator (`service::reindex::hnsw_swap`) commits.
+    /// What: set by `CodeIndexer::begin_reindex_staging` (called from
+    /// `service::reindex::hnsw_swap::begin_staged_hnsw_swap` at the start of
+    /// a reindex, alongside the existing redb corpus staging) and cleared by
+    /// `CodeIndexer::end_reindex_staging` once the reindex orchestrator has
+    /// resolved (committed or rolled back) the staged snapshot. Read by
+    /// `persist_hnsw::spawn_incremental_persist` to choose between the live
+    /// and staging destination path on every periodic checkpoint — it never
+    /// skips the checkpoint, only redirects it, so incremental crash-safety
+    /// checkpointing during the reindex is fully preserved (the explicitly
+    /// rejected alternative was a skip-while-`Running` gate, which would have
+    /// disabled that checkpointing entirely).
+    /// Test: `tests::persistence_and_search::test_incremental_persist_redirects_to_staging_while_reindexing`.
+    pub(crate) reindexing: AtomicBool,
 }
 
 impl CodeIndexer {
