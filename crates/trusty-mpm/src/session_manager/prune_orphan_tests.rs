@@ -247,6 +247,110 @@ fn find_orphaned_worktrees_covers_base_worktrees_shape() {
     );
 }
 
+// ── #3971: extended `.claude/worktrees` walk (Claude Code native agent
+// worktrees) ──────────────────────────────────────────────────────────────
+
+/// `find_orphaned_worktrees` must ALSO discover Claude Code's native
+/// `.claude/worktrees/agent-<hash>` shape, not just the two trusty-mpm-owned
+/// shapes (#3971 — this walk previously covered ONLY `.worktrees/<name>` and
+/// `.base/.worktrees/<id>`, so every Claude-Code-created agent worktree was
+/// invisible to the orphan-GC, `tm doctor`, and `--dry-run`, letting them
+/// accumulate silently).
+#[test]
+fn find_orphaned_worktrees_covers_claude_worktrees_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let claude_wt = root
+        .join("owner")
+        .join("repo")
+        .join(".claude")
+        .join("worktrees")
+        .join("agent-0123456789abcdef0123456789abcdef01234567");
+    std::fs::create_dir_all(&claude_wt).unwrap();
+    let empty_active: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    let orphans = find_orphaned_worktrees(root, &empty_active);
+    assert!(
+        orphans.contains(&claude_wt),
+        "the .claude/worktrees shape must be discovered as a candidate; got {orphans:?}"
+    );
+}
+
+/// A LIVE (non-orphaned) `.claude/worktrees/agent-<hash>` directory — one
+/// whose canonicalized path IS present in the caller-supplied active set —
+/// must never be returned as an orphan candidate (#3971). Mirrors the
+/// existing `prune_orphaned_worktrees_spares_active` guarantee for the other
+/// two shapes.
+#[test]
+fn find_orphaned_worktrees_spares_live_claude_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let claude_wt = root
+        .join("owner")
+        .join("repo")
+        .join(".claude")
+        .join("worktrees")
+        .join("agent-fedcba9876543210fedcba9876543210fedcba98");
+    std::fs::create_dir_all(&claude_wt).unwrap();
+    let active: std::collections::HashSet<_> =
+        vec![std::fs::canonicalize(&claude_wt).unwrap_or_else(|_| claude_wt.clone())]
+            .into_iter()
+            .collect();
+    let orphans = find_orphaned_worktrees(root, &active);
+    assert!(
+        orphans.is_empty(),
+        "a live .claude/worktrees entry must not be listed as orphan; got {orphans:?}"
+    );
+}
+
+/// Even when discovered as an orphan CANDIDATE by the walk, a
+/// `.claude/worktrees/agent-<hash>` directory is never created by
+/// trusty-mpm's own provisioning code, so it never carries the
+/// `.trusty-mpm-worktree` ownership sentinel. The existing #3649 ownership
+/// gate therefore classifies it as `SentinelOwner::Unknown` and the full
+/// `prune_orphaned_worktrees` sweep must NEVER auto-delete it — only report
+/// it via `OrphanSweepOutcome::owner_unknown`, exactly like any other
+/// legacy/owner-unknown worktree (#3971).
+#[tokio::test]
+async fn prune_orphaned_worktrees_never_deletes_claude_native_worktree() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repos = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let claude_wt = repos
+        .path()
+        .join("owner")
+        .join("repo")
+        .join(".claude")
+        .join("worktrees")
+        .join("agent-00112233445566778899aabbccddeeff00112233");
+    std::fs::create_dir_all(&claude_wt).unwrap();
+    // Deliberately NO sentinel file written — Claude Code's native
+    // `isolation: "worktree"` mechanism never writes trusty-mpm's sentinel.
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "a Claude-Code-native worktree must never be auto-deleted; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        outcome.owner_unknown.iter().any(|p| p == &claude_wt),
+        "expected {claude_wt:?} to be reported as owner-unknown; got {:?}",
+        outcome.owner_unknown
+    );
+    assert!(claude_wt.exists(), "worktree dir must survive the prune");
+}
+
 /// A candidate whose ownership sentinel is absent (no `.trusty-mpm-worktree`
 /// file at all — the pre-#3649/legacy shape) is NEVER auto-deleted, and is
 /// counted in [`OrphanSweepOutcome::owner_unknown`] (#3649 item 4b).
