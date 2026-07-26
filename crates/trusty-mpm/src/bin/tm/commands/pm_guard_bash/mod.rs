@@ -90,25 +90,46 @@ pub(crate) fn evaluate_bash_command(command: &str) -> Option<&'static str> {
 ///
 /// Why: a shell redirect (`echo … > .claude/settings.json`, `cat >>`), `tee`
 /// (which takes its output file as an ARGUMENT, not a `>` redirect — invisible
-/// to [`has_file_write_redirection`]/[`redirection_target`]), or `sed -i`/
-/// `awk`/`patch`/`git apply` (whose target is conventionally their trailing
-/// non-flag argument, per [`trailing_file_token`]) can all write the trust
-/// anchor exactly as surely as the `Write`/`Edit` tool. Without this check
-/// those would classify as the ordinary [`SHELL_EDIT_REASON`] — which
-/// `pm_guard`'s per-turn budget (issue #2918) allows up to 3 times BEFORE
-/// hard-blocking — silently reopening the exact hole the Edit/Write-side
-/// trust-anchor denylist closes.
+/// to [`has_file_write_redirection`]/[`redirection_target`]), `sed -i`/`awk`/
+/// `patch`/`git apply` (whose target is conventionally their trailing
+/// non-flag argument, per [`trailing_file_token`]), or `cp`/`mv`/`install`
+/// (whose source AND destination are both plain positional arguments, per
+/// [`non_flag_tokens`]) can all write the trust anchor exactly as surely as
+/// the `Write`/`Edit` tool. Without this check those would classify as the
+/// ordinary [`SHELL_EDIT_REASON`] (or, for `cp`/`mv`/`install`, would not be
+/// classified as a file-edit AT ALL — see the residual-gap note below) —
+/// `pm_guard`'s per-turn budget (issue #2918) allows a `SHELL_EDIT_REASON`
+/// deny up to 3 times BEFORE hard-blocking, silently reopening the exact hole
+/// the Edit/Write-side trust-anchor denylist closes.
 /// What: scans every composition segment ([`split_shell_segments`]) for a
 /// real file-write redirect target ([`redirection_target`]), a `tee`
-/// argument ([`tee_target_tokens`]), or — for the sed/awk-family/`patch`/
-/// `git apply` verbs — the trailing file token ([`trailing_file_token`]),
-/// and returns `true` on the first one [`is_trust_anchor_path`] confirms.
-/// Known residual gap: a trust-anchor write hidden inside a `$(…)`/backtick
-/// command substitution is NOT specially detected by this function (it scans
+/// argument ([`tee_target_tokens`]), a `cp`/`mv`/`install` argument
+/// ([`non_flag_tokens`] — checks EVERY positional token, source included, not
+/// just the destination: `cp .claude/settings.json /tmp/x` reads the trust
+/// anchor into an attacker-controlled sibling path, and being conservative
+/// about ambiguous positional order costs nothing since this check only ever
+/// widens a deny, never an allow), or — for the sed/awk-family/`patch`/
+/// `git apply` verbs — the trailing file token ([`trailing_file_token`]), and
+/// returns `true` on the first one [`is_trust_anchor_path`] confirms.
+/// Known residual gaps, deliberately NOT attempted here because a textual
+/// classifier cannot close them without becoming trivially evadable (a false
+/// sense of security is worse than an honest gap — see the PR description):
+/// (1) a trust-anchor write hidden inside a `$(…)`/backtick command
+/// substitution is not specially detected by this function (it scans
 /// top-level segments only) — such a call still denies, but as the ordinary
 /// budget-eligible `SHELL_EDIT_REASON` via [`classify_command_substitutions`]'s
-/// existing recursive scan, not this absolute deny. Documented, not silently
-/// swept under the rug — see the PR description for the same note.
+/// existing recursive scan, not this absolute deny; (2) a write performed by
+/// an interpreter's *inline program text* rather than the shell itself —
+/// `python3 -c "open('.claude/settings.json','w')…"`, `perl -e …`, `node -e
+/// …`, `ruby -e …`, `dd of=…`, `rsync … dest`, or a re-invoked shell
+/// (`bash -c "…"`, `sh -c "…"`) whose quoted body this function does not
+/// recursively parse — is not detected at all; the path can be assembled at
+/// runtime (concatenation, base64, an env var) in ways no static prefix/token
+/// scan can enumerate. Both gaps are pre-existing properties of
+/// [`evaluate_bash_command`]'s whole classification strategy (neither is
+/// specific to the trust anchor, nor introduced by this function), tracked
+/// for a possible follow-up allowlist-based Bash gate rather than papered
+/// over with a brittle heuristic here.
 /// Test: `bash_targets_trust_anchor_*` below.
 pub(crate) fn bash_targets_trust_anchor(command: &str) -> bool {
     for segment in split_shell_segments(command) {
@@ -132,6 +153,14 @@ pub(crate) fn bash_targets_trust_anchor(command: &str) -> bool {
             }
             continue;
         }
+        if matches!(program, "cp" | "mv" | "install") {
+            for target in non_flag_tokens(trimmed) {
+                if is_trust_anchor_path(target) {
+                    return true;
+                }
+            }
+            continue;
+        }
         let is_sed_awk_family =
             matches!(program, "patch" | "sed" | "awk" | "gawk" | "nawk" | "mawk");
         let is_git_apply =
@@ -144,6 +173,38 @@ pub(crate) fn bash_targets_trust_anchor(command: &str) -> bool {
         }
     }
     false
+}
+
+/// Every non-flag positional argument of a `cp`/`mv`/`install`-headed
+/// segment, source AND destination alike (issue #3981).
+///
+/// Why: unlike `tee` (output-only arguments) or `sed`/`patch` (a single
+/// trailing target), `cp`/`mv`/`install` take BOTH a source and a destination
+/// as plain positional arguments in either the 2-arg (`cp SRC DST`) or
+/// N-arg-plus-directory (`cp SRC1 SRC2 DIR/`, `cp -t DIR SRC1 SRC2`) forms —
+/// there is no single reliable "the target is always token N" rule cheap
+/// enough to be worth getting subtly wrong. Checking every positional token
+/// is simpler and can only widen the deny, never narrow it.
+/// What: the program token (index 0) is skipped; every remaining
+/// whitespace-separated token that does not start with `-` is returned. This
+/// deliberately does NOT track which flags consume a following value token
+/// (`install -m 644 …`, `cp -t DIR …`) — the value token (`644`, `DIR`) is
+/// returned right alongside the real source/destination tokens, exactly as
+/// if it were itself positional. That is harmless, not merely tolerated: the
+/// caller only ever asks "does ANY of these tokens match the trust-anchor
+/// path", so an extra, unrelated candidate token (a numeric mode, a
+/// directory name) can only ever be checked and rejected — it can never
+/// suppress a real match. Trying to enumerate every verb's flag arity so
+/// only the "true" positionals remain would add real complexity for zero
+/// added safety, and would risk getting it subtly wrong in the dangerous
+/// direction (excluding a real destination token by miscounting).
+/// Test: `non_flag_tokens_*`.
+fn non_flag_tokens(command: &str) -> Vec<&str> {
+    command
+        .split_whitespace()
+        .skip(1)
+        .filter(|t| !t.starts_with('-'))
+        .collect()
 }
 
 /// The non-flag argument tokens of a `tee`-headed segment.

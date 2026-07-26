@@ -878,6 +878,48 @@ fn bash_targets_trust_anchor_detects_sed_awk_patch_git_apply() {
 }
 
 #[test]
+fn bash_targets_trust_anchor_detects_cp_mv_install() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    let target = tmp.path().join(".claude/settings.json");
+    let target_s = target.to_string_lossy();
+
+    for cmd in [
+        format!("cp backup.json {target_s}"),
+        format!("mv backup.json {target_s}"),
+        format!("install -m 644 backup.json {target_s}"),
+        // Destination-flag form: the flag's VALUE is a plain path and must
+        // still be caught even though it isn't the trailing token.
+        format!("cp -t {target_s} backup.json"),
+        // Reading the trust anchor as a SOURCE (not the last token) is also
+        // caught — deliberately conservative, see `non_flag_tokens`'s doc.
+        format!("cp {target_s} /tmp/exfil.json"),
+    ] {
+        assert!(
+            bash_targets_trust_anchor(&cmd),
+            "expected cp/mv/install detection for: {cmd}"
+        );
+    }
+
+    assert!(!bash_targets_trust_anchor("cp src/lib.rs src/lib.rs.bak"));
+    assert!(!bash_targets_trust_anchor("mv /tmp/a.txt /tmp/b.txt"));
+}
+
+#[test]
+fn non_flag_tokens_skips_program_and_flags() {
+    assert_eq!(non_flag_tokens("cp a b"), vec!["a", "b"]);
+    assert_eq!(non_flag_tokens("cp -r a b"), vec!["a", "b"]);
+    // A value-taking flag's value token (`644`) is NOT specially filtered
+    // out — it is returned right alongside the real positional tokens. See
+    // the function's doc for why that over-inclusion is safe rather than a
+    // bug: the caller only ever checks membership against the trust-anchor
+    // path, so an extra candidate token can only ever be checked and
+    // rejected, never suppress a real match.
+    assert_eq!(non_flag_tokens("install -m 644 a b"), vec!["644", "a", "b"]);
+    assert!(non_flag_tokens("cp -r").is_empty());
+}
+
+#[test]
 #[serial_test::serial(claude_config_dir_env)]
 fn bash_targets_trust_anchor_detects_claude_config_dir_target() {
     let tmp = tempfile::TempDir::new().unwrap();

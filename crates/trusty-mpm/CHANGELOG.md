@@ -39,6 +39,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   absolute check (it still denies, via the pre-existing substitution scan,
   but as the budget-eligible `SHELL_EDIT_REASON`).
 
+- **`pm_guard_bash::bash_targets_trust_anchor` now also catches `cp`/`mv`/
+  `install` writes to the trust anchor**
+  ([#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981) follow-up):
+  these verbs take their target as a plain positional argument rather than a
+  `>` redirect or a `sed`/`patch`-style trailing token, so `cp evil.json
+  .claude/settings.json`, `mv evil.json .claude/settings.json`, and
+  `install -m 644 evil.json .claude/settings.json` previously sailed straight
+  through as an unclassified allow. New `non_flag_tokens` helper checks EVERY
+  non-flag positional token of the segment (source and destination alike,
+  deliberately not attempting to pin down "the" destination token position —
+  over-inclusion only ever widens the deny, never narrows it), wired into the
+  same `bash_targets_trust_anchor` function already called unconditionally
+  from `pm_guard()`'s body, so it denies absolutely (not the budget-eligible
+  `SHELL_EDIT_REASON`) for both the PM's own call and a dispatched subagent's.
+
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
   (worktree-hygiene follow-up to

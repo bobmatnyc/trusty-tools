@@ -773,6 +773,55 @@ fn pm_guard_denies_settings_json_write_via_sed_in_place() {
 }
 
 #[test]
+fn pm_guard_denies_settings_json_write_via_bash_cp() {
+    // `cp` writes its destination as a plain positional ARGUMENT — neither a
+    // `>` redirect (pm_guard_denies_settings_json_write_via_bash_redirect)
+    // nor a `tee`-style output argument (…_via_bash_tee); a distinct code
+    // path (issue #3981 follow-up: cp/mv/install were the residual gap).
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cp evil.json /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_bash_mv() {
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"mv evil.json /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_bash_install() {
+    // `install` additionally takes flags with values (`-m 644`) preceding the
+    // destination — confirms the flag-value token doesn't shift or hide the
+    // real destination token.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"install -m 644 evil.json /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_denies_settings_json_write_via_bash_cp_under_subagent_payload() {
+    // THE case the guard exists for: a native Task/Agent-dispatched subagent
+    // (agent_id present) copying over the trust anchor via `cp` must ALSO be
+    // denied — Guard 4's exemption must not reach this call, mirroring
+    // pm_guard_denies_settings_json_write_via_bash_under_subagent_payload for
+    // the redirect route.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","agent_type":"rust-engineer","tool_name":"Bash","tool_input":{"command":"cp evil.json /some/repo/.claude/settings.json"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_cp_settings_json_denial_is_not_budget_eligible() {
+    // Same absolute-prohibition requirement as the redirect/tee/sed routes —
+    // a cp-based trust-anchor write must deny every time, never sliding
+    // through on the per-turn file-change budget (issue #2918).
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cp evil.json /some/repo/.claude/settings.json"}}"#;
+    for _ in 1..=4 {
+        assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
 fn pm_guard_denies_settings_json_write_via_bash_under_subagent_payload() {
     let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","tool_name":"Bash","tool_input":{"command":"echo x > /some/repo/.claude/settings.json"}}"#;
     assert_denied(&run_pm_guard(payload, &[]));
