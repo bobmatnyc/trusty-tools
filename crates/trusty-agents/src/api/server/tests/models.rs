@@ -131,21 +131,21 @@ async fn reachable_today_matches_documented_set() {
 /// resolves. Sets a fake `ANTHROPIC_API_KEY`; the resolver's env tier
 /// short-circuits before ever touching the (unsandboxed, possibly
 /// real-credential-bearing) secure store, so this deterministically makes
-/// anthropic resolve `true` without needing `$HOME` sandboxing — see
-/// `zero_credentials_configured_is_stable`'s doc comment for why sandboxing
-/// `$HOME` in this crate's test binary is NOT reliable (a handful of
-/// pre-existing tests elsewhere mutate `$HOME` without the shared lock).
+/// anthropic resolve `true` without needing `$HOME` sandboxing at all — so
+/// this test never has to join the crate's `$HOME` domain (`HOME_LOCK`); see
+/// `zero_credentials_configured_is_stable`'s doc comment for what an
+/// unsandboxed `$HOME` does and does not let either test assert.
 /// Asserts the raw response body never contains the fake value anywhere,
 /// while `credential_configured` still flips `true` for anthropic — proving
 /// the boolean is computed correctly, not just absent because nothing
 /// resolved.
 /// What: Holds `ENV_LOCK` (the only global mutation this test performs) for
 /// its full body; restores the env var on the way out. Also `#[serial]`:
-/// `llm::adapter::tests`, `llm::http::tests`, and other files mutate the same
-/// credential env vars from tests that can only join the crate-wide `#[serial]`
-/// group (not `ENV_LOCK`, e.g. `#[tokio::test]`s that can't hold a
-/// `std::sync::Mutex` guard across `.await`), so this test must carry
-/// `#[serial]` too to stay mutually exclusive with them.
+/// `llm::adapter::tests`, `llm::inference_client::tests`, and other files
+/// mutate the same credential env vars, some from tests that can only join
+/// the crate-wide `#[serial]` group (not `ENV_LOCK`, e.g. `#[tokio::test]`s
+/// that can't hold a `std::sync::Mutex` guard across `.await`), so this test
+/// must carry `#[serial]` too to stay mutually exclusive with them.
 #[tokio::test]
 #[serial]
 async fn credential_values_never_serialized() {
@@ -198,13 +198,11 @@ async fn credential_values_never_serialized() {
 /// Why: The GUI's picker must render sensibly on a fresh install with no
 /// *env-tier* credentials configured — this pins that the endpoint never
 /// errors with every credential env var cleared. It intentionally does NOT
-/// assert every provider is `false`: this crate's test binary has a handful
-/// of pre-existing tests (outside this module) that sandbox `$HOME` without
-/// holding `crate::test_env::HOME_LOCK`, so a `$HOME`-swap here can race
-/// against them and transiently see either the real secure store (on a dev
-/// machine that has one configured, as observed while writing this test) or
-/// a sandboxed empty one — asserting a fixed `false` would be flaky either
-/// way. Instead this test asserts *self-consistency*: whatever
+/// assert every provider is `false`: this test does not sandbox `$HOME`, so
+/// on a dev machine with a real secure store configured a provider can
+/// legitimately resolve `true` (as observed while writing this test), and
+/// asserting a fixed `false` would be flaky. Instead this test asserts
+/// *self-consistency*: whatever
 /// `resolve_key` (the exact function the handler calls) returns at the same
 /// moment, for each provider, is exactly what the response reports — which
 /// is the actually-load-bearing contract (the handler doesn't invert or

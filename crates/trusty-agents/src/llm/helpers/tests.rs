@@ -244,13 +244,15 @@ fn tool_discipline_all_tool_calls_never_increments_counter() {
 //
 // SAFETY: each test below is `#[serial]` AND holds `crate::test_env::{ENV_LOCK,
 // HOME_LOCK}` for its full body (mirrors `llm::credentials::tests`'s documented
-// convention, #274). `#[serial]` is required because `llm::http::tests` and
-// `llm::inference_client::tests` mutate the same credential env vars from
-// `#[tokio::test]`s that cannot hold a `std::sync::Mutex` guard across
-// `.await` and rely on `#[serial]` alone for exclusion — so every sync test
-// touching these vars must also carry `#[serial]` to stay mutually exclusive
-// with them (a prior gap here caused a flaky cross-test env-var race under
-// `cargo test --workspace`).
+// convention, #274). `#[serial]` is required because
+// `llm::inference_client::tests` mutates the same credential env vars from a
+// `#[tokio::test]` that cannot hold a `std::sync::Mutex` guard across `.await`
+// and relies on `#[serial]` alone for exclusion — so every sync test touching
+// these vars must also carry `#[serial]` to stay mutually exclusive with it (a
+// prior gap here caused a flaky cross-test env-var race under
+// `cargo test --workspace`). #3952: `llm::http::tests` is no longer in that
+// category — its `$HOME`-sandboxing tests were converted to sync `#[test]`s
+// that hold `ENV_LOCK` + `lock_home()` like these do.
 
 #[test]
 #[serial]

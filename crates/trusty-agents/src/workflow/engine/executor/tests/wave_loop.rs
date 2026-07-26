@@ -21,6 +21,10 @@ use crate::workflow::engine::step_dispatch::{precreate_package_markers, should_p
 /// once per file in wave order, sets `TAGENT_ASSIGNED_FILE` for each
 /// call, and each file's prompt names the correct path.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn wave_loop_runs_one_agent_per_file() {
     let tmp = tempfile::tempdir().unwrap();
     let out_dir = tmp.path().to_path_buf();
@@ -131,6 +135,10 @@ async fn wave_loop_runs_one_agent_per_file() {
 /// recorded prompt contains the absolute path and the ABSOLUTE PATH
 /// warning language.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn wave_loop_task_uses_absolute_path_for_write() {
     let tmp = tempfile::tempdir().unwrap();
     let out_dir = tmp.path().to_path_buf();
@@ -218,6 +226,10 @@ async fn wave_loop_task_uses_absolute_path_for_write() {
 /// fall through to the legacy path. We assert the wave loop fires by
 /// counting per-file code-agent invocations.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn wave_loop_triggers_after_plan_phase_writes_assignments() {
     let tmp = tempfile::tempdir().unwrap();
     let out_dir = tmp.path().to_path_buf();
@@ -299,6 +311,10 @@ async fn wave_loop_triggers_after_plan_phase_writes_assignments() {
 /// #88: A workflow without assignments.json runs the code phase the old
 /// way — one invocation of the code-agent, not per-file.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn wave_loop_skipped_when_assignments_absent() {
     let tmp = tempfile::tempdir().unwrap();
     let out_dir = tmp.path().to_path_buf();

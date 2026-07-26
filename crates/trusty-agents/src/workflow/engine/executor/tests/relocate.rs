@@ -206,6 +206,10 @@ async fn post_code_reconcile_is_noop_without_assignments() {
 /// engine prepends the path-search hint to the QA prompt, while leaving
 /// it absent for non-claude-code runners.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn qa_receives_correct_path_for_claude_code_runner() {
     // Arrange: a workflow with a code phase that uses an agent backed by
     // the claude-code runner, then a QA phase. We capture the rendered

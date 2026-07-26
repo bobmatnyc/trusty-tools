@@ -23,6 +23,10 @@ use crate::workflow::engine::retry::run_wave_file_with_retry;
 /// made.
 /// Test: this function.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn wave_loop_retries_on_transient_error() {
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -119,6 +123,10 @@ async fn wave_loop_retries_on_transient_error() {
 /// exactly one call is made and the error propagates.
 /// Test: this function.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn wave_loop_does_not_retry_fatal_error() {
     use std::sync::atomic::{AtomicU32, Ordering};
 
