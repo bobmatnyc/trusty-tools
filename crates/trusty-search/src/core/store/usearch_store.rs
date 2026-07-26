@@ -122,12 +122,31 @@ pub(super) const SHRINK_GUARD_MIN_ON_DISK_VECTORS: usize = 1_000;
 /// the caller *knows* (via `SearchAppState::reindex_progress`) whether a
 /// reindex for this index is still in flight, and skips the flush entirely
 /// when it is — no heuristic, no percentage, correct at every completion
-/// percentage. This ratio guard remains in `save()` as defense-in-depth for
-/// every OTHER caller that has no equivalent "is this the final output of a
-/// still-running operation" signal available (chiefly the periodic
-/// incremental persister, and any future caller) — it stays useful for the
-/// sub-50% case even there, just not sufficient on its own for the shutdown
-/// race specifically.
+/// percentage. That exact check exists ONLY in `shutdown_flush.rs`, on the
+/// graceful-shutdown path.
+///
+/// This ratio guard remains in `save()` as defense-in-depth for every OTHER
+/// caller — but for the one that actually matters in practice, the periodic
+/// incremental persister (`core::indexer::persist_hnsw::spawn_incremental_persist`,
+/// called every `HNSW_SNAPSHOT_BATCH_INTERVAL` batches during EVERY reindex,
+/// plus once forced after the batch loop), this guard provides essentially
+/// NO protection on any reindex large enough to matter — tracked as **issue
+/// #3970**. Reindex progress is monotonic, so on any reindex whose final
+/// vector count exceeds roughly double the on-disk starting count, the
+/// persister's own routine, healthy checkpoints WILL cross this guard's 50%
+/// threshold as completely normal forward progress — no interruption
+/// required. The moment that happens, the complete pre-reindex on-disk
+/// snapshot has already been overwritten by a partial, still-growing one,
+/// during ordinary healthy operation. From then on an ungraceful termination
+/// (SIGKILL, OOM-kill, process abort, power loss — none of which run
+/// `shutdown_flush`'s exact check) at ANY later point — including 99%
+/// complete — permanently strands the index at whatever fraction was last
+/// checkpointed, with no path back to the original complete snapshot. #3970
+/// records the recommended fix: a staged-write-then-swap for the HNSW
+/// snapshot, mirroring what the redb corpus already has via #603/#839 —
+/// explicitly NOT routing the periodic save through a skip-while-`Running`
+/// gate, which would defeat incremental persistence's entire purpose
+/// (checkpointing durability during a long-running reindex).
 pub(super) const SHRINK_GUARD_RATIO_DIVISOR: usize = 2; // refuse below 50%
 
 /// Minimum plausible bytes-per-dimension-per-vector used to compute the

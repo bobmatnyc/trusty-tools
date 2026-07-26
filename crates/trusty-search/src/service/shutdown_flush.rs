@@ -161,10 +161,19 @@ fn shutdown_flush_concurrency() -> usize {
 ///    is checked; a `Running` reindex means the in-memory HNSW store is, by
 ///    definition, not yet the reindex's final output, so the flush for that
 ///    index is skipped entirely rather than published. This is an *exact*
-///    check (no size/ratio heuristic), so it closes the data-loss race at
-///    ANY completion percentage, not just the sub-50% window a magnitude
-///    comparison could catch — see [`flush_one_index_on_shutdown`] for the
-///    full rationale and the residual gap this does NOT close.
+///    check (no size/ratio heuristic), so it closes the data-loss race — for
+///    THIS graceful-shutdown flush path specifically — at ANY completion
+///    percentage, not just the sub-50% window a magnitude comparison could
+///    catch. It does NOT protect against ungraceful termination
+///    (SIGKILL/OOM-kill/process abort/power loss): the periodic incremental
+///    persister (`core::indexer::persist_hnsw::spawn_incremental_persist`)
+///    calls `UsearchStore::save()` directly on its own schedule, outside this
+///    function entirely, guarded only by the retained ratio guard — tracked
+///    separately as issue #3970 (a crash-safety hole independent of
+///    shutdown; see [`flush_one_index_on_shutdown`] for the full rationale
+///    and `SHRINK_GUARD_RATIO_DIVISOR`'s doc for why that guard provides
+///    essentially no protection there either, on any reindex large enough to
+///    matter).
 ///
 /// What: iterates `state.registry.list()`, applying the above five mitigations
 /// per index, running up to `shutdown_flush_concurrency()` flushes at a time.
@@ -216,23 +225,41 @@ async fn flush_one_index_on_shutdown(
 
     // Issue #1717: never publish a shutdown flush while a background reindex
     // for this index is still `Running`. This is the exact fix for the
-    // reported race — a reindex interrupted by SIGTERM at ANY completion
-    // percentage (not just the sub-50% window a size-ratio heuristic could
-    // catch) leaves the in-memory HNSW store in a state that is, by
-    // definition, not yet the reindex's final output. Skipping the flush
-    // here means the on-disk snapshot stays at whatever the last periodic
-    // incremental persist wrote (see `core::indexer::persist_hnsw`'s
+    // reported race — a reindex interrupted by a GRACEFUL SIGTERM SHUTDOWN at
+    // ANY completion percentage (not just the sub-50% window a size-ratio
+    // heuristic could catch) leaves the in-memory HNSW store in a state that
+    // is, by definition, not yet the reindex's final output. Skipping the
+    // flush here means the on-disk snapshot stays at whatever the last
+    // periodic incremental persist wrote (see `core::indexer::persist_hnsw`'s
     // `spawn_incremental_persist`, called every
     // `HNSW_SNAPSHOT_BATCH_INTERVAL` batches during the reindex, plus a
-    // forced final call after the batch loop) — never a corrupt mix of old
-    // and new state, and never worse than what #1711/#1716 already accepted
-    // as the fallback for a skipped flush.
+    // forced final call after the batch loop).
     //
     // This mirrors the identical guard already used by the residency-park
     // sweep (`service::server::tickers`, "never park an index with an
     // in-flight reindex") — the same `state.reindex_progress` map, the same
     // `ReindexStatus::Running` check, applied to a second operation that
     // must not race a live reindex.
+    //
+    // Scope, stated plainly: this check only runs on the GRACEFUL shutdown
+    // path (`run_daemon`'s axum graceful-shutdown future resolving, then this
+    // function). It does NOT protect against ungraceful termination —
+    // SIGKILL, an OOM-kill, a process abort, or power loss — because none of
+    // those execute this code at all. In that scenario the "last periodic
+    // incremental persist" baseline this comment describes above is itself
+    // only as safe as `spawn_incremental_persist`'s own caller,
+    // `UsearchStore::save()`, which outside of this function has ONLY the
+    // ratio guard (`core::store::usearch_store::SHRINK_GUARD_RATIO_DIVISOR`)
+    // protecting it — and that guard provides essentially no protection on
+    // any reindex large enough to cross its 50% threshold before finishing,
+    // since ordinary healthy progress crosses it every time. Tracked
+    // separately as issue #3970 (periodic-persister crash-safety hole; the
+    // recommended fix is a staged-write-then-swap for the HNSW snapshot,
+    // mirroring what the redb corpus already has via #603/#839 — #3970
+    // explicitly rules out routing the periodic save through a
+    // skip-while-`Running` gate like this one, since that would disable
+    // incremental checkpointing, whose entire purpose is durability during a
+    // long-running reindex) — not fixed here.
     //
     // Residual gap (issue #1717 follow-up, tracked separately): this closes
     // the shutdown-publish race, but does not make an interrupted reindex
@@ -244,9 +271,10 @@ async fn flush_one_index_on_shutdown(
     // not driven by a HEAD change has no equivalent staleness signal, so an
     // interruption there leaves the index at its pre-reindex state with no
     // automatic retry — an operator-visible "stuck" index, not silent
-    // corruption, but still a gap. Not fixed here: doing so needs a distinct
-    // in-progress marker independent of `indexed_head_sha`, which touches
-    // more of the reindex lifecycle than this shutdown-safety fix should.
+    // corruption, but still a gap (tracked as issue #3969). Not fixed here:
+    // doing so needs a distinct in-progress marker independent of
+    // `indexed_head_sha`, which touches more of the reindex lifecycle than
+    // this shutdown-safety fix should.
     if reindex_progress
         .get(&id)
         .is_some_and(|p| p.status.load() == ReindexStatus::Running)
