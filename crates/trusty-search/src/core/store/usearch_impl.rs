@@ -180,6 +180,10 @@ impl VectorStore for UsearchStore {
             }
         };
         self.key_to_id.write().await.remove(&key);
+        // Issue #1717: a real, tracked id was dropped — credit it against the
+        // shrink guard in `save()` so this legitimate deletion is never
+        // mistaken for an interrupted reindex's missing vectors.
+        self.removed_since_save.fetch_add(1, Ordering::Relaxed);
 
         let index = self.index.write().await;
         if index.contains(key) {

@@ -9,6 +9,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`UsearchStore::save()` now refuses a catastrophic, unexplained vector-count
+  shrink, closing the residual data-loss race the #1711 guard left open (issue
+  #1717).** The #1711 guard (PR #1716) only catches an in-memory index with
+  exactly 0 vectors; a background reindex that is only partially complete when
+  SIGTERM lands (e.g. 5,000 of 312,000 vectors upserted into a freshly
+  promoted, not-yet-restored store) is non-zero, so that guard did not fire —
+  the shutdown flush silently overwrote a complete on-disk HNSW snapshot with
+  the partial one. `save()` now also compares the new in-memory vector count
+  against the on-disk sidecar's count and refuses to persist when the new
+  count falls below half of what tracked `remove()` calls since the last save
+  can explain. Deliberate deletions (single-file removal, prune passes,
+  bulk corpus reduction) are tracked via a per-store `removed_since_save`
+  counter and are therefore never blocked, no matter how large the reduction.
 - **A legacy/colocated index whose storage path could not be resolved at
   warm-boot no longer silently restores as a healthy 0-chunk store (issue
   #2847).** `build_indexer_from_entry` / `build_store_for_entry` previously

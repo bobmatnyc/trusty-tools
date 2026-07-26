@@ -54,8 +54,45 @@ const DEFAULT_HNSW_MAX_ELEMENTS: usize = 1_000_000;
 ///
 /// Caveat: this guard catches only the exact-0-vector case. A non-zero but
 /// catastrophically-partial in-memory index (e.g., mid-reindex 5k of 312k
-/// vectors) would NOT be caught — tracked in issue #1717.
+/// vectors) is caught by the separate shrink guard, see
+/// [`SHRINK_GUARD_RATIO_DIVISOR`] (issue #1717).
 pub(super) const POPULATED_SNAPSHOT_THRESHOLD_BYTES: u64 = 100_000; // 100 KB
+
+/// Minimum on-disk vector count (per the sidecar's `id_to_key` map) before the
+/// [`SHRINK_GUARD_RATIO_DIVISOR`] shrink guard applies in [`UsearchStore::save`]
+/// (issue #1717).
+///
+/// Why: below this floor, a shrink is cheap to recover from (a full reindex of
+/// a small index is seconds, not minutes) and small indexes legitimately churn
+/// by a large relative percentage during normal operation (e.g. test fixtures,
+/// a handful of files). The catastrophic-partial-reindex scenario this guard
+/// targets only matters at a scale where losing the data is actually painful.
+pub(super) const SHRINK_GUARD_MIN_ON_DISK_VECTORS: usize = 1_000;
+
+/// Divisor applied to the "explained" on-disk vector count (on-disk count
+/// minus tracked removals since the last save) to compute the shrink-guard
+/// refusal threshold (issue #1717 — the #1711 follow-up).
+///
+/// Why: the #1711 guard (see [`POPULATED_SNAPSHOT_THRESHOLD_BYTES`]) only
+/// catches the exact-0-vector case. A background reindex that is only
+/// partially complete when SIGTERM lands (e.g. 5k of 312k vectors upserted)
+/// is non-zero, so that guard does not fire, and the partial state would
+/// silently overwrite a complete on-disk snapshot. This guard extends the
+/// same philosophy to any drastic, *unexplained* shrink: if the new in-memory
+/// vector count — even after crediting every tracked [`UsearchStore::remove`]
+/// call since the last successful save — is less than half of what the
+/// on-disk sidecar claims, the save is refused and the on-disk snapshot is
+/// preserved.
+///
+/// Tracking removals (rather than a bare percentage threshold) is what makes
+/// legitimate shrinkage safe: deleting documents, pruning stale files during a
+/// reindex, or any other deliberate reduction in corpus size goes through
+/// [`UsearchStore::remove`], which increments `removed_since_save`. A save
+/// whose shrink is fully accounted for by tracked removals is never refused,
+/// no matter how large the reduction — the guard only fires on vectors that
+/// are simply *missing* with no recorded reason, which is exactly the
+/// signature of a reindex interrupted mid-flight.
+pub(super) const SHRINK_GUARD_RATIO_DIVISOR: usize = 2; // refuse below 50%
 
 /// Minimum plausible bytes-per-dimension-per-vector used to compute the
 /// pre-`view()` safety floor in [`UsearchStore::load_from`] (issue #2922).
@@ -224,6 +261,20 @@ pub struct UsearchStore {
     /// the future drops the guard, releasing the lock for the next waiter.
     /// Test: `tests::test_concurrent_saves_are_serialized_and_end_consistent`.
     pub(super) save_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Count of [`Self::remove`] calls that actually dropped a tracked id
+    /// since the last successful [`Self::save`]. Reset to 0 on every
+    /// successful save.
+    ///
+    /// Why (issue #1717): the shrink guard in `save()` needs to distinguish
+    /// deliberate deletion (safe, must never be blocked) from vectors that are
+    /// simply missing because a background reindex was interrupted before it
+    /// finished populating the index (unsafe — must be blocked). Every call to
+    /// `remove()` that drops a real id increments this counter, "explaining"
+    /// that much of any shrink observed at save time. See
+    /// [`SHRINK_GUARD_RATIO_DIVISOR`] for how it's used.
+    /// Test: `tests::test_save_allows_legitimate_shrink_after_deletions`,
+    /// `tests::test_save_refuses_unexplained_catastrophic_shrink`.
+    pub(super) removed_since_save: Arc<AtomicU64>,
 }
 
 impl UsearchStore {
@@ -280,6 +331,7 @@ impl UsearchStore {
             hnsw_path: Arc::new(RwLock::new(None)),
             dirty: Arc::new(AtomicBool::new(false)),
             save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            removed_since_save: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -308,11 +360,16 @@ impl UsearchStore {
     /// leaves a partial file. The caller passes the HNSW path; the sidecar is
     /// written next to it with extension `.keys.json`. A data-loss guard
     /// (issue #1711) refuses to overwrite an on-disk snapshot larger than 100 KB
-    /// when the in-memory index has 0 vectors, preserving the on-disk state.
+    /// when the in-memory index has 0 vectors, preserving the on-disk state. A
+    /// second guard (issue #1717) refuses a catastrophic, unexplained shrink —
+    /// see [`SHRINK_GUARD_RATIO_DIVISOR`] — covering the non-zero-but-partial
+    /// case the #1711 guard cannot.
     /// Test: `tests::test_save_load_roundtrip` saves then loads into a fresh
     /// store and asserts a search still returns the original chunk_ids;
     /// `tests::test_save_refuses_to_overwrite_populated_snapshot_with_empty_index`
-    /// covers the #1711 guard.
+    /// covers the #1711 guard; `tests::test_save_refuses_unexplained_catastrophic_shrink`
+    /// and `tests::test_save_allows_legitimate_shrink_after_deletions` cover the
+    /// #1717 guard.
     pub async fn save(&self, hnsw_path: &Path) -> Result<()> {
         // Issue #2922: serialize the whole save (write+rename of both the
         // HNSW binary and the JSON sidecar) against any other concurrent
@@ -372,13 +429,16 @@ impl UsearchStore {
         // uninitialized / just-promoted but not-yet-populated UsearchStore
         // flushes 0 vectors over a fully-populated on-disk snapshot.
         //
-        // Residual-risk caveat (issue #1717): this guard catches the
-        // exact-0-vector case only. A non-zero but catastrophically-partial
-        // in-memory index (e.g. mid-reindex 5k of 312k vectors) would NOT
-        // be caught — the underlying race (shutdown flushing an in-flight
-        // background reindex from reconcile_stale_indexes / fe4c0b28) is
-        // tracked separately in #1717. This guard is defense-in-depth for
-        // the most acute data-loss path, not a complete fix.
+        // Shrink guard (issue #1717 — the #1711 follow-up): refuse to
+        // overwrite a large on-disk snapshot with a drastically SMALLER
+        // in-memory index unless the shrink is fully explained by tracked
+        // `remove()` calls since the last save. Catches the case the #1711
+        // 0-vector guard above cannot: a mid-reindex partial state (non-zero,
+        // but catastrophically incomplete — e.g. 5k of 312k vectors) that
+        // races a SIGTERM shutdown flush before the reindex finishes. See
+        // [`SHRINK_GUARD_RATIO_DIVISOR`] for the full rationale, including how
+        // legitimate shrinkage (document deletion, pruning, a deliberate
+        // reindex of a smaller corpus) stays unblocked.
         let tmp_hnsw = hnsw_path.with_extension("usearch.tmp");
         let tmp_hnsw_str = tmp_hnsw
             .to_str()
@@ -403,6 +463,7 @@ impl UsearchStore {
             // closure `spawn_blocking` demands.
             let index_guard = self.index.clone().write_owned().await;
             let hnsw_path_owned = hnsw_path.to_path_buf();
+            let removed_since_save = self.removed_since_save.clone();
             let saved = tokio::task::spawn_blocking(move || -> Result<bool> {
                 // Guard: check size under the write lock so there is no
                 // window between the check and the save call.
@@ -421,9 +482,49 @@ impl UsearchStore {
                         }
                     }
                 }
+
+                // Issue #1717 shrink guard: read the OLD sidecar (still on
+                // disk — we have not touched it yet; only the tmp file gets
+                // written below) to learn the on-disk vector count, then
+                // compare against the new in-memory count, crediting every
+                // tracked removal since the last save.
+                let new_size = index_guard.size();
+                let on_disk_sidecar = hnsw_path_owned.with_extension("keys.json");
+                let on_disk_count = std::fs::read(&on_disk_sidecar)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<StoreKeyMap>(&bytes).ok())
+                    .map(|m| m.id_to_key.len());
+                if let Some(on_disk_count) = on_disk_count {
+                    if on_disk_count >= SHRINK_GUARD_MIN_ON_DISK_VECTORS {
+                        let removed = removed_since_save.load(Ordering::Acquire) as usize;
+                        let explained_floor = on_disk_count.saturating_sub(removed);
+                        let refusal_threshold = explained_floor / SHRINK_GUARD_RATIO_DIVISOR;
+                        if new_size < refusal_threshold {
+                            tracing::error!(
+                                "usearch: REFUSING to overwrite populated snapshot {} \
+                                 ({} vectors on disk) with a catastrophically smaller \
+                                 in-memory index ({} vectors; {} tracked removal(s) since \
+                                 last save only explain a floor of {} vectors) — likely an \
+                                 interrupted background reindex racing shutdown (issue #1717 \
+                                 — data-loss guard). On-disk snapshot is preserved.",
+                                hnsw_path_owned.display(),
+                                on_disk_count,
+                                new_size,
+                                removed,
+                                explained_floor,
+                            );
+                            return Ok(false);
+                        }
+                    }
+                }
+
                 index_guard
                     .save(&tmp_hnsw_str)
                     .map_err(|e| anyhow!("usearch save failed: {e}"))?;
+                // The snapshot now reflects every removal up to this point;
+                // clear the counter so future shrink checks only weigh
+                // removals that happen after this save.
+                removed_since_save.store(0, Ordering::Release);
                 Ok(true)
             })
             .await
