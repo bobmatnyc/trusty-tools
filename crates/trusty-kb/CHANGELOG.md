@@ -26,8 +26,6 @@ independent semantic versioning per the workspace convention.
   `index.pending` alongside its watermark, and `KbStore::okg_index_coverage`
   folds the same numbers tree-wide. "Ingested but not yet searchable" is now a
   visible state rather than an invisible one.
-
-
 - **OKG builder engine (`okg` module):** the machinery that GROWS a KB tree from
   real sources, idempotently and additively. Three durable guarantees, all
   unit-proved:
