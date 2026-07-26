@@ -19,6 +19,11 @@
 
 pub mod adapter;
 pub mod config;
+// #3987 (option C): dead scope-pattern diagnostics. Lives beside `scope`
+// because it is the "why did this pattern match nothing" half of the same
+// matching model, but is kept in its own module so the pure matcher stays
+// free of vocabulary knowledge.
+pub mod dead_scope;
 pub mod direct;
 pub mod discovery;
 pub mod driver;

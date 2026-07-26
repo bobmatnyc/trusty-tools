@@ -562,3 +562,100 @@ fn cto_assistant_package_gmail_and_tasks_tools_survive_scope_intersection() {
         cfg.tools.scopes
     );
 }
+
+/// #3987 (option C) pinned against the SHIPPED base template: the bundled
+/// `assistant`'s declared `google.read` is a dead scope pattern.
+///
+/// Why assert on the checked-in config rather than a literal: the diagnostic's
+/// value is that it fires on the real defect, and the real defect is in the
+/// file we ship. Resolving through the real loader also proves the check sees
+/// the POST-`extends` scope set, which is the set the dispatch gate uses.
+///
+/// **This test is updated by #3987's option B**, which replaces the base's
+/// `google.read` with explicit family grants. After that lands the assertion
+/// inverts to "the base assistant has NO dead scope patterns" — that inversion
+/// is the acceptance criterion for option B, not a regression here. The
+/// warning-not-error posture in `persona.rs` exists precisely because this
+/// test currently passes: a hard load error today would break every assistant.
+#[test]
+fn base_assistant_google_read_is_a_dead_scope_pattern() {
+    use crate::tools::registry::dead_scope;
+
+    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".trusty-agents")
+        .join("agents");
+    let cfg = AgentConfig::by_name_in(&[agents_dir], "assistant")
+        .expect("bundled assistant template resolves");
+    let patterns: Vec<ScopePattern> = cfg
+        .tools
+        .scopes
+        .clone()
+        .expect("the base assistant declares [tools].scopes")
+        .into_iter()
+        .map(ScopePattern::new)
+        .collect();
+
+    // No live registry: the static Google vocabulary alone is enough to prove
+    // this pattern is dead under ANY registry state.
+    let dead = dead_scope::dead_scope_patterns(
+        &patterns,
+        &dead_scope::reachable_scopes(std::iter::empty::<String>()),
+    );
+    assert_eq!(
+        dead.iter().map(|d| d.pattern.as_str()).collect::<Vec<_>>(),
+        vec!["google.read"],
+        "resolved [tools].scopes = {:?}",
+        cfg.tools.scopes
+    );
+    assert!(
+        dead[0].nearest.iter().any(|s| s == "google.gmail.write"),
+        "the diagnostic must name a reachable alternative: {:?}",
+        dead[0].nearest
+    );
+
+    // The base's OTHER scopes must NOT be flagged: `memory.*`/`search.*` come
+    // from endpoints whose vocabulary this crate does not know statically, and
+    // reporting them dead when their daemon merely isn't running would be the
+    // false-positive that makes the whole diagnostic ignorable.
+    assert!(
+        !dead
+            .iter()
+            .any(|d| d.pattern.starts_with("memory.") || d.pattern.starts_with("search.")),
+        "namespace guard failed: {dead:?}"
+    );
+}
+
+/// #3987 the negative half: a live family/wildcard pattern is never flagged.
+/// `izzie` ships blanket `google.*` and `cto-assistant` ships the narrow
+/// `google.gmail.*` / `google.tasks.*` pair (#3985) — both are working grants
+/// and a diagnostic that cried wolf on them would be worse than none.
+#[test]
+fn shipped_agents_with_live_google_patterns_are_not_flagged() {
+    use crate::tools::registry::dead_scope;
+
+    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".trusty-agents")
+        .join("agents");
+    let reachable = dead_scope::reachable_scopes(std::iter::empty::<String>());
+    for name in ["izzie", "cto-assistant"] {
+        let cfg = AgentConfig::by_name_in(std::slice::from_ref(&agents_dir), name)
+            .unwrap_or_else(|e| panic!("bundled {name} resolves: {e}"));
+        let patterns: Vec<ScopePattern> = cfg
+            .tools
+            .scopes
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(ScopePattern::new)
+            .collect();
+        let dead = dead_scope::dead_scope_patterns(&patterns, &reachable);
+        // Both agents UNION the base's scopes via `extends`, so they inherit
+        // `google.read` too — that inherited pattern is expected here and is
+        // removed by option B. What must NOT appear is any of their OWN
+        // family patterns.
+        assert!(
+            dead.iter().all(|d| d.pattern == "google.read"),
+            "{name}: a live family pattern was flagged dead: {dead:?}"
+        );
+    }
+}

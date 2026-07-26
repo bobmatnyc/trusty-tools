@@ -128,6 +128,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   extended `kind` enum in §5.3, the new response fields in §5.7, and epic
   #4021 OQ-1's resolution recorded alongside §12 OQ-2.
 
+- **A `[tools].scopes` grant that can match nothing is now reported instead of
+  silently denying everything** (issue #3987, option C): `ScopePattern`
+  matching fails closed AND silent, so an agent declaring a pattern no tool can
+  ever advertise — the base `assistant`'s `google.read`, which no gworkspace
+  tool advertises because discovery only ever emits
+  `google.<family>.<access>` — got no error, no log line, just a persona whose
+  entire scoped tool surface vanished before the model saw it. That failure
+  mode is indistinguishable from "this agent has no tools", which is how both
+  #3938 and #3987 stayed invisible. The new
+  `tools::registry::dead_scope` module names the condition: at persona
+  registry-build time (`ctrl::pm_task::dispatch::persona`, the #3208
+  enforcement site, and the only place holding both the agent's resolved
+  patterns and the registry's scope vocabulary) a dead pattern now produces a
+  prominent `WARN` naming the agent, the pattern, and the nearest reachable
+  scopes; and `GET /api/agents/{name}/skills` gained a `dead_scope_patterns`
+  array so the GUI/CLI can say "this agent has dead scope grants" rather than
+  showing `granted: true` cards for tools dispatch will drop.
+  Reachability is the union of the live registry's discovered scopes and the
+  closed compile-time Google vocabulary, and a pattern is only judged when its
+  namespace appears in that set — so a `gworkspace`/`trusty-memory` daemon
+  being *down* can never make a working grant look broken. Deliberately a
+  warning and not a load error for now: the shipped base `assistant` still
+  carries `google.read` and every `extends = "assistant"` overlay inherits it,
+  so failing closed would break every assistant load; escalation to a hard
+  error is the intended follow-up once #3987's option B removes it.
+
 ### Fixed
 
 - **Streamed replies no longer flash blank or "(no narrative)" the moment a

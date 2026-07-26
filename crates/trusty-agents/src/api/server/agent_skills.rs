@@ -26,6 +26,12 @@
 //!   `unmatched_patterns`, not dropped: it may still resolve to a live-
 //!   discovered MCP tool at dispatch time, and saying so is more useful than
 //!   either hiding it or claiming it is broken.
+//! - #3987: a `[tools].scopes` pattern that can match NO reachable dotted
+//!   scope is surfaced in `dead_scope_patterns` — the scope-side analogue of
+//!   `unmatched_patterns`, and for the same reason. A dead scope grant denies
+//!   every scoped tool it was meant to permit while looking exactly like "this
+//!   agent has no tools"; a panel that renders `granted: true` cards for tools
+//!   the dispatch gate will drop is the audit-surface form of that same lie.
 //!
 //! **#4025 — function-skill groups.** The response is ADDITIVE only: every field
 //! a pre-#4022 consumer reads keeps its name, type and meaning. Function skills
@@ -57,6 +63,8 @@ use super::state::AppState;
 use crate::agents::{SkillsConfig, ToolsConfig};
 use crate::ctrl::pm_task::match_any_glob;
 use crate::skills::manifest::{SkillCatalog, SkillManifest, effective_tool_patterns};
+use crate::tools::registry::dead_scope;
+use crate::tools::registry::scope::ScopePattern;
 
 /// `GET /api/agents/:name/skills` — HTTP entry point.
 ///
@@ -170,6 +178,8 @@ pub(super) async fn skills_at(dirs: &[PathBuf], name: &str, project_root: &Path)
             }))
             .collect::<Vec<_>>(),
         "unmatched_patterns": unmatched_patterns(&catalog, patterns.as_deref()),
+        // #3987 (option C): scope grants that can never match anything.
+        "dead_scope_patterns": dead_scope_cards(tools.scopes.as_ref()),
         // Deny-on-absent polarity, stated rather than implied: `None` here is a
         // persona with no capability declaration at all, which grants nothing.
         "declares_capability": patterns.is_some(),
@@ -364,6 +374,58 @@ fn unmatched_patterns(catalog: &SkillCatalog, patterns: Option<&[String]>) -> Ve
                 "reason": "no skill in the catalog wraps a tool matching this pattern; it may \
                            still resolve to an MCP tool discovered at dispatch time, which is \
                            wrapped in a derived skill then",
+            })
+        })
+        .collect()
+}
+
+/// Declared `[tools].scopes` patterns that can match no reachable scope
+/// (#3987, option C).
+///
+/// Why: this route is the config-introspection surface the GUI/CLI reads, and
+/// until now it could show an agent a page full of `granted: true` gworkspace
+/// cards that the dispatch-time scope gate silently drops — the base
+/// `assistant`'s `google.read` grants literally nothing. Surfacing the dead
+/// pattern here is what lets a client say "this agent has dead scope grants"
+/// instead of leaving the user to conclude the tools simply do not work.
+///
+/// Honesty rules, matching the rest of this module:
+/// - The reachable set here is the STATIC vocabulary only
+///   (`dead_scope::reachable_scopes` with no live registry) — this route runs
+///   in the API process and has no built tool registry to consult. That is the
+///   conservative direction: the static vocabulary is a superset of what an
+///   offline endpoint would contribute for namespaces we know, and
+///   `dead_scope`'s namespace guard declines to judge namespaces we do not.
+///   A pattern reported here is dead under ANY registry state.
+/// - Scopes are read from the agent's OWN file, without resolving `extends`
+///   (same partial-read posture as the rest of this route — see
+///   `parse_capability_sections`). An agent that declares no `[tools].scopes`
+///   of its own reports nothing here even if it inherits a dead pattern from
+///   its base; the dispatch-time `warn!` in
+///   `ctrl::pm_task::dispatch::persona` sees the resolved set and covers that
+///   case. Under-reporting is the correct failure direction for an audit
+///   surface — it never claims a working grant is broken.
+/// What: one `{ pattern, nearest, reason }` object per dead pattern.
+/// Test: `dead_scope_cards_flags_the_google_read_pattern`,
+/// `dead_scope_cards_ignores_live_family_patterns`,
+/// `super::tests::agent_skills::skills_route_reports_dead_scope_patterns`.
+fn dead_scope_cards(scopes: Option<&Vec<String>>) -> Vec<Value> {
+    let Some(scopes) = scopes else {
+        return Vec::new();
+    };
+    let patterns: Vec<ScopePattern> = scopes.iter().cloned().map(ScopePattern::new).collect();
+    let reachable = dead_scope::reachable_scopes(std::iter::empty::<String>());
+    dead_scope::dead_scope_patterns(&patterns, &reachable)
+        .into_iter()
+        .map(|d| {
+            json!({
+                "pattern": d.pattern,
+                "nearest": d.nearest,
+                "reason": format!(
+                    "no reachable tool advertises a scope matching this pattern, so every \
+                     scoped tool it was meant to grant is denied at dispatch — {}",
+                    d.describe(),
+                ),
             })
         })
         .collect()
@@ -575,6 +637,50 @@ mod unit_tests {
         let card = render_skill(mta, false, None);
         assert!(card["provider"]["configured"].is_boolean());
         assert_eq!(card["provider"]["env_var"], "MTA_API_KEY");
+    }
+
+    /// #3987: the base assistant's `google.read` must reach the panel as a
+    /// dead grant, with actionable alternatives.
+    ///
+    /// NOTE: #3987's option B removes `google.read` from the shipped base;
+    /// this test asserts on a LITERAL pattern, not on the shipped config, so
+    /// it stays valid after that lands. The shipped-config assertion lives in
+    /// `ctrl::pm_task::dispatch::persona_tests` and is the one option B
+    /// updates.
+    #[test]
+    fn dead_scope_cards_flags_the_google_read_pattern() {
+        let scopes = vec![
+            "memory.read".to_string(),
+            "search.read".to_string(),
+            "google.read".to_string(),
+        ];
+        let cards = dead_scope_cards(Some(&scopes));
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0]["pattern"], "google.read");
+        assert!(
+            cards[0]["nearest"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "google.gmail.write"),
+            "the card must name a working alternative: {cards:?}"
+        );
+    }
+
+    /// The shape option B will declare must produce a clean panel.
+    #[test]
+    fn dead_scope_cards_ignores_live_family_patterns() {
+        let scopes = vec![
+            "google.gmail.*".to_string(),
+            "google.calendar.*".to_string(),
+            "google.accounts.*".to_string(),
+        ];
+        assert!(dead_scope_cards(Some(&scopes)).is_empty());
+    }
+
+    #[test]
+    fn dead_scope_cards_are_empty_when_no_scopes_are_declared() {
+        assert!(dead_scope_cards(None).is_empty());
     }
 
     #[test]

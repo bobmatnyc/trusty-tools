@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use crate::agents::AgentConfig;
 use crate::llm;
 use crate::subprocess::SubprocessAgentRunner;
+use crate::tools::registry::dead_scope;
 use crate::tools::registry::scope::{Scope, ScopePattern, agent_can_use};
 use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
 
@@ -517,6 +518,25 @@ pub async fn run_pm_task_with_persona(
                 .into_iter()
                 .map(ScopePattern::new)
                 .collect();
+            // #3987 (option C): this is the ONLY place that holds both halves
+            // of the intersection at once — the agent's resolved patterns
+            // (post-`extends` union) AND the scope vocabulary the registry
+            // actually built — so it is where a pattern that can match
+            // nothing becomes detectable. Emitted here, immediately before
+            // the gate that would otherwise drop the surface in silence.
+            // Deliberately a WARN and not a hard failure for now: the bundled
+            // base `assistant` still ships the dead `google.read` pattern that
+            // every `extends = "assistant"` overlay inherits, so failing
+            // closed here would break every assistant load. Escalate to a hard
+            // error once #3987's option B has removed it — see
+            // `tools::registry::dead_scope`'s module doc.
+            dead_scope::warn_dead_scope_patterns(
+                persona_name,
+                &dead_scope::dead_scope_patterns(
+                    &agent_scope_patterns,
+                    &dead_scope::reachable_scopes(tool_scopes.values()),
+                ),
+            );
             let kept = filter_persona_tool_names(
                 all_names,
                 &patterns,
