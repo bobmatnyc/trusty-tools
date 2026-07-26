@@ -67,6 +67,15 @@ pub(super) const POPULATED_SNAPSHOT_THRESHOLD_BYTES: u64 = 100_000; // 100 KB
 /// by a large relative percentage during normal operation (e.g. test fixtures,
 /// a handful of files). The catastrophic-partial-reindex scenario this guard
 /// targets only matters at a scale where losing the data is actually painful.
+///
+/// Consequence: for any index whose on-disk sidecar reports fewer than 1,000
+/// vectors, this ratio guard is INERT — it never fires, at any shrink ratio,
+/// including a full drop to 0 handled instead by the separate #1711 guard
+/// (see [`POPULATED_SNAPSHOT_THRESHOLD_BYTES`]) and a non-zero small-index
+/// partial reindex is not protected by either guard. Small indexes rely
+/// entirely on the exact `ReindexStatus::Running` check in
+/// `service::shutdown_flush` for shutdown-time protection — same as large
+/// ones — this floor only disables the size-based heuristic, not that check.
 pub(super) const SHRINK_GUARD_MIN_ON_DISK_VECTORS: usize = 1_000;
 
 /// Divisor applied to the "explained" on-disk vector count (on-disk count
@@ -92,6 +101,33 @@ pub(super) const SHRINK_GUARD_MIN_ON_DISK_VECTORS: usize = 1_000;
 /// no matter how large the reduction — the guard only fires on vectors that
 /// are simply *missing* with no recorded reason, which is exactly the
 /// signature of a reindex interrupted mid-flight.
+///
+/// Residual-risk caveat (issue #1717 code review, round 2): a magnitude ratio
+/// is inherently a heuristic, no matter where the divisor is set — it CANNOT
+/// by itself distinguish "a reindex interrupted at 91% complete" from "a
+/// legitimate reindex that simply produced 91% as many vectors," because both
+/// look identical to a size comparison alone. Concretely, with the divisor at
+/// 2 (50%): an interruption anywhere in the 50%-99% completion range produces
+/// an in-memory count that is NOT caught by this guard and WOULD be published
+/// — e.g. on-disk 312,000 vectors, SIGTERM at 200,000 (64% done, no tracked
+/// removals): `explained_floor = 312,000`, refusal threshold `156,000`, and
+/// `200,000 >= 156,000` lets the save through, silently discarding the
+/// remaining 112,000 vectors. Raising the divisor narrows but can never close
+/// this window for the same structural reason.
+///
+/// This guard is therefore NOT what closes that window for the shutdown race
+/// #1717 reports. The actual closure is
+/// [`crate::service::shutdown_flush::flush_one_index_on_shutdown`]'s exact
+/// `ReindexStatus::Running` check, added alongside this guard: at shutdown,
+/// the caller *knows* (via `SearchAppState::reindex_progress`) whether a
+/// reindex for this index is still in flight, and skips the flush entirely
+/// when it is — no heuristic, no percentage, correct at every completion
+/// percentage. This ratio guard remains in `save()` as defense-in-depth for
+/// every OTHER caller that has no equivalent "is this the final output of a
+/// still-running operation" signal available (chiefly the periodic
+/// incremental persister, and any future caller) — it stays useful for the
+/// sub-50% case even there, just not sufficient on its own for the shutdown
+/// race specifically.
 pub(super) const SHRINK_GUARD_RATIO_DIVISOR: usize = 2; // refuse below 50%
 
 /// Minimum plausible bytes-per-dimension-per-vector used to compute the
@@ -261,17 +297,32 @@ pub struct UsearchStore {
     /// the future drops the guard, releasing the lock for the next waiter.
     /// Test: `tests::test_concurrent_saves_are_serialized_and_end_consistent`.
     pub(super) save_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Count of [`Self::remove`] calls that actually dropped a tracked id
-    /// since the last successful [`Self::save`]. Reset to 0 on every
-    /// successful save.
+    /// Count of [`Self::remove`] calls that actually dropped a vector from the
+    /// HNSW graph (not merely an `id_to_key` entry — see the removal-site
+    /// comment in `usearch_impl::remove`) since the last successful
+    /// [`Self::save`].
+    ///
+    /// Reset semantics: cleared to 0 ONLY when `save()` actually writes a new
+    /// snapshot — i.e. on the success path, after `index_guard.save(..)`
+    /// returns `Ok`. It is deliberately left untouched when a save is
+    /// REFUSED by either guard (the #1711 zero-vector guard or the #1717
+    /// shrink guard): a refused save leaves the on-disk snapshot exactly as
+    /// it was, so the tracked removals still need to explain the SAME gap
+    /// against that same unchanged baseline on the next save attempt. Clearing
+    /// it on refusal would silently un-credit legitimate deletions and could
+    /// cause a later, otherwise-safe retry to be wrongly refused too.
     ///
     /// Why (issue #1717): the shrink guard in `save()` needs to distinguish
     /// deliberate deletion (safe, must never be blocked) from vectors that are
     /// simply missing because a background reindex was interrupted before it
     /// finished populating the index (unsafe — must be blocked). Every call to
-    /// `remove()` that drops a real id increments this counter, "explaining"
-    /// that much of any shrink observed at save time. See
-    /// [`SHRINK_GUARD_RATIO_DIVISOR`] for how it's used.
+    /// `remove()` that drops a real vector increments this counter,
+    /// "explaining" that much of any shrink observed at save time. See
+    /// [`SHRINK_GUARD_RATIO_DIVISOR`] for how it's used — and note that for
+    /// the specific shutdown-triggered race #1717 reports, the EXACT fix is
+    /// the `ReindexStatus::Running` check in `service::shutdown_flush`; this
+    /// counter backs the ratio guard, which remains defense-in-depth for
+    /// every other `save()` caller (e.g. periodic incremental persist).
     /// Test: `tests::test_save_allows_legitimate_shrink_after_deletions`,
     /// `tests::test_save_refuses_unexplained_catastrophic_shrink`.
     pub(super) removed_since_save: Arc<AtomicU64>,
@@ -363,7 +414,11 @@ impl UsearchStore {
     /// when the in-memory index has 0 vectors, preserving the on-disk state. A
     /// second guard (issue #1717) refuses a catastrophic, unexplained shrink —
     /// see [`SHRINK_GUARD_RATIO_DIVISOR`] — covering the non-zero-but-partial
-    /// case the #1711 guard cannot.
+    /// case the #1711 guard cannot, though ([`SHRINK_GUARD_RATIO_DIVISOR`]'s
+    /// doc explains) that guard is a ratio heuristic and does not by itself
+    /// close the full window; the shutdown path's exact protection is
+    /// `service::shutdown_flush::flush_one_index_on_shutdown`'s
+    /// `ReindexStatus::Running` check.
     /// Test: `tests::test_save_load_roundtrip` saves then loads into a fresh
     /// store and asserts a search still returns the original chunk_ids;
     /// `tests::test_save_refuses_to_overwrite_populated_snapshot_with_empty_index`
