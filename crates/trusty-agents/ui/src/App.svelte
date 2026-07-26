@@ -20,28 +20,26 @@
   // #3752: live Slack conversation mirror — the SSE bridge feeds these two
   // event kinds into the store the SlackMirror pane renders.
   import { pushSlackEvent } from './lib/slack-mirror';
-  // #3819: the Events tab's rolling log — fed from the same bridge as
-  // `pushSlackEvent`, additive, never a replacement for the existing
-  // task-progress/webBus routing below.
-  import { pushEvent } from './lib/events';
-  import { invoke, isDesktop, connectEventSource, listenEvent, emitWebEvent, type AppEvent } from './lib/transport';
-  import { bridgeDelta } from './lib/chatStream';
+  // #3759: the SSE→web-bus routing table (Events-tab log, workflow store,
+  // Slack mirror and recap fan-out included) now lives in `lib/eventBridge.ts`
+  // so it is unit-testable; it used to be an inline `bridgeEventToWebBus`
+  // here, with no automated coverage at all.
+  import { bridgeEventToWebBus } from './lib/eventBridge';
+  import { invoke, isDesktop, connectEventSource, listenEvent, type AppEvent } from './lib/transport';
   import { shouldRefetchCatalogs } from './lib/catalogRefetch';
   import {
     apiAuthRequired,
     getCurrentApiToken,
     setApiToken,
-    addMessage,
     fetchAgentCatalog,
     fetchModelCatalog,
     refreshOverlayAgents,
   } from './stores/app';
-  import { setRecap, type Recap } from './stores/recap';
   import { requestExitConfigPane } from './stores/configPane';
   // Why (#3217): parallel structured-data sink — see stores/workflow.ts doc
   // comment for the full rationale. Additive to the flattened webBus path
-  // below, never a replacement.
-  import { handleWorkflowEvent, applyTaskResult, resetWorkflow, workflowState } from './stores/workflow';
+  // in `lib/eventBridge.ts`, never a replacement.
+  import { applyTaskResult, resetWorkflow, workflowState } from './stores/workflow';
   // Why: Importing the theme store has the side-effect of running applyTheme()
   // for the persisted theme, ensuring the `dark` class on <html> tracks the
   // user's preference for the lifetime of the app (the inline <head> script
@@ -204,20 +202,6 @@
   }
 
   /**
-   * Why: When a typed server event arrives, route it onto the legacy webBus
-   * names so ChatView / TaskHistory / Sidebar pick it up without rewriting
-   * each component's listener wiring. Phase B keeps the migration mechanical
-   * — Phase C will surface the new event vocabulary directly to components
-   * that can render richer state (per-phase timeline, per-agent output).
-   * What: Maps a small set of high-signal server events to the existing
-   * `task-progress` / `task-complete` / `task-error` web-bus events. Unknown
-   * event types are forwarded as `task-progress` with a friendly summary so
-   * they show up in the UI rather than being silently dropped.
-   * Test: Trigger a workflow run with the API server up; observe Sidebar
-   * "Recent tasks" updates without a page refresh and ChatView shows live
-   * progress text.
-   */
-  /**
    * Why (#3257 code-critic HIGH): `workflowState.resetWorkflow()` previously
    * only fired on the SSE `session_started` event — but Tauri desktop mode
    * never opens the SSE stream (`startEventStream()` below no-ops when
@@ -247,151 +231,6 @@
     if (current.taskId !== taskId) {
       resetWorkflow();
       workflowState.update((s) => ({ ...s, taskId, status: 'running' }));
-    }
-  }
-
-  function bridgeEventToWebBus(ev: AppEvent) {
-    // #3819: feed the Events tab's rolling log for EVERY event, including
-    // ping/lag — additive, never short-circuits anything below.
-    pushEvent(ev);
-    // #3217: feed the structured workflow store first — additive, never
-    // short-circuits the flattened-text switch below.
-    handleWorkflowEvent(ev);
-    switch (ev.type) {
-      case 'session_started':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: 'Task started…',
-        });
-        break;
-      case 'session_done':
-        emitWebEvent('task-complete', {
-          id: ev.session_id ?? '',
-          status: ev.status ?? 'completed',
-          narrative: '',
-        });
-        break;
-      case 'session_cancelled':
-        emitWebEvent('task-error', {
-          task_id: ev.session_id ?? '',
-          error: 'cancelled',
-        });
-        break;
-      case 'pm_thinking':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: ev.text ?? '(thinking)',
-        });
-        break;
-      case 'pm_delegating':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: `Delegating to ${ev.agent}: ${ev.task_preview ?? ''}`,
-        });
-        break;
-      case 'agent_spawned':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: `Agent ${ev.agent} starting…`,
-        });
-        break;
-      case 'agent_message':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: `[${ev.agent}] ${ev.text ?? ''}`,
-        });
-        break;
-      case 'agent_message_delta': {
-        // Token-level streaming: forward each coalesced fragment on the
-        // dedicated `task-delta` bus so ChatView can grow the in-flight reply
-        // bubble incrementally (see `lib/chatStream.ts`). The final
-        // `task-complete` still replaces the accumulation with the
-        // authoritative narrative.
-        const delta = bridgeDelta(ev);
-        if (delta) emitWebEvent('task-delta', delta);
-        break;
-      }
-      case 'agent_done':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: `Agent ${ev.agent} done (${ev.status ?? 'ok'})`,
-        });
-        break;
-      case 'agent_failed':
-        emitWebEvent('task-error', {
-          task_id: ev.session_id ?? '',
-          error: `Agent ${ev.agent} failed: ${ev.error ?? ''}`,
-        });
-        break;
-      case 'tool_called':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: `Tool ${ev.tool}: ${ev.preview ?? ''}`,
-        });
-        break;
-      case 'phase_started':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: `Phase: ${ev.phase}`,
-        });
-        break;
-      case 'phase_done':
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: `Phase ${ev.phase} ${ev.status ?? 'done'}`,
-        });
-        break;
-      case 'recap_generated': {
-        // Why: #371 — surface session recaps in two places: the persistent
-        // RecapPanel between chat and input (latest recap per session) and as
-        // a banner-style chat message so the recap is preserved in the
-        // scrollback. Both consumers read from the recap store; the chat
-        // banner is appended via addMessage with role='recap'.
-        const sessionId = (ev.session_id ?? '') as string;
-        const summary = ((ev as Record<string, unknown>).summary ?? '') as string;
-        const rawRows = (ev as Record<string, unknown>).table_rows as unknown;
-        const rows: [string, string][] = Array.isArray(rawRows)
-          ? (rawRows as unknown[])
-              .filter((r): r is [unknown, unknown] => Array.isArray(r) && r.length === 2)
-              .map(([s, r]) => [String(s), String(r)])
-          : [];
-        const recap: Recap = {
-          session_id: sessionId,
-          summary,
-          table_rows: rows,
-          received_at: Date.now(),
-        };
-        setRecap(recap);
-        if (sessionId) {
-          addMessage(sessionId, {
-            id: `recap-${sessionId}-${recap.received_at}`,
-            role: 'recap',
-            content: summary,
-            timestamp: recap.received_at,
-            recapRows: rows,
-          });
-        }
-        break;
-      }
-      case 'slack_message_received':
-      case 'slack_reply_sent':
-        // #3752: live Slack conversation mirror. These are conversation-scoped
-        // (no session_id), so they don't belong on the task web-bus — fold them
-        // straight into the SlackMirror store and stop (no default fall-through
-        // to a `task-progress` emit).
-        pushSlackEvent(ev);
-        break;
-      case 'ping':
-      case 'lag':
-        // Diagnostic — no UI action; consumers that care can listen for the
-        // typed AppEvent directly via `connectEventSource`.
-        break;
-      default:
-        // Forward unknown events as progress so they're not invisible.
-        emitWebEvent('task-progress', {
-          task_id: ev.session_id ?? '',
-          message: `[${ev.type}]`,
-        });
     }
   }
 
