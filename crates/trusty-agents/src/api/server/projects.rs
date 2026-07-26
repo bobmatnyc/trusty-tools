@@ -416,6 +416,21 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
                 .collect()
         })
         .unwrap_or_default();
+    // #3232: `[tools].search_indexes` — the agent's attached tier-2
+    // trusty-search indexes (epic #4007). Surfaced here for the same reason
+    // `tools_allow`/`scopes` are: it is part of the agent's declared
+    // capability surface, and a client rendering "what can this agent reach"
+    // must not have to re-read the TOML itself. Same empty-array-not-absent
+    // convention as its neighbours.
+    let search_indexes: Vec<String> = tools
+        .and_then(|t| t.get("search_indexes"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
     // #3819: `hidden` — listing-surface-only visibility flag (see
     // `AgentInfo::hidden`'s doc comment for why this is a dedicated field
     // rather than repurposing `role`). Defaults to `false` when absent.
@@ -437,6 +452,7 @@ pub(super) fn parse_agent_toml(raw: &str, fallback_name: &str) -> Option<serde_j
         "display_name": display_name,
         "tools_allow": tools_allow,
         "scopes": scopes,
+        "search_indexes": search_indexes,
         "hidden": hidden,
         "kind": kind,
     }))
@@ -513,6 +529,9 @@ fn md_agent_to_catalog_json(
         "display_name": display_name,
         "tools_allow": cfg.tools.allow.clone().unwrap_or_default(),
         "scopes": cfg.tools.scopes.clone().unwrap_or_default(),
+        // #3232: normalized (blank-dropped, deduped) rather than the raw
+        // field, so the catalog never advertises an empty-string index id.
+        "search_indexes": cfg.tools.resolved_search_indexes(),
         "hidden": a.hidden,
         "kind": a.kind.clone(),
     })

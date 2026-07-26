@@ -717,6 +717,271 @@ async fn vector_search_routes_to_daemon_index() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #3232 / #4009 — tier-2 attached indexes (epic #4007)
+// ---------------------------------------------------------------------------
+
+/// #4009 schema enrichment: BOTH tiers are enumerated — the curated bound OKG
+/// store first, then the arbitrary attached indexes — so the model picks from
+/// real ids instead of guessing one that happens to exist.
+#[test]
+fn vector_search_schema_lists_attached_indexes() {
+    let s = VectorSearchTool::new()
+        .with_default_index(Some("cto-assistant".to_string()))
+        .with_attached_indexes(vec!["apex".to_string(), "cto-projects".to_string()])
+        .schema();
+    let desc = s["function"]["parameters"]["properties"]["index_id"]["description"]
+        .as_str()
+        .unwrap();
+    for id in ["cto-assistant", "apex", "cto-projects"] {
+        assert!(desc.contains(id), "`{id}` missing from description: {desc}");
+    }
+    // Declarative-only by default: the schema must not claim a restriction
+    // the tool does not actually apply (the #3864 defect class, inverted).
+    assert!(
+        !desc.contains("rejected"),
+        "unenforced schema must not claim enforcement: {desc}"
+    );
+}
+
+/// #4009: an agent with attached indexes but NO bound store still gets them
+/// enumerated (the OKG tier is optional; the tier-2 list stands alone).
+#[test]
+fn vector_search_schema_lists_attached_indexes_without_bound_store() {
+    let s = VectorSearchTool::new()
+        .with_attached_indexes(vec!["apex".to_string()])
+        .schema();
+    let desc = s["function"]["parameters"]["properties"]["index_id"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(desc.contains("apex"), "description was: {desc}");
+}
+
+/// #4009: when enforcement IS on, the schema says so — the model should learn
+/// the boundary from the tool definition rather than from a rejected call.
+#[test]
+fn vector_search_enforced_schema_states_the_restriction() {
+    let s = VectorSearchTool::new()
+        .with_default_index(Some("cto-assistant".to_string()))
+        .with_attached_indexes(vec!["apex".to_string()])
+        .with_index_enforcement(true)
+        .schema();
+    let desc = s["function"]["parameters"]["properties"]["index_id"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        desc.contains("Only these indexes"),
+        "description was: {desc}"
+    );
+}
+
+/// #3232/#4009 NO-BEHAVIOUR-CHANGE PIN: an UNENFORCED agent that declares no
+/// attached indexes must produce a schema BYTE-IDENTICAL to the pre-#4009 one
+/// — the tool definition is prompt input, so drift here changes every existing
+/// agent's context.
+///
+/// Deliberately scoped to `enforce == false`. An earlier revision of this test
+/// also looped `enforce == true`, which pinned a defect rather than a
+/// guarantee: a bound-only enforced agent DOES reject other indexes, so a
+/// schema that stayed silent about it was advertise/accept drift. See
+/// `vector_search_bound_only_enforcement_is_stated_in_schema`.
+#[test]
+fn vector_search_schema_unchanged_when_unenforced_without_attached_indexes() {
+    for bound in [None, Some("cto-assistant".to_string())] {
+        let baseline = VectorSearchTool::new()
+            .with_default_index(bound.clone())
+            .schema();
+        let after = VectorSearchTool::new()
+            .with_default_index(bound.clone())
+            .with_attached_indexes(vec![])
+            .with_index_enforcement(false)
+            .schema();
+        assert_eq!(
+            baseline, after,
+            "schema drifted for an unenforced agent with no attached indexes (bound={bound:?})"
+        );
+    }
+}
+
+/// #4009 (code-critic HIGH): `[[stores]]` bound + NO `search_indexes` +
+/// `enforce = true` is a legal config — an operator locking an agent to only
+/// its own corpus. `authorized_index_id` genuinely refuses every other id
+/// there, so the schema must SAY so; staying silent would leave the
+/// description promising "search a different corpus" over closed behaviour,
+/// which is the #3864 defect class in the schema-says-open direction.
+#[test]
+fn vector_search_bound_only_enforcement_is_stated_in_schema() {
+    let t = VectorSearchTool::new()
+        .with_default_index(Some("cto-assistant".to_string()))
+        .with_index_enforcement(true);
+    // Precondition: the behaviour really is closed.
+    assert_eq!(t.allowed_index_ids(), vec!["cto-assistant".to_string()]);
+    assert!(
+        t.authorized_index_id(&json!({"query": "q", "index_id": "apex"}))
+            .is_err(),
+        "bound-only enforcement must actually reject other ids"
+    );
+    let s = t.schema();
+    let desc = s["function"]["parameters"]["properties"]["index_id"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(
+        desc.contains("Only these indexes"),
+        "enforced bound-only schema must state the restriction: {desc}"
+    );
+    assert!(
+        desc.contains("`cto-assistant`"),
+        "and must name the one permitted index: {desc}"
+    );
+}
+
+/// #4009: enforcement with NOTHING queryable (no bound store, no attachments)
+/// — reachable once the schema note is gated on enforcement — must read as an
+/// explanation, not a dangling empty list.
+#[test]
+fn vector_search_enforced_empty_allowlist_schema_says_nothing_queryable() {
+    let s = VectorSearchTool::new()
+        .with_index_enforcement(true)
+        .schema();
+    let desc = s["function"]["parameters"]["properties"]["index_id"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(desc.contains("no queryable"), "description was: {desc}");
+    assert!(
+        !desc.contains("Indexes available to this agent: ."),
+        "must not emit an empty list: {desc}"
+    );
+}
+
+/// #4009: the allowlist is `{bound OKG index} ∪ search_indexes`, bound first,
+/// deduped — the single derivation feeding both the schema and the gate.
+#[test]
+fn vector_search_allowed_ids_put_bound_index_first() {
+    let t = VectorSearchTool::new()
+        .with_default_index(Some("cto-assistant".to_string()))
+        // `cto-assistant` re-declared as an attachment must not appear twice.
+        .with_attached_indexes(vec![
+            "apex".to_string(),
+            "cto-assistant".to_string(),
+            "  ".to_string(),
+        ]);
+    assert_eq!(t.allowed_index_ids(), vec!["cto-assistant", "apex"]);
+    // Neither tier declared → empty allowlist.
+    assert!(VectorSearchTool::new().allowed_index_ids().is_empty());
+}
+
+/// #4009 DEFAULT-OFF PIN (the runtime half): with enforcement off — today's
+/// default — `authorized_index_id` is exactly `effective_index_id`, for every
+/// combination of declared/undeclared id. No allowlist is consulted, so an
+/// agent that never opts in behaves byte-identically to pre-#4009.
+#[test]
+fn vector_search_default_is_unenforced() {
+    let t = VectorSearchTool::new()
+        .with_default_index(Some("bob-kb".to_string()))
+        .with_attached_indexes(vec!["apex".to_string()]);
+    for args in [
+        json!({"query": "q"}),
+        json!({"query": "q", "index_id": "apex"}),
+        json!({"query": "q", "index_id": "bob-kb"}),
+        // The whole point: an UNDECLARED id still passes through untouched.
+        json!({"query": "q", "index_id": "somebody-elses-index"}),
+        json!({"query": "q", "index_id": "  "}),
+    ] {
+        assert_eq!(
+            t.authorized_index_id(&args),
+            Ok(t.effective_index_id(&args)),
+            "unenforced resolution must match the pre-#4009 result for {args}"
+        );
+    }
+}
+
+/// #4009: with enforcement ON, both tiers are accepted and an omitted
+/// `index_id` still resolves to the agent's own bound store.
+#[test]
+fn vector_search_enforcement_allows_bound_and_attached() {
+    let t = VectorSearchTool::new()
+        .with_default_index(Some("cto-assistant".to_string()))
+        .with_attached_indexes(vec!["apex".to_string()])
+        .with_index_enforcement(true);
+    assert_eq!(
+        t.authorized_index_id(&json!({"query": "q"})),
+        Ok(Some("cto-assistant".to_string()))
+    );
+    assert_eq!(
+        t.authorized_index_id(&json!({"query": "q", "index_id": "cto-assistant"})),
+        Ok(Some("cto-assistant".to_string()))
+    );
+    assert_eq!(
+        t.authorized_index_id(&json!({"query": "q", "index_id": "apex"})),
+        Ok(Some("apex".to_string()))
+    );
+    // An agent with neither tier and nothing requested is not an error — it
+    // simply has no index, exactly as before.
+    let bare = VectorSearchTool::new().with_index_enforcement(true);
+    assert_eq!(bare.authorized_index_id(&json!({"query": "q"})), Ok(None));
+}
+
+/// #4009: with enforcement ON, an explicit id outside the allowlist is
+/// rejected with a message that NAMES the permitted set — a model that
+/// guessed wrong must be able to correct itself from the error alone.
+#[test]
+fn vector_search_enforcement_rejects_undeclared_index() {
+    let t = VectorSearchTool::new()
+        .with_default_index(Some("cto-assistant".to_string()))
+        .with_attached_indexes(vec!["apex".to_string()])
+        .with_index_enforcement(true);
+    let err = t
+        .authorized_index_id(&json!({"query": "q", "index_id": "bob-kb"}))
+        .expect_err("undeclared index must be rejected when enforced");
+    assert!(err.contains("bob-kb"), "must name the rejected id: {err}");
+    assert!(
+        err.contains("`cto-assistant`"),
+        "must name the bound index: {err}"
+    );
+    assert!(
+        err.contains("`apex`"),
+        "must name the attached index: {err}"
+    );
+    assert!(
+        err.contains("search_indexes"),
+        "must name the remedy: {err}"
+    );
+
+    // An agent with an EMPTY allowlist rejects everything, with a message
+    // that reads as an explanation rather than an empty list.
+    let bare = VectorSearchTool::new().with_index_enforcement(true);
+    let err = bare
+        .authorized_index_id(&json!({"query": "q", "index_id": "apex"}))
+        .expect_err("empty allowlist rejects any explicit id");
+    assert!(err.contains("none"), "message was: {err}");
+}
+
+/// #4009 end-to-end: a rejected id is a tool ERROR and must NOT fall through
+/// to the local/grep path — silently answering from a different corpus than
+/// the one that was refused would be worse than refusing at all.
+#[tokio::test]
+async fn vector_search_execute_rejects_undeclared_index_when_enforced() {
+    let tmp = tempdir().unwrap();
+    let tool = VectorSearchTool::new()
+        .with_code_dir(tmp.path().join("no-index"))
+        .with_default_index(Some("cto-assistant".to_string()))
+        .with_attached_indexes(vec!["apex".to_string()])
+        .with_index_enforcement(true)
+        // Deliberately unreachable: enforcement must reject before any I/O.
+        .with_search_base_url(Some("http://127.0.0.1:1".to_string()));
+
+    let out = tool
+        .execute(json!({"query": "q", "index_id": "bob-kb"}))
+        .await;
+    assert!(out.is_error(), "must be a tool error: {}", out.content());
+    assert!(out.content().contains("bob-kb"));
+    assert!(
+        !out.content().contains("grep_fallback"),
+        "a refused index must not silently answer from another corpus: {}",
+        out.content()
+    );
+}
+
 /// A missing index on the daemon degrades to the local/grep path rather than
 /// erroring the agent turn.
 #[tokio::test]

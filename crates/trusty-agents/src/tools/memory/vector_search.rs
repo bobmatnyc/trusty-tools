@@ -19,6 +19,19 @@
 //! `grep`/`search` tools use). Every failure — daemon undiscoverable, index
 //! missing, transport error — degrades to the embedded index and then to the
 //! regex fallback, so the tool never hard-fails an agent turn.
+//! #3232/#4009 (epic #4007's two-tier knowledge model) add a SECOND tier of
+//! corpora alongside the one curated OKG store: `[tools].search_indexes`, a
+//! plain list of trusty-search index ids attached to the agent. The tool
+//! enumerates bound + attached ids in its `index_id` schema description so
+//! the model no longer has to guess an id that happens to exist, and — only
+//! when `[tools] enforce_search_indexes = true` — rejects an explicit id
+//! outside that set. Enforcement is opt-in by owner decision (epic #4007
+//! OQ-2); an agent that is unenforced AND declares no attached indexes takes
+//! every path here byte-identically to pre-#4009, schema bytes included.
+//! Note the conjunction: an ENFORCED agent's schema always states the
+//! restriction, even with no attached indexes (bound-store-only lockdown is a
+//! legal config), because the schema must describe what the tool accepts.
+//!
 //! Test: See `super::tests` — `vector_search_returns_graceful_error_without_index`,
 //! `vector_search_schema_advertises_index_id`,
 //! `vector_search_prefers_explicit_index_over_default`,
@@ -60,6 +73,16 @@ pub struct VectorSearchTool {
     /// explicit `index_id` (#3864). `None` for agents with no `[[stores]]`
     /// binding — those keep the pre-#3864 local-index behaviour exactly.
     default_index_id: Option<String>,
+    /// Arbitrary trusty-search indexes attached to this agent via
+    /// `[tools].search_indexes` (#3232) — epic #4007's tier-2 knowledge
+    /// mechanism, distinct from the single curated OKG store above. Empty for
+    /// agents that declare none, which is the pre-#3232 state exactly.
+    attached_index_ids: Vec<String>,
+    /// Whether an explicit `index_id` outside the allowlist is REJECTED
+    /// (#4009). `false` (the default, per epic #4007 OQ-2) = declarative-only:
+    /// the allowlist informs the schema but gates nothing, byte-identically
+    /// to pre-#4009 behaviour.
+    enforce_index_allowlist: bool,
     /// trusty-search daemon base URL override. `None` = discover at call time
     /// via `trusty_common::resolve_daemon_base_url` (tests inject a mock).
     search_base_url: Option<String>,
@@ -79,6 +102,8 @@ impl VectorSearchTool {
             code_dir: PathBuf::from(".trusty-agents").join("state").join("code"),
             fallback: Arc::new(GrepFilesTool::new()),
             default_index_id: None,
+            attached_index_ids: Vec::new(),
+            enforce_index_allowlist: false,
             search_base_url: None,
         }
     }
@@ -96,6 +121,71 @@ impl VectorSearchTool {
     pub fn with_default_index(mut self, index_id: Option<String>) -> Self {
         self.default_index_id = index_id.filter(|s| !s.trim().is_empty());
         self
+    }
+
+    /// Attach the agent's arbitrary tier-2 search indexes (#3232/#4009).
+    ///
+    /// Why: `[tools].search_indexes` is where an agent declares corpora it
+    /// may query BESIDES its one curated OKG store. Passing the resolved list
+    /// in at registry-build time (where `AgentConfig` is in scope) keeps the
+    /// tool free of config loading, exactly as `with_default_index` does.
+    /// What: Sets `attached_index_ids`, dropping blanks and any id already
+    /// present (the caller normally passes
+    /// `ToolsConfig::resolved_search_indexes`, which has done this already —
+    /// this is belt-and-braces for direct callers and tests).
+    /// Test: `vector_search_schema_lists_attached_indexes`.
+    pub fn with_attached_indexes(mut self, ids: Vec<String>) -> Self {
+        let mut out: Vec<String> = Vec::new();
+        for id in ids {
+            let id = id.trim();
+            if id.is_empty() || out.iter().any(|e| e == id) {
+                continue;
+            }
+            out.push(id.to_string());
+        }
+        self.attached_index_ids = out;
+        self
+    }
+
+    /// Turn the allowlist from declarative into fail-closed (#4009).
+    ///
+    /// Why: Owner decision on epic #4007 OQ-2 — opt-in, default off. See
+    /// `ToolsConfig::enforce_search_indexes`.
+    /// What: Sets `enforce_index_allowlist`; `false` leaves every code path
+    /// byte-identical to pre-#4009.
+    /// Test: `vector_search_enforcement_rejects_undeclared_index`,
+    /// `vector_search_default_is_unenforced`.
+    pub fn with_index_enforcement(mut self, enforce: bool) -> Self {
+        self.enforce_index_allowlist = enforce;
+        self
+    }
+
+    /// The full set of indexes this agent may query: its bound OKG store
+    /// first, then its attached tier-2 indexes (#3232/#4009).
+    ///
+    /// Why: ONE derivation feeds both halves of #4009 — the schema
+    /// enumeration the model reads and the enforcement check — so what the
+    /// tool advertises and what it accepts can never drift apart. That
+    /// drift is precisely the #3864 class of defect this ticket must not
+    /// reintroduce in the other direction.
+    /// What: Bound index (when set) followed by the attached ids, deduped,
+    /// declaration order preserved. Empty for an agent with neither.
+    /// Test: `vector_search_allowed_ids_put_bound_index_first`.
+    pub fn allowed_index_ids(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for id in self
+            .default_index_id
+            .iter()
+            .map(String::as_str)
+            .chain(self.attached_index_ids.iter().map(String::as_str))
+        {
+            let id = id.trim();
+            if id.is_empty() || out.iter().any(|e| e == id) {
+                continue;
+            }
+            out.push(id.to_string());
+        }
+        out
     }
 
     /// Override the on-disk index location (used by tests).
@@ -136,6 +226,54 @@ impl VectorSearchTool {
             .map(str::to_string)
             .or_else(|| self.default_index_id.clone())
     }
+
+    /// [`Self::effective_index_id`] plus the #4009 allowlist gate — the entry
+    /// point `execute` uses.
+    ///
+    /// Why: Resolution (which index does this call mean?) and authorization
+    /// (may this agent query it?) are separate concerns, and only the second
+    /// is opt-in. Keeping them as two functions lets the resolution contract
+    /// stay pinned by its pre-existing tests while enforcement is layered on
+    /// top; keeping the gate on the path `execute` actually calls means an
+    /// enforced agent cannot reach `daemon_query` with an undeclared id.
+    /// What: With enforcement OFF (the default) this is exactly
+    /// `Ok(effective_index_id(args))` — no allowlist is consulted, so the
+    /// default path is byte-identical to pre-#4009. With enforcement ON, an
+    /// EXPLICIT `index_id` outside [`Self::allowed_index_ids`] returns `Err`
+    /// with a message naming the permitted set; the agent's own bound default
+    /// is never rejected (it is always a member), and an omitted `index_id`
+    /// therefore always resolves.
+    /// Test: `vector_search_enforcement_rejects_undeclared_index`,
+    /// `vector_search_enforcement_allows_bound_and_attached`,
+    /// `vector_search_default_is_unenforced`,
+    /// `vector_search_execute_rejects_undeclared_index_when_enforced`.
+    pub fn authorized_index_id(&self, args: &Value) -> Result<Option<String>, String> {
+        let resolved = self.effective_index_id(args);
+        if !self.enforce_index_allowlist {
+            return Ok(resolved);
+        }
+        let Some(id) = resolved else {
+            return Ok(None);
+        };
+        let allowed = self.allowed_index_ids();
+        if allowed.iter().any(|a| a == &id) {
+            return Ok(Some(id));
+        }
+        let allowed_list = if allowed.is_empty() {
+            "(none — this agent declares no bound store and no [tools].search_indexes)".to_string()
+        } else {
+            allowed
+                .iter()
+                .map(|a| format!("`{a}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Err(format!(
+            "vector_search: index_id `{id}` is not attached to this agent. Allowed indexes: \
+             {allowed_list}. Attach it via [tools].search_indexes in the agent config, or omit \
+             index_id to search the agent's own store."
+        ))
+    }
 }
 
 impl Default for VectorSearchTool {
@@ -154,7 +292,7 @@ impl ToolExecutor for VectorSearchTool {
         // #3864: `index_id`'s description names the agent's bound default
         // explicitly when there is one, so the model can see which corpus an
         // unqualified call will actually search rather than guessing.
-        let index_desc = match &self.default_index_id {
+        let mut index_desc = match &self.default_index_id {
             Some(id) => format!(
                 "trusty-search index to search. Defaults to this agent's bound OKG store index \
                  (`{id}`) when omitted. Pass an explicit id to search a different corpus."
@@ -163,6 +301,46 @@ impl ToolExecutor for VectorSearchTool {
                      project code index."
                 .to_string(),
         };
+        // #4009: enumerate the agent's attached tier-2 indexes
+        // (`[tools].search_indexes`, #3232) alongside the bound OKG store, so
+        // the model picks from real queryable ids instead of guessing one that
+        // happens to exist.
+        //
+        // The `|| enforce` half of this gate is load-bearing, not defensive.
+        // A bound store with NO `search_indexes` and `enforce = true` is a
+        // legal config — an operator locking an agent to only its own corpus —
+        // and there `allowed_index_ids()` is `[bound]` while
+        // `authorized_index_id()` genuinely refuses everything else. Gating on
+        // the attached list alone would leave that agent's schema saying
+        // "Pass an explicit id to search a different corpus" over closed
+        // behaviour: the #3864 advertise/accept drift, in the
+        // schema-says-open direction. The schema must describe what the tool
+        // ACCEPTS, so the note appears whenever enforcement is active.
+        //
+        // Unenforced agents with no attached indexes still take neither branch
+        // and keep the exact pre-#4009 description, prompt bytes unchanged —
+        // that, and not "enforce is invisible", is the compatibility promise.
+        if !self.attached_index_ids.is_empty() || self.enforce_index_allowlist {
+            let allowed = self.allowed_index_ids();
+            if allowed.is_empty() {
+                // Only reachable under enforcement (an unenforced agent with
+                // no ids took neither branch): nothing is queryable at all, so
+                // say that rather than emit a dangling empty list.
+                index_desc
+                    .push_str(" This agent has no queryable trusty-search index; omit index_id.");
+            } else {
+                let listed = allowed
+                    .iter()
+                    .map(|id| format!("`{id}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                index_desc.push_str(&format!(" Indexes available to this agent: {listed}."));
+                if self.enforce_index_allowlist {
+                    index_desc
+                        .push_str(" Only these indexes may be queried; any other id is rejected.");
+                }
+            }
+        }
         json!({
             "type": "function",
             "function": {
@@ -206,7 +384,17 @@ impl ToolExecutor for VectorSearchTool {
         // #3864 fast path: a named trusty-search index (explicit arg, or the
         // agent's bound OKG store). Any failure falls through to the
         // pre-existing local paths rather than erroring the turn.
-        if let Some(index_id) = self.effective_index_id(&args) {
+        // #4009: authorize before routing. With enforcement off (the default)
+        // this is the pre-existing `effective_index_id` result unchanged; with
+        // it on, an undeclared explicit id is a hard tool error rather than a
+        // silent daemon call — and deliberately NOT a fall-through to the
+        // local index, which would leak an answer from the wrong corpus in
+        // response to a rejected request.
+        let index_id = match self.authorized_index_id(&args) {
+            Ok(id) => id,
+            Err(msg) => return ToolResult::err(msg),
+        };
+        if let Some(index_id) = index_id {
             match self.daemon_query(&index_id, query, limit).await {
                 Ok(payload) => return ToolResult::ok(payload),
                 Err(e) => tracing::warn!(

@@ -436,6 +436,145 @@ scopes = ["memory.read", "search.read"]
     );
 }
 
+/// #3232: the ticket's own worked example — a base Assistant attaches its
+/// project index; a CTO Assistant extending it unions in `cto-projects`
+/// WITHOUT re-declaring the base's and without being able to silently drop
+/// it. Same base-first-union-with-dedup contract as `allow`/`scopes`.
+#[test]
+fn extends_unions_search_indexes() {
+    let base = cfg(r#"
+[agent]
+name = "assistant"
+role = "r"
+model = "m"
+description = "d"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "b"
+[tools]
+search_indexes = ["trusty-tools", "shared-docs"]
+"#);
+    let ch = cfg(r#"
+[agent]
+name = "cto-assistant"
+role = "agent"
+model = ""
+description = ""
+extends = "assistant"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+[tools]
+search_indexes = ["shared-docs", "cto-projects", "apex"]
+"#);
+    let merged = merge_extends(base, ch);
+    assert_eq!(
+        merged.tools.resolved_search_indexes(),
+        vec!["trusty-tools", "shared-docs", "cto-projects", "apex"],
+        "base-first union, dedup — the overlay may only ADD reach"
+    );
+}
+
+/// #3232: a child that declares nothing keeps its base's attached indexes;
+/// a base that declares nothing does not erase the child's. Mirrors
+/// `extends_union_none_cases` for the pre-existing list fields.
+#[test]
+fn extends_search_indexes_none_cases() {
+    let mk = |name: &str, extends: &str, line: &str| {
+        cfg(&format!(
+            r#"
+[agent]
+name = "{name}"
+role = "agent"
+model = "m"
+description = "d"
+{extends}
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "x"
+[tools]
+{line}
+"#
+        ))
+    };
+    // Child silent → inherits the base's list.
+    let merged = merge_extends(
+        mk("base", "", "search_indexes = [\"apex\"]"),
+        mk("child", "extends = \"base\"", ""),
+    );
+    assert_eq!(merged.tools.resolved_search_indexes(), vec!["apex"]);
+    // Base silent → the child's own list survives.
+    let merged = merge_extends(
+        mk("base", "", ""),
+        mk("child", "extends = \"base\"", "search_indexes = [\"apex\"]"),
+    );
+    assert_eq!(merged.tools.resolved_search_indexes(), vec!["apex"]);
+    // Neither declares → still absent (the pre-#3232 state).
+    let merged = merge_extends(mk("base", "", ""), mk("child", "extends = \"base\"", ""));
+    assert!(merged.tools.search_indexes.is_none());
+    assert!(!merged.tools.search_indexes_enforced());
+}
+
+/// #4009: `enforce_search_indexes` is a POSTURE, not a list — so it does not
+/// union. A child that declares it wins (may harden or relax); a child that
+/// omits it inherits, so a hardened base cannot be silently un-hardened by
+/// an overlay that simply never mentions the key.
+#[test]
+fn extends_child_overrides_enforce_search_indexes() {
+    let mk = |name: &str, extends: &str, line: &str| {
+        cfg(&format!(
+            r#"
+[agent]
+name = "{name}"
+role = "agent"
+model = "m"
+description = "d"
+{extends}
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "x"
+[tools]
+search_indexes = ["apex"]
+{line}
+"#
+        ))
+    };
+    // Hardened base + silent child → stays hardened.
+    let merged = merge_extends(
+        mk("base", "", "enforce_search_indexes = true"),
+        mk("child", "extends = \"base\"", ""),
+    );
+    assert!(merged.tools.search_indexes_enforced());
+    // Hardened base + child explicitly relaxing → child wins.
+    let merged = merge_extends(
+        mk("base", "", "enforce_search_indexes = true"),
+        mk(
+            "child",
+            "extends = \"base\"",
+            "enforce_search_indexes = false",
+        ),
+    );
+    assert!(!merged.tools.search_indexes_enforced());
+    // Unenforced base + child hardening → child wins.
+    let merged = merge_extends(
+        mk("base", "", ""),
+        mk(
+            "child",
+            "extends = \"base\"",
+            "enforce_search_indexes = true",
+        ),
+    );
+    assert!(merged.tools.search_indexes_enforced());
+}
+
 #[test]
 fn extends_unions_listener_bindings_by_name() {
     let base = cfg(r#"
