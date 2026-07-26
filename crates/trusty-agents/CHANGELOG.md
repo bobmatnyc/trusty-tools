@@ -9,6 +9,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Streamed replies no longer flash blank or "(no narrative)" the moment a
+  task finishes** (issue #3759): in browser mode the GUI's SSE→web-bus bridge
+  emitted a `task-complete` with a hardcoded empty narrative on every
+  `session_done`, racing the poll loop's `task-complete` that carries the real
+  text. Last writer won, and with token streaming (#3753) `session_done`
+  normally landed first — up to a poll interval ahead — wiping freshly streamed
+  prose mid-read. `session_done` now stays off the web bus entirely (its status
+  bookkeeping already flowed through the workflow store and the Events log), so
+  a task's narrative has exactly one emitter per transport. As a side effect, a
+  foreign session finishing mid-turn — the `/api/events` stream is a
+  process-wide broadcast — no longer clears this tab's spinner.
+
 - **Streamed chat turns now send the same sampling parameters as the blocking
   path** (issue #3758): `llm::stream::stream_reply` built its
   `OpenRouterProvider` with no temperature, token ceiling, or stop sequences, so
