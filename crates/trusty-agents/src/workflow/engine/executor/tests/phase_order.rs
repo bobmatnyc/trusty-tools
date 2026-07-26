@@ -72,6 +72,10 @@ fn discover_project_dir_falls_back_to_out_dir_when_no_project() {
 /// that snapshots the `out_dir` contents when QA is invoked, and assert
 /// both extracted files are visible from QA's perspective.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn files_are_extracted_before_next_phase_runs() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp.path().to_path_buf();
@@ -137,6 +141,10 @@ async fn files_are_extracted_before_next_phase_runs() {
 /// if its output contains `## File:` sections. This guards the opt-in
 /// semantics — only the code phase should touch disk.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn phase_without_produces_files_does_not_extract() {
     let tmp = tempfile::tempdir().unwrap();
     let out_dir = tmp.path().to_path_buf();
@@ -184,6 +192,10 @@ async fn phase_without_produces_files_does_not_extract() {
 /// (`out/legacy-monolithic-test`), let `run_with_perf` create and
 /// canonicalize it, and assert the runner observed an absolute path.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn legacy_monolithic_path_passes_absolute_working_dir() {
     // Drive a relative out_dir path, mirroring how the CLI
     // (`--out-dir out/...`) actually wires this.

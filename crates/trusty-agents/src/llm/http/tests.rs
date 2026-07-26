@@ -12,12 +12,44 @@
 //! Behaviour is unchanged from the inline versions; the only edit made
 //! during the move was carrying over #3464's `force_env_local_loaded()`
 //! preamble, which landed on `main` after this split was authored.
+//! #3952 later converted the five `$HOME`-sandboxing credential tests from
+//! `#[tokio::test]` to sync `#[test]` + [`block_on`] so they can join the
+//! crate's single `$HOME` lock domain — assertions unchanged.
 //! Test: This module IS the test.
 
 use super::*;
 use async_openai::types::{
     ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
 };
+
+/// Drive `fut` to completion on a private CURRENT-THREAD tokio runtime.
+///
+/// Why (#3952): the five credential-resolution tests below sandbox `$HOME`,
+/// so they must hold `crate::test_env::lock_home()` — the crate's single
+/// `$HOME` synchronization domain — for their whole body, including the
+/// awaited `send_raw_completion` call. As `#[tokio::test]`s they could not:
+/// `HOME_LOCK` is a `std::sync::Mutex` and clippy's `await_holding_lock`
+/// correctly forbids holding its guard across `.await`, which is precisely
+/// why they were left on `#[serial]` alone and became the landmine #3952
+/// describes. Inverting the structure removes the conflict instead of
+/// suppressing it: a SYNC `#[test]` holds the guards and hands the future to
+/// an explicit runtime, so there is no `.await` in the guarded scope at all
+/// and the lint never applies. This is the same manoeuvre PR #3976 used to
+/// bring the embedder reference-accuracy test under its module's existing
+/// std lock (issue #3711).
+/// What: builds a fresh `Builder::new_current_thread().enable_all()` runtime
+/// — current-thread, never `Runtime::new()`/`new_multi_thread()`, both of
+/// which `crate::test_env::lock_home` now rejects outright (#3957) — and
+/// `block_on`s the future on the calling thread, which is the same thread
+/// that owns the `HomeLockGuard`.
+/// Test: used by every `send_raw_completion_*` test in this module.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime")
+        .block_on(fut)
+}
 
 /// Why (fix regression test): `send_raw_completion` takes its auth value
 /// from `adapter.api_endpoint(false)`, which for `GenericAdapter` (no
@@ -31,21 +63,49 @@ use async_openai::types::{
 /// with a non-empty bearer token instead of bailing with "credential not
 /// found".
 /// Test: itself.
-// NOTE: none of the async tests below hold `crate::test_env::{ENV_LOCK,
-// HOME_LOCK}` (`std::sync::Mutex`) across their `.await` — clippy's
-// `await_holding_lock` correctly forbids that for a sync mutex. `#[serial]`
-// (unnamed group) provides the cross-test exclusion instead, matching the
-// established pattern in `inference_client::tests::with_store_honours_openrouter_base_url_override`.
+// #3952: every test below that sandboxes `$HOME` now holds
+// `crate::test_env::lock_home()` for its whole body — the crate's ONE `$HOME`
+// synchronization domain — instead of relying on `#[serial]` alone.
+//
+// The old arrangement was two mutually unaware exclusion mechanisms:
+// `#[serial]` (unnamed group) only excludes other `#[serial]`-tagged tests,
+// while dozens of `$HOME`-sandboxing tests elsewhere in this crate
+// (`listeners::poll`, `tools::mcp_tools`, `init::tests::*`, `api::server`,
+// `slack`, ...) exclude each other via `HOME_LOCK` and carry no `#[serial]`.
+// Neither mechanism serializes against the other, so this file's `$HOME`
+// swaps raced all of them — confirmed as the root cause of #3922's
+// `listeners::store::tests::dedup_seed_loads_recent_ids` CI flake. Two locks
+// do not serialize against each other; that is the same defect shape PR
+// #3976 fixed in the embedder module by collapsing two env-lock statics into
+// one, and the fix here is the same discipline, not a third mechanism.
+//
+// `#[serial]` is RETAINED (not replaced) because these tests also mutate
+// process-global credential env vars, whose domain is `ENV_LOCK` + the
+// crate-wide `#[serial]` convention documented in `llm::helpers::tests` —
+// unrelated to `$HOME`. Lock order matches every other multi-lock test in
+// this crate (`llm::{credentials,helpers,adapter}::tests`,
+// `system_status::credentials`): `#[serial]` → `ENV_LOCK` → `HOME_LOCK`.
+//
+// Holding sync guards is possible at all because these are now sync
+// `#[test]`s driving `block_on` (see this module's helper), so clippy's
+// `await_holding_lock` — the reason they were on `#[serial]` alone — no
+// longer applies to anything.
 
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn send_raw_completion_resolves_key_from_store_when_env_absent() {
+fn send_raw_completion_resolves_key_from_store_when_env_absent() {
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // #3952: single `$HOME` domain — `lock_home()`, not the raw `HOME_LOCK`,
+    // so `listeners::store::events_dir`'s per-thread ownership guard also
+    // recognises this test as participating.
+    let _home_guard = crate::test_env::lock_home();
     // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
     crate::test_env::force_env_local_loaded();
     let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
     let prev_home = std::env::var_os("HOME");
-    // SAFETY: `#[serial]` (unnamed group) serializes against every other
-    // unnamed `#[serial]` test in this binary.
+    // SAFETY: ENV_LOCK + HOME_LOCK held for the whole test body.
     unsafe {
         std::env::remove_var("OPENROUTER_API_KEY");
     }
@@ -69,15 +129,14 @@ async fn send_raw_completion_resolves_key_from_store_when_env_absent() {
     // Point it at an unroutable loopback port instead so the request
     // fails fast on connection refusal (not on auth), letting us assert
     // the fallback resolved a non-empty key without touching the network.
-    // SAFETY: still under `#[serial]` exclusion.
+    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
     unsafe {
         std::env::set_var("OPENROUTER_BASE_URL", "http://127.0.0.1:1");
     }
 
     let adapter = crate::llm::adapter::GenericAdapter;
     let body = serde_json::json!({"model": "gpt-4o", "messages": []});
-    let err = send_raw_completion(&body, &adapter)
-        .await
+    let err = block_on(send_raw_completion(&body, &adapter))
         .expect_err("connection to 127.0.0.1:1 must fail");
     let msg = format!("{err:#}");
     assert!(
@@ -85,7 +144,7 @@ async fn send_raw_completion_resolves_key_from_store_when_env_absent() {
         "must not report a missing credential when the store has one: {msg}"
     );
 
-    // SAFETY: still under `#[serial]` exclusion.
+    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
     unsafe {
         std::env::remove_var("OPENROUTER_BASE_URL");
         match prev_openrouter {
@@ -104,14 +163,19 @@ async fn send_raw_completion_resolves_key_from_store_when_env_absent() {
 /// instead of silently sending an empty bearer token and letting the
 /// provider's bare 401 stand in for the real problem.
 /// Test: itself.
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn send_raw_completion_missing_everywhere_errors_with_provider_name() {
+fn send_raw_completion_missing_everywhere_errors_with_provider_name() {
+    // #3952: ENV_LOCK then HOME_LOCK, held for the whole body.
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::lock_home();
     // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
     crate::test_env::force_env_local_loaded();
     let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
     let prev_home = std::env::var_os("HOME");
-    // SAFETY: `#[serial]` (unnamed group) provides exclusion.
+    // SAFETY: ENV_LOCK + HOME_LOCK held for the whole test body.
     unsafe {
         std::env::remove_var("OPENROUTER_API_KEY");
     }
@@ -123,8 +187,7 @@ async fn send_raw_completion_missing_everywhere_errors_with_provider_name() {
 
     let adapter = crate::llm::adapter::GenericAdapter;
     let body = serde_json::json!({"model": "gpt-4o", "messages": []});
-    let err = send_raw_completion(&body, &adapter)
-        .await
+    let err = block_on(send_raw_completion(&body, &adapter))
         .expect_err("no credential anywhere must error, not send an empty key");
     let msg = format!("{err:#}");
     assert!(
@@ -132,7 +195,7 @@ async fn send_raw_completion_missing_everywhere_errors_with_provider_name() {
         "error must name the provider and say credential not found: {msg}"
     );
 
-    // SAFETY: still under `#[serial]` exclusion.
+    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
     unsafe {
         match prev_openrouter {
             Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
@@ -182,14 +245,19 @@ impl ModelAdapter for NoCredentialAdapter {
 /// that supplies NO credential in its `ApiEndpoint`) must still resolve
 /// through the shared 3-tier resolver rather than a raw env read.
 /// Test: itself.
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn send_raw_completion_empty_endpoint_credential_falls_back_to_store() {
+fn send_raw_completion_empty_endpoint_credential_falls_back_to_store() {
+    // #3952: ENV_LOCK then HOME_LOCK, held for the whole body.
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::lock_home();
     // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
     crate::test_env::force_env_local_loaded();
     let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
     let prev_home = std::env::var_os("HOME");
-    // SAFETY: `#[serial]` (unnamed group) provides exclusion.
+    // SAFETY: ENV_LOCK + HOME_LOCK held for the whole test body.
     unsafe {
         std::env::remove_var("OPENROUTER_API_KEY");
     }
@@ -207,8 +275,7 @@ async fn send_raw_completion_empty_endpoint_credential_falls_back_to_store() {
 
     let adapter = NoCredentialAdapter;
     let body = serde_json::json!({"model": "gpt-4o", "messages": []});
-    let err = send_raw_completion(&body, &adapter)
-        .await
+    let err = block_on(send_raw_completion(&body, &adapter))
         .expect_err("connection to 127.0.0.1:1 must fail");
     let msg = format!("{err:#}");
     assert!(
@@ -216,7 +283,7 @@ async fn send_raw_completion_empty_endpoint_credential_falls_back_to_store() {
         "must not report a missing credential when the store has one: {msg}"
     );
 
-    // SAFETY: still under `#[serial]` exclusion.
+    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
     unsafe {
         match prev_openrouter {
             Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
@@ -234,14 +301,19 @@ async fn send_raw_completion_empty_endpoint_credential_falls_back_to_store() {
 /// credential not found" — the wrong provider name AND the wrong env
 /// var/config hint. This proves the error now names Fireworks.
 /// Test: itself.
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn send_raw_completion_fireworks_missing_key_errors_with_fireworks_name() {
+fn send_raw_completion_fireworks_missing_key_errors_with_fireworks_name() {
+    // #3952: ENV_LOCK then HOME_LOCK, held for the whole body.
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::lock_home();
     // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
     crate::test_env::force_env_local_loaded();
     let prev_fireworks = std::env::var_os("FIREWORKS_API_KEY");
     let prev_home = std::env::var_os("HOME");
-    // SAFETY: `#[serial]` (unnamed group) provides exclusion.
+    // SAFETY: ENV_LOCK + HOME_LOCK held for the whole test body.
     unsafe {
         std::env::remove_var("FIREWORKS_API_KEY");
     }
@@ -255,8 +327,7 @@ async fn send_raw_completion_fireworks_missing_key_errors_with_fireworks_name() 
         model_id: "accounts/fireworks/models/llama-v3p1-8b-instruct".to_string(),
     };
     let body = serde_json::json!({"model": "accounts/fireworks/models/llama-v3p1-8b-instruct", "messages": []});
-    let err = send_raw_completion(&body, &adapter)
-        .await
+    let err = block_on(send_raw_completion(&body, &adapter))
         .expect_err("no fireworks credential anywhere must error, not send an empty key");
     let msg = format!("{err:#}");
     assert!(
@@ -268,7 +339,7 @@ async fn send_raw_completion_fireworks_missing_key_errors_with_fireworks_name() 
         "error must hint the correct env var: {msg}"
     );
 
-    // SAFETY: still under `#[serial]` exclusion.
+    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
     unsafe {
         match prev_fireworks {
             Some(v) => std::env::set_var("FIREWORKS_API_KEY", v),
@@ -286,15 +357,19 @@ async fn send_raw_completion_fireworks_missing_key_errors_with_fireworks_name() 
 /// `send_raw_completion_resolves_key_from_store_when_env_absent` but for
 /// the new `FireworksAdapter` instead of `GenericAdapter`/OpenRouter.
 /// Test: itself.
-#[tokio::test]
+#[test]
 #[serial_test::serial]
-async fn send_raw_completion_fireworks_resolves_key_from_store_when_env_absent() {
+fn send_raw_completion_fireworks_resolves_key_from_store_when_env_absent() {
+    // #3952: ENV_LOCK then HOME_LOCK, held for the whole body.
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::lock_home();
     // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
     crate::test_env::force_env_local_loaded();
     let prev_fireworks = std::env::var_os("FIREWORKS_API_KEY");
     let prev_home = std::env::var_os("HOME");
-    // SAFETY: `#[serial]` (unnamed group) serializes against every other
-    // unnamed `#[serial]` test in this binary.
+    // SAFETY: ENV_LOCK + HOME_LOCK held for the whole test body.
     unsafe {
         std::env::remove_var("FIREWORKS_API_KEY");
     }
@@ -315,7 +390,7 @@ async fn send_raw_completion_fireworks_resolves_key_from_store_when_env_absent()
     // Point the adapter at an unroutable loopback port so the request
     // fails fast on connection refusal (not on auth), proving the
     // fallback resolved a non-empty key without touching the network.
-    // SAFETY: still under `#[serial]` exclusion.
+    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
     unsafe {
         std::env::set_var("FIREWORKS_BASE_URL", "http://127.0.0.1:1/inference/v1");
     }
@@ -324,8 +399,7 @@ async fn send_raw_completion_fireworks_resolves_key_from_store_when_env_absent()
         model_id: "accounts/fireworks/models/llama-v3p1-8b-instruct".to_string(),
     };
     let body = serde_json::json!({"model": "accounts/fireworks/models/llama-v3p1-8b-instruct", "messages": []});
-    let err = send_raw_completion(&body, &adapter)
-        .await
+    let err = block_on(send_raw_completion(&body, &adapter))
         .expect_err("connection to 127.0.0.1:1 must fail");
     let msg = format!("{err:#}");
     assert!(
@@ -333,7 +407,7 @@ async fn send_raw_completion_fireworks_resolves_key_from_store_when_env_absent()
         "must not report a missing credential when the store has one: {msg}"
     );
 
-    // SAFETY: still under `#[serial]` exclusion.
+    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
     unsafe {
         std::env::remove_var("FIREWORKS_BASE_URL");
         match prev_fireworks {

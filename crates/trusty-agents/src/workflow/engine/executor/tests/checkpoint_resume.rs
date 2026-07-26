@@ -19,6 +19,23 @@
 //! the §3.5 failure-matrix fail-closed paths plus the two code-critic
 //! findings from PR #3244 (summary/content conflation, concurrent-resume
 //! mutual exclusion).
+//!
+//! #3989 — why every engine-driving test in THIS DIRECTORY is `#[serial]`,
+//! not just the ones in this file: `WorkflowEngine::run()` resolves its
+//! checkpoint destination from two PROCESS-GLOBAL env vars —
+//! `TAGENT_RUN_ID` (`executor/run.rs`) and `TAGENT_PROJECT_DIR` via
+//! `crate::usage::project_dir()` (`executor/phase_loop.rs`). The tests here
+//! own both for their bodies through `EnvVarGuard` + `#[serial]`, but
+//! `#[serial]` excludes only other `#[serial]` tests. A sibling test that
+//! drove the real engine WITHOUT the attribute therefore inherited this
+//! file's tempdir AND this file's run id, and wrote its own checkpoint over
+//! this file's journal — surfacing here as a checkpoint whose phases belong
+//! to a completely different workflow (`plan`, not `phase-a`). Guarding the
+//! writer is not enough when the guarded value is *read and acted on* by
+//! code outside the guard's domain; the readers have to join it too. Same
+//! defect shape as #3398, whose reader/writer halves this completes. The
+//! durable fix (inject `project_dir`/`run_id` into the engine, so no test
+//! needs the globals at all) is tracked in #3989.
 //! Test: This file IS the test suite.
 
 use std::collections::HashMap;

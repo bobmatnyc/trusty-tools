@@ -76,6 +76,10 @@ fn parallel_workflow_json(label_a: &str, suffix_a: &str, label_b: &str, suffix_b
 /// directory) must fail the phase/workflow — not be swallowed into a
 /// `"merge failed: ..."` string appended to a successful `AgentOutput`.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn parallel_phase_merge_io_failure_fails_the_workflow() {
     let tmp = tempfile::tempdir().unwrap();
     let out_dir = tmp.path().join("out");
@@ -135,6 +139,10 @@ async fn parallel_phase_merge_io_failure_fails_the_workflow() {
 /// succeed exactly as before — both sub-agents' content shows up in the
 /// aggregated output and the merged files land on disk under `out_dir`.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn parallel_phase_clean_merge_still_succeeds() {
     let tmp = tempfile::tempdir().unwrap();
     let out_dir = tmp.path().join("out");

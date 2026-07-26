@@ -16,6 +16,10 @@ use super::*;
 /// We use a recording mock that captures the exact task text the runner
 /// receives and assert the prefix appears before the task body.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn init_context_is_prepended_to_phase_template() {
     struct RecordingRunner {
         tasks: Arc<Mutex<Vec<String>>>,
@@ -226,6 +230,10 @@ fn skill_discovery_returns_empty_when_registry_absent() {
 /// containing the "## Available Skills" header. Other phases must NOT
 /// receive that block.
 #[tokio::test]
+// #3989: joins the crate-wide `#[serial]` group — this test drives the real
+// `WorkflowEngine`, which resolves its checkpoint path from the PROCESS-GLOBAL
+// `TAGENT_PROJECT_DIR`/`TAGENT_RUN_ID`. See `checkpoint_resume.rs`'s module docs.
+#[serial_test::serial]
 async fn plan_agent_context_includes_skill_summaries() {
     let (_keep, reg) = temp_tag_registry_with_python_skills();
 
