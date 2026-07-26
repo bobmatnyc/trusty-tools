@@ -41,6 +41,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   anything else with `422`, mirroring the existing closed-set RBAC tier check
   on the inbound half.
 
+- **`cto-assistant`'s Gmail and Google Tasks tools are no longer scope-denied at
+  dispatch** (issue #3938): the bundled `cto-assistant` DIRECTORY PACKAGE
+  (`.trusty-agents/agents/cto-assistant/agent.toml`), which wins the loader's
+  resolution order over the flat `cto-assistant.toml`, declared no
+  `[tools].scopes` — so it inherited only the base assistant's `google.read` by
+  union. No gworkspace tool ever advertises that scope: discovery maps every
+  `x-google-scopes` OAuth URL to `google.<family>.<access>` (`google.gmail.write`,
+  `google.tasks.write`), and `ScopePattern::matches` compares on segment
+  boundaries, so `google.read` matched nothing and the per-agent scope gate in
+  `filter_persona_tool_names` (#3208) dropped the persona's entire Gmail/Tasks
+  surface before the model saw it. The package now declares
+  `scopes = ["google.gmail.*", "google.tasks.*"]` explicitly — narrowly, the two
+  families its allowlisted tools actually need, not a blanket `google.*` —
+  restoring the line the flat file has always carried and that the package
+  conversion dropped. A new test resolves the SHIPPED package through the real
+  loader, derives each tool's dotted scope from the real `trusty-gworkspace`
+  `rpc.discover` document, and runs the real dispatch-time filter, so
+  re-dropping the declaration fails in CI instead of at a user's dispatch.
+
 - **Streamed chat turns now send the same sampling parameters as the blocking
   path** (issue #3758): `llm::stream::stream_reply` built its
   `OpenRouterProvider` with no temperature, token ceiling, or stop sequences, so

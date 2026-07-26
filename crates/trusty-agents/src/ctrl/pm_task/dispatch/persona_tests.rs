@@ -465,3 +465,100 @@ fn persona_max_turns_with_tools_honors_config_override() {
     let llm = llm_params_with_persona_max_turns(Some(12));
     assert_eq!(persona_max_turns(true, &llm), 12);
 }
+
+/// #3938 regression pin: the bundled `cto-assistant` DIRECTORY PACKAGE must
+/// carry enough Google scope to survive the dispatch-time scope
+/// intersection for its Gmail/Tasks surface.
+///
+/// Why: the package (`.trusty-agents/agents/cto-assistant/agent.toml`) WINS
+/// over the flat `cto-assistant.toml` in `by_name_unresolved_src_in`, and
+/// when it was converted from the flat form its `scopes = [...]` line was
+/// dropped. With none declared it inherited only the base assistant's
+/// `google.read` by union (`extends::merge_extends`) — a pattern that
+/// matches NO scope any gworkspace tool advertises (every dotted scope is
+/// `google.<family>.<access>`; see `registry::google_scope`), so
+/// `agent_can_use` denied the whole Gmail/Tasks surface even though every
+/// tool was allowlisted by name. Asserting on the checked-in package rather
+/// than a synthetic fixture is the point: this pins the SHIPPED config, so
+/// re-dropping the line (or converting another agent the same way) fails
+/// here instead of at a user's dispatch.
+/// What: resolves the real package through the real loader (`by_name_in`,
+/// including its `extends = "assistant"` union), derives each tool's dotted
+/// scope from the real `trusty-gworkspace` `rpc.discover` document through
+/// the real `parse_manifest` -> `x-google-scopes` mapping, and runs the real
+/// `filter_persona_tool_names` gate. No daemon, no network, no LLM.
+#[test]
+fn cto_assistant_package_gmail_and_tasks_tools_survive_scope_intersection() {
+    // The scoped gworkspace tools this persona is built around: Gmail triage
+    // (#473, inherited from the base's Gmail surface) and Google Tasks
+    // (#472/#485, this package's own delta). `create_draft` / `create_task`
+    // are deliberately absent — they are legacy names gworkspace no longer
+    // exposes, so they carry no scope and are filtered by registration, not
+    // by scope (see `skills::manifest::builtin::gworkspace`).
+    const GMAIL_AND_TASKS: &[&str] = &[
+        "search_gmail_messages",
+        "get_gmail_message_content",
+        "modify_gmail_messages",
+        "list_tasks",
+        "complete_task",
+    ];
+
+    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".trusty-agents")
+        .join("agents");
+    let cfg = AgentConfig::by_name_in(&[agents_dir], "cto-assistant")
+        .expect("bundled cto-assistant directory package resolves");
+
+    let manifest = crate::tools::registry::discovery::parse_manifest(
+        "gworkspace",
+        &trusty_gworkspace::openrpc::discover_response(),
+    )
+    .expect("gworkspace rpc.discover document parses");
+    let tool_scopes: std::collections::HashMap<String, String> = manifest
+        .tools
+        .iter()
+        .map(|t| (t.name.clone(), t.scope.clone()))
+        .collect();
+
+    // Guard against a vacuous pass: every name below must still BE a scoped
+    // gworkspace tool, otherwise the scope gate would wave it through on the
+    // `None` branch and prove nothing.
+    for name in GMAIL_AND_TASKS {
+        assert!(
+            tool_scopes.contains_key(*name),
+            "{name} no longer advertises a gworkspace scope — refresh this list"
+        );
+    }
+
+    let allow = cfg
+        .tools
+        .allow
+        .clone()
+        .expect("cto-assistant declares [tools].allow");
+    let scope_patterns: Vec<ScopePattern> = cfg
+        .tools
+        .scopes
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(ScopePattern::new)
+        .collect();
+
+    let all_names: Vec<String> = GMAIL_AND_TASKS.iter().map(|s| (*s).to_string()).collect();
+    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
+
+    let survivors = filter_persona_tool_names(
+        all_names.clone(),
+        &allow,
+        &allowed_by_tier,
+        &tool_scopes,
+        &scope_patterns,
+    );
+
+    assert_eq!(
+        survivors, all_names,
+        "cto-assistant's Gmail/Tasks tools were scope-denied at dispatch; \
+         resolved [tools].scopes = {:?}",
+        cfg.tools.scopes
+    );
+}
