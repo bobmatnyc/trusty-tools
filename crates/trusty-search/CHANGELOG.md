@@ -28,6 +28,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   physical file are now still collapsed to one survivor — closing a gap in
   `corpus_dedup_key` (`service/warm_boot/mod.rs`) where "same `colocated`
   corpus" was determined purely by root-path string equality.
+- **`GET /health`'s top-level `status` now reflects the FULL
+  `warm_boot_degraded` signal, not just corpus-open failure (issue #3706).**
+  `overall_status` previously downgraded to `"degraded"` only when
+  `indexes_corpus_failed > 0` or a watcher was network-degraded, ignoring
+  the other three conditions `warmboot_summary.warm_boot_degraded` itself
+  aggregates (per its own doc comment in `state.rs`): a TCC/FDA denial, a
+  scan timeout, and mass index loss (loaded < 80% of the prior-known
+  count). A daemon that was genuinely warm-boot-degraded purely from one of
+  those three still reported `status: "ok"` on `/health` — exactly the
+  silent-degradation gap `warm_boot_degraded` exists to close, and the
+  reason trusty-review's `is_serving()` (#3693/#3704) never got a chance to
+  catch it, since it only consults `warm_boot_degraded` once `status`
+  itself already reads `"degraded"`. `overall_status` now checks
+  `warmboot_summary.warm_boot_degraded` directly (a strict superset of the
+  old `indexes_corpus_failed > 0` check, since that count is already
+  folded into `warm_boot_degraded`), so all four conditions now flip the
+  top-level status.
 
 ---
 ## [0.39.1] — 2026-07-24

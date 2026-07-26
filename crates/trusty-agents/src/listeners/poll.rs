@@ -437,10 +437,11 @@ fn stored_event_from_message(listener_id: &str, event_id: &str, msg: &Value) -> 
 
 #[cfg(test)]
 // The cursor tests below deliberately hold `HOME_LOCK` across `.await`
-// points (the whole point of the lock — see `crate::test_env`'s module
-// doc); matches the existing `#[allow(clippy::await_holding_lock)]` used
-// for the identical pattern elsewhere in this crate
-// (`mcp::config::tests::mod`, `listeners::store::tests`).
+// points via `crate::test_env::lock_home()` (the whole point of the lock —
+// see `crate::test_env`'s module doc); `lock_home()` also marks this
+// thread as the current holder for `listeners::store::events_dir`'s
+// per-caller recurrence guard (issue #3922 follow-up), which these tests
+// reach via `events_dir()`/`cursor_path()`.
 #[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
@@ -502,12 +503,10 @@ mod tests {
         assert_eq!(event.snippet.as_deref(), Some("Want to come over Sunday?"));
     }
 
-    use crate::test_env::HOME_LOCK;
-
     fn set_test_home(dir: &std::path::Path) {
-        // SAFETY: caller holds `HOME_LOCK` for the duration of the test (see
-        // `crate::test_env`'s module doc) so no other thread observes `HOME`
-        // mid-mutation.
+        // SAFETY: caller holds `HOME_LOCK` for the duration of the test (via
+        // `crate::test_env::lock_home()`, see `crate::test_env`'s module
+        // doc) so no other thread observes `HOME` mid-mutation.
         unsafe {
             std::env::set_var("HOME", dir);
         }
@@ -518,7 +517,11 @@ mod tests {
     /// written.
     #[tokio::test]
     async fn save_cursor_then_load_cursor_round_trips() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `lock_home()` (not the raw `HOME_LOCK.lock()`) also marks this
+        // thread as the holder for `listeners::store::events_dir`'s
+        // per-caller recurrence guard (issue #3922 follow-up) — this test
+        // reaches that function via `events_dir()`/`cursor_path()` below.
+        let _guard = crate::test_env::lock_home();
         let tmp = tempfile::tempdir().unwrap();
         set_test_home(tmp.path());
 
@@ -546,7 +549,7 @@ mod tests {
     /// distinct code path is exercised.
     #[tokio::test]
     async fn load_cursor_warns_and_defaults_on_malformed_json() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::lock_home();
         let tmp = tempfile::tempdir().unwrap();
         set_test_home(tmp.path());
 
@@ -565,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_cursor_defaults_when_file_absent() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::lock_home();
         let tmp = tempfile::tempdir().unwrap();
         set_test_home(tmp.path());
 

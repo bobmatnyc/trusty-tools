@@ -291,3 +291,163 @@ async fn recompute_does_not_flag_an_in_progress_tail_job_as_degraded() {
         "an InProgress (still embedding) tail job must not read as degraded (#3748)"
     );
 }
+
+/// Issue #3706: `overall_status` used to only inspect
+/// `indexes_corpus_failed` and the watcher-network-degraded count, ignoring
+/// the other three conditions `warm_boot_degraded` itself aggregates (see
+/// its doc comment in `state.rs`) — a TCC/FDA denial. A daemon that skipped
+/// loading a volume purely because of a TCC denial had
+/// `warm_boot_degraded: true` in the JSON body, yet the top-level `status`
+/// field consumers actually gate on (`HealthResponse::is_serving` in
+/// trusty-review, `status != "ok"` monitors) still read `"ok"`.
+/// What: seeds `warmboot_summary.indexes_skipped_tcc = 1` and
+/// `warm_boot_degraded = true` (exactly what `record_warm_boot_result` would
+/// have set at boot for a pure TCC-denial boot, with zero corpus failures
+/// and zero timeouts), registers one healthy index so `indexes_corpus_failed`
+/// stays `0`, and asserts `/health` still reports `status: "degraded"`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn health_reports_degraded_when_tcc_skip_recorded() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("healthy"),
+        Arc::new(RwLock::new(CodeIndexer::new("healthy", "/tmp/healthy"))),
+        "/tmp/healthy".into(),
+    ));
+
+    let state = Arc::new(SearchAppState::new(registry));
+    {
+        let mut summary = state.warmboot_summary.lock().expect("lock");
+        summary.indexes_skipped_tcc = 1;
+        summary.warm_boot_degraded = true;
+    }
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+
+    assert_eq!(
+        resp.status, "degraded",
+        "#3706: /health must report 'degraded' when warm_boot_degraded is true \
+         from a TCC skip alone, even though indexes_corpus_failed is 0"
+    );
+}
+
+/// Issue #3706: same gap as `health_reports_degraded_when_tcc_skip_recorded`
+/// but for the scan-timeout condition (`indexes_skipped_timeout > 0`, issue
+/// #1091) — the second of the three previously-ignored inputs.
+/// What: seeds `warmboot_summary.indexes_skipped_timeout = 1` and
+/// `warm_boot_degraded = true`, registers one healthy index (so
+/// `indexes_corpus_failed` stays `0`), and asserts `/health` reports
+/// `status: "degraded"`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn health_reports_degraded_when_scan_timeout_recorded() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("healthy"),
+        Arc::new(RwLock::new(CodeIndexer::new("healthy", "/tmp/healthy"))),
+        "/tmp/healthy".into(),
+    ));
+
+    let state = Arc::new(SearchAppState::new(registry));
+    {
+        let mut summary = state.warmboot_summary.lock().expect("lock");
+        summary.indexes_skipped_timeout = 1;
+        summary.warm_boot_degraded = true;
+    }
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+
+    assert_eq!(
+        resp.status, "degraded",
+        "#3706: /health must report 'degraded' when warm_boot_degraded is true \
+         from a scan timeout alone, even though indexes_corpus_failed is 0"
+    );
+}
+
+/// Issue #3706: same gap as the two tests above but for the mass-index-loss
+/// condition (`indexes_loaded` below 80% of the prior-known count) — the
+/// third of the three previously-ignored inputs.
+/// What: sets `state.prior_index_count = 10` and registers only 2 handles
+/// (2 < 10 * 80%), which is exactly the live signal
+/// `recompute_warm_boot_degraded` itself re-derives as `degraded_by_count`
+/// — so the assertion holds regardless of whether the deferred-embed-epoch
+/// recompute happens to fire during this call. Seeds `warm_boot_degraded =
+/// true` (what `record_warm_boot_result` would have set at boot) and asserts
+/// `/health` reports `status: "degraded"` even though `indexes_corpus_failed`
+/// stays `0` (neither registered handle has a failed stage).
+/// Test: this IS the test.
+#[tokio::test]
+async fn health_reports_degraded_on_mass_index_loss() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    for name in ["survivor-1", "survivor-2"] {
+        registry.register(IndexHandle::bare(
+            IndexId::new(name),
+            Arc::new(RwLock::new(CodeIndexer::new(name, "/tmp/does-not-exist"))),
+            "/tmp/does-not-exist".into(),
+        ));
+    }
+
+    let state = Arc::new(SearchAppState::new(registry));
+    state.prior_index_count.store(10, Ordering::Relaxed);
+    {
+        let mut summary = state.warmboot_summary.lock().expect("lock");
+        summary.warm_boot_degraded = true;
+    }
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+
+    assert_eq!(
+        resp.status, "degraded",
+        "#3706: /health must report 'degraded' on mass index loss (loaded < 80% \
+         of prior), even though indexes_corpus_failed is 0"
+    );
+}
+
+/// Issue #3706: the widened `overall_status` gate must not report degraded
+/// unconditionally — a boot with none of the four `warm_boot_degraded`
+/// inputs set (no TCC skip, no timeout, no corpus failure, no count drop)
+/// and no watcher-network degradation must still report `status: "ok"`.
+/// What: registers a single healthy index with a fresh `SearchAppState`
+/// (every `warmboot_summary` field at its zero/false default) and asserts
+/// `/health` reports `status: "ok"`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn health_status_stays_ok_when_no_warm_boot_degraded_condition_holds() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("healthy"),
+        Arc::new(RwLock::new(CodeIndexer::new("healthy", "/tmp/healthy"))),
+        "/tmp/healthy".into(),
+    ));
+
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+
+    assert_eq!(
+        resp.status, "ok",
+        "#3706: folding warm_boot_degraded into overall_status must not report \
+         'degraded' when none of its inputs are set"
+    );
+}

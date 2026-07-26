@@ -303,12 +303,15 @@ fn default_rbac_users_includes_kartik_parity() {
 mod eventstream_tests {
     use crate::listeners::store::EventStore;
     use crate::slack::handlers::record_listener_event;
-    use crate::test_env::HOME_LOCK;
 
     fn set_test_home(dir: &std::path::Path) {
-        // SAFETY: caller holds `HOME_LOCK` for the duration of the test (see
-        // `crate::test_env`'s module doc) so no other thread observes `HOME`
-        // mid-mutation.
+        // SAFETY: caller holds `HOME_LOCK` for the duration of the test (via
+        // `crate::test_env::lock_home()`, see `crate::test_env`'s module
+        // doc) so no other thread observes `HOME` mid-mutation.
+        // `lock_home()` also marks this thread as the current holder for
+        // `listeners::store::events_dir`'s per-caller recurrence guard
+        // (issue #3922 follow-up), which these tests reach via
+        // `record_listener_event`.
         unsafe {
             std::env::set_var("HOME", dir);
         }
@@ -321,7 +324,7 @@ mod eventstream_tests {
     /// default).
     #[tokio::test]
     async fn slack_listener_event_appends_and_respects_filter() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::lock_home();
         let tmp = tempfile::tempdir().unwrap();
         set_test_home(tmp.path());
 
@@ -353,7 +356,7 @@ mod eventstream_tests {
     /// the append itself on the filter.
     #[tokio::test]
     async fn slack_listener_event_excluded_type_still_appended() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::lock_home();
         let tmp = tempfile::tempdir().unwrap();
         set_test_home(tmp.path());
 
@@ -406,7 +409,7 @@ mod eventstream_tests {
     /// and `create_dir_all` under a non-directory `HOME` component errors.
     #[tokio::test]
     async fn slack_listener_event_publishes_even_when_append_fails() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_env::lock_home();
         let tmp = tempfile::tempdir().unwrap();
         let home_as_file = tmp.path().join("home_is_actually_a_file");
         std::fs::write(&home_as_file, b"not a directory").unwrap();
