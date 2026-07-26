@@ -477,6 +477,106 @@ fn pm_guard_denies_composition_hidden_verb() {
 }
 
 #[test]
+fn pm_guard_blocks_worktree_add_under_tmp_for_pm_own_call() {
+    // The PM's own (non-subagent) `git worktree add /tmp/...` must be denied
+    // — this is the baseline the subagent case (below) is compared against.
+    for target in [
+        "/tmp/wt-x",
+        "/private/tmp/wt-x",
+        "/var/folders/x1/abc/T/wt-x",
+    ] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"git worktree add {target}"}}}}"#
+        );
+        let stdout = run_pm_guard(&payload, &[]);
+        assert_denied(&stdout);
+        assert!(
+            stdout.contains("3955"),
+            "deny message must cite issue #3955: {stdout}"
+        );
+        assert!(
+            stdout.contains(".claude/worktrees"),
+            "deny message must name the correct location: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn pm_guard_blocks_worktree_add_under_scratchpad_for_pm_own_call() {
+    // The harness scratchpad is the subtle case: agents are told to prefer it
+    // "instead of /tmp", so it looks compliant while still landing under the
+    // denylisted /private/tmp root.
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /private/tmp/claude-502/some-session/scratchpad/wt-x"}}"#;
+    assert_denied(&run_pm_guard(payload, &[]));
+}
+
+#[test]
+fn pm_guard_blocks_worktree_add_under_tmp_via_subagent_payload() {
+    // THE case the whole task turns on: a native Task/Agent-dispatched
+    // subagent (agent_id present) attempting `git worktree add` under /tmp
+    // must ALSO be denied. Guard 4's subagent exemption would normally allow
+    // an arbitrary Bash call from this payload shape (see
+    // `pm_guard_native_subagent_dispatch_allows_bash` above) — proving this
+    // case denies proves the worktree-tmp check fires BEFORE that exemption,
+    // not through the ordinary `evaluate_tool`/`evaluate_bash_command` path.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","agent_type":"rust-engineer","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#;
+    let stdout = run_pm_guard(payload, &[]);
+    assert_denied(&stdout);
+    assert!(
+        stdout.contains("3955"),
+        "deny message must cite issue #3955: {stdout}"
+    );
+}
+
+#[test]
+fn pm_guard_allows_worktree_add_under_project_dir_via_subagent_payload() {
+    // The companion positive case: the SAME subagent payload shape, but
+    // targeting the documented in-project convention, must be allowed.
+    let payload = r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","tool_name":"Bash","tool_input":{"command":"git worktree add .claude/worktrees/wt-x"}}"#;
+    assert_eq!(
+        run_pm_guard(payload, &[]).trim(),
+        "",
+        "an in-project worktree target must be allowed even unbudgeted \
+         (worktree add is not a budget-eligible file-change deny)"
+    );
+}
+
+#[test]
+fn pm_guard_worktree_add_denial_is_not_budget_eligible() {
+    // Unlike source-code Edit/Write or shell file edits, a worktree-tmp deny
+    // must be an ABSOLUTE prohibition, not consumed against/gated by the
+    // per-turn file-change budget — repeating the call must deny every time.
+    let home = isolated_home();
+    let home_s = home.path().to_string_lossy().to_string();
+    let payload = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#;
+    for _ in 1..=4 {
+        assert_denied(&run_pm_guard(payload, &[("HOME", &home_s)]));
+    }
+}
+
+#[test]
+fn pm_guard_allows_non_add_worktree_subcommands_and_ordinary_temp_usage() {
+    // list/remove/prune must never be blocked, and ordinary temp usage
+    // (mktemp, temp-file writes, cargo build artifacts) must keep working.
+    for command in [
+        "git worktree list",
+        "git worktree remove /tmp/wt-x",
+        "git worktree prune",
+        "mktemp -d",
+        "cargo build --target-dir /tmp/build-cache",
+    ] {
+        let payload = format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{command}"}}}}"#
+        );
+        assert_eq!(
+            run_pm_guard(&payload, &[]).trim(),
+            "",
+            "expected allow for: {command}"
+        );
+    }
+}
+
+#[test]
 fn pm_guard_allows_benign_pipes_and_dev_null() {
     // Composition with no forbidden segment must still allow.
     let piped = run_pm_guard(

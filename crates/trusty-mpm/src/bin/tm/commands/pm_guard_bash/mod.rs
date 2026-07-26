@@ -26,6 +26,8 @@
 mod sed_awk;
 mod shell_lex;
 
+use std::path::{Path, PathBuf};
+
 use crate::commands::hook_rewrite::{effective_tool_name, first_command_token};
 use shell_lex::QuoteScan;
 
@@ -475,6 +477,269 @@ pub(crate) fn has_file_write_redirection(command: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// Deny reason for `git worktree add` targeting a denylisted temp root.
+///
+/// Why (issue #3977, filed as the worktree-hygiene follow-up to #3955): a
+/// worktree provisioned under `/tmp`/`/private/tmp`/`/var/folders` silently
+/// fails unrelated tests (trusty-search's `SENSITIVE_PATH_PREFIXES` denylist,
+/// #3955) and has repeatedly caused agents to lose in-flight work when the
+/// harness or OS reaps that scratch space out from under a live worktree.
+/// The message must be actionable, not a bare refusal, so it names the
+/// project-local convention directly.
+pub(crate) const WORKTREE_TMP_REASON: &str = "`git worktree add` must not target /tmp, \
+     /private/tmp, /var/folders, $TMPDIR, or the harness scratchpad — worktrees provisioned \
+     there silently fail unrelated tests and can be reaped mid-task (issue #3955). Use \
+     `<repo-root>/.claude/worktrees/<name>` (the tm-pr-workflow convention) instead.";
+
+/// Filesystem roots `git worktree add` must never target (issue #3977).
+///
+/// Why: `/tmp` and `/private/tmp` are the same location on macOS (`/tmp` is a
+/// symlink) but both are listed literally because [`resolves_under_denylisted_tmp`]
+/// does a lexical prefix match, not a filesystem-resolving one (see that
+/// function's doc for why). `/var/folders` is the root `$TMPDIR` resolves
+/// under on macOS (e.g. `/var/folders/x1/…/T/`), and the harness scratchpad
+/// (`/private/tmp/claude-502/…`) is already covered by the `/private/tmp`
+/// entry — it is called out separately in the deny message (not here) because
+/// agents are told to prefer it "instead of /tmp", making it the subtle case
+/// that looks compliant while still landing in a denylisted zone.
+const WORKTREE_TMP_DENYLIST_ROOTS: &[&str] = &["/tmp", "/private/tmp", "/var/folders"];
+
+/// `git worktree add`'s own flags that consume a following argv token.
+///
+/// Why: needed so [`worktree_add_target_token`] can skip past `-b <branch>` /
+/// `-B <branch>` / `--reason <text>` (used with `--lock`) without mistaking
+/// the flag's value for the target path.
+const WORKTREE_ADD_FLAGS_WITH_ARG: &[&str] = &["-b", "-B", "--reason"];
+
+/// Detect a `git worktree add` call whose target resolves under a denylisted
+/// temp root, regardless of who dispatches the `Bash` call.
+///
+/// Why: this is the ONE piece of policy that must be called directly from
+/// `pm_guard()` **before** its Guard 4 subagent-exemption early return, NOT
+/// routed through [`evaluate_tool`]/[`evaluate_bash_command`] like every other
+/// Bash rule in this module. `evaluate_bash_command` is the sole callee of
+/// `evaluate_tool`, which Guard 4 never reaches for a payload carrying a
+/// non-empty `agent_id` — i.e. every native Task/Agent-dispatched subagent,
+/// which is exactly who provisions these worktrees in practice. A rule placed
+/// inside `evaluate_bash_command`/`classify_bash_segment` would therefore be a
+/// silent no-op for that calling pattern. See `pm_guard::pm_guard`'s call site
+/// for the enforcement of "before Guard 4", and its comment for why that must
+/// never be "simplified" back inside `evaluate_tool`.
+/// What: splits `command` into composition segments (reusing
+/// [`split_shell_segments`] for consistency with the rest of the module),
+/// tracks a running effective working directory across the command line by
+/// following `cd <dir>` segments and a leading `git -C <dir>` override (a
+/// deliberate, PARTIAL closing of the `cd /tmp && git worktree add wt-foo`
+/// bypass — see the "Residual bypasses" note below), resolves each `worktree
+/// add` segment's target (skipping `-b`/`-B`/`--reason` flag values) against
+/// that directory, lexically normalizes it (collapsing `.`/`..` WITHOUT
+/// touching the filesystem — the target usually does not exist yet), expands
+/// a leading `~` and any `$TMPDIR`/`${TMPDIR}`/`$TMP`/`${TMP}` occurrence
+/// using the guard process's own environment (which a Bash tool call inherits
+/// unchanged), and denies when the result lexically starts with one of
+/// [`WORKTREE_TMP_DENYLIST_ROOTS`]. Only the exact `worktree add` two-token
+/// form denies — `list`/`remove`/`prune`/`lock`/… are left alone, matching
+/// git's own subcommand structure (`git worktree <subcmd>`, not
+/// `git worktree add <subcmd>`), and no other `git`/shell verb is touched.
+///
+/// Residual bypasses accepted (documented per the task's explicit instruction
+/// to state, not hide, what remains open — a missed instance here fails open
+/// to ALLOW, same as every other classifier in this module):
+/// - Indirection through an intermediate shell variable
+///   (`X=/tmp; git worktree add "$X/foo"`) is not resolved — this module does
+///   not implement a shell variable table.
+/// - A `cd`/`-C` target that is itself a symlink into a denylisted root
+///   (e.g. a project-tree symlink pointing at `/tmp`) is not caught: path
+///   resolution here is purely lexical, never touches the filesystem
+///   (`fs::canonicalize`), because the worktree target usually does not exist
+///   yet and a guard must stay fast and side-effect-free.
+///   `resolves_under_denylisted_tmp` therefore cannot see through a symlink
+///   the way the OS eventually would.
+///   `/tmp` itself being a symlink to `/private/tmp` is NOT in this bucket —
+///   both spellings are literal entries in [`WORKTREE_TMP_DENYLIST_ROOTS`],
+///   so a literal `/tmp/...` argument is caught without needing to resolve
+///   the symlink.
+/// - Multiple/cumulative `git -C` flags are collapsed to "the last one
+///   present"; real git applies them successively relative to each other.
+///   Realistic invocations use at most one `-C`.
+/// - A `cd`/`-C` argument built from command substitution
+///   (`cd "$(mktemp -d)"`) is not resolved — this module classifies text
+///   structurally, it does not execute the shell.
+///
+/// Test: `evaluate_worktree_add_command_*` below;
+/// `pm_guard_blocks_worktree_add_under_tmp_via_subagent_payload` and siblings
+/// in `tests/tm_hook_pm_guard.rs` exercise the end-to-end binary path,
+/// including the `agent_id`-present case this function exists for.
+pub(crate) fn evaluate_worktree_add_command(command: &str, cwd: &Path) -> Option<&'static str> {
+    let mut effective_cwd = cwd.to_path_buf();
+    for segment in split_shell_segments(command) {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if first_command_token(trimmed) == Some("cd") {
+            if let Some(argv) = shlex::split(trimmed)
+                && let Some(dest) = argv.get(1)
+            {
+                effective_cwd = resolve_target_path(dest, &effective_cwd);
+            }
+            continue;
+        }
+        if shell_lex::git_subcommand(trimmed).as_deref() != Some("worktree") {
+            continue;
+        }
+        let Some(argv) = shlex::split(trimmed) else {
+            continue;
+        };
+        let Some(worktree_idx) = argv
+            .windows(2)
+            .position(|w| w[0] == "worktree" && w[1] == "add")
+        else {
+            // Not the `add` subcommand (list/remove/prune/lock/…) — never
+            // blocked.
+            continue;
+        };
+        let base = match git_dash_c_override(&argv, worktree_idx) {
+            Some(dash_c) => resolve_target_path(dash_c, &effective_cwd),
+            None => effective_cwd.clone(),
+        };
+        let Some(target) = worktree_add_target_token(&argv[worktree_idx + 2..]) else {
+            continue;
+        };
+        let resolved = resolve_target_path(&target, &base);
+        if resolves_under_denylisted_tmp(&resolved) {
+            return Some(WORKTREE_TMP_REASON);
+        }
+    }
+    None
+}
+
+/// The `-C <path>` value preceding a resolved `worktree` subcommand token, if
+/// any — git's own global working-directory override.
+///
+/// Why: `git -C /tmp worktree add wt-foo` changes git's effective working
+/// directory for the whole invocation exactly as a preceding `cd /tmp &&`
+/// would, so it must feed the same resolution base as
+/// [`evaluate_worktree_add_command`]'s `cd`-tracking. Scoped to `argv[..worktree_idx]`
+/// so a `-C` appearing after `worktree` (not valid git syntax, but shlex would
+/// still tokenize it) is never mistaken for the global option.
+/// What: the last `-C <value>` pair found before `worktree_idx` (real git
+/// applies multiple `-C` flags cumulatively/relative to each other — this
+/// collapses to "last wins", a documented simplification; see the residual
+/// bypass list on [`evaluate_worktree_add_command`]).
+fn git_dash_c_override(argv: &[String], worktree_idx: usize) -> Option<&str> {
+    let mut i = 0;
+    let mut last = None;
+    while i < worktree_idx {
+        if argv[i] == "-C" && i + 1 < worktree_idx {
+            last = Some(argv[i + 1].as_str());
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    last
+}
+
+/// The target-path token of a `git worktree add …` argv tail (everything
+/// after the `add` token), skipping flags and their values.
+///
+/// Why: `git worktree add [-f] [--detach] [--checkout] [--lock [--reason
+/// <text>]] [--orphan] [(-b | -B) <branch>] <path> [<commit-ish>]` — the path
+/// is the first non-flag positional, but `-b`/`-B`/`--reason` each consume a
+/// following token that must not be mistaken for it.
+/// What: walks `tail`, skipping [`WORKTREE_ADD_FLAGS_WITH_ARG`] pairs and any
+/// other `-`-prefixed flag, returning the first remaining token.
+fn worktree_add_target_token(tail: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < tail.len() {
+        let tok = &tail[i];
+        if WORKTREE_ADD_FLAGS_WITH_ARG.contains(&tok.as_str()) {
+            i += 2;
+            continue;
+        }
+        if tok.starts_with('-') {
+            i += 1;
+            continue;
+        }
+        return Some(tok.clone());
+    }
+    None
+}
+
+/// Expand a leading `~`, `$TMPDIR`/`${TMPDIR}`, and `$TMP`/`${TMP}` in a path
+/// token using the current process environment, then resolve it against
+/// `base` if relative, then lexically normalize (collapse `.`/`..` components
+/// WITHOUT touching the filesystem).
+///
+/// Why: `shlex::split` does not perform shell variable expansion, so a target
+/// argument like `$TMPDIR/wt-foo` or `~/scratch/wt-foo` reaches this function
+/// as literal text; the guard must expand it itself to see where it really
+/// points. Filesystem-touching resolution (`fs::canonicalize`) is deliberately
+/// avoided — the worktree target usually does not exist yet, and a
+/// `PreToolUse` hook must stay fast and side-effect-free.
+/// What: string-replaces the env-var forms (guard process env — a `Bash` tool
+/// call inherits it unchanged), expands a `~`/`~/…` prefix via `$HOME`, joins
+/// onto `base` if the result is still relative, then normalizes.
+fn resolve_target_path(token: &str, base: &Path) -> PathBuf {
+    let mut expanded = token.to_string();
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        expanded = expanded
+            .replace("${TMPDIR}", &tmpdir)
+            .replace("$TMPDIR", &tmpdir);
+    }
+    if let Ok(tmp) = std::env::var("TMP") {
+        expanded = expanded.replace("${TMP}", &tmp).replace("$TMP", &tmp);
+    }
+    if expanded == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            expanded = home;
+        }
+    } else if let Some(rest) = expanded.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        expanded = format!("{home}/{rest}");
+    }
+    let path = Path::new(&expanded);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    normalize_lexically(&joined)
+}
+
+/// Collapse `.`/`..` path components without touching the filesystem.
+///
+/// Why: [`resolve_target_path`] must not call `fs::canonicalize` (the target
+/// usually doesn't exist yet), but a purely textual join like
+/// `/repo/../tmp/wt` must still be recognized as resolving under `/tmp`.
+/// What: walks `path`'s components, popping the accumulator on `..` and
+/// dropping `.`, otherwise appending. Does not consult the filesystem, so it
+/// cannot see through symlinks (see the residual-bypass note on
+/// [`evaluate_worktree_add_command`]).
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Whether `path` lexically starts with one of [`WORKTREE_TMP_DENYLIST_ROOTS`].
+fn resolves_under_denylisted_tmp(path: &Path) -> bool {
+    WORKTREE_TMP_DENYLIST_ROOTS
+        .iter()
+        .any(|root| path.starts_with(root))
 }
 
 #[cfg(test)]

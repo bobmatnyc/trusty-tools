@@ -51,6 +51,14 @@
 //! the specialist matching the target file's content type instead of a
 //! hardcoded `rust-engineer`.
 //! Build/test and network denials are NOT budget-eligible and stay absolute.
+//! **Worktree-tmp guard (issue #3977, follow-up to #3955):** [`pm_guard`] calls
+//! [`crate::commands::pm_guard_bash::evaluate_worktree_add_command`] DIRECTLY,
+//! before Guard 4's early return, denying any `git worktree add` whose target
+//! resolves under `/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR`, or the
+//! harness scratchpad — unconditionally, including native-subagent-dispatched
+//! calls. This is the one place in the file that pierces the Guard 4
+//! exemption; see that call site's comment for why it must never be routed
+//! through [`evaluate_tool`] instead.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
@@ -60,9 +68,12 @@
 //! exercises the stdin→decision→stdout path (and the env bypasses / sub-agent
 //! exemption / fail-open) end to end through the real binary.
 
+use std::path::PathBuf;
+
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::{
-    SHELL_EDIT_REASON, evaluate_bash_command, extract_shell_edit_target,
+    SHELL_EDIT_REASON, evaluate_bash_command, evaluate_worktree_add_command,
+    extract_shell_edit_target,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
@@ -180,6 +191,37 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         .get("session_id")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
+
+    // ABSOLUTE guard (issue #3977, worktree-hygiene follow-up to #3955) — deliberately
+    // placed BEFORE Guard 4's subagent-exemption early return, and called
+    // DIRECTLY rather than routed through `evaluate_tool`. A prior
+    // investigation established that `evaluate_tool` (and therefore
+    // `pm_guard_bash::evaluate_bash_command`, its only Bash-classifying
+    // callee) is NEVER reached for a payload carrying a non-empty `agent_id`
+    // — Guard 4 below returns before `evaluate_tool` runs — so a
+    // `git worktree add` rule placed inside the ordinary Bash classifier
+    // would be a silent no-op for exactly the calling pattern (a native
+    // Task/Agent-dispatched subagent) that actually provisions these
+    // worktrees. DO NOT move this block after Guard 4, and do NOT fold it
+    // into `evaluate_tool`/`evaluate_bash_command` — doing so re-introduces
+    // the no-op this comment exists to prevent.
+    if tool_name == "Bash" {
+        let command = tool_input
+            .and_then(|v| v.get("command"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let hook_cwd = payload
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        if let Some(reason) = evaluate_worktree_add_command(command, &hook_cwd) {
+            audit_denied_tool(url, session_id, tool_name, reason).await;
+            println!("{}", build_pretooluse_deny_response(reason));
+            return Ok(());
+        }
+    }
 
     // Guard 4: native Claude Code sub-agent dispatch (issue #2014). A
     // Task/Agent-dispatched sub-agent is doing exactly the delegated work the
