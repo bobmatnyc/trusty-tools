@@ -16,7 +16,7 @@
 use super::sse_pump::pump_openai_sse;
 use super::wire::tools_wire;
 use crate::ChatMessage;
-use crate::chat::{ChatEvent, ChatProvider, ToolDef};
+use crate::chat::{ChatEvent, ChatProvider, SamplingParams, ToolDef};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use tokio::sync::mpsc::Sender;
@@ -41,6 +41,10 @@ const X_TITLE: &str = "trusty-common";
 pub struct OpenRouterProvider {
     pub api_key: String,
     pub model: String,
+    /// #3758: sampling knobs forwarded on the streaming request so a streamed
+    /// turn matches the blocking path's style/verbosity/stopping. Default
+    /// (all-absent) reproduces the pre-#3758 body exactly.
+    pub sampling: SamplingParams,
 }
 
 impl OpenRouterProvider {
@@ -54,7 +58,21 @@ impl OpenRouterProvider {
         Self {
             api_key: api_key.into(),
             model: model.into(),
+            sampling: SamplingParams::default(),
         }
+    }
+
+    /// Attach sampling parameters to every request this provider sends.
+    ///
+    /// Why (#3758): callers that also have a blocking path must be able to send
+    /// the SAME temperature / token ceiling / stop sequences on the streaming
+    /// path, without `new()` growing three arguments that every existing call
+    /// site would have to spell out.
+    /// What: consuming builder; returns `self` with `sampling` replaced.
+    /// Test: `sampling_params_serialize_into_request_body`.
+    pub fn with_sampling(mut self, sampling: SamplingParams) -> Self {
+        self.sampling = sampling;
+        self
     }
 }
 
@@ -93,6 +111,10 @@ impl ChatProvider for OpenRouterProvider {
             messages: &messages,
             stream: true,
             tools: tw,
+            // #3758: forward the same sampling knobs the blocking path sends.
+            temperature: self.sampling.temperature,
+            max_tokens: self.sampling.max_tokens,
+            stop: self.sampling.stop_slice(),
         };
         let resp = client
             .post(OPENROUTER_URL)
@@ -129,6 +151,9 @@ impl ChatProvider for OpenRouterProvider {
 pub struct OllamaProvider {
     pub base_url: String,
     pub model: String,
+    /// #3758: see [`OpenRouterProvider::sampling`] — kept in lock-step so both
+    /// OpenAI-compatible providers send the same request shape.
+    pub sampling: SamplingParams,
 }
 
 impl OllamaProvider {
@@ -143,7 +168,19 @@ impl OllamaProvider {
         Self {
             base_url: base_url.into(),
             model: model.into(),
+            sampling: SamplingParams::default(),
         }
+    }
+
+    /// Attach sampling parameters to every request this provider sends.
+    ///
+    /// Why: parallel to [`OpenRouterProvider::with_sampling`] (#3758) so both
+    /// providers stay in lock-step.
+    /// What: consuming builder; returns `self` with `sampling` replaced.
+    /// Test: `sampling_params_serialize_into_request_body`.
+    pub fn with_sampling(mut self, sampling: SamplingParams) -> Self {
+        self.sampling = sampling;
+        self
     }
 }
 
@@ -179,6 +216,10 @@ impl ChatProvider for OllamaProvider {
             messages: &messages,
             stream: true,
             tools: tw,
+            // #3758: forward the same sampling knobs the blocking path sends.
+            temperature: self.sampling.temperature,
+            max_tokens: self.sampling.max_tokens,
+            stop: self.sampling.stop_slice(),
         };
         let resp = client
             .post(&url)

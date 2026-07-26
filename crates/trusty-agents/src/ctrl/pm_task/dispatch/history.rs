@@ -277,6 +277,15 @@ pub async fn run_pm_task_with_history(
                 &sid,
                 &pm_cfg.agent.name,
                 llm::stream::DEFAULT_STREAM_CADENCE,
+                // #3758: the SAME sampling knobs the blocking
+                // `chat_with_tools_gated` call below sends — including
+                // `effective_max_tokens`, which the local-route branch above
+                // may have overridden.
+                trusty_common::chat::SamplingParams {
+                    temperature: Some(pm_cfg.llm.temperature),
+                    max_tokens: Some(effective_max_tokens),
+                    stop: pm_cfg.llm.stop_sequences.clone(),
+                },
             )
             .await
             {

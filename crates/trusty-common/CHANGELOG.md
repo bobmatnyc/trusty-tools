@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`chat::SamplingParams` — sampling parity for streamed turns** (issue
+  #3758): the OpenAI-compatible streaming request wire sent only
+  `model`/`messages`/`tools`, so a streamed reply silently ran on provider
+  defaults while the blocking path for the same turn sent the caller's
+  configured temperature, token ceiling, and stop sequences — a documented
+  contract (`LlmConfig::stop_sequences` claims to be forwarded on the
+  OpenRouter path) that the streaming path was not honouring.
+  `OpenRouterProvider::with_sampling` / `OllamaProvider::with_sampling` attach
+  `temperature`, `max_tokens`, and `stop` to every request. All three fields
+  are omitted when absent (an empty `stop` array is never sent — some servers
+  reject `"stop": []`, the same trap an empty `tools` array has), so a caller
+  that does not opt in produces a byte-identical request body to before.
+
 ### Fixed
 
 - **`default_model_matches_sentence_transformers_reference` no longer
@@ -49,6 +64,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   shared `embedder::test_env` module holding the single lock and RAII guard;
   the four tests in `provider_tests.rs` became synchronous so they can take it,
   building an explicit current-thread runtime where they need one.
+
+- **Chat SSE pump surfaces stream failures instead of ending them as `Done`**
+  (issue #3757): `chat::openai_compat`'s shared pump never emitted
+  `ChatEvent::Error`, so a mid-stream `{"error": {...}}` frame, a stream cut off
+  mid-frame, and a 200 answered with a non-SSE body ALL arrived at the consumer
+  as a clean `ChatEvent::Done` — a partial answer rendered as a complete one,
+  and `trusty-agents`' blocking fallback never engaged. The pump now mirrors the
+  three guards `inference::streaming` shipped in #3751: an in-band error probe
+  that reads a numeric (`429`) or string (`"insufficient_quota"`) `code`;
+  incomplete-frame detection at EOF (bytes still buffered mid-frame is a
+  truncation, while a clean boundary without `[DONE]` remains a normal finish,
+  since not every provider sends the sentinel); and a `Content-Type` guard.
+  Failures are reported BOTH as `ChatEvent::Error` and as an `Err` return,
+  because consumers are split between watching the channel (trusty-memory,
+  trusty-analyze) and joining the pump task (trusty-agents, trusty-search).
+
+- **A non-SSE streaming response degrades instead of vanishing** (issue #3757):
+  a gateway that strips streaming and returns a buffered 200 previously decoded
+  to zero deltas plus `Done`, dropping the whole answer. Such a body is now
+  replayed as its `message.content` + `message.tool_calls`; a body that still
+  carries `data:` frames under the wrong `Content-Type` is decoded as SSE
+  anyway, so a mislabelled-but-valid stream keeps working; and only a body with
+  nothing renderable becomes an error.
+
+- **A chunk boundary splitting a multi-byte UTF-8 character no longer discards
+  the chunk** (issue #3757): the pump decoded each raw chunk with
+  `str::from_utf8` and skipped the entire chunk on failure, silently losing
+  text whenever a character straddled a socket read. It now buffers bytes and
+  decodes per complete line.
 
 - **`catchup::session_finder::extract_section` no longer absorbs trailing
   header text** (issue #3901): a substring match on `## <header>` treated a

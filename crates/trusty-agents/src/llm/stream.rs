@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
 use trusty_common::ChatMessage;
-use trusty_common::chat::{ChatEvent, ChatProvider, OpenRouterProvider, ToolCall};
+use trusty_common::chat::{ChatEvent, ChatProvider, OpenRouterProvider, SamplingParams, ToolCall};
 
 use crate::ctrl::state::ConversationTurn;
 use crate::events::{self, Event};
@@ -228,6 +228,13 @@ where
 /// tagged with `session_id`/`agent`. Errors (empty key, HTTP failure,
 /// mid-stream error) propagate as `Err` so the caller can fall back to the
 /// blocking chat path.
+///
+/// `sampling` (issue #3758) MUST carry the same temperature / token ceiling /
+/// stop sequences the caller's blocking path sends for this turn. Without it
+/// the streamed reply silently ran on provider defaults, so its style,
+/// verbosity, and stopping behaviour were not equivalent to the fallback — and
+/// `LlmConfig::stop_sequences` documents itself as forwarded on the OpenRouter
+/// path, which the streaming path was quietly not honouring.
 /// Test: exercised end-to-end against a live provider; the batching/assembly
 /// contract is unit-tested via [`drive_delta_stream`].
 pub async fn stream_reply(
@@ -236,6 +243,7 @@ pub async fn stream_reply(
     session_id: &str,
     agent: &str,
     cadence: Duration,
+    sampling: SamplingParams,
 ) -> Result<StreamAssembly> {
     let api_key =
         trusty_common::inference::credentials::resolve_key("openrouter").unwrap_or_default();
@@ -245,7 +253,8 @@ pub async fn stream_reply(
         ));
     }
 
-    let provider = OpenRouterProvider::new(api_key, model.to_string());
+    // #3758: forward the blocking path's sampling knobs onto the stream.
+    let provider = OpenRouterProvider::new(api_key, model.to_string()).with_sampling(sampling);
     stream_with_provider(provider, messages, session_id, agent, cadence).await
 }
 
@@ -255,16 +264,14 @@ pub async fn stream_reply(
 /// Why: Split out of [`stream_reply`] so the error branches can be unit-tested
 /// with a controllable fake provider (no live API key) — and so the
 /// failed-stream detection lives in exactly one place. The upstream SSE pump
-/// (`trusty_common::chat`) never emits `ChatEvent::Error`: a mid-stream error
-/// frame, a truncated EOF, or a non-SSE `200` all currently arrive as a clean
-/// `Done`. Without a guard those would return an empty (or partial-but-treated-
-/// as-complete) success and the caller's blocking fallback would never engage,
-/// leaving the user staring at an empty bubble. This function turns the
-/// unambiguous failure signal — a stream that yielded NO content and NO tool
-/// calls — into an `Err` so the caller falls back to the blocking chat path.
-/// (A partial-then-error stream that already produced some text is NOT caught
-/// here; robustly detecting that needs the pump to emit `ChatEvent::Error`,
-/// which is deferred to avoid destabilizing the shared tcode/memory consumers.)
+/// (`trusty_common::chat`) now emits `ChatEvent::Error` for a mid-stream error
+/// frame, a truncated EOF, and an unusable non-SSE `200` (issue #3757 — those
+/// three previously arrived as a clean `Done`), so the partial-then-truncated
+/// case IS caught here: the error surfaces through `assembly.error` and the
+/// caller falls back to the blocking chat path instead of rendering a cut-off
+/// answer as complete. The empty-stream guard below remains as the backstop for
+/// any remaining way a stream can yield NO content and NO tool calls without
+/// saying so.
 /// What: Spawns `provider.chat_stream` into a bounded channel, drives
 /// [`drive_delta_stream`] with a sink that publishes each batch as an
 /// [`Event::AgentMessageDelta`] tagged with `session_id`/`agent`, joins the

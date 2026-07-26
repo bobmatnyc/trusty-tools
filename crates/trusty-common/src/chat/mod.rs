@@ -124,6 +124,51 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// Sampling knobs forwarded to an OpenAI-compatible provider.
+///
+/// Why (issue #3758): the streaming request wire previously sent only
+/// `model`/`messages`/`tools`, so a streamed reply's style, verbosity, and
+/// stopping behaviour were NOT equivalent to the blocking path's for the same
+/// turn — the caller silently got provider defaults instead of its configured
+/// temperature, token ceiling, and stop sequences. Carrying them in one struct
+/// (rather than three provider constructor arguments) keeps `new()` stable for
+/// existing callers and lets the set grow without churning call sites.
+/// What: every field is optional — `None`/empty means "omit from the request
+/// body and let the provider default apply", which is exactly the pre-#3758
+/// behaviour, so a caller that does not opt in is unaffected. `stop` maps to
+/// the OpenAI `stop` array (the direct-Anthropic dialect calls the same thing
+/// `stop_sequences`).
+/// Test: `sampling_params_serialize_into_request_body`,
+/// `default_sampling_omits_fields`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SamplingParams {
+    /// Sampling temperature; `None` omits the field.
+    pub temperature: Option<f32>,
+    /// Maximum tokens to generate; `None` omits the field.
+    pub max_tokens: Option<u32>,
+    /// Stop sequences; empty omits the field.
+    pub stop: Vec<String>,
+}
+
+impl SamplingParams {
+    /// The stop sequences as a request-body-ready `Option<&[String]>`.
+    ///
+    /// Why: an EMPTY `stop` array is not the same as an absent one — some
+    /// OpenAI-compatible servers reject `"stop": []` outright, which is the
+    /// same trap [`ChatProvider`] already documents for an empty `tools`
+    /// array. Collapsing empty to `None` at the boundary keeps that decision
+    /// in one place instead of at each provider.
+    /// What: `None` when empty, `Some(slice)` otherwise.
+    /// Test: `default_sampling_omits_fields`.
+    pub fn stop_slice(&self) -> Option<&[String]> {
+        if self.stop.is_empty() {
+            None
+        } else {
+            Some(&self.stop)
+        }
+    }
+}
+
 /// Streaming chat event.
 ///
 /// Why: replaces the previous "string-only" channel so callers can
