@@ -43,6 +43,15 @@ mod types;
 #[cfg(any(test, feature = "embedder-test-support"))]
 mod mock;
 
+// Issue #3711: the ONE env lock + RAII guard shared by every env-touching test
+// in this module tree. Lives at module scope (not inside a test module) so
+// `mod tests`, its `reference_accuracy_tests` child, AND the sibling
+// `provider_tests` all serialise against the SAME static — two independent
+// locks do not serialise against each other, which is how the #3711 race
+// survived the first fix.
+#[cfg(test)]
+mod test_env;
+
 // Issue #610 (line-cap): split out of this file's own `mod tests` (already
 // at its grandfathered SLOC budget) rather than growing it further — covers
 // `resolve_expected_python_provider`, `embedding_model_name`, and
@@ -65,13 +74,15 @@ pub use mock::MockEmbedder;
 mod tests {
     use super::*;
 
-    /// Process-global lock guarding every test in this module that mutates
-    /// the process environment. Tests run in parallel by default, and
-    /// concurrent calls into `setenv`/`getenv` (even on disjoint keys) are
-    /// not safe across libc implementations — Rust 2024 reflects this by
-    /// marking `std::env::set_var` `unsafe`. One shared lock across all
-    /// env-touching tests in this binary is the simplest correct answer.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Issue #610 (line-cap) + #3711: the sentence-transformers reference-vector
+    // accuracy gate lives in `tests/reference_accuracy_tests.rs`, a CHILD of
+    // this module so it inherits the `ENV_LOCK`/`EnvVarGuard` imported below
+    // through `use super::*`.
+    mod reference_accuracy_tests;
+
+    // #3711: the shared lock + guard for the WHOLE embedder module tree,
+    // including the sibling `provider_tests`. See `test_env`'s docs.
+    use super::test_env::{ENV_LOCK, EnvVarGuard};
 
     /// Why: GH #58 — launchd runs trusty-memory with a read-only `TMPDIR`,
     /// and fastembed's default `./.fastembed_cache` is also unwritable from
@@ -134,48 +145,6 @@ mod tests {
             match prev_path {
                 Some(v) => std::env::set_var("FASTEMBED_CACHE_PATH", v),
                 None => std::env::remove_var("FASTEMBED_CACHE_PATH"),
-            }
-        }
-    }
-
-    /// RAII helper: set or clear a `TRUSTY_GPU_MEM_LIMIT_*` env var for the
-    /// duration of a test and restore it on drop. Keeps the CUDA-option tests
-    /// from leaking state into sibling tests that share the process env.
-    ///
-    /// Why: env vars are process-global; without restore, a stray
-    /// `TRUSTY_GPU_MEM_LIMIT_*` would skew every later `resolve_cuda_options`
-    /// call in the same binary.
-    /// What: captures the prior value, applies the new one (or removes it for
-    /// `None`), and reinstates the prior value on `Drop`.
-    /// Test: used by the `cuda_options_*` tests below.
-    struct EnvVarGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn apply(key: &'static str, value: Option<&str>) -> Self {
-            let prev = std::env::var(key).ok();
-            // SAFETY: every caller holds `ENV_LOCK`, so no other thread reads
-            // or writes the environment concurrently.
-            unsafe {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: same single-threaded-under-ENV_LOCK invariant as `apply`.
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
             }
         }
     }
@@ -560,73 +529,6 @@ mod tests {
         let v1 = embed_one(&e, "cached").await.unwrap();
         let v2 = embed_one(&e, "cached").await.unwrap();
         assert_eq!(v1, v2);
-    }
-
-    /// Fixed sample used by [`default_model_matches_sentence_transformers_reference`].
-    ///
-    /// Why: issue #3486 / #3493 P0 — the default model swap (INT8 →
-    /// `AllMiniLML6V2` fp32) must be verified against a genuine, independent
-    /// reference, not just "fastembed didn't error". These 5 texts and their
-    /// reference vectors were generated with a real
-    /// `sentence-transformers/all-MiniLM-L6-v2` CPU fp32 model (`device="cpu"`,
-    /// `normalize_embeddings=True`) — the same independent-library method the
-    /// #3486 CoreML/fp16 experiment's correctness gate used (there: 0.999999+
-    /// mean cosine for fp32/fp16 vs 0.9897 for INT8, across a 50-chunk sample).
-    const REFERENCE_TEXTS: [&str; 5] = [
-        "fn authenticate(user: &str) -> bool",
-        "pub struct Embedder { model: TextEmbedding }",
-        "the quick brown fox jumps over the lazy dog",
-        "async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>",
-        "memory palace consolidation cycle",
-    ];
-
-    include!("reference_vectors_test_data.rs");
-
-    /// Why: verifies the actual production default (`FastEmbedder::new()`,
-    /// which now resolves to `AllMiniLML6V2` fp32 per
-    /// `resolve_default_embedding_model`) produces embeddings numerically
-    /// consistent with a genuine, independent `sentence-transformers`
-    /// reference — not just "some vector came back" (issue #3486 / #3493 P0).
-    /// What: embeds [`REFERENCE_TEXTS`] with the default embedder and asserts
-    /// mean cosine similarity against `REFERENCE_VECTORS` is `>= 0.999`
-    /// (matching the experiment's fp32/fp16 threshold, well above INT8's
-    /// measured 0.9897).
-    /// Test: this test. NOT `#[ignore]`d (issue #3493 P0 part 2 — this is the
-    /// correctness gate that would have caught the CoreML-default accuracy
-    /// regression had it been wired into CI; see `ci.yml`'s `test` job for
-    /// the fastembed-model pre-seed step that makes this safe to run on every
-    /// PR without HuggingFace-download flakiness).
-    #[tokio::test]
-    async fn default_model_matches_sentence_transformers_reference() {
-        fn cosine(a: &[f32], b: &[f32]) -> f64 {
-            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
-            let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-            let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-            dot / (norm_a * norm_b)
-        }
-
-        let e = FastEmbedder::new().await.unwrap();
-        let texts: Vec<String> = REFERENCE_TEXTS.iter().map(|s| s.to_string()).collect();
-        let vectors = e.embed_batch(&texts).await.unwrap();
-        assert_eq!(vectors.len(), REFERENCE_VECTORS.len());
-
-        let sims: Vec<f64> = vectors
-            .iter()
-            .zip(REFERENCE_VECTORS.iter())
-            .map(|(v, r)| cosine(v, r))
-            .collect();
-        let mean_sim = sims.iter().sum::<f64>() / sims.len() as f64;
-        let min_sim = sims.iter().cloned().fold(f64::INFINITY, f64::min);
-        println!(
-            "default_model_matches_sentence_transformers_reference: mean_cosine={mean_sim:.6} min_cosine={min_sim:.6}"
-        );
-
-        assert!(
-            mean_sim >= 0.999,
-            "default model must match the sentence-transformers reference to \
-             >= 0.999 mean cosine similarity (got {mean_sim:.6}, min {min_sim:.6}); \
-             the previous INT8 default only reached 0.9897 (issue #3486 / #3493 P0)"
-        );
     }
 
     /// Why: issue #3493 P0 (part 2) — `TRUSTY_DEVICE=cpu` must keep working as

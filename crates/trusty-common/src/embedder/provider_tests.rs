@@ -6,61 +6,37 @@
 //! line-cap) rather than growing that file past its grandfathered SLOC
 //! budget — this crate's `embedder` module has no other logical home for new
 //! test code that doesn't touch `mod.rs` itself.
-//! What: mirrors `mod.rs`'s test-module conventions (`ENV_LOCK` +
-//! `EnvVarGuard` for serialised env-var mutation across parallel tests) —
-//! duplicated here rather than shared because both are private to their
-//! respective test modules and the crate has no shared test-support module.
+//! What: uses the module tree's SHARED `ENV_LOCK` + `EnvVarGuard` from
+//! `test_env` for serialised env-var mutation across parallel tests.
+//!
+//! Issue #3711: this file used to declare its own independent
+//! `tokio::sync::Mutex` lock, so its `TRUSTY_DEVICE` / `TRUSTY_EMBEDDER_MODEL`
+//! mutations did NOT serialise against `mod.rs`'s tests — two separate locks
+//! guard nothing from each other, which left the wrong-model race open (e.g.
+//! on macOS, or the moment either `#[ignore]` below is lifted) even after the
+//! first fix. The tests here are now plain `#[test]`s so they can share the
+//! one synchronous lock: the two below that need an async runtime build an
+//! explicit current-thread one rather than forcing the whole module tree onto
+//! an async lock that synchronous tests cannot take.
 //! Test: this file.
 
 use super::*;
-use tokio::sync::Mutex;
+use crate::embedder::test_env::{ENV_LOCK, EnvVarGuard};
 
-/// Process-global lock guarding every test in this module that mutates the
-/// process environment. A `tokio::sync::Mutex` (not `std::sync::Mutex`, unlike
-/// `mod.rs`'s synchronous-only `ENV_LOCK`) because the two `FastEmbedder::new`
-/// tests below hold the guard across an `.await` point — `clippy::
-/// await_holding_lock` forbids doing that with a std lock.
-static ENV_LOCK: Mutex<()> = Mutex::const_new(());
-
-/// RAII helper: set or clear an env var for the duration of a test and
-/// restore it on drop — see `mod.rs`'s identical `EnvVarGuard`.
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn apply(key: &'static str, value: Option<&str>) -> Self {
-        let prev = std::env::var(key).ok();
-        // SAFETY: every caller holds `ENV_LOCK`, so no other thread reads or
-        // writes the environment concurrently.
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
-        }
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: same single-threaded-under-ENV_LOCK invariant as `apply`.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
+/// Build a current-thread runtime for a synchronous test that must drive one
+/// async call while holding the synchronous [`ENV_LOCK`] (issue #3711).
+fn current_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread tokio runtime must build")
 }
 
 /// Issue #3493 P1: `TRUSTY_DEVICE=cpu` must force `Cpu` for the Python
 /// sidecar prediction too, mirroring the ORT resolver's behaviour.
-#[tokio::test]
-async fn resolve_expected_python_provider_forces_cpu() {
-    let _g = ENV_LOCK.lock().await;
+#[test]
+fn resolve_expected_python_provider_forces_cpu() {
+    let _g = ENV_LOCK.lock().unwrap();
     let _d = EnvVarGuard::apply("TRUSTY_DEVICE", Some("CPU"));
     assert_eq!(resolve_expected_python_provider(), ExecutionProvider::Cpu);
 }
@@ -68,9 +44,9 @@ async fn resolve_expected_python_provider_forces_cpu() {
 /// Issue #3493 P1: with `TRUSTY_DEVICE` unset, Apple Silicon predicts `Mps`
 /// (the Python sidecar's device resolver picks MPS first on aarch64-macOS);
 /// an `embedder-cuda` build predicts `Cuda`; every other host predicts `Cpu`.
-#[tokio::test]
-async fn resolve_expected_python_provider_default_matches_platform() {
-    let _g = ENV_LOCK.lock().await;
+#[test]
+fn resolve_expected_python_provider_default_matches_platform() {
+    let _g = ENV_LOCK.lock().unwrap();
     let _d = EnvVarGuard::apply("TRUSTY_DEVICE", None);
 
     let got = resolve_expected_python_provider();
@@ -117,22 +93,31 @@ fn embedding_model_name_reports_resolved_variant() {
 /// Issue #3530 — `FastEmbedder::model_name()` must report the fp32 default's
 /// real name, not the stale `"AllMiniLML6V2Q"` hardcode. `#[ignore]`:
 /// downloads a real ONNX model.
-#[tokio::test]
+#[test]
 #[ignore]
-async fn fast_embedder_model_name_reports_fp32_default() {
-    let _g = ENV_LOCK.lock().await;
+fn fast_embedder_model_name_reports_fp32_default() {
+    // #3711: sync test + explicit runtime so the SHARED std `ENV_LOCK` covers
+    // the whole construct window without `clippy::await_holding_lock`.
+    let _g = ENV_LOCK.lock().unwrap();
     let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", None);
-    let e = FastEmbedder::new().await.unwrap();
-    assert_eq!(e.model_name(), "all-MiniLM-L6-v2");
+    let name = current_thread_runtime().block_on(async {
+        let e = FastEmbedder::new().await.unwrap();
+        e.model_name()
+    });
+    assert_eq!(name, "all-MiniLM-L6-v2");
 }
 
 /// Issue #3530 — the explicit INT8 opt-in must be reflected by
 /// `model_name()` too. `#[ignore]`: downloads a real ONNX model.
-#[tokio::test]
+#[test]
 #[ignore]
-async fn fast_embedder_model_name_reports_int8_opt_in() {
-    let _g = ENV_LOCK.lock().await;
+fn fast_embedder_model_name_reports_int8_opt_in() {
+    // #3711: see the sibling test — same shared-lock discipline.
+    let _g = ENV_LOCK.lock().unwrap();
     let _m = EnvVarGuard::apply("TRUSTY_EMBEDDER_MODEL", Some("int8"));
-    let e = FastEmbedder::new().await.unwrap();
-    assert_eq!(e.model_name(), "all-MiniLM-L6-v2-int8");
+    let name = current_thread_runtime().block_on(async {
+        let e = FastEmbedder::new().await.unwrap();
+        e.model_name()
+    });
+    assert_eq!(name, "all-MiniLM-L6-v2-int8");
 }

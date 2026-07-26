@@ -9,6 +9,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`default_model_matches_sentence_transformers_reference` no longer
+  misreports a wrong-model load as an fp32 accuracy failure** (issue #3711):
+  the merge-gate flake that failed at `mean_cosine=0.990649` vs `>= 0.999` was
+  never numeric drift — a correctly loaded fp32 `all-MiniLM-L6-v2` measures
+  1.000000 against the reference vectors, and float re-association across
+  runners/microkernels moves that by ~1e-6, so a sub-0.999 result is only
+  reachable by the INT8 `all-MiniLM-L6-v2-int8` variant (reproduced locally at
+  0.995703 by loading INT8 under the pre-fix test, with the identical
+  misleading "accuracy" message). Two paths could substitute INT8 unnoticed:
+  the test read `TRUSTY_EMBEDDER_MODEL` through `FastEmbedder::new()` while
+  holding no `ENV_LOCK`, so the sibling
+  `resolve_default_embedding_model_int8_opt_in` could have `int8` set
+  process-globally at that instant; and `FastEmbedder::with_cache_size`'s
+  two-model robustness net silently loads INT8 when the fp32 primary fails to
+  initialise (plausible on a disk- and memory-tight CI runner). The test now
+  pins `TRUSTY_EMBEDDER_MODEL` unset under `ENV_LOCK` for the whole
+  construct-and-embed window — which also serialises the `TRUSTY_DEVICE` write
+  the CPU-fallback path performs — and asserts `model_name()` reports the fp32
+  variant *before* the cosine gate, so a substituted model fails as "the fp32
+  primary never loaded" with the tracing warning to check. The 0.999 threshold
+  is deliberately unchanged and now carries its justification in
+  `REFERENCE_MIN_MEAN_COSINE`'s doc comment, stated as deficit-from-perfect
+  ratios: the 1e-3 budget is ~1000x larger than fp32's ~1e-6 drift, while INT8
+  misses it by ~10x (#3486's 0.9897) or ~4x (the 0.995703 reproduced here) —
+  a single order of magnitude, which is exactly why the wrong-model
+  discriminator is the `model_name()` assertion rather than the threshold.
+  Loosening it would have deleted the test's diagnostic value while leaving
+  both causes in place. Not `#[ignore]`d.
+
+- **The `embedder` module tree now has ONE env lock, not two** (issue #3711):
+  `provider_tests.rs` declared its own independent `tokio::sync::Mutex`
+  `ENV_LOCK`, separate from `mod.rs`'s `std::sync::Mutex`, so its
+  `TRUSTY_DEVICE` / `TRUSTY_EMBEDDER_MODEL` mutations did not serialise against
+  the tests in `mod.rs` — two locks guard nothing from each other, leaving the
+  same wrong-model race open (on macOS, or the moment either `#[ignore]` there
+  is lifted) and making `mod.rs`'s "one shared lock across all env-touching
+  tests in this binary" claim false crate-wide. Both are now hoisted to a
+  shared `embedder::test_env` module holding the single lock and RAII guard;
+  the four tests in `provider_tests.rs` became synchronous so they can take it,
+  building an explicit current-thread runtime where they need one.
+
 - **`catchup::session_finder::extract_section` no longer absorbs trailing
   header text** (issue #3901): a substring match on `## <header>` treated a
   hand-written header like `## Next Steps (all Bob's call — none required)`
