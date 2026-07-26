@@ -5,6 +5,31 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **Warm-boot's colocated-root discovery scan now honors `--no-auto-discover`
+  / `TRUSTY_NO_AUTO_DISCOVER` (issue #3929).** Previously the flag only gated
+  the unrelated `auto_discover_and_index()` git-repo scan; `restore_indexes`
+  called `collect_colocated_entries` unconditionally on every boot, so a
+  restart with the flag set still walked every tracked root in `roots.toml`
+  and re-registered already-tracked indexes under a second, differently
+  derived id — both pointing at the same `<root>/.trusty-search/index.redb`.
+  redb is single-open, so the second registration failed with
+  `DatabaseAlreadyOpen` (188/222 indexes on the reporter's production box).
+  The scan is now gated by a new `collect_colocated_for_warmboot` helper in
+  `commands/start/restore.rs`.
+- **Hardened the warm-boot corpus dedup guard with file-identity (device,
+  inode) matching, on top of the existing root-path canonicalization (issue
+  #3929).** Two colocated entries whose `root_path` strings do not
+  canonicalize to the same value (e.g. two different mount-point aliases of
+  one backing NFS/EFS export) but whose resolved `index.redb` is the same
+  physical file are now still collapsed to one survivor — closing a gap in
+  `corpus_dedup_key` (`service/warm_boot/mod.rs`) where "same `colocated`
+  corpus" was determined purely by root-path string equality.
+
+---
 ## [0.39.1] — 2026-07-24
 
 ### Fixed

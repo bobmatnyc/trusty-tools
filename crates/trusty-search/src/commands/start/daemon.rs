@@ -37,7 +37,11 @@ use crate::commands::prior_index_count::load_prior_index_count;
 /// environment). When `no_auto_discover` is `true` (or
 /// `TRUSTY_NO_AUTO_DISCOVER=1` is set), the post-hydration auto-discovery scan
 /// is skipped entirely so the daemon serves only indexes already in
-/// `indexes.toml` or registered at runtime.
+/// `indexes.toml` or registered at runtime. Issue #3929: the flag also gates
+/// warm-boot's colocated-root discovery scan (`restore_indexes` →
+/// `collect_colocated_for_warmboot`) — previously that scan ran unconditionally
+/// even with `--no-auto-discover` set, re-registering already-tracked indexes
+/// under a second id and colliding on the shared `.redb` corpus.
 /// Test: run twice in a row — the second invocation must exit 1 with the
 /// "another daemon is already running" message. Run with `--data-dir /tmp/ts-x`
 /// and confirm the lockfile lands in `/tmp/ts-x/daemon.lock`. Unit coverage:
@@ -401,7 +405,10 @@ pub async fn handle_start(
                     .prior_index_count
                     .store(prior, std::sync::atomic::Ordering::Relaxed);
                 // Issue #85: restore every index recorded in `indexes.toml`.
-                restore_indexes(&install_state, &embedder).await;
+                // Issue #3929: `no_auto_discover` must also gate the warm-boot
+                // colocated-root discovery scan, not just `auto_discover_and_index`
+                // below — see `restore_indexes`'s doc comment.
+                restore_indexes(&install_state, &embedder, no_auto_discover).await;
                 // Issue #1670: boot-time stale-index reconciliation — for each
                 // restored index, compare the stored indexed_head_sha against
                 // the current git HEAD and reindex only what changed (or fall

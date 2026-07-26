@@ -170,34 +170,111 @@ pub fn is_on_inaccessible_volume(
     inaccessible_volumes.contains(&key)
 }
 
+/// Dedup key identifying the on-disk redb corpus a [`PersistedIndex`] resolves
+/// to (issue #2305; file-identity variant added for issue #3929).
+///
+/// Why: a plain canonicalized `root_path` string is not always a reliable
+/// proxy for "same redb file" — e.g. two mount-point aliases of the same
+/// backing NFS/EFS export canonicalize to two DIFFERENT absolute paths even
+/// though they resolve to the identical file server-side (issue #3929: this
+/// is the suspected reason a legacy `indexes.toml` entry and a freshly
+/// colocated-scanned entry for the "same" root slipped past the root-path
+/// equality check and both got registered against one physical `.redb`).
+/// [`Inode`] is the stronger signal — two entries whose resolved `index.redb`
+/// shares a `(device, inode)` pair are the same file on Unix, regardless of
+/// which path alias was used to reach it (symlinks, bind mounts, and — on
+/// filesystems where the client-side device id is stable across mounts of the
+/// same export — some NFS/EFS mount-alias cases too). [`Path`] is the
+/// pre-existing fallback used whenever the redb file cannot be stat'd (not
+/// created yet, permissions, non-Unix target).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CorpusDedupKey {
+    /// `(st_dev, st_ino)` of the resolved `index.redb` file.
+    Inode(u64, u64),
+    /// Canonicalized `root_path`, used when file identity is unavailable.
+    Path(PathBuf),
+}
+
+impl std::fmt::Display for CorpusDedupKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CorpusDedupKey::Inode(dev, ino) => write!(f, "inode:{dev}:{ino}"),
+            CorpusDedupKey::Path(p) => write!(f, "path:{}", p.display()),
+        }
+    }
+}
+
+/// Read-only `(st_dev, st_ino)` identity of `entry`'s on-disk redb corpus
+/// file, when it exists (issue #3929).
+///
+/// Why: stat'ing the actual corpus file (rather than just its parent
+/// `root_path`) gives the strongest available "same file" signal without
+/// requiring the two entries' `root_path` strings to canonicalize identically
+/// — see [`CorpusDedupKey`]. Never creates the file or any parent directory.
+/// What: builds `<root_path>/.trusty-search/index.redb` directly (bypassing
+/// `colocated_storage_dir`'s `create_dir_all` side effect) and calls
+/// `std::fs::metadata` on it. Returns `None` when the file does not exist,
+/// cannot be stat'd, or the target platform is not Unix (no portable
+/// device/inode API elsewhere).
+/// Test: `dedup_by_corpus_path_collapses_hardlinked_redb_across_different_roots`
+/// in `warm_boot_tests.rs`.
+fn corpus_file_identity(entry: &PersistedIndex) -> Option<(u64, u64)> {
+    if !entry.colocated {
+        return None;
+    }
+    let redb_path = entry
+        .root_path
+        .join(crate::service::colocated_storage::COLOCATED_DIR_NAME)
+        .join("index.redb");
+    let meta = std::fs::metadata(&redb_path).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
 /// Resolve the dedup key for `entry` — the identity of its on-disk redb corpus
-/// file — WITHOUT any filesystem side effect (issue #2305).
+/// file — WITHOUT any filesystem side effect beyond a read-only `stat`
+/// (issue #2305; file-identity fallback added for issue #3929).
 ///
 /// Why: `corpus_redb_path_for_entry` routes through `colocated_storage_dir`,
 /// which calls `create_dir_all` and would materialise a ghost `.trusty-search/`
 /// directory for a moved/dead root at collection time (the exact hazard the
-/// #484 relocation guard avoids). Deduplication must therefore key on a pure
-/// path formula. Only colocated entries can collide: their corpus lives at
-/// `<root_path>/.trusty-search/index.redb`, so two entries sharing a
+/// #484 relocation guard avoids). Deduplication must therefore key on a pure,
+/// read-only formula. Only colocated entries can collide: their corpus lives
+/// at `<root_path>/.trusty-search/index.redb`, so two entries sharing a
 /// `root_path` share one redb file. Legacy (non-colocated) corpora are keyed by
 /// unique `index_id` in the global data dir and can never collide, so they are
 /// never merged (`None`).
-/// What: for a colocated entry returns `Some(canonicalize_best_effort(root_path))`
-/// (canonicalization resolves symlink / `/var`↔`/private/var` aliases so two
-/// aliased roots map to one key, matching the read-only canonicalization used
-/// for the `seen_root_paths` set in `restore_indexes`); returns `None` for a
-/// non-colocated entry. `canonicalize_best_effort` is read-only — it never
-/// creates directories.
+/// What: for a colocated entry, prefers [`CorpusDedupKey::Inode`] (the
+/// resolved redb file's `(device, inode)`, via `corpus_file_identity`) when
+/// the file exists; falls back to
+/// `CorpusDedupKey::Path(canonicalize_best_effort(root_path))` (canonicalization
+/// resolves symlink / `/var`↔`/private/var` aliases so two aliased roots map
+/// to one key, matching the read-only canonicalization used for the
+/// `seen_root_paths` set in `restore_indexes`). Returns `None` for a
+/// non-colocated entry.
 /// Test: `dedup_by_corpus_path_*` in `warm_boot_tests.rs`.
-fn corpus_dedup_key(entry: &PersistedIndex) -> Option<PathBuf> {
+fn corpus_dedup_key(entry: &PersistedIndex) -> Option<CorpusDedupKey> {
     if !entry.colocated {
         // Legacy corpora are id-keyed in the global data dir → never collide.
         return None;
     }
+    if let Some((dev, ino)) = corpus_file_identity(entry) {
+        return Some(CorpusDedupKey::Inode(dev, ino));
+    }
     // Same root ⟺ same `<root>/.trusty-search/index.redb`, so keying on the
     // canonical root is equivalent to keying on the redb path and avoids the
     // create_dir_all side effect of resolving the redb path directly.
-    Some(canonicalize_best_effort(&entry.root_path))
+    Some(CorpusDedupKey::Path(canonicalize_best_effort(
+        &entry.root_path,
+    )))
 }
 
 /// Outcome of [`dedup_entries_by_corpus_path_verbose`] (issue #2337).
@@ -282,7 +359,7 @@ pub fn dedup_entries_by_corpus_path_verbose(entries: Vec<PersistedIndex>) -> Ded
 
     // First pass: group entry indices by corpus-path key. Entries with no key
     // (non-colocated) are always retained and can never be a collision member.
-    let mut groups: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<CorpusDedupKey, Vec<usize>> = HashMap::new();
     for (i, entry) in entries.iter().enumerate() {
         if let Some(key) = corpus_dedup_key(entry) {
             groups.entry(key).or_default().push(i);
@@ -336,7 +413,7 @@ pub fn dedup_entries_by_corpus_path_verbose(entries: Vec<PersistedIndex>) -> Ded
                  meant to be separate indexes.",
                 loser.id,
                 survivor_id,
-                key.display(),
+                key,
                 survivor_id,
                 loser.id,
                 loser.include_docs,

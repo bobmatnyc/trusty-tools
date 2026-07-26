@@ -446,6 +446,68 @@ fn dedup_by_corpus_path_keeps_most_recent() {
     );
 }
 
+/// Why (issue #3929 — the dedup-guard gap): a legacy `indexes.toml` entry and
+/// a freshly colocated-scanned entry for the "same" physical corpus can carry
+/// `root_path` strings that DO NOT canonicalize to the same value (e.g. two
+/// different mount-point aliases of the same backing NFS/EFS export), so the
+/// pre-#3929 path-only dedup key missed the collision and both entries
+/// survived — the reporter's production repro was 188/222 indexes failing
+/// with `DatabaseAlreadyOpen` because two IDs pointed at one `.redb`.
+/// What: two colocated entries at DISTINCT temp roots (so
+/// `canonicalize_best_effort` produces two different keys — this is exactly
+/// the case the old path-only key would miss) whose `index.redb` files are
+/// the SAME inode via a hard link (simulating "two path aliases, one
+/// physical file" without requiring a real NFS/EFS mount in a unit test).
+/// Assert the pair still collapses to one survivor because `corpus_dedup_key`
+/// now prefers the resolved file's `(device, inode)` identity over the
+/// root-path string.
+/// Test: this test.
+#[test]
+fn dedup_by_corpus_path_collapses_hardlinked_redb_across_different_roots() {
+    let root_a = tempfile::tempdir().unwrap();
+    let root_b = tempfile::tempdir().unwrap();
+
+    let ts_a = root_a.path().join(".trusty-search");
+    let ts_b = root_b.path().join(".trusty-search");
+    std::fs::create_dir_all(&ts_a).unwrap();
+    std::fs::create_dir_all(&ts_b).unwrap();
+
+    let redb_a = ts_a.join("index.redb");
+    let redb_b = ts_b.join("index.redb");
+    std::fs::write(&redb_a, b"redb-bytes").unwrap();
+    // Hard link, not a copy: `redb_b` now shares the SAME inode as `redb_a`,
+    // exactly like two mount-point aliases resolving to one server-side file.
+    std::fs::hard_link(&redb_a, &redb_b).unwrap();
+
+    // Sanity: the two roots must NOT canonicalize to the same path — otherwise
+    // this test would pass even with the pre-#3929 path-only key and prove
+    // nothing about the fix.
+    assert_ne!(
+        root_a.path().canonicalize().unwrap(),
+        root_b.path().canonicalize().unwrap(),
+        "test setup invalid: roots must be distinct paths"
+    );
+
+    let entries = vec![
+        colocated_entry("legacy-alias", root_a.path(), Some(10)),
+        colocated_entry("colocated-scan-alias", root_b.path(), Some(999)),
+    ];
+
+    let deduped = dedup_entries_by_corpus_path(entries);
+
+    assert_eq!(
+        deduped.len(),
+        1,
+        "two entries whose index.redb is the same inode must collapse to one \
+         survivor even when their root_path strings differ (issue #3929); \
+         got: {deduped:?}"
+    );
+    assert_eq!(
+        deduped[0].id, "colocated-scan-alias",
+        "the most-recently-active entry must be the survivor"
+    );
+}
+
 // ── dedup_entries_by_corpus_path_verbose (issue #2337) ────────────────────
 
 /// Why (#2337 part 1): callers need the dropped entries to prune their

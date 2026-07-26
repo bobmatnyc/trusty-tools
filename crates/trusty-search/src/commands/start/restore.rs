@@ -20,10 +20,54 @@ use crate::commands::start_restore::restore_one_index;
 use crate::service::SearchAppState;
 
 use crate::service::lazy_loader::{select_warmboot_entries, warmboot_max_indexes};
+use crate::service::persistence::PersistedIndex;
 use crate::service::warm_boot::{
     collect_colocated_entries, collect_legacy_entries, is_on_inaccessible_volume,
     probe_warmboot_volumes, probe_warmboot_volumes_from_paths, restore_one_index_bounded,
 };
+
+/// Collect colocated index entries for warm-boot, honoring
+/// `--no-auto-discover` / `TRUSTY_NO_AUTO_DISCOVER` (issue #3929).
+///
+/// Why: `restore_indexes` previously called `collect_colocated_entries`
+/// unconditionally. `--no-auto-discover`'s documented contract
+/// (`commands/start/daemon.rs::handle_start`) is that "the daemon serves only
+/// indexes already in `indexes.toml` or registered at runtime" — but the flag
+/// only gated the UNRELATED `auto_discover_and_index()` git-repo scan
+/// (`daemon.rs` ~line 436), not this one. The colocated-root scan IS a
+/// discovery mechanism in exactly the sense the flag promises to disable: it
+/// walks every tracked root in `roots.toml` looking for `.trusty-search/`
+/// directories and registers whatever it finds under a freshly-derived id —
+/// including a SECOND registration, under a different id, for a root that a
+/// legacy `indexes.toml` entry already owns. Both registrations resolve to
+/// the same `<root>/.trusty-search/index.redb`; redb is single-open, so the
+/// second one fails with `DatabaseAlreadyOpen` (issue #3929 — 188/222 indexes
+/// on the reporter's production box, despite `--no-auto-discover` being set).
+/// What: when `no_auto_discover` is `true`, returns an empty `Vec` without
+/// walking a single tracked root — a full no-op for the scan itself.
+/// `colocated_inaccessible` (the pre-computed per-volume probe result) is
+/// still accepted so the signature stays stable for the caller, which also
+/// reuses it for the restore-time TCC skip check on legacy colocated entries
+/// regardless of this flag. Otherwise (flag not set) delegates to
+/// `collect_colocated_entries` exactly as before the fix.
+/// Test: `collect_colocated_for_warmboot_skips_scan_when_no_auto_discover`,
+/// `collect_colocated_for_warmboot_scans_when_auto_discover_enabled`.
+async fn collect_colocated_for_warmboot(
+    no_auto_discover: bool,
+    seen_ids: &HashSet<String>,
+    seen_root_paths: &HashSet<std::path::PathBuf>,
+    colocated_inaccessible: &HashSet<std::path::PathBuf>,
+) -> Vec<PersistedIndex> {
+    if no_auto_discover {
+        tracing::info!(
+            "warm-boot: skipping colocated-root discovery scan — \
+             --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); \
+             serving only indexes already in indexes.toml"
+        );
+        return Vec::new();
+    }
+    collect_colocated_entries(seen_ids, seen_root_paths, colocated_inaccessible).await
+}
 
 /// Restore every index recorded in `indexes.toml` and in colocated roots by
 /// re-registering it on the in-memory registry.
@@ -33,14 +77,18 @@ use crate::service::warm_boot::{
 /// `spawn_blocking` + timeout. #723 adds probe-per-volume: each distinct
 /// volume is probed ONCE on a bare OS thread before any redb opens so a
 /// TCC-blocked volume costs at most one leaked thread (not one-per-index).
+/// Issue #3929: `no_auto_discover` must gate the colocated-root discovery
+/// scan too — see `collect_colocated_for_warmboot`.
 /// What: collects all entries (legacy + colocated), applies selective warm-boot
 /// (issue #993) to split into eager/cold slices, then restores only the eager
 /// slice via `restore_one_index_bounded`. Cold entries are registered into
 /// `state.cold_store` for lazy on-demand loading.
-/// Test: integration test in `tests/integration_tests.rs`.
+/// Test: integration test in `tests/integration_tests.rs`;
+///       `collect_colocated_for_warmboot_*` in this module (issue #3929).
 pub(super) async fn restore_indexes(
     state: &SearchAppState,
     embedder: &Arc<dyn crate::core::Embedder>,
+    no_auto_discover: bool,
 ) {
     // Issue #993: read TRUSTY_WARMBOOT_MAX_INDEXES once before collecting.
     let max_warmboot = warmboot_max_indexes();
@@ -88,8 +136,13 @@ pub(super) async fn restore_indexes(
             Err(_) => std::collections::HashSet::new(),
         }
     };
-    let colocated_entries =
-        collect_colocated_entries(&seen_ids, &seen_root_paths, &colocated_inaccessible).await;
+    let colocated_entries = collect_colocated_for_warmboot(
+        no_auto_discover,
+        &seen_ids,
+        &seen_root_paths,
+        &colocated_inaccessible,
+    )
+    .await;
 
     // Merge into a single pool then apply selective warm-boot split (issue #993).
     let all_entries: Vec<_> = legacy_entries
@@ -337,4 +390,93 @@ fn prune_and_persist_dedup_outcome(outcome: &crate::service::warm_boot::DedupOut
         outcome.dropped.len(),
         outcome.merged_survivor_ids.len(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why (issue #3929 — the regression): before the fix,
+    /// `collect_colocated_for_warmboot` (like the `restore_indexes` call site
+    /// it replaced) ran the colocated-root discovery scan unconditionally,
+    /// ignoring `--no-auto-discover`. This is the reporter's exact production
+    /// repro: a real colocated root is tracked in `roots.toml`; with
+    /// `no_auto_discover = true`, warm-boot must NOT discover or return it.
+    /// What: register one real colocated root via `roots_registry::upsert_root`,
+    /// call `collect_colocated_for_warmboot(true, ..)`, assert the result is
+    /// empty.
+    /// Note: `serial` prevents parallel env-var mutation from other tests
+    /// (`TRUSTY_DATA_DIR` is shared global state), matching the pattern used
+    /// throughout `warm_boot_tests.rs`.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn collect_colocated_for_warmboot_skips_scan_when_no_auto_discover() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        let real_root = tempfile::tempdir().unwrap();
+        let ts_dir = real_root.path().join(".trusty-search");
+        std::fs::create_dir_all(&ts_dir).unwrap();
+
+        unsafe {
+            std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
+        }
+        crate::service::roots_registry::upsert_root(real_root.path().to_path_buf()).unwrap();
+
+        let seen_ids: HashSet<String> = HashSet::new();
+        let seen_root_paths: HashSet<std::path::PathBuf> = HashSet::new();
+        let inaccessible: HashSet<std::path::PathBuf> = HashSet::new();
+
+        let results =
+            collect_colocated_for_warmboot(true, &seen_ids, &seen_root_paths, &inaccessible).await;
+
+        unsafe {
+            std::env::remove_var("TRUSTY_DATA_DIR");
+        }
+
+        assert!(
+            results.is_empty(),
+            "--no-auto-discover must suppress the colocated-root discovery scan \
+             entirely (issue #3929); got: {results:?}"
+        );
+    }
+
+    /// Why: the fix must not regress the default (flag NOT set) path — the
+    /// colocated scan must still discover tracked roots when
+    /// `no_auto_discover` is `false`, exactly as before issue #3929.
+    /// What: same setup as the skip test but with `no_auto_discover = false`;
+    /// assert the real root IS discovered.
+    /// Test: this test.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn collect_colocated_for_warmboot_scans_when_auto_discover_enabled() {
+        let data_tmp = tempfile::tempdir().unwrap();
+        let real_root = tempfile::tempdir().unwrap();
+        let ts_dir = real_root.path().join(".trusty-search");
+        std::fs::create_dir_all(&ts_dir).unwrap();
+
+        unsafe {
+            std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
+        }
+        crate::service::roots_registry::upsert_root(real_root.path().to_path_buf()).unwrap();
+
+        let seen_ids: HashSet<String> = HashSet::new();
+        let seen_root_paths: HashSet<std::path::PathBuf> = HashSet::new();
+        let inaccessible: HashSet<std::path::PathBuf> = HashSet::new();
+
+        let results =
+            collect_colocated_for_warmboot(false, &seen_ids, &seen_root_paths, &inaccessible).await;
+
+        unsafe {
+            std::env::remove_var("TRUSTY_DATA_DIR");
+        }
+
+        assert_eq!(
+            results.len(),
+            1,
+            "with no_auto_discover=false the colocated scan must still discover \
+             tracked roots exactly as before issue #3929; got: {results:?}"
+        );
+        let canonical_root = real_root.path().canonicalize().unwrap();
+        assert_eq!(results[0].root_path, canonical_root);
+    }
 }
