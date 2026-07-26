@@ -224,6 +224,18 @@ pub(super) async fn reindex_handler(
                     walk_diagnostics: Arc::clone(&handle.walk_diagnostics),
                 };
                 handle = state.registry.register(new_handle);
+                // Issue #3993 review round 3 (HIGH, applied here for
+                // consistency with create/relocate): reap any stale
+                // `state.cold_store` record parked under this SAME id. Same
+                // no-op-under-correct-operation reasoning as
+                // `relocate_index_handler`: reaching this branch already
+                // required `state.registry.get(&index_id)` to succeed at the
+                // top of this handler (404 otherwise), so `id` was already
+                // live before the override ran and cannot simultaneously be
+                // cold. Defense-in-depth against residual corruption
+                // predating the create-time fix; keyed by `IndexId`, so it
+                // can only ever touch this id's own record.
+                state.cold_store.mark_loaded(&index_id);
             }
         }
     }

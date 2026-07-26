@@ -339,6 +339,23 @@ pub(super) async fn relocate_index_handler(
     // Atomically replace the in-memory registry entry.
     state.registry.register(new_handle);
 
+    // Issue #3993 review round 3 (HIGH, applied here for consistency): reap
+    // any stale `state.cold_store` record parked under this SAME id. Under
+    // correct operation this is always a no-op — reaching this line already
+    // required `state.registry.get(&index_id)` to return `Some` above (404
+    // otherwise), so `id` was already live BEFORE this handler ran, meaning
+    // it could not simultaneously be a pending cold entry (cold→live
+    // promotion always goes through `get_or_load_index`, which calls
+    // `cold_store.mark_loaded` itself). This call exists purely as
+    // defense-in-depth against residual corruption predating this fix (e.g.
+    // an id that was created — before `create_index_handler`'s fix above
+    // shipped — while a stale cold record for it already existed, so it went
+    // live without ever being reaped): relocating that id is a natural,
+    // cheap point to self-heal the invariant rather than leaving the old
+    // root permanently poisoned. Keyed by `IndexId`, so it can only ever
+    // touch this id's own record.
+    state.cold_store.mark_loaded(&index_id);
+
     // Update `indexed_root` in the corpus `_meta` table so the root-move
     // detection in `spawn_reindex_with_cleanup` does NOT fire on the next
     // incremental reindex (which would otherwise clear the hash cache for

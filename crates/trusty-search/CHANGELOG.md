@@ -45,6 +45,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   silently registered broken. Not gated on #1681 or #2611 (neither addresses
   collision safety).
 
+  **Adversarial re-review (third round WARN) found the round-2 fix itself
+  introduced a HIGH-severity availability regression:** `create_index_handler`
+  never cleared a stale `state.cold_store` record for the id being
+  (re)created. Repro: park cold `foo` → `root_old`; `create_index(foo,
+  root_new)` succeeds and `foo` goes live at `root_new`, but the cold store
+  still claims `root_old` for `foo` forever — nothing ever triggers cleanup,
+  since `foo` now always resolves via the live registry path. A later,
+  wholly unrelated, legitimate `create_index(bar, root_old)` was then falsely
+  rejected with `409` even though nothing live or cold genuinely depended on
+  `root_old` any more. Fixed by reaping any cold-store record for the exact
+  id just (re)registered — `ColdIndexStore::mark_loaded`, keyed strictly by
+  `IndexId`, so it can only ever clear the record for that one id, never a
+  record that merely happens to share a root_path with someone else (the
+  existing collision guard still protects every other id's legitimate
+  claim). `relocate_index_handler` and the reindex `root_path` override gained
+  the identical reap call for consistency and to self-heal any pre-existing
+  residue, though neither can itself *create* the hole — both require the id
+  to already be live to reach the write, so under correct operation a stale
+  cold record for that same id cannot coexist with it. The reindex override's
+  narrower, pre-existing TOCTOU window (two concurrent overrides racing onto
+  one still-unclaimed root, the same accepted-race shape as #2519) is left as
+  a follow-up rather than fixed here — reindex has no synchronous fresh-corpus
+  open to hang a `corpus_open_failed` ground-truth backstop on the way
+  create/relocate do, so closing it properly needs a registration-wide
+  mutex/lock, a materially larger change than this collision-guard fix.
+
 - **Test-side remediation for `create_index`/`relocate_index` tests spuriously
   denied by the sensitive-path denylist (issue #3955).** `SENSITIVE_PATH_PREFIXES`
   denies `/tmp/`, `/private/tmp`, and `/var/folders` — which on macOS is where

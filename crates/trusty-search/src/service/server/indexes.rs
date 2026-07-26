@@ -580,6 +580,27 @@ pub(super) async fn create_index_handler(
         )),
     };
     let registered = state.registry.register(handle);
+    // Issue #3993 review round 3 (HIGH): `id` is now live at `req.root_path`
+    // (which may be a BRAND NEW root, distinct from wherever `id` was last
+    // parked cold — see the id-already-exists early return above, which only
+    // catches an id that is currently LIVE, not one sitting cold). Without
+    // this call, a stale `state.cold_store` record left over from before
+    // `id` was (re)created here keeps claiming its old root_path forever:
+    // `find_root_path_collision` would go on treating that old root as owned
+    // by `id` even though nothing live or cold genuinely depends on it any
+    // more, permanently blocking any OTHER id from ever registering there —
+    // an availability regression discovered in the exact PR meant to make
+    // registration safer. `mark_loaded` keys strictly off `IndexId`, so this
+    // can only ever clear the record for the id just registered, never a
+    // record that merely happens to share a root_path with someone else —
+    // reaping by id, not by root, is what keeps this safe against the
+    // inverse risk (deleting a cold record that still legitimately owns its
+    // root). No-op (two DashMap removes) when `id` had no cold record, which
+    // is the common case for a genuinely brand-new id — mirrors the cleanup
+    // `get_or_load_index` already performs after a normal cold→live promotion
+    // (`lazy_loader/loader.rs`), just reached via the create-index door
+    // instead.
+    state.cold_store.mark_loaded(&id);
     // Issue #1621 (epic #1619 WI-2): start the filesystem watcher for the
     // freshly-registered index so saves trigger incremental indexing without a
     // manual reindex. No-op when disabled (`TRUSTY_DISABLE_WATCHER=1`) or when

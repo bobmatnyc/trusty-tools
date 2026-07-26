@@ -602,3 +602,264 @@ async fn lazy_restore_concurrent_cold_entries_at_same_root_only_one_wins() {
          end up live — both live would silently double-register one on-disk corpus"
     );
 }
+
+// ── Third round (adversarial re-review, WARN): the round-2 write-side guard
+//    itself introduced a HIGH-severity availability regression — it never
+//    reaps a stale cold-store record for the id being (re)created/relocated,
+//    so an abandoned root stays permanently poisoned ──────────────────────
+
+/// Critic's exact repro: park cold `foo` → `root_old`, then `create_index`
+/// re-creates `foo` at a brand-new `root_new`. `foo` goes live at
+/// `root_new`, but before the round-3 fix `state.cold_store` still claims
+/// `root_old` for `foo` forever (nothing ever triggers cleanup — `foo` now
+/// always resolves via the live registry path, so `restore_index_on_demand`
+/// is never reached for it again). A later, wholly unrelated, legitimate
+/// `create_index(bar, root_old)` was then falsely rejected with `409` even
+/// though nothing live or cold genuinely depends on `root_old` any more.
+///
+/// Without the round-3 fix this assertion fails: `bar`'s create returns
+/// `409 Conflict` naming `foo` as the (stale, dead) owner of `root_old`.
+#[tokio::test]
+async fn create_index_reaps_stale_cold_entry_for_recreated_id() {
+    let state = mock_state_async().await;
+    let (_dir_old, root_old) = super::test_support::allowlisted_index_root("ts-3993-r3-old-");
+    let (_dir_new, root_new) = super::test_support::allowlisted_index_root("ts-3993-r3-new-");
+
+    // Park cold `foo` → `root_old`.
+    let cold_entry = PersistedIndex {
+        id: "foo".to_string(),
+        root_path: root_old.clone(),
+        colocated: true,
+        ..Default::default()
+    };
+    state.cold_store.register_cold_entries(vec![cold_entry]);
+    assert!(
+        state.cold_store.contains(&IndexId::new("foo")),
+        "foo must be parked cold before the recreate"
+    );
+
+    // create_index(foo, root_new) — succeeds, foo now live at root_new.
+    let created = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("foo", root_new.clone())),
+    )
+    .await;
+    assert_eq!(
+        created.status(),
+        StatusCode::OK,
+        "recreating foo at a genuinely new root must succeed"
+    );
+
+    // The stale cold-store record for foo (at root_old) must be reaped —
+    // nothing live or cold depends on root_old any more.
+    assert!(
+        !state.cold_store.contains(&IndexId::new("foo")),
+        "foo's stale cold-store record must be cleared once foo is live at a \
+         new root — otherwise root_old is poisoned forever (issue #3993 round 3)"
+    );
+
+    // create_index(bar, root_old) — an unrelated, legitimate registration —
+    // must now succeed: root_old is genuinely abandoned.
+    let created_bar = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("bar", root_old.clone())),
+    )
+    .await;
+    assert_eq!(
+        created_bar.status(),
+        StatusCode::OK,
+        "bar must be able to claim root_old once foo's dead cold record \
+         pointing there has been reaped (issue #3993 round 3)"
+    );
+}
+
+/// Non-regression / inverse-risk check: reaping `foo`'s own stale cold
+/// record on recreation must NOT disturb an unrelated cold entry that
+/// genuinely still owns its own root — the reap is scoped strictly by
+/// `IndexId`, never by root_path, so a root merely sharing nothing with the
+/// id being recreated stays fully protected by the existing collision guard.
+#[tokio::test]
+async fn create_index_reap_does_not_disturb_unrelated_cold_entry() {
+    let state = mock_state_async().await;
+    let (_dir_old, root_old) = super::test_support::allowlisted_index_root("ts-3993-r3-reap-old-");
+    let (_dir_new, root_new) = super::test_support::allowlisted_index_root("ts-3993-r3-reap-new-");
+    let (_dir_other, root_other) =
+        super::test_support::allowlisted_index_root("ts-3993-r3-reap-other-");
+
+    // Two unrelated cold entries: `foo` (about to be recreated) and `other`
+    // (a genuinely still-parked, unrelated index at a different root).
+    state.cold_store.register_cold_entries(vec![
+        PersistedIndex {
+            id: "foo".to_string(),
+            root_path: root_old.clone(),
+            colocated: true,
+            ..Default::default()
+        },
+        PersistedIndex {
+            id: "other".to_string(),
+            root_path: root_other.clone(),
+            colocated: true,
+            ..Default::default()
+        },
+    ]);
+
+    let created = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("foo", root_new.clone())),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+
+    // `other`'s cold record must be completely untouched by foo's reap.
+    assert!(
+        state.cold_store.contains(&IndexId::new("other")),
+        "reaping foo's own stale record must never disturb an unrelated \
+         cold entry's still-valid claim on its own root"
+    );
+
+    // A genuine collision against `other`'s root must still be rejected —
+    // the reap must not have over-triggered and cleared it.
+    let blocked = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("intruder", root_other.clone())),
+    )
+    .await;
+    assert_eq!(
+        blocked.status(),
+        StatusCode::CONFLICT,
+        "an unrelated cold entry must still block a genuine collision after \
+         an unrelated id's reap (issue #3993 round 3 inverse-risk check)"
+    );
+}
+
+/// `relocate_index_handler` shares the same defense-in-depth reap
+/// (`indexes_relocate.rs`), applied for consistency even though relocate
+/// cannot itself *create* the hole: reaching the handler already requires
+/// `id` to be LIVE (404 otherwise), so under correct operation `id` can
+/// never simultaneously hold a pending cold record — this test simulates
+/// residual corruption predating the round-3 fix (an id that went live
+/// before `create_index_handler`'s reap existed, leaving a stale cold
+/// record parked alongside it) and proves relocate self-heals it.
+#[tokio::test]
+async fn relocate_index_reaps_stale_cold_entry_for_own_id() {
+    use super::indexes_relocate::{relocate_index_handler, RelocateIndexRequest};
+
+    let state = mock_state_async().await;
+    let (_dir_a, root_a) = super::test_support::allowlisted_index_root("ts-3993-r3-reloc-a-");
+    let (_dir_new, root_new) = super::test_support::allowlisted_index_root("ts-3993-r3-reloc-new-");
+    let (_dir_legacy, root_legacy) =
+        super::test_support::allowlisted_index_root("ts-3993-r3-reloc-legacy-");
+
+    let created = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("index-a", root_a.clone())),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+
+    // Simulate pre-existing corruption: a stale cold record for the SAME id
+    // as the now-live handle, parked at some other legacy root.
+    state.cold_store.register_cold_entries(vec![PersistedIndex {
+        id: "index-a".to_string(),
+        root_path: root_legacy.clone(),
+        colocated: true,
+        ..Default::default()
+    }]);
+    assert!(state.cold_store.contains(&IndexId::new("index-a")));
+
+    let relocated = relocate_index_handler(
+        State(Arc::clone(&state)),
+        Path("index-a".to_string()),
+        Json(RelocateIndexRequest {
+            root_path: root_new.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(relocated.status(), StatusCode::OK);
+
+    assert!(
+        !state.cold_store.contains(&IndexId::new("index-a")),
+        "relocate must reap any stale cold record left over for its own id"
+    );
+
+    // root_legacy is now genuinely free.
+    let claimed = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("newcomer", root_legacy.clone())),
+    )
+    .await;
+    assert_eq!(
+        claimed.status(),
+        StatusCode::OK,
+        "root_legacy must be claimable once index-a's stale record there is reaped"
+    );
+}
+
+/// The reindex `root_path` override shares the same defense-in-depth reap
+/// (`reindex_handlers.rs`), same reasoning as relocate above: the id must
+/// already be live to reach this branch, so this only self-heals residual
+/// pre-round-3 corruption rather than closing a hole reindex itself creates.
+#[tokio::test]
+async fn reindex_root_override_reaps_stale_cold_entry_for_own_id() {
+    let (_dir_b, root_b) = super::test_support::allowlisted_index_root("ts-3993-r3-reindex-b-");
+    let (_dir_new, root_new) =
+        super::test_support::allowlisted_index_root("ts-3993-r3-reindex-new-");
+    let (_dir_legacy, root_legacy) =
+        super::test_support::allowlisted_index_root("ts-3993-r3-reindex-legacy-");
+
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("index-b"),
+        Arc::new(RwLock::new(CodeIndexer::new("index-b", &root_b))),
+        root_b.clone(),
+    ));
+    let state = SearchAppState::new(registry);
+    // Install a mock embedder so the follow-up `create_index_handler("newcomer", …)`
+    // check below (which requires an embedder) doesn't return an unrelated 503.
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(8));
+    state.install_embedder(embedder).await;
+    let state = Arc::new(state);
+
+    // Simulate pre-existing corruption: a stale cold record for the SAME id
+    // as the now-live handle, parked at some other legacy root.
+    state.cold_store.register_cold_entries(vec![PersistedIndex {
+        id: "index-b".to_string(),
+        root_path: root_legacy.clone(),
+        colocated: true,
+        ..Default::default()
+    }]);
+    assert!(state.cold_store.contains(&IndexId::new("index-b")));
+
+    let result = reindex_handler(
+        State(Arc::clone(&state)),
+        Path("index-b".to_string()),
+        Some(Json(ReindexRequest {
+            root_path: Some(root_new.clone()),
+            force: None,
+            background: None,
+        })),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "override onto an unclaimed root must succeed"
+    );
+
+    assert!(
+        !state.cold_store.contains(&IndexId::new("index-b")),
+        "the reindex root_path override must reap any stale cold record \
+         left over for its own id"
+    );
+
+    // root_legacy is now genuinely free.
+    let claimed = create_index_handler(
+        State(Arc::clone(&state)),
+        Json(create_req("newcomer", root_legacy.clone())),
+    )
+    .await;
+    assert_eq!(
+        claimed.status(),
+        StatusCode::OK,
+        "root_legacy must be claimable once index-b's stale record there is reaped"
+    );
+}
