@@ -233,6 +233,15 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
 /// runtime recreation of the #2305 double-registration hazard the warm-boot
 /// dedup fixed only for the boot path. This guard rejects the registration
 /// up front instead of building a broken indexer first.
+///
+/// Issue #3993: also called from `reindex_handlers::reindex_handler`
+/// (Gap E — a `root_path` override previously had no collision check at
+/// all) and from `service::lazy_restore::restore_index_on_demand` (Gap F —
+/// a cold/unloaded entry's on-demand restore previously opened its redb
+/// with no guard, even when a live sibling handle already owned that root).
+/// Both reuse this exact primitive rather than adding a fourth collision
+/// mechanism; visibility is `pub(crate)` (widened from `pub(super)`) so
+/// `lazy_restore` — outside `service::server` — can reach it.
 /// What: `candidate` must already be canonicalized — every caller passes the
 /// output of `validate_root_path`, the same normalization every registered
 /// handle's `root_path` went through (directly at create/relocate time, or
@@ -266,7 +275,7 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
 /// `create_index_concurrent_same_root_only_one_wins` in `tests_2336.rs`; plus
 /// the macOS-gated `create_index_rejects_case_variant_of_registered_root`
 /// exercising the dev/ino path directly.
-pub(super) fn find_root_path_collision(
+pub(crate) fn find_root_path_collision(
     handles: &[std::sync::Arc<IndexHandle>],
     candidate: &std::path::Path,
     exclude_id: Option<&IndexId>,

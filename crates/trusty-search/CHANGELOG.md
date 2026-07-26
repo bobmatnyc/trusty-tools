@@ -9,6 +9,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Two more index-registration paths had no `root_path` collision guard —
+  fourth occurrence of the #2305/#2336 `DatabaseAlreadyOpen` class (issue
+  #3993).** An audit prompted by #3929 found `find_root_path_collision`
+  (issue #2336) unreached from two call sites that can reproduce the same
+  hazard: two index ids claiming one physical `<root>/.trusty-search/index.redb`
+  corpus. **Gap E:** `POST /indexes/:id/reindex` with a `root_path` override
+  (`reindex_handlers.rs`) registered the new root with no collision check at
+  all — now rejected with `409 Conflict` naming the existing owner, same as
+  `create_index`/`relocate_index`. **Gap F:** `find_root_path_collision` scans
+  only LIVE handles, so a cold (unloaded) index entry parked in
+  `state.cold_store` was invisible to it — a `create_index` whose root matched
+  an unloaded cold entry passed the guard cleanly, and the cold entry's later
+  on-demand restore (`restore_index_on_demand`, `lazy_restore.rs`) then opened
+  the same redb with no guard at all, a third source of the hazard. Fixed by
+  checking the candidate root against live sibling handles right before the
+  cold entry is ever built, reusing the same `find_root_path_collision`
+  primitive rather than adding a fourth collision mechanism; a colliding cold
+  entry is now marked permanently failed (existing #1106 semantics) instead of
+  silently registered broken. Not gated on #1681 or #2611 (neither addresses
+  collision safety).
+
 - **Test-side remediation for `create_index`/`relocate_index` tests spuriously
   denied by the sensitive-path denylist (issue #3955).** `SENSITIVE_PATH_PREFIXES`
   denies `/tmp/`, `/private/tmp`, and `/var/folders` — which on macOS is where

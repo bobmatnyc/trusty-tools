@@ -22,7 +22,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus};
 
-use super::helpers::validate_root_path;
+use super::helpers::{find_root_path_collision, validate_root_path};
 use super::state::SearchAppState;
 
 #[derive(Deserialize, Default)]
@@ -131,6 +131,39 @@ pub(super) async fn reindex_handler(
                     return Err((status, Json(json)));
                 }
             };
+            // Issue #3993 (Gap E): a root_path override previously had NO
+            // collision check at all — `state.registry.register(new_handle)`
+            // below would silently re-point this index onto a root_path a
+            // DIFFERENT live index already owns, the same #2305/#2336 hazard
+            // (two ids claiming one on-disk `<root>/.trusty-search/index.redb`
+            // corpus) `create_index_handler` and `relocate_index_handler`
+            // already guard against. Reuse the exact same primitive rather
+            // than adding a fourth collision mechanism.
+            let live_handles = state.registry.list_handles();
+            if let Some(existing_id) =
+                find_root_path_collision(&live_handles, &new_root, Some(&index_id))
+            {
+                tracing::warn!(
+                    "reindex_handler: refusing root_path override for '{}' to {} — \
+                     already owned by '{}' (issue #3993)",
+                    index_id.0,
+                    new_root.display(),
+                    existing_id,
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "root_path {:?} is already registered to index '{}'; two \
+                             indexes cannot share one on-disk corpus (issues #2305, \
+                             #2336, #3993)",
+                            new_root.display(),
+                            existing_id,
+                        ),
+                        "existing_id": existing_id.0,
+                    })),
+                ));
+            }
             if handle.root_path.as_os_str().is_empty() || handle.root_path != new_root {
                 let indexer = Arc::clone(&handle.indexer);
                 // Preserve the filter set / domain vocabulary recorded on the

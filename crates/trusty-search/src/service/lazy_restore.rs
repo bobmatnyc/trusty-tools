@@ -48,6 +48,37 @@ pub(crate) async fn restore_index_on_demand(
         return;
     }
 
+    // Issue #3993 (Gap F): `find_root_path_collision` (issue #2336) scans
+    // only LIVE handles, so it is structurally blind to cold/unloaded
+    // entries — a `create_index` whose root matches THIS still-cold entry's
+    // root_path can pass that guard cleanly (this entry wasn't live yet to
+    // collide with). By the time that happens, though, the OTHER index is
+    // live and holds this root_path's `<root>/.trusty-search/index.redb`
+    // open. Checking here, against the live registry, right before ever
+    // touching disk, catches that collision at the only point it CAN be
+    // caught for this path — closing the crash site instead of teaching the
+    // create-time guard about cold entries (which would still race a
+    // restore that starts before the create call resolves). Reuses the
+    // existing primitive rather than adding a fourth collision mechanism.
+    let live_handles = state.registry.list_handles();
+    if let Some(existing_id) = crate::service::server::helpers::find_root_path_collision(
+        &live_handles,
+        &entry.root_path,
+        Some(&id),
+    ) {
+        tracing::warn!(
+            "lazy-load: refusing to restore cold index '{}' at {} — root_path \
+             already owned by live index '{}' (issue #3993); marking permanently \
+             failed so future queries fail fast instead of retrying the doomed \
+             restore",
+            entry.id,
+            entry.root_path.display(),
+            existing_id,
+        );
+        state.cold_store.mark_failed(&id);
+        return;
+    }
+
     // Guard against missing root_path. For cold indexes the path was valid when
     // they were parked; if it disappeared we skip gracefully (non-colocated path
     // used here — the relocation scan from issue #484 is a warm-boot-only flow).

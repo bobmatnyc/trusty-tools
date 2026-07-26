@@ -17,7 +17,7 @@ mod contrib_graph;
 mod fanout;
 mod files;
 mod health;
-mod helpers;
+pub(crate) mod helpers;
 mod index_config;
 mod indexes;
 mod indexes_relocate;
@@ -45,6 +45,8 @@ mod tests_2336;
 mod tests_2984;
 #[cfg(test)]
 mod tests_3304;
+#[cfg(test)]
+mod tests_3993;
 #[cfg(test)]
 mod tests_829;
 #[cfg(test)]
