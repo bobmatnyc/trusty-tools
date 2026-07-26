@@ -556,8 +556,21 @@ pub(super) async fn health_handler(
     // network-mounted root — the daemon is not silently broken, but it is
     // running with a real capability gap that the same `status != "ok"`
     // monitors should catch.
+    // Issue #3706: fold in the FULL `warm_boot_degraded` flag rather than only
+    // `indexes_corpus_failed`. `warm_boot_degraded` (see its doc comment in
+    // `state.rs`) already aggregates FOUR conditions — TCC/FDA denial, scan
+    // timeout, corpus-open failure, and mass index loss (< 80% of prior) —
+    // but only the corpus-open-failure case was previously reflected in the
+    // top-level `status` field. A daemon that was genuinely warm-boot-degraded
+    // purely from a TCC denial, a scan timeout, or a mass index loss still
+    // reported `status: "ok"`, which is exactly what `warmboot_summary.
+    // warm_boot_degraded` was supposed to make impossible to miss. Since
+    // `indexes_corpus_failed` is already OR'd into `warm_boot_degraded` above
+    // (and by `recompute_warm_boot_degraded`), checking `warm_boot_degraded`
+    // alone is a strict superset of the old condition — no case that used to
+    // report `"degraded"` stops doing so.
     let overall_status =
-        if warmboot_summary.indexes_corpus_failed > 0 || indexes_watcher_network_degraded > 0 {
+        if warmboot_summary.warm_boot_degraded || indexes_watcher_network_degraded > 0 {
             "degraded"
         } else {
             "ok"
