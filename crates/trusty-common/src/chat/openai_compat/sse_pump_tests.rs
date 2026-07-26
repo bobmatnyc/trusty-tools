@@ -80,7 +80,12 @@ async fn error_frame_emits_error_event() {
     )
     .await;
 
-    assert_eq!(flow, Flow::Stop);
+    assert_eq!(
+        flow,
+        Flow::Failed("429: rate limited".to_string()),
+        "an error frame must report FAILED, not a plain stop — the caller has \
+         to know to return Err"
+    );
     drop(tx);
     let mut events = Vec::new();
     while let Some(ev) = rx.recv().await {
@@ -263,6 +268,127 @@ async fn mislabelled_sse_body_is_decoded() {
     );
     assert!(matches!(events.first(), Some(ChatEvent::Delta(d)) if d == "still works"));
     assert!(matches!(events.last(), Some(ChatEvent::Done)));
+}
+
+/// The contract this module documents is that a failure surfaces on BOTH
+/// channels. An earlier revision emitted the `Error` event but still returned
+/// `Ok(())`, so a consumer that only joins the pump task saw success.
+#[tokio::test]
+async fn error_frame_returns_err() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        "data: {\"error\":{\"message\":\"rate limited\",\"code\":429}}\n\n",
+    );
+    let (events, result) = pump_response("Content-Type: text/event-stream", body).await;
+
+    let err = result.expect_err("a mid-stream error frame must return Err");
+    assert!(
+        err.to_string().contains("429: rate limited"),
+        "the Err must carry the provider's message: {err}"
+    );
+    assert!(
+        matches!(events.first(), Some(ChatEvent::Delta(d)) if d == "partial"),
+        "content before the error is still delivered: {events:?}"
+    );
+    match events.last() {
+        Some(ChatEvent::Error(msg)) => assert_eq!(msg, "429: rate limited"),
+        other => panic!("expected a terminal Error event, got {other:?}"),
+    }
+    assert!(
+        !events.iter().any(|e| matches!(e, ChatEvent::Done)),
+        "an errored stream must not also emit Done: {events:?}"
+    );
+}
+
+/// A final frame missing only its trailing newline is COMPLETE, not truncated.
+/// Failing it would flip a working stream to an error and cost the caller a
+/// second full blocking LLM call.
+#[tokio::test]
+async fn unterminated_done_sentinel_completes_cleanly() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"complete\"}}]}\n\n",
+        "data: [DONE]",
+    );
+    let (events, result) = pump_response("Content-Type: text/event-stream", body).await;
+
+    assert!(
+        result.is_ok(),
+        "an unterminated [DONE] is a clean finish: {result:?}"
+    );
+    assert!(matches!(events.first(), Some(ChatEvent::Delta(d)) if d == "complete"));
+    assert!(matches!(events.last(), Some(ChatEvent::Done)));
+}
+
+/// Same for a complete JSON frame whose trailing newline never arrived.
+#[tokio::test]
+async fn unterminated_complete_frame_is_not_a_truncation() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"first \"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}",
+    );
+    let (events, result) = pump_response("Content-Type: text/event-stream", body).await;
+
+    assert!(
+        result.is_ok(),
+        "a whole final frame is not a truncation: {result:?}"
+    );
+    let deltas: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            ChatEvent::Delta(d) => Some(d.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, vec!["first ", "second"], "both frames must arrive");
+    assert!(matches!(events.last(), Some(ChatEvent::Done)));
+}
+
+/// `is_complete_frame` is the truncation discriminator; pin its edges.
+#[test]
+fn complete_frame_detection_edges() {
+    assert!(is_complete_frame("data: [DONE]"));
+    assert!(is_complete_frame("data: {\"choices\":[]}"));
+    assert!(
+        is_complete_frame(": keep-alive"),
+        "a comment has no payload"
+    );
+    assert!(is_complete_frame(""));
+    assert!(
+        !is_complete_frame("data: {\"choices\":[{\"delta\":{\"content\":\"cut"),
+        "a severed JSON payload is a truncation"
+    );
+    assert!(
+        !is_complete_frame("dat"),
+        "a severed field name is a truncation"
+    );
+}
+
+/// A provider that always includes an `error` key sends `"error": null` on
+/// healthy frames — that must not be read as a failure.
+#[tokio::test]
+async fn null_error_key_is_not_a_failure() {
+    let body = concat!(
+        "data: {\"error\":null,\"choices\":[{\"delta\":{\"content\":\"healthy\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let (events, result) = pump_response("Content-Type: text/event-stream", body).await;
+
+    assert!(
+        result.is_ok(),
+        "a null error key must not fail the stream: {result:?}"
+    );
+    assert!(matches!(events.first(), Some(ChatEvent::Delta(d)) if d == "healthy"));
+    assert!(matches!(events.last(), Some(ChatEvent::Done)));
+}
+
+/// The same null guard on the buffered (non-SSE) body path.
+#[tokio::test]
+async fn null_error_key_in_buffered_body_is_not_a_failure() {
+    let body = r#"{"error":null,"choices":[{"message":{"content":"buffered"}}]}"#;
+    let (events, result) = pump_response("Content-Type: application/json", body).await;
+
+    assert!(result.is_ok(), "null error in a buffered body: {result:?}");
+    assert!(matches!(events.first(), Some(ChatEvent::Delta(d)) if d == "buffered"));
 }
 
 // ── #3758: request-body parity ────────────────────────────────────────────────

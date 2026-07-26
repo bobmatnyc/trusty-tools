@@ -104,14 +104,22 @@ impl ToolCallAccumulator {
 /// Why: [`handle_line`] is shared by the live byte-stream loop and the
 /// buffered-body fallback, so it must report "a terminal event was already
 /// dispatched" without either caller re-deriving that from the event itself.
-/// What: `Continue` keeps reading; `Stop` means a terminal
-/// (`Done`/`Error`) was sent, or the receiver hung up, and the caller must
-/// return immediately without sending anything else.
-/// Test: `sse_pump_tests.rs`.
+/// Crucially it must distinguish a SUCCESSFUL stop from a FAILED one: an
+/// earlier revision collapsed both into `Stop`, so a mid-stream error frame
+/// emitted `ChatEvent::Error` but still returned `Ok(())` — contradicting this
+/// module's own contract that a failure surfaces on both channels, and leaving
+/// consumers that only join the pump task (trusty-agents, trusty-search)
+/// believing the stream succeeded.
+/// What: `Continue` keeps reading; `Stop` means a normal terminal (`Done`) was
+/// sent or the receiver hung up — either way the caller returns `Ok`;
+/// `Failed(message)` means [`ChatEvent::Error`] was already sent and the caller
+/// MUST return `Err` carrying `message`.
+/// Test: `error_frame_emits_error_event`, `error_frame_returns_err`.
 #[derive(Debug, PartialEq, Eq)]
 enum Flow {
     Continue,
     Stop,
+    Failed(String),
 }
 
 /// Render a provider's in-band `error` payload as a human-readable message.
@@ -204,11 +212,12 @@ async fn handle_line(line: &str, acc: &mut ToolCallAccumulator, tx: &Sender<Chat
     };
     // #3757: an in-band error frame is a FAILURE, not a delta — surface it
     // instead of letting the stream end as an apparently complete answer.
-    if let Some(err) = v.get("error") {
-        let _ = tx
-            .send(ChatEvent::Error(error_message_from_frame(err)))
-            .await;
-        return Flow::Stop;
+    // `"error": null` is a real wire shape (providers that always include the
+    // key), so a PRESENT-but-null value must not be read as a failure.
+    if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+        let message = error_message_from_frame(err);
+        let _ = tx.send(ChatEvent::Error(message.clone())).await;
+        return Flow::Failed(message);
     }
     let Some(delta) = v
         .get("choices")
@@ -290,19 +299,39 @@ pub(super) async fn pump_openai_sse(resp: reqwest::Response, tx: Sender<ChatEven
 
         while let Some(idx) = buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = buf.drain(..=idx).collect();
-            if handle_line(&String::from_utf8_lossy(&line), &mut acc, &tx).await == Flow::Stop {
-                return Ok(());
+            match handle_line(&String::from_utf8_lossy(&line), &mut acc, &tx).await {
+                Flow::Continue => {}
+                Flow::Stop => return Ok(()),
+                // The Error event is already sent; the Err is the second half
+                // of the contract.
+                Flow::Failed(message) => return Err(anyhow!("{message}")),
             }
         }
     }
 
     // #3757: EOF. A clean socket close on a frame boundary is a normal finish,
-    // but bytes left mid-frame mean the stream was CUT OFF — reporting that as
+    // but bytes left MID-frame mean the stream was CUT OFF — reporting that as
     // Done would render a truncated answer as a complete one.
-    if buf.iter().any(|b| !b.is_ascii_whitespace()) {
-        let message = "chat stream ended with an incomplete SSE frame (truncated response)";
-        let _ = tx.send(ChatEvent::Error(message.to_string())).await;
-        return Err(anyhow!("{message}"));
+    //
+    // "Bytes remain" alone is too blunt a signal: a body whose final frame
+    // simply lacks its trailing newline (including a bare `data: [DONE]`) is
+    // COMPLETE, and failing it would flip a previously-successful stream to an
+    // error — in trusty-agents, a second full blocking LLM call per turn. So
+    // decode the residual first and only call it a truncation when it is not a
+    // whole frame.
+    let residual = String::from_utf8_lossy(&buf);
+    let residual = residual.trim();
+    if !residual.is_empty() {
+        if !is_complete_frame(residual) {
+            let message = "chat stream ended with an incomplete SSE frame (truncated response)";
+            let _ = tx.send(ChatEvent::Error(message.to_string())).await;
+            return Err(anyhow!("{message}"));
+        }
+        match handle_line(residual, &mut acc, &tx).await {
+            Flow::Continue => {}
+            Flow::Stop => return Ok(()),
+            Flow::Failed(message) => return Err(anyhow!("{message}")),
+        }
     }
     flush_terminal(acc, &tx).await;
     Ok(())
@@ -334,8 +363,10 @@ async fn pump_non_sse_body(resp: reqwest::Response, tx: Sender<ChatEvent>) -> Re
     if text.lines().any(|l| l.trim_start().starts_with("data:")) {
         let mut acc = ToolCallAccumulator::default();
         for line in text.split_inclusive('\n') {
-            if handle_line(line, &mut acc, &tx).await == Flow::Stop {
-                return Ok(());
+            match handle_line(line, &mut acc, &tx).await {
+                Flow::Continue => {}
+                Flow::Stop => return Ok(()),
+                Flow::Failed(message) => return Err(anyhow!("{message}")),
             }
         }
         flush_terminal(acc, &tx).await;
@@ -353,7 +384,8 @@ async fn pump_non_sse_body(resp: reqwest::Response, tx: Sender<ChatEvent>) -> Re
         )
         .await;
     };
-    if let Some(err) = v.get("error") {
+    // A present-but-null `error` key is not a failure (see `handle_line`).
+    if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
         return fail(&tx, error_message_from_frame(err)).await;
     }
 
@@ -398,6 +430,34 @@ async fn pump_non_sse_body(resp: reqwest::Response, tx: Sender<ChatEvent>) -> Re
     }
     let _ = tx.send(ChatEvent::Done).await;
     Ok(())
+}
+
+/// Whether a newline-less trailing line is a COMPLETE SSE frame rather than a
+/// truncated one.
+///
+/// Why: at EOF the only thing distinguishing "the provider did not terminate
+/// its last frame with a newline" from "the socket was cut mid-frame" is
+/// whether the residual payload is self-consistent. Treating every residual as
+/// a truncation makes a previously-successful stream fail — an expensive false
+/// positive, since trusty-agents answers it with a second full blocking LLM
+/// call.
+/// What: `true` for an SSE comment/keep-alive (no payload to truncate), for
+/// `[DONE]`, and for a `data:` payload that parses as complete JSON. `false`
+/// for an unparseable payload (a cut-off JSON object) or a line that is not a
+/// recognisable field at all (a severed `dat…` prefix).
+/// Test: `unterminated_done_sentinel_completes_cleanly`,
+/// `truncated_stream_errors_instead_of_done`.
+fn is_complete_frame(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') {
+        return true;
+    }
+    let Some(payload) = line.strip_prefix("data:").map(str::trim) else {
+        return false;
+    };
+    payload.is_empty()
+        || payload == "[DONE]"
+        || serde_json::from_str::<serde_json::Value>(payload).is_ok()
 }
 
 /// Report an unrecoverable stream failure on BOTH channels.

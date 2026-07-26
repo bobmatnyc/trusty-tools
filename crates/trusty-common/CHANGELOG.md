@@ -78,7 +78,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   since not every provider sends the sentinel); and a `Content-Type` guard.
   Failures are reported BOTH as `ChatEvent::Error` and as an `Err` return,
   because consumers are split between watching the channel (trusty-memory,
-  trusty-analyze) and joining the pump task (trusty-agents, trusty-search).
+  trusty-analyze) and joining the pump task (trusty-agents, trusty-search,
+  trusty-mpm's activity monitor).
+
+  Three refinements from review: the frame decoder distinguishes a FAILED stop
+  from a normal one, so an error frame returns `Err` instead of the `Ok(())` an
+  earlier revision returned (which silently broke the both-channels contract
+  for consumers that only join the task); a present-but-null `"error": null`
+  key — a real wire shape for providers that always include the field — is not
+  treated as a failure; and the truncation detector now decodes the residual
+  tail first, so a final frame missing only its trailing newline (including a
+  bare `data: [DONE]`) still completes cleanly rather than flipping a working
+  stream to an error and costing the caller a second blocking LLM call.
 
 - **A non-SSE streaming response degrades instead of vanishing** (issue #3757):
   a gateway that strips streaming and returns a buffered 200 previously decoded
