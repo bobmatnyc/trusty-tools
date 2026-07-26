@@ -182,6 +182,42 @@ pub(super) async fn commit_staged_hnsw_swap(
     // Round-2 CRITICAL 2: quiesce BEFORE touching anything else. While we
     // wait, `reindexing` stays `true`, so any still-running task keeps
     // correctly targeting staging.
+    //
+    // LOAD-BEARING INVARIANTS if this times out (round-3 review — a `false`
+    // return does NOT itself make proceeding safe; these two facts do):
+    //
+    // 1. A still-running task's CURRENT (and, in practice, only) iteration
+    //    already fixed its target as `staging` before this wait began —
+    //    `spawn_incremental_persist` reads `PersistState::reindexing` fresh
+    //    at the top of each coalescing-loop iteration, and `reindexing` was
+    //    still `true` when that iteration started. It can only pick a
+    //    DIFFERENT target by starting a NEW iteration, which requires
+    //    `PersistState::dirty` to be set again — and nothing sets `dirty`
+    //    for this index between the reindex's batch loop ending and this
+    //    swap resolving (the only caller, `commit_parsed_batch`, is not
+    //    invoked again for this index until either a watch-loop event or the
+    //    NEXT reindex). So however long that task remains "stuck", it can
+    //    only ever finish writing to `staging` — never `live` — for the
+    //    stuck iteration itself.
+    // 2. `UsearchStore::save`'s `save_lock` (a `tokio::sync::Mutex`, see that
+    //    field's doc) additionally serializes our OWN forced final save
+    //    (just below) against that same stuck task's save: if the stuck task
+    //    is holding `save_lock`, our save queues behind it and only starts
+    //    once it releases; if the stuck task hasn't yet acquired it, ours
+    //    may run first and the stuck task's save queues behind OURS. Either
+    //    way, by the time our save (and the rename further below) completes,
+    //    any concurrent save from that task has been folded into a
+    //    consistent ordering — our save is never torn by, and never tears,
+    //    a concurrent write from it.
+    //
+    // Fact 1 is what actually prevents the live path from being corrupted by
+    // a stuck task in the timeout case; fact 2 is what makes OUR OWN forced
+    // save (and therefore the swap we're about to publish) correct and
+    // uncorrupted regardless of what that stuck task is doing concurrently.
+    // If a future change makes `dirty` reachable for this index during this
+    // window (fact 1) — or narrows `save_lock` to not cover the whole save
+    // (fact 2) — this reasoning breaks and the CRITICAL 2 race this
+    // drain-wait exists to close can reopen on the timeout path specifically.
     if !handle
         .indexer
         .read()
@@ -191,8 +227,11 @@ pub(super) async fn commit_staged_hnsw_swap(
     {
         tracing::warn!(
             "staged hnsw swap: a periodic persist task for '{}' did not quiesce within {:?} — \
-             proceeding with the swap anyway (issue #3970 round-2); if that task is still \
-             running it will keep targeting staging (reindexing is still set), not live",
+             proceeding with the swap anyway (issue #3970 round-2); safe only because a \
+             still-in-flight task's target was already fixed as staging before this wait \
+             began (dirty can't be re-triggered for this index in this window) and \
+             UsearchStore::save's save_lock serializes our forced final save against it — \
+             see this branch's doc comment",
             index_id.0,
             PERSIST_DRAIN_TIMEOUT,
         );
@@ -308,7 +347,19 @@ pub(super) async fn abort_staged_hnsw_swap(
     index_id: &IndexId,
     paths: &HnswSwapPaths,
 ) {
-    // Round-2 CRITICAL 2: see `commit_staged_hnsw_swap`'s identical guard.
+    // Round-2 CRITICAL 2: quiesce before touching anything else — see
+    // `commit_staged_hnsw_swap`'s doc comment on its identical wait for the
+    // full two-part reasoning. Only INVARIANT 1 there applies to abort
+    // (a still-running task's current iteration already fixed `staging` as
+    // its target before this wait began, and cannot re-target `live`
+    // without a fresh `dirty` trigger that nothing produces for this index
+    // in this window): abort never calls `UsearchStore::save` itself, so
+    // INVARIANT 2 (the `save_lock` serialization against our OWN forced
+    // save) does not apply here — there is no forced save on this path for
+    // it to serialize against. That asymmetry is fine: invariant 1 alone is
+    // what actually keeps a stuck task off the live path; `save_lock` in
+    // commit's case is about that function's OWN save being correct, not an
+    // additional requirement for abort's safety.
     if !handle
         .indexer
         .read()
@@ -318,8 +369,10 @@ pub(super) async fn abort_staged_hnsw_swap(
     {
         tracing::warn!(
             "staged hnsw swap: a periodic persist task for '{}' did not quiesce within {:?} \
-             before abort — proceeding anyway (issue #3970 round-2); if that task is still \
-             running it will keep targeting staging (reindexing is still set), not live",
+             before abort — proceeding anyway (issue #3970 round-2); safe only because a \
+             still-in-flight task's target was already fixed as staging before this wait \
+             began and dirty can't be re-triggered for this index in this window — see \
+             this branch's doc comment",
             index_id.0,
             PERSIST_DRAIN_TIMEOUT,
         );

@@ -319,6 +319,75 @@ async fn test_incremental_persist_redirects_to_staging_while_reindexing() {
     unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 }
 
+/// Why (issue #3970 round-3 review, HIGH finding): `CodeIndexer::wait_for_incremental_persist_drain`'s
+/// own doc comment cited this test by name before it existed. Round-2's
+/// `hnsw_swap` regression tests only ever exercised the "drain succeeds"
+/// branch (a 150ms release against a 30s timeout) — the timeout-EXPIRY
+/// branch (the function returning `false`) had zero coverage anywhere. This
+/// is a direct unit test of that branch: `in_flight` is set and never
+/// released, so the wait must exhaust its budget and return `false`.
+/// What: sets `PersistState::in_flight` via the test-only
+/// `simulate_persist_in_flight_for_tests` accessor (never cleared), calls
+/// `wait_for_incremental_persist_drain` with a short 50ms timeout, and
+/// asserts it returns `false` after roughly that long — not immediately,
+/// and not hanging forever.
+/// Test: this test.
+#[tokio::test]
+async fn wait_for_incremental_persist_drain_waits_for_in_flight_task() {
+    let idx = make_indexer();
+    idx.simulate_persist_in_flight_for_tests(true);
+
+    let timeout = std::time::Duration::from_millis(50);
+    let start = std::time::Instant::now();
+    let drained = idx.wait_for_incremental_persist_drain(timeout).await;
+    let elapsed = start.elapsed();
+
+    assert!(
+        !drained,
+        "must return false when in_flight never clears within the timeout"
+    );
+    assert!(
+        elapsed >= timeout,
+        "must actually wait out the full timeout budget, not return early; elapsed={elapsed:?}"
+    );
+
+    // Clean up: leaving `in_flight` set would only affect this owned
+    // `CodeIndexer`, which is dropped at the end of this test, but clear it
+    // anyway for clarity.
+    idx.simulate_persist_in_flight_for_tests(false);
+}
+
+/// Why: the companion happy-path to the timeout test above — when nothing
+/// is in flight, the wait must return `true` immediately (bounded by the
+/// 10ms poll granularity, never the full timeout budget).
+/// What: fresh indexer (in_flight and dirty both default `false`), calls
+/// `wait_for_incremental_persist_drain` with a long (5s) timeout, and
+/// asserts it returns `true` in well under that budget.
+/// Test: this test.
+#[tokio::test]
+async fn wait_for_incremental_persist_drain_returns_immediately_when_idle() {
+    let idx = make_indexer();
+    assert!(
+        !idx.persist_state.in_flight.load(Ordering::Acquire),
+        "sanity: a fresh indexer must start idle"
+    );
+    assert!(
+        !idx.persist_state.dirty.load(Ordering::Acquire),
+        "sanity: a fresh indexer must start idle"
+    );
+
+    let long_timeout = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    let drained = idx.wait_for_incremental_persist_drain(long_timeout).await;
+    let elapsed = start.elapsed();
+
+    assert!(drained, "must return true when already idle");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "must return promptly when idle, not wait out the full budget; elapsed={elapsed:?}"
+    );
+}
+
 #[tokio::test]
 async fn test_search_integration_returns_relevant_chunk_first() {
     let idx = make_indexer();
