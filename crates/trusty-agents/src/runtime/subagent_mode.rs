@@ -385,10 +385,33 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     // (`ctrl::pm_task::dispatch::persona`) so a persona's `[tools].allow`
     // glob patterns are honored here too, not just in `/agent` REPL chat.
     // See `scope_assistant_allowed_tools` for why this is necessary.
+    //
+    // #3933: the patterns handed to that gate are the SKILL-COMPILED ones, so
+    // an agent granting capability via `[skills].allow` reaches the same tools
+    // on this `--direct`/subprocess path as it does in `/agent` chat. Keeping
+    // both dispatch paths reading one resolver is the same discipline #3745
+    // item C enforced for izzie's tool registration — a capability model that
+    // holds on only one path is a bug that surfaces as "it works in chat".
+    let (skill_scoped_allow, unresolved_skills) = crate::skills::manifest::effective_tool_patterns(
+        cfg.tools.allow.as_ref(),
+        cfg.skills.allow.as_ref(),
+        &crate::skills::manifest::SkillCatalog::builtin().with_authored(
+            crate::skills::manifest::authored::load_from_paths(
+                &crate::skills::sources::SkillSourceRegistry::load(&cwd).resolved_paths(),
+            ),
+        ),
+    );
+    if !unresolved_skills.is_empty() {
+        tracing::warn!(
+            agent = %name,
+            unresolved = ?unresolved_skills,
+            "[skills].allow names skills that resolved to nothing; they grant no tools"
+        );
+    }
     cfg.tools.allowed = super::tool_registry::scope_assistant_allowed_tools(
         is_assistant_tier,
         cfg.tools.allowed.clone(),
-        cfg.tools.allow.as_deref(),
+        skill_scoped_allow.as_deref(),
         registry.as_ref(),
     );
     if is_assistant_tier {

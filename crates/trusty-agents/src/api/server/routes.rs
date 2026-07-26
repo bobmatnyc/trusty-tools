@@ -23,6 +23,7 @@ use trusty_common::server::{SelfOrigins, with_guarded_middleware};
 
 use super::agent_create::create_agent_route;
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
+use super::agent_skills::agent_skills_route;
 use super::agent_stores::agent_stores_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
 use super::cancel::cancel_task;
@@ -155,6 +156,14 @@ pub fn build_router_with_origins(
         .route(
             "/api/agents/{name}/stores",
             axum::routing::get(agent_stores_route),
+        )
+        // #3933: the Skills pane reads the agent's resolved capability set —
+        // one named skill per tool, with granted state, the tool each wraps,
+        // and the credential it needs. Read-only in this slice; editing arrives
+        // as `PATCH { skills_allow }` (DOC-57 §5.7, S-12).
+        .route(
+            "/api/agents/{name}/skills",
+            axum::routing::get(agent_skills_route),
         )
         .route("/api/workstreams", get(list_workstreams_route))
         .route(

@@ -224,5 +224,6 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         // #3816: markdown agents carry no `[[stores]]` table — an unbound
         // store is a valid state (see `AgentConfig::stores`).
         stores: crate::stores::StoresConfig::default(),
+        skills: crate::agents::SkillsConfig::default(),
     })
 }
