@@ -351,6 +351,172 @@ async fn prune_orphaned_worktrees_never_deletes_claude_native_worktree() {
     assert!(claude_wt.exists(), "worktree dir must survive the prune");
 }
 
+// ── #3971 follow-up: the two Claude-worktree locations the first #3971 fix
+// missed — `.base/.claude/worktrees` and the nested per-session-checkout
+// shape (BLOCK finding: the fix only anchored at `<repo>/.claude/worktrees`,
+// covering roughly a third of the real on-disk surface) ────────────────────
+
+/// `find_orphaned_worktrees` must discover Claude Code agent worktrees
+/// created directly inside the bare `.base` clone checkout itself, at
+/// `<repo>/.base/.claude/worktrees/<name>` — a sibling of the repo-root
+/// `.claude/worktrees` shape the first #3971 fix covered, but a distinct
+/// filesystem location the walk did not anchor at (confirmed live on the
+/// dogfood machine with 29 real entries).
+#[test]
+fn find_orphaned_worktrees_covers_base_claude_worktrees_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let base_claude_wt = root
+        .join("owner")
+        .join("repo")
+        .join(".base")
+        .join(".claude")
+        .join("worktrees")
+        .join("agent-1111111111111111111111111111111111111111");
+    std::fs::create_dir_all(&base_claude_wt).unwrap();
+    let empty_active: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    let orphans = find_orphaned_worktrees(root, &empty_active);
+    assert!(
+        orphans.contains(&base_claude_wt),
+        "the .base/.claude/worktrees shape must be discovered as a candidate; got {orphans:?}"
+    );
+}
+
+/// `find_orphaned_worktrees` must discover Claude Code agent worktrees
+/// nested INSIDE a per-session checkout, at
+/// `<repo>/.base/.worktrees/<session-id>/.claude/worktrees/<name>` — the
+/// exact shape a Claude Code agent spawned from within its own trusty-mpm
+/// session checkout produces (this is literally the shape this leg's own
+/// `fix-worktree-hygiene` worktree lives under). The session-id leaf name is
+/// dynamic, so this exercises the `list_immediate_dirs` enumeration path,
+/// not a fixed join.
+#[test]
+fn find_orphaned_worktrees_covers_nested_session_claude_worktrees_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let nested_claude_wt = root
+        .join("owner")
+        .join("repo")
+        .join(".base")
+        .join(".worktrees")
+        .join("2eb72dca-de08-481b-8dfa-22ab7f81b1f9")
+        .join(".claude")
+        .join("worktrees")
+        .join("fix-worktree-hygiene");
+    std::fs::create_dir_all(&nested_claude_wt).unwrap();
+    let empty_active: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    let orphans = find_orphaned_worktrees(root, &empty_active);
+    assert!(
+        orphans.contains(&nested_claude_wt),
+        "the nested .base/.worktrees/<session-id>/.claude/worktrees shape must be \
+         discovered as a candidate; got {orphans:?}"
+    );
+}
+
+/// End-to-end through the real ownership gate (mirrors
+/// `prune_orphaned_worktrees_never_deletes_claude_native_worktree`): a
+/// sentinel-less `.base/.claude/worktrees/<name>` candidate is discovered but
+/// never auto-deleted, only reported as owner-unknown (#3971 follow-up).
+#[tokio::test]
+async fn prune_orphaned_worktrees_never_deletes_base_claude_native_worktree() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repos = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let base_claude_wt = repos
+        .path()
+        .join("owner")
+        .join("repo")
+        .join(".base")
+        .join(".claude")
+        .join("worktrees")
+        .join("agent-2222222222222222222222222222222222222222");
+    std::fs::create_dir_all(&base_claude_wt).unwrap();
+    // Deliberately NO sentinel file written.
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "a Claude-Code-native worktree under .base/.claude must never be auto-deleted; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        outcome.owner_unknown.iter().any(|p| p == &base_claude_wt),
+        "expected {base_claude_wt:?} to be reported as owner-unknown; got {:?}",
+        outcome.owner_unknown
+    );
+    assert!(
+        base_claude_wt.exists(),
+        "worktree dir must survive the prune"
+    );
+}
+
+/// End-to-end through the real ownership gate for the NESTED
+/// per-session-checkout shape: a sentinel-less
+/// `.base/.worktrees/<session-id>/.claude/worktrees/<name>` candidate is
+/// discovered but never auto-deleted, only reported as owner-unknown (#3971
+/// follow-up).
+#[tokio::test]
+async fn prune_orphaned_worktrees_never_deletes_nested_session_claude_worktree() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let repos = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let nested_claude_wt = repos
+        .path()
+        .join("owner")
+        .join("repo")
+        .join(".base")
+        .join(".worktrees")
+        .join("some-session-id")
+        .join(".claude")
+        .join("worktrees")
+        .join("nested-agent");
+    std::fs::create_dir_all(&nested_claude_wt).unwrap();
+    // Deliberately NO sentinel file written on the nested Claude worktree.
+    // The session-id leaf itself also has no sentinel — it must not be
+    // misclassified as a location-2 (`.base/.worktrees`) orphan candidate
+    // either, since it still contains a live-looking nested checkout; that
+    // is exercised implicitly here (only the leaf-most directory is ever a
+    // candidate for each scanned shape).
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "a nested Claude-Code-native worktree must never be auto-deleted; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        outcome.owner_unknown.iter().any(|p| p == &nested_claude_wt),
+        "expected {nested_claude_wt:?} to be reported as owner-unknown; got {:?}",
+        outcome.owner_unknown
+    );
+    assert!(
+        nested_claude_wt.exists(),
+        "worktree dir must survive the prune"
+    );
+}
+
 /// A candidate whose ownership sentinel is absent (no `.trusty-mpm-worktree`
 /// file at all — the pre-#3649/legacy shape) is NEVER auto-deleted, and is
 /// counted in [`OrphanSweepOutcome::owner_unknown`] (#3649 item 4b).

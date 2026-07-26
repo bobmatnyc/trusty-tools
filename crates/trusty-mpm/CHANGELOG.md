@@ -22,7 +22,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Claude-Code-created worktree (which never carries trusty-mpm's
   `.trusty-mpm-worktree` sentinel) as owner-unknown, so newly-discovered
   candidates are surfaced for `tm doctor`/`--dry-run` review, never
-  auto-deleted.
+  auto-deleted. Follow-up review found the initial fix anchored only at
+  `<repo>/.claude/worktrees`, missing two sibling locations confirmed live
+  with real entries: `<repo>/.base/.claude/worktrees` (agent worktrees
+  created directly inside the bare `.base` clone checkout) and
+  `<repo>/.base/.worktrees/<session-id>/.claude/worktrees` (agent worktrees
+  nested inside a per-session checkout) — both are now scanned too.
 
 - **A toggle being on was treated as proof of a successful MCP-server pin,
   even when the force-overwrite write itself failed** (closes
