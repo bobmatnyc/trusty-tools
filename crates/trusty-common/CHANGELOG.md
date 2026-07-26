@@ -30,10 +30,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   variant *before* the cosine gate, so a substituted model fails as "the fp32
   primary never loaded" with the tracing warning to check. The 0.999 threshold
   is deliberately unchanged and now carries its justification in
-  `REFERENCE_MIN_MEAN_COSINE`'s doc comment (it sits ~1000x above credible
-  fp32 drift and ~100x below the INT8 signature); loosening it would have
-  deleted the test's diagnostic value while leaving both causes in place. Not
-  `#[ignore]`d.
+  `REFERENCE_MIN_MEAN_COSINE`'s doc comment, stated as deficit-from-perfect
+  ratios: the 1e-3 budget is ~1000x larger than fp32's ~1e-6 drift, while INT8
+  misses it by ~10x (#3486's 0.9897) or ~4x (the 0.995703 reproduced here) —
+  a single order of magnitude, which is exactly why the wrong-model
+  discriminator is the `model_name()` assertion rather than the threshold.
+  Loosening it would have deleted the test's diagnostic value while leaving
+  both causes in place. Not `#[ignore]`d.
+
+- **The `embedder` module tree now has ONE env lock, not two** (issue #3711):
+  `provider_tests.rs` declared its own independent `tokio::sync::Mutex`
+  `ENV_LOCK`, separate from `mod.rs`'s `std::sync::Mutex`, so its
+  `TRUSTY_DEVICE` / `TRUSTY_EMBEDDER_MODEL` mutations did not serialise against
+  the tests in `mod.rs` — two locks guard nothing from each other, leaving the
+  same wrong-model race open (on macOS, or the moment either `#[ignore]` there
+  is lifted) and making `mod.rs`'s "one shared lock across all env-touching
+  tests in this binary" claim false crate-wide. Both are now hoisted to a
+  shared `embedder::test_env` module holding the single lock and RAII guard;
+  the four tests in `provider_tests.rs` became synchronous so they can take it,
+  building an explicit current-thread runtime where they need one.
 
 - **`catchup::session_finder::extract_section` no longer absorbs trailing
   header text** (issue #3901): a substring match on `## <header>` treated a

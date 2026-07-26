@@ -44,20 +44,30 @@ const REFERENCE_FP32_MODEL_NAME: &str = "all-MiniLM-L6-v2";
 /// and `REFERENCE_VECTORS` by
 /// [`default_model_matches_sentence_transformers_reference`].
 ///
-/// Why this exact value (issue #3711): the two models that can plausibly
-/// be loaded are separated by three orders of magnitude, so the threshold
-/// only has to land in the gap between them. fp32 `AllMiniLML6V2` — the
-/// production default this test guards — measures 0.999999+ against the
-/// `sentence-transformers` reference, and the only variance a *correctly
-/// loaded* fp32 model can contribute is float re-association across
-/// different GEMM/reduction microkernels (ORT thread counts, AVX2 vs
-/// AVX-512, different runners), which is ~1e-6 relative on a 6-layer
-/// MiniLM and cannot compound into a visible cosine change. INT8
-/// `AllMiniLML6V2Q` measures 0.9897 (see
-/// `resolve_default_embedding_model`'s doc for both figures). 0.999 sits
-/// ~1000x above the worst credible fp32 drift and ~100x below the INT8
-/// signature: platform numeric variance cannot trip it, and a wrong
-/// quantization still fails hard.
+/// Why this exact value (issue #3711): the threshold only has to land in the
+/// gap between the two models that can plausibly be loaded. Compare them by
+/// DEFICIT from a perfect match (`1 - cosine`), since that is what the
+/// threshold actually budgets — this constant allows a deficit of 1e-3:
+///
+///   - fp32 `AllMiniLML6V2` — the production default this test guards —
+///     measures 0.999999+ against the `sentence-transformers` reference, a
+///     deficit of ~1e-6. The only variance a *correctly loaded* fp32 model
+///     can contribute is float re-association across different
+///     GEMM/reduction microkernels (ORT thread counts, AVX2 vs AVX-512,
+///     different runners), which is ~1e-6 relative on a 6-layer MiniLM and
+///     cannot compound into a visible cosine change. So the budget is ~1000x
+///     larger than the drift it must tolerate.
+///   - INT8 `AllMiniLML6V2Q` measures 0.9897 (see
+///     `resolve_default_embedding_model`'s doc), a deficit of ~1.03e-2 —
+///     ~10x larger than the budget, so it fails. The local reproduction for
+///     #3711 was tighter still: 0.995703, a deficit of ~4.3e-3, only ~4x
+///     over. That ~4x is the REAL margin on the wrong-model side, not the
+///     comfortable gap an earlier draft of this comment claimed, and it is
+///     precisely why the wrong-model discriminator in the test body is the
+///     `model_name()` assertion rather than this number.
+///
+/// So: platform numeric variance cannot trip this threshold, and a wrong
+/// quantization still fails it — but only by a single order of magnitude.
 ///
 /// Why it is NOT loosened (issue #3711): the 0.990649 CI failure was not
 /// fp32 drift. A value that low is unreachable by re-association and is

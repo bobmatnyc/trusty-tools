@@ -43,6 +43,15 @@ mod types;
 #[cfg(any(test, feature = "embedder-test-support"))]
 mod mock;
 
+// Issue #3711: the ONE env lock + RAII guard shared by every env-touching test
+// in this module tree. Lives at module scope (not inside a test module) so
+// `mod tests`, its `reference_accuracy_tests` child, AND the sibling
+// `provider_tests` all serialise against the SAME static — two independent
+// locks do not serialise against each other, which is how the #3711 race
+// survived the first fix.
+#[cfg(test)]
+mod test_env;
+
 // Issue #610 (line-cap): split out of this file's own `mod tests` (already
 // at its grandfathered SLOC budget) rather than growing it further — covers
 // `resolve_expected_python_provider`, `embedding_model_name`, and
@@ -66,19 +75,14 @@ mod tests {
     use super::*;
 
     // Issue #610 (line-cap) + #3711: the sentence-transformers reference-vector
-    // accuracy gate lives in `tests/reference_accuracy_tests.rs`. Declared as a
-    // CHILD of this module — not a sibling of `provider_tests` — so it shares
-    // the single `ENV_LOCK`/`EnvVarGuard` below; a sibling would need its own
-    // lock, and a second lock does not serialise against this one.
+    // accuracy gate lives in `tests/reference_accuracy_tests.rs`, a CHILD of
+    // this module so it inherits the `ENV_LOCK`/`EnvVarGuard` imported below
+    // through `use super::*`.
     mod reference_accuracy_tests;
 
-    /// Process-global lock guarding every test in this module that mutates
-    /// the process environment. Tests run in parallel by default, and
-    /// concurrent calls into `setenv`/`getenv` (even on disjoint keys) are
-    /// not safe across libc implementations — Rust 2024 reflects this by
-    /// marking `std::env::set_var` `unsafe`. One shared lock across all
-    /// env-touching tests in this binary is the simplest correct answer.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // #3711: the shared lock + guard for the WHOLE embedder module tree,
+    // including the sibling `provider_tests`. See `test_env`'s docs.
+    use super::test_env::{ENV_LOCK, EnvVarGuard};
 
     /// Why: GH #58 — launchd runs trusty-memory with a read-only `TMPDIR`,
     /// and fastembed's default `./.fastembed_cache` is also unwritable from
@@ -141,48 +145,6 @@ mod tests {
             match prev_path {
                 Some(v) => std::env::set_var("FASTEMBED_CACHE_PATH", v),
                 None => std::env::remove_var("FASTEMBED_CACHE_PATH"),
-            }
-        }
-    }
-
-    /// RAII helper: set or clear a `TRUSTY_GPU_MEM_LIMIT_*` env var for the
-    /// duration of a test and restore it on drop. Keeps the CUDA-option tests
-    /// from leaking state into sibling tests that share the process env.
-    ///
-    /// Why: env vars are process-global; without restore, a stray
-    /// `TRUSTY_GPU_MEM_LIMIT_*` would skew every later `resolve_cuda_options`
-    /// call in the same binary.
-    /// What: captures the prior value, applies the new one (or removes it for
-    /// `None`), and reinstates the prior value on `Drop`.
-    /// Test: used by the `cuda_options_*` tests below.
-    struct EnvVarGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn apply(key: &'static str, value: Option<&str>) -> Self {
-            let prev = std::env::var(key).ok();
-            // SAFETY: every caller holds `ENV_LOCK`, so no other thread reads
-            // or writes the environment concurrently.
-            unsafe {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            // SAFETY: same single-threaded-under-ENV_LOCK invariant as `apply`.
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var(self.key, v),
-                    None => std::env::remove_var(self.key),
-                }
             }
         }
     }
