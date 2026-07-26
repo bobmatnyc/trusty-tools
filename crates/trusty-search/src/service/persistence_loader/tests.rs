@@ -557,6 +557,127 @@ async fn build_store_for_entry_flags_load_failure_when_storage_path_unresolvable
     );
 }
 
+// ── Issue #2847 round-2 critic finding: the LEGACY (non-colocated) path ────
+// ── named by the issue/PR title/CHANGELOG had no failure-forcing test ─────
+
+/// THE failing-test-first legacy-path counterpart to
+/// `build_indexer_from_entry_flags_corpus_open_failed_when_storage_path_unresolvable`.
+///
+/// Why: the code fix is symmetric across both `hnsw_path_for_entry` /
+/// `corpus_redb_path_for_entry` dispatch targets — colocated
+/// (`colocated_storage_dir`) and legacy/non-colocated (`index_data_dir` ->
+/// `data_dir()`, `service/persistence.rs:373-411`) — but only the colocated
+/// `Err` arm had a regression test proving it. The legacy path is the one
+/// issue #2847, this PR's title, and its CHANGELOG entry name explicitly, so
+/// it needs its own failure-forcing coverage, not just the symmetric-code
+/// argument.
+/// What: points `TRUSTY_DATA_DIR` at a path whose PARENT is a regular file,
+/// so `data_dir()`'s own `create_dir_all` (persistence.rs:381) fails —
+/// exactly the technique already proven in
+/// `server::tests_index_config::patch_persist_failure_returns_500` — which
+/// makes every legacy path resolver built on `data_dir()` (`index_data_dir`,
+/// `hnsw_path`, `corpus_redb_path`) return `Err`. Builds a `colocated: false`
+/// entry under that override, calls `build_indexer_from_entry`, and asserts
+/// `corpus_open_failed == true`. Against pre-fix code this fails with
+/// `corpus_open_failed == false` — reproducing the issue's headline path.
+/// `#[serial_test::serial]` (this crate's default unnamed group, shared by
+/// every other `TRUSTY_DATA_DIR`-mutating test in this binary — see
+/// `server::tests_components`'s module doc) plus removing the env var
+/// immediately after `await`ing the call (before any assertion can panic)
+/// avoids leaking the override into concurrently-running tests.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn build_indexer_from_entry_flags_corpus_open_failed_when_legacy_storage_path_unresolvable() {
+    let tmp = tempdir().unwrap();
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").unwrap();
+    let bad_data_dir = blocker.join("data"); // parent is a file -> mkdir fails
+                                             // SAFETY: test-only; #[serial_test::serial] (default group) excludes
+                                             // every other TRUSTY_DATA_DIR-mutating test in this binary from running
+                                             // concurrently with this one.
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", &bad_data_dir) };
+
+    let embedder = mock_embedder();
+    let entry = PersistedIndex {
+        id: "test-idx-2847-legacy-corpus-unresolvable".to_string(),
+        root_path: tmp.path().to_path_buf(),
+        colocated: false,
+        ..Default::default()
+    };
+    let result = build_indexer_from_entry(&entry, &embedder).await;
+
+    // Remove the override immediately after the call completes and before
+    // any assertion below can panic — matches this crate's established
+    // TRUSTY_DATA_DIR-test convention (e.g. `daemon_tests::
+    // daemon_dir_respects_trusty_data_dir_env_var`) so a failing assertion
+    // never leaves the process env var pointed at a blocked path for later
+    // tests.
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+    let indexer = result.expect("build_indexer_from_entry must not hard-fail on Err path");
+    assert!(
+        !indexer.has_corpus_store(),
+        "#2847 (legacy): an unresolvable data dir must not silently produce a \
+         wired-but-empty corpus store"
+    );
+    assert!(
+        indexer.corpus_open_failed,
+        "#2847 (legacy): a legacy storage path that cannot be resolved \
+         (TRUSTY_DATA_DIR itself unresolvable) must set corpus_open_failed=true \
+         — this is the headline path named by the issue, the PR title, and the \
+         CHANGELOG entry"
+    );
+}
+
+/// Legacy-path counterpart to
+/// `build_store_for_entry_flags_load_failure_when_storage_path_unresolvable`
+/// for the HNSW half of the same #2847 defect (round-2 critic finding).
+///
+/// Why / What: see
+/// `build_indexer_from_entry_flags_corpus_open_failed_when_legacy_storage_path_unresolvable`
+/// for the blocking technique and serialization rationale — identical setup,
+/// exercised against `build_store_for_entry` directly (mirroring how the
+/// colocated HNSW counterpart calls it) and asserting `load_failed == true`.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn build_store_for_entry_flags_load_failure_when_legacy_storage_path_unresolvable() {
+    let tmp = tempdir().unwrap();
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").unwrap();
+    let bad_data_dir = blocker.join("data");
+    // SAFETY: test-only; see the corpus counterpart above.
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", &bad_data_dir) };
+
+    let embedder = mock_embedder();
+    let dim = embedder.dimension();
+    let entry = PersistedIndex {
+        id: "test-idx-2847-legacy-hnsw-unresolvable".to_string(),
+        root_path: tmp.path().to_path_buf(),
+        colocated: false,
+        ..Default::default()
+    };
+    let result = build_store_for_entry(&entry, dim).await;
+
+    // Remove immediately after the call, before any assertion can panic —
+    // see the corpus counterpart above for the rationale.
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+
+    let (store, load_failed): (Arc<dyn VectorStore>, bool) =
+        result.expect("build_store_for_entry must not hard-fail on Err path");
+    assert_eq!(
+        store.len().await.unwrap(),
+        0,
+        "#2847 (legacy): an unresolvable hnsw path must fall back to an empty store"
+    );
+    assert!(
+        load_failed,
+        "#2847 (legacy): an unresolvable legacy hnsw storage path must set \
+         load_failed=true, not be treated as ordinary first-boot"
+    );
+}
+
 /// The required counterpart: a genuinely first-boot / never-populated
 /// colocated index (storage path resolves fine, nothing has been indexed
 /// yet) must NOT be reported as failed by either signal. This is the
