@@ -9,6 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`prune-worktrees` never scanned `.claude/worktrees`, so Claude Code's
+  native agent worktrees were never reclaimed** (closes
+  [#3971](https://github.com/bobmatnyc/trusty-tools/issues/3971)):
+  `find_orphaned_worktrees` walked only the two trusty-mpm-owned shapes
+  (`.worktrees/<name>`, `.base/.worktrees/<session-id>`) and never
+  `.claude/worktrees/<name>` — the path Claude Code's native
+  `isolation: "worktree"` mechanism uses — so those worktrees accumulated
+  silently, invisible to `tm session prune-worktrees` and `tm doctor`. Now
+  scanned as a third shape via the same `scan_worktree_shape` walk; the
+  existing #3649 ownership-sentinel gate already treats a
+  Claude-Code-created worktree (which never carries trusty-mpm's
+  `.trusty-mpm-worktree` sentinel) as owner-unknown, so newly-discovered
+  candidates are surfaced for `tm doctor`/`--dry-run` review, never
+  auto-deleted. Follow-up review found the initial fix anchored only at
+  `<repo>/.claude/worktrees`, missing two sibling locations confirmed live
+  with real entries: `<repo>/.base/.claude/worktrees` (agent worktrees
+  created directly inside the bare `.base` clone checkout) and
+  `<repo>/.base/.worktrees/<session-id>/.claude/worktrees` (agent worktrees
+  nested inside a per-session checkout) — both are now scanned too.
+
 - **A toggle being on was treated as proof of a successful MCP-server pin,
   even when the force-overwrite write itself failed** (closes
   [#3950](https://github.com/bobmatnyc/trusty-tools/issues/3950), fifth
