@@ -6,7 +6,7 @@
 **Last-updated:** 2026-07-25  
 **Spec ID:** `SPEC-OKGIMPORT-01~draft` … `SPEC-OKGIMPORT-07~draft` (DOC-55)  
 **Builds on:** DOC-54 [Trusty Agents Product Specification](./trusty-agents-product-spec.md) §5.1 (the `[[stores]]` config leg); the shipped OKG ingestion engine (#3881 / PR #3883); the OKG store binding (#3878)  
-**Related issues:** epic #3052 (Assistant M1), #3881 (ingestion layer, closed), #3892 (ingest→search gap, OPEN — see §7), #3816 (declarative templates), #3837 (git-backed per-agent content store)
+**Related issues:** epic #3052 (Assistant M1), #3881 (ingestion layer, closed), #3892 (ingest→search gap, RESOLVED via remediation (a) — see §7), #3816 (declarative templates), #3837 (git-backed per-agent content store)
 
 ---
 
@@ -40,11 +40,11 @@ that makes both of them useful:
   connect to, we should be able to crawl and import that data into an OKG store
   for an assistant, driven by the assistant."*
 
-**What this spec deliberately does not do:** it does not decide #3892 (whether an
-ingested entity reaches the bound search index, and how). §7 states the
-importer's position relative to that open decision explicitly rather than
-silently assuming one, because every additional format and connector multiplies
-the blast radius of getting it wrong.
+**On #3892 (ingest→search):** the first draft of this spec deliberately took no
+position on whether an ingested entity reaches the bound search index. That
+decision has since been made — remediation **(a)**, ingestion feeds the bound
+index — and §7 now records the shipped contract every extractor and connector
+inherits, rather than an open question.
 
 ---
 
@@ -141,7 +141,8 @@ would destroy that property and is out of scope (§3.3).
   credential resolver (#2643), never a bespoke token store.
 - **No parallel KB format.** Entity writes continue through
   `KbStore::put_entity`.
-- **No resolution of #3892.** See §7.
+- **No re-litigation of #3892.** Settled as remediation (a); §7 records the
+  contract this spec's connectors inherit.
 - **No SQL / structured-database ingestion** (`cto.db`, `analytics.duckdb`) —
   explicitly out of scope in #3881 and still out of scope here. A spreadsheet
   read as a document (§4.4) is not the same thing as a database connector.
@@ -510,46 +511,84 @@ the assumption that the first real backfill will immediately want it.
 
 ## 7. SPEC-OKGIMPORT-06 — Position Relative to the Ingest→Search Gap (#3892) {#SPEC-OKGIMPORT-06~draft}
 
-### 7.1 The open decision
+### 7.1 The decision, now settled
 
-#3892 (OPEN) documents, with live evidence, that an OKG store's two facets do not
+#3892 documented, with live evidence, that an OKG store's two facets did not
 meet: `okg_ingest_*` writes into
 `${KB_KNOWLEDGE_DIR:-$HOME/.trusty-agents/knowledge}/<agent>`, while the
 `[[stores]]` binding's `index` is a trusty-search index built over an unrelated
-root; `okg://<agent>` is never resolved to a filesystem path at all. A user can
+root; `okg://<agent>` was never resolved to a filesystem path at all. A user could
 run an ingest, get a truthful "N entities ingested", and still get nothing from
-`vector_search`. Two coherent remediations are on the table — **(a)** ingest also
+`vector_search`. Two coherent remediations were on the table — **(a)** ingest also
 feeds the bound index, or **(b)** the store's index is (re)built over the KB tree
-— and (b) collides with a deliberate operator choice (the 200,090-chunk
-`bob-duetto/cto` index), which is why the issue is flagged for owner sign-off.
+— and (b) collided with a deliberate operator choice (the 200,090-chunk
+`bob-duetto/cto` index).
 
-### 7.2 This spec's position (normative)
+**The owner chose (a)** (2026-07-25). Ingestion now feeds the bound index, and the
+operator's index-root configuration is left untouched. Shipped shape:
 
-1. **DOC-55 does not decide #3892, and must not be read as having decided it.**
-   Nothing in §§4–6 presumes either remediation.
-2. **DOC-55 makes #3892 strictly more urgent.** Every extractor and every
-   connector multiplies the volume of content that lands in a tree the assistant
-   cannot search. Shipping the importer without resolving #3892 produces a larger,
-   more convincing, still-invisible corpus — the worst outcome, because the
-   failure is silent by construction on both sides.
-3. **The importer is designed to be neutral to the outcome.** The extraction
-   layer is upstream of `SourceItem` and cannot care. The connector framework
-   ends at the ingest engine and cannot care. If (a) is chosen, the index push
-   attaches at exactly one place — after `write_item` succeeds, per item or
-   batched at end of run — and every connector inherits it with no per-connector
-   work. If (b) is chosen, nothing in this spec changes at all.
-4. **If (a) is chosen, the ledger's role must be settled deliberately.** #3892
-   already names the partial-failure mode (entity written, index push failed).
-   The importer's position: the ledger is the record of *KB-tree* truth and
-   should not be overloaded with index state; an index push failure belongs in
-   `IngestReport::errors` and is repaired by an index-level reconcile, not by
-   rolling back a ledger line. Recording index state in the ledger would make
-   ingestion non-convergent when the search daemon is merely down.
-5. **Sequencing recommendation:** #3892 should be decided before the connector
-   roster (§5.4) expands beyond the Google surface — i.e. before phase 3 in §9.
-   The extraction layer (phase 1) can land ahead of it safely, because it changes
-   only the *quality* of what already lands in the tree, not the volume of
-   sources.
+- `trusty_kb::okg::index_journal` — a second append-only journal per source,
+  `_sources/<id>.index.jsonl`, recording what reached the index and at what
+  content hash, plus `KbStore::okg_index_backlog`, the pure reconcile that diffs
+  the item ledger against it. The ledger is untouched: it remains the record of
+  KB-tree truth.
+- `trusty_agents::stores::index_feed` — the network half (`IndexFeed` seam,
+  `HttpIndexFeed` over `POST /indexes/{id}/index-file` and `/remove-file`) and
+  the drive loop. It lives in `trusty-agents` for the same reason the
+  Gmail/Drive fetchers do: `trusty-kb` stays deterministic and network-free.
+- `trusty_agents::stores::binding` — `okg://<agent>` finally RESOLVES, to
+  `<knowledge_dir>/<slug(agent)>`, and a push is refused when the binding's tree
+  is not the tree that was written. The naming coincidence #3892 named is now a
+  checked correspondence.
+
+### 7.2 The resulting contract (normative)
+
+Every connector and every extractor inherits this; none of them may weaken it.
+
+1. **The tree write is the durable record; the index push is not.** A ledger
+   line is never gated on a reachable daemon. A search daemon that is down,
+   slow, or 500ing cannot lose ingestion work or make it non-convergent. This is
+   the position §7.2.4 of the draft took and it is what shipped: the ledger is
+   KB-tree truth and is NOT overloaded with index state.
+2. **Success is never claimed falsely.** Every ingest reports `index.indexed`,
+   `index.removed`, and `index.pending` — the count of entities that are in the
+   tree and NOT searchable — plus a `reason` when nothing could be fed at all
+   (no binding, daemon undiscoverable, tree/index mismatch). "N entities
+   ingested" alone is no longer a complete answer, and no surface is allowed to
+   imply it is.
+3. **Push, then record.** A journal line is appended only after the daemon
+   acknowledges the write. A crash in between costs one redundant re-push (the
+   push is an upsert keyed by the entity file path), never a permanently
+   unindexed entity — the mirror of the engine's entity-before-ledger ordering.
+4. **Every run reconciles the whole backlog, not just what it ingested.** An
+   entity the engine skipped as unchanged but which never reached the index is
+   pushed by the next run. This is what makes a failed push self-healing rather
+   than permanent, and it is why index state cannot live in the ledger: the
+   ledger's own skip decision would hide it forever.
+5. **A changed entity is withdrawn before it is re-pushed**, and a tombstoned one
+   is withdrawn outright. trusty-search chunks by content, so re-pushing without
+   withdrawing would leave the old revision searchable alongside the new one.
+6. **An index that cannot serve the tree is refused, not fed.** trusty-search
+   post-filters every search result whose file path escapes the index root
+   (issues #64 / #541) — verified live: the push succeeds, the chunks are in the
+   corpus, and `search` returns nothing. So an OKG store's bound index is usable
+   only when its root CONTAINS the tree. The feed asks the daemon for the index
+   root first and, when it does not, reports that with the remediation rather
+   than manufacturing a fresh silent failure. This is also why (a) never has to
+   re-point an existing index root: a binding whose index cannot serve its tree
+   is a configuration error, and it is now a loud one. (For `cto-assistant`
+   specifically: the `bob-duetto/cto` index remains a separate raw-search layer;
+   making its OKG tree searchable means binding an index registered over that
+   tree.)
+7. **The backlog is visible where an operator looks.** `okg_sources` reports
+   per-source `index.synced` / `index.pending` and names the bound index;
+   `GET /api/agents/:name/stores` reports the resolved `tree_path` plus
+   `pending_index` / `synced_index`. "Ingested but not yet searchable" is a
+   reportable state, never an invisible one.
+8. **The importer remains neutral in shape.** The extraction layer is upstream of
+   `SourceItem`; the connector framework ends at the ingest engine. The index
+   push attaches at exactly one place — the ingest tool's tail, over the source's
+   backlog — so a new connector inherits it with no per-connector work.
 
 ---
 
@@ -594,8 +633,9 @@ no longer means editing the engine, and a crawl is scriptable.**
 **Phase 3 — Google surface completion.**
 `drive_content` routes base64 through extraction (§4.6); export-format selection
 for native Docs/Sheets/Slides; `gmail-attachments` connector. Net effect: **the
-data the user already has in Google lands in full fidelity.** *Gated on the #3892
-decision per §7.2.5.*
+data the user already has in Google lands in full fidelity.** *The #3892 gate is
+cleared — remediation (a) shipped, and every connector inherits the §7.2
+contract for free.*
 
 **Phase 4 — Assistant-driven crawl.**
 `okg_plan_import`; `okg_register` split; plan-level progress derived from
@@ -612,7 +652,7 @@ ticket.
 | # | Question | Recommendation |
 |---|---|---|
 | Q1 | Is `tagent okg` (§6.4) in the first wave or a follow-up? | Phase 2 — the first real backfill will want it immediately |
-| Q2 | #3892 remediation (a) or (b)? | Not decided here; §7.2.5 asks for it before phase 3 |
+| Q2 | ~~#3892 remediation (a) or (b)?~~ | **Answered 2026-07-25: (a).** Shipped; §7 records the contract |
 | Q3 | Do extracted-format entities need a distinguishing marker in frontmatter (`extracted_by: docx@2`)? | Yes — it is free, and it makes an extractor-version re-ingest auditable |
 | Q4 | PDF parser dependency choice (pure-Rust vs. bindings) | Pure-Rust, per §8.3; the specific crate is an implementation ticket |
 | Q5 | Should `xlsx` become a *structured* source (rows as entities) rather than a document? | No — that is the SQL/database gap (#3881 out-of-scope), tracked separately |
@@ -638,3 +678,4 @@ ticket.
 | Date | Change |
 |---|---|
 | 2026-07-25 | Initial draft — extraction layer, connector framework, assistant-driven crawl, #3892 position |
+| 2026-07-25 | §7 rewritten: #3892 settled as remediation (a); the open position becomes the shipped ingest→index contract |

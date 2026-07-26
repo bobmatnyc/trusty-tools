@@ -24,13 +24,12 @@
 //! `watermark_spans_oldest_and_newest`.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::entity::slugify;
+use crate::okg::jsonl::{Appender, read_journal};
 use crate::okg::registry::SOURCES_DIR;
 use crate::roots::{assert_within, confine};
 
@@ -86,23 +85,15 @@ pub struct Watermark {
 
 /// An open, append-only ledger for one source.
 pub struct Ledger {
-    /// Journal file path.
-    path: PathBuf,
     /// Last record seen per item id — the effective state.
     latest: BTreeMap<String, LedgerRecord>,
     /// `ingested_at` of the last line read or written.
     last_ingest_at: Option<String>,
     /// Count of unparseable lines encountered on load.
     malformed: usize,
-    /// The file's final line lacks a terminating newline — the signature of a
-    /// write interrupted mid-line. The first [`Ledger::append`] must emit a
-    /// newline before its own record, or the two would concatenate into one
-    /// unparseable line and the NEW record would be lost too. Without this the
-    /// journal never converges: every subsequent run re-ingests that item and
-    /// re-corrupts it the same way.
-    needs_newline: bool,
-    /// Lazily opened append handle, kept across a run.
-    handle: Option<File>,
+    /// Durable append handle, which also heals a crash-torn final line — see
+    /// [`crate::okg::jsonl`].
+    appender: Appender,
 }
 
 impl Ledger {
@@ -123,54 +114,24 @@ impl Ledger {
     ///
     /// Why: an absent journal is a first run, not an error; and a damaged line
     /// must be SKIPPED rather than abort the load, or one torn write from a
-    /// crash would permanently brick the source.
-    ///
-    /// The parse is deliberately BYTE-oriented. Reading the file as a `String`
-    /// first (`read_to_string`) fails the WHOLE load on invalid UTF-8, and a
-    /// crash mid-write lands mid-codepoint whenever the record contains
-    /// non-ASCII text — which for this crate is the common case, not the exotic
-    /// one: a Gmail subject with a dash or an accent, a Drive filename in any
-    /// non-Latin script. That turned a one-item loss into a permanently
-    /// unloadable source, the exact failure this doc promises cannot happen.
-    /// Splitting on `b'\n'` and decoding per line contains the damage to the
-    /// torn line, whether it is invalid UTF-8 or merely invalid JSON.
-    ///
-    /// What: splits the raw bytes on newlines, decodes and parses each line
-    /// independently, keeps the last record per item id, and counts every line
-    /// it could not use.
+    /// crash would permanently brick the source. Both properties live in
+    /// [`crate::okg::jsonl::read_journal`], shared with the index journal.
+    /// What: reads every parseable line, keeps the last record per item id, and
+    /// counts every line it could not use.
     /// Test: `torn_line_is_skipped_not_fatal`,
     /// `torn_mid_utf8_codepoint_is_skipped_not_fatal`.
     pub fn load(root: &Path, source_id: &str) -> anyhow::Result<Self> {
         let path = Self::path_for(root, source_id)?;
+        let load = read_journal::<LedgerRecord>(&path)?;
         let mut ledger = Self {
-            path,
             latest: BTreeMap::new(),
             last_ingest_at: None,
-            malformed: 0,
-            needs_newline: false,
-            handle: None,
+            malformed: load.malformed,
+            appender: Appender::new(path, load.needs_newline),
         };
-        if !ledger.path.exists() {
-            return Ok(ledger);
-        }
-        let bytes = std::fs::read(&ledger.path)?;
-        ledger.needs_newline = !bytes.is_empty() && bytes.last() != Some(&b'\n');
-        for line in bytes.split(|b| *b == b'\n') {
-            // Tolerate CRLF journals and blank separator lines.
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            if line.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            // `from_slice` handles the UTF-8 check itself, so an invalid-UTF-8
-            // line lands in exactly the same `malformed` bucket as bad JSON —
-            // no separate decode step, no way for one to abort the other.
-            match serde_json::from_slice::<LedgerRecord>(line) {
-                Ok(record) => {
-                    ledger.last_ingest_at = Some(record.ingested_at.clone());
-                    ledger.latest.insert(record.item_id.clone(), record);
-                }
-                Err(_) => ledger.malformed += 1,
-            }
+        for record in load.records {
+            ledger.last_ingest_at = Some(record.ingested_at.clone());
+            ledger.latest.insert(record.item_id.clone(), record);
         }
         Ok(ledger)
     }
@@ -205,6 +166,15 @@ impl Ledger {
         self.latest.contains_key(item_id)
     }
 
+    /// Every item's effective record, item-id sorted.
+    ///
+    /// Why: the index reconcile (`KbStore::okg_index_backlog`) must see
+    /// TOMBSTONED rows too — they are what tells it to withdraw an entity from
+    /// the search index — so [`Self::live_item_ids`] is deliberately not enough.
+    pub fn records(&self) -> impl Iterator<Item = &LedgerRecord> {
+        self.latest.values()
+    }
+
     /// Item ids currently in the ingested (non-tombstoned) state, sorted.
     pub fn live_item_ids(&self) -> Vec<String> {
         self.latest
@@ -222,33 +192,7 @@ impl Ledger {
     /// What: opens (once per run) in append mode, writes one JSON line, syncs.
     /// Test: `append_then_reload_is_current`.
     pub fn append(&mut self, record: LedgerRecord) -> anyhow::Result<()> {
-        if self.handle.is_none() {
-            if let Some(parent) = self.path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            self.handle = Some(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)?,
-            );
-        }
-        let line = serde_json::to_string(&record)?;
-        let file = self
-            .handle
-            .as_mut()
-            .expect("handle just opened above; None is unreachable");
-        // Heal a torn final line before appending — see `needs_newline`.
-        if self.needs_newline {
-            writeln!(file)?;
-            self.needs_newline = false;
-        }
-        writeln!(file, "{line}")?;
-        file.flush()?;
-        // Best-effort durability: a filesystem that cannot fsync must not fail
-        // the ingest — the line is already flushed to the OS at this point.
-        let _ = file.sync_data();
-
+        self.appender.append(&record)?;
         self.last_ingest_at = Some(record.ingested_at.clone());
         self.latest.insert(record.item_id.clone(), record);
         Ok(())

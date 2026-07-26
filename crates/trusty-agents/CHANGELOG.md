@@ -7,6 +7,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **OKG ingestion feeds the bound search index (#3892, remediation (a)):** an
+  `okg_ingest_*` call used to write markdown into the KB tree and stop there,
+  while `vector_search` queried an index built over an unrelated root — so an
+  ingest could report "N entities ingested" truthfully and the assistant would
+  still find nothing, with no error on either side. Every ingest tool now ends
+  by draining that source's index backlog into the agent's `[[stores]]`-bound
+  trusty-search index (`stores::index_feed`, over the daemon's
+  `POST /indexes/{id}/index-file` / `remove-file` routes). The contract: the
+  tree write is the durable record and is never gated on a reachable daemon;
+  the journal line is appended only AFTER the daemon acknowledges the push, so
+  a crash costs one redundant re-push rather than a lost entity; every run
+  reconciles the whole backlog, so a failed push is self-healing; a changed
+  entity is withdrawn before it is re-pushed and a tombstoned one is withdrawn
+  outright. Fail-open, never silent — each result reports `index.indexed` /
+  `removed` / `pending` plus a `reason` when nothing could be fed. The
+  operator's configured index roots are untouched (remediation (b) was not
+  taken). One constraint the live check surfaced and the feed now enforces:
+  trusty-search post-filters any search result whose path escapes the index
+  root (issues #64 / #541), so pushing a tree into a foreign-rooted index would
+  store the chunks and hide them from every query. The feed reads the index's
+  root first and REFUSES with an actionable reason when it does not contain the
+  tree, rather than reporting `indexed: N, pending: 0` over a corpus nothing can
+  return.
+- **`okg://<agent>` finally resolves (`stores::binding`, #3892):** the URI was an
+  opaque label nothing ever mapped to a path, so a binding's tree tail matching
+  its KB directory was a naming coincidence rather than an invariant. It now
+  resolves to `<knowledge_dir>/<slug(agent)>`, and a push is REFUSED when the
+  binding names a different tree than the one that was written — trading a
+  silent-empty failure for a loud one instead of a silent-wrong one.
+
+### Changed
+
+- **Store status surfaces the unsearchable backlog (#3892):** `okg_sources`
+  reports per-source `index.synced` / `index.pending` and names the bound index;
+  `GET /api/agents/:name/stores` adds the resolved `tree_path` plus
+  `pending_index` / `synced_index`, so a store can no longer read as CONNECTED
+  while holding none of the content its tree holds.
+
 ### Changed
 
 - **Agent configuration is five sections: Personality / Knowledge / Skills /

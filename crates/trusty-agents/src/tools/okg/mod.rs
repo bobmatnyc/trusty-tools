@@ -10,8 +10,11 @@
 //! ingested items into people/organizations/events entities.
 //!
 //! What: `okg_ingest_docstore`, `okg_ingest_gmail`, `okg_ingest_drive` each
-//! register-or-update their source and then ingest it; `okg_sources` reports
-//! every source with its live coverage. Registration is folded into ingestion
+//! register-or-update their source, ingest it, and then feed what they wrote
+//! into the agent's bound trusty-search index ([`index_feed`], #3892) so the
+//! `[[stores]]` binding's "one store, tree and index" semantics are true rather
+//! than aspirational; `okg_sources` reports every source with its live coverage,
+//! tree AND index. Registration is folded into ingestion
 //! on purpose — "point at this directory" and "reach further back in time" are
 //! the same call, so widening a window can never desync from the ledger.
 //! Gmail/Drive fetching goes through `trusty-gworkspace`'s authenticated client
@@ -25,6 +28,7 @@ pub mod docstore;
 pub mod drive;
 pub mod gapi;
 pub mod gmail;
+mod index_feed;
 pub mod sources;
 
 use std::path::PathBuf;

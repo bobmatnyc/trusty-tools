@@ -213,8 +213,18 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     report.skipped += ids.len() - unseen.len();
     report.scanned = ids.len();
 
+    // Make the pulled messages findable — fail-open, never silent (#3892).
+    let index = crate::tools::okg::index_feed::feed_bound_index(
+        &store,
+        &spec,
+        arg_str(args, "agent"),
+        &now,
+    )
+    .await;
+
     Ok(ok_json(&json!({
         "source": registered,
+        "index": index,
         "query": effective_query,
         "listed": ids.len(),
         "fetched": fetched,
