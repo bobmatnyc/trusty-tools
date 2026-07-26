@@ -9,6 +9,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Shutdown no longer publishes a partial in-flight reindex over a complete
+  on-disk HNSW snapshot, closing the residual data-loss race the #1711 guard
+  left open (issue #1717).** The #1711 guard (PR #1716) only catches an
+  in-memory index with exactly 0 vectors; a background reindex that is only
+  partially complete when SIGTERM lands (e.g. 5,000 of 312,000 vectors
+  upserted into a freshly promoted, not-yet-restored store) is non-zero, so
+  that guard did not fire — the shutdown flush silently overwrote a complete
+  on-disk HNSW snapshot with the partial one. Two changes close this:
+  1. `flush_one_index_on_shutdown` now checks `SearchAppState::reindex_progress`
+     and skips the flush entirely — exactly, at any completion percentage —
+     whenever a reindex for that index is still `ReindexStatus::Running`.
+     This is the fix that actually closes the reported race, but it is
+     scoped to the GRACEFUL shutdown flush path specifically (mirroring the
+     identical guard the residency-park sweep already used for the same
+     reason) — it does not run at all on an ungraceful termination
+     (SIGKILL/OOM-kill/process abort/power loss).
+  2. `UsearchStore::save()` additionally refuses a save whose in-memory vector
+     count falls below half of what tracked `remove()` calls since the last
+     save can explain, relative to the on-disk sidecar's count. This is
+     defense-in-depth for callers with no reindex-progress signal available.
+     Deliberate deletions (single-file removal, prune passes, bulk corpus
+     reduction) are tracked via a per-store `removed_since_save` counter,
+     incremented only when a vector is actually dropped from the HNSW graph,
+     and are therefore never blocked no matter how large the reduction.
+
+  Two known residual gaps, tracked separately, not fixed in this change:
+  - **Issue #3970**: the periodic incremental HNSW persister
+    (`spawn_incremental_persist`, called every 16 batches during EVERY
+    reindex, independent of shutdown entirely) is guarded only by the ratio
+    guard above — and that guard provides essentially NO protection there,
+    on any reindex large enough to matter, because ordinary healthy progress
+    is guaranteed to cross its 50% threshold before finishing. Once it does,
+    the complete pre-reindex on-disk snapshot has already been overwritten
+    by a partial, still-growing one; an ungraceful crash at any later point
+    permanently strands the index at whatever fraction was last
+    checkpointed. The recommended fix is a staged-write-then-swap for the
+    HNSW snapshot, mirroring what the redb corpus already has via
+    #603/#839 — explicitly NOT a skip-while-`Running` gate on the periodic
+    save, which would defeat incremental persistence's entire purpose.
+  - **Issue #3969**: a reindex triggered by something OTHER than a HEAD
+    change (e.g. `--force` on an unchanged HEAD, or an embedding-model
+    upgrade) that is interrupted before completion is not automatically
+    retried on the next boot — `indexed_head_sha` is only re-stamped on
+    successful completion, and boot-time reconcile only retries when the
+    stored SHA is stale relative to HEAD. The index is left at its
+    pre-reindex state (not corrupted, not silently smaller — just not
+    caught up) until an operator triggers another reindex.
 - **A legacy/colocated index whose storage path could not be resolved at
   warm-boot no longer silently restores as a healthy 0-chunk store (issue
   #2847).** `build_indexer_from_entry` / `build_store_for_entry` previously
