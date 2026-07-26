@@ -65,6 +65,13 @@ pub use mock::MockEmbedder;
 mod tests {
     use super::*;
 
+    // Issue #610 (line-cap) + #3711: the sentence-transformers reference-vector
+    // accuracy gate lives in `tests/reference_accuracy_tests.rs`. Declared as a
+    // CHILD of this module — not a sibling of `provider_tests` — so it shares
+    // the single `ENV_LOCK`/`EnvVarGuard` below; a sibling would need its own
+    // lock, and a second lock does not serialise against this one.
+    mod reference_accuracy_tests;
+
     /// Process-global lock guarding every test in this module that mutates
     /// the process environment. Tests run in parallel by default, and
     /// concurrent calls into `setenv`/`getenv` (even on disjoint keys) are
@@ -560,73 +567,6 @@ mod tests {
         let v1 = embed_one(&e, "cached").await.unwrap();
         let v2 = embed_one(&e, "cached").await.unwrap();
         assert_eq!(v1, v2);
-    }
-
-    /// Fixed sample used by [`default_model_matches_sentence_transformers_reference`].
-    ///
-    /// Why: issue #3486 / #3493 P0 — the default model swap (INT8 →
-    /// `AllMiniLML6V2` fp32) must be verified against a genuine, independent
-    /// reference, not just "fastembed didn't error". These 5 texts and their
-    /// reference vectors were generated with a real
-    /// `sentence-transformers/all-MiniLM-L6-v2` CPU fp32 model (`device="cpu"`,
-    /// `normalize_embeddings=True`) — the same independent-library method the
-    /// #3486 CoreML/fp16 experiment's correctness gate used (there: 0.999999+
-    /// mean cosine for fp32/fp16 vs 0.9897 for INT8, across a 50-chunk sample).
-    const REFERENCE_TEXTS: [&str; 5] = [
-        "fn authenticate(user: &str) -> bool",
-        "pub struct Embedder { model: TextEmbedding }",
-        "the quick brown fox jumps over the lazy dog",
-        "async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>",
-        "memory palace consolidation cycle",
-    ];
-
-    include!("reference_vectors_test_data.rs");
-
-    /// Why: verifies the actual production default (`FastEmbedder::new()`,
-    /// which now resolves to `AllMiniLML6V2` fp32 per
-    /// `resolve_default_embedding_model`) produces embeddings numerically
-    /// consistent with a genuine, independent `sentence-transformers`
-    /// reference — not just "some vector came back" (issue #3486 / #3493 P0).
-    /// What: embeds [`REFERENCE_TEXTS`] with the default embedder and asserts
-    /// mean cosine similarity against `REFERENCE_VECTORS` is `>= 0.999`
-    /// (matching the experiment's fp32/fp16 threshold, well above INT8's
-    /// measured 0.9897).
-    /// Test: this test. NOT `#[ignore]`d (issue #3493 P0 part 2 — this is the
-    /// correctness gate that would have caught the CoreML-default accuracy
-    /// regression had it been wired into CI; see `ci.yml`'s `test` job for
-    /// the fastembed-model pre-seed step that makes this safe to run on every
-    /// PR without HuggingFace-download flakiness).
-    #[tokio::test]
-    async fn default_model_matches_sentence_transformers_reference() {
-        fn cosine(a: &[f32], b: &[f32]) -> f64 {
-            let dot: f64 = a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum();
-            let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-            let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-            dot / (norm_a * norm_b)
-        }
-
-        let e = FastEmbedder::new().await.unwrap();
-        let texts: Vec<String> = REFERENCE_TEXTS.iter().map(|s| s.to_string()).collect();
-        let vectors = e.embed_batch(&texts).await.unwrap();
-        assert_eq!(vectors.len(), REFERENCE_VECTORS.len());
-
-        let sims: Vec<f64> = vectors
-            .iter()
-            .zip(REFERENCE_VECTORS.iter())
-            .map(|(v, r)| cosine(v, r))
-            .collect();
-        let mean_sim = sims.iter().sum::<f64>() / sims.len() as f64;
-        let min_sim = sims.iter().cloned().fold(f64::INFINITY, f64::min);
-        println!(
-            "default_model_matches_sentence_transformers_reference: mean_cosine={mean_sim:.6} min_cosine={min_sim:.6}"
-        );
-
-        assert!(
-            mean_sim >= 0.999,
-            "default model must match the sentence-transformers reference to \
-             >= 0.999 mean cosine similarity (got {mean_sim:.6}, min {min_sim:.6}); \
-             the previous INT8 default only reached 0.9897 (issue #3486 / #3493 P0)"
-        );
     }
 
     /// Why: issue #3493 P0 (part 2) — `TRUSTY_DEVICE=cpu` must keep working as
