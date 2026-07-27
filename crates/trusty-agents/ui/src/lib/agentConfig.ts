@@ -322,15 +322,51 @@ export interface AgentSkill {
   name: string;
   /** One line on what invoking it accomplishes. Empty for a derived skill. */
   description: string;
-  kind: 'action' | 'knowledge' | 'system';
+  /**
+   * `function` (#4022) is a BUNDLE — a group header over its member cards, not
+   * a capability of its own. It wraps no tool, so a pane that buckets by kind
+   * must not drop it into the Action bucket; rendering the group is #4024's job.
+   */
+  kind: 'action' | 'knowledge' | 'system' | 'function';
   /** `builtin` | `authored` (with `path`) | `derived`. */
   origin: { kind: string; path?: string };
-  /** Whether THIS agent is granted the skill, per the real dispatch gate. */
+  /**
+   * Whether THIS agent is granted the skill, per the real dispatch gate. For a
+   * `function` card this is the conservative reading of the tri-state below —
+   * `granted_state === 'all'`.
+   */
   granted: boolean;
-  /** The wrapped tool — zero or one name (1:1). */
+  /** The wrapped tool — zero or one name (1:1). Empty for a bundle. */
   tools: string[];
   /** Credential this skill needs, when it needs one. */
   provider: AgentSkillProvider | null;
+  /** #4022 member skill ids for a `function` card; empty for a leaf. */
+  members: string[];
+  /** The subset of `members` this agent holds; empty for a leaf. */
+  granted_members: string[];
+  /**
+   * #4025 tri-state. For a bundle: `all`/`some`/`none` of its members. For a
+   * leaf it simply restates `granted`, so no kind check is needed to read it.
+   */
+  granted_state: 'all' | 'some' | 'none';
+}
+
+/**
+ * One function-skill group from `GET /api/agents/:name/skills` (#4025).
+ *
+ * A convenience index over the `kind: 'function'` cards in `skills[]` — the
+ * server builds both from ONE computation, so a group and its card can never
+ * report different grant states. Members are skill ids to be looked up in
+ * `skills[]`; a member id the catalog cannot resolve is still LISTED here (it is
+ * what the bundle declares) but can never appear in `granted_members`.
+ */
+export interface AgentSkillGroup {
+  id: string;
+  name: string;
+  description: string;
+  members: string[];
+  granted_members: string[];
+  granted_state: 'all' | 'some' | 'none';
 }
 
 /**
@@ -352,7 +388,10 @@ export interface AgentSkillProvider {
 /** `GET /api/agents/:name/skills`'s wire shape. */
 export interface AgentSkills {
   skills: AgentSkill[];
+  /** Granted CAPABILITIES — `function` bundles are excluded (#4025). */
   granted_count: number;
+  /** #4025 function-skill groups, indexing the `kind: 'function'` cards. */
+  groups: AgentSkillGroup[];
   /** `[skills].allow` ids that resolved to nothing (DOC-57 S-11). */
   unresolved: { id: string; reason: string }[];
   /** Allow-patterns no catalog tool matches — may still resolve over MCP. */

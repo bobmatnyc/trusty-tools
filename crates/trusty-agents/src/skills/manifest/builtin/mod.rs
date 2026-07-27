@@ -14,6 +14,9 @@
 //! Test: `super::tests`.
 
 mod core;
+// #4022: the bundling tier — declared last so leaf rows are always inserted
+// before the bundles that name them.
+mod functions;
 mod gworkspace;
 mod knowledge;
 mod ops;
@@ -70,5 +73,7 @@ pub fn all() -> Vec<&'static SkillDef> {
         .chain(gworkspace::TABLE)
         .chain(platform::TABLE)
         .chain(prose::TABLE)
+        // #4022: function skills last — they reference the leaf ids above.
+        .chain(functions::TABLE)
         .collect()
 }

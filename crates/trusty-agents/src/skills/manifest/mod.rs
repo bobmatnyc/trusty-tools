@@ -30,14 +30,19 @@ use serde::Serialize;
 /// Why: `kind` is the only mechanism routing capability between the Knowledge
 /// and Skills panes; neither pane hardcodes tool names.
 /// What: `Action` (Skills pane), `Knowledge` (Knowledge pane), `System`
-/// (Skills pane, collapsed under "System").
-/// Test: `knowledge_kind_routes_out_of_the_skills_pane`.
+/// (Skills pane, collapsed under "System"), `Function` (#4022 — a *bundling*
+/// row, rendered as a group header over its member cards rather than as a
+/// capability of its own).
+/// Test: `knowledge_kind_routes_out_of_the_skills_pane`,
+/// `builtin_function_rows_declare_members_and_no_tool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillKind {
     Action,
     Knowledge,
     System,
+    /// #4022: a function skill — names member skill ids, wraps no tool itself.
+    Function,
 }
 
 /// A provider/credential a skill's tool depends on.
@@ -79,6 +84,15 @@ pub struct SkillDef {
     pub tool: Option<&'static str>,
     pub kind: SkillKind,
     pub provider: Option<&'static ProviderReq>,
+    /// #4022: member skill ids, for a **function skill** only.
+    ///
+    /// Why: Mutually exclusive with `tool` — a row is either a leaf wrapping
+    /// exactly one tool, or a bundle naming N leaves, never both. Modelling the
+    /// empty case as an empty slice rather than an `Option` keeps every existing
+    /// `const fn` constructor total and lets read sites ask `is_function()`
+    /// instead of pattern-matching two shapes.
+    /// Test: `builtin_function_rows_declare_members_and_no_tool`.
+    pub members: &'static [&'static str],
 }
 
 /// Terse constructor for a tool-wrapping built-in row.
@@ -103,6 +117,7 @@ pub const fn tool_skill(
         tool: Some(tool),
         kind,
         provider,
+        members: &[],
     }
 }
 
@@ -127,6 +142,42 @@ pub const fn prose_skill(
         tool: None,
         kind,
         provider: None,
+        members: &[],
+    }
+}
+
+/// Terse constructor for a **function skill** — a bundle of member skill ids.
+///
+/// Why (#4022, epic #4021 OQ-1 resolved *grant-the-bundle*): the owner's model
+/// is *"'ticketing' is a skill with various capabilities including all the
+/// skills under one"*. One `[skills].allow` entry should grant a whole
+/// capability. This is deliberately a **manifest-layer** primitive, not a new
+/// matcher: a function skill still resolves to an exact, closed, compile-time
+/// set of leaf ids, so it COMPILES DOWN to the same 1:1 rows the permission
+/// gates already see. No glob dialect is added, `is_exact_tool_name` still
+/// guards every name that reaches an allow-pattern, and the bundle id itself
+/// never leaves this layer.
+/// What: Builds a [`SkillDef`] with `tool: None`, `kind: Function`, and the
+/// given member ids. Members are leaf (or nested function) skill ids resolved
+/// against the same catalog — unknown ids are a **manifest validation error**
+/// caught at build/test time by [`SkillCatalog::unknown_function_members`], and
+/// at runtime they narrow (contribute zero tools, surface in `unresolved`).
+/// Test: `function_skill_expands_to_the_union_of_its_members_tools`,
+/// `function_skill_never_leaks_its_bundle_id_into_the_tool_patterns`.
+pub const fn function_skill(
+    id: &'static str,
+    name: &'static str,
+    description: &'static str,
+    members: &'static [&'static str],
+) -> SkillDef {
+    SkillDef {
+        id,
+        name,
+        description,
+        tool: None,
+        kind: SkillKind::Function,
+        provider: None,
+        members,
     }
 }
 
@@ -167,6 +218,16 @@ pub struct SkillManifest {
     pub tools: Vec<String>,
     pub provider: Option<ProviderReq>,
     pub origin: SkillOrigin,
+    /// #4022: member skill ids when this is a function skill; empty otherwise.
+    ///
+    /// Why: Authored `.md` frontmatter has no `members:` key and its parser
+    /// requires a `tools:` list, so an AUTHORED manifest is always a leaf and
+    /// this is always empty for it. Bundles are therefore built-in-only in this
+    /// slice — an operator cannot drop a `.md` into a skill source that widens
+    /// one grant into N. That is a deliberate narrowing of the attack surface,
+    /// not an oversight.
+    /// Test: `authored_manifest_cannot_declare_a_bundle`.
+    pub members: Vec<String>,
 }
 
 impl SkillManifest {
@@ -183,6 +244,8 @@ impl SkillManifest {
             tools: def.tool.map(str::to_string).into_iter().collect(),
             provider: def.provider.copied(),
             origin: SkillOrigin::Builtin,
+            // #4022: bundles are declared in the const table, adopted verbatim.
+            members: def.members.iter().map(|m| (*m).to_string()).collect(),
         }
     }
 
@@ -207,6 +270,7 @@ impl SkillManifest {
             tools: vec![tool.to_string()],
             provider: None,
             origin: SkillOrigin::Derived,
+            members: Vec::new(),
         }
     }
 
@@ -217,6 +281,18 @@ impl SkillManifest {
     /// Test: `tool_less_skills_are_present_and_expand_to_no_tools`.
     pub fn tool(&self) -> Option<&str> {
         self.tools.first().map(String::as_str)
+    }
+
+    /// Whether this row is a #4022 bundle rather than a leaf capability.
+    ///
+    /// Why: Read sites must distinguish "tool-less because it is prose guidance"
+    /// from "tool-less because it is a group header" WITHOUT inspecting
+    /// `members` — a bundle whose members all failed to resolve is still a
+    /// bundle, and treating it as a tool-less prose skill would grant it by id.
+    /// What: True when `kind` is [`SkillKind::Function`].
+    /// Test: `granted_ids_do_not_grant_a_function_skill_by_id_alone`.
+    pub fn is_function(&self) -> bool {
+        self.kind == SkillKind::Function
     }
 }
 
@@ -299,6 +375,19 @@ impl SkillCatalog {
         for def in builtin::all() {
             catalog.insert(SkillManifest::from_def(def));
         }
+        // #4022: a bundle naming a non-existent member is a manifest bug, and it
+        // is caught here in every debug build plus
+        // `builtin_function_skills_declare_only_known_members` in CI. Release
+        // builds fall through to expansion's narrow-never-widen behaviour rather
+        // than aborting a running daemon over a catalog typo.
+        #[cfg(debug_assertions)]
+        {
+            let unknown = catalog.unknown_function_members();
+            debug_assert!(
+                unknown.is_empty(),
+                "built-in function skills name unknown members: {unknown:?}"
+            );
+        }
         catalog
     }
 
@@ -350,11 +439,35 @@ impl SkillCatalog {
     /// manifest came from a higher-priority source and must survive — evicting
     /// it here is what silently inverted source precedence. Filtering on
     /// `origin` keeps both rules intact in one pass.
-    /// What: Retains everything except built-in rows colliding by id or tool.
-    /// Test: `authored_multi_source_precedence_first_source_wins`.
+    ///
+    /// **#4022 — a built-in FUNCTION row is exempt from id displacement.**
+    /// Authored-beats-built-in is a *renaming* rule: it lets an operator
+    /// re-describe a capability. Applied to a bundle id it stops being a rename
+    /// and becomes a HIJACK — dropping `ticketing.md` with
+    /// `tools: ["execute_shell_command"]` into any skill source would evict the
+    /// ten-member bundle and leave `[skills].allow = ["ticketing"]` resolving to
+    /// a shell, with no `unresolved` entry and nothing in `agent.toml` for a
+    /// reviewer to notice. The bundle id is the one name whose meaning a
+    /// reviewer cannot check by reading the config, so it is the one name a
+    /// skill source may not redefine. An authored row may still displace a
+    /// bundle's MEMBERS by id or tool — that path narrows and reports (see
+    /// `authored_displacement_of_a_member_narrows_the_bundle_and_reports_it`).
+    /// What: Retains everything except built-in rows colliding by id or tool,
+    /// EXCEPT built-in function rows, which survive an id collision and log it.
+    /// Test: `authored_multi_source_precedence_first_source_wins`,
+    /// `authored_md_cannot_displace_a_builtin_bundle_id`.
     fn remove_displaced_builtins(&mut self, incoming: &SkillManifest) {
         self.manifests.retain(|m| {
             if m.origin != SkillOrigin::Builtin {
+                return true;
+            }
+            if m.is_function() && m.id == incoming.id {
+                tracing::warn!(
+                    skill = %m.id,
+                    "an authored skill manifest claims a built-in function-skill id; \
+                     refusing to displace the bundle (a bundle id may not be redefined \
+                     by a skill source)"
+                );
                 return true;
             }
             m.id != incoming.id && (m.tool().is_none() || m.tool() != incoming.tool())
@@ -373,11 +486,32 @@ impl SkillCatalog {
     /// a glob-shaped tool never reaches `by_tool`, so it can never be expanded
     /// into an allow-pattern. Defence in depth on a privilege-escalation path is
     /// worth the duplicated check.
-    /// What: Skips insertion when `tool` is already indexed or is not an exact
-    /// name; tool-less skills always insert.
+    /// **#4022 — a bundle id is never shadowed.** `remove_displaced_builtins`
+    /// already refuses to evict a function row, but that leaves the incoming row
+    /// free to sit behind it as a duplicate id — and `get` returning the first
+    /// match makes "which one wins" a property of insertion order rather than of
+    /// a stated rule. Refusing the insert makes the bundle the single answer for
+    /// its id on every construction path, including hand-rolled ones that never
+    /// go through `with_authored`. Defence in depth, same posture as the
+    /// duplicated glob check above.
+    /// What: Skips insertion when `tool` is already indexed, is not an exact
+    /// name, or the id is already held by a function skill; tool-less skills
+    /// otherwise always insert.
     /// Test: `authored_glob_shaped_tool_entry_is_rejected_not_granted`,
-    /// `catalog_insert_refuses_a_glob_shaped_tool`.
+    /// `catalog_insert_refuses_a_glob_shaped_tool`,
+    /// `authored_md_cannot_displace_a_builtin_bundle_id`.
     fn insert(&mut self, manifest: SkillManifest) {
+        if self
+            .manifests
+            .iter()
+            .any(|m| m.is_function() && m.id == manifest.id)
+        {
+            tracing::warn!(
+                skill = %manifest.id,
+                "a function skill already owns this id; refusing to shadow it"
+            );
+            return;
+        }
         if let Some(tool) = manifest.tool()
             && (self.by_tool.contains_key(tool) || !is_exact_tool_name(tool))
         {
@@ -434,31 +568,115 @@ impl SkillCatalog {
     /// wildcard authority. Re-checking a value that `insert` already refused is
     /// deliberate: it costs one comparison and it means no future construction
     /// path can smuggle a wildcard through.
+    ///
+    /// **#4022 — function skills compile down here and only here.** A bundle id
+    /// is replaced by its members' tools *before* this function returns, so the
+    /// 1:1 layer and all three permission gates downstream see nothing but leaf
+    /// tool names. The bundle id is never itself a pattern.
     /// What: Returns exact tool names (deduped, catalog order) plus the ids that
     /// resolved to nothing. Tool-less skills resolve successfully and contribute
     /// zero tools — they are not "unresolved".
     /// Test: `unknown_skill_id_yields_no_tools_never_all_tools`,
     /// `authored_glob_shaped_tool_entry_is_rejected_not_granted`,
-    /// `tool_less_skills_are_present_and_expand_to_no_tools`.
+    /// `tool_less_skills_are_present_and_expand_to_no_tools`,
+    /// `function_skill_never_leaks_its_bundle_id_into_the_tool_patterns`.
     pub fn expand(&self, allow: &[String]) -> SkillExpansion {
-        let mut tools: Vec<String> = Vec::new();
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        let mut unresolved: Vec<String> = Vec::new();
+        let mut acc = Expansion::default();
         for id in allow {
-            match self.get(id) {
-                Some(manifest) => {
-                    if let Some(tool) = manifest.tool()
-                        && is_exact_tool_name(tool)
-                        && seen.insert(tool)
-                    {
-                        tools.push(tool.to_string());
-                    }
-                }
-                None => unresolved.push(id.clone()),
-            }
+            self.expand_id(id, &mut acc);
         }
-        SkillExpansion { tools, unresolved }
+        SkillExpansion {
+            tools: acc.tools,
+            unresolved: acc.unresolved,
+        }
     }
+
+    /// Resolve one skill id into `acc`, recursing through function members.
+    ///
+    /// Why (#4022): The bundling tier must not become a second resolution rule.
+    /// Expansion stays one recursive walk that bottoms out in the SAME leaf
+    /// check — `tool()` + [`is_exact_tool_name`] — so every property PR #3964
+    /// pinned holds for a bundle by construction rather than by a parallel
+    /// implementation that can drift: an unknown member contributes nothing and
+    /// is REPORTED (never "all tools"), and a bundle can only ever reach tools
+    /// its members already wrap.
+    ///
+    /// `acc.expanded` is a MEMOISATION set, and it is load-bearing for both
+    /// correctness and cost. Expanding an id is idempotent — tools dedupe
+    /// through `seen_tools` and a miss is recorded once — so a second visit can
+    /// only redo work. Recording ids permanently (rather than unwinding a
+    /// visited-set on the way out, which only bounds DEPTH) makes the walk
+    /// linear in the catalog and cycle-safe by the same stroke. The distinction
+    /// is not academic: an unwinding guard re-walks a DAG once per distinct
+    /// path, so a 24-level fan-out-2 bundle graph costs ~16.7M recursions, and
+    /// `expand` runs on EVERY persona turn and subagent launch — a catalog
+    /// shape, not untrusted input, would have become a latent CPU stall.
+    /// What: Already-expanded → return. Leaf → push its tool if new. Function →
+    /// recurse over members. Unknown → record in `unresolved`.
+    /// Test: `function_skill_member_cycle_terminates_without_widening`,
+    /// `function_skill_fan_out_expands_in_linear_work`.
+    fn expand_id(&self, id: &str, acc: &mut Expansion) {
+        if !acc.expanded.insert(id.to_string()) {
+            return;
+        }
+        let Some(manifest) = self.get(id) else {
+            acc.unresolved.push(id.to_string());
+            return;
+        };
+        if let Some(tool) = manifest.tool() {
+            if is_exact_tool_name(tool) && acc.seen_tools.insert(tool.to_string()) {
+                acc.tools.push(tool.to_string());
+            }
+            return;
+        }
+        if !manifest.is_function() {
+            return; // Tool-less prose skill: resolves, contributes nothing.
+        }
+        for member in &manifest.members {
+            self.expand_id(member, acc);
+        }
+    }
+
+    /// Function-skill members no manifest in this catalog resolves.
+    ///
+    /// Why (#4022): A bundle naming a member that does not exist is a MANIFEST
+    /// BUG, and the owner's instruction is that it fail at build/test time
+    /// rather than degrade silently in production. Runtime expansion already
+    /// narrows safely, so this is not a safety net — it is the tripwire that
+    /// makes a catalog rename (a leaf skill id changed, its bundle not updated)
+    /// fail CI instead of quietly shrinking an agent's capability.
+    /// What: `(bundle_id, unknown_member_id)` pairs, in catalog order. Empty is
+    /// the healthy state, and `SkillCatalog::builtin` `debug_assert!`s it.
+    /// Test: `builtin_function_skills_declare_only_known_members`,
+    /// `unknown_function_member_is_reported_by_validation`.
+    pub fn unknown_function_members(&self) -> Vec<(String, String)> {
+        self.manifests
+            .iter()
+            .flat_map(|m| {
+                m.members
+                    .iter()
+                    .filter(|member| self.get(member).is_none())
+                    .map(|member| (m.id.clone(), member.clone()))
+            })
+            .collect()
+    }
+}
+
+/// Mutable accumulator threaded through [`SkillCatalog::expand_id`].
+///
+/// Why/What: Four parallel `&mut` parameters through a recursive walk is how
+/// a resolution bug gets written; one struct keeps the dedup sets and the
+/// output in lockstep. `expanded` is both the cycle guard and the memo table
+/// (see [`SkillCatalog::expand_id`]); because it also makes each id reachable
+/// once, `unresolved` needs no dedup scan of its own.
+/// Test: `function_skill_expands_to_the_union_of_its_members_tools`,
+/// `function_skill_fan_out_expands_in_linear_work`.
+#[derive(Default)]
+struct Expansion {
+    tools: Vec<String>,
+    seen_tools: BTreeSet<String>,
+    unresolved: Vec<String>,
+    expanded: BTreeSet<String>,
 }
 
 /// The outcome of expanding a `[skills].allow` list.

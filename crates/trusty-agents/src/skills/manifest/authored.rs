@@ -138,6 +138,11 @@ fn parse(path: &Path, content: &str) -> Vec<SkillManifest> {
             kind,
             tools: vec![tool],
             provider: None,
+            // #4022: authored manifests are always LEAVES. The frontmatter
+            // dialect has no `members:` key and this parser requires a `tools:`
+            // list, so no `.md` dropped into a skill source can declare a bundle
+            // — one authored file can never widen one grant into N.
+            members: Vec::new(),
             origin: SkillOrigin::Authored {
                 path: path.display().to_string(),
             },
