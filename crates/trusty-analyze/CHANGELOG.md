@@ -7,9 +7,29 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
-## [0.7.4] — 2026-07-21
+## [0.7.4] — 2026-07-27
 
 ### Fixed
+
+- **`cargo install trusty-analyze` failed to compile with `error[E0063]: missing
+  field `no_spawn_hint` in initializer of `DaemonBridgeConfig``**
+  ([#4079](https://github.com/bobmatnyc/trusty-tools/issues/4079)): a fresh
+  install of the previously-published `0.7.3` could not be built at all. `0.7.3`
+  was published 2026-07-07 and declared `trusty-common = "0.22.0"` — a caret
+  range `[0.22.0, 0.23.0)`. Five days later, `trusty-common` 0.22.5 added the
+  public field `no_spawn_hint` to `DaemonBridgeConfig` (a SemVer-breaking
+  public-field addition shipped in a *patch* bump; the struct carries neither
+  `#[non_exhaustive]` nor a `Default` impl, so a struct literal missing a field
+  is a hard compile error). `cargo install` re-resolves without a lockfile, so it
+  picked the newest in-range `0.22.x` and paired 0.7.3's pre-field source with a
+  post-field dependency. This release carries the corrected call site
+  (`crates/trusty-analyze/src/commands/daemon_guard.rs` now sets
+  `no_spawn_hint: None`) and declares `trusty-common ^0.26.0`, verified against
+  the live registry with `cargo publish --dry-run`. Workspace CI never caught
+  this because every member consumes `trusty-common` through a path dependency
+  plus a root `[patch.crates-io]` override, so caller and definition are
+  permanently in lockstep and no version resolution ever happens locally.
+  Users on 0.7.3 could work around it with `cargo install trusty-analyze --locked`.
 
 - **Smell-count false positives made the codebase-wide quality metric untrustworthy**
   ([#3522](https://github.com/bobmatnyc/trusty-tools/issues/3522)): the
