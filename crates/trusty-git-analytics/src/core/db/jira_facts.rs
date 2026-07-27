@@ -194,6 +194,9 @@ pub fn set_cursor(
 pub struct FreshnessStatus {
     /// Table name checked.
     pub table: &'static str,
+    /// JIRA project this verdict covers, or `None` when the check was run
+    /// across every project in the table.
+    pub project: Option<String>,
     /// Total row count in the table.
     pub row_count: i64,
     /// Unix-seconds timestamp of the most recently *synced* (not
@@ -207,7 +210,36 @@ pub struct FreshnessStatus {
     pub stale: bool,
 }
 
-/// Check freshness of both JIRA fact tables against `max_age_days`.
+/// Every JIRA project that has ever recorded a sync cursor.
+///
+/// Why: the freshness guard defaults to checking *all* of them. A
+/// table-wide freshness aggregate is blind to a per-project outage — with
+/// projects A and B on a schedule, B's sync dying (revoked credentials, a
+/// renamed key, a cron entry that quietly stopped) leaves A's writes keeping
+/// `MAX(synced_at)` recent, and the guard prints OK for a dead ingestion
+/// path. Enumerating the cursor table makes "which projects should be
+/// fresh?" a fact the checker reads rather than an argument the operator has
+/// to remember to pass.
+///
+/// # Errors
+///
+/// Returns [`TgaError::DbError`] if the query fails.
+pub fn list_cursor_projects(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT project_key FROM jira_sync_cursor ORDER BY project_key")
+        .map_err(TgaError::from)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(TgaError::from)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(TgaError::from)?);
+    }
+    Ok(out)
+}
+
+/// Check freshness of both JIRA fact tables against `max_age_days`,
+/// optionally restricted to one `project_key`.
 ///
 /// Why measuring `MAX(synced_at)` and not `MAX(transitioned_at)` /
 /// `MAX(created_at)`: a historical backfill populates old business
@@ -217,35 +249,52 @@ pub struct FreshnessStatus {
 /// recently", which is the actual question a cron-health check needs
 /// answered.
 ///
-/// An empty table is always reported `stale = true` regardless of
-/// `max_age_days` — this is the "effort-scoring cron gap" failure mode
-/// from the issue (a fact table that was never wired into cron at all).
+/// Why `project_key` matters: without it this aggregate is table-wide, so
+/// one healthy project masks another project's dead sync — see
+/// [`list_cursor_projects`]. `None` keeps the original all-projects
+/// behaviour, which is still the right answer for a single-project install
+/// and for a database with no cursors yet.
+///
+/// An empty (or empty-for-this-project) table is always reported
+/// `stale = true` regardless of `max_age_days` — this is the "effort-scoring
+/// cron gap" failure mode from the issue (a fact table that was never wired
+/// into cron at all).
 ///
 /// # Errors
 ///
 /// Returns [`TgaError::DbError`] if either query fails.
-pub fn check_freshness(conn: &Connection, max_age_days: i64) -> Result<Vec<FreshnessStatus>> {
+pub fn check_freshness(
+    conn: &Connection,
+    max_age_days: i64,
+    project_key: Option<&str>,
+) -> Result<Vec<FreshnessStatus>> {
     let now = chrono::Utc::now().timestamp();
     let threshold_seconds = max_age_days.saturating_mul(86_400);
 
     let mut out = Vec::with_capacity(2);
     for table in ["fact_ticket_transitions", "fact_jira_comment_detail"] {
-        let (row_count, max_synced_at): (i64, Option<i64>) = conn
-            .query_row(
-                &format!("SELECT COUNT(*), MAX(synced_at) FROM {table}"),
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(TgaError::from)?;
+        let sql = match project_key {
+            Some(_) => {
+                format!("SELECT COUNT(*), MAX(synced_at) FROM {table} WHERE project_key = ?1")
+            }
+            None => format!("SELECT COUNT(*), MAX(synced_at) FROM {table}"),
+        };
+        let map_row = |row: &rusqlite::Row<'_>| Ok((row.get(0)?, row.get(1)?));
+        let (row_count, max_synced_at): (i64, Option<i64>) = match project_key {
+            Some(key) => conn.query_row(&sql, params![key], map_row),
+            None => conn.query_row(&sql, [], map_row),
+        }
+        .map_err(TgaError::from)?;
 
         let age_seconds = max_synced_at.map(|t| now - t);
         let stale = match age_seconds {
-            None => true, // empty table
+            None => true, // empty table (for this scope)
             Some(age) => age > threshold_seconds,
         };
 
         out.push(FreshnessStatus {
             table,
+            project: project_key.map(str::to_string),
             row_count,
             max_synced_at,
             age_seconds,
@@ -453,7 +502,7 @@ mod tests {
     #[test]
     fn freshness_reports_stale_when_tables_are_empty() {
         let db = Database::open_in_memory().expect("open");
-        let statuses = check_freshness(db.connection(), 2).expect("check");
+        let statuses = check_freshness(db.connection(), 2, None).expect("check");
         assert_eq!(statuses.len(), 2);
         for s in &statuses {
             assert_eq!(s.row_count, 0);
@@ -473,7 +522,7 @@ mod tests {
         upsert_comment_detail(db.connection(), &sample_comment("PROJ-1", "1"))
             .expect("upsert comment");
 
-        let statuses = check_freshness(db.connection(), 2).expect("check");
+        let statuses = check_freshness(db.connection(), 2, None).expect("check");
         for s in &statuses {
             assert_eq!(s.row_count, 1);
             assert!(s.max_synced_at.is_some());
@@ -500,7 +549,7 @@ mod tests {
             )
             .expect("backdate");
 
-        let statuses = check_freshness(db.connection(), 2).expect("check");
+        let statuses = check_freshness(db.connection(), 2, None).expect("check");
         let transitions = statuses
             .iter()
             .find(|s| s.table == "fact_ticket_transitions")
@@ -510,5 +559,69 @@ mod tests {
             "a row synced 10 days ago must be stale against a 2-day threshold"
         );
         assert!(transitions.age_seconds.unwrap() >= 10 * 86_400);
+    }
+
+    /// The HIGH finding from PR #4067 review: one project's ongoing writes
+    /// must not mask another project's dead sync. Unscoped, the table-wide
+    /// aggregate reports OK; scoped, the dead project reports STALE.
+    #[test]
+    fn freshness_is_project_scoped() {
+        let db = Database::open_in_memory().expect("open");
+
+        // Project A: written now (healthy).
+        let mut healthy = sample_transition("A-1", "Done", "2026-01-01T00:00:00Z");
+        healthy.project_key = "A".into();
+        upsert_ticket_transition(db.connection(), &healthy).expect("upsert A");
+        let mut healthy_comment = sample_comment("A-1", "1");
+        healthy_comment.project_key = "A".into();
+        upsert_comment_detail(db.connection(), &healthy_comment).expect("upsert A comment");
+
+        // Project B: written 10 days ago (its sync stopped running).
+        let mut dead = sample_transition("B-1", "Done", "2026-01-01T00:00:00Z");
+        dead.project_key = "B".into();
+        upsert_ticket_transition(db.connection(), &dead).expect("upsert B");
+        let ten_days_ago = chrono::Utc::now().timestamp() - 10 * 86_400;
+        db.connection()
+            .execute(
+                "UPDATE fact_ticket_transitions SET synced_at = ?1 WHERE project_key = 'B'",
+                params![ten_days_ago],
+            )
+            .expect("backdate B");
+
+        let unscoped = check_freshness(db.connection(), 2, None).expect("unscoped");
+        let unscoped_transitions = unscoped
+            .iter()
+            .find(|s| s.table == "fact_ticket_transitions")
+            .expect("present");
+        assert!(
+            !unscoped_transitions.stale,
+            "the table-wide aggregate is exactly the blind spot: A's write hides B"
+        );
+
+        let scoped = check_freshness(db.connection(), 2, Some("B")).expect("scoped");
+        let scoped_transitions = scoped
+            .iter()
+            .find(|s| s.table == "fact_ticket_transitions")
+            .expect("present");
+        assert!(
+            scoped_transitions.stale,
+            "project B's dead sync must surface once the check is scoped to it"
+        );
+        assert_eq!(scoped_transitions.project.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn list_cursor_projects_returns_every_synced_project() {
+        let db = Database::open_in_memory().expect("open");
+        assert!(list_cursor_projects(db.connection())
+            .expect("query")
+            .is_empty());
+
+        set_cursor(db.connection(), "B", "2026-01-01T00:00:00Z", 1).expect("set B");
+        set_cursor(db.connection(), "A", "2026-01-01T00:00:00Z", 1).expect("set A");
+        assert_eq!(
+            list_cursor_projects(db.connection()).expect("query"),
+            vec!["A".to_string(), "B".to_string()]
+        );
     }
 }

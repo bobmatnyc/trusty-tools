@@ -35,12 +35,14 @@ use clap::Args;
 use tracing::{info, warn};
 
 use tga::collect::errors::CollectError;
-use tga::collect::jira::sync::{build_jql, next_cursor, resolve_scope};
+use tga::collect::jira::sync::{
+    build_jql, plan_cursor, resolve_scope, validate_project_key, CursorPlan,
+};
 use tga::collect::jira::{ChangelogIssue, JiraClient};
 use tga::core::config::Config;
 use tga::core::db::{
-    check_freshness, get_cursor, set_cursor, upsert_comment_detail, upsert_ticket_transition,
-    CommentDetailRow, Database, TicketTransitionRow,
+    check_freshness, get_cursor, list_cursor_projects, set_cursor, upsert_comment_detail,
+    upsert_ticket_transition, CommentDetailRow, Database, FreshnessStatus, TicketTransitionRow,
 };
 
 /// Page size for `search_with_changelog` calls within one sync run. Kept
@@ -92,8 +94,8 @@ pub struct JiraSyncArgs {
     /// first-time backfill against a large project). [default: 10000]
     #[arg(long, value_name = "N")]
     pub max_tickets: Option<usize>,
-    /// Fetch from JIRA and report counts without writing to the database or
-    /// advancing the cursor.
+    /// Fetch from JIRA (including comments, so the counts are real) and
+    /// report them without writing to the database or advancing the cursor.
     #[arg(long, default_value_t = false)]
     pub dry_run: bool,
 }
@@ -110,8 +112,11 @@ as a health check (e.g. from the same cron slot as `tga jira sync`, or a\n\
 separate monitoring job) so a sync that silently stopped running is caught\n\
 loudly instead of downstream reports serving stale data with no alarm.",
     after_help = "EXAMPLES:\n\
-  # Standard health check (fails the process if either table is stale)\n\
+  # Standard health check: every project with a sync cursor, checked\n\
+  # individually (fails the process if ANY project's table is stale)\n\
   tga jira freshness\n\n\
+  # Check one project only\n\
+  tga jira freshness --project PROJ\n\n\
   # Report only, never fail the process (e.g. informational dashboard use)\n\
   tga jira freshness --report-only --max-age-days 7"
 )]
@@ -123,6 +128,10 @@ pub struct JiraFreshnessArgs {
     /// Always exit 0, even when a table is stale or empty (report-only mode).
     #[arg(long, default_value_t = false)]
     pub report_only: bool,
+    /// Check only this JIRA project. Default: check every project that has
+    /// a sync cursor and fail if ANY of them is stale.
+    #[arg(long, value_name = "KEY")]
+    pub project: Option<String>,
 }
 
 /// Parse a `YYYY-MM-DD` CLI date into a UTC midnight `DateTime`.
@@ -142,20 +151,25 @@ fn parse_cli_date(s: &str) -> anyhow::Result<DateTime<Utc>> {
 ///
 /// Returns an error if neither is set — `tga jira sync` cannot run without
 /// a project scope.
+/// The key is additionally validated against JIRA's key grammar before it
+/// can reach JQL interpolation — see
+/// [`tga::collect::jira::sync::validate_project_key`].
 fn resolve_project_key(config: &Config, cli_project: Option<&str>) -> anyhow::Result<String> {
-    if let Some(p) = cli_project {
-        return Ok(p.to_string());
-    }
-    config
-        .jira
-        .as_ref()
-        .and_then(|j| j.project_key.clone())
-        .filter(|p| !p.is_empty())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
+    let key = match cli_project {
+        Some(p) => p.to_string(),
+        None => config
+            .jira
+            .as_ref()
+            .and_then(|j| j.project_key.clone())
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
                 "no JIRA project scope: pass --project <KEY> or set jira.project_key in config.yaml"
             )
-        })
+            })?,
+    };
+    validate_project_key(&key).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(key)
 }
 
 /// Build a [`JiraClient`] from config, surfacing a clear error when
@@ -173,12 +187,29 @@ fn build_client(config: &Config) -> anyhow::Result<JiraClient> {
 
 /// Dispatch entry point for `tga jira sync`.
 ///
+/// ## Partial failure is never silent, and never permanent
+///
+/// A per-ticket comment fetch can still fail after its retry budget (see
+/// [`tga::collect::jira::retry`]). When it does, two things happen that did
+/// not happen before PR #4067's review round 1:
+///
+/// 1. The ticket is recorded as failed, and the incremental cursor is
+///    clamped so it never rises above the *earliest* failure — the ticket
+///    stays inside the next run's `updated >=` window. See
+///    [`plan_cursor`] for the full invariant. Previously the cursor advanced
+///    to the batch maximum, putting the failed ticket permanently below
+///    every future window: its comments were lost forever, silently.
+/// 2. The run reports the failure count and returns an error, so the process
+///    exits non-zero and a cron schedule surfaces it. Previously it exited 0
+///    with a `warn!` nobody reads.
+///
+/// The ticket's transitions are still persisted, and every write is an
+/// upsert, so the re-read on the next run is idempotent.
+///
 /// # Errors
 ///
-/// Propagates JIRA HTTP/auth failures and database errors. A per-ticket
-/// comment-fetch failure is downgraded to a `warn!` and the ticket's
-/// transitions are still persisted (partial progress beats an all-or-
-/// nothing abort on a single flaky ticket).
+/// Propagates JIRA HTTP/auth failures and database errors, and returns an
+/// error when any ticket's comments could not be ingested.
 pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> anyhow::Result<()> {
     let project_key = resolve_project_key(&config, args.project.as_deref())?;
     let client = build_client(&config)?;
@@ -189,23 +220,26 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
         .map(|d| d.with_timezone(&Utc));
 
     let scope = resolve_scope(&project_key, explicit_since, args.backfill, stored_cursor);
-    let jql = build_jql(&scope);
     let max_tickets = args.max_tickets.unwrap_or(DEFAULT_MAX_TICKETS);
 
     info!(
         project = %project_key,
-        jql = %jql,
+        jql = %build_jql(&scope),
         backfill = args.backfill,
         dry_run = args.dry_run,
         "starting tga jira sync"
     );
 
-    let issues = client.search_with_changelog(&jql, max_tickets).await?;
+    let issues = client.search_with_changelog(&scope, max_tickets).await?;
 
     let mut tickets_scanned = 0usize;
     let mut transitions_written = 0usize;
-    let mut comments_written = 0usize;
+    let mut comments_ingested = 0usize;
     let mut observed_updated: Vec<DateTime<Utc>> = Vec::new();
+    // Ticket keys whose comments could not be ingested, and their `updated`
+    // timestamps — the inputs the cursor clamp is computed from.
+    let mut failed_tickets: Vec<String> = Vec::new();
+    let mut failed_updated: Vec<Option<DateTime<Utc>>> = Vec::new();
 
     for issue in &issues {
         tickets_scanned += 1;
@@ -213,16 +247,21 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
             observed_updated.push(u);
         }
 
-        if args.dry_run {
-            transitions_written += issue.transitions.len();
-            continue;
+        if !args.dry_run {
+            write_transitions(db, issue)?;
         }
-
-        write_transitions(db, issue)?;
         transitions_written += issue.transitions.len();
 
+        // Comments are fetched even in dry-run: the flag suppresses writes,
+        // not reads, and its whole purpose is to report the counts a real
+        // run would produce. Skipping the fetch made it structurally report
+        // `0 comment(s)` for every preview.
         match client.fetch_comments(&issue.key).await {
             Ok(comments) => {
+                comments_ingested += comments.len();
+                if args.dry_run {
+                    continue;
+                }
                 for c in &comments {
                     let row = CommentDetailRow {
                         ticket_key: issue.key.clone(),
@@ -233,46 +272,77 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
                         body_len: c.body_len,
                     };
                     upsert_comment_detail(db.connection(), &row)?;
-                    comments_written += 1;
                 }
             }
             Err(e) => {
                 warn!(
                     ticket = %issue.key,
                     error = %e,
-                    "failed to fetch comments for this ticket; transitions were still persisted"
+                    "failed to fetch comments for this ticket; holding the sync \
+                     cursor at or below it so the next run re-fetches it"
                 );
+                failed_tickets.push(issue.key.clone());
+                failed_updated.push(issue.updated);
             }
         }
     }
 
     if !args.dry_run {
-        if let Some(next) = next_cursor(&observed_updated) {
-            set_cursor(
+        match plan_cursor(&observed_updated, &failed_updated) {
+            CursorPlan::Advance(next) => set_cursor(
                 db.connection(),
                 &project_key,
                 &next.to_rfc3339(),
                 tickets_scanned as i64,
-            )?;
-        } else {
-            info!(
+            )?,
+            CursorPlan::Hold => info!(
                 project = %project_key,
                 tickets_scanned,
-                "no `updated` timestamps observed this run; cursor left unchanged"
-            );
+                failures = failed_tickets.len(),
+                "cursor left unchanged (no usable `updated` timestamps, or a \
+                 failed ticket could not be placed on the timeline)"
+            ),
         }
     }
 
     println!(
         "JIRA sync ({project_key}): {tickets_scanned} ticket(s) scanned, \
-         {transitions_written} transition(s), {comments_written} comment(s){}.",
+         {transitions_written} transition(s), {comments_ingested} comment(s), \
+         {} failed ticket(s){}.",
+        failed_tickets.len(),
         if args.dry_run {
             " [dry-run: no writes]"
         } else {
             ""
         }
     );
+
+    if !failed_tickets.is_empty() {
+        anyhow::bail!(
+            "JIRA sync ({project_key}) could not ingest comments for {} of {} ticket(s): {}. \
+             The sync cursor was held at or below the earliest failure, so the next run \
+             re-fetches them — but this run's data is incomplete and must not be treated \
+             as a successful sync.",
+            failed_tickets.len(),
+            tickets_scanned,
+            summarize_keys(&failed_tickets)
+        );
+    }
     Ok(())
+}
+
+/// Render a failed-ticket list for an error message, capped so a mass
+/// failure does not produce an unreadable wall of keys.
+fn summarize_keys(keys: &[String]) -> String {
+    const MAX_LISTED: usize = 10;
+    if keys.len() <= MAX_LISTED {
+        return keys.join(", ");
+    }
+    format!(
+        "{}, … and {} more",
+        keys[..MAX_LISTED].join(", "),
+        keys.len() - MAX_LISTED
+    )
 }
 
 /// Persist every transition on one [`ChangelogIssue`] via a single
@@ -298,12 +368,49 @@ fn write_transitions(db: &mut Database, issue: &ChangelogIssue) -> anyhow::Resul
 
 /// Dispatch entry point for `tga jira freshness`.
 ///
+/// ## Scoping
+///
+/// `--project KEY` checks one project. With no `--project`, every project
+/// carrying a sync cursor is checked *individually* and the command fails if
+/// any one of them is stale. That default is deliberate: the freshness
+/// aggregate is table-wide, so on a multi-project install one healthy
+/// project's writes keep `MAX(synced_at)` recent and mask another project's
+/// dead sync entirely — the guard would print OK for an ingestion path that
+/// has not run in weeks. Enumerating the cursors makes the guard correct by
+/// default instead of correct only when invoked carefully.
+///
+/// A database with no cursors at all (nothing has ever synced) falls back to
+/// the unscoped, all-projects check, which correctly reports the empty
+/// tables as stale.
+///
 /// # Errors
 ///
-/// Returns an error (non-zero exit) if any fact table is stale/empty and
+/// Returns an error (non-zero exit) if any checked scope is stale/empty and
 /// `--report-only` was not passed, or if the underlying DB query fails.
 pub fn run_freshness(db: &Database, args: JiraFreshnessArgs) -> anyhow::Result<()> {
-    let statuses = check_freshness(db.connection(), args.max_age_days)?;
+    let scopes: Vec<Option<String>> = match &args.project {
+        Some(p) => {
+            validate_project_key(p).map_err(|e| anyhow::anyhow!(e))?;
+            vec![Some(p.clone())]
+        }
+        None => {
+            let projects = list_cursor_projects(db.connection())?;
+            if projects.is_empty() {
+                vec![None]
+            } else {
+                projects.into_iter().map(Some).collect()
+            }
+        }
+    };
+
+    let mut statuses: Vec<FreshnessStatus> = Vec::new();
+    for scope in &scopes {
+        statuses.extend(check_freshness(
+            db.connection(),
+            args.max_age_days,
+            scope.as_deref(),
+        )?);
+    }
 
     let mut any_stale = false;
     for s in &statuses {
@@ -313,8 +420,12 @@ pub fn run_freshness(db: &Database, args: JiraFreshnessArgs) -> anyhow::Result<(
         };
         let verdict = if s.stale { "STALE" } else { "OK" };
         println!(
-            "{:<28} rows={:<8} last_synced={:<14} [{}]",
-            s.table, s.row_count, age_desc, verdict
+            "{:<10} {:<28} rows={:<8} last_synced={:<14} [{}]",
+            s.project.as_deref().unwrap_or("<all>"),
+            s.table,
+            s.row_count,
+            age_desc,
+            verdict
         );
         if s.stale {
             any_stale = true;
@@ -323,9 +434,14 @@ pub fn run_freshness(db: &Database, args: JiraFreshnessArgs) -> anyhow::Result<(
 
     if any_stale {
         let msg = format!(
-            "one or more JIRA fact tables are stale or empty (threshold: {} day(s)); \
-             see rows above",
-            args.max_age_days
+            "one or more JIRA fact tables are stale or empty (threshold: {} day(s), \
+             scopes checked: {}); see rows above",
+            args.max_age_days,
+            scopes
+                .iter()
+                .map(|s| s.as_deref().unwrap_or("<all>"))
+                .collect::<Vec<_>>()
+                .join(", ")
         );
         if args.report_only {
             warn!("{msg}");

@@ -12,6 +12,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - JIRA changelog + comment extraction client, covering issue transition history and per-comment detail (closes [#3966](https://github.com/bobmatnyc/trusty-tools/issues/3966)).
 - `fact_ticket_transitions` + `fact_jira_comment_detail` schema, introduced by migration `0023_jira_ingestion`.
 - `tga jira sync` and `tga jira freshness` subcommands to drive ingestion and report per-project data freshness.
+- `tga jira freshness --project <KEY>` scopes the freshness guard to one project; with no flag it now checks every project carrying a sync cursor individually, so one project's ongoing writes can no longer mask another project's dead sync.
+- Bounded retry with exponential backoff (429 / 5xx / timeouts) on the JIRA paged read paths, so a transient rate-limit response during a backfill no longer turns into a ticket-level ingestion failure.
+
+### Fixed
+
+- `tga jira sync` no longer advances the incremental cursor past a ticket whose comment fetch failed. Previously the cursor moved to the batch maximum, leaving the failed ticket permanently below every later `updated >=` window — its comments were lost silently, with the process still exiting 0. The cursor is now clamped at or below the earliest failure, the failure count is printed in the run summary, and the run exits non-zero.
+- `tga jira sync` paginates the changelog walk by re-anchoring the `updated >=` window instead of by `startAt` offset. Offset paging over `ORDER BY updated ASC` let a ticket edited mid-walk shift an unread ticket across the read boundary, permanently excluding it from later runs.
+- `tga jira sync --dry-run` now fetches comments and reports their real count instead of always printing `0 comment(s)`; it still writes nothing and leaves the cursor untouched.
+- A JIRA project key that is not `[A-Za-z][A-Za-z0-9_]*` is rejected locally instead of being interpolated into JQL, where it could silently widen the query and let another project's tickets advance this project's cursor.
+- A `${ENV_VAR}` JIRA credential whose variable is unset is now a startup configuration error naming the field and variable, instead of an empty password surfacing as an opaque HTTP 401.
 
 ---
 ## [2.9.4] — 2026-07-21
