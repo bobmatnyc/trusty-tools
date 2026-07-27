@@ -639,9 +639,105 @@ pub struct AgentInfo {
     /// Test: `agents::extends::tests` — see `extends_*` unit tests.
     #[serde(default)]
     pub extends: Option<String>,
+
+    /// Privilege tier declaration (#4168, epic #4167 — L0/L1 orchestration
+    /// model), raw as parsed from TOML. Use [`AgentInfo::tier`] rather than
+    /// reading this field directly.
+    ///
+    /// Why: The owner's tiered persona model (#4167) needs a privilege
+    /// boundary distinct from `role`. `role` is already triple-overloaded —
+    /// it selects the per-agent tool-registry branch
+    /// (`runtime::tool_registry::build_registry_for_agent`), gates
+    /// `delegate_to_agent`'s target allowlist
+    /// (`ASSISTANT_ALLOWED_DELEGATE_ROLES`), and drives capability matching
+    /// — and `hidden`'s own doc comment above already names the hazard of
+    /// adding a FOURTH meaning to it: "repurposing role would silently
+    /// change tool permissions too — not a safe mechanism." A dedicated
+    /// field keeps this SPECIFIC boundary (L0 orchestration-tier PM-grants
+    /// vs. L1 standard black-box posture) explicit, grep-able, and
+    /// independent of any future `role` value — an operator adding a new
+    /// specialist `role` can never accidentally grant it orchestration-tier
+    /// delegation reach as a side effect.
+    /// What: Raw TOML string (`"l0"` / `"orchestration"` for L0,
+    /// `"l1"` / `"standard"` for L1, case-insensitive). Resolved by
+    /// [`AgentInfo::tier`], which FAILS CLOSED: `None` (field absent —
+    /// every persona shipped before #4168, and the overwhelming majority
+    /// going forward), an unrecognized string, or a blank/whitespace-only
+    /// string all resolve to [`AgentTier::L1Standard`] — the most
+    /// restricted tier — NEVER [`AgentTier::L0Orchestration`]. This is a
+    /// privilege boundary, not a convenience default: every call site that
+    /// needs to know an agent's tier MUST call `AgentInfo::tier()`, never
+    /// match on this raw field.
+    /// Test: `agent_tier_defaults_to_l1_when_absent`,
+    /// `agent_tier_parses_l0_orchestration_aliases`,
+    /// `agent_tier_parses_l1_standard_aliases`,
+    /// `agent_tier_unknown_value_fails_closed_to_l1`,
+    /// `agent_tier_blank_value_fails_closed_to_l1`.
+    #[serde(default)]
+    pub tier: Option<String>,
+}
+
+/// Persona privilege tier (#4168, epic #4167 — L0/L1 orchestration model).
+///
+/// Why: The owner decision (2026-07-27) splits personas into two tiers: L0
+/// ("orchestration assistant") carries PM-tier grants (GitHub/PR/CI,
+/// session-state read, cross-project git, shell/build/test execution,
+/// delegation) under a YOLO risk posture the owner explicitly accepts —
+/// deliberately NOT sandboxed, but it must never ingest untrusted content
+/// (no Gmail/Drive/Calendar surface). L1 ("standard assistant") is today's
+/// `assistant`/`cto-assistant`/`izzie`: the documented black-box posture,
+/// which DOES ingest untrusted content and therefore must never be able to
+/// acquire L0's grants — including via delegation (#4169, epic #4167).
+/// This PR defines the tier and its one-directional delegation boundary
+/// ONLY; it grants L0 no actual capabilities (those are #4170-#4173) and
+/// creates no L0 persona instance.
+/// What: Two variants. `L1Standard` is `#[default]` — every accessor that
+/// falls back to `Default::default()` (or an explicit fail-closed match
+/// arm) lands on the restricted tier, never the elevated one.
+/// Test: See `AgentInfo::tier`'s Test pointer for parsing; delegation-gate
+/// behavior is covered by `crate::tools::delegate` tests (search
+/// `l1_to_l0` / `l0_to_l1` / `tier`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentTier {
+    /// L1 — standard assistant tier. Black-box posture; may ingest
+    /// untrusted content (Gmail/Drive/web); MUST NOT reach L0 via
+    /// delegation. The fail-closed default.
+    #[default]
+    L1Standard,
+    /// L0 — orchestration tier. PM-tier grants; YOLO risk posture
+    /// explicitly accepted by the owner; deliberately not sandboxed but
+    /// must never ingest untrusted content. Only reachable by an EXPLICIT
+    /// `tier = "l0"` / `tier = "orchestration"` declaration — never a
+    /// default, never inferred from `role`.
+    L0Orchestration,
 }
 
 impl AgentInfo {
+    /// Resolve this agent's privilege tier, fail-closed (#4168).
+    ///
+    /// Why: The single normalization point for the raw [`Self::tier`]
+    /// string — see that field's doc comment for the full fail-closed
+    /// rationale. Every consumer (the delegation gate, and any future
+    /// L0-gated capability) MUST call this rather than matching on the raw
+    /// field, so "what counts as L0" can never drift between call sites.
+    /// What: Case-insensitive, trimmed match against `"l0"`/`"orchestration"`
+    /// (-> [`AgentTier::L0Orchestration`]) and `"l1"`/`"standard"` (->
+    /// [`AgentTier::L1Standard`]); anything else — absent, blank, or an
+    /// unrecognized string — resolves to [`AgentTier::L1Standard`].
+    /// Test: `agent_tier_defaults_to_l1_when_absent`,
+    /// `agent_tier_parses_l0_orchestration_aliases`,
+    /// `agent_tier_parses_l1_standard_aliases`,
+    /// `agent_tier_unknown_value_fails_closed_to_l1`,
+    /// `agent_tier_blank_value_fails_closed_to_l1`.
+    pub fn tier(&self) -> AgentTier {
+        match self.tier.as_deref().map(str::trim) {
+            Some(s) if s.eq_ignore_ascii_case("l0") || s.eq_ignore_ascii_case("orchestration") => {
+                AgentTier::L0Orchestration
+            }
+            _ => AgentTier::L1Standard,
+        }
+    }
+
     /// The human-facing speaker label for this persona (#3738).
     ///
     /// Why: The chat surface (GUI per-message speaker attribution, the REPL

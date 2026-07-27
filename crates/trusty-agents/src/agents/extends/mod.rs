@@ -186,7 +186,10 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 /// `extends_nameless_child_does_not_inherit_named_base_display`,
 /// `extends_scalar_child_override`, `extends_llm_child_overrides_temperature_only`,
 /// `extends_llm_child_overrides_max_tokens_only`,
-/// `extends_llm_child_inherits_when_omitted`.
+/// `extends_llm_child_inherits_when_omitted`,
+/// `extends_tier_child_inherits_l0_from_base_when_omitted`,
+/// `extends_tier_child_can_downgrade_l0_base_to_l1`,
+/// `extends_tier_omitted_everywhere_resolves_l1`.
 pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // #3936: the base's own contribution to the `permissions.scopes`
     // accumulator, captured BEFORE `base` moves into `merged` below.
@@ -274,6 +277,22 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // (`false` is the neutral default and inherits the base).
     if child.agent.persistent_session {
         merged.agent.persistent_session = true;
+    }
+    // `tier` (#4168, epic #4167 — L0/L1 orchestration model): child-declares-
+    // wins, child-omits-inherits — the SAME posture as `enforce_search_indexes`/
+    // `default_tier` below: a hardened (L1) base stays hardened under a
+    // silent overlay, and this is a privilege boundary, not a convenience
+    // default, so the rule cuts both ways deliberately. An L0 base's
+    // elevated tier travels to a child overlay that doesn't explicitly
+    // declare its own `tier` — exactly like every other un-redeclared field
+    // in an `extends` overlay — while a child that DOES declare `tier`
+    // (including downgrading an L0 base to `l1`) always wins. This is
+    // distinct from the "absent/malformed -> L1" fail-closed resolution
+    // `AgentInfo::tier()` performs: that guards a chain where NO level ever
+    // declares a recognized value, not a child that inherits an ancestor's
+    // explicit declaration.
+    if child.agent.tier.is_some() {
+        merged.agent.tier = child.agent.tier.clone();
     }
 
     // --- user_authority: NEVER inherited/unioned through `extends` ---
