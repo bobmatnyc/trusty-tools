@@ -267,10 +267,16 @@ fn default_config_is_valid_toml() {
         .iter()
         .find(|s| s.name == "trusty-search")
         .expect("trusty-search present");
-    assert!(search.enabled, "trusty-search must ship enabled, not DISABLED");
+    assert!(
+        search.enabled,
+        "trusty-search must ship enabled, not DISABLED"
+    );
     assert_eq!(search.command, "trusty-search");
     assert_eq!(search.args, vec!["serve".to_string()]);
-    assert!(search.discover, "trusty-search should live-discover its tools");
+    assert!(
+        search.discover,
+        "trusty-search should live-discover its tools"
+    );
     assert!(
         !cfg.mcp
             .services

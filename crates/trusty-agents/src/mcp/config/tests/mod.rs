@@ -72,7 +72,10 @@ async fn load_or_create_writes_default_when_absent() {
         .iter()
         .find(|s| s.name == "trusty-search")
         .expect("trusty-search present as a live mcp.services entry");
-    assert!(search.enabled, "trusty-search must ship enabled, not DISABLED");
+    assert!(
+        search.enabled,
+        "trusty-search must ship enabled, not DISABLED"
+    );
     assert!(
         !cfg.mcp
             .services
@@ -200,7 +203,10 @@ async fn load_returns_documented_defaults_when_absent() {
         .iter()
         .find(|s| s.name == "trusty-search")
         .expect("trusty-search present in defaults");
-    assert!(search.enabled, "trusty-search must ship enabled, not DISABLED");
+    assert!(
+        search.enabled,
+        "trusty-search must ship enabled, not DISABLED"
+    );
 }
 
 #[tokio::test]
