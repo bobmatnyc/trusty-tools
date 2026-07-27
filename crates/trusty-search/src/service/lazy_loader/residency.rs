@@ -267,7 +267,7 @@ pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<Per
 /// `cold_park_index_absent_returns_false_and_leaves_no_stray_entry`,
 /// `cold_park_index_never_orphans_a_racing_cold_load`,
 /// `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`,
-/// `cold_park_index_handler_reap_never_orphans_concurrent_park` (round 5);
+/// `cold_park_index_handler_reap_guarded_before_park_never_orphans` (round 5);
 /// full disk-round-trip coverage in `tests/residency_cold_park.rs`.
 pub async fn cold_park_index(
     id: &IndexId,
