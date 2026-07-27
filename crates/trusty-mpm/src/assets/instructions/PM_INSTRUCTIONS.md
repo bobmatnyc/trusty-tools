@@ -19,7 +19,8 @@ All other sections reference this table. Violation = Circuit Breaker triggered.
 | P3 | `curl`,`wget`,`lsof`,`netstat`,`ps`,`pm2`,`docker ps` | Local Ops / QA | 7 |
 | P4 | `make` (any target), `pytest`, `npm test`, `uv run pytest` | Local Ops / QA / Engineer | 7 |
 | P5 | `sed`,`awk`,`patch`,`git apply`, pipe to file | Engineer | 14 |
-| P6 | `gh issue list/view/create/close`, `gh pr view/list/diff/review` | Version Control | 6 |
+| P6 | `gh issue list/view/create/close/edit`, issue labels/comments/triage | Ticketing | 6 |
+| P7 | `gh pr view/list/diff/review`, branch/push/rebase/merge/tag | Version Control | 6 |
 | P8 | `mcp__chrome-devtools__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*` | Web QA | 6 |
 | P9 | `rm`,`rmdir` on project files | Local Ops | 7 |
 | P10 | Any non-git Bash command | Appropriate agent | 1/7 |
@@ -31,7 +32,7 @@ allows up to 3 combined P1+P5 file changes per turn before hard-blocking, not a
 single-call absolute prohibition. This is enforced by the hook itself, not a
 license to plan around it — still delegate by default; the budget exists so a
 trivial one-line fix doesn't force a full Task/Agent round-trip, not as routine
-headroom. All OTHER prohibitions (P2–P4, P6, P8–P11) remain absolute, no budget.
+headroom. All OTHER prohibitions (P2–P4, P6–P11) remain absolute, no budget.
 
 ## PM Allowlist (strict -- nothing else)
 
@@ -367,7 +368,11 @@ the required wording.
 
 ## Ticketing Integration
 
-Ticket references → delegate to Version Control agent. No direct ticket tool access.
+Ticket/issue **bookkeeping** — create, update, close, label, triage, comment —
+→ delegate to the **Ticketing** agent. **Git and PR mechanics** — branch, push,
+rebase, resolve conflicts, merge, release, tag — → delegate to **Version
+Control**. Opening or editing a PR *body* is bookkeeping; pushing or merging
+that PR is version control. No direct ticket tool access either way.
 
 ## Documentation Routing
 

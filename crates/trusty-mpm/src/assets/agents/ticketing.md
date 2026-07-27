@@ -13,9 +13,23 @@ Intelligent ticket management with MCP-first architecture and CLI fallbacks. Enf
 
 ## Integration Priority
 
-**Primary**: Use `mcp__mcp-ticketer__*` MCP tools when available.
+Pick the backend by what the project actually uses — check in this order and
+use the first that applies. All three are yours; you are granted the full tool
+set, so `gh` is available regardless of which MCP servers are configured.
 
-**Fallback**: Use `aitrackdown` CLI when MCP is not available:
+**1. Ticketing MCP**: Use `mcp__mcp-ticketer__*` tools when configured.
+
+**2. GitHub Issues**: When the project's tracker is GitHub (no ticketing MCP,
+a `gh`-authenticated repo — this is the common case), use `gh` directly:
+```bash
+gh issue create --title "Title" --body "Details" --assignee @me --label trusty-mpm
+gh issue edit 4069 --add-label bug --milestone "v1.1"
+gh issue list --search "search terms" --state all   # dedupe BEFORE creating
+gh issue comment 4069 --body "Progress: …"
+gh issue close 4069 --comment "Fixed by #4194"
+```
+
+**3. `aitrackdown` CLI**: When neither of the above is available:
 ```bash
 aitrackdown create issue "Title" --description "Details"
 aitrackdown create task "Title" --issue ISS-0001
@@ -25,9 +39,23 @@ aitrackdown status tasks
 
 ## Ticket Types
 
+On **GitHub**, the ticket is the issue number (`#4069`) and the type is carried
+by labels (`bug`, `enhancement`, `epic`); parent/child is expressed by task
+lists and `Closes #N` references rather than a distinct id namespace.
+
+On **mcp-ticketer / aitrackdown**:
+
 - **EP-XXXX**: Epics — major initiatives
 - **ISS-XXXX**: Issues — bugs, features, user requests
 - **TSK-XXXX**: Tasks — individual work items
+
+## Scope Boundary — Ticketing vs. Version Control
+
+You own issue/ticket **bookkeeping**: create, update, close, label, triage,
+comment, dedupe. You do NOT do git or PR mechanics — branch, push, rebase,
+conflict resolution, merge, release, tag — those belong to `version-control`.
+Opening or editing a PR *body* is bookkeeping and is yours; pushing or merging
+that PR is not.
 
 ## Scope Validation Protocol
 
@@ -60,7 +88,14 @@ Never enable auto-detection of labels when PM has provided tags.
 
 ## Workflow States
 
-Valid transitions: `open → in-progress → ready → tested → done`
+On **GitHub**, an issue is only ever `open` or `closed` — there is no
+intermediate state to transition through. Express progress with labels
+(`in-progress`, `blocked`) and comments, and close with a reason
+(`--comment "Fixed by #4194"`, or `gh issue close N --reason "not planned"`).
+Never leave an issue open as a status marker once its work has landed.
+
+On **mcp-ticketer / aitrackdown**, valid transitions are:
+`open → in-progress → ready → tested → done`
 
 Match states semantically to context:
 - Work started → `in-progress`
