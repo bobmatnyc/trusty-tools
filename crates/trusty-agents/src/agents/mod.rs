@@ -22,6 +22,7 @@ pub mod in_process_runner;
 mod loader;
 mod model;
 mod params;
+pub mod permissions;
 pub mod persona;
 pub mod prompt_builder;
 pub mod registry;
@@ -39,6 +40,10 @@ pub use config::{
 pub use params::{
     AgentCompressConfig, AgentPluginsConfig, LlmParams, RbacConfig, RunnerConfig,
     SessionCompressionConfig, ToolChoice, WorkstreamContextConfig,
+};
+// #3936: the `[permissions]` section (DOC-57 §7).
+pub use permissions::{
+    AutonomyMode, GrantMode, PermissionGrant, PermissionsConfig, effective_scopes,
 };
 
 // Model resolution: `resolve_model` and `ModelSource` are part of the public

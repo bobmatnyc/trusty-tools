@@ -19,6 +19,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `StreamAssembly` gained a `usage: Option<ChatUsage>` field so per-call token
   usage — which Bedrock reports exactly once, in a terminal event — survives
   the streaming path instead of being dropped.
+- **`GET /api/agents/:name/permissions` — the Permissions pane's structured
+  backend (#3936, DOC-57 §7).** A new `[permissions]` `agent.toml` section
+  (`scopes`, `user_authority`, `default_tier`/`unauthenticated_tier`,
+  `autonomy`, `[[grants]]`) describes the four scattered enforcement
+  mechanisms (`[tools].allow`, `[tools].scopes`, RBAC tiers, the endpoint
+  scope filter) as one coherent model rather than inventing a new one. Every
+  response field carries an `enforced` boolean — `true` only for `scopes[]`,
+  which is now resolved by `agents::permissions::effective_scopes` and fed
+  into the SAME persona-chat dispatch gate the route reports on (so the
+  claim is never aspirational); every other field (`user_authority`, tiers,
+  `autonomy`, `grants`) is honestly `enforced: false`, since none has a live
+  enforcement site yet. `[permissions].scopes` supersedes legacy
+  `[tools].scopes` within one file (CC-9 — the union is deliberately not
+  taken) but still unions base-first across `extends` (§2.3), so a
+  partially-migrated inheritance chain never silently drops a base's
+  un-migrated grant. `source` distinguishes `declared` from
+  `inherited:<base>` so the class of defect DOC-57 §7.3 records (an agent
+  granting tools whose scopes it never actually declared) is visible in the
+  pane. `user_authority` (DOC-41 §5.5's reserved singleton) is now a real,
+  parsed `AgentConfig` field and is never inherited across `extends`
+  (PM-3) — the previously `#[ignore]`d
+  `extends_does_not_inherit_user_authority` regression test is un-ignored.
+  Read-only in every phase (PM-4); grants or widens nothing (C-06.4).
 
 ### Removed
 
