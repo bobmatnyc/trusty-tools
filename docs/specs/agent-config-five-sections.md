@@ -612,7 +612,7 @@ Agent skills may carry executable code — Python packages, binaries, or other i
   1. **Bundled implementation** — a skill package may include executable assets directly, discovered and loaded by the platform's plugin system at startup. The operator controls deployment and bears responsibility for auditing the code.
   2. **MCP server** — `McpService.command` in `~/.trusty-agents/config.toml`, operator-controlled platform infrastructure. A skill wraps such a server's tools exactly as it wraps any other tool.
 
-Security review is running in parallel as advisory input (§12). Mandatory controls over skill code vetting may be added in a later phase without contradicting this amendment.
+**Future enforcement (planned):** A security review is underway (issue #4080) to establish review-gated skill code loading. A planned epic will add a `build_plugin`-level check that refuses to load executable skill code unless a recorded review verdict exists, via a canonical package hash store and fail-closed verdict lookup. This amendment describes the current permissive state; §5.8 will be revisited once the review gate lands to make the gating requirement normative.
 
 ### 5.9 Conformance
 
@@ -1264,3 +1264,11 @@ tools *and* MCP connections. Users may read "Knowledge" as documents only.
   rationale, and updated §11.1 non-goal 1 to reflect the resolution. Updated
   conformance C-04.5 to permit executables in skill packages with operator
   responsibility for vetting.
+- **2026-07-27 (clarification)** — Sharpened §5.8's closing paragraph from
+  noting that mandatory controls "may" be added to stating that they "will" be
+  added. The planned review-gate epic (issue #4080) will implement a
+  `build_plugin`-level check enforcing a recorded security verdict before skill
+  code loads, via canonical package hash and fail-closed verdict lookup. This
+  amendment describes current permissive behavior; §5.8 will be revisited when
+  the review gate lands to make enforcement normative. Harmonizes this spec with
+  the stated intent that security review gates implementation.

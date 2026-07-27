@@ -666,13 +666,15 @@ persona name, because `display_name` is absent and the existing fallback
 `display_name: Izzie` via `extends: assistant` is the only path by which an
 agent instance acquires a persona name.
 
-### 2.6 Code ownership and responsibility (AMENDED 2026-07-27)
+### 2.6 Code ownership and responsibility (AMENDED 2026-07-27, clarified 2026-07-27)
 
-Agent skills may contain executable code (e.g., Python packages discovered and loaded via the skill plugin system). The responsibility for vetting, auditing, and managing that code rests with the operator and agent owner, not enforced by the platform.
+Agent skills may contain executable code (e.g., Python packages discovered and loaded via the skill plugin system). The responsibility for vetting, auditing, and managing that code rests with the operator and agent owner.
 
-**Historical note:** An earlier version of this spec proposed a file allowlist (`PackageContainsForeignFile` error) to exclude executable files from agent packages. That rule was policy-only — never enforced in `load_agent_package` (`loader.rs:764-784`) and has zero occurrences in the codebase. Executable skill code is already loading in production (the `cto-db` skill, loaded via `install_discovered_skill_plugins`, `runtime/startup.rs:153`). This amendment ratifies existing behavior and clarifies that responsibility lies with the owner/operator, not with automated platform controls.
+**Current state (2026-07-27):** At the time of this amendment, **no platform-enforced gating exists** — a skill package loads if its `manifest.json` is well-formed, regardless of review status. A planned review-gate epic (issue #4080, epic pending) will add a `build_plugin`-level check that refuses to load skill code unless a security review verdict is recorded (§10 item pending).
 
-**Explicit boundary, not ambiguous:** `~/.trusty-agents/config.toml`'s `McpService.command` (§4) legitimately references executables (`slack-mcp`, a stdio MCP server binary) — that is operator-controlled platform infrastructure, a different trust boundary from agent-authored content. This principle extends to agent-bundled code: an operator who deploys an agent with executable skill code accepts responsibility for its provenance and behavior. The platform imposes no gating or validation over such code.
+**Historical note:** An earlier version of this spec proposed a file allowlist (`PackageContainsForeignFile` error) to exclude executable files from agent packages. That rule was policy-only — never enforced in `load_agent_package` (`loader.rs:764-784`) and has zero occurrences in the codebase. Executable skill code is already loading in production (the `cto-db` skill, loaded via `install_discovered_skill_plugins`, `runtime/startup.rs:153`). This amendment ratifies existing behavior and clarifies that responsibility lies with the owner/operator.
+
+**Explicit boundary, not ambiguous:** `~/.trusty-agents/config.toml`'s `McpService.command` (§4) legitimately references executables (`slack-mcp`, a stdio MCP server binary) — that is operator-controlled platform infrastructure, a different trust boundary from agent-authored content. This principle extends to agent-bundled code: an operator who deploys an agent with executable skill code accepts responsibility for its provenance and behavior. **Future note:** once the review-gate epic lands, the platform will enforce a recorded security verdict before allowing skill code to load; at that point responsibility becomes joint operator/platform.
 
 ### 2.7 Directory-convention layout (worked example)
 
@@ -1956,6 +1958,15 @@ not a speculative extension.
   auditing, and managing such code. Updated conformance in §2.8 to reflect that
   directory packages may contain executables. Rescinds the earlier proposed
   rule that executable files would be rejected at load time.
+- **2026-07-27 (v3.3 clarification)** — Qualified §2.6's statement of current
+  state to clarify that no platform-enforced gating exists *at the time of this
+  amendment*, and that a planned review-gate epic (issue #4080) will add a
+  `build_plugin`-level check refusing to load skill code unless a security
+  review verdict is recorded. Inserted "Current state (2026-07-27)" subheading
+  to distinguish today's permissive loading from future enforced gating. Amended
+  closing paragraph to note that once the review-gate epic lands, responsibility
+  becomes joint operator/platform. This clarification harmonizes §2.6 with the
+  stated intent that a security review gates implementation.
 
 [gallery-doc]: ../research/agent-gallery-validation-20260716.md
 [eve-blog]: https://vercel.com/blog/introducing-eve
