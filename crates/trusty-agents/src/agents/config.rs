@@ -179,10 +179,49 @@ pub struct AgentConfig {
     /// Test: `skills::manifest::tests`.
     #[serde(default)]
     pub skills: SkillsConfig,
+
+    // #4026: cross-product subagent grants — the config source for the
+    // bridge-layer allow-set (epic #4021, OQ-3/OQ-7).
+    /// Optional `[subagents]` section (#4026, epic #4021) — which external
+    /// non-coding specialists this agent may target through `dispatch_task`.
+    ///
+    /// Why: OQ-7's owner ruling puts enforcement at the BRIDGE, fail-closed,
+    /// but OQ-3's ruling makes the caller's config the source of the set until
+    /// #4030's runtime-built domain authority exists to feed it. This section
+    /// is that source. Absent = EMPTY, never "all" — an agent with no
+    /// `[subagents]` section cannot reach any cross-product specialist, the
+    /// same deny-by-default posture `[skills].allow` takes.
+    /// What: [`SubagentsConfig`], whose `allowed` list is intersected with
+    /// `tools::cross_product::NON_CODING_TARGETS` by
+    /// `tools::cross_product::SubagentAllowSet` — config can only ever narrow
+    /// that floor, never widen it.
+    /// Test: `subagents_config_defaults_empty`, `subagents_config_parses_allowed`.
+    #[serde(default)]
+    pub subagents: SubagentsConfig,
 }
 
 fn default_adapter() -> Arc<dyn ModelAdapter> {
     Arc::new(crate::llm::adapter::GenericAdapter)
+}
+
+// #4026: minimal, forward-compatible shape — a struct (not a bare `Vec`) so
+// #4029's Sub-agents configuration section can add `deny`/`domain` keys
+// without a breaking config change, exactly as `SkillsConfig` was shaped.
+/// Optional `[subagents]` section in agent TOML (#4026, epic #4021).
+///
+/// Why: kept as its own struct rather than a bare list so #4029's Sub-agents
+/// configuration section — and #4030's domain-authority feed — can add fields
+/// later without a breaking change, mirroring [`SkillsConfig`]'s rationale.
+/// What: `allowed` is a list of external specialist names. `None` (missing
+/// section) and `Some(vec![])` both resolve to an EMPTY allow-set; the
+/// distinction is deliberately NOT load-bearing here because neither may grant
+/// anything (unlike `[skills]`, where absence leaves `[tools].allow` as the
+/// sole source). No glob dialect — exact names only.
+/// Test: `subagents_config_defaults_empty`, `subagents_config_parses_allowed`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SubagentsConfig {
+    #[serde(default)]
+    pub allowed: Option<Vec<String>>,
 }
 
 /// Optional `[skills]` section in agent TOML (#3933).

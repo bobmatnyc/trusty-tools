@@ -602,3 +602,71 @@ max_auto = 2
     let cfg: AgentConfig = toml::from_str(toml_str).expect("tolerates legacy [skills]");
     assert_eq!(cfg.agent.name, "x");
 }
+
+#[test]
+fn subagents_config_defaults_empty() {
+    // #4026 EMPTY-DEFAULT PIN: an agent TOML with no `[subagents]` section
+    // grants NO cross-product reach. An absent section must never be read as
+    // "all" — that would be a silent capability grant across a product
+    // boundary, the exact failure mode the owner's OQ-7 fail-closed ruling
+    // exists to prevent.
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert!(cfg.subagents.allowed.is_none());
+    assert!(
+        crate::tools::cross_product::SubagentAllowSet::from_allowed(
+            cfg.subagents.allowed.as_deref()
+        )
+        .is_empty(),
+        "absent [subagents] must resolve to the EMPTY allow-set"
+    );
+}
+
+#[test]
+fn subagents_config_parses_allowed() {
+    // #4026: `[subagents] allowed = [...]` parses alongside `[tools]`/`[skills]`
+    // without disturbing either — the same independence `skills_config_parses_allow`
+    // pins for the skills section.
+    let toml_str = r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+
+[tools]
+allow = ["git_log"]
+
+[subagents]
+allowed = ["research", "ticketing"]
+"#;
+    let cfg: AgentConfig = toml::from_str(toml_str).expect("parses");
+    assert_eq!(
+        cfg.subagents.allowed.as_deref(),
+        Some(&["research".to_string(), "ticketing".to_string()][..])
+    );
+    assert_eq!(
+        cfg.tools.allow.as_deref(),
+        Some(&["git_log".to_string()][..])
+    );
+}

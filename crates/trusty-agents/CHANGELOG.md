@@ -7,6 +7,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`dispatch_task` can now hand a task to a NAMED non-coding specialist in
+  trusty-code's roster, behind a fail-closed bridge-layer allow-set (#4026,
+  #4028; epic #4021 bridge track).** The bridge previously hardcoded a single
+  opaque target (`pm`), so a trusty-agents agent could never reach the
+  `research`/`ticketing` specialists the owner's directive names. The tool
+  gained an optional `specialist` argument and an optional
+  HandoffContext-shaped `handoff` payload:
+  - **Fail-closed allow-set (#4026, epic #4021 OQ-3/OQ-7).** A named
+    specialist is resolved by `tools::cross_product::SubagentAllowSet` — the
+    INTERSECTION of the bridge's own `NON_CODING_TARGETS` floor (`research`,
+    `ticketing`) with the calling agent's new `[subagents].allowed` config
+    list. Caller configuration can only ever NARROW that floor: a config that
+    lists `rust-engineer` is still denied AT THE BRIDGE, per the owner's OQ-7
+    ruling that enforcement is never caller-trusted alone. The default is
+    EMPTY — an agent with no `[subagents]` section grants no cross-product
+    reach at all, so this ships as no silent capability grant. A denial
+    returns before the backend is invoked; nothing is dispatched. #4030's
+    runtime-built domain authority will later feed the same `SubagentAllowSet`
+    seam without touching the bridge.
+  - **Propose-not-authorize envelope (#4028, epic #4021 OQ-6).** A named
+    specialist's result is wrapped in `tools::cross_product::ProposalEnvelope`
+    — origin agent, target agent, the CALLER's authority tier, and a
+    `Disposition` marker that `for_cross_product` can only ever set to
+    `Proposal`. This is DOC-41 §5.5's "propose-not-authorize, absolute for M1
+    — no exceptions" made structural rather than conventional, mirroring
+    #3078/AUTH-5's rule on `delegate_to_agent`: a caller holding
+    `user_authority` has that tier RECORDED on the envelope but the
+    specialist's output is still never an authorization — the holder acts on
+    the proposal in its own turn, under its own identity. No new authority
+    tier was invented; `CallerAuthority` names exactly the two states §5.5
+    already describes, and reports the fail-closed `Standard` until
+    #3074/AUTH-1 adds the `user_authority` field to `AgentConfig`.
+  - **Minimal HandoffContext (#4028, OQ-6).** `tools::cross_product::HandoffContext`
+    is a LOCAL copy of epic #2809's shape (`summary`/`relevant_state`/
+    `constraints`, 4 KiB serialized cap) with NO dependency on #2809 landing —
+    an over-cap payload is a recoverable error and the target is never
+    invoked.
+  - **Unchanged for every existing caller.** Omitting `specialist` is
+    byte-identical to pre-#4026 behaviour: same `route_task` derivation, same
+    default target (`pm`), same bare scrubbed transcript back with no
+    envelope. `scrub_branding` and the RBAC tier gate are untouched, and the
+    widened schema still names no backend and enumerates no roster.
+
+### Changed
+
+- **`PmBridgeBackend::run` gained a `target: Option<&str>` parameter (#4026).**
+  `None` preserves today's exact command line. Only the tcode leg honours a
+  target; the tm leg has no per-agent selector and deliberately ignores one
+  rather than mis-routing (the tool forces the tcode leg whenever a specialist
+  is named, so this is unreachable in practice).
+- **`AgentConfig` gained an optional `[subagents]` section (#4026).**
+  `SubagentsConfig { allowed: Option<Vec<String>> }` — a struct rather than a
+  bare list so #4029's Sub-agents configuration section can add fields without
+  a breaking config change, exactly as `SkillsConfig` was shaped. Absent =
+  EMPTY, never "all". Exact names only, no glob dialect.
+
 ### Fixed
 
 - **Streamed replies no longer flash blank or "(no narrative)" the moment a

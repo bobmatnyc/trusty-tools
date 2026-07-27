@@ -65,6 +65,7 @@ use tools::{ToolRegistry, delegate::DelegateToAgentTool};
 
 use crate::rbac::ServiceTier;
 use crate::subprocess;
+use crate::tools::cross_product::{CallerAuthority, SubagentAllowSet};
 use crate::tools::pm_bridge::PmBridgeTool;
 use crate::tools::pm_bridge_backend::ProcessPmBridge;
 
@@ -98,9 +99,16 @@ pub(super) async fn run_pm() -> Result<()> {
     // (`delegate_to_agent` above). RBAC-locked to deny ReadOnly + Analytics.
     {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        // #4026/#4028: same registration-time wiring as the history dispatch
+        // path — `[subagents].allowed` resolved into the bridge's fail-closed
+        // allow-set (absent = EMPTY), plus envelope provenance.
         registry.register(Arc::new(
             PmBridgeTool::new(Arc::new(ProcessPmBridge::from_project(cwd)))
-                .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics]),
+                .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics])
+                .with_allow_set(SubagentAllowSet::from_allowed(
+                    pm_cfg.subagents.allowed.as_deref(),
+                ))
+                .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard),
         ));
     }
     // #304: Coordinator-facing shell executor — see `tools::run_bash`.

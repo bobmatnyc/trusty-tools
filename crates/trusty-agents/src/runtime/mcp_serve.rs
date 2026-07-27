@@ -379,7 +379,12 @@ mod mcp_serve_tests {
         }
         #[async_trait::async_trait]
         impl PmBridgeBackend for RecordingBackend {
-            async fn run(&self, _route: BridgeRoute, task: &str) -> anyhow::Result<String> {
+            async fn run(
+                &self,
+                _route: BridgeRoute,
+                _target: Option<&str>,
+                task: &str,
+            ) -> anyhow::Result<String> {
                 self.seen.lock().unwrap().push(task.to_string());
                 Ok("backend transcript".into())
             }

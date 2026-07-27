@@ -9,11 +9,12 @@
 //! disk-based `.claude/agents/` and `.claude/skills/` always take precedence
 //! when present (see `agents::load_all_agents` and
 //! `skills::discover_skill_metadata`'s embedded-fallback branches).
-//! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the 32-agent dispatchable
-//! roster (Slice E3, #2958, plus `pm` added for #3437): tcode's own 4
-//! defaults (`engineer`, `qa-agent`, `code-reviewer`, `pm`, no `extends:`
-//! chain — projected via `agents::md_loader::project_embedded_md`) plus the
-//! 28 coding-relevant tm agents Bob selected in #2958 (`extends:`-chained
+//! What: [`EmbeddedAgent`]/[`DEFAULT_AGENTS`] — the 33-agent dispatchable
+//! roster (Slice E3, #2958, plus `pm` added for #3437 and `ticketing` for
+//! #4027): tcode's own 4 defaults (`engineer`, `qa-agent`, `code-reviewer`,
+//! `pm`, no `extends:` chain — projected via
+//! `agents::md_loader::project_embedded_md`) plus the 29 tm agents (the 28
+//! coding-relevant ones Bob selected in #2958, plus `ticketing`) (`extends:`-chained
 //! through the 5 `BASE-*` templates — projected via
 //! `agents::md_loader::project_embedded_md_with_extends`, which resolves
 //! against [`EMBEDDED_TM_AGENT_SOURCES`]). Authored as Markdown+frontmatter
@@ -68,6 +69,20 @@
 //! trusty-mpm byte-parity beyond the `tools:` line alone; the deferred E4
 //! staleness guard must whitelist the reworded prose sections in these three
 //! files too, not just the `tools:` line.
+//!
+//! ## Non-coding cross-product roster addition (#4027, epic #4021)
+//!
+//! `ticketing` was ported here from `crates/trusty-mpm/src/assets/agents/`
+//! byte-for-byte (same treatment `research` got) so trusty-agents' widened
+//! `dispatch_task` bridge (#4026) can reach ONE roster instead of growing a
+//! second dispatch leg into trusty-mpm — the owner's OQ-4 ruling. It carries
+//! no tcode-specific `tools:` restriction: it is a byte-parity copy, NOT a
+//! pinned deviation, so `check_agent_assets.sh` keeps it in lockstep with
+//! upstream automatically. Its non-coding property is enforced where the
+//! owner's OQ-7 ruling put enforcement — the BRIDGE's fail-closed
+//! `NON_CODING_TARGETS` floor in
+//! `crates/trusty-agents/src/tools/cross_product.rs` — not by an asset-level
+//! allowlist that a direct `tcode run-task` invocation would bypass anyway.
 //!
 //! ## E4 staleness guard (issue #2958, `scripts/check_agent_assets.sh`)
 //!
@@ -163,15 +178,15 @@ const QA_AGENT_MD: &str = include_str!("agents/qa-agent.md");
 const CODE_REVIEWER_MD: &str = include_str!("agents/code-reviewer.md");
 const PM_MD: &str = include_str!("agents/pm.md");
 
-/// The 32-agent dispatchable default roster, embedded at compile time
-/// (Slice E3, #2958, plus `pm` added for #3437): tcode's original 3
-/// defaults plus `pm` plus the 28 coding-relevant tm roster agents. The 5
+/// The 33-agent dispatchable default roster, embedded at compile time
+/// (Slice E3, #2958, plus `pm` added for #3437 and `ticketing` for #4027):
+/// tcode's original 3 defaults plus `pm` plus the 29 tm roster agents. The 5
 /// `BASE-*` extends templates in [`EMBEDDED_TM_AGENT_SOURCES`] are
 /// deliberately NOT entries here — they are extends-sources only, never
 /// dispatchable — and trusty-mpm's own `engineer` agent is excluded from the
 /// roster upstream (#2958's roster decision) precisely because it would
 /// collide with tcode's `engineer` below;
-/// `assets::tests::no_name_collisions_across_the_32_agent_roster` pins that
+/// `assets::tests::no_name_collisions_across_the_33_agent_roster` pins that
 /// no collision exists in the final table.
 ///
 /// Why: gives `agents::load_all_agents`'s embedded-fallback branch a fixed,
@@ -188,14 +203,15 @@ const PM_MD: &str = include_str!("agents/pm.md");
 /// (adversarial, read-only review, no `bash`), `pm` (orchestrator/default —
 /// delegates when `delegate_to_agent` is available, executes directly
 /// otherwise; see `assets/agents/pm.md`) — all four [`EmbeddedAgent::Direct`].
-/// Then the 28 [`EmbeddedAgent::Composed`] roster agents, alphabetical,
+/// Then the 29 [`EmbeddedAgent::Composed`] roster agents, alphabetical,
 /// matching [`EMBEDDED_TM_AGENT_SOURCES`]'s roster ordering. Four of them
 /// (`qa`, `code-critic`, `code-analyzer`, `web-qa`) carry a tcode-only
 /// restrictive `tools:` override in their `.md` source — see this module's
 /// "Tools-restriction deviation" doc section above.
 /// Test: `assets::tests::default_agents_parse_and_names_match`,
 /// `assets::tests::base_templates_are_never_dispatchable`,
-/// `assets::tests::no_name_collisions_across_the_32_agent_roster`,
+/// `assets::tests::no_name_collisions_across_the_33_agent_roster`,
+/// `assets::tests::ticketing_is_dispatchable_for_cross_product_delegation`,
 /// `assets::tests::restricted_reviewer_agents_carry_read_only_tools`,
 /// `assets::tests::documentation_and_research_remain_unrestricted`,
 /// `assets::tests::default_task_run_agent_resolves_against_default_agents`,
@@ -280,6 +296,10 @@ pub const DEFAULT_AGENTS: &[EmbeddedAgent] = &[
     EmbeddedAgent::Composed {
         name: "tauri-engineer",
     },
+    // #4027: non-coding ticketing specialist, reachable from trusty-agents'
+    // widened cross-product bridge (#4026). See this module's "Non-coding
+    // cross-product roster addition" doc section.
+    EmbeddedAgent::Composed { name: "ticketing" },
     EmbeddedAgent::Composed {
         name: "typescript-engineer",
     },
@@ -352,13 +372,15 @@ const RUST_ENGINEER_MD: &str = include_str!("agents/rust-engineer.md");
 const SECURITY_MD: &str = include_str!("agents/security.md");
 const SVELTE_ENGINEER_MD: &str = include_str!("agents/svelte-engineer.md");
 const TAURI_ENGINEER_MD: &str = include_str!("agents/tauri-engineer.md");
+// #4027: byte-parity copy of trusty-mpm's ticketing agent.
+const TICKETING_MD: &str = include_str!("agents/ticketing.md");
 const TYPESCRIPT_ENGINEER_MD: &str = include_str!("agents/typescript-engineer.md");
 const WEB_QA_MD: &str = include_str!("agents/web-qa.md");
 const WEB_UI_ENGINEER_MD: &str = include_str!("agents/web-ui-engineer.md");
 
 /// The embedded tm agent catalog's raw sources (Slice E2, #2958): the 5
-/// `BASE-*` extends templates plus the 28 coding-relevant roster agents Bob
-/// selected in #2958 (mpm/memory/cloud-vendor agents excluded -- see the
+/// `BASE-*` extends templates plus the 29 roster agents (the 28
+/// coding-relevant ones Bob selected in #2958, plus `ticketing` from #4027) (mpm/memory/cloud-vendor agents excluded -- see the
 /// issue's roster decision). Keyed by each asset's ORIGINAL embedded
 /// filename (`"BASE-QA.md"`, `"rust-engineer.md"`, ...) rather than a
 /// pre-lowercased bare name, because
@@ -368,18 +390,18 @@ const WEB_UI_ENGINEER_MD: &str = include_str!("agents/web-ui-engineer.md");
 /// `extends: base-qa` reference with no extra normalisation needed here.
 ///
 /// Why: `agents::md_loader::project_embedded_md_with_extends` needs a single
-/// batch source for `build_in_memory_source_map` instead of 33 individual
+/// batch source for `build_in_memory_source_map` instead of 34 individual
 /// `insert` calls; this table is that source. Kept separate from
 /// [`DEFAULT_AGENTS`] (rather than folded into it) because this table's key
 /// space includes the 5 `BASE-*` templates, which must remain resolvable as
 /// `extends:` targets while staying permanently non-dispatchable -- merging
 /// the two tables would require a third state ("resolvable but not listed")
 /// that the current `Direct`/`Composed` enum has no need to express.
-/// What: 33 `(original_filename, raw_md_content)` pairs: 5 `BASE-*` templates
-/// (never dispatchable) plus the 28 roster agents (dispatchable as of Slice
+/// What: 34 `(original_filename, raw_md_content)` pairs: 5 `BASE-*` templates
+/// (never dispatchable) plus the 29 roster agents (dispatchable as of Slice
 /// E3 via [`DEFAULT_AGENTS`]'s `EmbeddedAgent::Composed` entries, which
 /// resolve against this table at load time).
-/// Test: `assets::tests::embedded_tm_agent_sources_has_33_entries_and_unique_keys`,
+/// Test: `assets::tests::embedded_tm_agent_sources_has_34_entries_and_unique_keys`,
 /// `assets::tests::base_templates_are_never_dispatchable`,
 /// `md_loader::tests::project_embedded_md_with_extends_resolves_rust_engineer_from_base_engineer`.
 pub const EMBEDDED_TM_AGENT_SOURCES: &[(&str, &str)] = &[
@@ -413,6 +435,7 @@ pub const EMBEDDED_TM_AGENT_SOURCES: &[(&str, &str)] = &[
     ("security.md", SECURITY_MD),
     ("svelte-engineer.md", SVELTE_ENGINEER_MD),
     ("tauri-engineer.md", TAURI_ENGINEER_MD),
+    ("ticketing.md", TICKETING_MD),
     ("typescript-engineer.md", TYPESCRIPT_ENGINEER_MD),
     ("web-qa.md", WEB_QA_MD),
     ("web-ui-engineer.md", WEB_UI_ENGINEER_MD),
