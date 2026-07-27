@@ -18,7 +18,7 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::daemon::state::DaemonState;
-use crate::session_manager::PruneFilter;
+use crate::session_manager::{DirtyWorktreePolicy, PruneFilter};
 
 /// Request body for POST /api/v1/sessions/managed/prune (#1508).
 ///
@@ -67,13 +67,21 @@ pub async fn decommission_ephemeral_route(
 ///
 /// Why: the orphaned-worktree sweep should default to dry-run so operators can
 /// preview what will be removed before committing.
-/// What: `dry_run` (default true — safe preview default).
-/// Test: integration test via `prune_worktrees_route`.
+/// What: `dry_run` (default true — safe preview default) and `discard_dirty`
+/// (#4091, default FALSE — the only way to reach
+/// [`DirtyWorktreePolicy::ForceDiscard`], i.e. to delete a worktree that still
+/// holds uncommitted or unpushed work; omitting the field, or sending `{}`,
+/// always yields the safe skip-and-report behaviour).
+/// Test: `prune_worktrees_request_defaults_to_skip_dirty`.
 #[derive(Debug, Deserialize)]
 pub struct PruneWorktreesRequest {
     /// When true (the default), report orphans without deleting anything.
     #[serde(default = "default_dry_run")]
     pub dry_run: bool,
+    /// When true, ALSO remove worktrees holding uncommitted/unpushed work
+    /// (#4091). Defaults to false — the fail-safe default.
+    #[serde(default)]
+    pub discard_dirty: bool,
 }
 
 fn default_dry_run() -> bool {
@@ -88,11 +96,16 @@ fn default_dry_run() -> bool {
 /// that belongs to an active session.
 /// What: collects active workspace paths and the managed workspace root, then
 /// delegates to [`SessionManager::prune_orphaned_worktrees`]. Returns
-/// `{ dry_run, paths: ["..."], owner_unknown_paths: ["..."] }` (#3649 adds the
-/// second field: worktrees conservatively skipped because their ownership
-/// sentinel had no resolvable owner — never auto-deleted, surfaced here for
-/// operator review). Dry-run is the default.
-/// Test: `prune_worktrees_route_dry_run`.
+/// `{ dry_run, paths: ["..."], owner_unknown_paths: ["..."], skipped_dirty: [...] }`
+/// (#3649 added the second field: worktrees conservatively skipped because
+/// their ownership sentinel had no resolvable owner — never auto-deleted,
+/// surfaced here for operator review; #4091 adds the third: worktrees skipped
+/// because they still hold uncommitted or unpushed work, each an object with
+/// `path`, `reason`, `dirty_files`, and `unpushed_commits`). Dry-run is the
+/// default, and so is skipping dirty worktrees — `discard_dirty: true` is the
+/// only path to a destructive removal of unsaved work.
+/// Test: `prune_worktrees_route_dry_run`,
+/// `prune_worktrees_request_defaults_to_skip_dirty`.
 pub async fn prune_worktrees_route(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<PruneWorktreesRequest>,
@@ -107,8 +120,15 @@ pub async fn prune_worktrees_route(
     let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
     // Item 7 (#1845): propagate scan failures as HTTP 500 instead of silently
     // returning an empty path list (which could mask the underlying error).
+    // #4091: the ONLY place `ForceDiscard` can be requested, and only via an
+    // explicit `discard_dirty: true` in the request body.
+    let policy = if req.discard_dirty {
+        DirtyWorktreePolicy::ForceDiscard
+    } else {
+        DirtyWorktreePolicy::Skip
+    };
     match mgr
-        .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, req.dry_run)
+        .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, req.dry_run, policy)
         .await
     {
         Ok(outcome) => {
@@ -126,6 +146,7 @@ pub async fn prune_worktrees_route(
                 "dry_run": req.dry_run,
                 "paths": paths,
                 "owner_unknown_paths": owner_unknown_paths,
+                "skipped_dirty": outcome.skipped_dirty,
             }))
             .into_response()
         }
@@ -171,5 +192,29 @@ pub async fn prune_managed_route(
     {
         Ok(outcome) => Json(outcome).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #4091: a request body that says nothing about dirty worktrees must
+    /// deserialize to the SAFE behaviour. An omitted field is the overwhelming
+    /// majority of real calls (the CLI's non-`--discard-dirty` path, and any
+    /// third-party caller), so the serde default is the actual guard here.
+    #[test]
+    fn prune_worktrees_request_defaults_to_skip_dirty() {
+        let req: PruneWorktreesRequest = serde_json::from_str("{}").expect("empty body parses");
+        assert!(req.dry_run, "an unspecified prune must preview, not delete");
+        assert!(
+            !req.discard_dirty,
+            "an unspecified prune must NEVER discard uncommitted work"
+        );
+
+        let explicit: PruneWorktreesRequest =
+            serde_json::from_str(r#"{"dry_run":false,"discard_dirty":true}"#)
+                .expect("explicit body parses");
+        assert!(explicit.discard_dirty, "the opt-in must round-trip");
     }
 }

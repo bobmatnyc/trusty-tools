@@ -7,6 +7,7 @@
 #![allow(clippy::await_holding_lock)]
 
 mod agent_patch;
+mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
 mod cancel;

@@ -23,6 +23,9 @@ use tracing::{error, info, warn};
 use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::worktree_safety::{
+    DirtyWorktree, DirtyWorktreePolicy, dirt_blocks_removal, git_worktree_list_agrees, inspect_dirt,
+};
 
 /// Maximum age an EPHEMERAL session may reach before the auto-reaper tears it
 /// down — default 24 hours (#1508).
@@ -481,6 +484,11 @@ pub(crate) fn find_orphaned_worktrees(
             }
         }
     }
+    // #4118: `read_dir` order is filesystem-dependent, so two runs of the same
+    // sweep could remove the same worktrees in different orders — which makes a
+    // dry-run preview a poor predictor of the real run and makes any ordering
+    // bug unreproducible. Sorting costs nothing at this scale.
+    orphans.sort();
     orphans
 }
 
@@ -567,9 +575,14 @@ fn scan_worktree_shape(
 /// left in place for `tm doctor` / `--dry-run` review, not merely "not found".
 /// What: `removed` — paths actually removed (or that WOULD be removed under
 /// `dry_run`); `owner_unknown` — paths whose ownership sentinel had no
-/// resolvable owner (absent, empty/legacy, or unparsable content).
+/// resolvable owner (absent, empty/legacy, or unparsable content);
+/// `skipped_dirty` (#4091) — paths whose owner WAS resolvable and provably
+/// gone, but which still hold uncommitted or unpushed work (or whose
+/// dirty-check could not complete), each with the reason and counts behind
+/// the decision so no skip is ever silent.
 /// Test: `prune_orphaned_worktrees_skips_owner_unknown`,
-///       `prune_orphaned_worktrees_reclaims_terminal_owner`.
+///       `prune_orphaned_worktrees_reclaims_terminal_owner`,
+///       `prune_orphaned_worktrees_skips_modified_tracked_file` (#4091).
 #[derive(Debug, Clone, Default)]
 pub struct OrphanSweepOutcome {
     /// Paths actually removed (or that would be removed under `dry_run`).
@@ -577,59 +590,9 @@ pub struct OrphanSweepOutcome {
     /// Paths skipped because their sentinel's owner could not be resolved —
     /// never auto-deleted; surfaced here for `tm doctor`/manual review.
     pub owner_unknown: Vec<std::path::PathBuf>,
-}
-
-/// Best-effort cross-check: does `git worktree list` on the checkout owning
-/// `candidate` agree that `candidate` is a real, currently-registered git
-/// worktree (#3649)?
-///
-/// Why: the sentinel + store-ownerless checks establish WHO owned this
-/// directory and whether that owner is provably gone, but neither confirms
-/// git's OWN bookkeeping still recognises the path as a worktree at all — a
-/// belt-and-suspenders safety net against deleting a directory that merely
-/// LOOKS like a worktree (e.g. its git worktree entry was already pruned by
-/// something else, or the shape matched by coincidence). A disagreement is
-/// treated conservatively: skip rather than delete.
-/// What: runs `git -C <repo_root> worktree list --porcelain`, where
-/// `repo_root` is `candidate`'s grandparent directory — the SAME derivation
-/// `decommission::remove_session_worktree` uses, which works identically for
-/// both worktree-store shapes (`<repo>/.worktrees/<name>` and
-/// `<repo>/.base/.worktrees/<id>`, since either way the grandparent of the
-/// worktree leaf is the git checkout root). Returns `true` (agree — deletion
-/// may proceed, subject to the caller's other checks) when the git command
-/// cannot be run or fails outright — this check is an ADDITIONAL safety net
-/// on top of the sentinel/store checks, not a replacement for them, so a
-/// missing `git` binary or a transient failure never blocks a deletion those
-/// checks already approved. Returns `true` only when `candidate`'s
-/// canonicalized path appears among the porcelain output's `worktree <path>`
-/// lines.
-/// Test: `git_worktree_list_agrees_true_for_real_worktree`,
-///       `git_worktree_list_agrees_false_for_untracked_dir`.
-fn git_worktree_list_agrees(candidate: &std::path::Path) -> bool {
-    let Some(repo_root) = candidate.parent().and_then(|p| p.parent()) else {
-        return true;
-    };
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_root)
-        .args(["worktree", "list", "--porcelain"])
-        .output();
-    let Ok(out) = out else {
-        return true; // best-effort: git unavailable must never block a delete
-    };
-    if !out.status.success() {
-        return true;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let canonical_candidate =
-        std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
-    stdout
-        .lines()
-        .filter_map(|l| l.strip_prefix("worktree "))
-        .any(|p| {
-            let pb = std::path::PathBuf::from(p);
-            std::fs::canonicalize(&pb).unwrap_or(pb) == canonical_candidate
-        })
+    /// Paths skipped because they hold unsaved work (#4091) — never
+    /// auto-deleted under the default [`DirtyWorktreePolicy::Skip`].
+    pub skipped_dirty: Vec<DirtyWorktree>,
 }
 
 impl SessionManager {
@@ -846,18 +809,49 @@ impl SessionManager {
     ///   path is a real worktree ([`git_worktree_list_agrees`]) — a
     ///   disagreement is skipped conservatively, never deleted.
     ///
+    /// #4091 DIRTY-TREE GATE (applied AFTER the #3649 gate, additively — it
+    /// never widens what ownership already approved, only narrows it): every
+    /// candidate that survived the ownership gate is passed to
+    /// [`inspect_dirt`], which fails toward DIRTY on any error. Under the
+    /// default `policy` ([`DirtyWorktreePolicy::Skip`]) a dirty candidate is
+    /// NEVER removed — it is reported in [`OrphanSweepOutcome::skipped_dirty`]
+    /// with the reason and file/commit counts. `DirtyWorktreePolicy::ForceDiscard`
+    /// removes it anyway after a `warn!` naming exactly what is being
+    /// discarded; that variant is reachable only from an explicit operator
+    /// opt-in (`discard_dirty` on the HTTP route / `tm session prune-worktrees
+    /// --discard-dirty`), never from the default `/tm-session-pause` path.
+    /// The gate runs under `dry_run` too, so a preview matches a real run.
+    ///
+    /// #4118 DIRTY-GATE TOCTOU: the Phase 1.5 verdict above is computed for
+    /// EVERY candidate before ANY removal happens, so across a ~95-candidate
+    /// sweep the gap between "certified clean" and "deleted" is the sweep's
+    /// whole duration — minutes, not the sub-millisecond window the paragraph
+    /// above describes for the ACTIVE-SESSION check. [`inspect_dirt`] is
+    /// therefore re-run immediately before each individual
+    /// `remove_session_worktree`, so the authoritative verdict is adjacent to
+    /// the deletion. The Phase 1.5 pass is kept because it is what `dry_run`
+    /// reports and what keeps a preview honest. Two extra git invocations per
+    /// candidate is nothing against a `remove_dir_all` of gigabytes.
+    ///
     /// Test: `prune_orphaned_worktrees_removes_orphan`,
     /// `prune_orphaned_worktrees_spares_active`,
     /// `prune_orphaned_worktrees_store_snapshot_blocks_deletion` (item 1),
     /// `prune_orphaned_worktrees_skips_owner_unknown`,
     /// `prune_orphaned_worktrees_reclaims_terminal_owner`,
     /// `prune_orphaned_worktrees_spares_live_owner`,
-    /// `prune_orphaned_worktrees_spares_recent_unregistered_owner` (#3649).
+    /// `prune_orphaned_worktrees_spares_recent_unregistered_owner` (#3649),
+    /// `prune_orphaned_worktrees_skips_modified_tracked_file`,
+    /// `prune_orphaned_worktrees_skips_untracked_file`,
+    /// `prune_orphaned_worktrees_skips_unpushed_commit`,
+    /// `prune_orphaned_worktrees_reclaims_clean_pushed_worktree`,
+    /// `prune_orphaned_worktrees_skips_when_dirty_check_errors`,
+    /// `prune_orphaned_worktrees_force_discards_dirty` (#4091).
     pub async fn prune_orphaned_worktrees(
         &self,
         repos_root: &std::path::Path,
         active_workspace_paths: &[std::path::PathBuf],
         dry_run: bool,
+        policy: DirtyWorktreePolicy,
     ) -> Result<OrphanSweepOutcome, anyhow::Error> {
         use super::decommission::remove_session_worktree;
         use super::worktree_ownership::SentinelOwner;
@@ -884,6 +878,7 @@ impl SessionManager {
         // deletion decision — applied identically under dry-run and real runs
         // so a preview reflects reality.
         let mut owner_unknown = Vec::new();
+        let mut skipped_dirty: Vec<DirtyWorktree> = Vec::new();
         let mut reclaimable = Vec::new();
         for candidate in candidates {
             match super::worktree_ownership::read_sentinel_owner(&candidate) {
@@ -913,6 +908,11 @@ impl SessionManager {
                         );
                         continue;
                     }
+                    // #4091: last gate — never destroy unsaved work.
+                    if let Some(dirt) = dirt_blocks_removal(&candidate, policy, "scan") {
+                        skipped_dirty.push(dirt);
+                        continue;
+                    }
                     reclaimable.push(candidate);
                 }
             }
@@ -925,6 +925,7 @@ impl SessionManager {
             return Ok(OrphanSweepOutcome {
                 removed: reclaimable,
                 owner_unknown,
+                skipped_dirty,
             });
         }
 
@@ -1019,6 +1020,14 @@ impl SessionManager {
                 continue;
             }
 
+            // #4118 TOCTOU: the scan-time verdict is now minutes old. Re-ask
+            // immediately before THIS removal so the clean-to-deleted window is
+            // sub-millisecond again rather than the whole sweep's duration.
+            if let Some(dirt) = dirt_blocks_removal(&candidate, policy, "pre-removal") {
+                skipped_dirty.push(dirt);
+                continue;
+            }
+
             info!(path = %candidate.display(), "prune-worktrees: removing orphaned worktree");
             let candidate_clone = candidate.clone();
             let removed_ok =
@@ -1037,6 +1046,7 @@ impl SessionManager {
         Ok(OrphanSweepOutcome {
             removed,
             owner_unknown,
+            skipped_dirty,
         })
     }
 
@@ -1054,7 +1064,10 @@ impl SessionManager {
     /// active set, then delegates to `prune_orphaned_worktrees` with
     /// `dry_run = false`. The two-phase TOCTOU safety (a fresh store snapshot taken
     /// immediately before deletion) and the "only leaf dirs under `.worktrees/`,
-    /// never the base clone" guard are inherited unchanged. Returns the paths removed.
+    /// never the base clone" guard are inherited unchanged, as is the #4091
+    /// dirty-tree gate — the periodic daemon sweep ALWAYS uses the default
+    /// [`DirtyWorktreePolicy::Skip`] and has no way to opt into discarding
+    /// work. Returns the paths removed.
     /// Test: `reap_orphaned_worktrees_removes_orphan_preserves_live` in
     /// `super::reap_orphaned_worktrees_tests`.
     pub async fn reap_orphaned_worktrees(
@@ -1067,7 +1080,7 @@ impl SessionManager {
             .into_iter()
             .filter_map(|r| r.workspace_path)
             .collect();
-        self.prune_orphaned_worktrees(repos_root, &active, false)
+        self.prune_orphaned_worktrees(repos_root, &active, false, DirtyWorktreePolicy::Skip)
             .await
     }
 
@@ -1106,6 +1119,28 @@ impl SessionManager {
 
         let mut reaped = 0usize;
         for record in stale {
+            // #4118: `decommission` reaches the SAME `remove_session_worktree`
+            // (worktree remove --force + remove_dir_all + branch -D) as the
+            // orphan sweep, but never passed through the #4091 guard — and this
+            // reaper fires automatically on every daemon GC tick. Guarding one
+            // sweep while its sibling deletes freely is a half-measure. There is
+            // no discard opt-in here by design: an automatic reaper must never
+            // be able to destroy work.
+            //
+            // Checked UNCONDITIONALLY, not just for `.worktrees/<leaf>` paths:
+            // `decommission` also `remove_dir_all`s the whole workspace when
+            // `workspace_owned` is true, which an `is_session_worktree` filter
+            // would have excused entirely. No current call site sets that flag,
+            // but it is persisted store data that outlives upgrades — and "no
+            // caller does this today" is not a safety property.
+            if let Some(dirt) = record.workspace_path.as_deref().and_then(inspect_dirt) {
+                warn!(
+                    id = %record.id, path = %dirt.path.display(), reason = %dirt.reason,
+                    "auto-reap: workspace holds unsaved work — leaving the session in \
+                     place for an operator (#4118)"
+                );
+                continue;
+            }
             match self.decommission(&record.id, None).await {
                 Ok(_) => {
                     reaped += 1;

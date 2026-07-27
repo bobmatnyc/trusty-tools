@@ -180,6 +180,24 @@ pub struct AgentConfig {
     #[serde(default)]
     pub skills: SkillsConfig,
 
+    /// Optional `[permissions]` section (#3936, DOC-57 §7) — the structured
+    /// permissions model: scopes, tiers, `user_authority`, autonomy posture,
+    /// per-skill grants.
+    ///
+    /// Why: An agent's permission posture was spread across four unrelated
+    /// mechanisms in three locations with three different failure polarities
+    /// (DOC-57 §7.1) — `[tools].scopes`, `[rbac]`, and two more with no config
+    /// surface at all. `[permissions]` DESCRIBES that union; it invents no new
+    /// enforcement (PM-1). Absent = today's behaviour exactly: scope
+    /// resolution falls back to `[tools].scopes` verbatim
+    /// ([`super::permissions::effective_scopes`]), tiers fall back to
+    /// `[rbac]`, and `user_authority` defaults `false` (its documented
+    /// default either way).
+    /// What: [`super::permissions::PermissionsConfig`].
+    /// Test: `super::permissions::tests`.
+    #[serde(default)]
+    pub permissions: super::permissions::PermissionsConfig,
+
     // #4026: cross-product subagent grants — the config source for the
     // bridge-layer allow-set (epic #4021, OQ-3/OQ-7).
     /// Optional `[subagents]` section (#4026, epic #4021) — which external

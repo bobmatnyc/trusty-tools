@@ -16,6 +16,8 @@
 //!   - `projects`     → project / session / agent listing handlers
 //!   - `agent_patch`  → per-agent model/provider write path
 //!     (`PATCH /api/agents/:name`, #3246)
+//!   - `agent_permissions` → structured permissions model
+//!     (`GET /api/agents/:name/permissions`, #3936, DOC-57 §7)
 //!   - `project_registration` → project register + per-project config lookup
 //!   - `ctrl_sessions`→ CTRL session CRUD (`om session …`)
 //!   - `tm`           → tmux session management (`/api/tm/*`)
@@ -31,6 +33,7 @@
 
 mod agent_create;
 mod agent_patch;
+mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
 mod auth;

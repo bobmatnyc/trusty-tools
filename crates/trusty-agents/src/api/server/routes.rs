@@ -23,6 +23,7 @@ use trusty_common::server::{SelfOrigins, with_guarded_middleware};
 
 use super::agent_create::create_agent_route;
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
+use super::agent_permissions::agent_permissions_route;
 use super::agent_skills::agent_skills_route;
 use super::agent_stores::agent_stores_route;
 use super::auth::{ApiClientConfig, ApiConfig, AuthState, auth_middleware};
@@ -164,6 +165,15 @@ pub fn build_router_with_origins(
         .route(
             "/api/agents/{name}/skills",
             axum::routing::get(agent_skills_route),
+        )
+        // #3936: the Permissions pane reads the agent's structured
+        // permissions model — scopes (with declared/inherited provenance),
+        // tiers, `user_authority`, autonomy posture, per-skill grants — with
+        // an `enforced` flag on every field (DOC-57 §7). Read-only in every
+        // phase (PM-4).
+        .route(
+            "/api/agents/{name}/permissions",
+            axum::routing::get(agent_permissions_route),
         )
         .route("/api/workstreams", get(list_workstreams_route))
         .route(
