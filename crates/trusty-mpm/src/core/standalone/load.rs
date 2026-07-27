@@ -350,6 +350,17 @@ mod tests {
     fn run_prepare_session_pins_palace_from_clone_url() {
         // Hermetic: an ambient override would win over the URL-derived slug.
         let _guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
+        // #3965: `run_prepare_session` drives `prepare_session`, which seeds
+        // `$HOME/.claude.json` via the REAL process `$HOME` (not a param this
+        // function takes) — point `$HOME` at a throwaway dir so this never
+        // writes into the operator's real file. See `HomeGuard` below.
+        let fake_home = crate::test_support::hermetic_temp_dir();
+        let _home_guard = {
+            let prior = std::env::var("HOME").ok();
+            // SAFETY: serialized via `#[serial_test::serial]`.
+            unsafe { std::env::set_var("HOME", fake_home.path()) };
+            HomeGuard(prior)
+        };
         let tmp = crate::test_support::hermetic_temp_dir();
         // Deliberately a session-id-like basename: the pin must come from the
         // clone URL, NOT this directory name.
@@ -393,6 +404,14 @@ mod tests {
     #[serial_test::serial]
     fn run_prepare_session_bare_stub_when_no_identity() {
         let _guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
+        // #3965: `$HOME` override — see `run_prepare_session_pins_palace_from_clone_url`.
+        let fake_home = crate::test_support::hermetic_temp_dir();
+        let _home_guard = {
+            let prior = std::env::var("HOME").ok();
+            // SAFETY: serialized via `#[serial_test::serial]`.
+            unsafe { std::env::set_var("HOME", fake_home.path()) };
+            HomeGuard(prior)
+        };
         let tmp = crate::test_support::hermetic_temp_dir();
         // A basename that slugifies to empty (only separators) cannot yield a
         // parent-dir slug, so with no URL/remote/override the stub stays bare.

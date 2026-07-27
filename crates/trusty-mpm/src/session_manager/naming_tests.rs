@@ -21,6 +21,41 @@ use super::manager::{ManagedTmuxDriver, SessionManager};
 use super::record::ManagedSessionState;
 use super::tests::FakeTmuxDriver;
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `core::session_launch::tests::EnvVarGuard` and
+/// siblings (each module needs its own copy; `pub(super)`/module-private
+/// visibility does not cross sibling module trees — see those sites' docs).
+///
+/// Why (#3965): `reconcile_on_boot`'s external-adopt loop, when a pane's cwd
+/// resolves, calls `deploy_validate::validate_and_repair(&fw, &workspace,
+/// None)` where `fw = FrameworkPaths::for_managed_workspace(&workspace)` —
+/// whose root resolves from the REAL process `$HOME` (`core/paths.rs`), not
+/// from `workspace`. When the workspace is incomplete (as every bare
+/// `TempDir` used by these tests is), that falls through to
+/// `preseed_workspace_trust_home`, writing into the operator's real
+/// `~/.claude.json`. Pairs with `#[serial_test::serial]`.
+/// Test: used by every `reconcile_*` test below that resolves a pane cwd.
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
+/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
+fn set_home(home: &std::path::Path) -> HomeGuard {
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home) };
+    HomeGuard(prior)
+}
+
 /// The full `tm-<leaf>-NN` naming convention (issue #1955): a `tm-` prefix
 /// AND a trailing two-digit numeric serial.
 ///
@@ -250,9 +285,12 @@ impl ManagedTmuxDriver for PaneCwdTmux {
 /// validated/auto-repaired like any other managed workspace.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn reconcile_resolves_adopted_session_cwd_from_pane() {
     let dir = TempDir::new().unwrap();
     let workspace = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(dir.path());
     let fake = std::sync::Arc::new(PaneCwdTmux {
         alive: vec!["tm-resolvable-01".into()],
         pane_cwd: Some(workspace.path().to_path_buf()),
@@ -277,8 +315,15 @@ async fn reconcile_resolves_adopted_session_cwd_from_pane() {
 /// as unmanaged — never an indistinguishable-from-normal "adopted session".
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn reconcile_flags_unresolvable_adopted_session_as_unmanaged() {
     let dir = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above. This
+    // particular case never reaches `validate_and_repair` today (an
+    // unresolved pane cwd short-circuits before `newly_resolved` is
+    // populated), but pin `$HOME` anyway so a future refactor of that
+    // short-circuit can't silently reopen the real-`$HOME` write.
+    let _home = set_home(dir.path());
     let fake = std::sync::Arc::new(PaneCwdTmux {
         alive: vec!["tm-unresolvable-01".into()],
         pane_cwd: None,
@@ -323,9 +368,15 @@ async fn reconcile_flags_unresolvable_adopted_session_as_unmanaged() {
 /// never appears in `report.external_adopted`.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
     let dir = TempDir::new().unwrap();
     let workspace = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above. This
+    // case's crossed-workspace `continue` also short-circuits before
+    // `validate_and_repair` runs today, but pin `$HOME` anyway for the same
+    // future-proofing reason as the sibling test above.
+    let _home = set_home(dir.path());
     let fake = std::sync::Arc::new(PaneCwdTmux {
         alive: vec!["tm-crossed-01".into()],
         pane_cwd: Some(workspace.path().to_path_buf()),
