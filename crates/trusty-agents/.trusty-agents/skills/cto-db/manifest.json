@@ -1,0 +1,57 @@
+{
+  "skill": "cto-db",
+  "persona": "cto-assistant",
+  "python": {
+    "dir": "python",
+    "command": ["uv", "run", "--project", ".", "python", "-m", "cto_db_skill.cli"]
+  },
+  "tools": [
+    {
+      "name": "query_headcount",
+      "description": "Headcount summary from the CTO ops database. `filter_by` groups counts: 'team' | 'status' | 'vendor'. Omit to get a flat list of active people (capped at 500).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "filter_by": {
+            "type": "string",
+            "enum": ["team", "status", "vendor"]
+          }
+        }
+      }
+    },
+    {
+      "name": "query_budget",
+      "description": "2026 R&D budget breakdown from the CTO ops database. Optional `team` filters by team; optional `category` filters by organization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "team": { "type": "string" },
+          "category": { "type": "string" }
+        }
+      }
+    },
+    {
+      "name": "query_risks",
+      "description": "Risk register proxy: low-confidence classifications from the CTO ops database, bucketed into high/medium/low by confidence. Filter with `severity`.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          }
+        }
+      }
+    },
+    {
+      "name": "query_work_classification",
+      "description": "Work-type breakdown for the most recent month in the CTO ops database. Optional `pod` filters by team.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pod": { "type": "string" }
+        }
+      }
+    }
+  ]
+}

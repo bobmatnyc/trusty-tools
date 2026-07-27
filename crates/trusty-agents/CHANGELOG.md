@@ -9,6 +9,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **cto-assistant's four CTO DB tools (`query_headcount`, `query_budget`,
+  `query_risks`, `query_work_classification`) are invokable again, via a new
+  Python skill instead of hardcoded Rust (#3656, #3700, #3732).** These tool
+  names have been in cto-assistant's `[tools].allow` list with no live
+  implementation since the Rust-native `crates/cto-assistant` plugin's only
+  `install_plugins(...)` call site was removed by PR #3310. Per the owner's
+  directive, the fix bundles the query code and its data source together as
+  a skill (`.trusty-agents/skills/cto-db/`, a Python package + a fixture
+  SQLite database) rather than resurrecting the old Rust wiring, which
+  #3656 objects to as a "coded agent" violating DOC-41 §2.0
+  declarative-only.
+  - New generic bridge `tools::python_skill` (CTO-agnostic — no per-skill
+    Rust code): reads a skill's `manifest.json`, builds one `ToolExecutor`
+    per declared tool that spawns the manifest's Python command, and wires
+    the whole batch through the pre-existing `AgentPlugin`/`install_plugins`
+    mechanism. `runtime::startup` now calls
+    `python_skill::install_discovered_skill_plugins` once at boot,
+    best-effort (a missing skills directory or a malformed manifest is
+    logged and skipped, never fatal).
+  - **The bundled `cto_fixture.db` is FIXTURE data, not the real Duetto CTO
+    ops database** (`~/Duetto/cto/data/cto.db`, unreachable from this
+    environment) — set `CTO_DB_PATH` to the real file once it's reachable.
+    See `.trusty-agents/skills/cto-db/python/README.md` for the full
+    disclosure.
+  - The old Rust implementation (`crates/cto-assistant`,
+    `crates/tc-services::cto_db`, `crates/trusty-cto-db`) is untouched;
+    dissolving it is separate, larger scope (#3732).
+
 - **`dispatch_task` can now hand a task to a NAMED non-coding specialist in
   trusty-code's roster, behind a fail-closed bridge-layer allow-set (#4026,
   #4028; epic #4021 bridge track).** The bridge previously hardcoded a single
