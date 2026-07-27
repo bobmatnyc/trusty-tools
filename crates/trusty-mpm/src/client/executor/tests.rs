@@ -190,27 +190,27 @@ async fn register_project_succeeds() {
 
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
-    // `/doctor` returns a twenty-two-check report against a live daemon.
+    // `/doctor` round-trips a real report through the client executor.
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
         CommandResult::Doctor(report) => {
-            // #1840 added the worktrees check (6); DOC-28 R4(a) added the
-            // output_style check (7); A2 (tm-skills-portfolio epic) added the
-            // skill_source check (8); #gh-account-awareness added the gh_account
-            // check (9); #2158 added the deployment check (10); #2246 added the
-            // oauth_token check (11); #2876 added the skill_staleness and
-            // legacy_sources checks (13); DOC-42 / issue #2889 added the
-            // agent_skills check (14); issue #2906 review split it into
-            // agent_skills + agent_skills_prose_hints, bringing the total to
-            // 15; issue #2940 added hooks_contamination + hooks_foreign_conflict,
-            // bringing the total to 17; issue #2333 added output_style_staleness,
-            // bringing the total to 18; issue #2997 added tcc_taint, bringing the
-            // total to 19; issue #3453 part 2 added output_style_legacy_ids,
-            // bringing the total to 20; issue #3427 added scaffold_tracking,
-            // bringing the total to 21. #1905's stale-skill cleanup is a
-            // one-time migration, not a probe here.
-            assert_eq!(report.checks.len(), 22);
+            // This test owns the EXECUTOR round-trip, not the check roster.
+            // The exact count is pinned by `run_doctor_produces_twenty_two_checks`
+            // and `doctor_endpoint_returns_report`, both of which derive it from
+            // their own name list — duplicating a bare literal here just made it a
+            // fourth place to forget (#4090 review LOW-1).
+            assert!(
+                !report.checks.is_empty(),
+                "a live daemon must return a non-empty doctor report"
+            );
+            let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+            for expected in ["instructions", "worktrees", "push_guard"] {
+                assert!(
+                    names.contains(&expected),
+                    "the round-tripped report must carry the `{expected}` check, got: {names:?}"
+                );
+            }
         }
         other => panic!("expected Doctor, got {other:?}"),
     }

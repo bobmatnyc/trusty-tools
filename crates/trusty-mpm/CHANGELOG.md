@@ -11,20 +11,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Cross-branch `git push` guard for every worktree of a managed base clone**
   ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): a bundled
-  `pre-push` hook now refuses any push that would land one branch's history on
-  a remote branch of a DIFFERENT name — the shape that clobbered PR #2863's
-  reviewed lineage. One rule, applied identically whether `HEAD` is attached or
-  detached: the source branch name must equal the destination branch name. It
-  is installed into `$GIT_COMMON_DIR/hooks` at base-clone time, which every
-  worktree of that base shares, so it also covers ad-hoc `git worktree add`
-  worktrees an agent creates for itself (the actual incident path, which no
-  other trusty-mpm code path ever sees). Three shapes are deliberately out of
-  scope and pass through: non-branch destinations (tags, notes), remote-branch
-  deletes (they move no history onto a branch, no config can make a bare push
-  perform one, and post-merge cleanup is routine), and an anonymous source
-  pushed from a detached `HEAD` (`git push origin <sha>:refs/heads/<name>` is
-  the standard way to rescue work out of a detached worktree, and git itself
-  refuses a bare push while detached, so there is no accidental path to guard).
+  `pre-push` hook now refuses any push that would OVERWRITE AN EXISTING remote
+  branch with the history of a branch of a DIFFERENT name — the shape that
+  clobbered PR #2863's reviewed lineage. One rule, applied identically whether
+  `HEAD` is attached or detached: updating an existing branch requires the
+  source branch name to equal the destination branch name. It is installed into
+  `$GIT_COMMON_DIR/hooks` at base-clone time, which every worktree of that base
+  shares, so it also covers ad-hoc `git worktree add` worktrees an agent
+  creates for itself (the actual incident path, which no other trusty-mpm code
+  path ever sees). Three shapes are deliberately out of scope and pass through:
+  non-branch destinations (tags, notes); **creating** a branch that does not
+  exist on the remote yet (git reports an all-zero `<remote sha>`; there is no
+  lineage to destroy, and `git push origin <sha>:refs/heads/<new-name>` is the
+  standard way to rescue work out of a detached worktree); and remote-branch
+  deletes — not because they cannot happen by accident, but because a deleted
+  GitHub branch is recoverable (the PR retains its commits at
+  `refs/pull/<N>/head`) whereas a force-clobbered lineage is not, post-merge
+  cleanup is routine, and server-side branch protection is the right layer to
+  police deletion. Note that a configured `remote.<name>.push` refspec makes a
+  **bare** `git push` land on an arbitrary branch — even from a detached
+  `HEAD`, where `push.default` is never consulted — which is why the exemption
+  is keyed on create-vs-update rather than on `HEAD` state or on how the push
+  was spelled.
   Installation refuses rather than overwrites whenever the existing `pre-push`
   is not provably ours — a foreign hook, a symlink, a `core.hooksPath`
   redirect, or a file that cannot be read at all (invalid UTF-8, a permissions

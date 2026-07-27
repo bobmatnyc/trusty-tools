@@ -1113,35 +1113,35 @@ async fn doctor_endpoint_returns_report() {
     // HTTP status.
     let state = DaemonState::shared();
     let Json(report) = doctor(State(state), Query(DoctorQuery::default())).await;
-    assert_eq!(report.checks.len(), 22);
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(
-        names,
-        [
-            "instructions",
-            "agents",
-            "skills",
-            "skill_source",
-            "output_style",
-            "output_style_staleness",
-            "output_style_legacy_ids",
-            "deployment",
-            "skill_staleness",
-            "legacy_sources",
-            "agent_skills",
-            "agent_skills_prose_hints",
-            "memory",
-            "search",
-            "worktrees",
-            "gh_account",
-            "oauth_token",
-            "hooks_contamination",
-            "hooks_foreign_conflict",
-            "tcc_taint",
-            "scaffold_tracking",
-            "push_guard"
-        ]
-    );
+    let expected = [
+        "instructions",
+        "agents",
+        "skills",
+        "skill_source",
+        "output_style",
+        "output_style_staleness",
+        "output_style_legacy_ids",
+        "deployment",
+        "skill_staleness",
+        "legacy_sources",
+        "agent_skills",
+        "agent_skills_prose_hints",
+        "memory",
+        "search",
+        "worktrees",
+        "gh_account",
+        "oauth_token",
+        "hooks_contamination",
+        "hooks_foreign_conflict",
+        "tcc_taint",
+        "scaffold_tracking",
+        "push_guard",
+    ];
+    assert_eq!(names, expected);
+    // Count derived from the list above, never a standalone literal:
+    // adding a check is then a one-line edit here (#4090 review LOW-1).
+    assert_eq!(report.checks.len(), expected.len());
 }
 
 #[tokio::test]

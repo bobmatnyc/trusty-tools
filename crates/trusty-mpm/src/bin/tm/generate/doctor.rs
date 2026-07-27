@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 /// `doctor_checks_match_run_doctor_names`, which fails the test suite the
 /// moment `run_doctor`'s actual check set diverges from this list.
 /// Test: `doctor_checks_match_run_doctor_names`.
-pub(crate) const DOCTOR_CHECKS: [(&str, &str); 22] = [
+pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     (
         "instructions",
         "Framework instructions deployed and non-empty for the target project.",

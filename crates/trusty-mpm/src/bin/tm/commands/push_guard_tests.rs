@@ -94,6 +94,45 @@ fn unresolvable_path_exits_nonzero() {
     assert!(repair_push_guard(Some("/nonexistent/tm/test/path".to_string()), false).is_err());
 }
 
+/// A BARE repository must retrofit successfully.
+///
+/// Why: trusty-mpm's own managed base clone is bare, and the operator-
+/// authorised retrofit points this command straight at it — so `--path <bare>`
+/// is the headline use case, not an edge case. The first revision resolved the
+/// target with `git rev-parse --show-toplevel`, which FATALS in a bare repo
+/// ("this operation must be run in a work tree"), so the command rejected its
+/// most obvious argument outright.
+#[test]
+fn retrofits_a_bare_repository() {
+    let dir = tempfile::Builder::new()
+        .prefix("tm-test-repairguard-bare-")
+        .tempdir()
+        .expect("temp dir");
+    let bare = dir.path().join("base.git");
+    let ok = std::process::Command::new("git")
+        .args(["init", "--bare", "-q", "-b", "main"])
+        .arg(&bare)
+        .status();
+    match ok {
+        Ok(s) if s.success() => {}
+        _ => return,
+    }
+
+    repair_push_guard(Some(bare.to_string_lossy().to_string()), false)
+        .expect("a bare repository must retrofit, not fail on --show-toplevel");
+    assert!(
+        bare.join("hooks").join("pre-push").exists(),
+        "the guard must land in the bare repo's own hooks dir"
+    );
+    assert!(matches!(
+        inspect_pre_push_guard(&bare),
+        GuardState::Current(_)
+    ));
+
+    // …and the dry run must work against a bare repo too.
+    repair_push_guard(Some(bare.to_string_lossy().to_string()), true).expect("bare dry run");
+}
+
 /// A retrofit run from a LINKED worktree must protect the whole clone — that
 /// is the property that makes one invocation cover a 95-worktree base.
 #[test]

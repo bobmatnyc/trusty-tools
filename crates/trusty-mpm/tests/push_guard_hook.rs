@@ -17,7 +17,10 @@
 //! still refuses a named-branch cross-branch push, (5) the name-preserving
 //! push of another branch gets the same verdict attached and detached, (6)
 //! deletes and tags pass through, (7) `TM_ALLOW_CROSS_BRANCH_PUSH=1` permits
-//! the deliberate cross-branch push, (8) an ad-hoc worktree inherits the guard.
+//! the deliberate cross-branch push, (8) an ad-hoc worktree inherits the guard,
+//! (9) a configured `remote.<name>.push` refspec cannot smuggle the clobber
+//! past the guard via a BARE push from a detached HEAD, and (10) CREATING a
+//! branch is permitted attached and detached while UPDATING one is not.
 //! Test: this file IS the test module.
 
 use std::path::{Path, PathBuf};
@@ -176,14 +179,17 @@ fn refuses_cross_branch_push_and_permits_same_name_push() {
     );
 }
 
-/// A DETACHED HEAD must not be a blanket refusal.
+/// A DETACHED HEAD must not be a blanket refusal — but the exemption is
+/// CREATE-only.
 ///
 /// Why: 13 of the 95 worktrees on this repo's own base clone sit in detached
-/// HEAD at any moment, and `git push origin <sha>:refs/heads/<name>` is the
-/// standard way to rescue work out of one. Refusing that — while printing it
-/// as the remedy — burned the whole point of the guard. There is no #2867
-/// hazard here either: git itself refuses a bare `git push` while detached, so
-/// every push from this state is an explicit operator refspec.
+/// HEAD at any moment, and `git push origin <sha>:refs/heads/<new-name>` is
+/// the standard way to rescue work out of one. Refusing that — while printing
+/// it as the remedy — burned the whole point of the guard. But the exemption
+/// may only cover CREATES: an earlier revision exempted every anonymous-source
+/// push from a detached HEAD, reasoning that git refuses a bare `git push`
+/// while detached so all of them must be explicit refspecs. That reasoning was
+/// FALSE and is now proven so by `remote_push_refspec_cannot_clobber_from_detached_head`.
 #[test]
 fn detached_head_permits_explicit_refspec_but_still_refuses_cross_branch() {
     let Some(fx) = fixture() else {
@@ -230,6 +236,127 @@ fn detached_head_permits_explicit_refspec_but_still_refuses_cross_branch() {
     );
 }
 
+/// A configured `remote.<name>.push` refspec must not smuggle the #2867
+/// clobber past the guard from a detached HEAD via a BARE `git push`.
+///
+/// Why: this is the exploit that disproved the previous revision's central
+/// justification. That revision exempted every anonymous-source push from a
+/// detached HEAD on the reasoning that git refuses a bare `git push` while
+/// detached, so any such push had to be an explicit refspec someone typed.
+/// The `fatal: You are not currently on a branch` comes from `push.default`
+/// resolution ONLY — and git never consults `push.default` when
+/// `remote.<name>.push` supplies the destination. So a bare `git push` from a
+/// detached HEAD did land on a foreign branch and destroy its lineage, through
+/// a fully installed guard. The exemption is now keyed on CREATE-vs-UPDATE,
+/// which git states in the `<remote sha>` field, so how the push was spelled
+/// and what state HEAD is in no longer matter.
+#[test]
+fn remote_push_refspec_cannot_clobber_from_detached_head() {
+    let Some(fx) = fixture() else {
+        return;
+    };
+    install_pre_push_guard(&fx.clone).expect("install");
+
+    // Arm the repo the way the exploit does: no refspec is ever typed.
+    assert!(
+        git(
+            &fx.clone,
+            &["config", "remote.origin.push", "+HEAD:refs/heads/victim"],
+        )
+        .0
+    );
+    assert!(git(&fx.clone, &["checkout", "-q", "--detach", "HEAD"]).0);
+    commit(&fx.clone, "unrelated-work.txt");
+    let victim_before = remote_sha(&fx.origin, "refs/heads/victim").expect("victim exists");
+
+    let (pushed, _, stderr) = git(&fx.clone, &["push"]);
+    assert!(
+        !pushed,
+        "a BARE push from a detached HEAD onto an existing foreign branch must be refused \
+         — `remote.<name>.push` bypasses push.default entirely; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("REFUSED cross-branch push"),
+        "the refusal must come from the guard; stderr: {stderr}"
+    );
+    assert_eq!(
+        remote_sha(&fx.origin, "refs/heads/victim").as_deref(),
+        Some(victim_before.as_str()),
+        "PR-branch lineage must be byte-identical — this is the #2867 regression"
+    );
+
+    // The detached refusal must ALSO print a remedy that actually works, not a
+    // placeholder and not the command it just refused.
+    let remedy = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with("git push origin"))
+        .expect("the detached refusal must print a concrete remedy")
+        .trim()
+        .to_string();
+    assert!(
+        !remedy.contains('<') && !remedy.contains('>'),
+        "the remedy must be concrete, not a placeholder: {remedy}"
+    );
+    let remedy_args: Vec<&str> = remedy.split_whitespace().skip(1).collect();
+    let (remedy_ok, _, remedy_err) = git(&fx.clone, &remedy_args);
+    assert!(
+        remedy_ok,
+        "the printed remedy `{remedy}` must actually succeed; stderr: {remedy_err}"
+    );
+}
+
+/// Creating a branch that does not exist yet is always allowed — and that is
+/// what makes the attached and detached rules identical.
+///
+/// Why: the create exemption is now the ONLY thing that permits a detached
+/// rescue push, so it must be keyed on the destination not existing rather
+/// than on HEAD state. Pinning both states here is what stops a future change
+/// from reintroducing the asymmetry (previously: attached
+/// `<sha>:refs/heads/backup` was refused while the identical detached command
+/// was allowed).
+#[test]
+fn creating_a_new_branch_is_allowed_attached_and_detached() {
+    let Some(fx) = fixture() else {
+        return;
+    };
+    install_pre_push_guard(&fx.clone).expect("install");
+    assert!(git(&fx.clone, &["checkout", "-q", "-b", "mine"]).0);
+    commit(&fx.clone, "work.txt");
+
+    // Attached on `mine`, creating a differently-named NEW branch.
+    let (attached_ok, _, attached_err) =
+        git(&fx.clone, &["push", "origin", "HEAD:refs/heads/backup-1"]);
+    assert!(
+        attached_ok,
+        "creating a new branch must be allowed while attached; stderr: {attached_err}"
+    );
+    assert!(remote_sha(&fx.origin, "refs/heads/backup-1").is_some());
+
+    // Detached, the identical shape must get the identical verdict.
+    assert!(git(&fx.clone, &["checkout", "-q", "--detach", "HEAD"]).0);
+    let (detached_ok, _, detached_err) =
+        git(&fx.clone, &["push", "origin", "HEAD:refs/heads/backup-2"]);
+    assert!(detached_ok, "…and while detached; stderr: {detached_err}");
+    assert!(remote_sha(&fx.origin, "refs/heads/backup-2").is_some());
+
+    // But UPDATING either of them from a differently-named source is refused
+    // in both states — the create exemption must not leak into updates.
+    let before = remote_sha(&fx.origin, "refs/heads/backup-1").expect("exists");
+    commit(&fx.clone, "more.txt");
+    let (upd_ok, _, _) = git(
+        &fx.clone,
+        &["push", "origin", "--force", "HEAD:refs/heads/backup-1"],
+    );
+    assert!(
+        !upd_ok,
+        "updating an existing branch from a detached HEAD must still be refused"
+    );
+    assert_eq!(
+        remote_sha(&fx.origin, "refs/heads/backup-1").as_deref(),
+        Some(before.as_str())
+    );
+}
+
 /// The same-name push must get the SAME verdict attached and detached.
 ///
 /// Why: the first revision refused `git push origin <other-branch>` when
@@ -266,10 +393,15 @@ fn name_preserving_push_of_another_branch_agrees_attached_and_detached() {
 
 /// Branch DELETES and TAG pushes are out of scope and must pass through.
 ///
-/// Why: the hook header promises both, and nothing asserted either. A delete
-/// moves no history onto a branch and no git config can make a bare push
-/// perform one, so it is never the #2867 accident — while post-merge remote
-/// cleanup is routine. Refusing it (as the first revision did) also produced
+/// Why: the hook header promises both, and nothing asserted either. Deletes
+/// are out of scope on a RECOVERABILITY argument, not an "it cannot happen by
+/// accident" one — a configured `remote.<name>.push = :refs/heads/victim`
+/// makes a BARE `git push` delete that branch, which was verified. But a
+/// deleted GitHub branch is recoverable (the PR retains its commits at
+/// `refs/pull/<N>/head`, and it can be re-pushed from any clone) whereas a
+/// force-clobbered lineage is not; post-merge cleanup is routine; and the
+/// right layer to police deletion is server-side branch protection, not a hook
+/// the pusher can remove. Refusing it (as the first revision did) also produced
 /// remediation text that recommended a *push* to accomplish a *delete*.
 #[test]
 fn deletes_and_tags_pass_through() {

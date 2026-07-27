@@ -97,7 +97,7 @@ fn report_dry_run(target: &Path) {
 /// a hook nobody will ever execute.
 /// What: `Err` with an actionable message when the path is missing or is not
 /// inside a git working tree.
-/// Test: `unresolvable_path_exits_nonzero`.
+/// Test: `unresolvable_path_exits_nonzero`, `retrofits_a_bare_repository`.
 fn resolve_target(path: Option<&str>) -> Result<PathBuf, String> {
     let start = match path {
         Some(p) => PathBuf::from(p),
@@ -108,26 +108,45 @@ fn resolve_target(path: Option<&str>) -> Result<PathBuf, String> {
     if !start.exists() {
         return Err(format!("{} does not exist", start.display()));
     }
+    // `--show-toplevel` FATALS in a bare repository ("this operation must be
+    // run in a work tree"), and a bare clone is the primary retrofit target —
+    // trusty-mpm's own managed base clone is bare, so requiring a work tree
+    // rejected the single most obvious argument to this command. Ask for the
+    // work tree first, then fall back to the repository directory itself,
+    // which `effective_hooks_dir` handles identically (it resolves
+    // `--git-common-dir`, which is valid bare or not).
+    if let Some(top) = git_rev_parse(&start, "--show-toplevel") {
+        return Ok(PathBuf::from(top));
+    }
+    if let Some(common) = git_rev_parse(&start, "--git-common-dir") {
+        return Ok(PathBuf::from(common));
+    }
+    Err(format!(
+        "{} is not inside a git repository",
+        start.display()
+    ))
+}
+
+/// Run one `git rev-parse` query, returning `None` when git declines.
+///
+/// Why: `resolve_target` needs to TRY a query and fall back, so a non-zero
+/// exit must be a `None` rather than an error — `--show-toplevel` failing is
+/// the normal, expected answer for a bare repository, not a fault.
+/// What: absolute-path output, trimmed; `None` on spawn failure, non-zero
+/// exit, or blank output.
+/// Test: `retrofits_a_bare_repository`, `unresolvable_path_exits_nonzero`.
+fn git_rev_parse(start: &Path, flag: &str) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
-        .arg(&start)
-        .args(["rev-parse", "--path-format=absolute", "--show-toplevel"])
+        .arg(start)
+        .args(["rev-parse", "--path-format=absolute", flag])
         .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+        .ok()?;
     if !out.status.success() {
-        return Err(format!(
-            "{} is not inside a git working tree",
-            start.display()
-        ));
+        return None;
     }
-    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if top.is_empty() {
-        return Err(format!(
-            "git could not resolve a working tree for {}",
-            start.display()
-        ));
-    }
-    Ok(PathBuf::from(top))
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
 }
 
 /// How many worktrees share this clone's hooks directory.
