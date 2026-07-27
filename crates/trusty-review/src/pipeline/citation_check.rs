@@ -1,30 +1,53 @@
-//! Deterministic citation verification for diff-provable findings (#2881).
+//! Deterministic citation verification for every emitted finding (#2881, #4042).
 //!
 //! Why: a `code_provable: true` finding (or a `code:`-cited finding) drives the
 //! deterministic BLOCK / REQUEST_CHANGES floor unconditionally
-//! (`grade::drives_block_floor` = `cited || code_provable`).  The reviewer LLM can
-//! confabulate such a finding — the #2881 repro emitted a high-severity
-//! `code_provable: true` finding claiming a new vitest test file's content had been
-//! "prepended" into a large regenerated bundle (`api/chat.js`), content that lives
-//! in a DIFFERENT changed file and never appears in the cited file at all.  The
-//! grade floor trusted the flag at face value and fail-CLOSED a clean PR to
-//! D+/REQUEST_CHANGES.  Diff-hunk attribution through the parse → split pipeline is
-//! correct (verified by the `mapreduce`/`diff_analyzer` tests); the missing layer
-//! is a check that a diff-provable CLAIM is actually grounded in the cited file.
+//! (`grade::drives_block_floor` = `cited || code_provable`).  The reviewer LLM
+//! can confabulate such a finding — the #2881 repro emitted a high-severity
+//! `code_provable: true` finding claiming a new vitest test file's content had
+//! been "prepended" into a large regenerated bundle (`api/chat.js`), content
+//! that lives in a DIFFERENT changed file and never appears in the cited file
+//! at all.  The original (#2882) fix downgraded (never dropped) any finding
+//! whose free-text quotes failed to ground in the cited file, but scoped the
+//! check to `code_provable`/`code:`-cited findings only, and — the load-bearing
+//! gap #4042 exploited — deliberately EXEMPTED the prompt-mandated
+//! `[code: `path:line` — "excerpt"]` citation's own excerpt from verification,
+//! on the theory that it was always a paraphrase.  #4042 showed the model often
+//! puts its verbatim "evidence" for a fabrication INSIDE that exact bracket
+//! (attributing four mutually exclusive contents to one file, `hotelPage.ts:207`
+//! citing a file/line that never existed in the diff at all), so the one
+//! citation form the check was built to verify was the one place it never
+//! looked.
 //!
-//! What: [`DiffContentIndex`] indexes the surviving diff by file (the exact content
-//! the reviewer saw, built from the post-filter [`FilteredDiff`]).
-//! [`downgrade_uncitable_findings`] scans findings and, for each finding that claims
-//! to be provable from the diff, verifies the cited file exists in the diff AND that
-//! the concrete code fragments the finding quotes actually appear in that file.  A
-//! finding that fails verification is DOWNGRADED (never silently dropped): its
-//! `code_provable` flag is cleared, a `code:` citation to the unverifiable location
-//! is removed, and its confidence is lowered to the refuted floor so it can no longer
-//! force any verdict floor — it survives as an advisory note.  The check is
-//! FAIL-OPEN: a finding that quotes nothing concrete, or whose quote is grounded in
-//! the cited file, is left untouched.
+//! What: rather than adding another downgrade layer on top of the confabulated
+//! finding, this module makes the emit path structurally incapable of carrying
+//! an unverifiable citation — every finding's citations are checked and, on
+//! failure, the finding is DROPPED (not downgraded, not neutered-but-kept):
 //!
-//! Test: `citation_check_tests.rs`.
+//!  - [`DiffContentIndex::from_filtered`] indexes every file the diff mentions
+//!    (Kept, SummaryOnly, AND Dropped/Stage-A-excluded) so path EXISTENCE can be
+//!    checked regardless of disposition, with content available only for
+//!    Kept/SummaryOnly files.
+//!  - [`enforce_citation_integrity`] runs on EVERY finding (not just
+//!    `code_provable`/cited ones — closing the #4042-named coverage gap) and
+//!    drops a finding whose `file` does not resolve in the diff at all, whose
+//!    free-text quotes contradict the cited file's real content, or whose
+//!    `[code: …]` bracket citation — INCLUDING its excerpt, no longer exempted
+//!    — is unresolvable or contradicted.
+//!  - A cheap, low-false-positive INTERNAL CONSISTENCY check
+//!    ([`detect_line_contradictions`]) drops any pair of findings that cite the
+//!    SAME file+line with two mutually exclusive quoted contents — at least one
+//!    must be invented, and the safest action is to drop both (#4042's own
+//!    suggested direction) — even when the file's content is not independently
+//!    indexable (SummaryOnly / Stage-A-dropped).
+//!
+//! FAIL-OPEN remains the default wherever there is genuinely nothing to verify:
+//! a finding with no quoted content at all is left alone (only path existence is
+//! checked); the `Finding::UNKNOWN_FILE_PLACEHOLDER` sentinel (a legitimately
+//! file-less, general observation) is exempt from path resolution entirely.
+//!
+//! Test: `citation_check_tests.rs`; end-to-end regressions in
+//! `tests/citation_2881_regression.rs` and `tests/citation_4042_regression.rs`.
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -32,54 +55,74 @@ use std::sync::LazyLock;
 use regex::Regex;
 use tracing::warn;
 
-use crate::models::Finding;
+use crate::models::{Finding, UNKNOWN_FILE_PLACEHOLDER};
 use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff};
 
 /// The four inline bracket-citation forms the system prompt mandates
 /// (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[apex: … ]`).
 ///
-/// Why: the reviewer prompt REQUIRES a finding to cite grounding context with one
-/// of these bracket forms (see `assets/prompts/system_prompt_stock.md`), and the
-/// `[code: `path:line` — "brief excerpt"]` form carries a `path:line` token plus a
-/// deliberately-paraphrased excerpt — neither appears verbatim in diff content.
-/// Treating those as verifiable quotes would FALSE-downgrade a correctly-cited
-/// `code_provable` finding; stripping the whole bracket before quote extraction
-/// keeps only the finding's standalone code quotes (raw diff lines) for grounding.
-/// What: matches a bracket beginning with one of the four labels through its
-/// closing `]`, case-insensitively.
-/// Test: `extract_spans_skips_prompt_mandated_citation_grammar`,
-/// `keeps_finding_using_only_bracket_citation_grammar`.
+/// Why: used to strip ALL bracket citations before the generic backtick/quote
+/// scan, so a citation's `path:line` locator token is never mistaken for a
+/// free-text code quote. `jira:`/`gh:`/`apex:` citations ground in context
+/// (ticket/PR/spec-snippet text) this module has no index for and are left
+/// untouched (fail-open); `code:` citations are extracted and verified
+/// SEPARATELY, before this strip runs (see [`CODE_CITATION_RE`]).
+/// Test: `extract_spans_skips_prompt_mandated_citation_grammar`.
 static BRACKET_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\[(?:code|jira|gh|apex):[^\]]*\]")
         .expect("bracket-citation regex is a valid literal")
 });
 
-/// Confidence a downgraded finding is clamped to — mirrors the verifier-refuted
-/// floor so a citation-refuted finding is treated as the noise it is by every
-/// verdict floor (`grade::is_substantive`, `derive_verdict`'s low-confidence
-/// override, and the synthesis floor's confidence gate).
-const DOWNGRADED_CITATION_CONFIDENCE: f32 = 0.10;
-
-/// Minimum normalized length for a quoted fragment to count as verifiable evidence.
+/// The mandated `[code: `path:line` — "excerpt"]` citation form, captured
+/// structurally (#4042).
 ///
-/// Why: short quotes (a bare identifier, a single keyword) coincidentally appear in
-/// many files and would drive false-positive downgrades; a finding must quote a
-/// substantial fragment before we hold it to the "must appear in the cited file"
-/// bar.  Below this length we FAIL-OPEN (leave the finding untouched).
+/// Why: this is the ONE citation form the prompt requires the model to ground
+/// in a real diff/repo location, and the #2882 fix exempted its excerpt from
+/// verification entirely (assuming it was always a paraphrase). #4042 showed
+/// the model routinely puts its strongest — and sometimes fabricated —
+/// "evidence" here. Capturing the locator (group 1, backtick-delimited) and
+/// the remainder of the bracket (group 2, where the quoted excerpt lives)
+/// separately lets [`extract_citations`] verify the excerpt against the
+/// locator's OWN path, independent of `f.file` (a citation may legitimately
+/// point at a different file than the one the finding is primarily filed
+/// against).
+/// What: matches case-insensitively; group 1 is the backtick-delimited
+/// `path[:line]` locator, group 2 is everything else in the bracket up to `]`.
+/// Test: `code_citation_re_captures_path_line_and_excerpt`.
+static CODE_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)\[code:\s*`([^`\]]+)`\s*[—-]+\s*([^\]]*)\]")
+        .expect("code-citation regex is a valid literal")
+});
+
+/// Minimum normalized length for a quoted fragment to count as verifiable
+/// evidence.
+///
+/// Why: short quotes (a bare identifier, a single keyword) coincidentally
+/// appear in many files and would drive false-positive drops; a finding must
+/// quote a substantial fragment before we hold it to the "must appear in the
+/// cited file" bar. Below this length we FAIL-OPEN.
 const MIN_SPAN_LEN: usize = 12;
 
 // ─── Diff content index ─────────────────────────────────────────────────────────
 
-/// Per-file index of the surviving diff content, for grounding finding citations.
+/// Per-file index of the diff, for grounding finding citations (#4042: now
+/// covers every disposition, not only Kept/SummaryOnly).
 ///
-/// Why: verifying a finding's quoted content requires the exact per-file text the
-/// reviewer saw.  Building it once from the [`FilteredDiff`] (the post-Stage-A/B
-/// content that actually reached the prompt) and reusing it across all findings
-/// keeps the check O(findings) rather than re-scanning the raw diff per finding.
-/// What: `by_file` maps a normalized file path to that file's normalized diff
-/// content (hunk line bodies, marker-stripped); `all` is every file's content
-/// concatenated, used to detect content that belongs to a DIFFERENT changed file.
-/// Test: `index_from_filtered_indexes_each_file`, `contains_is_whitespace_tolerant`.
+/// Why: verifying a finding's quoted content requires the exact per-file text
+/// the reviewer saw; verifying a finding's cited PATH requires knowing every
+/// file the diff actually touches, regardless of whether that file's content
+/// reached the prompt. Building both from the [`FilteredDiff`] once and
+/// reusing across all findings keeps the check O(findings).
+/// What: `by_file` maps a normalized file path to that file's normalized
+/// content — hunk line bodies for `Kept`, the summary line for `SummaryOnly`,
+/// and the EMPTY string for a Stage-A-excluded file (`dropped_files`): the path
+/// is real (part of the diff), but no content was ever shown to the model, so
+/// any finding that quotes SPECIFIC content for it is verifiably wrong. `all`
+/// is every file's content concatenated, used to distinguish "this quote
+/// belongs to a DIFFERENT changed file" from "this quote is absent everywhere".
+/// Test: `index_from_filtered_indexes_each_file`,
+/// `index_indexes_dropped_files_with_empty_content` (#4042),
+/// `contains_is_whitespace_tolerant`.
 pub struct DiffContentIndex {
     by_file: HashMap<String, String>,
     all: String,
@@ -88,15 +131,20 @@ pub struct DiffContentIndex {
 impl DiffContentIndex {
     /// Build an index from a post-filter [`FilteredDiff`].
     ///
-    /// Why: the `FilteredDiff` is the authoritative record of what the reviewer
-    /// saw — `Kept` files carry their surviving hunk lines and `SummaryOnly` files
-    /// their summary line; `Dropped` files never reached the prompt and are omitted
-    /// so a finding citing one is correctly treated as ungrounded.
-    /// What: for each surviving file, joins its hunk line bodies (or summary line)
-    /// into one normalized string keyed by the normalized path; also builds the
-    /// concatenated `all` blob.
+    /// Why: the `FilteredDiff` is the authoritative record of what the diff
+    /// contains — `Kept` files carry their surviving hunk lines and
+    /// `SummaryOnly` files their summary line; `dropped_files` (Stage A
+    /// exclusions — lockfiles, snapshots, generated code) never reached the
+    /// prompt but ARE real files in the diff, so their paths must still
+    /// resolve (#4042: a citation must be droppable for being fabricated, not
+    /// merely for citing a file the noise filter removed).
+    /// What: for each surviving file, joins its hunk line bodies (or summary
+    /// line) into one normalized string keyed by the normalized path; for each
+    /// Stage-A-dropped file, indexes an EMPTY string at its path. Also builds
+    /// the concatenated `all` blob (surviving files only — a dropped file's
+    /// absent content cannot possibly ground a cross-file misattribution).
     /// Test: `index_from_filtered_indexes_each_file`,
-    /// `index_omits_dropped_files`.
+    /// `index_indexes_dropped_files_with_empty_content`.
     pub fn from_filtered(filtered: &FilteredDiff) -> Self {
         let mut by_file: HashMap<String, String> = HashMap::new();
         let mut all = String::new();
@@ -117,12 +165,21 @@ impl DiffContentIndex {
                     buf
                 }
                 FileDisposition::SummaryOnly => file.summary_line.clone().unwrap_or_default(),
-                FileDisposition::Dropped => continue,
+                // Never populated in `filtered.files` (see `FilteredFile::disposition`'s
+                // doc) — handled defensively as "path real, content unseen".
+                FileDisposition::Dropped => String::new(),
             };
             let norm = normalize(&content);
             all.push_str(&norm);
             all.push(' ');
             by_file.insert(normalize_path(&file.filename), norm);
+        }
+
+        // Stage-A-excluded files: real paths in the diff, zero content shown to
+        // the model. Indexing them (empty) lets path resolution succeed while
+        // content verification still fails any finding that quotes them.
+        for dropped in &filtered.dropped_files {
+            by_file.entry(normalize_path(&dropped.path)).or_default();
         }
 
         Self { by_file, all }
@@ -157,156 +214,290 @@ impl DiffContentIndex {
 
 // ─── Public entry point ─────────────────────────────────────────────────────────
 
-/// Downgrade findings whose diff-provable citation is not grounded in the cited
-/// file, returning the number downgraded.
+/// Enforce citation integrity over every finding, DROPPING (never downgrading)
+/// any finding whose citation cannot be verified, returning the number dropped
+/// (#4042).
 ///
-/// Why: this is the deterministic backstop the #2881 repro needed — the reviewer
-/// LLM tagged a confabulated finding `code_provable: true`, and the grade floor
-/// trusted it.  Verifying the citation against the actual diff before the floor
-/// runs prevents a fabricated finding from ever forcing a verdict.
-/// What: for each finding that claims diff-provability (`code_provable` or a
-/// `code:` citation), verifies the cited file is in the diff and that at least one
-/// substantial code fragment the finding quotes appears in that file.  A finding
-/// that fails is downgraded via [`apply_downgrade`] (advisory, non-blocking) rather
-/// than dropped.  FAIL-OPEN: findings with no verifiable quote, or whose quote is
-/// grounded, are left exactly as-is.
-/// Test: `downgrades_cross_file_misattribution`, `keeps_grounded_code_provable`,
-/// `fail_open_when_cited_file_not_indexed`, `fail_open_when_no_quote`.
-pub fn downgrade_uncitable_findings(findings: &mut [Finding], index: &DiffContentIndex) -> usize {
-    let mut downgraded = 0usize;
-    for f in findings.iter_mut() {
-        if !is_diff_grounded(f) {
+/// Why: the property this pipeline must guarantee is "every emitted finding
+/// cites a path (and, where quoted, content) that verifiably exists in the
+/// diff." #2882 approximated this with a downgrade-only check scoped to
+/// `code_provable`/cited findings and exempting the mandated citation
+/// grammar's own excerpt; #4042 is the direct consequence of both narrowings.
+/// Dropping (rather than downgrading) the finding is the structurally simpler
+/// fix Bob's simplify mandate asks for: a dropped finding cannot leak into the
+/// rendered review OR the verdict floor by construction, with no second
+/// "is this still escalation-eligible after neutering" reasoning needed
+/// downstream.
+/// What: runs in two passes:
+///  1. [`detect_line_contradictions`] — a finding that cites the same
+///     file+line as another finding, with mutually exclusive quoted content, is
+///     dropped alongside its contradictor (internal-consistency backstop, no
+///     index required).
+///  2. Per-finding verification against `index` — a finding whose `file` does
+///     not resolve in the diff at all (except the
+///     [`UNKNOWN_FILE_PLACEHOLDER`] sentinel), whose free-text quotes
+///     contradict the cited file's real content, or whose `[code: …]` bracket
+///     citation is unresolvable or contradicted, is dropped.
+///
+/// FAIL-OPEN: a finding with no quoted content and a resolvable `file` is left
+/// completely untouched.
+///
+/// Test: `drops_cross_file_misattribution`, `keeps_grounded_code_provable`,
+/// `drops_citation_to_path_outside_diff` (#4042),
+/// `drops_findings_with_line_contradiction` (#4042),
+/// `fail_open_when_no_quote`.
+pub fn enforce_citation_integrity(findings: &mut Vec<Finding>, index: &DiffContentIndex) -> usize {
+    let contradictory = detect_line_contradictions(findings);
+
+    let mut reasons: Vec<Option<&'static str>> = Vec::with_capacity(findings.len());
+    for (i, f) in findings.iter().enumerate() {
+        reasons.push(if contradictory.contains(&i) {
+            Some(
+                "mutual-contradiction: another finding cites the same file+line with \
+                  incompatible content",
+            )
+        } else {
+            unresolvable_reason(f, index)
+        });
+    }
+
+    let mut dropped = 0usize;
+    let mut kept = Vec::with_capacity(findings.len());
+    for (f, reason) in std::mem::take(findings).into_iter().zip(reasons) {
+        match reason {
+            Some(reason) => {
+                warn!(
+                    file = %f.file,
+                    line = ?f.line,
+                    kind = %f.kind,
+                    reason,
+                    "citation-check: dropping unverifiable finding (#4042)"
+                );
+                dropped += 1;
+            }
+            None => kept.push(f),
+        }
+    }
+    *findings = kept;
+
+    if dropped > 0 {
+        warn!(count = dropped, "citation-check: findings dropped");
+    }
+    dropped
+}
+
+/// Decide whether a single finding's citations are unresolvable, and why.
+///
+/// Why: isolates the decision from the mutation so it is unit-testable.
+/// What: returns `Some(reason)` when:
+///  - `f.file` is not the [`UNKNOWN_FILE_PLACEHOLDER`] sentinel AND does not
+///    resolve in `index` at all (outside the diff entirely — the
+///    `hotelPage.ts:207` #4042 shape); or
+///  - `f.file` resolves AND the finding quotes ≥1 substantial free-text
+///    fragment (backtick/quote spans OUTSIDE any bracket citation) of which
+///    NONE appears in that file's content; or
+///  - any `[code: …]` bracket citation's own path does not resolve in `index`,
+///    or its excerpt does not appear in that path's content.
+///
+/// Every other case FAILS OPEN and returns `None` — most notably a finding
+/// with a resolvable `file` and no verifiable quote at all.
+///
+/// Test: covered by the `drops_*` / `keeps_*` / `fail_open_*` tests.
+fn unresolvable_reason(f: &Finding, index: &DiffContentIndex) -> Option<&'static str> {
+    let extracted = extract_citations(f);
+
+    if f.file != UNKNOWN_FILE_PLACEHOLDER {
+        match index.lookup(&f.file) {
+            None => return Some("cited file is not part of the diff at all"),
+            Some(content) => {
+                if !extracted.generic.is_empty()
+                    && !extracted
+                        .generic
+                        .iter()
+                        .any(|s| content.contains(s.as_str()))
+                {
+                    let elsewhere = extracted
+                        .generic
+                        .iter()
+                        .any(|s| index.all.contains(s.as_str()));
+                    return Some(if elsewhere {
+                        "quoted content belongs to a different changed file"
+                    } else {
+                        "quoted content is absent from the diff entirely"
+                    });
+                }
+            }
+        }
+    }
+
+    for citation in &extracted.code_citations {
+        match index.lookup(&citation.path) {
+            None => return Some("[code: …] citation's path is not part of the diff at all"),
+            Some(content) => {
+                if !content.contains(citation.excerpt.as_str()) {
+                    return Some("[code: …] citation's excerpt does not appear at the cited path");
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Detect pairs of findings that cite the SAME file+line with mutually
+/// exclusive quoted content (#4042's "internal consistency" backstop).
+///
+/// Why: at most one of two findings that assert incompatible contents for the
+/// SAME location can be right — this is provable without knowing the file's
+/// real content, so it catches fabrications even when the cited file's content
+/// was never indexed (`SummaryOnly` / Stage-A-dropped). Scoped to the SAME
+/// line (not merely the same file) deliberately: two real, distinct findings
+/// about DIFFERENT lines of one file are normal and must never be flagged as
+/// contradictory — only the same locator with incompatible content is proof.
+/// What: groups every qualifying quoted span (free-text spans keyed by
+/// `(f.file, f.line)`; `[code: …]` excerpts keyed by their OWN
+/// `(citation.path, citation.line)`) by locator. Within a group, any two
+/// DISTINCT findings whose spans are neither a substring nor a superstring of
+/// one another are marked contradictory (both findings, not just one — #4042:
+/// "at least one had to be invented", and there is no deterministic way to
+/// tell which).
+/// Test: `drops_findings_with_line_contradiction`,
+/// `distinct_lines_are_never_contradictory`.
+fn detect_line_contradictions(findings: &[Finding]) -> std::collections::HashSet<usize> {
+    let mut groups: HashMap<(String, u32), Vec<(usize, String)>> = HashMap::new();
+
+    for (i, f) in findings.iter().enumerate() {
+        let extracted = extract_citations(f);
+        if let Some(line) = f.line {
+            for span in &extracted.generic {
+                groups
+                    .entry((normalize_path(&f.file), line))
+                    .or_default()
+                    .push((i, span.clone()));
+            }
+        }
+        for citation in &extracted.code_citations {
+            if let Some(line) = citation.line {
+                groups
+                    .entry((normalize_path(&citation.path), line))
+                    .or_default()
+                    .push((i, citation.excerpt.clone()));
+            }
+        }
+    }
+
+    let mut contradictory = std::collections::HashSet::new();
+    for entries in groups.into_values() {
+        if entries.len() < 2 {
             continue;
         }
-        let Some(reason) = uncitable_reason(f, index) else {
-            continue;
-        };
-        warn!(
-            file = %f.file,
-            line = ?f.line,
-            kind = %f.kind,
-            reason,
-            "citation-check: downgrading unverifiable diff-provable finding (#2881)"
-        );
-        apply_downgrade(f);
-        downgraded += 1;
+        for a in 0..entries.len() {
+            for b in (a + 1)..entries.len() {
+                let (idx_a, span_a) = &entries[a];
+                let (idx_b, span_b) = &entries[b];
+                if idx_a == idx_b {
+                    continue; // same finding citing itself twice — not a conflict
+                }
+                if !span_a.contains(span_b.as_str()) && !span_b.contains(span_a.as_str()) {
+                    contradictory.insert(*idx_a);
+                    contradictory.insert(*idx_b);
+                }
+            }
+        }
     }
-    if downgraded > 0 {
-        warn!(count = downgraded, "citation-check: findings downgraded");
-    }
-    downgraded
-}
-
-/// Decide whether a diff-grounded finding's citation is unverifiable, and why.
-///
-/// Why: isolates the decision from the mutation so it is unit-testable and the
-/// FAIL-OPEN boundaries are explicit.
-/// What: returns `Some(reason)` ONLY when the cited file IS present in the diff
-/// AND the finding quotes ≥1 substantial fragment of which NONE appears in that
-/// file (distinguishing content that belongs to another changed file from content
-/// absent everywhere, for logging only).  Every other case FAILS OPEN and returns
-/// `None`:
-///  - the cited file is not indexed (outside the diff, or a header the parser
-///    could not attribute) — we have no content to check against, so we never
-///    penalise a finding merely for citing a file we did not index; and
-///  - the finding quotes nothing concrete, or a quote is found in the cited file.
-///
-/// This keeps the check high-precision: a legitimate diff-provable finding is
-/// never downgraded, and only a demonstrable content mismatch (the #2881 shape)
-/// is caught.
-///
-/// Test: covered by the `downgrade_*` / `keeps_*` / `fail_open_*` tests.
-fn uncitable_reason(f: &Finding, index: &DiffContentIndex) -> Option<&'static str> {
-    // FAIL OPEN when the cited file is not indexed: without the file's actual
-    // content there is nothing to verify against, and citing a file outside the
-    // reviewed diff is not, by itself, proof of fabrication.
-    let content = index.lookup(&f.file)?;
-
-    let spans = extract_quoted_spans(f);
-    if spans.is_empty() {
-        return None; // nothing concrete to verify — fail open
-    }
-    if spans.iter().any(|s| content.contains(s.as_str())) {
-        return None; // a quote is grounded in the cited file — keep
-    }
-    // None of the finding's substantial quotes appear in the cited file.
-    let elsewhere = spans.iter().any(|s| index.all.contains(s.as_str()));
-    Some(if elsewhere {
-        "content-belongs-to-another-file"
-    } else {
-        "cited-content-absent-from-diff"
-    })
-}
-
-/// Return `true` when a finding claims to be provable from the diff itself.
-///
-/// Why: only diff-provable claims are verifiable against the diff — a finding
-/// grounded in an external spec/ticket (`jira:`/`gh:`/`apex:` citation) is out of
-/// scope for this check and must be left untouched.
-/// What: true iff `code_provable` is set OR the `source_citation` is a `code:`
-/// location.
-/// Test: `is_diff_grounded_detects_code_provable_and_code_citation`.
-fn is_diff_grounded(f: &Finding) -> bool {
-    f.code_provable || has_code_citation(f)
-}
-
-/// Return `true` when the finding carries a `code:`-prefixed source citation.
-fn has_code_citation(f: &Finding) -> bool {
-    f.source_citation
-        .as_deref()
-        .map(|c| c.trim_start().to_ascii_lowercase().starts_with("code:"))
-        .unwrap_or(false)
-}
-
-/// Neutralize a finding whose diff citation could not be verified.
-///
-/// Why: an unverifiable diff-provable claim must never force a verdict floor, but
-/// dropping it outright would hide a possible (unproven) concern from the author —
-/// so we downgrade to advisory instead (honest partial signal, mirroring the
-/// verifier-refuted treatment).
-/// What: clears `code_provable`; removes ANY `source_citation` (not just a `code:`
-/// one); and lowers confidence to the refuted floor so every verdict floor treats
-/// it as non-evidence.  Stripping the whole citation is deliberate: a finding whose
-/// diff-provable factual basis was just disproven cannot be trusted to have
-/// correctly grounded a co-attached spec/ticket citation either, and leaving a
-/// non-`code:` citation in place would keep `grade::is_escalation_eligible` true
-/// (the citation-grammar shape check) — so `drives_block_floor` would still fire
-/// and the downgrade would be a no-op (code-critic WARN, #2881).
-/// Test: `apply_downgrade_clears_provability_and_all_citations`,
-/// `downgrade_neutralizes_surviving_non_code_citation`.
-fn apply_downgrade(f: &mut Finding) {
-    f.code_provable = false;
-    f.source_citation = None;
-    f.confidence = f.confidence.min(DOWNGRADED_CITATION_CONFIDENCE);
+    contradictory
 }
 
 // ─── Quote extraction + normalization ───────────────────────────────────────────
 
-/// Extract substantial code fragments the finding explicitly quotes.
+/// A single `[code: `path:line` — "excerpt"]` citation, extracted structurally.
+struct CodeCitation {
+    path: String,
+    line: Option<u32>,
+    excerpt: String,
+}
+
+/// The citations extracted from one finding's text.
+struct ExtractedCitations {
+    /// `[code: …]` citations, each carrying its OWN path/line (may differ from
+    /// `f.file`/`f.line`).
+    code_citations: Vec<CodeCitation>,
+    /// Free-text backtick/quote spans OUTSIDE any bracket citation, checked
+    /// against `f.file`'s content.
+    generic: Vec<String>,
+}
+
+/// Extract every citation a finding carries — structured `[code: …]` brackets
+/// (with their own path/line/excerpt) AND free-text quoted spans — from its
+/// `description` and `consequence` (#4042).
 ///
-/// Why: a fabricated diff-provable finding "proves" its claim by quoting content it
-/// asserts is present at the cited location; verifying those quotes against the
-/// cited file is what catches the confabulation.  Only the model's OWN explicit
-/// quotes are used (never paraphrase) to keep the check high-precision.
-/// What: pulls backtick-, double-quote-, and single-quote-delimited spans from the
-/// finding's `description` and `consequence` AFTER stripping the prompt-mandated
-/// bracket citations (via [`BRACKET_CITATION_RE`]) so a `path:line` token or a
-/// paraphrased excerpt inside a `[code: … ]` citation is never mistaken for a
-/// verifiable diff quote.  Each span is normalized and kept only if at least
-/// [`MIN_SPAN_LEN`] chars.  `suggested_replacement` is deliberately excluded — it
-/// is the PROPOSED fix, which by design need not appear in the diff.
-/// Test: `extract_spans_pulls_backtick_and_quotes`, `extract_spans_skips_short`,
-/// `extract_spans_skips_prompt_mandated_citation_grammar`.
-fn extract_quoted_spans(f: &Finding) -> Vec<String> {
-    let mut out = Vec::new();
+/// Why: #2882 stripped `[code: …]` brackets wholesale before scanning for
+/// quotes, on the theory the excerpt inside was always a paraphrase — #4042
+/// showed that is where the model's fabricated "evidence" most often lives.
+/// Extracting the bracket's locator (path/line) and excerpt SEPARATELY from
+/// the general free-text scan lets each be verified against its OWN cited
+/// path, while still preventing the locator token itself (`path.ts:42`, never
+/// literally present in that file's content) from being misread as a
+/// content quote.
+/// What: for each `[code: `path:line` — "excerpt"]` match, splits the locator
+/// into path + optional line and pulls the excerpt from the remainder via
+/// quote-delimited scanning; then strips ALL FOUR bracket forms (`code`,
+/// `jira`, `gh`, `apex`) and scans the remainder for backtick/double/single
+/// quoted spans ≥ [`MIN_SPAN_LEN`] chars. `suggested_replacement` and
+/// `suggestion` are deliberately excluded (as before #4042) — they are the
+/// PROPOSED fix, which by design need not appear in the diff.
+/// Test: `code_citation_re_captures_path_line_and_excerpt`,
+/// `extract_spans_pulls_backtick_and_quotes`, `extract_spans_skips_short`.
+fn extract_citations(f: &Finding) -> ExtractedCitations {
+    let mut code_citations = Vec::new();
+    let mut generic = Vec::new();
+
     for text in [f.description.as_str(), f.consequence.as_str()] {
+        for caps in CODE_CITATION_RE.captures_iter(text) {
+            let locator = caps.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
+            let rest = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+            let (path, line) = split_locator(locator);
+            let mut excerpts = Vec::new();
+            collect_delimited(rest, '"', &mut excerpts);
+            collect_delimited(rest, '\'', &mut excerpts);
+            for excerpt in excerpts {
+                if excerpt.len() >= MIN_SPAN_LEN {
+                    code_citations.push(CodeCitation {
+                        path: path.clone(),
+                        line,
+                        excerpt,
+                    });
+                }
+            }
+        }
+
         let stripped = BRACKET_CITATION_RE.replace_all(text, " ");
-        collect_delimited(&stripped, '`', &mut out);
-        collect_delimited(&stripped, '"', &mut out);
-        collect_delimited(&stripped, '\'', &mut out);
+        collect_delimited(&stripped, '`', &mut generic);
+        collect_delimited(&stripped, '"', &mut generic);
+        collect_delimited(&stripped, '\'', &mut generic);
     }
-    out.retain(|s| s.len() >= MIN_SPAN_LEN);
-    out
+    generic.retain(|s| s.len() >= MIN_SPAN_LEN);
+
+    ExtractedCitations {
+        code_citations,
+        generic,
+    }
+}
+
+/// Split a `[code: …]` locator into its path and optional trailing line
+/// number.
+///
+/// What: if `locator` ends in `:<digits>`, returns `(path-without-suffix,
+/// Some(n))`; otherwise returns `(locator, None)` unchanged (e.g. a spec file
+/// cited without a line, `docs/specs/foo.md`).
+/// Test: `split_locator_extracts_line`, `split_locator_no_line`.
+fn split_locator(locator: &str) -> (String, Option<u32>) {
+    if let Some((path, line)) = locator.rsplit_once(':')
+        && let Ok(n) = line.trim().parse::<u32>()
+    {
+        return (path.trim().to_string(), Some(n));
+    }
+    (locator.to_string(), None)
 }
 
 /// Collect normalized spans delimited by `delim` from `text` into `out`.

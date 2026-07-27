@@ -540,15 +540,31 @@ pub async fn run_review(
         );
     }
 
-    // ── Step 7-cite: verify diff-provable citations BEFORE grading (#2881) ─
-    // A confabulated `code_provable: true` finding drives the deterministic BLOCK
-    // floor at face value; verify each such finding's cited content against the
-    // actual (filtered) diff and downgrade any that is not grounded in the cited
-    // file, so a fabricated finding can never fail-close a clean PR.
+    // ── Step 7-hyg: drop self-negated / CoT-leaking findings (#4044) ───────
+    // A finding that withdraws itself in its own text, or leaks raw mid-
+    // reasoning deliberation, must never reach the rendered review or the
+    // verdict floor — see `finding_hygiene` module doc.
+    let findings_before_hygiene = parsed.findings.len();
+    crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings);
+
+    // ── Step 7-cite: enforce citation integrity BEFORE grading (#2881, #4042) ─
+    // Every finding's cited path (and, where quoted, content) must verifiably
+    // exist in the diff; a finding that fails is DROPPED (never downgraded-but-
+    // kept) so a fabrication can never fail-close a clean PR nor survive into
+    // the rendered review.
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(&filtered);
-    crate::pipeline::citation_check::downgrade_uncitable_findings(
-        &mut parsed.findings,
-        &cite_index,
+    crate::pipeline::citation_check::enforce_citation_integrity(&mut parsed.findings, &cite_index);
+
+    // ── Step 7-relax: the model's own raw verdict/grade rested on the SAME
+    // findings we may have just wiped out entirely — relax it too (#4042,
+    // #4044). See `finding_hygiene::relax_verdict_if_evidence_wiped` doc for
+    // why this is safe and does not touch `derive_verdict`'s shared floor
+    // semantics.
+    crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
+        &mut parsed.verdict,
+        &mut parsed.grade,
+        findings_before_hygiene,
+        &parsed.findings,
     );
 
     // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─
