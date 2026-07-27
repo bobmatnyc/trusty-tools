@@ -89,8 +89,103 @@ pub fn resolve_scope(
 ///
 /// Returns `None` when no tickets were processed (the caller should leave
 /// the stored cursor untouched in that case, not regress it).
+///
+/// Callers that can observe *partial* ticket failures must use
+/// [`plan_cursor`] instead — this function knows nothing about failures and
+/// will happily return a maximum that steps over a ticket whose ingestion
+/// did not complete.
 pub fn next_cursor(observed_updated: &[DateTime<Utc>]) -> Option<DateTime<Utc>> {
     observed_updated.iter().max().copied()
+}
+
+/// What a sync run should do with the stored incremental cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorPlan {
+    /// Store this timestamp as the new `updated >=` cursor.
+    Advance(DateTime<Utc>),
+    /// Leave the stored cursor exactly as it is.
+    Hold,
+}
+
+/// Decide the next stored cursor given what a run observed *and* what it
+/// failed to ingest.
+///
+/// # The invariant this exists to enforce
+///
+/// **A ticket whose ingestion did not fully succeed always remains inside
+/// the next run's query window.** Because the window is
+/// `updated >= <cursor>` (inclusive, and further truncated *downward* to
+/// minute resolution by [`jql_date`]), that reduces to a single rule:
+///
+/// > the stored cursor is never allowed above the `updated` timestamp of the
+/// > earliest failed ticket.
+///
+/// Why it must be the *earliest* failure and not, say, "skip the failed
+/// one": tickets arrive in `updated ASC` order, so clamping to the earliest
+/// failure also re-covers every ticket after it. Re-covering is free —
+/// every write on this path is an `INSERT OR REPLACE` upsert, so a re-read
+/// is idempotent. Skipping is not free: it is permanent, because the ticket
+/// sorts below the cursor forever after and nothing but a human edit or a
+/// full `--backfill` would ever bring it back.
+///
+/// A failed ticket with no `updated` timestamp cannot be placed on the
+/// timeline at all, so there is no safe clamp for it — the only correct
+/// answer is [`CursorPlan::Hold`], leaving the whole window unchanged.
+///
+/// Test: `plan_cursor_clamps_to_the_earliest_failure`,
+/// `plan_cursor_holds_when_a_failure_has_no_timestamp`,
+/// `plan_cursor_advances_to_max_when_nothing_failed`,
+/// `plan_cursor_holds_on_an_empty_run`.
+pub fn plan_cursor(
+    observed_updated: &[DateTime<Utc>],
+    failed_updated: &[Option<DateTime<Utc>>],
+) -> CursorPlan {
+    if failed_updated.iter().any(Option::is_none) {
+        return CursorPlan::Hold;
+    }
+    if let Some(earliest_failure) = failed_updated.iter().flatten().min() {
+        return CursorPlan::Advance(*earliest_failure);
+    }
+    match next_cursor(observed_updated) {
+        Some(max) => CursorPlan::Advance(max),
+        None => CursorPlan::Hold,
+    }
+}
+
+/// Reject a project key that would not survive interpolation into JQL.
+///
+/// Why: [`build_jql`] interpolates the key directly into the query string.
+/// This is not a security boundary — the value comes from `--project` or
+/// `config.yaml`, both operator-controlled — but an unvalidated key is a
+/// real robustness hazard: a quote or a boolean operator silently *widens*
+/// the query, and tickets from another project then advance *this*
+/// project's cursor, corrupting incremental state for both. A benign typo
+/// (a space, a reserved word) otherwise surfaces as an opaque JIRA 400
+/// instead of a local error naming the offending value.
+///
+/// What: JIRA project keys are `[A-Za-z][A-Za-z0-9_]*`; anything else is
+/// rejected here rather than at the far end of an HTTP round-trip.
+///
+/// # Errors
+///
+/// Returns a human-readable message naming the offending value.
+///
+/// Test: `validate_project_key_accepts_conventional_keys`,
+/// `validate_project_key_rejects_jql_metacharacters`.
+pub fn validate_project_key(key: &str) -> Result<(), String> {
+    let mut chars = key.chars();
+    let ok = match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => chars.all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid JIRA project key '{key}': expected a leading ASCII letter \
+             followed by letters, digits or underscores (e.g. PROJ)"
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -180,5 +275,95 @@ mod tests {
     #[test]
     fn next_cursor_returns_none_for_empty_batch() {
         assert_eq!(next_cursor(&[]), None);
+    }
+
+    // ---- plan_cursor: the "no ticket is ever permanently skipped" rule ----
+
+    #[test]
+    fn plan_cursor_advances_to_max_when_nothing_failed() {
+        let observed = vec![dt("2026-01-01T00:00:00Z"), dt("2026-03-01T00:00:00Z")];
+        assert_eq!(
+            plan_cursor(&observed, &[]),
+            CursorPlan::Advance(dt("2026-03-01T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn plan_cursor_holds_on_an_empty_run() {
+        assert_eq!(plan_cursor(&[], &[]), CursorPlan::Hold);
+    }
+
+    /// The CRITICAL case: a ticket in the middle of the batch failed, so the
+    /// cursor must clamp back to *its* timestamp — not to the batch maximum,
+    /// which would put it permanently below the next query window.
+    #[test]
+    fn plan_cursor_clamps_to_the_earliest_failure() {
+        let observed = vec![
+            dt("2026-01-01T00:00:00Z"),
+            dt("2026-01-03T00:00:00Z"),
+            dt("2026-06-01T00:00:00Z"),
+        ];
+        let failed = vec![
+            Some(dt("2026-01-03T00:00:00Z")),
+            Some(dt("2026-04-01T00:00:00Z")),
+        ];
+        assert_eq!(
+            plan_cursor(&observed, &failed),
+            CursorPlan::Advance(dt("2026-01-03T00:00:00Z")),
+            "the cursor must never move above the earliest failed ticket"
+        );
+    }
+
+    /// A failure we cannot place on the timeline leaves the window entirely
+    /// unchanged — there is no clamp that could be proven safe.
+    #[test]
+    fn plan_cursor_holds_when_a_failure_has_no_timestamp() {
+        let observed = vec![dt("2026-06-01T00:00:00Z")];
+        assert_eq!(plan_cursor(&observed, &[None]), CursorPlan::Hold);
+    }
+
+    /// The clamped cursor must survive the JQL round-trip: `jql_date`
+    /// truncates downward and the clause is `>=`, so the failed ticket is
+    /// inside the next window rather than one minute past it.
+    #[test]
+    fn clamped_cursor_keeps_the_failed_ticket_inside_the_next_window() {
+        let failed_at = dt("2026-01-03T10:15:45Z");
+        let CursorPlan::Advance(next) =
+            plan_cursor(&[dt("2026-06-01T00:00:00Z")], &[Some(failed_at)])
+        else {
+            panic!("expected an advance");
+        };
+        let bound = jql_date(next);
+        assert_eq!(bound, "2026-01-03 10:15");
+        assert!(
+            jql_date(failed_at) >= bound,
+            "the failed ticket must satisfy `updated >= {bound}` next run"
+        );
+    }
+
+    // ---- validate_project_key ------------------------------------------
+
+    #[test]
+    fn validate_project_key_accepts_conventional_keys() {
+        for key in ["PROJ", "API", "Proj2", "a_b9"] {
+            assert!(validate_project_key(key).is_ok(), "{key} must be accepted");
+        }
+    }
+
+    #[test]
+    fn validate_project_key_rejects_jql_metacharacters() {
+        for key in [
+            "",
+            "1PROJ",
+            "PROJ OR project = OTHER",
+            "PR\"OJ",
+            "PROJ-1",
+            "PROJ)",
+        ] {
+            assert!(
+                validate_project_key(key).is_err(),
+                "{key:?} must be rejected before it reaches JQL"
+            );
+        }
     }
 }

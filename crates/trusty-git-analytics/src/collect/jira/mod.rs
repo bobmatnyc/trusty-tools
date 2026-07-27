@@ -3,6 +3,9 @@
 //! `fact_jira_comment_detail`.
 
 pub mod client;
+pub mod paging;
+pub mod retry;
 pub mod sync;
 
 pub use client::{ChangelogIssue, JiraClient, JiraComment, JiraIssue, JiraTransition};
+pub use retry::RetryPolicy;

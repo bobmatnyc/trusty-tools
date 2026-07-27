@@ -10,6 +10,9 @@ use tracing::{debug, warn};
 
 use crate::collect::env_expand::expand_env_var;
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::jira::paging::{KeysetPager, PagedItem};
+use crate::collect::jira::retry::{with_retry, RetryPolicy};
+use crate::collect::jira::sync::{build_jql, SyncScope};
 use crate::core::config::JiraConfig;
 
 /// Page size for the `/issue/{key}/comment` pagination (issue #3966).
@@ -33,6 +36,8 @@ pub struct JiraClient {
     /// `None` = uncached; `Some(None)` = discovered to be absent;
     /// `Some(Some(_))` = discovered key.
     story_point_field: Mutex<Option<Option<String>>>,
+    /// Retry schedule applied to the paged read paths.
+    retry: RetryPolicy,
 }
 
 /// Subset of fields extracted from a JIRA issue payload.
@@ -84,13 +89,17 @@ struct FieldDescriptor {
 }
 
 /// Wire shape of a JQL search response.
+///
+/// `startAt` is deliberately NOT modelled: the client tracks its own offset.
+/// Deriving the next offset from the server's echo is unsafe under
+/// `#[serde(default)]`, which silently yields `0` when the field is absent —
+/// pinning the loop on page 2 forever. The `/search/jql` successor endpoint
+/// omits `startAt` entirely, so this is a live hazard, not a hypothetical.
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     issues: Vec<ApiIssue>,
     #[serde(default)]
     total: u64,
-    #[serde(rename = "startAt", default)]
-    start_at: u64,
 }
 
 impl JiraClient {
@@ -124,7 +133,10 @@ impl JiraClient {
         // token as literal strings only, unlike its siblings — issue #3966
         // aligned it during the JIRA-ingestion-ownership build-out.
         let credentials = match (&config.username, &config.token) {
-            (Some(u), Some(t)) => Some((expand_env_var(u), expand_env_var(t))),
+            (Some(u), Some(t)) => Some((
+                expand_credential("jira.username", u)?,
+                expand_credential("jira.token", t)?,
+            )),
             _ => None,
         };
 
@@ -134,7 +146,20 @@ impl JiraClient {
             credentials,
             project_key: config.project_key.clone().unwrap_or_default(),
             story_point_field: Mutex::new(None),
+            retry: RetryPolicy::default(),
         })
+    }
+
+    /// Override the retry schedule used by the paged read paths.
+    ///
+    /// Why this is a knob and not a constant: the default is tuned for an
+    /// unattended cron backfill (patient), which is the wrong trade-off for
+    /// an interactive caller that would rather fail fast — and for tests,
+    /// which must not spend real seconds asleep.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry = policy;
+        self
     }
 
     /// Fetch a single issue by its key, returning `None` on 404.
@@ -225,7 +250,7 @@ impl JiraClient {
             if n < page_size {
                 break;
             }
-            start_at = parsed.start_at + n as u64;
+            start_at += n as u64;
             if start_at >= parsed.total {
                 break;
             }
@@ -317,6 +342,19 @@ impl JiraClient {
     /// dropped since only status transitions are in scope for this fact
     /// table.
     ///
+    /// Pagination is **keyset**, not offset: the caller passes the sync
+    /// [`SyncScope`] rather than a pre-built JQL string so each page can
+    /// re-anchor the `updated >=` window onto the previous page's maximum.
+    /// Offset paging over `ORDER BY updated ASC` — paging on the same
+    /// mutable field it sorts by — lets a ticket edited mid-walk shift an
+    /// unread ticket across the read boundary, permanently. See
+    /// [`super::paging`] for the full argument and the residual
+    /// intra-minute case. Boundary re-reads are deduplicated by issue key,
+    /// so the returned vector holds each ticket at most once.
+    ///
+    /// Transient failures (429/5xx/timeouts) are retried with backoff; see
+    /// [`super::retry`].
+    ///
     /// KNOWN LIMITATION: JIRA's search-embedded changelog is itself paged
     /// (`changelog.total` vs `changelog.histories.len()`); a ticket with a
     /// history longer than one changelog page will have its oldest
@@ -330,50 +368,84 @@ impl JiraClient {
     /// - [`CollectError::Json`] on payload parse failures.
     pub async fn search_with_changelog(
         &self,
-        jql: &str,
+        scope: &SyncScope,
         max_results: usize,
     ) -> Result<Vec<ChangelogIssue>> {
         let url = format!("{}/rest/api/3/search", self.base_url);
         let fields = vec!["project".to_string(), "updated".to_string()];
 
+        // Slack over the ideal page count absorbs the deduplicated re-reads
+        // that window re-anchoring deliberately causes.
+        let max_pages = max_results.div_ceil(SEARCH_PAGE_SIZE) * 2 + 8;
+        let mut pager = KeysetPager::new(scope.since, max_pages);
         let mut out: Vec<ChangelogIssue> = Vec::new();
-        let mut start_at = 0u64;
+
         loop {
             let remaining = max_results.saturating_sub(out.len());
             if remaining == 0 {
                 break;
             }
             let page_size = remaining.min(SEARCH_PAGE_SIZE);
+            let request = pager.request();
+            let jql = build_jql(&SyncScope {
+                project_key: scope.project_key.clone(),
+                since: request.since,
+            });
             let body = json!({
                 "jql": jql,
-                "startAt": start_at,
+                "startAt": request.start_at,
                 "maxResults": page_size,
                 "fields": fields,
                 "expand": ["changelog"],
             });
-            debug!(url = %url, %jql, start_at, "POST (with changelog)");
-            let mut req = self.client.post(&url).json(&body);
-            if let Some((user, token)) = &self.credentials {
-                req = req.basic_auth(user, Some(token));
-            }
-            let resp = req.send().await?.error_for_status()?;
-            let parsed: ChangelogSearchResponse = resp.json().await?;
-            let n = parsed.issues.len();
-            for issue in parsed.issues {
-                out.push(ChangelogIssue::from_api(issue));
+            debug!(url = %url, %jql, start_at = request.start_at, "POST (with changelog)");
+            let parsed: ChangelogSearchResponse =
+                with_retry("search_with_changelog", &self.retry, || {
+                    self.post_json(&url, &body)
+                })
+                .await?;
+
+            let issues: Vec<ChangelogIssue> = parsed
+                .issues
+                .into_iter()
+                .map(ChangelogIssue::from_api)
+                .collect();
+            let items: Vec<PagedItem> = issues.iter().map(|i| (i.key.clone(), i.updated)).collect();
+            let step = pager.record_page(&items, page_size);
+
+            for (issue, is_new) in issues.into_iter().zip(step.is_new) {
+                if !is_new {
+                    continue;
+                }
+                out.push(issue);
                 if out.len() >= max_results {
                     break;
                 }
             }
-            if n < page_size {
-                break;
-            }
-            start_at = parsed.start_at + n as u64;
-            if start_at >= parsed.total {
+            if !step.more {
                 break;
             }
         }
         Ok(out)
+    }
+
+    /// `POST` a JSON body and decode the response, applying Basic Auth when
+    /// credentials are configured.
+    ///
+    /// Factored out so [`with_retry`] can re-run the whole request/decode
+    /// round-trip (a `reqwest::RequestBuilder` is single-use, so the
+    /// retry closure has to rebuild it every attempt).
+    async fn post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<T> {
+        let mut req = self.client.post(url).json(body);
+        if let Some((user, token)) = &self.credentials {
+            req = req.basic_auth(user, Some(token));
+        }
+        let resp = req.send().await?.error_for_status()?;
+        Ok(resp.json().await?)
     }
 
     /// Fetch every comment on a JIRA issue, paginating in
@@ -395,9 +467,16 @@ impl JiraClient {
     ///   known, documented approximation for this first slice — full ADF
     ///   plain-text extraction would need a dedicated renderer.
     ///
+    /// Transient failures (429/5xx/timeouts) are retried with backoff (see
+    /// [`super::retry`]). This matters more here than anywhere else in the
+    /// client: this is the one request issued *per ticket*, so it is the
+    /// request a rate limiter throttles first, and a failure here is what
+    /// holds the whole run's incremental cursor back.
+    ///
     /// # Errors
     ///
-    /// - [`CollectError::Http`] on transport / non-success HTTP responses.
+    /// - [`CollectError::Http`] on transport / non-success HTTP responses,
+    ///   after the retry budget is exhausted.
     /// - [`CollectError::Json`] on payload parse failures.
     pub async fn fetch_comments(&self, key: &str) -> Result<Vec<JiraComment>> {
         let mut out = Vec::new();
@@ -408,12 +487,8 @@ impl JiraClient {
                 self.base_url, key, start_at, COMMENT_PAGE_SIZE
             );
             debug!(url = %url, "GET");
-            let mut req = self.client.get(&url);
-            if let Some((user, token)) = &self.credentials {
-                req = req.basic_auth(user, Some(token));
-            }
-            let resp = req.send().await?.error_for_status()?;
-            let parsed: CommentSearchResponse = resp.json().await?;
+            let parsed: CommentSearchResponse =
+                with_retry("fetch_comments", &self.retry, || self.get_json(&url)).await?;
             let n = parsed.comments.len();
             for c in parsed.comments {
                 if let Some(comment) = JiraComment::from_api(c) {
@@ -430,6 +505,48 @@ impl JiraClient {
         }
         Ok(out)
     }
+
+    /// `GET` a URL and decode the response, applying Basic Auth when
+    /// credentials are configured. See [`Self::post_json`] for why this is
+    /// factored out.
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        let mut req = self.client.get(url);
+        if let Some((user, token)) = &self.credentials {
+            req = req.basic_auth(user, Some(token));
+        }
+        let resp = req.send().await?.error_for_status()?;
+        Ok(resp.json().await?)
+    }
+}
+
+/// Expand a `${ENV_VAR}` credential reference, rejecting an expansion that
+/// resolves to nothing.
+///
+/// Why: [`expand_env_var`] returns the empty string for an unset variable,
+/// so `token: "${JIRA_TOKEN}"` with `JIRA_TOKEN` missing from a cron
+/// environment produced an empty password and a bare HTTP 401 — a slow
+/// diagnosis in exactly the unattended context this is built for. (A unified
+/// credential resolver is tracked separately as issue #4037; this is the
+/// local guard, not that.)
+///
+/// No secret can leak through the error message: it is only reachable when
+/// the expansion is empty, which means `raw` is either an empty literal or
+/// an unresolved `${PLACEHOLDER}`. A real credential expands to itself and
+/// never reaches this branch.
+///
+/// # Errors
+///
+/// [`CollectError::Config`] naming the config field and the unresolved value.
+fn expand_credential(field: &str, raw: &str) -> Result<String> {
+    let expanded = expand_env_var(raw);
+    if expanded.is_empty() {
+        return Err(CollectError::Config(format!(
+            "{field} is empty after expansion (config value: `{raw}`) — set the \
+             referenced environment variable, or remove the field to run \
+             unauthenticated"
+        )));
+    }
+    Ok(expanded)
 }
 
 /// One parsed status transition from a JIRA changelog history entry
@@ -589,13 +706,13 @@ impl JiraComment {
 }
 
 /// Wire shape of `POST /rest/api/3/search` with `expand=changelog`.
+///
+/// Neither `startAt` nor `total` is modelled: the keyset walk terminates on
+/// a short page and tracks its own window (see [`super::paging`]), so it
+/// depends on no server-side bookkeeping field.
 #[derive(Debug, Deserialize)]
 struct ChangelogSearchResponse {
     issues: Vec<ChangelogApiIssue>,
-    #[serde(default)]
-    total: u64,
-    #[serde(rename = "startAt", default)]
-    start_at: u64,
 }
 
 #[derive(Debug, Deserialize)]
