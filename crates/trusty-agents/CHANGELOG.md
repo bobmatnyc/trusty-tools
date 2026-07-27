@@ -7,6 +7,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Removed
+
+- **Removed the unused `ompm` `[[bin]]` target.** It was a thin HTTP client
+  shim never invoked by any current workflow, CI job, or script; removed
+  ahead of trusty-agents' first crates.io publish so the publish doesn't
+  lock in a binary with no reason to exist (#4056).
+
 ### Added
 
 - **`dispatch_task` can now hand a task to a NAMED non-coding specialist in
