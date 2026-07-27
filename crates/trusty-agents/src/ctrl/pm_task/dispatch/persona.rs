@@ -346,8 +346,52 @@ pub async fn run_pm_task_with_persona(
             // against `patterns` (the persona's `[tools].allow` globs), so
             // registering them here does not by itself grant access.
             let config_dir = project_path.join(".trusty-agents").join("agents");
-            let runner: Arc<dyn AgentRunner> =
-                Arc::new(SubprocessAgentRunner::new().with_config_dir(Some(config_dir.clone())));
+            // Security fix (delegate_to_agent injection-to-RCE path): this
+            // in-process persona-chat dispatch is the SECOND place (besides
+            // the `--direct`/`--agent` subprocess path handled in
+            // `runtime::subagent_mode`/`runtime::tool_registry`) that builds
+            // a `DelegateToAgentTool` for an assistant-tier persona holding
+            // live external-content tools (Gmail/Drive/web) plus
+            // `delegate_to_agent`. Tag the runner with THIS persona's own
+            // `[tools].allow` posture (`patterns`, already resolved above)
+            // whenever the persona's role is the assistant tier
+            // (`runtime::tool_registry::ASSISTANT_TIER_ROLE` — literal here
+            // because that constant is private to `runtime`, mirroring the
+            // existing `cfg.agent.role == "assistant"` comparison in
+            // `repl::agent_commands`) so whatever this persona spawns is
+            // narrowed to its own posture regardless of the spawned agent's
+            // declared role. Non-assistant-tier callers of this same chat
+            // path (if any) are unaffected — `None` is a byte-identical no-op.
+            // Security fix (multi-hop taint composition, item 1, #4126): this
+            // in-process persona-chat dispatch is always a fresh top-level
+            // turn today (the ONLY way an already-tainted delegation reaches
+            // this process is via a subprocess spawn, and every subprocess
+            // spawn -- `--agent <name>` -- runs through
+            // `runtime::subagent_mode::run_subagent` instead, never this
+            // function). Reading `TAGENT_DELEGATION_TAINT_ALLOW` here anyway
+            // and composing it via `compose_delegation_taint` (rather than
+            // forwarding `patterns` verbatim) means this call site can never
+            // silently widen past an inbound taint if that assumption ever
+            // stops holding, at zero behavioral cost today: no env var is set
+            // on this process, so `inbound_taint` is `None` and the result is
+            // byte-identical to the prior `Some(patterns.clone())`/`None`
+            // split.
+            let inbound_taint = crate::runtime::tool_registry::parse_delegation_taint_env(
+                std::env::var("TAGENT_DELEGATION_TAINT_ALLOW").ok(),
+            );
+            let delegation_taint = if persona_cfg.agent.role == "assistant" {
+                crate::runtime::tool_registry::compose_delegation_taint(
+                    Some(&patterns),
+                    inbound_taint.as_deref(),
+                )
+            } else {
+                None
+            };
+            let runner: Arc<dyn AgentRunner> = Arc::new(
+                SubprocessAgentRunner::new()
+                    .with_config_dir(Some(config_dir.clone()))
+                    .with_delegation_taint(delegation_taint),
+            );
             registry.register(Arc::new(
                 // #3737: thread the session id so a persona that delegates
                 // onward attributes the answer to the specialist that produced

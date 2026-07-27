@@ -98,6 +98,7 @@ pub async fn spawn_subagent_and_run_with_full_env_ctx(
         ctx: Some(ctx),
         config_dir: None,
         project_dir: None,
+        delegation_taint_allow: None,
     })
     .await
 }
@@ -129,6 +130,76 @@ pub(super) struct SpawnConfig<'a> {
     /// Also used as the child's `current_dir` when `ctx.working_dir` is None
     /// so agents see the source tree rather than the artifacts directory.
     pub(super) project_dir: Option<&'a std::path::Path>,
+    /// Security fix (delegate_to_agent injection-to-RCE path): when
+    /// `Some(patterns)`, forwarded to the child as JSON in
+    /// `TAGENT_DELEGATION_TAINT_ALLOW` — see
+    /// `SubprocessAgentRunner::with_delegation_taint` for the full rationale.
+    /// `None` (every non-assistant-tier caller) sets no env var; the child
+    /// behaves exactly as before this field existed.
+    pub(super) delegation_taint_allow: Option<&'a [String]>,
+}
+
+/// Apply the delegation-taint env var to a child `Command` (security fix —
+/// delegate_to_agent injection-to-RCE path, item 4, #4126).
+///
+/// Why: Pulled out of `spawn_and_run_inner` so the `cmd.env(
+/// "TAGENT_DELEGATION_TAINT_ALLOW", ...)` write — previously asserted only
+/// indirectly, if at all — is directly unit-testable against a real
+/// `tokio::process::Command` via `Command::as_std().get_envs()`, without
+/// needing a full subprocess round-trip. Forwards the delegator's tainted
+/// allow-posture to the child as JSON; `run_subagent` reads this back and
+/// narrows the child's tool registry via `scope_assistant_allowed_tools`
+/// regardless of the child's own declared role — see
+/// `SubprocessAgentRunner::with_delegation_taint` for the full rationale.
+/// Logged at `info` (not merely `debug`) precisely because a narrowing that
+/// only shows up in a log nobody reads is not observable (#4111 found the
+/// app-launched daemon emits no logs at all — this is the PARENT-side half
+/// of that observability; `run_subagent` logs the CHILD-side half when it
+/// actually applies the narrowing).
+/// What: `None` sets no env var at all — the child's `run_subagent` sees an
+/// absent `TAGENT_DELEGATION_TAINT_ALLOW`, byte-identical to every caller
+/// before this feature existed. `Some(patterns)` sets the var to the JSON
+/// encoding of `patterns` (including `Some(vec![])`, which still sets the
+/// var — to `"[]"` — marking the spawn tainted with a deny-all set, NOT the
+/// same as not tainting at all). A JSON-encode failure (should be
+/// unreachable for `Vec<String>`) falls back to writing the literal `"[]"`
+/// rather than skipping the env var — fail closed, never silently untainted.
+/// Test: `delegation_taint_allow_env_set_when_configured`,
+/// `delegation_taint_allow_env_absent_by_default`,
+/// `delegation_taint_allow_env_empty_vec_still_sets_deny_all`
+/// (`subprocess::tests`).
+pub(super) fn apply_delegation_taint_env(
+    cmd: &mut Command,
+    delegation_taint_allow: Option<&[String]>,
+    agent_name: &str,
+) {
+    let Some(patterns) = delegation_taint_allow else {
+        return;
+    };
+    match serde_json::to_string(patterns) {
+        Ok(encoded) => {
+            cmd.env("TAGENT_DELEGATION_TAINT_ALLOW", encoded);
+            tracing::info!(
+                agent = %agent_name,
+                taint_patterns = ?patterns,
+                "delegate_to_agent: tainting spawned worker to delegator's own tool posture"
+            );
+        }
+        Err(e) => {
+            // Fail closed: if we can't encode the allow-list, forward an
+            // empty (deny-all) taint rather than silently spawning
+            // untainted. This should be unreachable (`Vec<String>` is
+            // always representable as JSON) but a defensive default here
+            // costs nothing.
+            cmd.env("TAGENT_DELEGATION_TAINT_ALLOW", "[]");
+            tracing::warn!(
+                agent = %agent_name,
+                error = %e,
+                "delegate_to_agent: failed to encode taint patterns; \
+                 falling back to deny-all taint for the spawned worker"
+            );
+        }
+    }
 }
 
 /// Unified subprocess spawn + IPC round-trip.
@@ -153,6 +224,7 @@ pub(super) async fn spawn_and_run_inner(cfg: SpawnConfig<'_>) -> Result<IpcMessa
         ctx,
         config_dir,
         project_dir,
+        delegation_taint_allow,
     } = cfg;
 
     let exe_path: PathBuf = std::env::current_exe().context("failed to resolve current_exe")?;
@@ -176,6 +248,14 @@ pub(super) async fn spawn_and_run_inner(cfg: SpawnConfig<'_>) -> Result<IpcMessa
     if let Some(cd) = config_dir {
         cmd.env("TAGENT_CONFIG_DIR", cd);
     }
+
+    // Security fix (delegate_to_agent injection-to-RCE path): forward the
+    // delegator's tainted allow-posture to the child as JSON. See
+    // `apply_delegation_taint_env` for the full rationale — extracted to its
+    // own function so the `cmd.env(...)` write is unit-testable in isolation
+    // (item 4, #4126: this exact write previously had no test coverage at
+    // all, end-to-end or otherwise).
+    apply_delegation_taint_env(&mut cmd, delegation_taint_allow, agent_name);
 
     // Stamp the MPM sub-agent marker so any Claude Code instance running
     // inside this child knows it is nested. The `trusty-mpm hook` consumer
@@ -439,6 +519,7 @@ pub(super) async fn spawn_subagent_with_config_dir(
     history: &[HistoryMessage],
     config_dir: &std::path::Path,
     ctx: Option<&RunContext>,
+    delegation_taint_allow: Option<&[String]>,
 ) -> Result<IpcMessage> {
     spawn_and_run_inner(SpawnConfig {
         agent_name,
@@ -449,6 +530,7 @@ pub(super) async fn spawn_subagent_with_config_dir(
         ctx,
         config_dir: Some(config_dir),
         project_dir,
+        delegation_taint_allow,
     })
     .await
 }
