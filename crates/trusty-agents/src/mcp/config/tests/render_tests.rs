@@ -234,10 +234,12 @@ fn default_config_includes_local_inference_section() {
 #[test]
 fn default_config_is_valid_toml() {
     let cfg = GlobalConfig::from_toml_str(DEFAULT_CONFIG_TOML).expect("default parses");
-    // ADR-0014 + #3203/#3204: 3 services after slack-user-proxy retire and
+    // ADR-0014 + #3203/#3204: 5 services after slack-user-proxy retire and
     // the gworkspace-mcp → trusty-mpm swap (gworkspace-mcp's static tool list
-    // had drifted from the real binary; trusty-mpm's is fresh, see #3203).
-    assert_eq!(cfg.mcp.services.len(), 3);
+    // had drifted from the real binary; trusty-mpm's is fresh, see #3203),
+    // plus trusty-memory/trusty-search moved here from the dead
+    // tool_registry.endpoints OpenRPC stubs (see default-config.toml).
+    assert_eq!(cfg.mcp.services.len(), 5);
     let tm = cfg
         .mcp
         .services
@@ -249,6 +251,32 @@ fn default_config_is_valid_toml() {
     assert_eq!(tm.args, vec!["serve".to_string(), "--stdio".to_string()]);
     assert!(tm.tools.iter().any(|t| t.name == "session_list"));
     assert!(tm.tools.iter().any(|t| t.name == "agent_delegate"));
+    let mem = cfg
+        .mcp
+        .services
+        .iter()
+        .find(|s| s.name == "trusty-memory")
+        .expect("trusty-memory present");
+    assert!(mem.enabled, "trusty-memory must ship enabled, not DISABLED");
+    assert_eq!(mem.command, "trusty-memory");
+    assert_eq!(mem.args, vec!["serve".to_string(), "--stdio".to_string()]);
+    assert!(mem.discover, "trusty-memory should live-discover its tools");
+    let search = cfg
+        .mcp
+        .services
+        .iter()
+        .find(|s| s.name == "trusty-search")
+        .expect("trusty-search present");
+    assert!(
+        search.enabled,
+        "trusty-search must ship enabled, not DISABLED"
+    );
+    assert_eq!(search.command, "trusty-search");
+    assert_eq!(search.args, vec!["serve".to_string()]);
+    assert!(
+        search.discover,
+        "trusty-search should live-discover its tools"
+    );
     assert!(
         !cfg.mcp
             .services
