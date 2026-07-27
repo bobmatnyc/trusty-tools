@@ -48,6 +48,10 @@
   // #4024's ticket; until then a bundle is simply not shown.
   $: leaves = all.filter((s) => s.kind !== 'function');
   $: granted = leaves.filter((s) => s.granted);
+  // #3987: scope grants that can match nothing. Defaulted like every array
+  // above so an older sidecar (which has no such field) renders the rest of
+  // the pane rather than throwing.
+  $: deadScopes = data?.dead_scope_patterns ?? [];
   $: actions = granted.filter((s) => s.kind === 'action');
   $: knowledge = granted.filter((s) => s.kind === 'knowledge');
   $: system = granted.filter((s) => s.kind === 'system');
@@ -177,6 +181,36 @@
         {#each unresolved as u (u.id)}
           <p class="mt-1 text-[11px] text-foundry-light-muted dark:text-foundry-text/60">
             <code class="font-mono">{u.id}</code> — {u.reason}
+          </p>
+        {/each}
+      </div>
+    {/if}
+
+    <!--
+      #3987: dead scope grants. Given the SAME visual weight as
+      "Unresolved skill grants" above rather than the muted `details`
+      treatment used for `unmatched_patterns` below, because the two are not
+      equally severe: an unmatched allow-pattern MAY still resolve to a
+      live-discovered MCP tool, whereas a dead scope pattern conclusively
+      denies every scoped tool it names. Without this the pane would render
+      those tools as granted cards while dispatch silently drops them — the
+      exact confusion this issue exists to end.
+    -->
+    {#if deadScopes.length > 0}
+      <div class="rounded-md border border-foundry-amber/40 px-3 py-2">
+        <h4 class="font-mono text-[10px] uppercase tracking-wide text-foundry-amber">
+          Dead scope grants ({deadScopes.length})
+        </h4>
+        {#each deadScopes as d (d.pattern)}
+          <p class="mt-1 text-[11px] text-foundry-light-muted dark:text-foundry-text/60">
+            <code class="font-mono">{d.pattern}</code> — {d.reason}
+            {#if d.nearest.length > 0}
+              <span class="block mt-0.5">
+                Nearest reachable: {#each d.nearest as n, i (n)}<code class="font-mono"
+                    >{n}</code
+                  >{i < d.nearest.length - 1 ? ', ' : ''}{/each}
+              </span>
+            {/if}
           </p>
         {/each}
       </div>

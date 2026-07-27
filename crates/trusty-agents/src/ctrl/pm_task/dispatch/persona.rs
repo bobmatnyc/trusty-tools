@@ -305,16 +305,24 @@ pub async fn run_pm_task_with_persona(
             for tool in crate::tools::mcp_service_tools::mcp_service_tool_executors().await {
                 registry.register(tool);
             }
+            // #3987: `advertised_scopes` is the UNFILTERED vocabulary every
+            // endpoint published, captured here because the registry only
+            // keeps what the operator's `[[endpoints]].scopes` policy let
+            // through. Feeding the dead-grant diagnostic the post-policy set
+            // would make an operator's deliberate narrowing look like a
+            // broken agent grant — see `build_with_scope_vocabulary`.
+            let mut advertised_scopes: Vec<String> = Vec::new();
             {
                 let global_config = crate::mcp::config::GlobalConfig::load().await;
                 match crate::tools::registry::ToolRegistryBuilder::from_config(&global_config)
-                    .build()
+                    .build_with_scope_vocabulary()
                     .await
                 {
-                    Ok(execs) => {
+                    Ok((execs, vocabulary)) => {
                         for tool in execs {
                             registry.register(tool);
                         }
+                        advertised_scopes = vocabulary;
                     }
                     Err(e) => {
                         tracing::warn!("tool registry init failed: {e}");
@@ -534,7 +542,13 @@ pub async fn run_pm_task_with_persona(
                 persona_name,
                 &dead_scope::dead_scope_patterns(
                     &agent_scope_patterns,
-                    &dead_scope::reachable_scopes(tool_scopes.values()),
+                    // Both halves: what the registry actually kept AND what
+                    // the endpoints advertised before operator filtering, so
+                    // a narrowed `[[endpoints]].scopes` policy can never be
+                    // mistaken for a dead grant.
+                    &dead_scope::reachable_scopes(
+                        tool_scopes.values().chain(advertised_scopes.iter()),
+                    ),
                 ),
             );
             let kept = filter_persona_tool_names(

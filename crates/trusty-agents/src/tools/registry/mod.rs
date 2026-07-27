@@ -70,17 +70,47 @@ impl ToolRegistryBuilder {
     /// Why: Each endpoint contributes zero or more executors (one per
     /// discovered tool that survives scope filtering). Endpoint-level
     /// failures degrade gracefully: log a warning and continue.
-    /// What: Iterates `endpoints`, instantiates the driver, runs
-    /// `rpc.discover` if `eager_discovery = true` (otherwise skips —
-    /// non-eager endpoints contribute nothing until lazy discovery is
-    /// wired in a follow-up), filters tools by the operator-declared
-    /// scope patterns, and wraps each surviving tool in a
-    /// `RegistryToolExecutor`.
+    /// What: Thin wrapper over [`Self::build_with_scope_vocabulary`] that
+    /// discards the vocabulary — for the callers that only register tools.
     pub async fn build(self) -> Result<Vec<Arc<dyn ToolExecutor>>> {
+        Ok(self.build_with_scope_vocabulary().await?.0)
+    }
+
+    /// Build the executors AND report the scope vocabulary every endpoint
+    /// advertised, BEFORE operator scope filtering (#3987).
+    ///
+    /// Why: `dead_scope`'s diagnostic needs to know what an endpoint COULD
+    /// advertise, not what an operator's `[[endpoints]].scopes` policy let
+    /// through. Those differ, and the difference is a false-positive
+    /// generator: an operator who narrows a non-Google endpoint to, say,
+    /// `memory.read` makes the `memory` namespace *known* (so
+    /// `dead_scope`'s namespace guard starts judging it) while
+    /// simultaneously removing `memory.write` from the registry — and an
+    /// agent's perfectly legitimate `memory.write` grant would then be
+    /// reported dead, with "nearest reachable: memory.read" as advice that
+    /// silently recommends dropping a capability the operator deliberately
+    /// revoked. Denied-by-policy and cannot-possibly-exist are different
+    /// conditions and must not share a diagnostic. Returning the
+    /// UNFILTERED vocabulary keeps `dead_scope` reporting only the latter.
+    ///
+    /// **This property must hold before the diagnostic is escalated to a
+    /// hard load error** (see `dead_scope`'s module doc): failing a load
+    /// closed on an operator's own narrowing policy would turn a
+    /// deliberate configuration choice into an outage.
+    /// What: same work as `build`, plus a de-duplicated, sorted list of every
+    /// non-empty `scope` string in every successfully-discovered endpoint
+    /// manifest. Discovery runs exactly once per endpoint — the vocabulary is
+    /// collected from the same manifest the filter consumes, never by a second
+    /// `rpc.discover` call.
+    /// Test: `unfiltered_vocabulary_survives_operator_scope_narrowing`.
+    pub async fn build_with_scope_vocabulary(
+        self,
+    ) -> Result<(Vec<Arc<dyn ToolExecutor>>, Vec<String>)> {
         let Some(cfg) = self.config else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         let mut executors: Vec<Arc<dyn ToolExecutor>> = Vec::new();
+        let mut vocabulary: std::collections::BTreeSet<String> = Default::default();
 
         for ep in &cfg.endpoints {
             if !ep.enabled {
@@ -88,13 +118,15 @@ impl ToolRegistryBuilder {
                 continue;
             }
             match build_endpoint(ep).await {
-                Ok(mut endpoint_executors) => {
+                Ok((mut endpoint_executors, advertised)) => {
                     tracing::info!(
                         endpoint = %ep.name,
                         count = endpoint_executors.len(),
+                        advertised_scopes = advertised.len(),
                         "tool registry: endpoint contributed tools",
                     );
                     executors.append(&mut endpoint_executors);
+                    vocabulary.extend(advertised);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -106,13 +138,17 @@ impl ToolRegistryBuilder {
             }
         }
 
-        Ok(executors)
+        Ok((executors, vocabulary.into_iter().collect()))
     }
 }
 
-/// Build executors for one endpoint. Returns an error if the driver itself
-/// fails to construct or eager discovery is requested and fails.
-async fn build_endpoint(ep: &EndpointConfig) -> Result<Vec<Arc<dyn ToolExecutor>>> {
+/// Build executors for one endpoint, plus the scope vocabulary it advertised
+/// BEFORE operator filtering (#3987 — see
+/// [`ToolRegistryBuilder::build_with_scope_vocabulary`]).
+///
+/// Returns an error if the driver itself fails to construct or eager
+/// discovery is requested and fails.
+async fn build_endpoint(ep: &EndpointConfig) -> Result<(Vec<Arc<dyn ToolExecutor>>, Vec<String>)> {
     let driver: ArcDriver = match ep.driver {
         DriverKind::Direct => Arc::new(DirectDriver::new(ep)?),
         DriverKind::StdioMcp => {
@@ -131,10 +167,23 @@ async fn build_endpoint(ep: &EndpointConfig) -> Result<Vec<Arc<dyn ToolExecutor>
             endpoint = %ep.name,
             "tool registry: lazy discovery not yet implemented; endpoint contributes 0 tools",
         );
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
 
     let manifest = driver.discover().await?;
+
+    // #3987: captured BEFORE the operator scope filter below, on purpose —
+    // this is what the endpoint CAN advertise, which is the only honest
+    // baseline for "could this pattern ever match anything". Tools whose
+    // scope could not be derived carry `""` (see `discovery::method_to_tool`,
+    // which warns) and are excluded: an empty string is a discovery failure,
+    // not a vocabulary entry.
+    let advertised_scopes: Vec<String> = manifest
+        .tools
+        .iter()
+        .filter(|t| !t.scope.trim().is_empty())
+        .map(|t| t.scope.clone())
+        .collect();
 
     // #3577: zero tools from a manifest we successfully understood is a
     // DIFFERENT condition from zero tools because the wire shape didn't
@@ -186,7 +235,7 @@ async fn build_endpoint(ep: &EndpointConfig) -> Result<Vec<Arc<dyn ToolExecutor>
         })
         .collect();
 
-    Ok(executors)
+    Ok((executors, advertised_scopes))
 }
 
 #[cfg(test)]
@@ -275,6 +324,58 @@ mod tests {
         assert!(kept.iter().any(|t| t.name == "gmail_read"));
         assert!(kept.iter().any(|t| t.name == "cal_write"));
         assert!(!kept.iter().any(|t| t.name == "outlook_read"));
+    }
+
+    /// #3987: the scope vocabulary `build_endpoint` reports must be the
+    /// endpoint's ADVERTISED set, unaffected by the operator's narrowing.
+    ///
+    /// Why: this is the property that keeps `dead_scope` from reporting a
+    /// grant the operator deliberately revoked as a broken pattern. The
+    /// executors ARE narrowed (policy is enforced); only the vocabulary the
+    /// diagnostic reasons over stays whole.
+    #[tokio::test]
+    async fn unfiltered_vocabulary_survives_operator_scope_narrowing() {
+        let manifest = EndpointManifest {
+            server: ServerInfo::default(),
+            protocol_version: "openrpc/1".into(),
+            capabilities: EndpointCapabilities::default(),
+            tools: vec![
+                tool("mem_read", "memory.read"),
+                tool("mem_write", "memory.write"),
+                // A tool whose scope could not be derived: excluded from the
+                // vocabulary, since `""` is a discovery failure not a scope.
+                tool("mystery", ""),
+            ],
+        };
+        // Reproduce `build_endpoint`'s two computations against a narrowing
+        // operator policy that admits only `memory.read`.
+        let advertised: Vec<String> = manifest
+            .tools
+            .iter()
+            .filter(|t| !t.scope.trim().is_empty())
+            .map(|t| t.scope.clone())
+            .collect();
+        let patterns = vec![ScopePattern::new("memory.read")];
+        let filtered = filter_by_endpoint_scopes(&patterns, &manifest.tools, |t| &t.scope);
+
+        assert_eq!(
+            filtered.len(),
+            1,
+            "operator policy must still be enforced on the executors"
+        );
+        assert_eq!(
+            advertised,
+            vec!["memory.read".to_string(), "memory.write".to_string()],
+            "the reported vocabulary must survive the narrowing (and drop empty scopes)"
+        );
+
+        // End to end: the narrowed endpoint must not make `memory.write` look
+        // dead once the advertised vocabulary is unioned in.
+        let reachable = self::dead_scope::reachable_scopes(advertised.iter().map(String::as_str));
+        assert!(
+            self::dead_scope::dead_scope_patterns(&[ScopePattern::new("memory.write")], &reachable)
+                .is_empty()
+        );
     }
 
     #[tokio::test]

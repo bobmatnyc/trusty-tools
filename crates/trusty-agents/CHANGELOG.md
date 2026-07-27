@@ -142,17 +142,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   enforcement site, and the only place holding both the agent's resolved
   patterns and the registry's scope vocabulary) a dead pattern now produces a
   prominent `WARN` naming the agent, the pattern, and the nearest reachable
-  scopes; and `GET /api/agents/{name}/skills` gained a `dead_scope_patterns`
-  array so the GUI/CLI can say "this agent has dead scope grants" rather than
-  showing `granted: true` cards for tools dispatch will drop.
-  Reachability is the union of the live registry's discovered scopes and the
-  closed compile-time Google vocabulary, and a pattern is only judged when its
-  namespace appears in that set — so a `gworkspace`/`trusty-memory` daemon
-  being *down* can never make a working grant look broken. Deliberately a
-  warning and not a load error for now: the shipped base `assistant` still
-  carries `google.read` and every `extends = "assistant"` overlay inherits it,
-  so failing closed would break every assistant load; escalation to a hard
-  error is the intended follow-up once #3987's option B removes it.
+  scopes; `GET /api/agents/{name}/skills` gained a `dead_scope_patterns`
+  array; and the Skills pane renders those as a "Dead scope grants" warning
+  block, so the GUI says so outright rather than showing `granted: true` cards
+  for tools dispatch will drop.
+
+  Reachability is the union of three sources — the scopes the registry kept,
+  every scope the endpoints *advertised* before the operator's
+  `[[endpoints]].scopes` policy filtered them, and the closed compile-time
+  Google vocabulary — and a pattern is only judged when its namespace appears
+  in that set. So neither a `gworkspace`/`trusty-memory` daemon being *down*
+  nor an operator deliberately narrowing an endpoint can make a working grant
+  look broken: denied-by-policy and cannot-possibly-exist stay distinct
+  conditions.
+
+  This ships as a warning rather than a load error. Failing closed is the
+  right end state, but it cannot precede every bundled agent being clean —
+  which is what #3987's option B (the base `assistant`'s explicit Google
+  family grants) delivers. Promoting it to a hard error is deliberately left
+  as its own change even after that: it would also stop *user-authored* agents
+  from loading, which deserves its own decision and release note.
 
 ### Fixed
 

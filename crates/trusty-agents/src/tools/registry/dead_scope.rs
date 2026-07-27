@@ -19,19 +19,36 @@
 //!
 //! ## No false positives: the namespace guard
 //!
-//! "Reachable" is deliberately the UNION of two sources:
+//! "Reachable" is deliberately the UNION of three sources:
 //!
-//! 1. the scopes the live registry actually discovered this run
-//!    (`ToolRegistry::tool_scopes()`), and
-//! 2. the closed compile-time vocabulary this build can ever emit for
+//! 1. the scopes the live registry actually kept this run
+//!    (`ToolRegistry::tool_scopes()`),
+//! 2. every scope those endpoints ADVERTISED before the operator's
+//!    `[[endpoints]].scopes` policy filtered them
+//!    ([`super::ToolRegistryBuilder::build_with_scope_vocabulary`]), and
+//! 3. the closed compile-time vocabulary this build can ever emit for
 //!    namespaces it owns — today just `google`, via
 //!    [`super::google_scope::known_dotted_scopes`].
 //!
-//! Source 2 is what keeps a `gworkspace` daemon being *down* from making
-//! every `google.*` grant look broken. But the union alone is still not
-//! enough: `memory.read` / `search.read` come from endpoints whose
-//! vocabulary this crate does not know statically, so with those endpoints
-//! offline they would match nothing and be falsely reported dead.
+//! Source 3 is what keeps a `gworkspace` daemon being *down* from making
+//! every `google.*` grant look broken.
+//!
+//! Source 2 exists because source 1 is POST-FILTER. An operator who narrows a
+//! non-Google endpoint to, say, `memory.read` makes the `memory` namespace
+//! known (so the guard below starts judging it) while removing
+//! `memory.write` from the registry — and an agent's legitimate
+//! `memory.write` grant would be reported dead, advising "nearest reachable:
+//! memory.read", i.e. quietly recommending the operator's own revoked
+//! capability be dropped from the agent. **Denied by operator policy and
+//! cannot possibly exist are different conditions and must never share a
+//! diagnostic.** Feeding in the unfiltered vocabulary keeps this module
+//! reporting only the latter. This property is load-bearing for the
+//! escalation described below.
+//!
+//! Even so the union is not enough on its own: `memory.read` / `search.read`
+//! come from endpoints whose vocabulary this crate does not know statically,
+//! so with those endpoints entirely offline they would match nothing and be
+//! falsely reported dead.
 //!
 //! Hence the namespace guard: a pattern is only JUDGED when its first
 //! segment (`google` in `google.read`) appears in the reachable set at all.
@@ -52,6 +69,13 @@
 //! bundled agent trips this diagnostic, escalating
 //! [`dead_scope_patterns`]'s callers from `warn!` to a hard load error is
 //! the intended follow-up. Do not escalate before then.
+//!
+//! **A second precondition for that escalation**: every caller must be
+//! feeding in the UNFILTERED endpoint vocabulary (source 2 above). Escalating
+//! while a caller passes only post-policy scopes would convert an operator's
+//! deliberate `[[endpoints]].scopes` narrowing into a hard startup failure
+//! for agents that did nothing wrong. Audit the call sites, not just the
+//! bundled configs, before flipping this to an error.
 //!
 //! Test: the `tests` module below, plus
 //! `ctrl::pm_task::dispatch::persona_tests::base_assistant_google_read_is_a_dead_scope_pattern`
@@ -285,6 +309,38 @@ mod tests {
                 &reachable(&[])
             )
             .is_empty()
+        );
+    }
+
+    /// An operator narrowing `[[endpoints]].scopes` must not turn a
+    /// legitimate agent grant into a "dead" report.
+    ///
+    /// Scenario: the `memory` endpoint advertises `memory.read` AND
+    /// `memory.write`, but the operator's endpoint policy admits only
+    /// `memory.read`, so `ToolRegistry::tool_scopes()` (post-filter) contains
+    /// just that. An agent granting `memory.write` is then DENIED BY POLICY —
+    /// a deliberate operator decision — not broken. Reporting it dead would
+    /// both misdiagnose the cause and advise dropping the grant, which is the
+    /// opposite of what the operator wants.
+    #[test]
+    fn operator_narrowed_endpoint_does_not_produce_a_false_dead_report() {
+        let post_filter_only = reachable(&["memory.read"]);
+        // The bug this guards: with ONLY post-filter scopes, the namespace is
+        // known and `memory.write` looks dead. This assertion documents why
+        // `reachable_scopes` must be fed the unfiltered vocabulary.
+        assert_eq!(
+            dead_scope_patterns(&patterns(&["memory.write"]), &post_filter_only).len(),
+            1,
+            "precondition: post-filter-only input is what produces the false positive"
+        );
+
+        // With the endpoint's UNFILTERED vocabulary unioned in — what
+        // `ToolRegistryBuilder::build_with_scope_vocabulary` supplies — the
+        // grant is correctly left alone.
+        let with_advertised = reachable(&["memory.read", "memory.read", "memory.write"]);
+        assert!(
+            dead_scope_patterns(&patterns(&["memory.write"]), &with_advertised).is_empty(),
+            "a grant denied by operator policy is not a dead grant"
         );
     }
 

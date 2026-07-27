@@ -116,6 +116,7 @@ const SKILLS_PAYLOAD = {
   unmatched_patterns: [
     { pattern: 'gworkspace_*', reason: 'may resolve to an MCP tool at dispatch time' },
   ],
+  dead_scope_patterns: [],
   declares_capability: true,
 };
 
@@ -160,6 +161,7 @@ function stubBareApiWithFailingStores() {
               granted_count: 0,
               unresolved: [],
               unmatched_patterns: [],
+              dead_scope_patterns: [],
               declares_capability: false,
             }
           : { name: 'bare', display_name: 'Bare', tools_allow: [], scopes: [] };
