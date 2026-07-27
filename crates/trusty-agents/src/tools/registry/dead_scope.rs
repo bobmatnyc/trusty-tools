@@ -59,16 +59,22 @@
 //!
 //! ## Warning today, hard error later (deliberate sequencing)
 //!
-//! This is intentionally NOT a load-time error yet. At the time of writing,
-//! the bundled base `assistant` template itself declares the dead
-//! `google.read` pattern (`.trusty-agents/agents/assistant/agent.toml`), and
-//! every `extends = "assistant"` overlay inherits it by union — so failing
-//! closed here would break EVERY assistant load, including the default
-//! persona, on the very commit that added the check. #3987's option B
-//! removes that pattern from the shipped base; once it has landed and no
-//! bundled agent trips this diagnostic, escalating
-//! [`dead_scope_patterns`]'s callers from `warn!` to a hard load error is
-//! the intended follow-up. Do not escalate before then.
+//! This is still a `warn!` and not a load-time error. When option C landed it
+//! HAD to be: the bundled base `assistant` itself declared the dead
+//! `google.read` pattern, and every `extends = "assistant"` overlay inherited
+//! it by union, so failing closed would have broken every assistant load.
+//!
+//! #3987's option B has since removed that pattern
+//! (`.trusty-agents/agents/assistant/agent.toml` now grants explicit
+//! families), and
+//! `persona_tests::base_assistant_declares_no_dead_scope_patterns` +
+//! `shipped_agents_with_live_google_patterns_are_not_flagged` pin every
+//! bundled agent clean. **The sequencing constraint is therefore discharged
+//! and escalation to a hard error is unblocked** — it is deliberately left as
+//! a separate change because promoting a diagnostic to a fatal is a behaviour
+//! change for USER-authored agents (a hand-written `google.read` would stop
+//! loading rather than degrading), which deserves its own decision and its
+//! own release note rather than riding along with a config fix.
 //!
 //! **A second precondition for that escalation**: every caller must be
 //! feeding in the UNFILTERED endpoint vocabulary (source 2 above). Escalating
@@ -78,8 +84,8 @@
 //! bundled configs, before flipping this to an error.
 //!
 //! Test: the `tests` module below, plus
-//! `ctrl::pm_task::dispatch::persona_tests::base_assistant_google_read_is_a_dead_scope_pattern`
-//! which pins the diagnostic against the SHIPPED base template.
+//! `ctrl::pm_task::dispatch::persona_tests::base_assistant_declares_no_dead_scope_patterns`
+//! which pins the SHIPPED base template clean.
 
 use std::collections::BTreeSet;
 

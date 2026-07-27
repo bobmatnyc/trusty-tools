@@ -532,12 +532,12 @@ pub async fn run_pm_task_with_persona(
             // actually built — so it is where a pattern that can match
             // nothing becomes detectable. Emitted here, immediately before
             // the gate that would otherwise drop the surface in silence.
-            // Deliberately a WARN and not a hard failure for now: the bundled
-            // base `assistant` still ships the dead `google.read` pattern that
-            // every `extends = "assistant"` overlay inherits, so failing
-            // closed here would break every assistant load. Escalate to a hard
-            // error once #3987's option B has removed it — see
-            // `tools::registry::dead_scope`'s module doc.
+            // Still a WARN and not a hard failure. #3987's option B has
+            // removed the dead `google.read` from the shipped base, so the
+            // sequencing constraint that forced a warning is discharged and
+            // escalation is unblocked — but promoting this to a fatal would
+            // stop USER-authored agents from loading, which is its own
+            // decision. See `tools::registry::dead_scope`'s module doc.
             dead_scope::warn_dead_scope_patterns(
                 persona_name,
                 &dead_scope::dead_scope_patterns(

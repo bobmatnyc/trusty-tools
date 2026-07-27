@@ -642,11 +642,12 @@ mod unit_tests {
     /// #3987: the base assistant's `google.read` must reach the panel as a
     /// dead grant, with actionable alternatives.
     ///
-    /// NOTE: #3987's option B removes `google.read` from the shipped base;
-    /// this test asserts on a LITERAL pattern, not on the shipped config, so
-    /// it stays valid after that lands. The shipped-config assertion lives in
-    /// `ctrl::pm_task::dispatch::persona_tests` and is the one option B
-    /// updates.
+    /// NOTE: #3987's option B has removed `google.read` from the shipped
+    /// base; this test asserts on a LITERAL pattern, not on the shipped
+    /// config, so it survived that change — a USER can still hand-write
+    /// `google.read` in their own agent, and the panel must still say so.
+    /// The shipped-config assertion lives in
+    /// `ctrl::pm_task::dispatch::persona_tests`.
     #[test]
     fn dead_scope_cards_flags_the_google_read_pattern() {
         let scopes = vec![

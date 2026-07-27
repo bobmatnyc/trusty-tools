@@ -804,6 +804,14 @@ active on the persona-chat path.
 
 - **PM-5** This is filed separately rather than fixed inside a docs PR (OQ-6,
   §12). It is cited here as motivating evidence, not as spec content.
+- **RESOLVED (historical record above).** The overlay half was filed as #3938
+  and fixed in PR #3985 (the package now declares `google.gmail.*` /
+  `google.tasks.*`). The base half — `google.read` matching nothing at all —
+  was filed as #3987 and fixed in two parts: a dead-scope-pattern diagnostic
+  (`tools::registry::dead_scope`, warning at registry build and surfaced in
+  `GET /api/agents/:name/skills` as `dead_scope_patterns`), and explicit
+  per-family grants on the base `assistant`. §7.3's quoted scope line is the
+  pre-fix state, retained because it is what motivated this section.
 
 ### 7.4 Backend contract (NEW)
 
