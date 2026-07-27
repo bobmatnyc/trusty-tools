@@ -117,7 +117,16 @@ pub(super) const ASSISTANT_TIER_ROLE: &str = "assistant";
 /// `delegate_assistant_role_gate_allows_worker_role`,
 /// `delegate_assistant_role_gate_allows_peer_assistant_role`
 /// (`src/tools/delegate.rs`).
-pub(super) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
+///
+/// `pub(crate)` (security fix, third dispatch path, #4126): `ctrl::pm_task::
+/// dispatch::history::run_pm_task_with_history` builds its OWN
+/// `DelegateToAgentTool` (it does not go through `build_assistant_tier_registry`
+/// below) and needed the SAME role allowlist for the SAME reason — the
+/// caller's config (`ctrl.toml`, `role = "assistant"` per #3812) makes it
+/// eligible for the assistant-tier treatment even though it lives in a
+/// different module tree. Reusing this constant (rather than a second
+/// hand-copied list) is the single-source-of-truth choice.
+pub(crate) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
     "engineer",          // engineer.toml, code-agent.toml, python-engineer.toml, …
     "qa",                // qa-agent.toml
     "researcher",        // research-agent.toml
@@ -562,7 +571,21 @@ pub(super) fn build_assistant_tier_registry(delegator_allow: Option<&[String]>) 
 /// is untouched.
 /// Test: `scope_assistant_allowed_tools_filters_by_glob`,
 /// `scope_assistant_allowed_tools_noop_for_non_assistant`,
-/// `scope_assistant_allowed_tools_noop_when_allowed_already_set`.
+/// `scope_assistant_allowed_tools_noop_when_allowed_already_set`,
+/// `scope_assistant_allowed_tools_fails_closed_when_allow_absent`,
+/// `scope_assistant_allowed_tools_fails_closed_when_registry_absent`.
+///
+/// Security fix (item 2, fail-closed on absent taint/allow, #4126): when
+/// `is_assistant_tier` is true and no explicit `[tools].allowed` was already
+/// set, reaching this point with NO resolvable `allow` glob patterns (or no
+/// `registry` to resolve them against) used to fall through to
+/// `existing_allowed` — which is `None` here (the `existing_allowed.is_some()`
+/// case already returned above) — i.e. "every registered tool is callable."
+/// That is the WRONG default for a tier whose entire security model is a
+/// curated, narrowed surface: a misconfigured persona TOML (missing
+/// `[tools].allow`) or a registry that failed to build must never silently
+/// grant full access. `scope_for_delegation`'s `!is_tainted` branch is the
+/// caller that exercises this in practice — see its own doc comment.
 pub(super) fn scope_assistant_allowed_tools(
     is_assistant_tier: bool,
     existing_allowed: Option<Vec<String>>,
@@ -573,7 +596,11 @@ pub(super) fn scope_assistant_allowed_tools(
         return existing_allowed;
     }
     let (Some(patterns), Some(reg)) = (allow, registry) else {
-        return existing_allowed;
+        // Fail closed: an assistant-tier agent with nothing to scope against
+        // gets NO tools, never every tool. A persona that legitimately wants
+        // tools declares `[tools].allow` and takes the `Some(patterns)`
+        // branch below.
+        return Some(Vec::new());
     };
     let kept: Vec<String> = reg
         .schemas()
@@ -626,7 +653,10 @@ pub(super) fn scope_assistant_allowed_tools(
 /// Test: `tainted_delegation_cannot_reach_tool_delegator_lacked`,
 /// `untainted_delegation_is_unaffected`,
 /// `tainted_delegation_intersects_with_existing_allowed`,
-/// `assistant_delegate_to_engineer_path_is_scoped`.
+/// `assistant_delegate_to_engineer_path_is_scoped`,
+/// `scope_for_delegation_untainted_assistant_tier_fails_closed_without_allow`
+/// (item 2 fail-closed regression), `multi_hop_delegation_narrows_at_every_hop`
+/// (item 1 multi-hop regression).
 pub(super) fn scope_for_delegation(
     is_assistant_tier: bool,
     is_tainted: bool,
@@ -674,7 +704,12 @@ pub(super) fn scope_for_delegation(
 /// Test: `parse_delegation_taint_env_absent_is_untainted`,
 /// `parse_delegation_taint_env_valid_json_is_tainted`,
 /// `parse_delegation_taint_env_malformed_fails_closed`.
-pub(super) fn parse_delegation_taint_env(raw: Option<String>) -> Option<Vec<String>> {
+///
+/// `pub(crate)` (security fix, #4126): `ctrl::pm_task::dispatch::persona` and
+/// `ctrl::pm_task::dispatch::history` both defensively read this same env var
+/// (see `compose_delegation_taint`'s doc comment for why) — a single parser
+/// with one fail-closed behavior, not a second hand-copied one.
+pub(crate) fn parse_delegation_taint_env(raw: Option<String>) -> Option<Vec<String>> {
     let raw = raw?;
     match serde_json::from_str::<Vec<String>>(&raw) {
         Ok(patterns) => Some(patterns),
@@ -686,6 +721,60 @@ pub(super) fn parse_delegation_taint_env(raw: Option<String>) -> Option<Vec<Stri
                  treating as an empty (deny-all) taint"
             );
             Some(Vec::new())
+        }
+    }
+}
+
+/// Compose the OUTBOUND delegation taint an assistant-tier agent tags its
+/// OWN `delegate_to_agent` spawns with, given any INBOUND taint this agent
+/// itself received (security fix — item 1, multi-hop taint composition,
+/// #4126).
+///
+/// Why: The delegation-taint fix's stated invariant is "a taint only ever
+/// narrows, never widens." That broke at hop 2: `run_subagent` passed
+/// `cfg.tools.allow.as_deref()` (THIS agent's own native `[tools].allow`)
+/// straight into `build_registry_for_agent`'s `delegator_allow` parameter —
+/// which becomes the taint `build_assistant_tier_registry` stamps on
+/// whatever THIS agent spawns next — completely ignoring any INBOUND taint
+/// it was itself spawned under. Concretely: `assistant` (native allow `A`)
+/// delegates to `izzie` (native allow `B`, tainted with `A` via
+/// `TAGENT_DELEGATION_TAINT_ALLOW`); when izzie then delegates to `engineer`,
+/// the pre-fix code tagged that spawn with `B` alone — potentially WIDER
+/// than `A` — silently discarding hop 1's narrowing. `run_pm_task_with_persona`
+/// had the identical shape (`patterns.clone()`, ignoring any inbound taint).
+/// What: `inbound_taint = None` (this agent was not itself spawned via a
+/// tainted delegation — every hop-0/top-level dispatch, and still the
+/// overwhelming common case even at hop 2+) returns `native` unchanged:
+/// byte-identical to pre-fix behavior. `inbound_taint = Some(patterns)`
+/// returns the INTERSECTION of `inbound_taint` and `native`, by pattern
+/// string. `native == None` (this agent declares no explicit `[tools].allow`
+/// of its own) is treated as "impose no FURTHER narrowing beyond what was
+/// already received" — the result is `inbound_taint` unchanged — never wider
+/// than what this agent itself was handed, and never wider than its own
+/// declared posture either.
+/// Test: `compose_delegation_taint_untainted_forwards_native_unchanged`,
+/// `compose_delegation_taint_intersects_native_with_inbound`,
+/// `compose_delegation_taint_no_native_forwards_inbound_unchanged`,
+/// `multi_hop_delegation_narrows_at_every_hop`.
+pub(crate) fn compose_delegation_taint(
+    native: Option<&[String]>,
+    inbound_taint: Option<&[String]>,
+) -> Option<Vec<String>> {
+    let Some(inbound) = inbound_taint else {
+        return native.map(<[String]>::to_vec);
+    };
+    match native {
+        None => Some(inbound.to_vec()),
+        Some(native_patterns) => {
+            let native_set: std::collections::HashSet<&str> =
+                native_patterns.iter().map(String::as_str).collect();
+            Some(
+                inbound
+                    .iter()
+                    .filter(|p| native_set.contains(p.as_str()))
+                    .cloned()
+                    .collect(),
+            )
         }
     }
 }

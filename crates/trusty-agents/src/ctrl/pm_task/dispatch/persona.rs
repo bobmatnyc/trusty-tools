@@ -362,8 +362,28 @@ pub async fn run_pm_task_with_persona(
             // narrowed to its own posture regardless of the spawned agent's
             // declared role. Non-assistant-tier callers of this same chat
             // path (if any) are unaffected — `None` is a byte-identical no-op.
+            // Security fix (multi-hop taint composition, item 1, #4126): this
+            // in-process persona-chat dispatch is always a fresh top-level
+            // turn today (the ONLY way an already-tainted delegation reaches
+            // this process is via a subprocess spawn, and every subprocess
+            // spawn -- `--agent <name>` -- runs through
+            // `runtime::subagent_mode::run_subagent` instead, never this
+            // function). Reading `TAGENT_DELEGATION_TAINT_ALLOW` here anyway
+            // and composing it via `compose_delegation_taint` (rather than
+            // forwarding `patterns` verbatim) means this call site can never
+            // silently widen past an inbound taint if that assumption ever
+            // stops holding, at zero behavioral cost today: no env var is set
+            // on this process, so `inbound_taint` is `None` and the result is
+            // byte-identical to the prior `Some(patterns.clone())`/`None`
+            // split.
+            let inbound_taint = crate::runtime::tool_registry::parse_delegation_taint_env(
+                std::env::var("TAGENT_DELEGATION_TAINT_ALLOW").ok(),
+            );
             let delegation_taint = if persona_cfg.agent.role == "assistant" {
-                Some(patterns.clone())
+                crate::runtime::tool_registry::compose_delegation_taint(
+                    Some(&patterns),
+                    inbound_taint.as_deref(),
+                )
             } else {
                 None
             };

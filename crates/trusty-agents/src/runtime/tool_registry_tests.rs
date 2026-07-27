@@ -530,6 +530,208 @@ fn scope_assistant_allowed_tools_noop_when_allowed_already_set() {
     assert_eq!(kept, existing);
 }
 
+// --- item 2 regression: fail-closed on absent taint/allow signal (#4126) ---
+
+#[test]
+fn scope_assistant_allowed_tools_fails_closed_when_allow_absent() {
+    // The bug: an assistant-tier agent with no `[tools].allow` resolved at
+    // all (misconfigured persona TOML) and no pre-existing `[tools].allowed`
+    // used to fall through to `None` here — "every registered tool is
+    // callable" — the exact opposite of what the assistant tier's security
+    // model requires. Must be `Some(vec![])` (deny-all), never `None`.
+    let reg = build_registry_for_agent(
+        "assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+    )
+    .expect("assistant-tier agent builds a registry");
+
+    let kept = scope_assistant_allowed_tools(true, None, None, Some(&reg));
+    assert_eq!(
+        kept,
+        Some(Vec::new()),
+        "an assistant-tier agent with no resolvable allow patterns must be denied \
+         every tool, never left unrestricted"
+    );
+}
+
+#[test]
+fn scope_assistant_allowed_tools_fails_closed_when_registry_absent() {
+    // Same fail-closed requirement when `registry` itself is unavailable
+    // (e.g. the registry failed to build) — still must not fall through to
+    // unrestricted `None`.
+    let allow = vec!["web_search".to_string()];
+    let kept = scope_assistant_allowed_tools(true, None, Some(&allow), None);
+    assert_eq!(kept, Some(Vec::new()));
+}
+
+#[test]
+fn scope_for_delegation_untainted_assistant_tier_fails_closed_without_allow() {
+    // End-to-end of item 2 through the actual caller, `scope_for_delegation`,
+    // in its `!is_tainted` branch: an assistant-tier agent invoked directly
+    // (not via a tainted delegation) with no resolvable `[tools].allow` must
+    // still be denied every tool, not handed an unrestricted registry.
+    let reg = build_registry_for_agent(
+        "assistant",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+    )
+    .expect("assistant-tier agent builds a registry");
+
+    let kept = scope_for_delegation(
+        /* is_assistant_tier */ true,
+        /* is_tainted */ false,
+        /* original_allowed */ None,
+        /* skill_scoped_allow */ None,
+        /* taint_allow */ None,
+        Some(&reg),
+    );
+    assert_eq!(
+        kept,
+        Some(Vec::new()),
+        "an untainted assistant-tier agent with no declared posture must never end up \
+         unrestricted"
+    );
+}
+
+// --- item 1 regression: multi-hop taint composition (#4126) ---
+//
+// `compose_delegation_taint` is what `run_subagent` (`subagent_mode.rs`) and
+// `run_pm_task_with_persona` (`persona.rs`) now call instead of forwarding
+// their own native `[tools].allow` verbatim as the outbound taint for
+// whatever they spawn next.
+
+#[test]
+fn compose_delegation_taint_untainted_forwards_native_unchanged() {
+    // Hop 0 (no inbound taint): this agent forwards its OWN posture,
+    // byte-identical to the pre-fix `cfg.tools.allow.as_deref()` call.
+    let native = vec!["web_search".to_string(), "delegate_to_agent".to_string()];
+    let composed = compose_delegation_taint(Some(&native), None);
+    assert_eq!(composed, Some(native));
+}
+
+#[test]
+fn compose_delegation_taint_intersects_native_with_inbound() {
+    // Hop 2: an inbound taint narrower than (or disjoint from) this agent's
+    // own native posture must NEVER widen back out to the native list.
+    let native = vec![
+        "delegate_to_agent".to_string(),
+        "web_search".to_string(),
+        "get_weather".to_string(),
+    ];
+    let inbound = vec!["delegate_to_agent".to_string(), "web_search".to_string()];
+    let composed = compose_delegation_taint(Some(&native), Some(&inbound));
+    assert_eq!(
+        composed,
+        Some(vec![
+            "delegate_to_agent".to_string(),
+            "web_search".to_string()
+        ]),
+        "get_weather is native-only (not in the inbound taint) and must be dropped"
+    );
+}
+
+#[test]
+fn compose_delegation_taint_no_native_forwards_inbound_unchanged() {
+    // This agent declares no `[tools].allow` of its own — it cannot impose
+    // any FURTHER narrowing, so the inbound taint passes through unchanged
+    // (never widened, since there is nothing native to widen it with).
+    let inbound = vec!["delegate_to_agent".to_string()];
+    let composed = compose_delegation_taint(None, Some(&inbound));
+    assert_eq!(composed, Some(inbound));
+}
+
+#[test]
+fn multi_hop_delegation_narrows_at_every_hop() {
+    // The concrete scenario named in the fix: `assistant -> izzie ->
+    // engineer`. `assistant`'s own posture (A) is broader than `izzie`'s own
+    // posture (B) in one dimension (A grants get_gmail_message_content,
+    // which izzie does not have) and narrower in another (izzie grants
+    // get_weather, which assistant does not have) — proving the hop-2 taint
+    // is the TRUE intersection, not either side alone.
+    let assistant_allow = vec![
+        "delegate_to_agent".to_string(),
+        "web_search".to_string(),
+        "get_gmail_message_content".to_string(),
+    ];
+
+    // Hop 1: assistant -> izzie. No inbound taint at hop 0, so izzie is
+    // tainted with assistant's own posture verbatim.
+    let hop1_taint =
+        compose_delegation_taint(Some(&assistant_allow), None).expect("hop 1 must produce a taint");
+    assert_eq!(hop1_taint, assistant_allow);
+
+    // Hop 2: izzie -> engineer. Izzie's OWN native posture (B) includes
+    // get_weather (not in A) and omits get_gmail_message_content (which IS
+    // in A) — the bug this closes forwarded B verbatim, ignoring hop 1's
+    // taint (A) entirely.
+    let izzie_allow = vec![
+        "delegate_to_agent".to_string(),
+        "web_search".to_string(),
+        "get_weather".to_string(),
+    ];
+    let hop2_taint = compose_delegation_taint(Some(&izzie_allow), Some(&hop1_taint))
+        .expect("hop 2 must produce a taint");
+
+    assert!(
+        hop2_taint.iter().any(|p| p == "delegate_to_agent"),
+        "delegate_to_agent is in both A and B and must survive: {hop2_taint:?}"
+    );
+    assert!(
+        hop2_taint.iter().any(|p| p == "web_search"),
+        "web_search is in both A and B and must survive: {hop2_taint:?}"
+    );
+    assert!(
+        !hop2_taint.iter().any(|p| p == "get_weather"),
+        "get_weather is izzie-only (not in assistant's forwarded taint) and must be \
+         dropped, not forwarded to engineer: {hop2_taint:?}"
+    );
+    assert!(
+        !hop2_taint.iter().any(|p| p == "get_gmail_message_content"),
+        "get_gmail_message_content is assistant-only (izzie's own posture never \
+         granted it) and must be dropped: {hop2_taint:?}"
+    );
+
+    // Finally, prove the composed hop-2 taint actually narrows `engineer`'s
+    // real registry the same way `scope_for_delegation` would when
+    // `run_subagent` applies it: engineer's shell_exec/read_file surface has
+    // no overlap with either persona's tool posture, so it must end up with
+    // zero callable tools.
+    let engineer_reg = build_registry_for_agent(
+        "local-ops-agent",
+        "engineer",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+    )
+    .expect("engineer-shaped registry builds");
+    assert!(engineer_reg.contains("shell_exec"));
+
+    let engineer_scoped = scope_for_delegation(
+        false,
+        true,
+        None,
+        None,
+        Some(&hop2_taint),
+        Some(&engineer_reg),
+    )
+    .expect("a tainted engineer spawn must always be scoped");
+    assert!(
+        !engineer_scoped.iter().any(|n| n == "shell_exec"),
+        "engineer must not reach shell_exec via the narrowed hop-2 taint: {engineer_scoped:?}"
+    );
+}
+
 // --- `scope_for_delegation` (security fix: delegate_to_agent injection-to-RCE path) ---
 //
 // Chain: an assistant-tier persona holding live external-content tools

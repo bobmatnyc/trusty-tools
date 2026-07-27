@@ -9,7 +9,7 @@
 
 use serde_json::json;
 
-use super::allowed_tool_names_for;
+use super::{allowed_tool_names_for, ctrl_delegate_posture};
 use crate::rbac::{ServiceTier, UserIdentity};
 use crate::tools::ToolRegistry;
 use crate::tools::pm_bridge::PmBridgeTool;
@@ -177,5 +177,88 @@ async fn dispatch_task_invocable_when_no_user_through_dispatch_gated() {
         !result.is_error(),
         "no UserIdentity (local REPL/CLI) must preserve full access: {}",
         result.content()
+    );
+}
+
+// --- `ctrl_delegate_posture` (security fix, item 3, #4126) ---
+//
+// The THIRD `delegate_to_agent` construction site: `run_pm_task_with_history`
+// backs the REPL, Slack, Telegram, and the API server, and `ctrl.toml` (the
+// standalone-mode default) declares `role = "assistant"` (#3812) — the same
+// role value the OTHER two dispatch paths treat as "holds live
+// external-content tools, must never produce an unrestricted
+// `delegate_to_agent` spawn." Before this fix, this path applied NEITHER a
+// taint NOR a role-gate at all.
+
+#[test]
+fn ctrl_delegate_posture_orchestrator_role_is_unrestricted() {
+    // `resolve_agent_config` can load a project's `pm.toml` (`role =
+    // "orchestrator"`) instead of `ctrl.toml`. That case must be completely
+    // unaffected — `pm` is the trusted orchestrator, not a sandboxed
+    // persona — so this dispatch path keeps working exactly as before for it.
+    let (taint, roles) = ctrl_delegate_posture("orchestrator", None, None);
+    assert_eq!(taint, None, "pm/orchestrator must not be tainted");
+    assert_eq!(roles, None, "pm/orchestrator must not be role-gated");
+}
+
+#[test]
+fn ctrl_delegate_posture_assistant_role_fails_closed_without_allow() {
+    // `ctrl.toml` declares no `[tools]` section at all — `native_allow` is
+    // `None` — and there is no inbound taint (ctrl is always a top-level
+    // dispatch, never itself a delegation target). The fix must still
+    // produce an EXPLICIT empty (deny-all) taint, not skip tainting.
+    let (taint, roles) = ctrl_delegate_posture("assistant", None, None);
+    assert_eq!(
+        taint,
+        Some(Vec::new()),
+        "an assistant-tier ctrl with no declared [tools].allow must taint its \
+         delegate_to_agent spawns with an explicit deny-all set, never None \
+         (which would mean untainted/unrestricted)"
+    );
+    assert!(
+        roles.is_some(),
+        "assistant-tier ctrl must always be role-gated"
+    );
+}
+
+#[test]
+fn ctrl_delegate_posture_assistant_role_forwards_native_allow() {
+    // When `ctrl.toml` (or an operator override) DOES declare
+    // `[tools].allow`, that posture is what gets forwarded as the taint —
+    // not silently dropped to empty.
+    let native = vec!["web_search".to_string(), "delegate_to_agent".to_string()];
+    let (taint, _roles) = ctrl_delegate_posture("assistant", Some(&native), None);
+    assert_eq!(taint, Some(native));
+}
+
+#[test]
+fn ctrl_delegate_posture_assistant_role_always_gates_target_roles() {
+    // The role-gate must exclude orchestrator/controller/observer/analysis —
+    // the same privilege-escalation targets #3555 closed for the other two
+    // dispatch paths — and must include the worker roster ctrl legitimately
+    // delegates to.
+    let (_taint, roles) = ctrl_delegate_posture("assistant", None, None);
+    let roles = roles.expect("assistant-tier ctrl must be role-gated");
+    for expected in [
+        "engineer",
+        "qa",
+        "researcher",
+        "documentation",
+        "ops",
+        "planner",
+    ] {
+        assert!(
+            roles.iter().any(|r| r == expected),
+            "{expected} must be an allowed delegation target for ctrl, got: {roles:?}"
+        );
+    }
+    assert!(
+        !roles.iter().any(|r| r == "orchestrator"),
+        "orchestrator (pm) must NOT be a directly delegatable role for the \
+         assistant-tier gate, got: {roles:?}"
+    );
+    assert!(
+        !roles.iter().any(|r| r == "controller"),
+        "controller must NOT be a directly delegatable role, got: {roles:?}"
     );
 }

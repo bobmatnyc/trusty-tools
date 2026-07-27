@@ -364,6 +364,19 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         &default_bundled_config_dir(),
     ));
 
+    // Security fix (multi-hop taint composition, item 1, #4126): the taint
+    // THIS agent stamps on whatever IT spawns next must be the INTERSECTION
+    // of any INBOUND taint it received (`delegation_taint_allow`, parsed
+    // above) with its own NATIVE `[tools].allow` — never the native list
+    // alone. Without this, hop 2 of `assistant -> izzie -> engineer` forwards
+    // izzie's own (potentially wider) posture instead of the narrower of the
+    // two, discarding hop 1's narrowing. See `compose_delegation_taint`.
+    let outbound_delegate_allow: Option<Vec<String>> =
+        super::tool_registry::compose_delegation_taint(
+            cfg.tools.allow.as_deref(),
+            delegation_taint_allow.as_deref(),
+        );
+
     // Build the per-agent tool registry based on agent name (and role, for
     // the assistant-tier gate — see `ASSISTANT_TIER_ROLE`).
     let mut registry = super::tool_registry::build_registry_for_agent(
@@ -373,7 +386,7 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         code_dir.as_deref(),
         skill_registry.clone(),
         tag_skill_registry.clone(),
-        cfg.tools.allow.as_deref(),
+        outbound_delegate_allow.as_deref(),
     );
 
     // #57: If the agent opts into `use_finish_task`, auto-register the

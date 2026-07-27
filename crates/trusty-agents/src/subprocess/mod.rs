@@ -166,8 +166,11 @@ impl SubprocessAgentRunner {
     /// `None` (every caller except `build_assistant_tier_registry`) leaves
     /// behavior byte-identical to before this field existed.
     /// Test: `delegation_taint_allow_env_set_when_configured`,
-    /// `delegation_taint_allow_env_absent_by_default` (`subprocess::tests`);
-    /// `scope_assistant_allowed_tools_*` (`tool_registry_tests`).
+    /// `delegation_taint_allow_env_absent_by_default`,
+    /// `delegation_taint_allow_env_empty_vec_still_sets_deny_all`
+    /// (`subprocess::tests`, exercising `spawn::apply_delegation_taint_env`
+    /// directly against a real `Command`); `scope_assistant_allowed_tools_*`
+    /// (`tool_registry_tests`).
     pub fn with_delegation_taint(mut self, patterns: Option<Vec<String>>) -> Self {
         self.delegation_taint_allow = patterns;
         self
