@@ -56,6 +56,27 @@ description = "test"
 name = "ghost-kb"
 "#;
 
+/// The live cto-assistant shape (HIGH, code-critic PR #4119): one curated
+/// `[[stores]]` OKG binding PLUS a tier-2 `[tools].search_indexes` attachment
+/// pointing at a large, genuinely queryable corpus. Before this fix the
+/// route silently omitted `search_indexes` entirely — the majority of this
+/// agent's real retrievable knowledge would never have reached the pane.
+const CTO_ASSISTANT_SHAPE_FIXTURE: &str = r#"[agent]
+name = "cto-assistant"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+
+[[stores]]
+name = "cto-assistant"
+index = "cto-assistant"
+
+[tools]
+allow = ["vector_search"]
+search_indexes = ["cto-duetto"]
+enforce_search_indexes = true
+"#;
+
 async fn mock_search_daemon() -> String {
     let app = Router::new().route(
         "/indexes/{id}/status",
@@ -143,6 +164,51 @@ async fn knowledge_route_reports_bound_store_and_granted_tool() {
             .expect("memory_recall must appear as a knowledge tool");
         assert_eq!(recall["available"], true);
         assert_eq!(recall["bound_store"], serde_json::Value::Null);
+    })
+    .await;
+}
+
+/// HIGH regression (code-critic, PR #4119): the cto-assistant shape's
+/// `[tools].search_indexes` attachment must appear in the response — before
+/// this fix it was parsed and silently dropped.
+#[tokio::test]
+async fn knowledge_route_surfaces_attached_search_indexes() {
+    with_sandboxed_home(|_home| async move {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cto-assistant.toml"),
+            CTO_ASSISTANT_SHAPE_FIXTURE,
+        )
+        .unwrap();
+        let base = mock_search_daemon().await;
+
+        let resp = knowledge_at(
+            &[dir.path().to_path_buf()],
+            "cto-assistant",
+            dir.path(),
+            Some(&base),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+
+        // The curated OKG binding is still reported under `stores`.
+        let stores = body["stores"].as_array().unwrap();
+        assert_eq!(stores.len(), 1);
+        assert_eq!(stores[0]["index"], "cto-assistant");
+
+        // The tier-2 attachment must be visible too — same field names
+        // `/stores` already uses, so the two routes can never disagree.
+        let search_indexes = body["search_indexes"]
+            .as_array()
+            .expect("search_indexes must be present");
+        assert_eq!(
+            search_indexes,
+            &[serde_json::Value::String("cto-duetto".to_string())],
+            "the attached corpus must not be silently omitted: {body:?}"
+        );
+        assert_eq!(body["enforce_search_indexes"], true);
     })
     .await;
 }
@@ -238,6 +304,77 @@ scopes = ["memory.read", "memory.write"]
             "never rendered as connected for a disabled endpoint"
         );
         assert!(memory["reason"].as_str().unwrap().contains("disabled"));
+        // MEDIUM (code-critic, PR #4119): the bare "plain" agent declares no
+        // capability at all, so it must never be reported as `granted_for_agent`
+        // even for an enabled connection — this one happens to be disabled too,
+        // so the field should read `false` regardless of grant state.
+        assert_eq!(memory["granted_for_agent"], false);
+    })
+    .await;
+}
+
+/// CRITICAL regression (code-critic, PR #4119 / issue #4115): a store whose
+/// corpus failed to open (HTTP 2xx, `status: "ready"`, `chunk_count: 0`, but
+/// every staged-pipeline lane `Failed`) must render `connected: false` — the
+/// exact `cto-duetto` false-green this route inherited from `/stores` before
+/// `stores::status::resolve_store_statuses` was fixed at the source.
+#[tokio::test]
+async fn knowledge_route_reports_corpus_open_failed_as_not_connected() {
+    with_sandboxed_home(|_home| async move {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cto-assistant.toml"),
+            "[agent]\nname = \"cto-assistant\"\nrole = \"assistant\"\nmodel = \"claude-sonnet-4-6\"\ndescription = \"test\"\n\n[[stores]]\nname = \"cto-duetto-kb\"\nindex = \"cto-duetto\"\n",
+        )
+        .unwrap();
+
+        let app = axum::Router::new().route(
+            "/indexes/{id}/status",
+            get(|Path(id): Path<String>| async move {
+                if id == "cto-duetto" {
+                    (
+                        AxumStatus::OK,
+                        Json(serde_json::json!({
+                            "index_id": "cto-duetto",
+                            "chunk_count": 0,
+                            "status": "ready",
+                            "stages": {
+                                "lexical": {"status": "failed"},
+                                "semantic": {"status": "failed"},
+                                "graph": {"status": "failed"},
+                            },
+                        })),
+                    )
+                } else {
+                    (AxumStatus::NOT_FOUND, Json(serde_json::json!({})))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = format!("http://{addr}");
+
+        let resp = knowledge_at(
+            &[dir.path().to_path_buf()],
+            "cto-assistant",
+            dir.path(),
+            Some(&base),
+            None,
+        )
+        .await;
+        let body = body_json(resp).await;
+        let store = &body["stores"][0];
+        assert_eq!(
+            store["connected"], false,
+            "a reachable-but-broken corpus must not report connected: {body:?}"
+        );
+        assert!(
+            store["reason"]
+                .as_str()
+                .unwrap()
+                .contains("corpus failed to open")
+        );
     })
     .await;
 }

@@ -53,14 +53,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   "what does this agent know" backend (#3935, DOC-57 §4).** One response
   carries all three sub-surfaces so the pane never has to correlate a store
   card, a tool glob and a harness endpoint table across three routes: `[[stores]]`
-  bindings resolved live (`/stores`' existing, unchanged logic), the agent's
-  knowledge-classified tools (`kind = Knowledge` in `#3933`'s skill catalog,
-  `vector_search` rendered under its bound store), and the operator-configured
-  MCP knowledge connections (`[[tool_registry.endpoints]]` +
-  `[[mcp.services]]`, read-only, no live probe — a disabled/unenabled service
-  is always reported truthfully, never as connected). Read-only in this slice;
-  store editing remains #3890's contract.
-- **Fixed: stability regression in corpus-open-failed routes (#4115).** Knowledge stores with open() failures now correctly report as not-connected rather than crashing the /knowledge endpoint.
+  bindings resolved live (`/stores`' existing, now-fixed logic — see Fixed
+  below), the agent's knowledge-classified tools (`kind = Knowledge` in
+  `#3933`'s skill catalog, `vector_search` rendered under its bound store),
+  the tier-2 `[tools].search_indexes` attachments (`search_indexes` +
+  `enforce_search_indexes`, same field names `/stores` already uses), and the
+  operator-configured MCP knowledge connections
+  (`[[tool_registry.endpoints]]` + `[[mcp.services]]`, read-only, no live
+  probe — a disabled/unenabled service is always reported truthfully, never
+  as connected, and every card carries `granted_for_agent` so an operator-
+  enabled connection isn't conflated with one this specific agent can
+  actually reach). Read-only in this slice; store editing remains #3890's
+  contract.
+
+### Fixed
+
+- **`GET /api/agents/:name/stores` (and the new `/knowledge` route above) no
+  longer report `connected: true` for an index whose corpus failed to open
+  (#4115).** `resolve_store_statuses` previously derived `connected` from
+  HTTP reachability alone — a warm-booted index with `corpus_open_failed`
+  answers the status probe with 2xx, `status: "ready"` and `chunk_count: 0`
+  while every staged-pipeline lane is `Failed`, and the store card showed a
+  healthy green connection for a corpus that answers zero queries.
+  `StoreStatus` now derives `connected` from the response's `stages` object
+  (the same ground truth trusty-search's own `/health` handler uses,
+  `IndexStages::any_failed`) and carries a new `failed_stages` field naming
+  which lane(s) failed, instead of collapsing everything to a boolean.
 
 ### Removed
 

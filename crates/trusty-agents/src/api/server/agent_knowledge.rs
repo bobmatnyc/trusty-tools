@@ -32,7 +32,12 @@
 //!   the former onto the latter in `default-config.toml`, so DOC-57 §4.4's
 //!   illustrative "both disabled under tool_registry.endpoints" table is
 //!   stale against the live default; this route reports what is actually
-//!   configured, not the issue's example.
+//!   configured, not the issue's example. Every card ALSO carries
+//!   `granted_for_agent`: `GlobalConfig::load()` falls back to the same
+//!   compiled-in default (enabling `trusty-memory`/`trusty-search`) for
+//!   every agent, so `enabled` alone cannot distinguish "the operator turned
+//!   this on" from "this specific agent is granted anything it would back" —
+//!   see [`agent_reaches_connection`].
 //!
 //! What: [`agent_knowledge_route`] is the axum shim; [`knowledge_at`] is the
 //! testable core. Like `agent_skills::skills_at`, K-b is read from the
@@ -130,6 +135,18 @@ pub(super) async fn knowledge_at(
     // K-a: unchanged resolution logic from `/stores` (#3878/#3864).
     let statuses = resolve_store_statuses(name, &stores, search_base, memory_base).await;
     let issues = stores.validate();
+    // Tier-2 `[tools].search_indexes` attachments (#3232/#4009, epic #4007),
+    // reported the SAME way `/stores` already reports them — as a bare id
+    // list plus the enforcement posture, deduped against any id already
+    // bound as a curated store (`attached_indexes_deduped`, shared with
+    // `/stores` so the two routes can never disagree about the id set).
+    // Without this, an agent like cto-assistant (one curated `[[stores]]`
+    // binding plus `search_indexes = ["cto-duetto"]` — a 200,090-chunk corpus
+    // its `vector_search` can genuinely query) would have the overwhelming
+    // majority of its real retrievable knowledge silently missing from the
+    // Knowledge pane, with no `issues` entry to say so.
+    let attached_search_indexes = super::agent_stores::attached_indexes_deduped(&stores, &tools);
+    let enforce_search_indexes = tools.search_indexes_enforced();
 
     // K-b: the agent's resolved skill set, filtered to `kind == Knowledge`.
     // Deliberately does NOT resolve `extends` — same documented limitation
@@ -143,11 +160,21 @@ pub(super) async fn knowledge_at(
     let knowledge_tools = knowledge_tool_cards(&catalog, patterns.as_deref(), &stores);
 
     // K-c: declared MCP knowledge connections — no live probe (see module doc).
+    // `patterns` (this agent's own resolved tool patterns, computed above for
+    // K-b) is threaded through so each card can distinguish "the OPERATOR
+    // enabled this" from "THIS AGENT is granted a tool it would back" —
+    // otherwise a bare agent with zero grants reports the same two
+    // connections as a fully-provisioned one (see `agent_reaches_connection`).
     let global_config = crate::mcp::config::GlobalConfig::load().await;
-    let mcp = knowledge_mcp_connections(&global_config);
+    let mcp = knowledge_mcp_connections(&global_config, patterns.as_deref());
 
     let mut body = json!({
         "stores": statuses,
+        // #3232/#4009: tier-2 attached indexes, same field names as `/stores`
+        // (`agent_stores::stores_at`) so a client reading either route sees
+        // the identical shape for the identical mechanism.
+        "search_indexes": attached_search_indexes,
+        "enforce_search_indexes": enforce_search_indexes,
         "tools": knowledge_tools,
         "mcp": mcp,
         "issues": issues,
@@ -171,9 +198,11 @@ pub(super) async fn knowledge_at(
 /// only for `vector_search` (the seam DOC-57 §4.3 names explicitly) AND only
 /// when the agent has a bound store — every other knowledge tool renders
 /// `bound_store: null`, never a fabricated linkage. A tool-less knowledge
-/// skill (none exist in the current catalog, but the shape is defensive) is
-/// skipped: this array reports resolvable TOOLS, and a tool-less skill has
-/// none to name.
+/// skill IS skipped here — the catalog has at least one
+/// (`owner-context`, `skills/manifest/builtin/prose.rs`) — because this array
+/// reports resolvable TOOLS and a tool-less skill has none to name; it still
+/// appears on `GET …/skills` like any other tool-less skill (§5.2), just not
+/// in this tool-shaped list.
 /// Test: `knowledge_tool_cards_reports_vector_search_bound_to_the_store`,
 /// `knowledge_tool_cards_reports_ungranted_tool_with_a_reason`,
 /// `knowledge_tool_cards_excludes_action_kind_skills`.
@@ -233,16 +262,32 @@ fn knowledge_tool_cards(
 /// them, `enabled = false`) and onto `[[mcp.services]]` (`enabled = true`,
 /// `discover = true`) — this route reads the config LIVE, so it reports
 /// today's actual shape rather than the issue's now-stale illustration.
+///
+/// `patterns` is this agent's own resolved tool patterns (the same value K-b
+/// uses) — every card carries `granted_for_agent` derived from it, because
+/// `GlobalConfig::load()` falls back to the compiled-in default the moment
+/// no `~/.trusty-agents/config.toml` exists, which enables `trusty-memory`/
+/// `trusty-search` for EVERY agent regardless of what that agent actually
+/// declares. Without this a bare agent with zero grants and a fully
+/// provisioned one would report the identical two connections — collapsing
+/// "the operator turned this on" into "this agent can use it". See
+/// [`agent_reaches_connection`].
 /// What: One entry per qualifying service, `{name, kind, enabled, connected,
-/// scopes, reason}`. `kind` is `"openrpc"` for `driver = "direct"`, `"mcp"`
-/// for `driver = "stdio-mcp"` or an `[[mcp.services]]` entry. `connected` is
-/// always `false` (no probe — see module doc); `scopes` is `[]` for an
-/// `mcp.services` entry (nothing to report).
+/// scopes, granted_for_agent, reason}`. `kind` is `"openrpc"` for
+/// `driver = "direct"`, `"mcp"` for `driver = "stdio-mcp"` or an
+/// `[[mcp.services]]` entry. `connected` is always `false` (no probe — see
+/// module doc); `scopes` is `[]` for an `mcp.services` entry (nothing to
+/// report).
 /// Test: `knowledge_mcp_connections_flags_memory_and_search_by_scope`,
 /// `knowledge_mcp_connections_ignores_an_unrelated_endpoint`,
 /// `knowledge_mcp_connections_empty_when_no_registry_configured`,
-/// `knowledge_mcp_connections_flags_first_party_mcp_services_by_name`.
-fn knowledge_mcp_connections(global: &crate::mcp::config::GlobalConfig) -> Vec<Value> {
+/// `knowledge_mcp_connections_flags_first_party_mcp_services_by_name`,
+/// `knowledge_mcp_connections_reports_ungranted_for_a_bare_agent`,
+/// `knowledge_mcp_connections_reports_granted_when_agent_holds_a_backing_tool`.
+fn knowledge_mcp_connections(
+    global: &crate::mcp::config::GlobalConfig,
+    patterns: Option<&[String]>,
+) -> Vec<Value> {
     const KNOWLEDGE_NAMESPACES: &[&str] = &["memory", "search", "google"];
     const KNOWLEDGE_SERVICE_NAMES: &[&str] = &["trusty-memory", "trusty-search"];
 
@@ -258,7 +303,7 @@ fn knowledge_mcp_connections(global: &crate::mcp::config::GlobalConfig) -> Vec<V
                         KNOWLEDGE_NAMESPACES.contains(&namespace)
                     })
                 })
-                .map(endpoint_card),
+                .map(|ep| endpoint_card(ep, patterns)),
         );
     }
     out.extend(
@@ -267,45 +312,106 @@ fn knowledge_mcp_connections(global: &crate::mcp::config::GlobalConfig) -> Vec<V
             .services
             .iter()
             .filter(|svc| KNOWLEDGE_SERVICE_NAMES.contains(&svc.name.as_str()))
-            .map(mcp_service_card),
+            .map(|svc| mcp_service_card(svc, patterns)),
     );
     out
 }
 
-fn endpoint_card(ep: &EndpointConfig) -> Value {
+/// Whether this agent's OWN resolved tool patterns grant a tool the named
+/// connection would plausibly back (the per-agent half of `granted_for_agent`
+/// — see `knowledge_mcp_connections`'s doc for why the operator-level
+/// `enabled` flag alone is not enough).
+///
+/// Why: There is no live discovery linking a connection to its tools (same
+/// constraint as the classification above), so this is a best-effort,
+/// documented mapping from connection NAME to the small, stable set of
+/// first-party tool names it is understood to back — `gworkspace` backs the
+/// Google-OAuth knowledge tools (`okg_ingest_gmail`/`okg_ingest_drive`);
+/// `trusty-memory`/`trusty-search` back the native memory/search family.
+/// **This is a per-agent CAPABILITY signal, not a live routing fact** — the
+/// module doc's honest gap still holds: today's memory/search tools dispatch
+/// in-process, not through these endpoints, even when this returns `true`.
+/// What: `true` iff `patterns` matches at least one tool in the connection's
+/// mapped set via the SAME `match_any_glob` the dispatch gate uses. An
+/// unknown connection name (an operator's own, unrelated endpoint) never
+/// reaches this function — the caller only invokes it for connections
+/// already classified as knowledge-relevant.
+/// Test: `agent_reaches_connection_true_for_a_granted_backing_tool`,
+/// `agent_reaches_connection_false_for_a_bare_agent`.
+fn agent_reaches_connection(name: &str, patterns: Option<&[String]>) -> bool {
+    let Some(patterns) = patterns else {
+        return false;
+    };
+    let backing_tools: &[&str] = match name {
+        "gworkspace" => &["okg_ingest_gmail", "okg_ingest_drive"],
+        "trusty-memory" => &[
+            "memory_recall",
+            "memory_search",
+            "memory_store",
+            "store_memory",
+            "retrieve_memory",
+            "list_memory_keys",
+        ],
+        "trusty-search" => &[
+            "vector_search",
+            "search_code",
+            "search_docs",
+            "search_skills",
+            "search_sessions",
+            "okg_sources",
+            "okg_ingest_docstore",
+        ],
+        _ => return false,
+    };
+    backing_tools
+        .iter()
+        .any(|tool| match_any_glob(tool, patterns))
+}
+
+/// `reason` text for a connection given its enabled/granted state — shared
+/// between `endpoint_card` and `mcp_service_card` so the three phrasings
+/// (disabled / enabled-but-ungranted / enabled-and-granted) can never drift
+/// between the two sources.
+fn connection_reason(enabled: bool, granted_for_agent: bool, noun: &str) -> String {
+    if !enabled {
+        return format!("{noun} disabled in config.toml");
+    }
+    if !granted_for_agent {
+        return format!(
+            "{noun} is enabled for the operator, but this agent is not granted any \
+             knowledge tool this connection would back"
+        );
+    }
+    format!("{noun} is enabled in config.toml; this route does not probe live connectivity")
+}
+
+fn endpoint_card(ep: &EndpointConfig, patterns: Option<&[String]>) -> Value {
     let kind = match ep.driver {
         DriverKind::Direct => "openrpc",
         DriverKind::StdioMcp => "mcp",
     };
-    let reason = if ep.enabled {
-        "endpoint is enabled in config.toml; this route does not probe live connectivity"
-            .to_string()
-    } else {
-        "endpoint disabled in config.toml".to_string()
-    };
+    let granted_for_agent = agent_reaches_connection(&ep.name, patterns);
     json!({
         "name": ep.name,
         "kind": kind,
         "enabled": ep.enabled,
         "connected": false,
         "scopes": ep.scopes,
-        "reason": reason,
+        "granted_for_agent": granted_for_agent,
+        "reason": connection_reason(ep.enabled, granted_for_agent, "endpoint"),
     })
 }
 
-fn mcp_service_card(svc: &McpService) -> Value {
-    let reason = if svc.enabled {
-        "service is enabled in config.toml; this route does not probe live connectivity".to_string()
-    } else {
-        "service disabled in config.toml".to_string()
-    };
+fn mcp_service_card(svc: &McpService, patterns: Option<&[String]>) -> Value {
+    let granted_for_agent = agent_reaches_connection(&svc.name, patterns);
     json!({
         "name": svc.name,
         "kind": "mcp",
         "enabled": svc.enabled,
         "connected": false,
         "scopes": Vec::<String>::new(),
-        "reason": reason,
+        "granted_for_agent": granted_for_agent,
+        "reason": connection_reason(svc.enabled, granted_for_agent, "service"),
     })
 }
 
@@ -419,6 +525,30 @@ allow = ["memory-recall"]
         );
     }
 
+    /// LOW (code-critic, PR #4119): `owner-context`
+    /// (`skills/manifest/builtin/prose.rs`) is a real, tool-less
+    /// `kind: Knowledge` skill in the catalog — it intentionally does NOT
+    /// appear here (this array reports resolvable tools; see the doc
+    /// comment), but it must not silently vanish from every other surface —
+    /// covered here as the documented, deliberate exclusion, not an
+    /// accidental gap.
+    #[test]
+    fn knowledge_tool_cards_excludes_tool_less_knowledge_skills_by_design() {
+        let catalog = SkillCatalog::builtin();
+        assert!(
+            catalog.manifests().iter().any(|m| m.id == "owner-context"
+                && m.kind == SkillKind::Knowledge
+                && m.tool().is_none()),
+            "the catalog must still carry a tool-less Knowledge skill for this test to mean anything"
+        );
+        let patterns = vec!["*".to_string()];
+        let cards = knowledge_tool_cards(&catalog, Some(&patterns), &StoresConfig::default());
+        assert!(
+            cards.iter().all(|c| c["skill"] != "owner-context"),
+            "a tool-less skill has no tool to name in a tools[] array: {cards:?}"
+        );
+    }
+
     #[test]
     fn knowledge_mcp_connections_flags_memory_and_search_by_scope() {
         let global: crate::mcp::config::GlobalConfig = toml::from_str(
@@ -440,7 +570,7 @@ scopes = ["search.read"]
 "#,
         )
         .unwrap();
-        let cards = knowledge_mcp_connections(&global);
+        let cards = knowledge_mcp_connections(&global, None);
         assert_eq!(cards.len(), 2);
         let memory = cards.iter().find(|c| c["name"] == "trusty-memory").unwrap();
         assert_eq!(memory["enabled"], false);
@@ -466,13 +596,13 @@ scopes = ["ticketing.read"]
 "#,
         )
         .unwrap();
-        assert!(knowledge_mcp_connections(&global).is_empty());
+        assert!(knowledge_mcp_connections(&global, None).is_empty());
     }
 
     #[test]
     fn knowledge_mcp_connections_empty_when_no_registry_configured() {
         let global = crate::mcp::config::GlobalConfig::default();
-        assert!(knowledge_mcp_connections(&global).is_empty());
+        assert!(knowledge_mcp_connections(&global, None).is_empty());
     }
 
     /// Today's actual shape (see the module doc's "honest gap discovered"
@@ -501,12 +631,92 @@ enabled = true
 "#,
         )
         .unwrap();
-        let cards = knowledge_mcp_connections(&global);
+        let cards = knowledge_mcp_connections(&global, None);
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert_eq!(cards[0]["name"], "trusty-memory");
         assert_eq!(cards[0]["kind"], "mcp");
         assert_eq!(cards[0]["enabled"], true);
         assert_eq!(cards[0]["connected"], false);
+    }
+
+    /// MEDIUM (code-critic, PR #4119): `GlobalConfig::load()` falls back to
+    /// the compiled-in default, which enables `trusty-memory`/`trusty-search`
+    /// for EVERY agent. Without per-agent scoping a bare agent with zero
+    /// grants would report the same two "available" connections as a fully
+    /// provisioned one. `granted_for_agent` must be `false` here.
+    #[test]
+    fn knowledge_mcp_connections_reports_ungranted_for_a_bare_agent() {
+        let global: crate::mcp::config::GlobalConfig = toml::from_str(
+            r#"
+[[mcp.services]]
+name = "trusty-memory"
+description = "memory"
+command = "trusty-memory"
+transport = "stdio"
+enabled = true
+"#,
+        )
+        .unwrap();
+        // No patterns at all — the bare-agent case (`declares_capability: false`).
+        let cards = knowledge_mcp_connections(&global, None);
+        assert_eq!(cards[0]["enabled"], true, "operator turned it on");
+        assert_eq!(
+            cards[0]["granted_for_agent"], false,
+            "but this agent declares no capability at all"
+        );
+        assert!(
+            cards[0]["reason"].as_str().unwrap().contains("not granted"),
+            "{:?}",
+            cards[0]["reason"]
+        );
+
+        // A DIFFERENT agent granted an unrelated tool is still ungranted for
+        // THIS connection — granting is per-backing-tool, not "has any grant".
+        let unrelated = vec!["get_weather".to_string()];
+        let cards = knowledge_mcp_connections(&global, Some(&unrelated));
+        assert_eq!(cards[0]["granted_for_agent"], false);
+    }
+
+    /// The positive case: an agent actually granted a tool the connection
+    /// backs reports `granted_for_agent: true` with the "does not probe"
+    /// phrasing, not the "not granted" one.
+    #[test]
+    fn knowledge_mcp_connections_reports_granted_when_agent_holds_a_backing_tool() {
+        let global: crate::mcp::config::GlobalConfig = toml::from_str(
+            r#"
+[[mcp.services]]
+name = "trusty-memory"
+description = "memory"
+command = "trusty-memory"
+transport = "stdio"
+enabled = true
+"#,
+        )
+        .unwrap();
+        let patterns = vec!["memory_recall".to_string()];
+        let cards = knowledge_mcp_connections(&global, Some(&patterns));
+        assert_eq!(cards[0]["granted_for_agent"], true);
+        assert!(
+            cards[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("does not probe"),
+            "{:?}",
+            cards[0]["reason"]
+        );
+    }
+
+    #[test]
+    fn agent_reaches_connection_true_for_a_granted_backing_tool() {
+        let patterns = vec!["okg_ingest_gmail".to_string()];
+        assert!(agent_reaches_connection("gworkspace", Some(&patterns)));
+        assert!(!agent_reaches_connection("trusty-memory", Some(&patterns)));
+    }
+
+    #[test]
+    fn agent_reaches_connection_false_for_a_bare_agent() {
+        assert!(!agent_reaches_connection("gworkspace", None));
+        assert!(!agent_reaches_connection("trusty-memory", Some(&[])));
     }
 
     #[derive(serde::Deserialize)]
