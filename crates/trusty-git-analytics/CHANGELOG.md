@@ -5,6 +5,15 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Added
+
+- JIRA changelog + comment extraction client, covering issue transition history and per-comment detail (closes [#3966](https://github.com/bobmatnyc/trusty-tools/issues/3966)).
+- `fact_ticket_transitions` + `fact_jira_comment_detail` schema, introduced by migration `0023_jira_ingestion`.
+- `tga jira sync` and `tga jira freshness` subcommands to drive ingestion and report per-project data freshness.
+
+---
 ## [2.9.4] — 2026-07-21
 
 ### Fixed
