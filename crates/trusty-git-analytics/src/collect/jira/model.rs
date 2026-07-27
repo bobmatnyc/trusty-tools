@@ -54,7 +54,18 @@ pub struct ChangelogWalk {
 }
 
 /// A JIRA issue plus its parsed status-transition changelog (issue #3966).
+///
+/// `#[non_exhaustive]` because `tga` is a published crate and this struct
+/// gains a field whenever the walk learns to report something new about a
+/// ticket (`truncated_history_total` via #4084). Without the attribute each
+/// such field is a SemVer-major break for any downstream that constructs the
+/// struct literally or destructures it exhaustively. The attribute costs
+/// nothing to enforce here: the sole constructor is the `pub(crate)`
+/// `ChangelogIssue::from_api` in this module, so downstreams already only
+/// ever *receive* one of these from
+/// [`super::JiraClient::search_with_changelog`] and read its fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangelogIssue {
     /// Issue key, e.g. `PROJ-123`.
     pub key: String,

@@ -18,6 +18,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `jira.timezone` config key pins the IANA timezone in which the JIRA account evaluates JQL date literals; when unset it is discovered from `GET /rest/api/3/myself` and cached.
 - `tga jira freshness --max-cursor-lag-days N` fails when a project's sync cursor falls that far behind, catching a sync that runs on schedule but never catches up. Cursor lag is always reported; only this flag makes it fail.
 
+### Changed
+
+- `CollectError` and `ChangelogIssue` are now `#[non_exhaustive]`. Both grow with every provider failure mode or per-ticket verdict the collector learns — `CollectError` gained `Throttled`, `IncompleteChangelog` and `PagingBudgetExceeded` across #3966 and #4084, and `ChangelogIssue` gained `truncated_history_total` — and on a published crate each such addition was a SemVer-major break, forcing a minor bump for what is genuinely a patch. Downstream crates must now carry a wildcard `match` arm on `CollectError`; `ChangelogIssue` was already receive-only outside the crate (its sole constructor is `pub(crate)`), so that half costs callers nothing. Every in-tree `match` already used a wildcard, so no call site changed.
+
 ### Fixed
 
 - JIRA changelog pagination no longer silently truncates a ticket's oldest status transitions. The search-embedded changelog is itself paged, so `search_with_changelog` now compares JIRA's `changelog.total` against the embedded entry count and flags the shortfall; `tga jira sync` then walks the dedicated `GET /issue/{key}/changelog` endpoint to exhaustion and replaces the truncated history. A repair that cannot retrieve every entry the server reported fails with the new `CollectError::IncompleteChangelog`, naming the ticket and the expected-vs-retrieved counts, rather than returning a partial history that reads as complete — and the knowingly-short embedded copy is not persisted either. Unblocks the #3966 historical backfill (closes [#4084](https://github.com/bobmatnyc/trusty-tools/issues/4084)).

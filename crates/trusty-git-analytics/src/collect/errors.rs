@@ -15,7 +15,16 @@ use thiserror::Error;
 /// failures.
 /// Test: covered indirectly — every provider client and `GitCollector`
 /// test that exercises an error path produces these variants.
+///
+/// `#[non_exhaustive]` because `tga` is a published crate and this enum grows
+/// a variant nearly every time a provider learns a new failure mode
+/// (`Throttled` via #3966, `IncompleteChangelog` / `PagingBudgetExceeded` via
+/// #4084). Without the attribute each of those is a SemVer-major break —
+/// every downstream exhaustive `match` fails to compile with E0004 — which
+/// forces a minor bump for what is genuinely a patch. Downstreams must carry
+/// a wildcard arm; in-tree callers already do.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CollectError {
     /// A `git2`/libgit2 error occurred during repository operations.
     #[error("git error: {0}")]
