@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+
 - **Agent delegations are now tracked automatically, with a real lifecycle**
   ([#2864](https://github.com/bobmatnyc/trusty-tools/issues/2864), slices
   S1+S2): the daemon observes every native subagent dispatch from the
@@ -61,7 +62,123 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   fixed here; tracked as
   [#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981).
 
+### Changed
+
+- **Orphan-sweep candidates are processed in sorted order** rather than
+  filesystem order, so a `--dry-run` preview predicts the real run and any
+  ordering-dependent behaviour is reproducible.
+
 ### Fixed
+
+- **The worktree reclaim path no longer force-deletes uncommitted work**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091)): the
+  orphaned-worktree sweep had no dirty-tree check anywhere — its entire safety
+  model was the #3649 ownership sentinel, and a candidate with a KNOWN owner
+  that passed the owner-terminal and grace-window gates was removed with
+  `git worktree remove --force` (falling back to `fs::remove_dir_all`) no
+  matter what was in it. Because `session_context_pause` prunes by DEFAULT,
+  this fired on an ordinary `/tm-session-pause`. A new
+  `session_manager::worktree_safety::inspect_dirt` gate now runs on every
+  candidate the ownership gate approves, and refuses to remove a worktree that
+  has modified/staged tracked files, untracked (non-ignored) files, or commits
+  present on no remote — that last case matters because
+  `remove_session_worktree` also runs `git branch -D session/<leaf>`, so an
+  unpushed commit loses its last reachable ref. **Every error path resolves to
+  DIRTY**: a git subprocess that cannot run, exits non-zero, or returns an
+  unparsable count, and an unreadable directory, all skip rather than delete.
+  Skips are never silent — they are returned as
+  `skipped_dirty` (path, reason, file/commit counts) from the sweep, as
+  `skipped_dirty_worktrees` from the `session_context_pause` MCP tool, in the
+  `prune-worktrees` HTTP response, printed by `tm session prune-worktrees`, and
+  warned per-path by the daemon's orphan-GC loop. Discarding that work requires
+  an explicit opt-in (`discard_dirty` on the HTTP route,
+  `tm session prune-worktrees --discard-dirty`); `--force` alone does NOT imply
+  it, and the pause tool's schema is closed with no such knob at all, so no
+  default `/tm-session-pause` can reach it. Purely additive — the #3649
+  owner/sentinel guard is unchanged.
+
+- **The dirty-tree guard now sees work `git status` hides**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review
+  round): `git status --porcelain` reports what git has been *configured* to
+  show, and the most valuable content in a session worktree was outside that.
+  Six holes closed, each with a test:
+  - **Nested repositories are now enumerated, not inferred.** A worktree
+    containing nested git worktrees or clones that hold uncommitted or unpushed
+    work is DIRTY regardless of gitignore — the `.claude/worktrees/` agent shape
+    is gitignored on `main`, so seven live nested worktrees inside one session
+    checkout produced `dirty_files = 0`. Since the #3649 gate deliberately
+    refuses to delete those nested worktrees directly, the sweep would have
+    honoured that refusal and then deleted their parent. Registered worktrees
+    come from `git worktree list --porcelain`; unregistered clones come from a
+    bounded walk of gitignored subtrees that skips regenerable build directories
+    (`target/`, `node_modules/`, …). A nested worktree that is itself clean and
+    pushed does NOT pin its parent.
+  - **`.trusty-mpm/` is no longer excused wholesale.** Only
+    `scrollback.txt` and `last-instructions.md` are treated as disposable;
+    pause snapshots under `sessions/`, checkpoints, and anything else — a live
+    example held twelve files of hand-rescued uncommitted Rust source — now
+    count as work, whether the project gitignores the subtree or not.
+  - **Config can no longer silence the guard.** `status.showUntrackedFiles=no`
+    made `git status --porcelain` exit 0 with empty output while untracked work
+    sat on disk, and a `core.excludesFile` naming that work hid it the same way
+    — either one in the shared `.base/.git/config` would have blinded every
+    worktree in a sweep. Both are now pinned on the command line.
+  - **`GIT_DIR`/`GIT_WORK_TREE` and friends are stripped** from every git
+    invocation, so an inherited environment cannot point the check at a
+    different (clean) repository.
+  - **Unpushed commits on `session/<leaf>` are counted**, not just on `HEAD`.
+    `decommission` force-deletes that branch by directory name, and a worktree
+    switched off its own branch reported HEAD fully pushed while the branch
+    about to be destroyed was not.
+  - **The verdict is re-checked immediately before each removal.** Computing it
+    once up front left the whole sweep's duration between "certified clean" and
+    "deleted".
+
+- **A nested self-contained clone is no longer assessed with the wrong loss
+  model** ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091),
+  review round 3): the nested-repository scan found unregistered clones in
+  gitignored subtrees and then asked them the *candidate's* questions — `HEAD`
+  and `session/<leaf>` — which are the right questions only when the object
+  store lives outside the candidate and survives it. A self-contained clone
+  keeps its entire `.git` INSIDE the candidate, so every local branch, tag,
+  stash entry and reflog dies with it. A clone whose `HEAD` sat on a pushed
+  `main` while a `feature` branch held the only copy of a commit answered clean
+  on all three questions and was destroyed. The two shapes are now separated by
+  `git rev-parse --path-format=absolute --git-common-dir` — a direct test of
+  *does this repository's object store live inside the directory we are about
+  to delete* — and a self-contained clone is measured with
+  `rev-list --count --all --not --remotes` plus a `refs/stash` check. Registered
+  nested worktrees keep the shared-store model, so a clean agent worktree still
+  does not pin its parent. A clone with no remotes at all counts every commit,
+  which is the correct answer for a scratch clone nobody pushed.
+
+- **`.trusty-mpm/`'s existence probe no longer fails toward CLEAN**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review round
+  3): it used `Path::exists()`, which collapses every I/O error to `false`,
+  while the first status pass had already skipped every `.trusty-mpm/`-scoped
+  entry on the promise that the second pass owned them — so a permission error
+  became CLEAN, inverting the module's own fail-safe invariant.
+
+- **The unpushed-commit check now covers the bare branch spelling too**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review round
+  3): `core::worktree_naming::worktree_branch_for` says `session/<leaf>`, but
+  `provisioner/workspace.rs` names the branch for the
+  `.base/.worktrees/<session-id>` shape **bare** — the dominant population of a
+  sweep — so the check was inert exactly where most worktrees live. Both
+  spellings are now counted, in one `rev-list` so a shared commit is not counted
+  twice.
+
+- **The age-based ephemeral auto-reaper now honours the dirty-tree guard**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review
+  round): `reap_aged_ephemeral` reaches the same
+  `worktree remove --force` → `remove_dir_all` → `branch -D` sequence as the
+  orphan sweep but never passed through the guard, and it fires automatically
+  on every daemon GC tick. An aged ephemeral whose workspace holds unsaved work
+  is now left in place for an operator. There is deliberately no discard opt-in
+  on this path, and the check is unconditional rather than restricted to
+  `.worktrees/<leaf>` paths — `decommission` also `remove_dir_all`s the whole
+  workspace for `workspace_owned` records, which a path-shape filter would have
+  excused entirely.
 
 - **The idle nudge is no longer suppressed indefinitely by a single delegation**
   (#2864): `has_live_children` treats `Queued`/`Running` as live, but nothing

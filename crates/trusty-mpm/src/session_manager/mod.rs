@@ -33,7 +33,9 @@ pub mod snapshot;
 pub mod store;
 pub mod task_inject;
 pub mod workspace_guard;
+mod worktree_nested;
 pub(crate) mod worktree_ownership;
+pub mod worktree_safety;
 
 #[cfg(test)]
 mod tests;
@@ -101,6 +103,11 @@ mod slots_tests;
 #[cfg(test)]
 mod send_input_gate_tests;
 
+/// Shared real-git fixtures for the #4091 dirty-worktree-guard tests, used by
+/// both `worktree_safety::worktree_safety_tests` and `prune::orphan_tests`.
+#[cfg(test)]
+pub(crate) mod worktree_git_fixture;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]
@@ -114,6 +121,7 @@ pub use session_guard::TmuxSessionGuard;
 pub use slots::{NumberedSlot, SlotRegistry};
 pub use store::{SessionStore, StoreError};
 pub use task_inject::should_inject_task;
+pub use worktree_safety::{DirtyWorktree, DirtyWorktreePolicy};
 
 #[cfg(feature = "daemon")]
 pub use real_tmux::RealTmuxDriver;

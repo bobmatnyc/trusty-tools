@@ -208,7 +208,7 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
     // runs — still never removed, now for the #3649 safe-default reason
     // rather than (only) the #1845 TOCTOU fresh-snapshot reason.
     let outcome = mgr
-        .prune_orphaned_worktrees(repos_tmp.path(), &[], false)
+        .prune_orphaned_worktrees(repos_tmp.path(), &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -334,7 +334,7 @@ async fn prune_orphaned_worktrees_never_deletes_claude_native_worktree() {
     // `isolation: "worktree"` mechanism never writes trusty-mpm's sentinel.
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -442,7 +442,7 @@ async fn prune_orphaned_worktrees_never_deletes_base_claude_native_worktree() {
     // Deliberately NO sentinel file written.
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -497,7 +497,7 @@ async fn prune_orphaned_worktrees_never_deletes_nested_session_claude_worktree()
     // candidate for each scanned shape).
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -541,7 +541,7 @@ async fn prune_orphaned_worktrees_skips_owner_unknown() {
     // Deliberately NO sentinel file written — simulates a legacy worktree.
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -614,7 +614,7 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
     .expect("write sentinel");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -663,7 +663,7 @@ async fn prune_orphaned_worktrees_spares_recent_unregistered_owner() {
     .expect("write sentinel");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -731,7 +731,7 @@ async fn prune_orphaned_worktrees_spares_live_owner() {
     .expect("write sentinel");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false)
+        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -938,4 +938,441 @@ fn canonicalize_streak_evicts_paths_no_longer_active() {
         3,
         "a path still present in the active set must be untouched by eviction"
     );
+}
+
+// ── #4091: the dirty-tree gate, wired into the reclaim path ──────────────
+//
+// Every test below builds a REAL git checkout + worktree in a throwaway
+// `tempfile::tempdir()` via `GitWorktreeFixture`, stamps it with an aged
+// ownership sentinel so the #3649 owner gate PASSES (otherwise the candidate
+// would be spared for the wrong reason and prove nothing), and then asserts
+// what the #4091 gate does with it. No live worktree is ever touched.
+
+use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
+
+/// Build a manager plus a fixture whose worktree `name` is fully reclaimable
+/// as far as the #3649 ownership gate is concerned — so the ONLY thing that
+/// can still spare it is the #4091 dirty gate.
+async fn reclaimable_fixture(
+    name: &str,
+) -> (
+    SessionManager,
+    tempfile::TempDir,
+    GitWorktreeFixture,
+    std::path::PathBuf,
+) {
+    let store_dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree(name);
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    (mgr, store_dir, fx, wt)
+}
+
+/// The control case: a genuinely clean, fully-pushed, owner-known stale
+/// worktree IS still reclaimed. Without this the guard could "pass" every
+/// other test simply by never deleting anything, which would be a silent leak
+/// rather than a fix.
+#[tokio::test]
+async fn prune_orphaned_worktrees_reclaims_clean_pushed_worktree() {
+    let (mgr, _store, fx, wt) = reclaimable_fixture("clean-pushed").await;
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.skipped_dirty.is_empty(),
+        "a clean worktree must not be reported dirty; got {:?}",
+        outcome.skipped_dirty
+    );
+    assert!(
+        outcome.removed.iter().any(|p| p == &wt),
+        "a clean, fully-pushed, owner-known stale worktree must still be reclaimed; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        !wt.exists(),
+        "the reclaimed worktree must be gone from disk"
+    );
+}
+
+/// #4118 TOCTOU: a candidate that goes dirty AFTER the Phase 1.5 scan but
+/// BEFORE its own removal must not be removed.
+///
+/// Why: the scan classifies every candidate up front and the removal loop runs
+/// afterwards, so across a ~95-candidate / ~730 GB sweep the gap between
+/// "certified clean" and "deleted" is the whole sweep duration — minutes, not
+/// the sub-millisecond window `prune_orphaned_worktrees` documents for the
+/// active-session check. Re-checking adjacent to the deletion is what closes it.
+///
+/// Both candidates scan CLEAN — asserted below, so the test cannot pass because
+/// `zzz-victim` was dirty from the start. `find_orphaned_worktrees` sorts its
+/// candidates, so `aaa-remover` is always processed first. A watcher waits for
+/// `aaa-remover`'s directory to disappear and only then writes an untracked
+/// file into `zzz-victim`: a transition that is impossible during Phase 1.5 and
+/// guaranteed to land before `zzz-victim`'s own removal.
+///
+/// The window is not a gamble. `remove_session_worktree` runs
+/// `git worktree prune` and `git branch -D` AFTER the directory is gone — two
+/// process spawns, tens of milliseconds — while the watcher polls at 200 µs and
+/// the loop needs only a `canonicalize` before re-checking. The watcher also
+/// reports whether it fired, so a lost race FAILS the test rather than passing
+/// it vacuously.
+///
+/// Without the pre-removal re-check, `zzz-victim` is still on the Phase 1.5
+/// `reclaimable` list and is handed to `remove_session_worktree` regardless.
+#[tokio::test]
+async fn prune_orphaned_worktrees_rechecks_dirt_immediately_before_removal() {
+    let (mgr, _store, fx, remover) = reclaimable_fixture("aaa-remover").await;
+    let victim = fx.add_worktree("zzz-victim");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&victim);
+
+    // Both are clean and reclaimable RIGHT NOW — assert it, so the test cannot
+    // pass because the victim was dirty from the start.
+    let preview = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("dry run must not error");
+    assert!(
+        preview.skipped_dirty.is_empty() && preview.removed.len() == 2,
+        "premise broken: both candidates must scan CLEAN; got removed={:?} skipped={:?}",
+        preview.removed,
+        preview.skipped_dirty
+    );
+
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let (remover, victim, fired) = (remover.clone(), victim.clone(), fired.clone());
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while remover.exists() {
+                if std::time::Instant::now() > deadline {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            std::fs::write(victim.join("notes.md"), "written mid-sweep\n").unwrap();
+            fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+    watcher.join().expect("watcher thread");
+
+    assert!(
+        fired.load(std::sync::atomic::Ordering::SeqCst),
+        "the watcher never observed the first removal, so nothing was tested"
+    );
+    assert!(
+        outcome.removed.iter().any(|p| p == &remover),
+        "the first candidate was clean throughout and must still be reclaimed; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        !outcome.removed.iter().any(|p| p == &victim),
+        "a candidate dirtied AFTER the scan must NOT be removed; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        victim.join("notes.md").exists(),
+        "the work written mid-sweep must still be on disk"
+    );
+    assert!(
+        outcome.skipped_dirty.iter().any(|d| d.path == victim),
+        "the mid-sweep skip must be REPORTED, not merely logged; got {:?}",
+        outcome.skipped_dirty
+    );
+}
+
+/// #4118: the age-based auto-reaper reaches the SAME destructive sequence
+/// (`worktree remove --force` → `remove_dir_all` → `branch -D`) without going
+/// through the orphan sweep, and it fires automatically on every daemon GC
+/// tick. Guarding one sweep while its sibling deletes freely is a half-measure.
+///
+/// There is deliberately no discard opt-in on this path: an automatic reaper
+/// must never be able to destroy work, whatever an operator asks for elsewhere.
+#[tokio::test]
+async fn reap_aged_ephemeral_spares_a_worktree_holding_unsaved_work() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("aged-ephemeral");
+    std::fs::write(wt.join("rescued.rs"), "// never committed\n").unwrap();
+
+    let id = crate::session_manager::record::ManagedSessionId::new();
+    let record = crate::session_manager::record::SessionRecord {
+        id,
+        tmux_name: format!("tmpm-aged-{id}"),
+        cwd: fx.repo.clone(),
+        task: "aged".into(),
+        state: crate::session_manager::record::ManagedSessionState::Active,
+        created_at: chrono::Utc::now() - chrono::Duration::hours(2),
+        last_activity_at: None,
+        workspace_path: Some(wt.clone()),
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: true,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: Default::default(),
+        worktree_owner: None,
+    };
+    mgr.store.write().await.upsert(record).await.expect("seed");
+
+    let reaped = mgr
+        .reap_aged_ephemeral(chrono::Duration::hours(1))
+        .await
+        .expect("reap must not error");
+
+    assert_eq!(
+        reaped, 0,
+        "an aged ephemeral holding uncommitted work must not be auto-reaped"
+    );
+    assert!(
+        wt.join("rescued.rs").exists(),
+        "the uncommitted work must still be on disk"
+    );
+    assert_eq!(
+        mgr.get(&id).await.unwrap().state,
+        crate::session_manager::record::ManagedSessionState::Active,
+        "the record must be left for an operator, not silently decommissioned"
+    );
+}
+
+/// A worktree with MODIFIED TRACKED files must not be removed, and the skip
+/// must be visible in the return value — not merely logged.
+#[tokio::test]
+async fn prune_orphaned_worktrees_skips_modified_tracked_file() {
+    let (mgr, _store, fx, wt) = reclaimable_fixture("modified").await;
+    std::fs::write(wt.join("README.md"), "uncommitted edit\n").unwrap();
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "a worktree with modified tracked files must NOT be removed; got {:?}",
+        outcome.removed
+    );
+    let dirt = outcome
+        .skipped_dirty
+        .iter()
+        .find(|d| d.path == wt)
+        .expect("the skip must be reported in skipped_dirty, not just logged");
+    assert_eq!(dirt.dirty_files, 1, "reason: {}", dirt.reason);
+    assert!(wt.exists(), "the dirty worktree must survive on disk");
+}
+
+/// A worktree holding ONLY untracked (non-ignored) files must not be removed.
+/// Untracked work exists nowhere else at all.
+#[tokio::test]
+async fn prune_orphaned_worktrees_skips_untracked_file() {
+    let (mgr, _store, fx, wt) = reclaimable_fixture("untracked").await;
+    std::fs::write(wt.join("scratch-notes.md"), "never added to git\n").unwrap();
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "a worktree with untracked files must NOT be removed; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        outcome.skipped_dirty.iter().any(|d| d.path == wt),
+        "the untracked-file skip must be reported; got {:?}",
+        outcome.skipped_dirty
+    );
+    assert!(wt.exists(), "the dirty worktree must survive on disk");
+}
+
+/// A worktree whose work is COMMITTED but never pushed must not be removed.
+/// This is the case that looks safe and is not: `remove_session_worktree`
+/// deletes the `session/<leaf>` branch, taking the commit's last reachable
+/// ref with it.
+#[tokio::test]
+async fn prune_orphaned_worktrees_skips_unpushed_commit() {
+    let (mgr, _store, fx, wt) = reclaimable_fixture("unpushed").await;
+    GitWorktreeFixture::commit_unpushed(&wt);
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "a worktree with unpushed commits must NOT be removed; got {:?}",
+        outcome.removed
+    );
+    let dirt = outcome
+        .skipped_dirty
+        .iter()
+        .find(|d| d.path == wt)
+        .expect("the unpushed-commit skip must be reported");
+    assert_eq!(dirt.unpushed_commits, 1, "reason: {}", dirt.reason);
+    assert!(wt.exists(), "the worktree must survive on disk");
+}
+
+/// FAIL-SAFE, end to end: when the dirty check itself cannot complete, the
+/// candidate is SKIPPED, never removed. An error on the check must never be a
+/// green light to delete — that would invert the entire guard.
+///
+/// The failure is injected by replacing the worktree's git index with a
+/// directory, which makes `git status` exit 128 while leaving the worktree
+/// registration intact (so the #3649 `git worktree list` cross-check still
+/// agrees and the candidate genuinely reaches the #4091 gate).
+#[tokio::test]
+async fn prune_orphaned_worktrees_skips_when_dirty_check_errors() {
+    let (mgr, _store, fx, wt) = reclaimable_fixture("broken-index").await;
+    let index = fx
+        .repo
+        .join(".git")
+        .join("worktrees")
+        .join("broken-index")
+        .join("index");
+    std::fs::remove_file(&index).expect("remove worktree index");
+    std::fs::create_dir(&index).expect("replace index with a directory");
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "a candidate whose dirty-check errored must NOT be removed; got {:?}",
+        outcome.removed
+    );
+    let dirt = outcome
+        .skipped_dirty
+        .iter()
+        .find(|d| d.path == wt)
+        .expect("an errored dirty-check must be reported as a dirty skip");
+    assert!(
+        dirt.reason.contains("dirty-check failed"),
+        "unexpected reason: {}",
+        dirt.reason
+    );
+    assert!(
+        wt.exists(),
+        "the unexaminable worktree must survive on disk"
+    );
+}
+
+/// The explicit override DOES remove a dirty worktree — the guard is a
+/// default, not a wall. If this ever stops working the override is dead code
+/// and operators will reach for `rm -rf` instead.
+#[tokio::test]
+async fn prune_orphaned_worktrees_force_discards_dirty() {
+    let (mgr, _store, fx, wt) = reclaimable_fixture("force-discard").await;
+    std::fs::write(wt.join("README.md"), "uncommitted edit\n").unwrap();
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(
+            &fx.repos_root,
+            &[],
+            false,
+            DirtyWorktreePolicy::ForceDiscard,
+        )
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.iter().any(|p| p == &wt),
+        "the explicit force-discard opt-in must remove a dirty worktree; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        outcome.skipped_dirty.is_empty(),
+        "force-discard reports nothing as skipped; got {:?}",
+        outcome.skipped_dirty
+    );
+    assert!(!wt.exists(), "the force-discarded worktree must be gone");
+}
+
+/// REGRESSION (#4091): the DEFAULT policy — the one the `/tm-session-pause`
+/// path and the periodic daemon orphan-GC both use, neither of which has any
+/// argument that could change it — cannot delete dirty work.
+///
+/// Asserting `DirtyWorktreePolicy::default()` here (rather than naming `Skip`)
+/// is deliberate: it fails if anyone ever flips the default, which is the only
+/// way the pause path could silently gain destructive behaviour.
+#[tokio::test]
+async fn prune_orphaned_worktrees_default_policy_cannot_delete_dirty_work() {
+    let (mgr, _store, fx, wt) = reclaimable_fixture("default-policy").await;
+    std::fs::write(wt.join("precious.txt"), "hours of work\n").unwrap();
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::default())
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "the DEFAULT prune policy must never delete dirty work; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        wt.exists(),
+        "the dirty worktree must survive the default sweep"
+    );
+    assert_eq!(
+        std::fs::read_to_string(wt.join("precious.txt")).unwrap(),
+        "hours of work\n",
+        "the untracked file's contents must be intact"
+    );
+}
+
+/// A `dry_run` preview must report the same dirty skip a real run would, so an
+/// operator previewing a 95-worktree sweep sees exactly what will be spared.
+#[tokio::test]
+async fn prune_orphaned_worktrees_dry_run_reports_dirty_skip() {
+    let (mgr, _store, fx, wt) = reclaimable_fixture("dry-run-dirty").await;
+    std::fs::write(wt.join("README.md"), "uncommitted edit\n").unwrap();
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.is_empty(),
+        "dry-run must not list a dirty worktree as would-remove; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        outcome.skipped_dirty.iter().any(|d| d.path == wt),
+        "dry-run must report the dirty skip; got {:?}",
+        outcome.skipped_dirty
+    );
+    assert!(wt.exists(), "dry-run must not touch anything");
 }
