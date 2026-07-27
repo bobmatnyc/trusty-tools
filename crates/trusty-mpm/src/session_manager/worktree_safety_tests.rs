@@ -519,6 +519,53 @@ fn inspect_dirt_reports_unpushed_session_branch_when_head_moved() {
     );
 }
 
+/// The `.base/.worktrees/<session-id>` shape — the DOMINANT population of the
+/// sweep — has its branch named BARE by `provisioner/workspace.rs:803`
+/// (`session_id.to_string()`), not `session/<id>`. Checking only the prefixed
+/// spelling left this leg inert exactly where most worktrees live.
+///
+/// Deliberately conservative: `branch -D session/<id>` currently MISSES the
+/// bare branch, so it survives removal today. The divergence is a live
+/// pre-existing bug that will be repaired on one side or the other, and if it
+/// is repaired on the `remove_session_worktree` side then bare branches start
+/// being destroyed. A guard that goes silently inert because somebody fixed an
+/// unrelated naming bug is the failure mode this module exists to prevent.
+#[test]
+fn inspect_dirt_reports_unpushed_bare_leaf_branch_when_head_moved() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("bare-branch");
+    // Re-point the worktree at a BARE branch named after the leaf, the way the
+    // provisioner names it, then commit on it and switch HEAD away.
+    for args in [
+        vec!["switch", "-c", "bare-branch"],
+        vec!["branch", "-D", "session/bare-branch"],
+    ] {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&wt)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    }
+    GitWorktreeFixture::commit_unpushed(&wt);
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&wt)
+        .args(["switch", "--detach", "origin/main"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    let dirt = inspect_dirt(&wt)
+        .expect("an unpushed commit on the bare leaf-named branch must read as dirty");
+    assert_eq!(
+        dirt.unpushed_commits, 1,
+        "HEAD is pushed but the bare `bare-branch` is not; reason: {}",
+        dirt.reason
+    );
+}
+
 /// The counterweight to the test above: when the session branch IS the
 /// checked-out branch, its commits must be counted ONCE, not twice.
 #[test]

@@ -7,6 +7,67 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **Agent delegations are now tracked automatically, with a real lifecycle**
+  ([#2864](https://github.com/bobmatnyc/trusty-tools/issues/2864), slices
+  S1+S2): the daemon observes every native subagent dispatch from the
+  `PreToolUse` hook it already receives on every managed session, so tracking no
+  longer depends on the PM voluntarily calling `agent_delegate`. Delegations move
+  `Running` → `Completed`/`Failed` instead of sitting in `Queued` forever, and a
+  `Delegation` now carries `source`, `tool_use_id`, `agent_id`,
+  `transcript_path`, `cwd`, `started_at`, and `ended_at`. A dispatch that both
+  declares (`agent_delegate`) and executes the *same* task produces one record,
+  not two.
+- **`tm hook` forwards Claude Code's subagent correlation keys** (#2864):
+  `tool_use_id` and `transcript_path` on tool events, and `agent_id` /
+  `agent_type` / `agent_transcript_path` on `SubagentStop`. A `tool_response` is
+  relayed only for a subagent-dispatch tool and only as a fixed five-key
+  projection, so an ordinary tool's output is never forwarded. All fields are
+  additive.
+- **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
+  `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
+  (worktree-hygiene follow-up to
+  [#3955](https://github.com/bobmatnyc/trusty-tools/issues/3955)): worktrees
+  provisioned there silently fail unrelated tests (trusty-search's
+  `SENSITIVE_PATH_PREFIXES` denylist) and can be reaped mid-task by the OS or
+  harness. The check is called directly from `pm_guard()` BEFORE Guard 4's
+  native-subagent-dispatch exemption, and is unconditional — including for
+  Task/Agent-dispatched subagents, which is who actually provisions these
+  worktrees in practice. `pm_guard_bash::evaluate_worktree_add_command`
+  resolves the target (relative paths, `cd`/`git -C` tracking, `~`/`$TMPDIR`/
+  `$TMP` expansion, lexical `.`/`..` normalization) without touching the
+  filesystem; only the exact `worktree add` subcommand is affected —
+  `list`/`remove`/`prune`/`lock`/… and ordinary temp usage (`mktemp`, temp
+  files, cargo build artifacts) are untouched.
+
+  **Round 2 (code-critic BLOCK, PR #3978):** the guard also pierces Guard 1
+  (`CLAUDE_MPM_SUB_AGENT`) — the automatic marker trusty-agents' own
+  subprocess/runner spawn helpers stamp on every nested subagent process
+  (`crates/trusty-agents/src/subprocess/spawn.rs:189-192`,
+  `crates/trusty-agents/src/agents/claude_code_runner/run.rs:211-215`), which
+  is who actually provisions most of these worktrees. Before this round,
+  Guard 1 short-circuited to ALLOW before the stdin payload was even read, so
+  a `CLAUDE_MPM_SUB_AGENT=1`-tagged `git worktree add /tmp/...` call was
+  silently allowed. Guards 2/3 (`TRUSTY_MPM_DISABLE_HOOKS` /
+  `TRUSTY_MPM_PM_UNRESTRICTED`) are deliberately left UN-pierced — neither is
+  ever set programmatically anywhere in this codebase's Rust source, so
+  whoever sets them still gets exactly that, including for this guard.
+  **Round 3 correction:** that is narrower than "operator-only" — Claude
+  Code's `settings.json` `env` object can set either var for every hook
+  invocation (live-reloaded mid-session), and a write to
+  `.claude/settings.json` is not itself blocked by `pm_guard` today, so the
+  PM or an exempt subagent can self-exempt from this entire guard via that
+  pre-existing, unrelated gap. Not introduced or widened by this change; not
+  fixed here; tracked as
+  [#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981).
+
+### Changed
+
+- **Orphan-sweep candidates are processed in sorted order** rather than
+  filesystem order, so a `--dry-run` preview predicts the real run and any
+  ordering-dependent behaviour is reproducible.
+
 ### Fixed
 
 - **The worktree reclaim path no longer force-deletes uncommitted work**
@@ -73,6 +134,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     once up front left the whole sweep's duration between "certified clean" and
     "deleted".
 
+- **A nested self-contained clone is no longer assessed with the wrong loss
+  model** ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091),
+  review round 3): the nested-repository scan found unregistered clones in
+  gitignored subtrees and then asked them the *candidate's* questions — `HEAD`
+  and `session/<leaf>` — which are the right questions only when the object
+  store lives outside the candidate and survives it. A self-contained clone
+  keeps its entire `.git` INSIDE the candidate, so every local branch, tag,
+  stash entry and reflog dies with it. A clone whose `HEAD` sat on a pushed
+  `main` while a `feature` branch held the only copy of a commit answered clean
+  on all three questions and was destroyed. The two shapes are now separated by
+  `git rev-parse --path-format=absolute --git-common-dir` — a direct test of
+  *does this repository's object store live inside the directory we are about
+  to delete* — and a self-contained clone is measured with
+  `rev-list --count --all --not --remotes` plus a `refs/stash` check. Registered
+  nested worktrees keep the shared-store model, so a clean agent worktree still
+  does not pin its parent. A clone with no remotes at all counts every commit,
+  which is the correct answer for a scratch clone nobody pushed.
+
+- **`.trusty-mpm/`'s existence probe no longer fails toward CLEAN**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review round
+  3): it used `Path::exists()`, which collapses every I/O error to `false`,
+  while the first status pass had already skipped every `.trusty-mpm/`-scoped
+  entry on the promise that the second pass owned them — so a permission error
+  became CLEAN, inverting the module's own fail-safe invariant.
+
+- **The unpushed-commit check now covers the bare branch spelling too**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review round
+  3): `core::worktree_naming::worktree_branch_for` says `session/<leaf>`, but
+  `provisioner/workspace.rs` names the branch for the
+  `.base/.worktrees/<session-id>` shape **bare** — the dominant population of a
+  sweep — so the check was inert exactly where most worktrees live. Both
+  spellings are now counted, in one `rev-list` so a shared commit is not counted
+  twice.
+
 - **The age-based ephemeral auto-reaper now honours the dirty-tree guard**
   ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review
   round): `reap_aged_ephemeral` reaches the same
@@ -80,69 +175,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   orphan sweep but never passed through the guard, and it fires automatically
   on every daemon GC tick. An aged ephemeral whose workspace holds unsaved work
   is now left in place for an operator. There is deliberately no discard opt-in
-  on this path.
-
-### Changed
-
-- **Orphan-sweep candidates are processed in sorted order** rather than
-  filesystem order, so a `--dry-run` preview predicts the real run and any
-  ordering-dependent behaviour is reproducible.
-
-### Added
-- **Agent delegations are now tracked automatically, with a real lifecycle**
-  ([#2864](https://github.com/bobmatnyc/trusty-tools/issues/2864), slices
-  S1+S2): the daemon observes every native subagent dispatch from the
-  `PreToolUse` hook it already receives on every managed session, so tracking no
-  longer depends on the PM voluntarily calling `agent_delegate`. Delegations move
-  `Running` → `Completed`/`Failed` instead of sitting in `Queued` forever, and a
-  `Delegation` now carries `source`, `tool_use_id`, `agent_id`,
-  `transcript_path`, `cwd`, `started_at`, and `ended_at`. A dispatch that both
-  declares (`agent_delegate`) and executes the *same* task produces one record,
-  not two.
-- **`tm hook` forwards Claude Code's subagent correlation keys** (#2864):
-  `tool_use_id` and `transcript_path` on tool events, and `agent_id` /
-  `agent_type` / `agent_transcript_path` on `SubagentStop`. A `tool_response` is
-  relayed only for a subagent-dispatch tool and only as a fixed five-key
-  projection, so an ordinary tool's output is never forwarded. All fields are
-  additive.
-- **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
-  `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
-  (worktree-hygiene follow-up to
-  [#3955](https://github.com/bobmatnyc/trusty-tools/issues/3955)): worktrees
-  provisioned there silently fail unrelated tests (trusty-search's
-  `SENSITIVE_PATH_PREFIXES` denylist) and can be reaped mid-task by the OS or
-  harness. The check is called directly from `pm_guard()` BEFORE Guard 4's
-  native-subagent-dispatch exemption, and is unconditional — including for
-  Task/Agent-dispatched subagents, which is who actually provisions these
-  worktrees in practice. `pm_guard_bash::evaluate_worktree_add_command`
-  resolves the target (relative paths, `cd`/`git -C` tracking, `~`/`$TMPDIR`/
-  `$TMP` expansion, lexical `.`/`..` normalization) without touching the
-  filesystem; only the exact `worktree add` subcommand is affected —
-  `list`/`remove`/`prune`/`lock`/… and ordinary temp usage (`mktemp`, temp
-  files, cargo build artifacts) are untouched.
-
-  **Round 2 (code-critic BLOCK, PR #3978):** the guard also pierces Guard 1
-  (`CLAUDE_MPM_SUB_AGENT`) — the automatic marker trusty-agents' own
-  subprocess/runner spawn helpers stamp on every nested subagent process
-  (`crates/trusty-agents/src/subprocess/spawn.rs:189-192`,
-  `crates/trusty-agents/src/agents/claude_code_runner/run.rs:211-215`), which
-  is who actually provisions most of these worktrees. Before this round,
-  Guard 1 short-circuited to ALLOW before the stdin payload was even read, so
-  a `CLAUDE_MPM_SUB_AGENT=1`-tagged `git worktree add /tmp/...` call was
-  silently allowed. Guards 2/3 (`TRUSTY_MPM_DISABLE_HOOKS` /
-  `TRUSTY_MPM_PM_UNRESTRICTED`) are deliberately left UN-pierced — neither is
-  ever set programmatically anywhere in this codebase's Rust source, so
-  whoever sets them still gets exactly that, including for this guard.
-  **Round 3 correction:** that is narrower than "operator-only" — Claude
-  Code's `settings.json` `env` object can set either var for every hook
-  invocation (live-reloaded mid-session), and a write to
-  `.claude/settings.json` is not itself blocked by `pm_guard` today, so the
-  PM or an exempt subagent can self-exempt from this entire guard via that
-  pre-existing, unrelated gap. Not introduced or widened by this change; not
-  fixed here; tracked as
-  [#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981).
-
-### Fixed
+  on this path, and the check is unconditional rather than restricted to
+  `.worktrees/<leaf>` paths — `decommission` also `remove_dir_all`s the whole
+  workspace for `workspace_owned` records, which a path-shape filter would have
+  excused entirely.
 
 - **The idle nudge is no longer suppressed indefinitely by a single delegation**
   (#2864): `has_live_children` treats `Queued`/`Running` as live, but nothing
