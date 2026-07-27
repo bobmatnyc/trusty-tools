@@ -163,6 +163,52 @@ impl GitWorktreeFixture {
         .expect("fixture: write sentinel");
     }
 
+    /// Add a nested git worktree of the SAME repo INSIDE `parent`, at
+    /// `<parent>/<rel>` (#4118).
+    ///
+    /// Why: this is the shape that made the guard bypassable — Claude Code's
+    /// `isolation: "worktree"` agents create `.claude/worktrees/<name>` inside a
+    /// session checkout, this repo's `main` gitignores that path, and seven of
+    /// them were live inside `.base/.worktrees/2eb72dca-…` while the parent
+    /// reported `dirty_files = 0`.
+    /// What: `git worktree add -b agent/<name>` under `parent`. Returns the
+    /// nested worktree path.
+    /// Test: `inspect_dirt_reports_nested_gitignored_worktree`.
+    pub(crate) fn add_nested_worktree(&self, parent: &Path, rel: &str, name: &str) -> PathBuf {
+        let nested = parent.join(rel).join(name);
+        git_ok(
+            &self.repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("agent/{name}"),
+                nested.to_str().expect("utf8 nested worktree path"),
+            ],
+        );
+        git_ok(&nested, &["config", "user.email", "ci@test.invalid"]);
+        git_ok(&nested, &["config", "user.name", "CI"]);
+        git_ok(&nested, &["config", "commit.gpgsign", "false"]);
+        nested
+    }
+
+    /// Commit everything in `wt` and push it, so the worktree reads CLEAN.
+    ///
+    /// Why: several #4118 tests need a parent worktree whose ONLY dirt is the
+    /// thing under test (a nested checkout, a `.trusty-mpm/` artefact). Setting
+    /// those up requires committing a `.gitignore` first, and an uncommitted or
+    /// unpushed `.gitignore` would make the parent dirty for the wrong reason —
+    /// the test would pass without exercising anything.
+    /// What: stages all, commits, pushes the current branch to `origin` under
+    /// its own name, and fetches so the remote-tracking ref exists locally.
+    /// Test: `inspect_dirt_reports_nested_gitignored_worktree`.
+    pub(crate) fn commit_all_and_push(wt: &Path, msg: &str) {
+        git_ok(wt, &["add", "-A"]);
+        git_ok(wt, &["commit", "-m", msg]);
+        git_ok(wt, &["push", "origin", "HEAD"]);
+        git_ok(wt, &["fetch", "origin"]);
+    }
+
     /// Commit a new file inside `wt` without pushing it anywhere.
     ///
     /// Why: this is the "committed but unpushed" case — the one that looks
