@@ -63,6 +63,16 @@ pub struct SubprocessAgentRunner {
     /// search, edit) operate against the project source files rather than the
     /// artifacts directory.
     project_dir: Option<PathBuf>,
+    /// Security fix (delegate_to_agent injection-to-RCE path): glob patterns
+    /// forwarded to the child as `TAGENT_DELEGATION_TAINT_ALLOW` (JSON array).
+    /// `Some(patterns)` — including `Some(vec![])` — marks every spawn this
+    /// runner performs as a TAINTED delegation: the child's `run_subagent`
+    /// applies `patterns` via `scope_assistant_allowed_tools` regardless of
+    /// the child's own declared role or `[tools].allow`, narrowing it to
+    /// (at most) the delegator's own tool posture. `None` (every caller
+    /// except `build_assistant_tier_registry`) is byte-identical to before
+    /// this field existed. See `with_delegation_taint`.
+    delegation_taint_allow: Option<Vec<String>>,
 }
 
 impl SubprocessAgentRunner {
@@ -73,6 +83,7 @@ impl SubprocessAgentRunner {
             memory: None,
             config_dir: None,
             project_dir: None,
+            delegation_taint_allow: None,
         }
     }
 
@@ -129,6 +140,39 @@ impl SubprocessAgentRunner {
         self
     }
 
+    /// Mark every spawn this runner performs as a TAINTED delegation
+    /// (security fix — delegate_to_agent injection-to-RCE path).
+    ///
+    /// Why: `scope_assistant_allowed_tools` only ever narrowed a spawned
+    /// child's tool registry when the CHILD's own role was `"assistant"`
+    /// (see `runtime::tool_registry::scope_assistant_allowed_tools`). An
+    /// assistant-tier persona holding live external-content tools
+    /// (`get_gmail_message_content`, `web_search`, …) plus `delegate_to_agent`
+    /// could hand attacker-controlled task text to `delegate_to_agent(
+    /// agent_name="engineer", ...)` — `engineer` declares no `[tools].allow`
+    /// at all, so the spawned `claude-code` subprocess got its full
+    /// unrestricted tool surface (shell, file write) with no narrowing
+    /// whatsoever. Calling this on the runner backing an assistant-tier
+    /// `DelegateToAgentTool` closes that: every spawn is tagged with the
+    /// delegator's own allow patterns regardless of the target's role.
+    /// What: Stores `patterns`; forwarded to the child as
+    /// `TAGENT_DELEGATION_TAINT_ALLOW` (JSON array) by `spawn_and_run_inner`.
+    /// `run_subagent` reads it back and applies it via
+    /// `scope_assistant_allowed_tools(true, ..., patterns, ...)`
+    /// unconditionally — i.e. EVERY assistant-tier delegation is tainted,
+    /// not only ones whose turn happened to touch a live-fetch tool (the
+    /// simpler, fail-safe posture: per-turn tracking would still miss
+    /// content fetched in an earlier turn and still present in history).
+    /// `None` (every caller except `build_assistant_tier_registry`) leaves
+    /// behavior byte-identical to before this field existed.
+    /// Test: `delegation_taint_allow_env_set_when_configured`,
+    /// `delegation_taint_allow_env_absent_by_default` (`subprocess::tests`);
+    /// `scope_assistant_allowed_tools_*` (`tool_registry_tests`).
+    pub fn with_delegation_taint(mut self, patterns: Option<Vec<String>>) -> Self {
+        self.delegation_taint_allow = patterns;
+        self
+    }
+
     /// Builder-style constructor that attaches a memory graph for auto-capture.
     ///
     /// Why: Wiring memory at construction keeps the runner API otherwise
@@ -178,6 +222,7 @@ impl AgentRunner for SubprocessAgentRunner {
                 &[],
                 config_dir,
                 Some(ctx),
+                self.delegation_taint_allow.as_deref(),
             )
             .await?
         } else {
@@ -193,6 +238,7 @@ impl AgentRunner for SubprocessAgentRunner {
                 ctx: Some(ctx),
                 config_dir: None,
                 project_dir: self.project_dir.as_deref(),
+                delegation_taint_allow: self.delegation_taint_allow.as_deref(),
             })
             .await?
         };
@@ -219,6 +265,7 @@ impl AgentRunner for SubprocessAgentRunner {
                 history,
                 config_dir,
                 Some(ctx),
+                self.delegation_taint_allow.as_deref(),
             )
             .await?
         } else {
@@ -231,6 +278,7 @@ impl AgentRunner for SubprocessAgentRunner {
                 ctx: Some(ctx),
                 config_dir: None,
                 project_dir: self.project_dir.as_deref(),
+                delegation_taint_allow: self.delegation_taint_allow.as_deref(),
             })
             .await?
         };

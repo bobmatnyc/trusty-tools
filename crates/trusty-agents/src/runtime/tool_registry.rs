@@ -143,6 +143,13 @@ pub(super) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
 /// Test: `assistant_tier_registry_excludes_skill_catalog_tools`,
 /// `assistant_tier_registry_includes_curated_tools`; called during
 /// `run_subagent`.
+///
+/// `delegator_allow` (security fix, delegation-taint issue): the CURRENT
+/// assistant-tier agent's own resolved `[tools].allow` glob patterns —
+/// passed straight through to `build_assistant_tier_registry` so the
+/// `delegate_to_agent` tool THIS agent registers narrows whatever it spawns
+/// to this agent's own tool posture. Ignored (and safe to pass `None`) for
+/// every non-assistant-tier role.
 pub(super) fn build_registry_for_agent(
     name: &str,
     role: &str,
@@ -150,9 +157,10 @@ pub(super) fn build_registry_for_agent(
     code_dir: Option<&std::path::Path>,
     skill_registry: Arc<skills::SkillRegistry>,
     tag_skill_registry: Arc<skills::registry::SkillRegistry>,
+    delegator_allow: Option<&[String]>,
 ) -> Option<ToolRegistry> {
     if role == ASSISTANT_TIER_ROLE {
-        return Some(build_assistant_tier_registry());
+        return Some(build_assistant_tier_registry(delegator_allow));
     }
     // #222: When `code_dir` is set and distinct from `out_dir`, the code-agent
     // and any future tool that writes *generated source files* should root at
@@ -427,7 +435,24 @@ pub(super) fn build_registry_for_agent(
 /// `assistant_tier_registry_includes_curated_tools`,
 /// `assistant_tier_registry_includes_izzie_tools`,
 /// `izzie_allow_list_surfaces_persona_tools_through_scoping`.
-pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
+///
+/// `delegator_allow` (security fix — delegate_to_agent injection-to-RCE
+/// path, see `ASSISTANT_ALLOWED_DELEGATE_ROLES`'s doc comment and
+/// `scope_assistant_allowed_tools`): this agent's own resolved
+/// `[tools].allow` glob patterns. Threaded into the `DelegateToAgentTool`
+/// this function registers via `SubprocessAgentRunner::with_delegation_taint`
+/// so EVERY spawn this assistant-tier agent makes is tagged with its own
+/// tool posture — regardless of the spawned agent's declared role. Without
+/// this, `delegate_to_agent(agent_name="engineer", ...)` handed a fully
+/// unrestricted `claude-code` subprocess to whatever text reached this
+/// agent's turn (including live Gmail/Drive/web content the untrusted-data
+/// envelope in `persona_memory.rs` never covers, because it only wraps
+/// persisted memory-drawer recall — not live tool return values). `None`
+/// (no `[tools].allow` resolved) still tags the spawn with an EMPTY pattern
+/// list rather than skipping tainting — fail-closed, not fail-open: a
+/// mis-configured or absent allow-list denies the child every tool rather
+/// than granting it every tool.
+pub(super) fn build_assistant_tier_registry(delegator_allow: Option<&[String]>) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
     let cwd = std::env::current_dir().unwrap_or_default();
 
@@ -453,8 +478,20 @@ pub(super) fn build_assistant_tier_registry() -> ToolRegistry {
     // and can never diverge.
     let config_dirs = crate::agents::agents_dir_candidates();
     let primary_config_dir = config_dirs.first().cloned();
+    // Security fix (delegate_to_agent injection-to-RCE path): tag every
+    // spawn from this DelegateToAgentTool with this agent's own
+    // `[tools].allow` posture. `run_subagent` (the child process) reads this
+    // back via `TAGENT_DELEGATION_TAINT_ALLOW` and applies it through
+    // `scope_assistant_allowed_tools` REGARDLESS of the spawned agent's own
+    // role/`[tools].allow` — closing the gap where `scope_assistant_allowed_tools`
+    // previously no-op'd for any target whose OWN role wasn't `"assistant"`
+    // (e.g. `engineer`, which declares no `[tools].allow` at all and would
+    // otherwise get its full unrestricted `claude-code` tool surface).
+    let taint_allow: Vec<String> = delegator_allow.map(<[String]>::to_vec).unwrap_or_default();
     let runner: Arc<dyn AgentRunner> = Arc::new(
-        crate::subprocess::SubprocessAgentRunner::new().with_config_dir(primary_config_dir),
+        crate::subprocess::SubprocessAgentRunner::new()
+            .with_config_dir(primary_config_dir)
+            .with_delegation_taint(Some(taint_allow)),
     );
     // #3555 CRITICAL follow-up: role-gate the assistant tier's delegation
     // target to workers + peer assistants ONLY — see
@@ -550,6 +587,107 @@ pub(super) fn scope_assistant_allowed_tools(
         .filter(|n| crate::ctrl::pm_task::match_any_glob(n, patterns))
         .collect();
     Some(kept)
+}
+
+/// Resolve the effective `[tools].allowed` override for a spawned sub-agent,
+/// accounting for a TAINTED delegation (security fix — delegate_to_agent
+/// injection-to-RCE path).
+///
+/// Why: `scope_assistant_allowed_tools` only narrows a spawned agent when
+/// ITS OWN role is the assistant tier — by design, since a coding sub-agent
+/// (`engineer`, `qa-agent`, …) legitimately needs its full tool surface when
+/// spawned normally (by `pm`/`ctrl`, which are trusted). But
+/// `ASSISTANT_ALLOWED_DELEGATE_ROLES` lets an assistant-TIER persona holding
+/// live external-content tools (Gmail/Drive/web) delegate to those SAME
+/// coding sub-agents. Attacker-controlled text reaching that persona's turn
+/// (a fetched email, a scraped page — none of it covered by the
+/// `persona_memory.rs` untrusted-data envelope, which wraps only persisted
+/// memory-drawer recall) could drive `delegate_to_agent(agent_name="engineer",
+/// task="<attacker text>")`, and `engineer` — no `[tools].allow` declared —
+/// got its full unrestricted `claude-code` subprocess with no narrowing at
+/// all. This function is the fix: when `is_tainted` (the spawn was tagged by
+/// `SubprocessAgentRunner::with_delegation_taint`), it forces the same
+/// `scope_assistant_allowed_tools` narrowing using the DELEGATOR's own
+/// `taint_allow` patterns instead of this agent's own posture — "regardless
+/// of the spawned agent's own role", per the fix design (unconditional
+/// tainting of every assistant-tier delegation, not only turns that happened
+/// to touch a live-fetch tool: simpler, and fail-safe against content
+/// fetched in an earlier turn that is still present in history).
+/// What: When `is_tainted` is false, delegates unchanged to
+/// `scope_assistant_allowed_tools(is_assistant_tier, original_allowed,
+/// skill_scoped_allow, registry)` — byte-identical to the pre-fix behavior.
+/// When `is_tainted` is true, ALWAYS applies `taint_allow` against
+/// `registry` (bypassing `scope_assistant_allowed_tools`'s
+/// `existing_allowed.is_some()` early-return — a taint must never be
+/// skippable just because the agent's own TOML also set an exact
+/// `[tools].allowed`), then intersects the result with `original_allowed`
+/// when the agent's own TOML declared one, so a taint only ever narrows,
+/// never widens past an explicit author-set restriction either.
+/// Test: `tainted_delegation_cannot_reach_tool_delegator_lacked`,
+/// `untainted_delegation_is_unaffected`,
+/// `tainted_delegation_intersects_with_existing_allowed`,
+/// `assistant_delegate_to_engineer_path_is_scoped`.
+pub(super) fn scope_for_delegation(
+    is_assistant_tier: bool,
+    is_tainted: bool,
+    original_allowed: Option<Vec<String>>,
+    skill_scoped_allow: Option<&[String]>,
+    taint_allow: Option<&[String]>,
+    registry: Option<&ToolRegistry>,
+) -> Option<Vec<String>> {
+    if !is_tainted {
+        return scope_assistant_allowed_tools(
+            is_assistant_tier,
+            original_allowed,
+            skill_scoped_allow,
+            registry,
+        );
+    }
+    let mut scoped = scope_assistant_allowed_tools(true, None, taint_allow, registry);
+    if let (Some(orig), Some(sc)) = (&original_allowed, &scoped) {
+        let orig_set: std::collections::HashSet<&String> = orig.iter().collect();
+        scoped = Some(
+            sc.iter()
+                .filter(|n| orig_set.contains(n))
+                .cloned()
+                .collect(),
+        );
+    }
+    scoped
+}
+
+/// Parse the `TAGENT_DELEGATION_TAINT_ALLOW` child-process env var (security
+/// fix — delegate_to_agent injection-to-RCE path).
+///
+/// Why: Pulled out of `run_subagent` so the "a malformed/corrupted value
+/// fails CLOSED, not open" invariant is unit-testable without spawning a
+/// real subprocess or mutating process-global env vars from a test — the
+/// same rationale `scope_assistant_allowed_tools` documents for its own
+/// extraction.
+/// What: `None` (env var unset — the overwhelming majority of spawns, which
+/// were never delegated by an assistant-tier persona) returns `None`
+/// (untainted, byte-identical to pre-fix behavior). `Some(raw)` that parses
+/// as a JSON `Vec<String>` returns `Some(patterns)`. `Some(raw)` that fails
+/// to parse returns `Some(vec![])` — an empty, deny-all taint — rather than
+/// falling back to `None` (untainted): a truncated/corrupted env var must
+/// only ever narrow further, never silently disable the taint.
+/// Test: `parse_delegation_taint_env_absent_is_untainted`,
+/// `parse_delegation_taint_env_valid_json_is_tainted`,
+/// `parse_delegation_taint_env_malformed_fails_closed`.
+pub(super) fn parse_delegation_taint_env(raw: Option<String>) -> Option<Vec<String>> {
+    let raw = raw?;
+    match serde_json::from_str::<Vec<String>>(&raw) {
+        Ok(patterns) => Some(patterns),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                raw = %raw,
+                "TAGENT_DELEGATION_TAINT_ALLOW present but unparseable; \
+                 treating as an empty (deny-all) taint"
+            );
+            Some(Vec::new())
+        }
+    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **Closed a prompt-injection-to-arbitrary-code-execution path through
+  `delegate_to_agent` (#4126).** An assistant-tier persona (`assistant`,
+  `cto-assistant`, `izzie`) holding live external-content tools
+  (`get_gmail_message_content`, `web_search`, …) plus `delegate_to_agent`
+  could be driven by attacker-controlled fetched content to delegate an
+  attacker-authored task to `engineer` — a worker role with no
+  `[tools].allow` at all — and the spawned `claude-code` subprocess got its
+  full unrestricted tool surface (shell, file write) with no narrowing,
+  because the existing `scope_assistant_allowed_tools` gate only narrowed a
+  spawn when the SPAWNED agent's own role was `"assistant"`. Every
+  assistant-tier `delegate_to_agent` call now tags its spawn with the
+  delegator's own `[tools].allow` posture (`SubprocessAgentRunner::
+  with_delegation_taint`); the spawned worker's registry is narrowed to that
+  posture regardless of its own declared role, on both dispatch paths (the
+  `--direct`/`--agent` subprocess path and the in-process `/agent`
+  persona-chat path). A malformed/corrupted taint value fails CLOSED
+  (deny-all), never silently untainted. Narrowing is logged on both the
+  parent (pre-spawn) and child (post-scoping) sides, and a disallowed tool
+  call already returned (and continues to return) a legible
+  "not permitted for this agent" error rather than a silently-missing tool.
+
+- **Follow-up hardening for the `delegate_to_agent` taint fix above (#4126):
+  closed a multi-hop composition gap, added a fail-closed default, and
+  covered a third, previously-unpatched dispatch path.** (1) At hop 2+
+  (`assistant -> izzie -> engineer`), both dispatch paths forwarded the
+  INTERMEDIATE agent's own native `[tools].allow` as the outbound taint
+  instead of intersecting it with the INBOUND taint it had itself received —
+  a taint could widen back out instead of only ever narrowing. A new
+  `compose_delegation_taint` helper is now the single place both paths
+  compute the outbound taint, always as an intersection. (2) An
+  assistant-tier agent reached with no taint AND no resolvable
+  `[tools].allow` previously fell through to fully unrestricted; it is now
+  denied every tool by default. (3) `run_pm_task_with_history` — the path
+  backing the REPL, Slack, Telegram, and the API server, and `ctrl.toml`
+  (the standalone default) declares `role = "assistant"` per #3812 — built
+  its `DelegateToAgentTool` with no taint and no target-role gate at all,
+  reproducing #4126's exact exploit shape on the default path; it now
+  applies the same taint and `ASSISTANT_ALLOWED_DELEGATE_ROLES` gate as the
+  other two dispatch paths (`pm`/orchestrator-role callers are unaffected).
+
 ### Added
 
 - **The token-streaming chat path now streams Bedrock models via

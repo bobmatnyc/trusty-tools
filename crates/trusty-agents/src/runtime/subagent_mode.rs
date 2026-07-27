@@ -132,6 +132,35 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
     // agents (role != "assistant") are completely unaffected.
     let is_assistant_tier = cfg.agent.role == super::tool_registry::ASSISTANT_TIER_ROLE;
 
+    // Security fix (delegate_to_agent injection-to-RCE path): a spawn tagged
+    // by `SubprocessAgentRunner::with_delegation_taint` (assistant-tier
+    // `delegate_to_agent` only — see that doc comment) carries the
+    // delegator's own `[tools].allow` posture as JSON here. `is_assistant_tier`
+    // above is keyed on THIS agent's OWN role, so `engineer` (no `[tools].allow`
+    // at all) previously sailed straight past every scoping check below and
+    // kept its full unrestricted registry regardless of who spawned it.
+    // `delegation_taint_allow`, when present, forces the SAME narrowing
+    // `scope_assistant_allowed_tools` already applies to assistant-tier
+    // agents onto THIS agent too, using the DELEGATOR's patterns instead of
+    // this agent's own — closing that gap without touching the (correct,
+    // unrelated) behavior for every non-delegated spawn. A malformed env var
+    // is treated as an empty (deny-all) taint rather than ignored, so a
+    // corrupted/truncated value can only narrow further, never widen.
+    let delegation_taint_allow: Option<Vec<String>> =
+        super::tool_registry::parse_delegation_taint_env(
+            std::env::var("TAGENT_DELEGATION_TAINT_ALLOW").ok(),
+        );
+    let is_tainted_delegation = delegation_taint_allow.is_some();
+    if is_tainted_delegation {
+        tracing::info!(
+            agent = %name,
+            role = %cfg.agent.role,
+            taint_patterns = ?delegation_taint_allow,
+            "sub-agent spawned via a tainted assistant-tier delegation; \
+             tool registry will be narrowed to the delegator's own posture"
+        );
+    }
+
     // #88: Per-call `max_turns` override via `TAGENT_MAX_TURNS`. The wave
     // loop sets this to tighten the turn budget per file (e.g. 20) so a
     // single invocation can't absorb an entire wave's work. Applied after
@@ -344,6 +373,7 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         code_dir.as_deref(),
         skill_registry.clone(),
         tag_skill_registry.clone(),
+        cfg.tools.allow.as_deref(),
     );
 
     // #57: If the agent opts into `use_finish_task`, auto-register the
@@ -408,17 +438,25 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
             "[skills].allow names skills that resolved to nothing; they grant no tools"
         );
     }
-    cfg.tools.allowed = super::tool_registry::scope_assistant_allowed_tools(
+    // Security fix (delegate_to_agent injection-to-RCE path): `scope_for_delegation`
+    // is `scope_assistant_allowed_tools` plus taint handling — see its doc
+    // comment in `tool_registry.rs` for the full rationale and the fixed
+    // vulnerability. Byte-identical to the pre-fix `scope_assistant_allowed_tools`
+    // call when `is_tainted_delegation` is false.
+    cfg.tools.allowed = super::tool_registry::scope_for_delegation(
         is_assistant_tier,
+        is_tainted_delegation,
         cfg.tools.allowed.clone(),
         skill_scoped_allow.as_deref(),
+        delegation_taint_allow.as_deref(),
         registry.as_ref(),
     );
-    if is_assistant_tier {
+    if is_assistant_tier || is_tainted_delegation {
         tracing::info!(
             agent = %name,
+            tainted = is_tainted_delegation,
             tools = ?cfg.tools.allowed,
-            "assistant-tier tool registry scoped to [tools].allow"
+            "assistant-tier/tainted-delegation tool registry scoped"
         );
     }
 
