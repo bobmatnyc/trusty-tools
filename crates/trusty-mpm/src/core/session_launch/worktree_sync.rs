@@ -416,7 +416,10 @@ mod tests {
         // Session worktree, mirroring `create_session_worktree` +
         // `configure_session_branch_tracking` (issue #2189): a new branch
         // checked out from `base`'s HEAD, with its upstream explicitly
-        // pointed at `origin/main`.
+        // pointed at `origin/main`. Production pins `push.default = current`
+        // BEFORE arming that foreign upstream (#2867) and this fixture does
+        // the same, so it never codifies the un-pinned shape that let a bare
+        // `git push` clobber PR #2863.
         let worktree_dir = crate::test_support::hermetic_temp_dir();
         let worktree = worktree_dir.path().to_path_buf();
         let _ = std::fs::remove_dir(&worktree);
@@ -433,6 +436,15 @@ mod tests {
             return None;
         }
         configure_identity(&worktree);
+        if !git_ok(&base, &["config", "extensions.worktreeConfig", "true"]) {
+            return None;
+        }
+        if !git_ok(
+            &worktree,
+            &["config", "--worktree", "push.default", "current"],
+        ) {
+            return None;
+        }
         if !git_ok(
             &worktree,
             &["branch", "--set-upstream-to=origin/main", "session-branch"],

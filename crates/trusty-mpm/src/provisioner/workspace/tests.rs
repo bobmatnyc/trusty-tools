@@ -755,3 +755,121 @@ fn git_identity_commit_args_applied_to_command() {
         ]
     );
 }
+
+// ── #2867: the provisioner must never arm a worktree with a foreign upstream ──
+
+/// #2867: `RealGitBackend::worktree_add` must leave the session branch with NO
+/// `branch.<name>.merge` pointing at a ref the worktree does not own.
+///
+/// Why: this is the exact config shape that clobbered PR #2863 — a worktree's
+/// local branch tracked a foreign PR branch, so a later bare `git push` landed
+/// on that branch instead of its own. The provisioner is one of the two code
+/// paths that create session worktrees, so its output is a standing invariant,
+/// not an incidental property: any future `--track` / `--set-upstream-to` /
+/// `guessRemote` change here must fail this test rather than silently re-arm
+/// the gun.
+/// What: builds a real local bare `origin`, runs the production
+/// `ensure_base_checkout` + `worktree_add` against it, then enumerates EVERY
+/// `branch.*.merge` key visible from the resulting worktree and asserts each
+/// one names its own branch. Also asserts the session branch has no upstream
+/// at all (`@{u}` fails), which is the fail-safe state.
+/// Test: this function IS the test.
+#[test]
+fn provisioner_worktree_add_writes_no_foreign_branch_merge() {
+    let scratch = crate::test_support::hermetic_temp_dir();
+    let Some(bare) = make_local_bare_origin(&scratch) else {
+        return; // git unavailable
+    };
+    let repo_url = format!("file://{}", bare.display());
+    let base_dir = scratch.path().join("base.git");
+    let backend = RealGitBackend::default();
+    backend
+        .ensure_base_checkout(&repo_url, &base_dir)
+        .expect("ensure_base_checkout must succeed against a local bare origin");
+
+    let worktree = scratch.path().join("wt");
+    let branch = "session/tm-2867-01";
+    backend
+        .worktree_add(&base_dir, "main", &worktree, branch)
+        .expect("worktree_add must succeed");
+
+    // Every branch.<name>.merge in the whole config must name its own branch.
+    let listed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&worktree)
+        .args(["config", "--get-regexp", r"^branch\..*\.merge$"])
+        .output()
+        .expect("git config --get-regexp");
+    let body = String::from_utf8_lossy(&listed.stdout);
+    for line in body.lines().filter(|l| !l.trim().is_empty()) {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        let own = key
+            .trim_start_matches("branch.")
+            .trim_end_matches(".merge")
+            .to_string();
+        assert_eq!(
+            value.trim(),
+            format!("refs/heads/{own}"),
+            "provisioner wrote a FOREIGN upstream (#2867): {line}"
+        );
+    }
+
+    // And the session branch specifically must have no upstream at all.
+    let upstream = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&worktree)
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .output()
+        .expect("git rev-parse @{u}");
+    assert!(
+        !upstream.status.success(),
+        "the provisioner must leave the session branch with NO upstream, got: {}",
+        String::from_utf8_lossy(&upstream.stdout).trim()
+    );
+}
+
+/// #2867: `ensure_base_checkout` must install the cross-branch push guard into
+/// the freshly cloned base's shared hooks directory.
+///
+/// Why: the guard is the only mitigation that covers an ad-hoc `git worktree
+/// add` an agent makes for itself — the actual shape of the PR #2863 clobber.
+/// It only covers those worktrees if it lands in the base clone's
+/// `$GIT_COMMON_DIR/hooks`, which every worktree of that base shares.
+/// What: clones a base via the production path and asserts an executable
+/// `pre-push` carrying the trusty-mpm marker exists in the resolved hooks dir.
+/// Test: this function IS the test.
+#[test]
+fn ensure_base_checkout_installs_push_guard() {
+    let scratch = crate::test_support::hermetic_temp_dir();
+    let Some(bare) = make_local_bare_origin(&scratch) else {
+        return; // git unavailable
+    };
+    let repo_url = format!("file://{}", bare.display());
+    let base_dir = scratch.path().join("base.git");
+    RealGitBackend::default()
+        .ensure_base_checkout(&repo_url, &base_dir)
+        .expect("ensure_base_checkout must succeed");
+
+    let hooks = crate::core::push_guard::effective_hooks_dir(&base_dir)
+        .expect("hooks dir must resolve for a fresh bare clone");
+    let hook = hooks.join("pre-push");
+    let body = std::fs::read_to_string(&hook)
+        .unwrap_or_else(|e| panic!("pre-push guard missing at {}: {e}", hook.display()));
+    assert!(
+        body.contains(crate::core::push_guard::HOOK_MARKER),
+        "installed pre-push must carry the trusty-mpm marker"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&hook)
+            .expect("stat hook")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "hook must be executable, mode {mode:o}"
+        );
+    }
+}

@@ -1,0 +1,71 @@
+#!/bin/sh
+# trusty-mpm-push-guard: v1 (#2867)
+#
+# Why: issue #2867 — an agent worktree whose local branch was configured with
+#   `branch.<local>.merge = refs/heads/<someone-else's-PR-branch>` ran a bare
+#   `git push` and clobbered the reviewed lineage of a PR branch it did not
+#   own. Tracking config is not the only way to arm that gun (an explicit
+#   `git push origin HEAD:other-branch` does it too), and the offending push
+#   may come from a process trusty-mpm never created. A pre-push hook is the
+#   only guard that fires regardless of WHO runs the push.
+# What: refuses any push whose destination branch name differs from the
+#   checked-out branch name. Non-branch destinations (tags, notes, refs/pull)
+#   are out of scope and pass through untouched. Set
+#   TM_ALLOW_CROSS_BRANCH_PUSH=1 to perform a deliberate cross-branch push.
+# Test: crates/trusty-mpm/tests/push_guard_hook.rs (real temp repos: refuses a
+#   cross-branch push, permits the same-name push, permits with the override).
+#
+# stdin lines are: <local ref> <local sha> <remote ref> <remote sha>
+# argv is: $1 = remote name, $2 = remote URL.
+
+if [ "${TM_ALLOW_CROSS_BRANCH_PUSH:-}" = "1" ]; then
+	exit 0
+fi
+
+# Empty when HEAD is detached; the per-line fallback below handles that.
+head_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || head_branch=""
+
+refused=0
+while read -r local_ref _local_sha remote_ref _remote_sha; do
+	# Only branch destinations can clobber a PR lineage.
+	case "${remote_ref:-}" in
+	refs/heads/*) ;;
+	*) continue ;;
+	esac
+	remote_branch=${remote_ref#refs/heads/}
+
+	# Source name: the local branch being pushed, or — for a delete
+	# (`git push origin :foo`, where local_ref is literally "(delete)") — the
+	# checked-out branch, since deleting a branch you are not on is the same
+	# cross-branch hazard.
+	case "${local_ref:-}" in
+	refs/heads/*) local_branch=${local_ref#refs/heads/} ;;
+	*) local_branch=$head_branch ;;
+	esac
+
+	# Detached HEAD has no checked-out branch name to compare against, so fall
+	# back to source-vs-destination equality only.
+	expected=${head_branch:-$local_branch}
+
+	if [ "$remote_branch" = "$expected" ] && [ "$remote_branch" = "$local_branch" ]; then
+		continue
+	fi
+
+	refused=1
+	echo "pre-push: REFUSED cross-branch push (trusty-mpm push guard, #2867)" >&2
+	echo "  checked-out branch : ${head_branch:-<detached HEAD>}" >&2
+	echo "  pushing            : ${local_ref:-<delete>}" >&2
+	echo "  onto destination   : $remote_ref" >&2
+done
+
+if [ "$refused" -ne 0 ]; then
+	echo "" >&2
+	echo "A bare \`git push\` landing on a branch you do not own is how PR #2863's" >&2
+	echo "reviewed lineage was clobbered (#2867). Push to your own branch instead:" >&2
+	echo "  git push origin HEAD:refs/heads/${head_branch:-<your-branch>}" >&2
+	echo "If this cross-branch push is deliberate, re-run it with:" >&2
+	echo "  TM_ALLOW_CROSS_BRANCH_PUSH=1 git push ..." >&2
+	exit 1
+fi
+
+exit 0

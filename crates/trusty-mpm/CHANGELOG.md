@@ -9,6 +9,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Cross-branch `git push` guard for every worktree of a managed base clone**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): a bundled
+  `pre-push` hook now refuses any push whose destination branch differs from the
+  checked-out branch — the shape that clobbered PR #2863's reviewed lineage. It
+  is installed into `$GIT_COMMON_DIR/hooks` at base-clone time, which every
+  worktree of that base shares, so it also covers ad-hoc `git worktree add`
+  worktrees an agent creates for itself (the actual incident path, which no
+  other trusty-mpm code path ever sees). Installation refuses rather than
+  overwrites when a foreign `pre-push` hook or a `core.hooksPath` redirect is
+  present, so it never fights husky/lefthook. Set
+  `TM_ALLOW_CROSS_BRANCH_PUSH=1` for a deliberate cross-branch push.
+
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
   (worktree-hygiene follow-up to
@@ -57,6 +69,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   env-resolved managed session id exists, and if the session still hasn't
   settled it prints an honest "still settling" message instead of the
   misleading non-git hint.
+
+- **A session worktree's branch is no longer left tracking the default branch
+  unless a bare `git push` is provably confined to its own branch**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)):
+  `configure_session_branch_tracking` used to set
+  `branch.<session>.merge = refs/heads/<default>` FIRST and pin
+  `push.default = current` afterwards, both best-effort — so any failure of the
+  pin (old git, unwritable base config, sandboxed `git config`) left the
+  worktree armed with a foreign upstream. The pin is now established first and
+  read back from the effective config stack; when it cannot be confirmed the
+  worktree is left with no upstream at all (`git pull origin <default>` still
+  works) rather than an upstream it does not own.
 
 - **Concurrent workspace-trust seeds no longer clobber each other's
   `~/.claude.json` entries** (closes

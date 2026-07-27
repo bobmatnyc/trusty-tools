@@ -78,6 +78,7 @@ pub mod project_discovery;
 pub mod project_trust;
 pub mod protected_dirs;
 pub mod provisioning_stage;
+pub mod push_guard;
 pub mod scaffold_gitignore;
 pub mod session;
 pub mod session_assets;
