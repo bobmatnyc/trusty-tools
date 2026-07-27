@@ -78,7 +78,7 @@ const SCOPE_ENFORCED_ON: &[&str] = &["persona_chat"];
 /// `GET /api/agents/:name/permissions` — HTTP entry point.
 ///
 /// Why/What: see the module doc.
-/// Test: `super::tests::agent_permissions::permissions_route_reports_declared_scopes`.
+/// Test: `super::tests::agent_permissions::permissions_route_reports_declared_and_inherited_scopes`.
 pub(super) async fn agent_permissions_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -109,8 +109,7 @@ pub(super) async fn agent_permissions_route(
 /// reachable only via that immediate base, whatever THAT base in turn
 /// inherited — and avoids re-deriving per-level provenance from
 /// `merge_extends`'s flattened output, which does not retain it.
-/// Test: `permissions_route_reports_declared_scopes`,
-/// `permissions_route_reports_inherited_scope_from_immediate_base`,
+/// Test: `permissions_route_reports_declared_and_inherited_scopes`,
 /// `permissions_route_never_inherits_user_authority`,
 /// `permissions_route_degrades_on_malformed_toml`,
 /// `permissions_route_degrades_gracefully_on_unresolvable_extends`.
