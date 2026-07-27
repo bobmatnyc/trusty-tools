@@ -505,3 +505,60 @@ async fn skills_route_leaf_cards_keep_their_pre_4022_shape() {
         .count() as u64;
     assert_eq!(granted_count, granted_leaf_cards);
 }
+
+/// #3987 (option C): a dead `[tools].scopes` grant reaches the panel.
+///
+/// Why route-level and not just unit-level: the whole point of option C is
+/// that a client can render "this agent has dead scope grants" instead of the
+/// user concluding the tools are broken, and that requires the field to
+/// actually be in the response body — not merely computable.
+#[tokio::test]
+async fn skills_route_reports_dead_scope_patterns() {
+    const DEAD_SCOPE_FIXTURE: &str = r#"[agent]
+name = "deadscope"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+
+[tools]
+allow = ["search_gmail_messages"]
+scopes = ["memory.read", "google.read", "google.gmail.*"]
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("deadscope.toml"), DEAD_SCOPE_FIXTURE).unwrap();
+
+    let resp = skills_at(&[dir.path().to_path_buf()], "deadscope", dir.path()).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+
+    let dead = body["dead_scope_patterns"].as_array().unwrap();
+    assert_eq!(dead.len(), 1, "{dead:?}");
+    assert_eq!(dead[0]["pattern"], "google.read");
+    assert!(
+        dead[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("denied at dispatch"),
+        "the reason must say what the consequence is: {dead:?}"
+    );
+    assert!(
+        dead[0]["nearest"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "google.gmail.write"),
+        "the entry must name a working alternative: {dead:?}"
+    );
+}
+
+/// A healthy agent's panel must carry an EMPTY list, not a missing field —
+/// a client checking `dead_scope_patterns.length` must not have to special-case
+/// `undefined`.
+#[tokio::test]
+async fn skills_route_reports_no_dead_scope_patterns_for_a_healthy_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("izzie.toml"), TOOLS_ONLY_FIXTURE).unwrap();
+    let resp = skills_at(&[dir.path().to_path_buf()], "izzie", dir.path()).await;
+    let body = body_json(resp).await;
+    assert_eq!(body["dead_scope_patterns"], serde_json::json!([]));
+}

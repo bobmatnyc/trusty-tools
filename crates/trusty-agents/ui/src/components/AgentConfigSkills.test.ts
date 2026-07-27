@@ -41,6 +41,7 @@ function payload(over: Partial<AgentSkills> = {}): AgentSkills {
     groups: [],
     unresolved: [],
     unmatched_patterns: [],
+    dead_scope_patterns: [],
     declares_capability: true,
     ...over,
   };
@@ -193,6 +194,33 @@ describe('AgentConfigSkills', () => {
     expect(details).not.toBeNull();
     expect(details.open).toBe(false);
     expect(details.textContent).toContain('granola_*');
+  });
+
+  // #3987: a dead scope grant denies every scoped tool it names, so it gets
+  // the same prominent treatment as an unresolved grant — NOT the collapsed
+  // `details` an unmatched allow-pattern gets, which may still resolve.
+  it('surfaces a dead scope grant prominently, with actionable alternatives', () => {
+    render(
+      payload({
+        dead_scope_patterns: [
+          {
+            pattern: 'google.read',
+            nearest: ['google.gmail.write', 'google.calendar.write'],
+            reason: 'no reachable tool advertises a scope matching this pattern',
+          },
+        ],
+      }),
+    );
+    expect(target.textContent).toContain('Dead scope grants (1)');
+    expect(target.textContent).toContain('google.read');
+    expect(target.textContent).toContain('google.gmail.write');
+    // Not hidden behind a disclosure triangle the way `unmatched_patterns` is.
+    expect(target.querySelector('details')).toBeNull();
+  });
+
+  it('renders nothing about dead scopes for a healthy agent', () => {
+    render(payload());
+    expect(target.textContent).not.toContain('Dead scope grants');
   });
 
   it('states the deny polarity for an agent that declares no capability', () => {

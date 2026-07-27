@@ -155,6 +155,7 @@ describe('fetchAgentSkills', () => {
       granted_count: 1,
       unresolved: [],
       unmatched_patterns: [],
+      dead_scope_patterns: [],
       declares_capability: true,
     };
     globalThis.fetch = (async () =>

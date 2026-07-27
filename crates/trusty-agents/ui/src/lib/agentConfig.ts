@@ -400,6 +400,16 @@ export interface AgentSkills {
   unresolved: { id: string; reason: string }[];
   /** Allow-patterns no catalog tool matches — may still resolve over MCP. */
   unmatched_patterns: { pattern: string; reason: string }[];
+  /**
+   * `[tools].scopes` patterns that can match NO reachable dotted scope
+   * (#3987). Unlike `unmatched_patterns` — which may still resolve to a
+   * live-discovered MCP tool — these are conclusively broken: every scoped
+   * tool the grant was meant to permit is denied at dispatch, which looks
+   * exactly like "this agent has no tools". `nearest` carries working
+   * alternatives in the same namespace, so the pane can be actionable rather
+   * than merely alarming. Render it as a WARNING, not as an aside.
+   */
+  dead_scope_patterns: { pattern: string; nearest: string[]; reason: string }[];
   /** `false` when the agent declares no capability at all (grants nothing). */
   declares_capability: boolean;
   config_error?: string;
