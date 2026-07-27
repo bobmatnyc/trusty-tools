@@ -16,14 +16,18 @@
 //! set for a native subagent, so those calls were denied, forcing operators to
 //! fall back to the all-or-nothing `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass just
 //! to get delegated work done.
-//! What: [`pm_guard`] is the `tm hook --pm-guard` entry point. It short-circuits
-//! (ALLOW) inside sub-agents / disabled-hook shells / the explicit
-//! `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass, reads the `PreToolUse` stdin payload,
-//! exempts native sub-agent dispatches via [`payload_is_subagent_dispatch`]
-//! (the payload's documented `agent_id` field), classifies the tool **locally**
-//! (no daemon round-trip — a PreToolUse hook must be fast and must never
-//! hard-block when the daemon is down), and either stays silent (ALLOW) or
-//! prints a `permissionDecision: "deny"` response (DENY). The classification is
+//! What: [`pm_guard`] is the `tm hook --pm-guard` entry point. It resolves the
+//! two kill-switch bypasses from the DAEMON (Guards 2/3 — see
+//! [`pm_guard_session_flags`] and the "Daemon-held kill-switch flags" note
+//! below), short-circuits (ALLOW) inside sub-agents, reads the `PreToolUse`
+//! stdin payload, exempts native sub-agent dispatches via
+//! [`payload_is_subagent_dispatch`] (the payload's documented `agent_id`
+//! field), classifies the tool **locally** (no daemon round-trip for the
+//! per-tool classification itself — a PreToolUse hook must stay fast and must
+//! never hard-block on tool-classification when the daemon is down; see below
+//! for why Guards 2/3 are a deliberate, narrow exception to that rule), and
+//! either stays silent (ALLOW) or prints a `permissionDecision: "deny"`
+//! response (DENY). The classification is
 //! a static default-ALLOW + explicit deny-list: [`evaluate_tool`] denies a PM
 //! direct edit tool ONLY when it targets a *source-code* file (path-based —
 //! issue #2604), denies the forbidden Bash verbs, and allows everything else —
@@ -56,40 +60,51 @@
 //! before Guard 4's early return, denying any `git worktree add` whose target
 //! resolves under `/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR`, or the
 //! harness scratchpad. It also pierces Guard 1 (`CLAUDE_MPM_SUB_AGENT`) —
-//! Guard 2 (`TRUSTY_MPM_DISABLE_HOOKS`) and Guard 3
-//! (`TRUSTY_MPM_PM_UNRESTRICTED`) run first and are UNAFFECTED, since a
-//! round 2 code-critic review (PR #3978) established that Guards 1/4 are
+//! Guards 2/3 (below) run first and are UNAFFECTED, since Guard 1/4 are
 //! automatic markers a spawn helper stamps on every nested/dispatched
 //! subagent process (no human decides per-invocation whether they're set),
-//! while nothing in this codebase's Rust source ever sets
-//! `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` programmatically via
-//! `std::env::var` — see [`pm_guard`]'s body for the exact reordering this
+//! unlike Guards 2/3 — see [`pm_guard`]'s body for the exact reordering this
 //! required (Guard 1's check moved after the stdin payload read, specifically
-//! so this worktree check — which needs the payload — can run first). **This
-//! is NOT the same as "operator-only"**: Claude Code's `settings.json`
-//! supports a top-level `env` object applied to every session/subprocess it
-//! spawns (hooks included, live-reloaded mid-session), and a `Write`/`Edit`
-//! to `.claude/settings.json` is not itself blocked by this guard (`.json` is
-//! not in [`SOURCE_CODE_EXTENSIONS`], so [`evaluate_edit_tool`] falls through
-//! to an unconditional ALLOW) — so the PM, or any Guard-4-exempt subagent,
-//! can set either var there and self-exempt from this entire guard. That gap
-//! predates this PR by many issues and is NOT introduced or widened by it;
-//! tracked separately as issue #3981, not fixed here. This is the one place
-//! in the file that pierces an automatic-marker exemption; see that call
-//! site's comment for why it must never be routed through [`evaluate_tool`]
-//! instead.
+//! so this worktree check — which needs the payload — can run first). This
+//! guard is a different threat model from Guards 2/3 entirely and is left
+//! exactly as-is by issue #3981 — do not fold it into that redesign.
+//! **Daemon-held kill-switch flags (issue #3981, replacing an env-var design
+//! that predated this crate):** Guards 2/3 (`disable_hooks`/`pm_unrestricted`)
+//! used to read `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED`
+//! directly from LIVE process env on every `PreToolUse` call. Claude Code
+//! re-spawns this hook subprocess fresh each time and re-injects
+//! `.claude/settings.json`'s top-level `env` object into it (live-reloaded
+//! mid-session) — a `.json` file is not in [`SOURCE_CODE_EXTENSIONS`], so a
+//! plain PM `Write`/`Edit` to that file fell through [`evaluate_edit_tool`]
+//! to an unconditional ALLOW, letting the PM (or any Guard-4-exempt
+//! subagent) self-exempt from the ENTIRE guard with one file write, no
+//! restart, no observable disruption. [`pm_guard_session_flags::guard_flags`]
+//! replaces both env reads with a daemon round trip resolving the flags from
+//! the session's OWN record — captured ONCE at `tm sessions new`/`start`/
+//! `resume` time from the operator's launching shell
+//! (`session_manager::guard_flags`, `core::pm_guard_launch_env`), and never
+//! written by this hook process. Disabling the guard now requires an actual
+//! session restart with the flag set — an operator-initiated act, matching
+//! `core::project_trust`'s consult-once-at-launch precedent, NOT a
+//! file-permission boundary. FAILS TOWARD GUARD-ACTIVE: an unreachable
+//! daemon, an unresolvable session, or an unconfirmed tmux pane (issue
+//! #3600's lesson, applied here) all resolve to the flags staying `false`/
+//! `false` — never a bypass; see that module's doc for the full design and
+//! its scope note on local (non-managed) sessions.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
 //! substitution handling) lives in the sibling [`super::pm_guard_bash`] module
 //! with its own tests; the opt-in persona gate's policy lives in
-//! [`super::pm_guard_deny_by_default`] with its own tests; `tests/tm_hook_pm_guard.rs`
-//! exercises the stdin→decision→stdout path (and the env bypasses / sub-agent
-//! exemption / fail-open) end to end through the real binary.
+//! [`super::pm_guard_deny_by_default`] with its own tests; the daemon-held
+//! kill-switch resolution lives in [`super::pm_guard_session_flags`] with its
+//! own tests; `tests/tm_hook_pm_guard.rs` exercises the stdin→decision→stdout
+//! path (and the sub-agent exemption / fail-open) end to end through the real
+//! binary.
 
 use std::path::PathBuf;
 
-use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
+use crate::commands::misc::{SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::{
     SHELL_EDIT_REASON, evaluate_bash_command, evaluate_worktree_add_command,
     extract_shell_edit_target,
@@ -97,23 +112,7 @@ use crate::commands::pm_guard_bash::{
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
-
-/// Escape-hatch env var: `TRUSTY_MPM_PM_UNRESTRICTED=1` disables all PM
-/// enforcement for the invocation.
-///
-/// Why: the prohibitions exist for the *autonomous* PM loop; when the operator
-/// explicitly tells the PM "you do it this time", there must be a way to lift
-/// the block without editing settings.json and restarting. Keying it on the
-/// exact value `"1"` (rather than mere presence) keeps an accidental empty
-/// export from silently disabling enforcement. This is a manual, opt-in,
-/// single-named-var override — never set by trusty-mpm's own session-launch or
-/// spawn code (verified: no occurrence outside this module and its tests) — so
-/// there is nothing for issue #2014 to "retire" in the launcher; the fix there
-/// is that [`payload_is_subagent_dispatch`] now makes this bypass unnecessary
-/// for ordinary delegated work. It remains available for the rare case an
-/// operator wants to lift enforcement on the PM's *own* direct edits too.
-/// What: the literal env var name. See [`pm_unrestricted`].
-pub(crate) const PM_UNRESTRICTED_ENV: &str = "TRUSTY_MPM_PM_UNRESTRICTED";
+use crate::commands::pm_guard_session_flags;
 
 /// Single-file mutation tools the PM invokes directly. Whether a given call is
 /// denied is decided by its *target path*, not the tool name — see
@@ -142,6 +141,17 @@ const SOURCE_EDIT_REASON: &str = "PM must not implement source code directly (pr
      Delegate the change to rust-engineer via the Task/Agent tool. Single-file writes to \
      non-source files (docs, config, and `.trusty-mpm/` orchestration state) are permitted.";
 
+/// Deny reason for a PM direct write to a guard-owned enforcement-state file.
+///
+/// Why (issue #3981 Part 3): distinct from [`SOURCE_EDIT_REASON`] so `pm_guard`'s
+/// budget gate (which only recognizes that exact reason) never treats this as
+/// budget-eligible — forging the guard's own inputs is an absolute deny, not a
+/// routine file edit.
+const GUARD_STATE_EDIT_REASON: &str = "PM must not write pm_guard's own enforcement state \
+     directly (issue #3981) — this file is an INPUT to the guard, not PM orchestration \
+     output. If the turn budget or project-trust decision needs to change, that is an \
+     operator action, not something the PM edits for itself.";
+
 /// Source-code file extensions a PM direct edit-tool call must not target.
 ///
 /// Why: prohibition P1 blocks the PM from *implementing code* directly; the file
@@ -165,55 +175,63 @@ const SOURCE_CODE_EXTENSIONS: &[&str] = &[
 ///
 /// Why: this is the load-bearing integration point wired into every managed
 /// session's `PreToolUse` hook (see `session_launch::settings::write_project_hooks`).
-/// It must be fast and fail-open: CI/build shells (`TRUSTY_MPM_DISABLE_HOOKS`)
-/// and the explicit `TRUSTY_MPM_PM_UNRESTRICTED=1` operator bypass short-circuit
-/// to ALLOW before the stdin payload is even read — both are genuine
-/// human-operated escape hatches (nothing in this codebase sets either
-/// programmatically), so they lift EVERY check below, including the absolute
-/// worktree-tmp guard. Nested MPM sub-agents (`CLAUDE_MPM_SUB_AGENT`) are
-/// different: that marker is stamped automatically by a spawn helper, not
-/// operator-decided per call, so it is checked LATER — after the worktree-tmp
-/// guard has already had a chance to fire (issue #3977; PR #3978 round 2) —
-/// and exempts everything else, matching the pre-#3977 behavior. Any missing/
-/// malformed input degrades to ALLOW rather than wedging the PM. The decision
-/// is computed purely from the static tool classification — never a daemon
-/// call — so a down daemon can never hard-block a tool call.
+/// The two kill-switch bypasses (`disable_hooks`/`pm_unrestricted`) are
+/// resolved from the daemon's held session record via
+/// [`pm_guard_session_flags::guard_flags`] and checked FIRST, before the
+/// stdin payload is even read — genuine operator-set escape hatches (see
+/// that module's doc for the #3981 redesign), lifting EVERY check below,
+/// including the absolute worktree-tmp guard, when set. Nested MPM
+/// sub-agents (`CLAUDE_MPM_SUB_AGENT`) are different: that marker is stamped
+/// automatically by a spawn helper, not operator-decided per call, so it is
+/// checked LATER — after the worktree-tmp guard has already had a chance to
+/// fire (issue #3977; PR #3978 round 2) — and exempts everything else,
+/// matching the pre-#3977 behavior. Any missing/malformed input degrades to
+/// ALLOW rather than wedging the PM. The per-tool CLASSIFICATION below
+/// (`evaluate_tool` and friends) is still computed purely, with no daemon
+/// call, so a down daemon can never hard-block a tool call on that path —
+/// only the kill-switch resolution above makes a (tightly-timed, fail-toward-
+/// active) daemon round trip.
 /// What: returns `Ok(())` (ALLOW, no stdout) for every short-circuit, a payload
 /// with no `tool_name`, or an [`evaluate_tool`] verdict of ALLOW. On DENY it
 /// fires a best-effort audit POST to `<url>/hooks` (tight timeout, result
 /// ignored — audit only, never gating) and prints the
 /// `hookSpecificOutput.permissionDecision = "deny"` JSON to stdout, then
 /// returns. `url` is used only for the audit POST.
-/// Test: env short-circuits + fail-open + deny/allow are covered end to end in
-/// `tests/tm_hook_pm_guard.rs`; the pure policy is covered by this module's
-/// unit tests.
+/// Test: sub-agent short-circuit + fail-open + deny/allow are covered end to
+/// end in `tests/tm_hook_pm_guard.rs`; the pure policy is covered by this
+/// module's unit tests; the kill-switch daemon round trip is covered by
+/// [`pm_guard_session_flags`]'s own tests.
 pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
-    // Guard 2: universal opt-out for CI / build shells that can't edit
-    // settings.json without a restart. Checked FIRST (ahead of Guard 1, a
-    // reordering from this function's original shape — see the code-critic
-    // round 2 finding on PR #3978): this and Guard 3 below are never SET
-    // programmatically anywhere in this codebase's Rust source (verified: no
-    // `std::env::var`/`set_var` occurrence outside doc comments and this
-    // module) — so they must keep working exactly as before, including
-    // against the ABSOLUTE worktree-tmp guard below: whoever sets
-    // `TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED` gets exactly
-    // that, no exceptions. That is a narrower claim than "operator-only",
-    // though: Claude Code's `settings.json` `env` object can set either var
-    // for every hook invocation, and a write to `.claude/settings.json` is
-    // not itself blocked by this guard (see the module doc above, "This is
-    // NOT the same as 'operator-only'") — so the PM or an exempt subagent CAN
-    // self-exempt via that path. That gap predates this PR by many issues and
-    // is out of scope here; tracked as issue #3981. Guard 1 (`SUB_AGENT_ENV`),
-    // by contrast, is an
-    // AUTOMATIC marker a spawn helper stamps on every nested MPM subagent
-    // process with no per-invocation env-write decision involved — see
-    // Guard 1's own comment below for why it is checked LATER, after the
-    // worktree guard, instead of here.
-    if std::env::var_os(DISABLE_HOOKS_ENV).is_some() {
-        return Ok(());
-    }
-    // Guard 3: explicit operator override — "the user said you do it".
-    if pm_unrestricted() {
+    // Guards 2/3: the two kill-switch bypasses, resolved from the DAEMON's
+    // held session record rather than live process env (issue #3981 Part 2).
+    // Checked FIRST (ahead of Guard 1), mirroring this function's original
+    // ordering. Formerly these read `TRUSTY_MPM_DISABLE_HOOKS`/
+    // `TRUSTY_MPM_PM_UNRESTRICTED` directly from `std::env::var` — but Claude
+    // Code re-spawns this hook subprocess fresh on EVERY `PreToolUse` call
+    // and re-injects `.claude/settings.json`'s `env` block into it, so a
+    // single PM-writable settings.json edit disabled the ENTIRE guard,
+    // persistently, with no restart and no observable session disruption.
+    // `pm_guard_session_flags::guard_flags` instead resolves these from the
+    // session's own daemon record, captured ONCE at `tm sessions new`/
+    // `start`/`resume` time from the operator's launching shell
+    // (`session_manager::guard_flags`) — this hook process never writes that
+    // record, only reads it, so there is no live flip: disabling the guard
+    // now requires an actual session restart with the flag set (Bob's
+    // decision — "resume-with-flag is fine", matching
+    // `core::project_trust`'s consult-once-at-launch precedent).
+    // DELIBERATE BEHAVIOR CHANGE: this makes Guards 2/3 a daemon round trip
+    // on every `PreToolUse` call (tight 500ms-connect/2s-total budget,
+    // mirroring `pm_guard_deny_by_default::persona_status`'s), and an
+    // unreachable/slow daemon now resolves to GUARD FULLY ACTIVE — the
+    // opposite of this module's usual fail-OPEN posture. That inversion is
+    // intentional: fail-open exists so a down daemon never blocks a tool
+    // call for the ordinary classification path below; a KILL-SWITCH query
+    // must never fail toward "disabled" or crashing/pausing the daemon
+    // becomes the new universal bypass. See
+    // `pm_guard_session_flags`'s module doc for the full design, including
+    // its scope note on local (non-managed) sessions.
+    let flags = pm_guard_session_flags::guard_flags(url).await;
+    if flags.disable_hooks || flags.pm_unrestricted {
         return Ok(());
     }
 
@@ -364,17 +382,6 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether the `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass is active.
-///
-/// Why: split out so the exact-`"1"` matching rule has one definition.
-/// What: `true` only when [`PM_UNRESTRICTED_ENV`] is set to exactly `"1"`.
-/// Test: exercised via `tests/tm_hook_pm_guard.rs::pm_guard_bypass_env_allows_all`.
-fn pm_unrestricted() -> bool {
-    std::env::var(PM_UNRESTRICTED_ENV)
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
 /// Whether a `PreToolUse` payload originates from a native Claude Code
 /// sub-agent (a `Task`/`Agent`-tool-dispatched delegation) rather than the
 /// top-level PM's own tool call.
@@ -460,6 +467,14 @@ pub(crate) fn evaluate_tool(
 /// `evaluate_edit_tool_fails_open_without_path`.
 fn evaluate_edit_tool(tool_input: Option<&serde_json::Value>) -> Option<&'static str> {
     let path = edit_tool_target_path(tool_input)?;
+    // Checked BEFORE the orchestration allow (issue #3981 Part 3): the guard's
+    // own enforcement-state files live UNDER `.trusty-mpm`/`.trusty-tools`, so
+    // without this they would fall straight through `is_pm_orchestration_path`'s
+    // component match into an unconditional ALLOW — the PM could edit its own
+    // turn-budget counter or the project-trust store via a plain Edit/Write.
+    if is_guard_state_path(path) {
+        return Some(GUARD_STATE_EDIT_REASON);
+    }
     if is_pm_orchestration_path(path) {
         return None;
     }
@@ -467,6 +482,31 @@ fn evaluate_edit_tool(tool_input: Option<&serde_json::Value>) -> Option<&'static
         return Some(SOURCE_EDIT_REASON);
     }
     None
+}
+
+/// Whether `path` is one of pm_guard's OWN enforcement-state files — a
+/// denylist-within-the-allowlist (issue #3981 Part 3).
+///
+/// Why: `is_pm_orchestration_path` deliberately allows any path under
+/// `.trusty-mpm`/`.trusty-tools` (issue #2604) so the PM can write its own
+/// session/config state — but two files under those same roots are INPUTS to
+/// this guard, not PM-owned output: `pm_guard_budget`'s per-session turn
+/// counter (`<root>/state/pm_guard_turn_budget/<session>.json`) and
+/// `core::project_trust`'s store (`<root>/project-trust.json`). Letting the PM
+/// edit either would let it forge the very decisions this guard makes about it.
+/// What: `true` when the basename is exactly `project-trust.json`, or when any
+/// path component is exactly `pm_guard_turn_budget`. Component/basename
+/// matching (not substring) mirrors [`is_pm_orchestration_path`]'s discipline.
+/// Test: `is_guard_state_path_matches_enforcement_state`,
+/// `evaluate_tool_denies_guard_state_writes`.
+fn is_guard_state_path(path: &str) -> bool {
+    use std::path::{Component, Path};
+    let p = Path::new(path);
+    if p.file_name().and_then(|s| s.to_str()) == Some("project-trust.json") {
+        return true;
+    }
+    p.components()
+        .any(|c| matches!(c, Component::Normal(os) if os.to_str() == Some("pm_guard_turn_budget")))
 }
 
 /// The filesystem path an edit-tool call targets, if any.
@@ -687,6 +727,51 @@ mod tests {
         for p in ["crates/trusty-mpm/src/lib.rs", "src/main.rs", "notes.md"] {
             assert!(!is_pm_orchestration_path(p), "{p} should NOT be PM-owned");
         }
+    }
+
+    #[test]
+    fn is_guard_state_path_matches_enforcement_state() {
+        for p in [
+            "/Users/x/.trusty-tools/trusty-mpm/project-trust.json",
+            "project-trust.json",
+            "/Users/x/.trusty-mpm/state/pm_guard_turn_budget/sess-abc.json",
+            ".trusty-mpm/state/pm_guard_turn_budget/_default.json",
+        ] {
+            assert!(is_guard_state_path(p), "{p} should be guard-owned state");
+        }
+        for p in [
+            ".trusty-mpm/sessions/session-20260714-064556.md",
+            "TASK.md",
+            "/Users/x/.trusty-tools/trusty-mpm/claude-config/projects/p/memory/MEMORY.md",
+            "notes.md",
+        ] {
+            assert!(
+                !is_guard_state_path(p),
+                "{p} should NOT be guard-owned state"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_tool_denies_guard_state_writes() {
+        for path in [
+            "/Users/x/.trusty-tools/trusty-mpm/project-trust.json",
+            ".trusty-mpm/state/pm_guard_turn_budget/sess-abc.json",
+        ] {
+            assert_eq!(
+                evaluate_tool("Write", Some(&serde_json::json!({"file_path": path}))),
+                Some(GUARD_STATE_EDIT_REASON),
+                "expected {path} to be denied"
+            );
+        }
+        // The ordinary #2604 orchestration-write case must still be allowed.
+        assert_eq!(
+            evaluate_tool(
+                "Write",
+                Some(&serde_json::json!({"file_path": ".trusty-mpm/sessions/session-1.md"}))
+            ),
+            None
+        );
     }
 
     #[test]

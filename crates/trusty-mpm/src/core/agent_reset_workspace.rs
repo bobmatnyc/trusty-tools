@@ -223,6 +223,8 @@ mod tests {
     /// `session_manager::store::tests::make_record`).
     fn bare_session(tmux_name: &str) -> SessionRecord {
         SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id: ManagedSessionId::new(),
             tmux_name: tmux_name.to_string(),
             cwd: PathBuf::from("/tmp"),

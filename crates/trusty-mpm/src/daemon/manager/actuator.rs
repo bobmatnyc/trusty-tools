@@ -196,6 +196,10 @@ impl SessionLauncher for DaemonLauncher {
             deliverable_id: None,
             // A confirmed "launch" is an explicit new-session intent.
             force_new: true,
+            // #3981: an autonomous manager-driven launch is never an
+            // operator's launching shell — the guard stays fully active.
+            disable_hooks: false,
+            pm_unrestricted: false,
         };
         let record = spawn_managed(&self.state, ManagedSessionId::new(), params).await?;
         Ok(LaunchOutcome {

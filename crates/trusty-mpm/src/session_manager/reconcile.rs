@@ -196,6 +196,10 @@ impl SessionManager {
                     pane_id: self.tmux.get_pane_id(name),
                     injection_status: Default::default(),
                     worktree_owner: None,
+                    // Reconciled external sessions never ran `tm sessions
+                    // new`/`start` through this daemon (#3981).
+                    disable_hooks: false,
+                    pm_unrestricted: false,
                 };
                 if let Some(path) = resolved_cwd {
                     newly_resolved.push((id, path));

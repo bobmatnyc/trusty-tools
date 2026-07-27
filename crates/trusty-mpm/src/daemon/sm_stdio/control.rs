@@ -149,6 +149,10 @@ impl SessionControl for DaemonSessionControl {
             // programmatic driver; an idempotent reconnect for a project that
             // already has a live session is the safe default here too.
             force_new: false,
+            // #3981: the SM-STDIO adapter is never an operator's launching
+            // shell — the guard stays fully active.
+            disable_hooks: false,
+            pm_unrestricted: false,
         };
         let record = spawn_managed(
             &self.state,

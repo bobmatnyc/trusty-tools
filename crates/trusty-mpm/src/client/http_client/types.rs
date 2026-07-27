@@ -622,6 +622,15 @@ pub struct ManagedSpawnRequest {
     /// non-forcing caller.
     #[serde(skip_serializing_if = "is_false")]
     pub force_new: bool,
+    /// `pm_guard` kill-switch flags captured by the CLI from its OWN process
+    /// env at spawn time (issue #3981 Part 2) — see
+    /// `daemon::managed_routes::SpawnRequest::disable_hooks`/
+    /// `pm_unrestricted`. Omitted from the wire when `false` (the common
+    /// case), same pattern as `force_new`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub disable_hooks: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub pm_unrestricted: bool,
 }
 
 /// Whether a bool is `false` — the `skip_serializing_if` predicate that omits a
@@ -775,6 +784,24 @@ pub struct ManagedAnswerResponse {
 pub struct ManagedAttachCmdResponse {
     /// tmux attach command string.
     pub attach_cmd: String,
+}
+
+/// Response body for `GET /api/v1/sessions/managed/{id}/guard-flags` (issue #3981 Part 2).
+///
+/// Why: `pm_guard`'s daemon round-trip needs the two kill-switch flags plus
+/// `pane_id` for the #3600 identity cross-check — see
+/// `daemon::managed_routes::guard_flags`'s module doc.
+/// What: mirrors `daemon::managed_routes::GuardFlagsResponse` field-for-field.
+/// Test: `guard_flags_response_deserializes`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GuardFlagsResponse {
+    /// Mirrors `SessionRecord::disable_hooks`.
+    pub disable_hooks: bool,
+    /// Mirrors `SessionRecord::pm_unrestricted`.
+    pub pm_unrestricted: bool,
+    /// The tmux `pane_id` of this session's original pane, if captured.
+    #[serde(default)]
+    pub pane_id: Option<String>,
 }
 
 /// Response body for `GET /api/v1/sessions/managed/{id}/activity`.

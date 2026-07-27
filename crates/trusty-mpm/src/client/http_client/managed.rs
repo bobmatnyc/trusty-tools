@@ -89,6 +89,33 @@ impl DaemonClient {
         Ok(summary)
     }
 
+    /// Fetch `pm_guard`'s kill-switch flags via
+    /// `GET /api/v1/sessions/managed/{id}/guard-flags` (issue #3981 Part 2).
+    ///
+    /// Why: a dedicated, minimal round trip — see
+    /// `daemon::managed_routes::guard_flags`'s module doc for why this is not
+    /// folded into [`Self::get_managed_session`]'s [`ManagedSessionSummary`].
+    /// What: GETs the endpoint and returns [`super::types::GuardFlagsResponse`];
+    /// a 404 (and any other non-success status) surfaces as an `Err` — the
+    /// caller (`pm_guard`'s resolver) treats ANY error identically, as
+    /// "flags unresolved, guard stays fully active".
+    /// Test: live HTTP via `tests/session_manager_mvp.rs`.
+    pub async fn get_guard_flags(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<super::types::GuardFlagsResponse> {
+        let url = format!("{}/api/v1/sessions/managed/{id}/guard-flags", self.base);
+        let flags = self
+            .http
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(flags)
+    }
+
     /// Spawn a managed session via `POST /api/v1/sessions/managed`.
     ///
     /// Why: provision an isolated workspace and start a harness in it. The

@@ -79,6 +79,8 @@ impl ManagedTmuxDriver for PaneAwareTmux {
 /// Build a minimal [`SessionRecord`] suitable for serialization tests.
 fn make_record(source_id: Option<&str>) -> SessionRecord {
     SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-test-session".into(),
         cwd: PathBuf::from("/tmp/test"),

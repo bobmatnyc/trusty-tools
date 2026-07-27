@@ -205,6 +205,8 @@ fn bare_record(
     pane_id: Option<&str>,
 ) -> SessionRecord {
     SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: PathBuf::from("/tmp/bare"),

@@ -47,6 +47,8 @@ fn record_without_injection_status_field_defaults_to_not_applicable() {
 #[test]
 fn record_round_trips_injection_status() {
     let mut record = SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-injected".into(),
         cwd: PathBuf::from("/tmp"),

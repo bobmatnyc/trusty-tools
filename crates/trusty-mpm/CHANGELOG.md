@@ -7,6 +7,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **`pm_guard`'s kill-switch flags moved from live process env to a
+  daemon-held session record, closing the settings.json self-exemption hole**
+  ([#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981)): Guards 2/3
+  (`TRUSTY_MPM_DISABLE_HOOKS`/`TRUSTY_MPM_PM_UNRESTRICTED`) previously read
+  live process env on every `PreToolUse` call. Claude Code re-spawns the hook
+  subprocess fresh each time and re-injects `.claude/settings.json`'s `env`
+  block into it, so a single PM-writable settings.json edit disabled the
+  ENTIRE guard — persistently, with no restart and no observable disruption.
+  `tm sessions new`/`start`/`resume` now capture both flags ONCE from the CLI
+  process's own environment (the operator's launching shell) and persist them
+  on the managed session's daemon record
+  (`session_manager::guard_flags::SessionManager::set_guard_flags`); `pm_guard`
+  resolves them via a new `GET /api/v1/sessions/managed/{id}/guard-flags`
+  round trip (`pm_guard_session_flags`), cross-checking the resolving pane's
+  tmux identity against the record's captured `pane_id` (the same #3600
+  lesson `pm_guard_deny_by_default::persona_status` already applies) so a
+  sibling pane can never inherit another session's bypass. **Behavior
+  change:** disabling the guard now requires an actual session restart with
+  the flag set (`tm sessions resume` — see `ResumeQuery`'s doc for why an
+  ordinary bodyless resume deliberately re-arms the guard) — an
+  operator-initiated act, matching `core::project_trust`'s
+  consult-once-at-launch precedent, not a live file-permission boundary.
+  **Behavior change:** an unreachable/unresolvable daemon now resolves to the
+  guard staying FULLY ACTIVE (the opposite of this module's usual fail-open
+  posture for ordinary tool classification) — a killed or paused daemon must
+  never become the new universal bypass. Scope: this covers managed sessions
+  (`tm sessions new`, the git-repo-backed `session start` path, and `tm
+  sessions resume`) — the dominant real-world path, since the bare-`tm` guided
+  default always routes a GitHub-backed project through the managed
+  session-manager. A local, non-managed `tm sessions start` (a directory with
+  no recognized git remote) has no session-identity env var exported into its
+  pane at all, so the guard is unconditionally fully active there — never a
+  regression, since no session could disable the guard via a live env var
+  before this change either. This also **narrows the `.trusty-mpm`/
+  `.trusty-tools` write allowlist** (`evaluate_edit_tool`'s issue #2604
+  orchestration exemption): pm_guard's own turn-budget counter
+  (`<root>/state/pm_guard_turn_budget/<session>.json`) and
+  `core::project_trust`'s store (`<root>/project-trust.json`) are no longer
+  PM-writable via the plain Edit/Write tool — the PM could previously edit
+  its own budget counter and the project-trust decision through that
+  unconditional allowlist; ordinary orchestration writes (session snapshots,
+  `TASK.md`, the memory palace) are unaffected. This supersedes PR #3994's
+  Bash-command-classifier approach to #3981 (four adversarial review rounds,
+  a trivial bypass found each round — `cp`/`mv`/`install`, then `ln`/`git
+  mv`, then a verb-agnostic token scan still closing new holes — because
+  scanning Bash for writes to one path fails open by construction); that
+  trust-anchor apparatus was never merged and this change supersedes it
+  entirely rather than building on top of it.
+
 ### Added
 
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,

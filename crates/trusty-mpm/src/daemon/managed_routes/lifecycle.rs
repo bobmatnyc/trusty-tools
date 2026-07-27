@@ -146,6 +146,13 @@ pub struct SpawnParams {
     /// `session_new`, the SM-STDIO adapter, the chat surfaces — keep
     /// reconnecting) preserves #1707.
     pub force_new: bool,
+    /// `pm_guard` kill-switch flags captured by the CLI from its OWN process
+    /// env at spawn time (issue #3981 Part 2) — see
+    /// `session_manager::guard_flags::SessionManager::set_guard_flags` for
+    /// the full rationale. `false`/`false` (the default) leaves the guard
+    /// fully active for the new session.
+    pub disable_hooks: bool,
+    pub pm_unrestricted: bool,
 }
 
 /// Spawn a managed session, shared by the HTTP handler and the MCP tool.
@@ -227,11 +234,34 @@ pub async fn spawn_managed(
     // metadata-only (`--no-inject`).
     let inject_flag = params.inject_task != Some(false);
     let deliverable_id = params.deliverable_id.clone();
+    let guard_flags = (params.disable_hooks, params.pm_unrestricted);
     let mut record = crate::core::provisioning_stage::scoped(
         emitter,
         spawn_managed_routed(state, session_id, params, runtime, config),
     )
     .await?;
+
+    // #3981 Part 2: persist the operator-captured guard flags. Non-fatal —
+    // an otherwise-successful spawn must never fail because of this, and the
+    // safe (guard-active) default the record was created with (see
+    // `session_manager::create`) is preserved on failure.
+    if guard_flags != (false, false) {
+        match state
+            .session_manager()
+            .await
+            .set_guard_flags(&record.id, guard_flags.0, guard_flags.1)
+            .await
+        {
+            Ok(()) => {
+                record.disable_hooks = guard_flags.0;
+                record.pm_unrestricted = guard_flags.1;
+            }
+            Err(e) => warn!(
+                id = %record.id,
+                "spawn_managed: set_guard_flags failed: {e}; guard stays fully active"
+            ),
+        }
+    }
 
     // Deliverable linkage (DOC-35 §10.6, #2379): the HTTP route already
     // validated `deliverable_id` exists and belongs to this project BEFORE

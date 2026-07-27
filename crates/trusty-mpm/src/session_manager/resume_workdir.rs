@@ -232,6 +232,8 @@ mod tests {
         last_cwd: Option<PathBuf>,
     ) -> SessionRecord {
         SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-resume-workdir-test".into(),
             cwd,

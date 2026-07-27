@@ -68,6 +68,7 @@ pub mod overseer;
 pub mod overseer_config;
 pub mod paths;
 pub mod pid_registry;
+pub mod pm_guard_launch_env;
 pub mod process;
 pub mod project;
 pub mod project_aliases;

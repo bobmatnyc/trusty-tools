@@ -170,6 +170,8 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
 
     let canonical_wt = std::fs::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
     let record = super::super::record::SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: session_id,
         tmux_name: "test-toctou".into(),
         cwd: PathBuf::from("/tmp"),

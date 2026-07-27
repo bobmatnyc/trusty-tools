@@ -14,6 +14,7 @@ pub mod decommission;
 pub mod dedup;
 pub mod delete;
 pub mod driver;
+pub mod guard_flags;
 pub mod hook_sync;
 pub mod injection_status;
 pub mod manager;

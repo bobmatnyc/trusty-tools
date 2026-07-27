@@ -311,6 +311,14 @@ impl SessionManager {
             // parameter through every `create_with_id`/`create_with_reserved_name`
             // call site.
             worktree_owner: None,
+            // #3981: guard-inactive by default. `spawn_managed`
+            // (`daemon::managed_routes::lifecycle`) calls
+            // `SessionManager::set_guard_flags` immediately after this
+            // constructor returns when the caller supplied non-default
+            // values — same post-creation-setter precedent as
+            // `worktree_owner` above.
+            disable_hooks: false,
+            pm_unrestricted: false,
         };
 
         // Persist the record. On failure the freshly-created tmux session has

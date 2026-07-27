@@ -67,6 +67,8 @@ fn stub_record(
     tmux_name: &str,
 ) -> SessionRecord {
     SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.to_owned(),
         cwd: std::path::PathBuf::from("/tmp/project"),
@@ -379,6 +381,8 @@ async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
 
     let session_id = ManagedSessionId::new();
     let params = SpawnParams {
+        disable_hooks: false,
+        pm_unrestricted: false,
         repo_url: base.to_string_lossy().into_owned(),
         git_ref: "main".into(),
         task: "task".into(),
@@ -726,6 +730,8 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
 
     let session_id = ManagedSessionId::new();
     let params = SpawnParams {
+        disable_hooks: false,
+        pm_unrestricted: false,
         repo_url: local_path.to_string_lossy().into_owned(),
         git_ref: "main".into(),
         task: "".into(),

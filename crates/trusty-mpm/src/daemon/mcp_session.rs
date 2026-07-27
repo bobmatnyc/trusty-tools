@@ -88,6 +88,10 @@ pub async fn session_new(
         // duplicate — idempotent reconnect is the safe default for automated
         // callers (prevents LLM-driven session proliferation).
         force_new: false,
+        // #3981: the MCP tool surface is never an operator's launching
+        // shell — the guard stays fully active.
+        disable_hooks: false,
+        pm_unrestricted: false,
     };
     let record = spawn_managed(
         state,

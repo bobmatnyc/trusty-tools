@@ -61,6 +61,8 @@ async fn reconcile_backfills_source_id_from_workspace_git_remote() {
 
     // Directly insert a record with source_id=None into the store.
     let record = SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.clone(),
         cwd: ws_path.clone(),
@@ -150,6 +152,8 @@ async fn reconcile_backfills_source_id_for_stopped_record() {
         .expect("manager");
 
     let record = SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.clone(),
         cwd: ws_path.clone(),

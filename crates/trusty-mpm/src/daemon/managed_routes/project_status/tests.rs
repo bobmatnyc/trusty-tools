@@ -29,6 +29,8 @@ fn session(
     activity: Option<DateTime<Utc>>,
 ) -> SessionRecord {
     SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: "tm-test".to_string(),
         cwd: PathBuf::from("/tmp"),

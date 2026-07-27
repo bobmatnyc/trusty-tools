@@ -744,6 +744,8 @@ async fn manager_decommission_removes_workspace() {
 // 20-field struct literals when only tmux_name / task / ws_path vary).
 fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {
     SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: PathBuf::from("/tmp"),
@@ -841,6 +843,8 @@ async fn manager_reconcile_skips_decommissioned() {
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
     let tombstone = SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-decomm".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1411,6 +1415,8 @@ pub(super) async fn seed_record(
         ManagedSessionState::Active | ManagedSessionState::Provisioning
     );
     let record = SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id,
         tmux_name: tmux_name.clone(),
         cwd: root.path().to_path_buf(),
@@ -1885,6 +1891,8 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
         let ws = root.path().join(format!("aged-{id}"));
         std::fs::create_dir_all(&ws).expect("mk ws");
         let record = SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id,
             tmux_name: format!("tmpm-aged-{id}"),
             cwd: root.path().to_path_buf(),
@@ -1973,6 +1981,8 @@ async fn manager_decommission_unowned_skips_deletion() {
     // spawn (#1502) that sets workspace_path to the real directory.
     let id = ManagedSessionId::new();
     let record = SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id,
         tmux_name: format!("tmpm-local-{id}"),
         cwd: repo_path.clone(),
@@ -2254,5 +2264,44 @@ async fn claude_session_id_persists_on_session() {
         reloaded.claude_session_id.as_deref(),
         Some("uuid-abc-123"),
         "claude_session_id must survive a store reload (#1744)"
+    );
+}
+
+#[tokio::test]
+async fn guard_flags_persist_on_session() {
+    // Why (#3981): set_guard_flags must survive a store reload so that
+    // pm_guard's daemon round-trip reads the operator-captured flags back
+    // correctly even after a daemon restart.
+    // What: create a session (both flags default false), write both flags
+    // true via `set_guard_flags`, reload from disk, assert both survive.
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    assert!(!record.disable_hooks);
+    assert!(!record.pm_unrestricted);
+
+    mgr.set_guard_flags(&record.id, true, true)
+        .await
+        .expect("set_guard_flags");
+
+    let reloaded = mgr.get(&record.id).await.expect("get after set");
+    assert!(
+        reloaded.disable_hooks,
+        "disable_hooks must survive a store reload (#3981)"
+    );
+    assert!(
+        reloaded.pm_unrestricted,
+        "pm_unrestricted must survive a store reload (#3981)"
     );
 }

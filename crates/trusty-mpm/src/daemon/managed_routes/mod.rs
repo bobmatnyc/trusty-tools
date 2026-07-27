@@ -31,6 +31,7 @@ mod deliverable_link;
 mod deployment_check;
 mod fleet;
 pub mod front_gate;
+mod guard_flags;
 pub mod inproject;
 pub mod inproject_hygiene;
 mod launch_on_main;
@@ -52,6 +53,7 @@ pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_rout
 pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
 };
+pub use guard_flags::{GuardFlagsResponse, get_guard_flags};
 pub use lifecycle::{
     SpawnParams, is_local_workdir, resume_managed, spawn_managed, spawn_runtime_for, write_task_md,
 };
@@ -153,6 +155,14 @@ pub struct SpawnRequest {
     /// mismatch (400), not tolerated as `false`.
     #[serde(default)]
     pub background: bool,
+    /// `pm_guard` kill-switch flags captured by the CLI from its OWN process
+    /// env at spawn time (issue #3981 Part 2) — see
+    /// `SpawnParams::disable_hooks`/`pm_unrestricted`. Absent/`false` (the
+    /// default) leaves the guard fully active for the new session.
+    #[serde(default)]
+    pub disable_hooks: bool,
+    #[serde(default)]
+    pub pm_unrestricted: bool,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -305,6 +315,31 @@ pub struct DeleteQuery {
     pub force: bool,
 }
 
+/// Query params for POST /api/v1/sessions/managed/{id}/resume (issue #3981 Part 2).
+///
+/// Why: `resume` re-spawns the session's PM process, so it is the OTHER
+/// moment (besides spawn) an operator's launching-shell env can legitimately
+/// re-arm or re-confirm `pm_guard`'s kill-switch flags — "resume with the
+/// flag set" is the sanctioned way to disable the guard, per Bob's decision
+/// against a mid-session flip. A query string (not a JSON body) keeps every
+/// existing bodyless `POST .../resume` caller (the GUI, the picker,
+/// programmatic callers) working unchanged — the extractor defaults absent
+/// params to `false`/`false`. That default is DELIBERATELY re-asserted (not
+/// skipped) on every resume: a bypass must be re-declared on the SPECIFIC
+/// `tm sessions resume` call that wants it, never left silently "sticky"
+/// from an earlier resume once an unrelated bodyless resume (GUI, picker)
+/// comes along — that would be the exact sticky-bypass shape this issue
+/// exists to close, just moved from settings.json to the session record.
+/// What: `#[serde(default)]` bools, mirroring [`DeleteQuery`]'s pattern.
+/// Test: `resume_route_persists_guard_flags` in managed_routes tests.
+#[derive(Debug, Deserialize, Default)]
+pub struct ResumeQuery {
+    #[serde(default)]
+    pub disable_hooks: bool,
+    #[serde(default)]
+    pub pm_unrestricted: bool,
+}
+
 /// Response body for POST /api/v1/sessions/managed/{id}/delete (#2012).
 ///
 /// Why: delete SOFT-deletes — it marks the record `Deleted` (rendered
@@ -450,6 +485,10 @@ pub async fn spawn_session(
         // session", `tm session new`) sets `force_new: true` to skip the
         // in-project reconnect pre-flight and always spawn fresh.
         force_new: req.force_new,
+        // #3981 Part 2: passed through verbatim from the CLI, which captured
+        // them from its own launching-shell env.
+        disable_hooks: req.disable_hooks,
+        pm_unrestricted: req.pm_unrestricted,
     };
 
     // Async path (#2605): provision on a detached task and return the job id
@@ -794,6 +833,7 @@ pub async fn stop_managed_session_runtime(
 pub async fn resume_managed_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
+    axum::extract::Query(q): axum::extract::Query<ResumeQuery>,
 ) -> impl IntoResponse {
     let id = match parse_id(&id_str) {
         Ok(id) => id,
@@ -809,7 +849,30 @@ pub async fn resume_managed_session(
     // `Display`-substring matching (which silently fell through to 500 whenever
     // the error wording changed).
     match resume_managed(&state, &id).await {
-        Ok(final_record) => Json(record_to_summary(&final_record)).into_response(),
+        Ok(mut final_record) => {
+            // #3981 Part 2: re-assert the guard flags for THIS resume — see
+            // `ResumeQuery`'s doc for why this is unconditional (bodyless
+            // callers deliberately reset to guard-fully-active). Non-fatal:
+            // a persist failure must never turn a successful resume into an
+            // error response, and it leaves the record's PRE-resume flags in
+            // place rather than silently granting a bypass.
+            match state
+                .session_manager()
+                .await
+                .set_guard_flags(&id, q.disable_hooks, q.pm_unrestricted)
+                .await
+            {
+                Ok(()) => {
+                    final_record.disable_hooks = q.disable_hooks;
+                    final_record.pm_unrestricted = q.pm_unrestricted;
+                }
+                Err(e) => warn!(
+                    id = %id,
+                    "resume_managed_session: set_guard_flags failed: {e}; guard flags unchanged"
+                ),
+            }
+            Json(record_to_summary(&final_record)).into_response()
+        }
         Err(e) => e.into_response(),
     }
 }

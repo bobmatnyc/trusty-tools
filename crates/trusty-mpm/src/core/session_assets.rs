@@ -166,6 +166,8 @@ mod tests {
     /// Build a minimal `SessionRecord` for a workspace-rooted session.
     fn make_record(workspace: Option<PathBuf>, cwd: PathBuf) -> SessionRecord {
         SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id: ManagedSessionId::new(),
             tmux_name: "tm-test".to_string(),
             cwd,

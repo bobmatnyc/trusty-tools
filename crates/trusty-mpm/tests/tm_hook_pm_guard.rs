@@ -285,17 +285,27 @@ fn pm_guard_fails_open_on_malformed_input() {
 }
 
 #[test]
-fn pm_guard_bypass_env_allows_all() {
-    // TRUSTY_MPM_PM_UNRESTRICTED=1 lifts enforcement — even an Edit is allowed.
+fn pm_guard_raw_pm_unrestricted_env_no_longer_bypasses() {
+    // Issue #3981: TRUSTY_MPM_PM_UNRESTRICTED is no longer read from live
+    // process env — Guards 2/3 now resolve exclusively from the daemon's
+    // held session record, keyed by TM_MANAGED_SESSION_ID (deliberately
+    // removed by `run_pm_guard`'s env_remove list, so no daemon lookup is
+    // even attempted here). Setting the raw env var directly on this
+    // subprocess — exactly what a PM-writable `.claude/settings.json`
+    // `env` block would do — must have NO EFFECT. Uses a build/test Bash
+    // verb (NOT budget-eligible, an absolute single-call prohibition) so
+    // this test's verdict cannot be muddied by the per-turn file-change
+    // budget the way a bare Edit denial could be (issue #2918).
     let stdout = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs"}}"#,
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"make build"}}"#,
         &[("TRUSTY_MPM_PM_UNRESTRICTED", "1")],
     );
-    assert_eq!(
+    assert_ne!(
         stdout.trim(),
         "",
-        "the unrestricted bypass must allow everything"
+        "a raw TRUSTY_MPM_PM_UNRESTRICTED env var must no longer bypass enforcement (#3981)"
     );
+    assert_denied(&stdout);
 }
 
 #[test]
@@ -465,18 +475,25 @@ fn pm_guard_agent_type_alone_does_not_exempt() {
 }
 
 #[test]
-fn pm_guard_disable_hooks_env_allows_all() {
-    // TRUSTY_MPM_DISABLE_HOOKS is the universal opt-out for CI / build shells —
-    // even a direct Edit must pass when it is set.
+fn pm_guard_raw_disable_hooks_env_no_longer_bypasses() {
+    // Issue #3981: TRUSTY_MPM_DISABLE_HOOKS is no longer read from live
+    // process env by pm_guard's Guards 2/3 (the general `tm hook` shim's
+    // OWN separate DISABLE_HOOKS_ENV check in `commands::misc` is untouched
+    // and out of scope — this test exercises `--pm-guard` specifically).
+    // Setting the raw env var directly must have NO EFFECT. Uses a
+    // build/test Bash verb (not budget-eligible — see the sibling
+    // `pm_unrestricted` test's comment for why an Edit alone would be a
+    // weaker proxy here).
     let stdout = run_pm_guard(
-        r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"pytest"}}"#,
         &[("TRUSTY_MPM_DISABLE_HOOKS", "1")],
     );
-    assert_eq!(
+    assert_ne!(
         stdout.trim(),
         "",
-        "the disable-hooks bypass must allow everything"
+        "a raw TRUSTY_MPM_DISABLE_HOOKS env var must no longer bypass pm_guard (#3981)"
     );
+    assert_denied(&stdout);
 }
 
 #[test]
@@ -600,39 +617,59 @@ fn pm_guard_claude_mpm_sub_agent_env_still_allows_everything_else() {
 }
 
 #[test]
-fn pm_guard_disable_hooks_env_still_allows_worktree_add_under_tmp() {
-    // `TRUSTY_MPM_DISABLE_HOOKS` is a genuine operator-set escape hatch (never
-    // set programmatically anywhere in this codebase) — unlike
-    // `CLAUDE_MPM_SUB_AGENT` above, it is deliberately NOT pierced: an
-    // operator who disables the hook entirely gets exactly that, including
-    // for the worktree-tmp guard.
+fn pm_guard_raw_disable_hooks_env_no_longer_bypasses_worktree_guard() {
+    // Issue #3981: since Guards 2/3 no longer read live process env at all, a
+    // raw TRUSTY_MPM_DISABLE_HOOKS env var no longer lifts ANYTHING —
+    // including the absolute worktree-tmp guard (#3977), which stays denied.
     let stdout = run_pm_guard(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#,
         &[("TRUSTY_MPM_DISABLE_HOOKS", "1")],
     );
-    assert_eq!(
-        stdout.trim(),
-        "",
-        "the disable-hooks operator escape hatch must still allow everything, \
-         including the worktree-tmp guard"
-    );
+    assert_denied(&stdout);
 }
 
 #[test]
-fn pm_guard_unrestricted_env_still_allows_worktree_add_under_tmp() {
-    // `TRUSTY_MPM_PM_UNRESTRICTED=1` — the explicit "the operator said you do
-    // it this time" override — is likewise a genuine human escape hatch and
-    // must still lift the worktree-tmp guard along with everything else.
+fn pm_guard_raw_pm_unrestricted_env_no_longer_bypasses_worktree_guard() {
+    // Same as above for TRUSTY_MPM_PM_UNRESTRICTED (#3981).
     let stdout = run_pm_guard(
         r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#,
         &[("TRUSTY_MPM_PM_UNRESTRICTED", "1")],
     );
-    assert_eq!(
-        stdout.trim(),
-        "",
-        "the unrestricted operator bypass must still allow everything, \
-         including the worktree-tmp guard"
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_denies_when_daemon_unreachable_even_with_managed_session_id() {
+    // Verification target (issue #3981 fix): with a TM_MANAGED_SESSION_ID SET
+    // (so guard_flags actually attempts the daemon round trip, unlike the
+    // rest of this file's tests, which run with no session id and so
+    // short-circuit before any network attempt) against the same
+    // unreachable `http://127.0.0.1:1` every test in this file uses, the
+    // guard must FAIL TOWARD ACTIVE. Uses a build/test Bash verb (not
+    // budget-eligible) so the verdict cannot be muddied by the per-turn
+    // file-change budget the way a bare Edit denial could be (#2918) — a
+    // down/unreachable daemon must never be silently indistinguishable from
+    // "still within this turn's file-change budget".
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}"#,
+        &[(
+            "TM_MANAGED_SESSION_ID",
+            "11111111-1111-1111-1111-111111111111",
+        )],
     );
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_worktree_guard_still_denies_with_no_env_bypass_available() {
+    // Verification target (issue #3981 fix): the worktree-tmp guard (#3977)
+    // is a DIFFERENT threat model and must remain untouched by this
+    // redesign — proven here with no env vars at all, the ordinary case.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree add /tmp/wt-x"}}"#,
+        &[],
+    );
+    assert_denied(&stdout);
 }
 
 #[test]

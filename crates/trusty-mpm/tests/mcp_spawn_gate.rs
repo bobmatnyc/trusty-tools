@@ -68,6 +68,8 @@ impl Drop for EnvGuard {
 
 fn base_params(repo_url: &str, mcp_initiated: bool) -> SpawnParams {
     SpawnParams {
+        disable_hooks: false,
+        pm_unrestricted: false,
         repo_url: repo_url.to_string(),
         git_ref: "main".to_string(),
         task: "test task".to_string(),

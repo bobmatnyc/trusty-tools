@@ -158,6 +158,8 @@ async fn seed_sessions(
     for i in 0..n {
         let id = ManagedSessionId::new();
         let rec = SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id,
             tmux_name: format!("tmpm-fleet-{i}"),
             cwd: ws.path().to_path_buf(),
@@ -293,6 +295,8 @@ fn env_bool_recognizes_truthy_and_falsy() {
 
 fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
     SessionRecord {
+        disable_hooks: false,
+        pm_unrestricted: false,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-x".into(),
         cwd: PathBuf::from("/tmp"),

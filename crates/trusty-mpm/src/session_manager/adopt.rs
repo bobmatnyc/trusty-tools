@@ -234,6 +234,10 @@ impl SessionManager {
             pane_id: pane_id.clone(),
             injection_status: Default::default(),
             worktree_owner: None,
+            // Adopting an existing pane never runs `tm sessions new`/`start`,
+            // so there is no operator-launch env to capture (#3981).
+            disable_hooks: false,
+            pm_unrestricted: false,
         };
 
         // ── Guard 1: collision check (+ the no-collision persist) — the
@@ -416,6 +420,8 @@ mod tests {
 
     fn make_record_with_workspace(workspace: PathBuf) -> SessionRecord {
         SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-test".into(),
             cwd: workspace.clone(),
@@ -445,6 +451,8 @@ mod tests {
 
     fn make_record_unknown_cwd() -> SessionRecord {
         SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-external".into(),
             cwd: PathBuf::from("/unknown"),

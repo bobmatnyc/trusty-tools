@@ -45,6 +45,13 @@ impl CommandExecutor {
     }
 
     /// `managed-new` — spawn a managed session from a repo + ref + task.
+    ///
+    /// Why (issue #3981 Part 2): `TRUSTY_MPM_DISABLE_HOOKS`/
+    /// `TRUSTY_MPM_PM_UNRESTRICTED` are captured HERE, from this `tm`
+    /// process's own environment, and sent to the daemon to persist on the
+    /// new session's record — see `session_manager::guard_flags` for why
+    /// this is a one-time, launch-time capture rather than something
+    /// `pm_guard` re-reads live.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn managed_new(
         &self,
@@ -66,6 +73,8 @@ impl CommandExecutor {
             inject_task,
             deliverable_id,
             force_new,
+            disable_hooks: crate::core::pm_guard_launch_env::disable_hooks_requested(),
+            pm_unrestricted: crate::core::pm_guard_launch_env::pm_unrestricted_requested(),
         };
         match self.client().spawn_managed_session(&req).await {
             Ok(resp) => CommandResult::ManagedSpawned {

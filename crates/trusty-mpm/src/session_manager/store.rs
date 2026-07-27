@@ -350,6 +350,8 @@ mod tests {
 
     fn make_record(id: ManagedSessionId) -> SessionRecord {
         SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id,
             tmux_name: format!("tmpm-test-{id}"),
             cwd: PathBuf::from("/tmp"),

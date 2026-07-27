@@ -406,6 +406,36 @@ pub struct SessionRecord {
     /// explicit human action (zero-migration by design — see ADR-0020).
     #[serde(default)]
     pub worktree_owner: Option<ManagedSessionId>,
+
+    /// Guard kill-switch flags captured ONCE at `tm sessions new`/`start`/
+    /// `resume` time, from the CLI process's own environment — i.e. the
+    /// operator's launching shell, before this session's PM/harness process
+    /// exists to influence anything (issue #3981 Part 2).
+    ///
+    /// Why: `pm_guard`'s Guards 2/3 (`TRUSTY_MPM_DISABLE_HOOKS` /
+    /// `TRUSTY_MPM_PM_UNRESTRICTED`) used to read these as LIVE process env
+    /// vars on every `PreToolUse` call — but Claude Code re-spawns the hook
+    /// subprocess fresh each time and re-injects `.claude/settings.json`'s
+    /// `env` block into it, so the PM could self-exempt by writing that file
+    /// once, no restart needed. Recording the operator's intent HERE, at
+    /// spawn/resume time, and never re-reading live env afterward, closes
+    /// that hole: disabling the guard now requires an actual session
+    /// restart with the flag set (`tm sessions resume` reads its own launch
+    /// env fresh each time) — an operator-initiated act, not a PM-writable
+    /// file. Mirrors `core::project_trust`'s consult-once-at-launch
+    /// property, not a file-permission boundary.
+    /// What: `disable_hooks` mirrors `TRUSTY_MPM_DISABLE_HOOKS`;
+    /// `pm_unrestricted` mirrors `TRUSTY_MPM_PM_UNRESTRICTED`. Both default
+    /// to `false` (guard fully active) for every session that never opted
+    /// in and every pre-#3981 record.
+    ///
+    /// `#[serde(default)]` (→ `false`/`false`) keeps every pre-#3981 record
+    /// deserializable — they load with the guard fully active, the safe
+    /// direction.
+    #[serde(default)]
+    pub disable_hooks: bool,
+    #[serde(default)]
+    pub pm_unrestricted: bool,
 }
 
 /// Error types for session record operations.

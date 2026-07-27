@@ -112,6 +112,8 @@ async fn spawn_managed_session_surfaces_daemon_error_body() {
     let url = spawn_test_daemon().await;
     let client = DaemonClient::new(url);
     let req = ManagedSpawnRequest {
+        disable_hooks: false,
+        pm_unrestricted: false,
         repo_url: "https://github.com/acme/unregistered".to_string(),
         git_ref: "main".to_string(),
         task: "do it".to_string(),
@@ -548,6 +550,8 @@ fn managed_spawn_request_serializes() {
     // The `git_ref` field must serialize under the wire key `ref`, and absent
     // optionals must be omitted so the daemon sees them as null/defaulted.
     let req = ManagedSpawnRequest {
+        disable_hooks: false,
+        pm_unrestricted: false,
         repo_url: "https://example.com/r.git".to_string(),
         git_ref: "main".to_string(),
         task: "do the thing".to_string(),
@@ -569,6 +573,8 @@ fn managed_spawn_request_serializes() {
     assert!(v.get("git_ref").is_none(), "must use wire key `ref`");
 
     let bare = ManagedSpawnRequest {
+        disable_hooks: false,
+        pm_unrestricted: false,
         repo_url: "r".to_string(),
         git_ref: "r".to_string(),
         task: "t".to_string(),

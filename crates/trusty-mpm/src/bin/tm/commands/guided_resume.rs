@@ -440,12 +440,22 @@ async fn restart_via_daemon(
     url: &str,
     session: &trusty_mpm::client::ManagedSessionSummary,
 ) -> anyhow::Result<trusty_mpm::client::ManagedSessionSummary> {
+    // #3981 Part 2: captured from THIS `tm` process's own environment — the
+    // operator's launching shell, right now — and re-asserted on every
+    // restart (see `daemon::managed_routes::ResumeQuery`'s doc for why an
+    // ordinary bodyless resume deliberately resets these to `false`).
+    let disable_hooks = trusty_mpm::core::pm_guard_launch_env::disable_hooks_requested();
+    let pm_unrestricted = trusty_mpm::core::pm_guard_launch_env::pm_unrestricted_requested();
     // POST with a 30-second timeout — a hung daemon must not freeze the CLI.
     let resp = match client
         .post(format!(
             "{url}/api/v1/sessions/managed/{}/resume",
             session.id
         ))
+        .query(&[
+            ("disable_hooks", disable_hooks.to_string()),
+            ("pm_unrestricted", pm_unrestricted.to_string()),
+        ])
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await

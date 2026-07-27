@@ -631,6 +631,8 @@ mod tests {
     /// for a freshly-provisioned session.
     fn owned_record(id: ManagedSessionId, state: ManagedSessionState) -> SessionRecord {
         SessionRecord {
+            disable_hooks: false,
+            pm_unrestricted: false,
             id,
             tmux_name: format!("tm-owner-gate-{id}"),
             cwd: std::path::PathBuf::from("/tmp"),

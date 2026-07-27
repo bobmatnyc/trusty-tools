@@ -33,9 +33,9 @@ mod types;
 pub use types::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
     CoordinatorSession, DiscoveredProjectRow, EventRow, FleetByProjectWireResponse,
-    FleetProjectGroupWire, HealthSnapshot, LastSeen, LlmChatOutcome, ManagedActivityResponse,
-    ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
-    ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
+    FleetProjectGroupWire, GuardFlagsResponse, HealthSnapshot, LastSeen, LlmChatOutcome,
+    ManagedActivityResponse, ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest,
+    ManagedAnswerResponse, ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
     ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
     OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
 };
