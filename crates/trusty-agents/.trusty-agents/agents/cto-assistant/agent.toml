@@ -81,9 +81,17 @@ allow = [
     # vector_search (semantic code/doc search).
     "memory_recall",
     "vector_search",
-    # #472: CTO ops DB query tools — read-only SQLite over ~/Duetto/cto/data/cto.db.
-    # Registered in-process via `src/tools/cto_db.rs` and gated to this persona
-    # in `ctrl::mod.rs` (sensitive HR/budget data; cto-assistant only).
+    # #472/#3656/#3700/#3732: CTO ops DB query tools — read-only SQLite over
+    # ~/Duetto/cto/data/cto.db (a fixture DB ships until the real file is
+    # reachable — see the skill's README). Backed by the "cto-db" Python
+    # skill (`.trusty-agents/skills/cto-db/`), NOT hardcoded Rust: business
+    # logic lives in the skill's `python/` package, discovered and registered
+    # generically at startup by `crate::tools::python_skill` (persona-gated
+    # via the `AgentPlugin`/`install_plugins` mechanism in
+    # `crate::tools::agent_plugin`, matched to this persona by name — the
+    # same gate `crates/cto-assistant` used before its wiring was severed by
+    # PR #3310, now reused by the skill bridge instead of by that unwired
+    # Rust crate).
     "query_headcount",
     "query_budget",
     "query_risks",

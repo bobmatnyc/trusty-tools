@@ -35,6 +35,7 @@ pub mod okg;
 pub mod phase_audit;
 pub mod pm_bridge;
 pub mod pm_bridge_backend;
+pub mod python_skill;
 pub mod registry;
 pub mod run_bash;
 pub mod shell;
