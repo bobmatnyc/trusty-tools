@@ -7,13 +7,14 @@
 //!      correct file through the full parse → filter → split pipeline; no file's
 //!      content leaks into another file's map unit.
 //!  (b) CITATION VERIFICATION — a confabulated `code_provable` finding that cites
-//!      one file but quotes content from another is downgraded before the verdict
+//!      one file but quotes content from another is DROPPED before the verdict
 //!      floor runs, so it can no longer fail-close a clean PR (the exact #2881
-//!      D+/REQUEST_CHANGES symptom).
+//!      D+/REQUEST_CHANGES symptom) — as of #4042 this is a drop, not a
+//!      downgrade-in-place: the fabricated finding does not survive at all.
 
 use trusty_review::config::mapreduce::MapReduceConfig;
 use trusty_review::models::{Effort, Finding, Verdict};
-use trusty_review::pipeline::citation_check::{DiffContentIndex, downgrade_uncitable_findings};
+use trusty_review::pipeline::citation_check::{DiffContentIndex, enforce_citation_integrity};
 use trusty_review::pipeline::derive_verdict;
 use trusty_review::pipeline::diff_analyzer::DiffAnalyzer;
 use trusty_review::pipeline::mapreduce::MapOutcome;
@@ -123,7 +124,7 @@ fn fabricated_finding() -> Finding {
 }
 
 /// (b) BEFORE the fix the fabricated finding drives BLOCK; AFTER citation
-/// verification it is downgraded and the verdict recovers to APPROVE.
+/// verification it is DROPPED and the verdict recovers to APPROVE.
 #[tokio::test]
 async fn repro_fabricated_finding_no_longer_forces_block() {
     let diff = repro_diff();
@@ -141,17 +142,25 @@ async fn repro_fabricated_finding_no_longer_forces_block() {
 
     // AFTER: verify citations, then re-derive.
     let mut findings = vec![fabricated_finding()];
-    let n = downgrade_uncitable_findings(&mut findings, &index);
-    assert_eq!(n, 1, "the misattributed finding must be downgraded");
-    assert!(!findings[0].code_provable, "code_provable must be cleared");
-    // The finding is still surfaced (advisory) — downgraded, not dropped.
-    assert_eq!(findings.len(), 1);
+    let n = enforce_citation_integrity(&mut findings, &index);
+    assert_eq!(n, 1, "the misattributed finding must be dropped");
+    // #4042: dropped, not downgraded-in-place — it does not survive at all.
+    assert!(findings.is_empty());
 
-    let after = derive_verdict(Verdict::RequestChanges, &findings);
+    // The FLOOR component (what a fabricated finding could hijack) no longer
+    // escalates — seeded with APPROVE here to isolate exactly that guarantee.
+    // (The model's own raw self-reported REQUEST_CHANGES/BLOCK, produced by
+    // the SAME hallucinating call, is a separate signal `derive_verdict`
+    // deliberately treats as a floor it can only raise, never lower — see
+    // `grade::derive_verdict_with`'s doc; the full pipeline additionally
+    // relaxes THAT via `finding_hygiene::relax_verdict_if_evidence_wiped`,
+    // covered by `citation_4042_regression.rs` /
+    // `finding_hygiene_tests.rs::relaxes_verdict_when_all_findings_wiped_this_run`.)
+    let after = derive_verdict(Verdict::Approve, &findings);
     assert_eq!(
         after,
         Verdict::Approve,
-        "downgraded finding must not force any floor"
+        "a dropped finding must not force any floor"
     );
 }
 
@@ -165,15 +174,33 @@ async fn repro_reduce_recovers_after_downgrade() {
     let index = DiffContentIndex::from_filtered(&filtered);
     let cfg = MapReduceConfig::default();
 
+    let findings_before = 1;
     let mut findings = vec![fabricated_finding()];
-    downgrade_uncitable_findings(&mut findings, &index);
+    enforce_citation_integrity(&mut findings, &index);
 
-    // The bundle chunk's model verdict was REQUEST_CHANGES (driven by the finding);
-    // the two source chunks were clean APPROVE.
+    // The bundle chunk's model verdict was REQUEST_CHANGES (driven by the
+    // finding) — mirror production's `run_map_reduce` wiring, which relaxes a
+    // per-chunk verdict that rested entirely on findings this run just wiped
+    // out (`finding_hygiene::relax_verdict_if_evidence_wiped`, #4042, #4044).
+    let mut chunk_verdict = Verdict::RequestChanges;
+    let mut chunk_grade = None;
+    trusty_review::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
+        &mut chunk_verdict,
+        &mut chunk_grade,
+        findings_before,
+        &findings,
+    );
+    assert_eq!(
+        chunk_verdict,
+        Verdict::Approve,
+        "the chunk's own verdict must relax once its only finding is dropped"
+    );
+
+    // The two source chunks were clean APPROVE.
     let outcomes = vec![
         MapOutcome::Reviewed {
             file: "api/chat.js".to_string(),
-            verdict: Verdict::RequestChanges,
+            verdict: chunk_verdict,
             findings,
             tokens: TokenUsage::default(),
         },
@@ -195,12 +222,10 @@ async fn repro_reduce_recovers_after_downgrade() {
     assert_eq!(
         reduced.verdict,
         Verdict::Approve,
-        "a clean PR must not be fail-closed by a downgraded confabulation"
+        "a clean PR must not be fail-closed by a dropped confabulation"
     );
-    assert_eq!(
-        reduced.findings.len(),
-        1,
-        "the finding is retained as advisory"
+    assert!(
+        reduced.findings.is_empty(),
+        "#4042: the fabricated finding is dropped, not retained as advisory"
     );
-    assert!(!reduced.findings[0].code_provable);
 }
