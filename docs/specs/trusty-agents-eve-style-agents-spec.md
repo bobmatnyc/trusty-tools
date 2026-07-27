@@ -670,11 +670,11 @@ agent instance acquires a persona name.
 
 Agent skills may contain executable code (e.g., Python packages discovered and loaded via the skill plugin system). The responsibility for vetting, auditing, and managing that code rests with the operator and agent owner.
 
-**Current state (2026-07-27):** At the time of this amendment, **no platform-enforced gating exists** — a skill package loads if its `manifest.json` is well-formed, regardless of review status. A planned review-gate epic (issue #4080, epic pending) will add a `build_plugin`-level check that refuses to load skill code unless a security review verdict is recorded (§10 item pending).
+**Current state (2026-07-27):** At the time of this amendment, **no platform-enforced gating exists** — a skill package loads if its `manifest.json` is well-formed, regardless of review status. A planned review-gate epic (#4128) will add a `build_plugin`-level check (#4137) that refuses to load skill code unless a security review verdict is recorded, backed by a canonical package hash (#4135) and fail-closed verdict store (#4136).
 
 **Historical note:** An earlier version of this spec proposed a file allowlist (`PackageContainsForeignFile` error) to exclude executable files from agent packages. That rule was policy-only — never enforced in `load_agent_package` (`loader.rs:764-784`) and has zero occurrences in the codebase. Executable skill code is already loading in production (the `cto-db` skill, loaded via `install_discovered_skill_plugins`, `runtime/startup.rs:153`). This amendment ratifies existing behavior and clarifies that responsibility lies with the owner/operator.
 
-**Explicit boundary, not ambiguous:** `~/.trusty-agents/config.toml`'s `McpService.command` (§4) legitimately references executables (`slack-mcp`, a stdio MCP server binary) — that is operator-controlled platform infrastructure, a different trust boundary from agent-authored content. This principle extends to agent-bundled code: an operator who deploys an agent with executable skill code accepts responsibility for its provenance and behavior. **Future note:** once the review-gate epic lands, the platform will enforce a recorded security verdict before allowing skill code to load; at that point responsibility becomes joint operator/platform.
+**Explicit boundary, not ambiguous:** `~/.trusty-agents/config.toml`'s `McpService.command` (§4) legitimately references executables (`slack-mcp`, a stdio MCP server binary) — that is operator-controlled platform infrastructure, a different trust boundary from agent-authored content. This principle extends to agent-bundled code: an operator who deploys an agent with executable skill code accepts responsibility for its provenance and behavior. **Future note:** once the review-gate epic #4128 lands (specifically issue #4137 for the `build_plugin`-level enforcement), the platform will enforce a recorded security verdict before allowing skill code to load; at that point responsibility becomes joint operator/platform.
 
 ### 2.7 Directory-convention layout (worked example)
 
@@ -1960,9 +1960,10 @@ not a speculative extension.
   rule that executable files would be rejected at load time.
 - **2026-07-27 (v3.3 clarification)** — Qualified §2.6's statement of current
   state to clarify that no platform-enforced gating exists *at the time of this
-  amendment*, and that a planned review-gate epic (issue #4080) will add a
-  `build_plugin`-level check refusing to load skill code unless a security
-  review verdict is recorded. Inserted "Current state (2026-07-27)" subheading
+  amendment*, and that a planned review-gate epic (#4128) will add a
+  `build_plugin`-level check (#4137) refusing to load skill code unless a security
+  review verdict is recorded, via canonical package hash (#4135) and fail-closed
+  verdict store (#4136). Inserted "Current state (2026-07-27)" subheading
   to distinguish today's permissive loading from future enforced gating. Amended
   closing paragraph to note that once the review-gate epic lands, responsibility
   becomes joint operator/platform. This clarification harmonizes §2.6 with the
