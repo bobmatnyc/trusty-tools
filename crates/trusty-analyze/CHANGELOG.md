@@ -7,6 +7,32 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.7.5] — 2026-07-27
+
+### Changed
+
+- `trusty-common` requirement raised to `^0.27` (was `^0.26`, inherited from
+  `[workspace.dependencies]`): 0.27.0 makes `ChatEvent` `#[non_exhaustive]`,
+  which a `^0.26` requirement cannot express.
+
+### Fixed
+
+- **Post-publish source drift — `explain` did not compile against the
+  `ChatEvent::Usage` variant.** `src/core/explain.rs` gained its
+  `ChatEvent::Usage(_)` arm in #4112, *after* 0.7.4 was published, so the
+  published 0.7.4 artifact cannot build against any `trusty-common` carrying
+  that variant. This is the same failure shape as #4079 below — a downstream
+  exhaustive `match` broken by an upstream variant addition — and this release
+  ships the arm before it can bite a `cargo install`. The match also gained a
+  wildcard arm now that `ChatEvent` is `#[non_exhaustive]`, so the next variant
+  addition is no longer breaking here.
+
+---
+
 ## [0.7.4] — 2026-07-27
 
 ### Fixed

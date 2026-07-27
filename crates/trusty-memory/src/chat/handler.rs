@@ -330,6 +330,9 @@ pub(crate) async fn chat_handler(
                         stream_err = Some(e);
                         break;
                     }
+                    // `ChatEvent` is `#[non_exhaustive]` (trusty-common 0.27.0): a wildcard
+                    // keeps a future variant from breaking this crate's build.
+                    _ => {}
                 }
             }
 

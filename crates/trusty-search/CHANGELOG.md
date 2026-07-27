@@ -7,6 +7,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+---
+## [0.40.0] — 2026-07-27
+
+MINOR, not patch: `service::lazy_loader::store`'s public
+`register_cold_entries` changed its return type from `()` to
+`Vec<Arc<()>>` (it now hands back the per-entry residency tokens that
+`mark_loaded_if` needs to detect a reindex that raced a cold restore). In
+0.x, MINOR is the breaking axis.
+
+### Changed
+
+- `trusty-common` requirement raised to `^0.27` (was `^0.26`): 0.27.0 makes
+  `ChatEvent` `#[non_exhaustive]`, which a `^0.26` requirement cannot express.
+  `service::ui`'s `ChatEvent` match gained a wildcard arm accordingly.
+
+
 ### Fixed
 
 - **Two more index-registration paths had no `root_path` collision guard —
