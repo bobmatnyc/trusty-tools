@@ -151,6 +151,15 @@ async fn permissions_route_reports_declared_and_inherited_scopes() {
     let own = find_scope(&body, "google.gmail.*");
     assert_eq!(own["source"], "declared");
     assert_eq!(own["enforced"], true);
+    // HIGH (code-critic, PR #4127): `enforced: true` alone reads as
+    // universal, but `effective_scopes` only feeds the persona-chat gate —
+    // the `--direct`/subprocess path never consults a scope pattern at all.
+    // The wire contract must say so, not just a doc comment.
+    assert_eq!(
+        own["enforced_on"],
+        serde_json::json!(["persona_chat"]),
+        "the enforcement claim must be qualified to the path that actually gates it: {own:?}"
+    );
 
     let inherited = find_scope(&body, "memory.read");
     assert_eq!(
@@ -158,6 +167,10 @@ async fn permissions_route_reports_declared_and_inherited_scopes() {
         "a scope only the base declared must name the immediate base"
     );
     assert_eq!(inherited["enforced"], true);
+    assert_eq!(
+        inherited["enforced_on"],
+        serde_json::json!(["persona_chat"])
+    );
 
     assert_eq!(body["tiers"]["default"], "analytics");
     assert_eq!(body["tiers"]["enforced"], false);
