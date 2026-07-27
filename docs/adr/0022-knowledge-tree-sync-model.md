@@ -13,9 +13,9 @@ DOC-56 (Agents Monorepo Sync Spec) defines a private repository (`bobmatnyc/trus
 
 This is not a rhetorical question. Both options are specified with measured sizes and growth profiles. The decision determines:
 
-1. **Repo growth and clone latency.** Today:
+1. **Repo growth and clone latency.** Measured 2026-07-25 (from DOC-56 §5.3):
    - All agent config: **516 KB** on disk, 34 tracked files, whole repo ~260 KiB packed
-   - `bob-kb` distilled tree (measured knowledge corpus for one agent): **2.7 MB**
+   - `bob-kb` distilled tree: **2.7 MB** (forward projection; current tree at `~/trusty-agents/bob-kb` contains ~180 markdown files, much smaller; 2.7 MB is designed forward growth per DOC-55 extractors/connectors, not today's snapshot)
    - Raw sources: 3.1 MB (already excluded from sync)
 
 2. **Conflict semantics.** DOC-55 (Universal OKG Importer §2.2) establishes idempotency invariants on which multi-machine sync depends. Knowledge trees use append-only ledgers (`_sources/<id>.jsonl`) per §4.3 of DOC-55, which create a conflict class (concurrent multi-machine ingest appends) not present in config sync.
@@ -112,19 +112,22 @@ Concretely:
 
 - **Multiple repos to provision per agent with per-store sync.**
   - A user with one agent bound to one tree syncs one monorepo. A user with one agent bound to three trees (e.g., for Duetto, personal, and public knowledge) provisions three separate repos.
-  - **Mitigation:** The `tagent sync` CLI abstracts this. The user runs `tagent sync init --remote <monorepo-url>` once, then `tagent sync pull`/`push` pulls/pushes both the monorepo and all declared per-store repos in one command. No user-facing fragmentation.
+  - **Mitigation (planned, not shipped):** The `tagent sync` CLI will abstract this (DOC-56 §7.1–§7.3). Specification: the user runs `tagent sync init --remote <monorepo-url>` once, then `tagent sync pull`/`push` pulls/pushes both the monorepo and all declared per-store repos in one command. Status: **specified but unbuilt**. `tagent sync` subcommand does not exist in `crates/trusty-agents/src/runtime/subcommands.rs` (checked against current origin/main at 45447e42). Issue #3899 tracks implementation as part of DOC-56 Phase 2.
 
 - **No single clone that reproduces an agent end-to-end.** A git clone of the monorepo yields configuration and platform files but not knowledge. A restore requires:
   1. Clone the monorepo
   2. For each agent with a `sync_remote`, clone its knowledge repo(s) into `knowledge_dir/<tree_slug>`
-  3. Run `tagent sync` to merge and start
+  3. Run `tagent sync` (when implemented) to merge and start
 
-  **Mitigation:** The bootstrap report (DOC-56 §7.4) surfaces the missing tree repos. A scripted restore is a 3-liner. A future convenience layer (e.g., a `tagent bootstrap --full` that fetches all declared remotes) is trivial to add.
+  **Mitigation (planned, not shipped):** The bootstrap report (DOC-56 §7.4) will surface the missing tree repos with actionable messages. Status: **specified but unbuilt**. No bootstrap/report path exists in the agent startup that detects and reports absent knowledge trees. A scripted restore is a 3-liner today. The `tagent sync init` subcommand (Phase 2) will emit the bootstrap report.
 
 - **Sync story now spans two mechanisms.**
   - Config syncs via the monorepo; trees sync via per-store repos.
-  - Both use the same underlying git-merge machinery, same secret gate, same debounced auto-sync.
-  - **Mitigation:** The `tagent sync` command is the single user-visible API; it orchestrates both repos transparently. The split is an implementation detail. If a simpler unified mechanism is desired later, all trees can be re-consolidated into the monorepo by mirroring per-store repos back into `knowledge/<tree>/` (reversing this decision), without breaking the configuration parts.
+  - **Status of architectural mitigations:**
+    - **Three-way git merge (templates branch):** Specified normatively in DOC-56 §6.2. **Status: specified but unbuilt.** The mechanism is not yet implemented; config reprovision still uses the `.stale.bak` archive approach (checked against `crates/trusty-agents/src/agents/bundled/mod.rs:200–241`).
+    - **Pre-push secret gate:** Specified normatively in DOC-56 §5.1 as a deny-list checker + entropy detection. **Status: specified but unbuilt.** The initial sync of #3899 was a one-time "copy/export" manual pass (DOC-56 §2.2), not an automated gate. No evidence of a deployed scrub-gate implementation. Phase 2 implementation owns this.
+    - **Debounced auto-sync:** Specified in DOC-56 §7.3 with A1/A2 constraints (no mid-turn merges, conflicts block). **Status: specified but unbuilt.** No auto-sync machinery exists yet.
+  - **If both sync paths ship:** The `tagent sync` command is the single user-visible API; it orchestrates both repos transparently. The split is an implementation detail. If a simpler unified mechanism is desired later, all trees can be re-consolidated into the monorepo by mirroring per-store repos back into `knowledge/<tree>/` (reversing this decision), without breaking the configuration parts.
 
 - **Requires explicit follow-up for ledger-merge semantics (if ever used).**
   - If a per-store knowledge repo ever gets `templates` branch merge semantics (to handle conflicting re-ingests), the ledger union-merge strategy must be verified against `Ledger::watermark()` (DOC-56 §5.3 sub-question).
