@@ -26,6 +26,20 @@
 //!   `unmatched_patterns`, not dropped: it may still resolve to a live-
 //!   discovered MCP tool at dispatch time, and saying so is more useful than
 //!   either hiding it or claiming it is broken.
+//!
+//! **#4025 — function-skill groups.** The response is ADDITIVE only: every field
+//! a pre-#4022 consumer reads keeps its name, type and meaning. Function skills
+//! (#4022) appear as ordinary `skills[]` cards with `kind: "function"`, plus a
+//! top-level `groups[]` index so #4024's pane can render group headers without
+//! re-deriving membership from the catalog. Both are built from ONE computation
+//! ([`function_groups`]) rather than two, so a card and its group entry can never
+//! report different grant states. `granted_state` is the tri-state
+//! (`"all"`/`"some"`/`"none"` of the members) and the boolean `granted` stays
+//! what it always was — for a bundle it is `granted_state == "all"`, the
+//! conservative answer an existing consumer gets for free. `granted_count`
+//! deliberately EXCLUDES function cards: it counts capabilities, and a bundle is
+//! not a capability of its own — counting it would inflate the number the pane
+//! shows without the agent gaining anything.
 //! Test: `super::tests::agent_skills`.
 
 use std::path::{Path, PathBuf};
@@ -122,25 +136,32 @@ pub(super) async fn skills_at(dirs: &[PathBuf], name: &str, project_root: &Path)
     let (patterns, unresolved) =
         effective_tool_patterns(tools.allow.as_ref(), skills.allow.as_ref(), &catalog);
     let granted_ids = granted_skill_ids(&catalog, patterns.as_deref(), skills.allow.as_ref());
+    // #4025: one computation feeds both the function cards and `groups[]`.
+    let groups = function_groups(&catalog, &granted_ids);
 
     let mut cards: Vec<Value> = catalog
         .manifests()
         .iter()
-        .map(|m| render_skill(m, granted_ids.contains(&m.id)))
+        .map(|m| {
+            let group = groups.iter().find(|g| g.id == m.id);
+            render_skill(m, granted_ids.contains(&m.id), group)
+        })
         .collect();
     cards.extend(
         derived_skills(&catalog, patterns.as_deref())
             .iter()
-            .map(|m| render_skill(m, true)),
+            .map(|m| render_skill(m, true, None)),
     );
+    // A bundle is not a capability, so it does not move this count (#4025).
     let granted_count = cards
         .iter()
-        .filter(|c| c["granted"] == Value::Bool(true))
+        .filter(|c| c["granted"] == Value::Bool(true) && c["kind"] != "function")
         .count();
 
     let mut body = json!({
         "skills": cards,
         "granted_count": granted_count,
+        "groups": groups.iter().map(FunctionGroup::to_json).collect::<Vec<_>>(),
         "unresolved": unresolved
             .iter()
             .map(|id| json!({
@@ -187,12 +208,99 @@ fn granted_skill_ids(
     }
     if let Some(ids) = skills_allow {
         for id in ids {
-            if catalog.get(id).is_some_and(|m| m.tool().is_none()) {
+            // #4022: a FUNCTION skill is deliberately excluded from this clause.
+            // It is tool-less, so it would otherwise be granted merely by being
+            // named — asserting a grant this route never verified. Its state is
+            // derived from its members instead (`function_groups`), which is the
+            // only answer that stays true when a member fails to resolve.
+            if catalog
+                .get(id)
+                .is_some_and(|m| m.tool().is_none() && !m.is_function())
+            {
                 granted.insert(id.clone());
             }
         }
     }
     granted
+}
+
+/// One function skill resolved against this agent's grants (#4022/#4025).
+///
+/// Why: The pane needs "7 of 10 granted", which is neither a boolean nor
+/// derivable from the bundle id alone. Computing it ONCE here — from the
+/// `granted_ids` set the leaf cards already use — is what stops the group header
+/// and its member cards from disagreeing, which is the display-layer form of the
+/// same drift `granted_skill_ids` exists to prevent against dispatch.
+/// What: The bundle's identity plus its declared members and the subset of them
+/// this agent holds.
+/// Test: `skills_route_surfaces_function_skill_tri_state`.
+struct FunctionGroup {
+    id: String,
+    name: String,
+    description: String,
+    members: Vec<String>,
+    granted_members: Vec<String>,
+}
+
+impl FunctionGroup {
+    /// `"all"` / `"some"` / `"none"` of the members are granted.
+    ///
+    /// Why/What: A memberless bundle reports `"none"` rather than the vacuous
+    /// `"all"` — claiming a group is fully granted when it contains nothing is
+    /// the fabrication #3945 forbids.
+    /// Test: `skills_route_surfaces_function_skill_tri_state`.
+    fn state(&self) -> &'static str {
+        if self.members.is_empty() || self.granted_members.is_empty() {
+            "none"
+        } else if self.granted_members.len() == self.members.len() {
+            "all"
+        } else {
+            "some"
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "members": self.members,
+            "granted_members": self.granted_members,
+            "granted_state": self.state(),
+        })
+    }
+}
+
+/// Resolve every function skill in the catalog against this agent's grants.
+///
+/// Why: See [`FunctionGroup`] — one computation, two render sites.
+/// What: One entry per `kind: Function` manifest, members in declaration order.
+/// A member id no manifest resolves is still LISTED (it is what the bundle
+/// declares) but can never appear in `granted_members`, so an unresolvable
+/// member drags the state down to `"some"`/`"none"` rather than being hidden.
+/// Test: `skills_route_surfaces_function_skill_tri_state`,
+/// `function_group_never_reports_all_when_a_member_is_missing`.
+fn function_groups(
+    catalog: &SkillCatalog,
+    granted_ids: &std::collections::BTreeSet<String>,
+) -> Vec<FunctionGroup> {
+    catalog
+        .manifests()
+        .iter()
+        .filter(|m| m.is_function())
+        .map(|m| FunctionGroup {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            description: m.description.clone(),
+            members: m.members.clone(),
+            granted_members: m
+                .members
+                .iter()
+                .filter(|id| granted_ids.contains(*id))
+                .cloned()
+                .collect(),
+        })
+        .collect()
 }
 
 /// Derived 1:1 skills for exactly-named tools the catalog does not know.
@@ -269,8 +377,17 @@ fn unmatched_patterns(catalog: &SkillCatalog, patterns: Option<&[String]>) -> Ve
 /// OAuth grant or MCP wiring that this endpoint does not verify. Rendering
 /// `null` as "not verified" is the whole point — a `false` there would assert a
 /// check nobody ran.
-/// Test: `skill_card_reports_env_credential_state`.
-fn render_skill(manifest: &SkillManifest, granted: bool) -> Value {
+///
+/// #4025: `members` and `granted_state` are present on EVERY card, not just
+/// function ones. A consumer that has to check the kind before it knows whether
+/// a field exists writes the branch wrong once and then renders a leaf skill as
+/// an empty group; a uniform shape costs two empty arrays and removes the
+/// branch. For a leaf, `members` is empty and `granted_state` restates `granted`.
+/// For a bundle, `granted` is `granted_state == "all"` — the boolean an existing
+/// consumer already reads keeps its conservative meaning.
+/// Test: `skill_card_reports_env_credential_state`,
+/// `skills_route_surfaces_function_skill_tri_state`.
+fn render_skill(manifest: &SkillManifest, granted: bool, group: Option<&FunctionGroup>) -> Value {
     let provider = manifest.provider.map(|p| {
         let configured = p.env_var.map(|var| {
             std::env::var(var)
@@ -284,15 +401,23 @@ fn render_skill(manifest: &SkillManifest, granted: bool) -> Value {
             "configured": configured,
         })
     });
+    let granted_state = match group {
+        Some(g) => g.state(),
+        None if granted => "all",
+        None => "none",
+    };
     json!({
         "id": manifest.id,
         "name": manifest.name,
         "description": manifest.description,
         "kind": manifest.kind,
         "origin": manifest.origin,
-        "granted": granted,
+        "granted": group.map_or(granted, |g| g.state() == "all"),
         "tools": manifest.tools,
         "provider": provider,
+        "members": group.map(|g| g.members.clone()).unwrap_or_default(),
+        "granted_members": group.map(|g| g.granted_members.clone()).unwrap_or_default(),
+        "granted_state": granted_state,
     })
 }
 
@@ -438,7 +563,7 @@ mod unit_tests {
         let catalog = SkillCatalog::builtin();
         // OAuth-backed: `configured` must stay null — unknown, never asserted.
         let gmail = catalog.skill_for_tool("search_gmail_messages").unwrap();
-        let card = render_skill(gmail, true);
+        let card = render_skill(gmail, true, None);
         assert_eq!(card["provider"]["configured"], Value::Null);
         assert_eq!(card["provider"]["provider"], "Google Workspace");
         assert_eq!(card["granted"], true);
@@ -447,16 +572,55 @@ mod unit_tests {
         // environment. Its VALUE depends on the machine, so assert only that a
         // boolean — not null — is produced.
         let mta = catalog.skill_for_tool("get_train_schedule").unwrap();
-        let card = render_skill(mta, false);
+        let card = render_skill(mta, false, None);
         assert!(card["provider"]["configured"].is_boolean());
         assert_eq!(card["provider"]["env_var"], "MTA_API_KEY");
+    }
+
+    #[test]
+    fn granted_ids_do_not_grant_a_function_skill_by_id_alone() {
+        // #4022: a bundle is tool-less, so the tool-less clause would otherwise
+        // grant it just for being named — asserting a grant nobody verified.
+        // Its state comes from its members, computed by `function_groups`.
+        let catalog = SkillCatalog::builtin();
+        let allow = vec!["ticketing".to_string()];
+        let granted = granted_skill_ids(&catalog, Some(&[]), Some(&allow));
+        assert!(!granted.contains("ticketing"));
+    }
+
+    #[test]
+    fn function_group_never_reports_all_when_a_member_is_missing() {
+        // Tri-state honesty: nine of ten is `"some"`, never `"all"`. A member
+        // that fails to resolve can never enter `granted_ids`, so this is also
+        // the shape an unresolvable member produces.
+        let catalog = SkillCatalog::builtin();
+        let ticketing = catalog.get("ticketing").expect("ticketing bundle");
+        let mut granted: std::collections::BTreeSet<String> =
+            ticketing.members.iter().cloned().collect();
+        let dropped = ticketing.members.last().unwrap().clone();
+        granted.remove(&dropped);
+
+        let groups = function_groups(&catalog, &granted);
+        let g = groups.iter().find(|g| g.id == "ticketing").unwrap();
+        assert_eq!(g.members.len(), 10);
+        assert_eq!(g.granted_members.len(), 9);
+        assert_eq!(g.state(), "some");
+        assert!(!g.granted_members.contains(&dropped));
+
+        // And the full set is `"all"` — the tri-state is not stuck.
+        let full: std::collections::BTreeSet<String> = ticketing.members.iter().cloned().collect();
+        let groups = function_groups(&catalog, &full);
+        assert_eq!(
+            groups.iter().find(|g| g.id == "ticketing").unwrap().state(),
+            "all"
+        );
     }
 
     #[test]
     fn skill_card_carries_one_tool_and_a_human_name() {
         let catalog = SkillCatalog::builtin();
         let mta = catalog.skill_for_tool("get_train_schedule").unwrap();
-        let card = render_skill(mta, true);
+        let card = render_skill(mta, true, None);
         assert_eq!(card["name"], "MTA Train Time");
         assert_eq!(card["tools"], json!(["get_train_schedule"]));
         assert_eq!(card["origin"]["kind"], "builtin");

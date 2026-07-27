@@ -347,22 +347,23 @@ fn unknown_skill_id_yields_no_tools_never_all_tools() {
 
 #[test]
 fn expansion_never_exceeds_the_union_of_named_skills() {
-    // Property check across the whole catalog: for any subset of ids, the
-    // expansion is a subset of exactly those skills' tools.
+    // Property check across the WHOLE catalog: expanding every id at once must
+    // yield exactly the union of the tools those skills wrap — nothing invented.
+    // #4022: the expectation now walks function members too, so the property is
+    // stated over the bundling tier rather than only over the ids that happen to
+    // sort ahead of it.
     let catalog = SkillCatalog::builtin();
-    let ids: Vec<String> = catalog
-        .manifests()
-        .iter()
-        .take(25)
-        .map(|m| m.id.clone())
-        .collect();
+    let ids: Vec<String> = catalog.manifests().iter().map(|m| m.id.clone()).collect();
     let expected: BTreeSet<String> = ids
         .iter()
         .filter_map(|id| catalog.get(id))
         .filter_map(|m| m.tool().map(str::to_string))
         .collect();
     let got: BTreeSet<String> = catalog.expand(&ids).tools.into_iter().collect();
-    assert_eq!(got, expected);
+    assert_eq!(
+        got, expected,
+        "a bundle can only reach tools its members already wrap"
+    );
 }
 
 #[test]
@@ -651,6 +652,7 @@ fn catalog_insert_refuses_a_glob_shaped_tool() {
         kind: SkillKind::Action,
         tools: vec!["*".into()],
         provider: None,
+        members: Vec::new(),
         origin: SkillOrigin::Authored {
             path: "synthetic".into(),
         },
@@ -871,4 +873,312 @@ fn provider_env_presence_is_reported_only_for_env_backed_credentials() {
         trains.provider.expect("mta provider").env_var,
         Some("MTA_API_KEY")
     );
+}
+
+// --------------------------------------------------------------------------
+// Function skills — the bundling tier (#4022) and the Ticketing exemplar (#4023)
+// --------------------------------------------------------------------------
+
+/// Build a catalog from hand-rolled manifests, bypassing the built-in table.
+///
+/// Why: The bundle properties worth pinning (an unknown member, a cycle, a
+/// partially resolvable bundle) must never be true of the shipped catalog, so
+/// they cannot be exercised against it. Synthesising a catalog is the only way
+/// to test the failure branches without introducing the failures.
+fn synthetic_catalog(manifests: Vec<SkillManifest>) -> SkillCatalog {
+    let mut catalog = SkillCatalog::default();
+    for manifest in manifests {
+        catalog.insert(manifest);
+    }
+    catalog
+}
+
+fn synthetic_leaf(id: &str, tool: &str) -> SkillManifest {
+    SkillManifest {
+        id: id.into(),
+        name: format!("Leaf {id}"),
+        description: "synthetic".into(),
+        kind: SkillKind::Action,
+        tools: vec![tool.into()],
+        provider: None,
+        members: Vec::new(),
+        origin: SkillOrigin::Builtin,
+    }
+}
+
+fn synthetic_bundle(id: &str, members: &[&str]) -> SkillManifest {
+    SkillManifest {
+        id: id.into(),
+        name: format!("Bundle {id}"),
+        description: "synthetic".into(),
+        kind: SkillKind::Function,
+        tools: Vec::new(),
+        provider: None,
+        members: members.iter().map(|m| (*m).to_string()).collect(),
+        origin: SkillOrigin::Builtin,
+    }
+}
+
+/// The ten ticketing leaf ids the `ticketing` bundle is specified to carry.
+///
+/// Why: Named here so #4023's assertions read against the ISSUE's list, while
+/// the tools they resolve to are always read from the live `ops.rs` catalog —
+/// a hand-copied tool list would pass while the catalog drifted underneath it.
+const TICKETING_LEAF_IDS: &[&str] = &[
+    "ticket-create",
+    "ticket-read",
+    "ticket-update",
+    "ticket-close",
+    "ticket-list",
+    "ticket-comment",
+    "ticket-tag",
+    "ticket-assign",
+    "ticket-transition",
+    "ticket-search",
+];
+
+#[test]
+fn builtin_function_skills_declare_only_known_members() {
+    // The build/test-time validation gate. A leaf skill renamed without updating
+    // the bundle that names it fails HERE, loudly, rather than silently shrinking
+    // an agent's capability in production.
+    let unknown = SkillCatalog::builtin().unknown_function_members();
+    assert!(
+        unknown.is_empty(),
+        "function skills name members no manifest resolves: {unknown:?}"
+    );
+}
+
+#[test]
+fn builtin_function_rows_declare_members_and_no_tool() {
+    // `tool` and `members` are mutually exclusive: a row is a leaf or a bundle.
+    for def in builtin::all() {
+        if def.kind == SkillKind::Function {
+            assert!(
+                def.tool.is_none(),
+                "{} is a bundle AND wraps a tool",
+                def.id
+            );
+            assert!(!def.members.is_empty(), "{} bundles nothing", def.id);
+        } else {
+            assert!(
+                def.members.is_empty(),
+                "{} declares members but is not a function skill",
+                def.id
+            );
+        }
+    }
+}
+
+#[test]
+fn function_skill_names_do_not_collide_with_a_leaf_skill_name() {
+    // A group header reading the same as one of its cards makes the pane
+    // ambiguous about which row a grant applies to.
+    let catalog = SkillCatalog::builtin();
+    let leaf_names: BTreeSet<&str> = catalog
+        .manifests()
+        .iter()
+        .filter(|m| !m.is_function())
+        .map(|m| m.name.as_str())
+        .collect();
+    for bundle in catalog.manifests().iter().filter(|m| m.is_function()) {
+        assert!(
+            !leaf_names.contains(bundle.name.as_str()),
+            "function skill {} reuses a leaf skill's name: {:?}",
+            bundle.id,
+            bundle.name
+        );
+    }
+}
+
+#[test]
+fn function_skill_expands_to_the_union_of_its_members_tools() {
+    // Grant-the-bundle (epic #4021 OQ-1): one id in, N leaf tools out — and
+    // exactly the tools those members wrap, read from the live catalog.
+    let catalog = SkillCatalog::builtin();
+    let expected: Vec<String> = TICKETING_LEAF_IDS
+        .iter()
+        .map(|id| {
+            catalog
+                .get(id)
+                .unwrap_or_else(|| panic!("{id} missing from the catalog"))
+                .tool()
+                .unwrap_or_else(|| panic!("{id} wraps no tool"))
+                .to_string()
+        })
+        .collect();
+    let expansion = catalog.expand(&["ticketing".to_string()]);
+    assert_eq!(expansion.tools, expected);
+    assert!(expansion.unresolved.is_empty());
+}
+
+#[test]
+fn function_skill_never_leaks_its_bundle_id_into_the_tool_patterns() {
+    // **The pin.** The 1:1 layer and all three permission gates downstream must
+    // only ever see LEAF tool names. If `ticketing` itself reached
+    // `filter_persona_tool_names`, a tool literally named `ticketing` would be
+    // granted by a bundle that never claimed it — the compile-down would have
+    // widened instead of narrowing.
+    let catalog = SkillCatalog::builtin();
+    let allow = vec!["ticketing".to_string()];
+    let (patterns, unresolved) = effective_tool_patterns(None, Some(&allow), &catalog);
+    let patterns = patterns.expect("a declared skills section always compiles to Some");
+    assert!(unresolved.is_empty());
+    assert!(
+        !patterns.iter().any(|p| p == "ticketing"),
+        "the bundle id escaped into the allow-patterns: {patterns:?}"
+    );
+    for pattern in &patterns {
+        assert!(
+            catalog.skill_for_tool(pattern).is_some(),
+            "{pattern} is not a tool any leaf skill wraps"
+        );
+        assert!(
+            is_exact_tool_name(pattern),
+            "{pattern} is not an exact name"
+        );
+    }
+}
+
+#[test]
+fn unknown_function_member_yields_no_tools_and_is_unresolved() {
+    // Narrow-never-widen through the bundling tier: a dangling member costs
+    // capability and is REPORTED; it never falls back to "all tools".
+    let catalog = synthetic_catalog(vec![synthetic_bundle("bundle", &["no-such-leaf"])]);
+    let expansion = catalog.expand(&["bundle".to_string()]);
+    assert!(expansion.tools.is_empty());
+    assert_eq!(expansion.unresolved, vec!["no-such-leaf".to_string()]);
+
+    let (patterns, unresolved) =
+        effective_tool_patterns(None, Some(&vec!["bundle".to_string()]), &catalog);
+    assert_eq!(patterns, Some(Vec::new()));
+    assert_eq!(unresolved, vec!["no-such-leaf".to_string()]);
+}
+
+#[test]
+fn unknown_function_member_is_reported_by_validation() {
+    let catalog = synthetic_catalog(vec![
+        synthetic_leaf("known", "known_tool"),
+        synthetic_bundle("bundle", &["known", "typo"]),
+    ]);
+    assert_eq!(
+        catalog.unknown_function_members(),
+        vec![("bundle".to_string(), "typo".to_string())]
+    );
+}
+
+#[test]
+fn function_skill_with_one_unknown_member_still_resolves_the_rest() {
+    // Partial resolution is REPORTED, not hidden: the good members still grant,
+    // and the bad one still surfaces. Dropping the whole bundle would silently
+    // revoke nine working capabilities over one typo.
+    let catalog = synthetic_catalog(vec![
+        synthetic_leaf("alpha", "alpha_tool"),
+        synthetic_leaf("beta", "beta_tool"),
+        synthetic_bundle("bundle", &["alpha", "gone", "beta"]),
+    ]);
+    let expansion = catalog.expand(&["bundle".to_string()]);
+    assert_eq!(
+        expansion.tools,
+        vec!["alpha_tool".to_string(), "beta_tool".to_string()]
+    );
+    assert_eq!(expansion.unresolved, vec!["gone".to_string()]);
+}
+
+#[test]
+fn function_skill_member_cycle_terminates_without_widening() {
+    // A cycle is a catalog bug; the guard makes it a bounded no-op rather than a
+    // stack overflow, and it still cannot widen past the members' own tools.
+    let catalog = synthetic_catalog(vec![
+        synthetic_leaf("alpha", "alpha_tool"),
+        synthetic_bundle("outer", &["alpha", "inner"]),
+        synthetic_bundle("inner", &["outer"]),
+    ]);
+    let expansion = catalog.expand(&["outer".to_string()]);
+    assert_eq!(expansion.tools, vec!["alpha_tool".to_string()]);
+    assert!(expansion.unresolved.is_empty());
+}
+
+#[test]
+fn nested_function_skills_flatten_to_leaf_tools() {
+    let catalog = synthetic_catalog(vec![
+        synthetic_leaf("alpha", "alpha_tool"),
+        synthetic_leaf("beta", "beta_tool"),
+        synthetic_bundle("inner", &["beta"]),
+        synthetic_bundle("outer", &["alpha", "inner"]),
+    ]);
+    assert_eq!(
+        catalog.expand(&["outer".to_string()]).tools,
+        vec!["alpha_tool".to_string(), "beta_tool".to_string()]
+    );
+}
+
+#[test]
+fn authored_manifest_cannot_declare_a_bundle() {
+    // The frontmatter dialect has no `members:` key and the parser requires a
+    // `tools:` list, so no `.md` in any skill source can turn one grant into N.
+    let dir = tempfile::tempdir().unwrap();
+    write_skill(
+        dir.path(),
+        "sneaky.md",
+        "---\nname: Sneaky\nkind: function\nmembers: [ticket-create, ticket-close]\ntools: [get_weather]\n---\nbody\n",
+    );
+    let authored = authored::load_from_paths(&[dir.path().to_path_buf()]);
+    assert_eq!(authored.len(), 1);
+    assert!(authored[0].members.is_empty());
+    assert!(!authored[0].is_function());
+    assert_eq!(authored[0].tools, vec!["get_weather".to_string()]);
+}
+
+#[test]
+fn ticketing_function_skill_bundles_the_ten_ticket_leaf_skills() {
+    // #4023: the exemplar. Membership is asserted against the issue's list, and
+    // the tools come from the live `ops.rs` catalog so drift fails here.
+    let catalog = SkillCatalog::builtin();
+    let ticketing = catalog.get("ticketing").expect("ticketing function skill");
+    assert_eq!(ticketing.name, "Ticketing");
+    assert_eq!(ticketing.kind, SkillKind::Function);
+    assert!(
+        ticketing.tools.is_empty(),
+        "a bundle wraps no tool of its own"
+    );
+    assert_eq!(ticketing.members, TICKETING_LEAF_IDS);
+    assert_eq!(
+        catalog.expand(&["ticketing".to_string()]).tools.len(),
+        TICKETING_LEAF_IDS.len()
+    );
+}
+
+#[test]
+fn ticket_leaf_skills_remain_independently_grantable() {
+    // The bundle is ADDITIVE. An agent that already grants one leaf keeps
+    // working, byte-identically, and gains nothing it did not ask for.
+    let catalog = SkillCatalog::builtin();
+    let (patterns, unresolved) =
+        effective_tool_patterns(None, Some(&vec!["ticket-create".to_string()]), &catalog);
+    assert!(unresolved.is_empty());
+    assert_eq!(patterns, Some(vec!["create_ticket".to_string()]));
+}
+
+#[test]
+fn granting_the_bundle_and_an_unrelated_leaf_unions_correctly() {
+    let catalog = SkillCatalog::builtin();
+    let allow = vec!["ticketing".to_string(), "mta-train-time".to_string()];
+    let (patterns, _) = effective_tool_patterns(None, Some(&allow), &catalog);
+    let patterns = patterns.expect("Some");
+    assert!(patterns.contains(&"create_ticket".to_string()));
+    assert!(patterns.contains(&"ticket_search".to_string()));
+    assert!(patterns.contains(&"get_train_schedule".to_string()));
+    assert_eq!(patterns.len(), TICKETING_LEAF_IDS.len() + 1);
+}
+
+#[test]
+fn revoking_the_bundle_removes_members_unless_individually_granted() {
+    // The revoke half of grant-the-bundle: dropping `ticketing` from
+    // `[skills].allow` must take its members with it — except the ones the agent
+    // also named on their own, which are a separate grant and must survive.
+    let catalog = SkillCatalog::builtin();
+    let after = vec!["ticket-read".to_string()];
+    let (patterns, _) = effective_tool_patterns(None, Some(&after), &catalog);
+    assert_eq!(patterns, Some(vec!["get_ticket".to_string()]));
 }

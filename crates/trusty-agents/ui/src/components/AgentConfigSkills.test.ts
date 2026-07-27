@@ -26,6 +26,10 @@ function skill(over: Partial<AgentSkill> = {}): AgentSkill {
     granted: true,
     tools: ['get_train_schedule'],
     provider: null,
+    // #4022/#4025: additive fields, inert on a leaf card.
+    members: [],
+    granted_members: [],
+    granted_state: 'all',
     ...over,
   };
 }
@@ -34,6 +38,7 @@ function payload(over: Partial<AgentSkills> = {}): AgentSkills {
   return {
     skills: [skill()],
     granted_count: 1,
+    groups: [],
     unresolved: [],
     unmatched_patterns: [],
     declares_capability: true,

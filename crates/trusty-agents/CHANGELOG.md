@@ -52,6 +52,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     envelope. `scrub_branding` and the RBAC tier gate are untouched, and the
     widened schema still names no backend and enumerates no roster.
 
+- **Function skills — grant a whole capability with one line** (issues #4022,
+  #4023, #4025; part of epic #4021): the skill catalog gains a *bundling* tier
+  above the one-skill-per-tool base shipped in #3964. A `SkillKind::Function`
+  row names a fixed, compile-time set of member skill ids instead of wrapping a
+  tool, and naming it in `[skills].allow` grants every member (epic #4021's
+  OQ-1, resolved *grant-the-bundle* by the owner on 2026-07-26). The first
+  exemplar is **Ticketing**, bundling the ten existing `ticket-*` leaf skills.
+
+  The 1:1 model is untouched: every tool still maps to exactly one leaf skill,
+  every leaf stays independently grantable, and a bundle **compiles down** to
+  those leaves inside `SkillCatalog::expand` — *before* the three permission
+  layers run. The 1:1 layer and the allow-glob/RBAC/scope gates therefore never
+  see a bundle id, only exact leaf tool names, so #3964's defence in depth
+  (exact ids, no glob dialect, the glob-laundering fix) applies to a bundle
+  unchanged and is pinned by
+  `function_skill_never_leaks_its_bundle_id_into_the_tool_patterns`. Bundles are
+  built-in `const` data only — the authored `.md` frontmatter dialect has no
+  `members:` key and its parser requires a `tools:` list, so no file dropped
+  into a skill source can widen one grant into N. A bundle naming a member no
+  manifest resolves is a **manifest validation error** caught at build/test time
+  (`SkillCatalog::unknown_function_members`, a `debug_assert!` in
+  `SkillCatalog::builtin`, and `builtin_function_skills_declare_only_known_members`
+  in CI) rather than a runtime surprise; if one ever reaches production anyway,
+  expansion still narrows — the member contributes zero tools and is reported in
+  `unresolved`, never "all tools".
+
+  `GET /api/agents/:name/skills` surfaces bundles **additively**: every field a
+  pre-#4022 consumer reads keeps its name, type and meaning. Function skills
+  appear as ordinary `skills[]` cards with `kind: "function"`, and every card —
+  leaf or bundle — now carries `members`, `granted_members` and a tri-state
+  `granted_state` (`"all"`/`"some"`/`"none"` of the members) so a consumer needs
+  no kind check to read a field. A new top-level `groups[]` index gives the
+  Skills pane (#4024) group headers without re-deriving membership, and is built
+  from the same single computation as the cards so the two can never disagree.
+  The boolean `granted` keeps its old meaning — for a bundle it is
+  `granted_state == "all"`, the conservative answer — and `granted_count` still
+  counts capabilities, excluding bundles.
+
+  Per the domain authority (epic #4021 section D), the ticketing *domain* routes
+  to the subagent modality when one is available; the Ticketing function skill
+  is the direct-skill fallback, and its description says so.
+
 ### Changed
 
 - **`PmBridgeBackend::run` gained a `target: Option<&str>` parameter (#4026).**

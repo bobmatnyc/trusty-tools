@@ -365,3 +365,143 @@ async fn skills_route_is_wired_into_the_router() {
     let body = body_json(resp).await;
     assert_eq!(body["error"], "unknown agent");
 }
+
+// --------------------------------------------------------------------------
+// Function-skill groups (#4025)
+// --------------------------------------------------------------------------
+
+/// Grants the whole `ticketing` bundle with one line (#4022 grant-the-bundle).
+const BUNDLE_FIXTURE: &str = r#"[agent]
+name = "bundled"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+
+[skills]
+allow = ["ticketing"]
+"#;
+
+/// Grants three of the bundle's ten members individually — the `"some"` case.
+const PARTIAL_BUNDLE_FIXTURE: &str = r#"[agent]
+name = "partial"
+role = "assistant"
+model = "claude-sonnet-4-6"
+description = "test"
+
+[skills]
+allow = ["ticket-create", "ticket-read", "ticket-close"]
+"#;
+
+fn group<'a>(body: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    body["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["id"] == id)
+        .unwrap_or_else(|| panic!("group {id} missing from response"))
+}
+
+#[tokio::test]
+async fn skills_route_surfaces_function_skill_tri_state() {
+    // All three states of the same bundle, from three real agent configs.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("bundled.toml"), BUNDLE_FIXTURE).unwrap();
+    std::fs::write(dir.path().join("partial.toml"), PARTIAL_BUNDLE_FIXTURE).unwrap();
+    std::fs::write(dir.path().join("plain.toml"), BARE_FIXTURE).unwrap();
+    let dirs = [dir.path().to_path_buf()];
+
+    let all = body_json(skills_at(&dirs, "bundled", dir.path()).await).await;
+    let card = find(&all, "ticketing");
+    assert_eq!(card["kind"], "function");
+    assert_eq!(card["granted_state"], "all");
+    assert_eq!(card["granted"], true);
+    assert_eq!(card["members"].as_array().unwrap().len(), 10);
+    assert_eq!(card["granted_members"].as_array().unwrap().len(), 10);
+    assert_eq!(
+        find(&all, "ticket-create")["granted"],
+        true,
+        "granting the bundle grants each member card"
+    );
+
+    let some = body_json(skills_at(&dirs, "partial", dir.path()).await).await;
+    let card = find(&some, "ticketing");
+    assert_eq!(card["granted_state"], "some");
+    assert_eq!(
+        card["granted"], false,
+        "the boolean stays conservative: partial is not granted"
+    );
+    assert_eq!(card["granted_members"].as_array().unwrap().len(), 3);
+    assert_eq!(find(&some, "ticket-search")["granted"], false);
+
+    let none = body_json(skills_at(&dirs, "plain", dir.path()).await).await;
+    let card = find(&none, "ticketing");
+    assert_eq!(card["granted_state"], "none");
+    assert_eq!(card["granted"], false);
+    assert!(card["granted_members"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn skills_route_groups_agree_with_their_cards() {
+    // One computation, two render sites — the group index and the card must
+    // never be able to disagree about the same bundle.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("partial.toml"), PARTIAL_BUNDLE_FIXTURE).unwrap();
+
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "partial", dir.path()).await).await;
+    let g = group(&body, "ticketing");
+    let card = find(&body, "ticketing");
+    assert_eq!(g["name"], "Ticketing");
+    assert_eq!(g["members"], card["members"]);
+    assert_eq!(g["granted_members"], card["granted_members"]);
+    assert_eq!(g["granted_state"], card["granted_state"]);
+}
+
+#[tokio::test]
+async fn skills_route_bundle_grant_never_shows_the_bundle_id_as_a_tool() {
+    // The pin, restated at the audit surface: the bundle id compiles down to
+    // leaf tools, so it must never appear as a tool NOR as an unmatched pattern.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("bundled.toml"), BUNDLE_FIXTURE).unwrap();
+
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "bundled", dir.path()).await).await;
+    assert!(
+        find(&body, "ticketing")["tools"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(body["unresolved"].as_array().unwrap().is_empty());
+    assert!(body["unmatched_patterns"].as_array().unwrap().is_empty());
+    for card in body["skills"].as_array().unwrap() {
+        for tool in card["tools"].as_array().unwrap() {
+            assert_ne!(tool, "ticketing", "the bundle id surfaced as a tool");
+        }
+    }
+}
+
+#[tokio::test]
+async fn skills_route_leaf_cards_keep_their_pre_4022_shape() {
+    // Additive-only (DOC-58 §5.3 discipline): every field an existing consumer
+    // reads keeps its name, type and meaning, and the new ones are inert on a
+    // leaf. `granted_count` must still count capabilities, not bundles.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("izzie.toml"), TOOLS_ONLY_FIXTURE).unwrap();
+
+    let body = body_json(skills_at(&[dir.path().to_path_buf()], "izzie", dir.path()).await).await;
+    let trains = find(&body, "mta-train-time");
+    assert_eq!(trains["granted"], true);
+    assert_eq!(trains["kind"], "action");
+    assert_eq!(trains["tools"], serde_json::json!(["get_train_schedule"]));
+    assert!(trains["members"].as_array().unwrap().is_empty());
+    assert_eq!(trains["granted_state"], "all");
+    assert_eq!(find(&body, "gmail-search")["granted_state"], "none");
+
+    let granted_count = body["granted_count"].as_u64().unwrap();
+    let granted_leaf_cards = body["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["granted"] == true && c["kind"] != "function")
+        .count() as u64;
+    assert_eq!(granted_count, granted_leaf_cards);
+}
