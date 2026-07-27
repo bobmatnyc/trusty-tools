@@ -70,7 +70,7 @@ use crate::tools::registry::config::{DriverKind, EndpointConfig};
 /// Why/What: see the module doc. Daemon base URLs are discovered the same
 /// way as `agent_stores_route`; the skill-source root mirrors the dispatch
 /// call sites (project CWD), matching `agent_skills_route`.
-/// Test: `super::tests::agent_knowledge::knowledge_route_reports_bound_store_and_tools`.
+/// Test: `super::tests::agent_knowledge::knowledge_route_reports_bound_store_and_granted_tool`.
 pub(super) async fn agent_knowledge_route(
     State(_state): State<AppState>,
     AxumPath(name): AxumPath<String>,
@@ -93,10 +93,10 @@ pub(super) async fn agent_knowledge_route(
 /// What: `400` for an invalid name, `404` for an unknown agent, `500` only
 /// when the resolved config file cannot be read. Malformed TOML degrades to
 /// empty sub-surfaces plus `config_error`, never a `500` (K-1).
-/// Test: `knowledge_route_reports_bound_store_and_tools`,
+/// Test: `knowledge_route_reports_bound_store_and_granted_tool`,
 /// `knowledge_route_unknown_agent_404`,
 /// `knowledge_route_degrades_on_malformed_toml`,
-/// `knowledge_route_reports_disabled_endpoint_with_reason`.
+/// `knowledge_route_reports_disabled_endpoint_never_as_connected`.
 pub(super) async fn knowledge_at(
     dirs: &[PathBuf],
     name: &str,
