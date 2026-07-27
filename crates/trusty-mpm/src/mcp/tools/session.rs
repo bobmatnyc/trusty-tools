@@ -306,7 +306,10 @@ pub(super) fn session_tools() -> Vec<Value> {
              `## Tmux Window`), plus an appended `pause` line in the \
              append-only `sessions-log.jsonl`. Also prunes orphaned managed-session \
              git worktrees in-process (same engine as `tm session prune-worktrees`) \
-             unless `prune_worktrees` is set to `false`. Does NOT touch tmux — \
+             unless `prune_worktrees` is set to `false`. That prune NEVER removes a \
+             worktree holding uncommitted or unpushed work (#4091) — any such \
+             worktree is returned in `skipped_dirty_worktrees` with a reason and \
+             file/commit counts for you to relay to the user. Does NOT touch tmux — \
              window realignment on resume stays a PM-side `tmux select-window` step.",
             json!({
                 "type": "object",

@@ -475,11 +475,19 @@ pub(crate) enum SessionAction {
     /// are ever touched. `tm doctor` reports the count of orphans and suggests
     /// running this command.
     /// What: POSTs `/api/v1/sessions/managed/prune-worktrees`; defaults to dry
-    /// run (pass `--force` to actually delete).
-    /// Test: `cli_parses_session_prune_worktrees`.
+    /// run (pass `--force` to actually delete). `--force` alone still refuses
+    /// to touch a worktree holding uncommitted or unpushed work (#4091) — it
+    /// is reported instead; `--discard-dirty` is the separate, explicit opt-in
+    /// that permits destroying that work.
+    /// Test: `cli_parses_session_prune_worktrees`,
+    /// `cli_prune_worktrees_discard_dirty_is_opt_in`.
     PruneWorktrees {
         /// Actually delete orphaned dirs (default: dry-run / preview only).
         #[arg(long)]
         force: bool,
+        /// ALSO delete worktrees that still hold uncommitted or unpushed work
+        /// (#4091). Off by default; this discards that work irreversibly.
+        #[arg(long)]
+        discard_dirty: bool,
     },
 }

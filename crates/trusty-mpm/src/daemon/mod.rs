@@ -672,6 +672,19 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                                 outcome.owner_unknown.len()
                             );
                         }
+                        // #4091: a worktree holding uncommitted or unpushed
+                        // work is NEVER auto-deleted. Warn (not info) with the
+                        // per-path reason — this is unsaved work sitting in a
+                        // directory the sweep would otherwise have reclaimed,
+                        // and the operator needs to see it, not discover it
+                        // missing later.
+                        for dirt in &outcome.skipped_dirty {
+                            tracing::warn!(
+                                path = %dirt.path.display(),
+                                reason = %dirt.reason,
+                                "orphan-GC left a worktree with unsaved work untouched (#4091)"
+                            );
+                        }
                     }
                     Err(e) => tracing::warn!("orphan-GC worktree sweep failed: {e}"),
                 }

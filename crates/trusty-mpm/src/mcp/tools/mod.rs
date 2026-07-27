@@ -176,6 +176,40 @@ mod tests {
         }
     }
 
+    /// #4091 REGRESSION: `session_context_pause` must expose NO knob that could
+    /// authorise discarding uncommitted work.
+    ///
+    /// Why: the pause tool prunes worktrees by DEFAULT, so it is the single
+    /// most likely place for a destructive override to be added "for
+    /// convenience" and then triggered by an ordinary `/tm-session-pause`. The
+    /// discard opt-in belongs on the deliberate operator surfaces only (the
+    /// `prune-worktrees` HTTP route / CLI). This test fails if anyone adds a
+    /// force/discard/dirty property to the pause schema.
+    #[test]
+    fn session_context_pause_schema_has_no_dirty_override() {
+        let catalog = tool_catalog();
+        let pause = catalog
+            .iter()
+            .find(|t| t["name"] == "session_context_pause")
+            .expect("session_context_pause must be in the catalog");
+        let props = pause["inputSchema"]["properties"]
+            .as_object()
+            .expect("pause schema must declare properties");
+        for key in props.keys() {
+            let lowered = key.to_ascii_lowercase();
+            assert!(
+                !lowered.contains("force")
+                    && !lowered.contains("discard")
+                    && !lowered.contains("dirty"),
+                "#4091: `{key}` would let a default /tm-session-pause discard unsaved work"
+            );
+        }
+        assert_eq!(
+            pause["inputSchema"]["additionalProperties"], false,
+            "the pause schema must stay closed so no override can be smuggled in"
+        );
+    }
+
     #[test]
     fn console_tools_present() {
         let catalog = tool_catalog();

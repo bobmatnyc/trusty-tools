@@ -7,6 +7,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **The worktree reclaim path no longer force-deletes uncommitted work**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091)): the
+  orphaned-worktree sweep had no dirty-tree check anywhere — its entire safety
+  model was the #3649 ownership sentinel, and a candidate with a KNOWN owner
+  that passed the owner-terminal and grace-window gates was removed with
+  `git worktree remove --force` (falling back to `fs::remove_dir_all`) no
+  matter what was in it. Because `session_context_pause` prunes by DEFAULT,
+  this fired on an ordinary `/tm-session-pause`. A new
+  `session_manager::worktree_safety::inspect_dirt` gate now runs on every
+  candidate the ownership gate approves, and refuses to remove a worktree that
+  has modified/staged tracked files, untracked (non-ignored) files, or commits
+  present on no remote — that last case matters because
+  `remove_session_worktree` also runs `git branch -D session/<leaf>`, so an
+  unpushed commit loses its last reachable ref. **Every error path resolves to
+  DIRTY**: a git subprocess that cannot run, exits non-zero, or returns an
+  unparsable count, and an unreadable directory, all skip rather than delete.
+  trusty-mpm's own untracked artefacts (the `.trusty-mpm-worktree` sentinel and
+  the `.trusty-mpm/` scrollback directory) are excluded, since counting them
+  would mark every managed worktree permanently dirty; a TRACKED edit under
+  `.trusty-mpm/` still counts. Skips are never silent — they are returned as
+  `skipped_dirty` (path, reason, file/commit counts) from the sweep, as
+  `skipped_dirty_worktrees` from the `session_context_pause` MCP tool, in the
+  `prune-worktrees` HTTP response, printed by `tm session prune-worktrees`, and
+  warned per-path by the daemon's orphan-GC loop. Discarding that work requires
+  an explicit opt-in (`discard_dirty` on the HTTP route,
+  `tm session prune-worktrees --discard-dirty`); `--force` alone does NOT imply
+  it, and the pause tool's schema is closed with no such knob at all, so no
+  default `/tm-session-pause` can reach it. Purely additive — the #3649
+  owner/sentinel guard is unchanged.
+
 ### Added
 
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
