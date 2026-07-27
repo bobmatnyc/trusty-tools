@@ -346,8 +346,32 @@ pub async fn run_pm_task_with_persona(
             // against `patterns` (the persona's `[tools].allow` globs), so
             // registering them here does not by itself grant access.
             let config_dir = project_path.join(".trusty-agents").join("agents");
-            let runner: Arc<dyn AgentRunner> =
-                Arc::new(SubprocessAgentRunner::new().with_config_dir(Some(config_dir.clone())));
+            // Security fix (delegate_to_agent injection-to-RCE path): this
+            // in-process persona-chat dispatch is the SECOND place (besides
+            // the `--direct`/`--agent` subprocess path handled in
+            // `runtime::subagent_mode`/`runtime::tool_registry`) that builds
+            // a `DelegateToAgentTool` for an assistant-tier persona holding
+            // live external-content tools (Gmail/Drive/web) plus
+            // `delegate_to_agent`. Tag the runner with THIS persona's own
+            // `[tools].allow` posture (`patterns`, already resolved above)
+            // whenever the persona's role is the assistant tier
+            // (`runtime::tool_registry::ASSISTANT_TIER_ROLE` — literal here
+            // because that constant is private to `runtime`, mirroring the
+            // existing `cfg.agent.role == "assistant"` comparison in
+            // `repl::agent_commands`) so whatever this persona spawns is
+            // narrowed to its own posture regardless of the spawned agent's
+            // declared role. Non-assistant-tier callers of this same chat
+            // path (if any) are unaffected — `None` is a byte-identical no-op.
+            let delegation_taint = if persona_cfg.agent.role == "assistant" {
+                Some(patterns.clone())
+            } else {
+                None
+            };
+            let runner: Arc<dyn AgentRunner> = Arc::new(
+                SubprocessAgentRunner::new()
+                    .with_config_dir(Some(config_dir.clone()))
+                    .with_delegation_taint(delegation_taint),
+            );
             registry.register(Arc::new(
                 // #3737: thread the session id so a persona that delegates
                 // onward attributes the answer to the specialist that produced

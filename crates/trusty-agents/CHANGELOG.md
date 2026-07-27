@@ -7,6 +7,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Security
+
+- **Closed a prompt-injection-to-arbitrary-code-execution path through
+  `delegate_to_agent` (#4126).** An assistant-tier persona (`assistant`,
+  `cto-assistant`, `izzie`) holding live external-content tools
+  (`get_gmail_message_content`, `web_search`, …) plus `delegate_to_agent`
+  could be driven by attacker-controlled fetched content to delegate an
+  attacker-authored task to `engineer` — a worker role with no
+  `[tools].allow` at all — and the spawned `claude-code` subprocess got its
+  full unrestricted tool surface (shell, file write) with no narrowing,
+  because the existing `scope_assistant_allowed_tools` gate only narrowed a
+  spawn when the SPAWNED agent's own role was `"assistant"`. Every
+  assistant-tier `delegate_to_agent` call now tags its spawn with the
+  delegator's own `[tools].allow` posture (`SubprocessAgentRunner::
+  with_delegation_taint`); the spawned worker's registry is narrowed to that
+  posture regardless of its own declared role, on both dispatch paths (the
+  `--direct`/`--agent` subprocess path and the in-process `/agent`
+  persona-chat path). A malformed/corrupted taint value fails CLOSED
+  (deny-all), never silently untainted. Narrowing is logged on both the
+  parent (pre-spawn) and child (post-scoping) sides, and a disallowed tool
+  call already returned (and continues to return) a legible
+  "not permitted for this agent" error rather than a silently-missing tool.
+
+### Removed
+
+- **Removed the unused `ompm` `[[bin]]` target.** It was a thin HTTP client
+  shim never invoked by any current workflow, CI job, or script; removed
+  ahead of trusty-agents' first crates.io publish so the publish doesn't
+  lock in a binary with no reason to exist (#4056).
+
 ### Added
 
 - **The token-streaming chat path now streams Bedrock models via
@@ -19,15 +49,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `StreamAssembly` gained a `usage: Option<ChatUsage>` field so per-call token
   usage — which Bedrock reports exactly once, in a terminal event — survives
   the streaming path instead of being dropped.
-
-### Removed
-
-- **Removed the unused `ompm` `[[bin]]` target.** It was a thin HTTP client
-  shim never invoked by any current workflow, CI job, or script; removed
-  ahead of trusty-agents' first crates.io publish so the publish doesn't
-  lock in a binary with no reason to exist (#4056).
-
-### Added
 
 - **cto-assistant's four CTO DB tools (`query_headcount`, `query_budget`,
   `query_risks`, `query_work_classification`) are invokable again, via a new
