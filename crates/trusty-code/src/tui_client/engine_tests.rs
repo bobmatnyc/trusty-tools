@@ -159,6 +159,127 @@ fn forward_unrelated_event_is_ignored() {
     assert!(rx.try_recv().is_err());
 }
 
+/// tcode streaming epic #3696 Slice 2: a non-final `AgentMessageDelta`
+/// (`done: false`) must forward as an `AssistantOutput` chunk with
+/// `done: false`, reusing the SAME append machinery `Message`/`AgentMessage`
+/// use (`trusty-tui reduce.rs`'s `streaming_idx`-keyed append) — no new
+/// rendering path.
+#[test]
+fn forward_agent_message_delta_not_done_appends() {
+    let (tx, mut rx) = unbounded_channel();
+    let terminal = forward_session_event(
+        envelope(Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "coder".into(),
+            agent_id: "agent-1".into(),
+            turn_id: "turn-1".into(),
+            delta: "Hello".into(),
+            done: false,
+        }),
+        &tx,
+    );
+    assert!(!terminal);
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::AssistantOutput {
+            chunk: "Hello".into(),
+            done: false,
+            is_error: false,
+        }
+    );
+}
+
+/// The final delta (`done: true`) for a turn must forward `done: true` (so
+/// `apply_assistant_output` finalizes the streaming bubble) — and, unlike
+/// `SessionDone`, is NOT terminal for the SSE pump itself: one agent's turn
+/// finishing doesn't mean the whole session stream is over.
+#[test]
+fn forward_agent_message_delta_done_finalizes() {
+    let (tx, mut rx) = unbounded_channel();
+    let terminal = forward_session_event(
+        envelope(Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "coder".into(),
+            agent_id: "agent-1".into(),
+            turn_id: "turn-1".into(),
+            delta: " world".into(),
+            done: true,
+        }),
+        &tx,
+    );
+    assert!(
+        !terminal,
+        "an agent turn finishing must not end the SSE pump"
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::AssistantOutput {
+            chunk: " world".into(),
+            done: true,
+            is_error: false,
+        }
+    );
+}
+
+/// Two agents streaming concurrently and sharing a `turn_id` (the Slice 0
+/// contract's defensive `(agent_id, turn_id)` grouping scenario,
+/// `events.rs:436-456`) must each forward as their OWN independent
+/// `AssistantOutput` message, in call order — `forward_session_event` never
+/// accumulates or merges chunks itself; it is a stateless 1:1 mapper.
+///
+/// NOTE (see PR description / module doc comment on the `AgentMessageDelta`
+/// arm): this proves `forward_session_event` doesn't merge them. It does
+/// NOT prove the two stay visually separate once downstream in
+/// `trusty-tui` — `ReplEvent::AssistantOutput` carries no `agent_id`/
+/// `turn_id`, and `ReplApp::streaming_idx` is a single unkeyed
+/// `Option<usize>`, so today the reducer WOULD interleave them into one
+/// chat bubble. That gap lives in `trusty-tui` (out of this crate's file
+/// scope) and is tracked as a follow-up, not fixed in this slice.
+#[test]
+fn forward_agent_message_delta_distinct_agent_ids_not_merged() {
+    let (tx, mut rx) = unbounded_channel();
+    forward_session_event(
+        envelope(Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "coder".into(),
+            agent_id: "agent-1".into(),
+            turn_id: "turn-shared".into(),
+            delta: "from-agent-1".into(),
+            done: false,
+        }),
+        &tx,
+    );
+    forward_session_event(
+        envelope(Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "reviewer".into(),
+            agent_id: "agent-2".into(),
+            turn_id: "turn-shared".into(),
+            delta: "from-agent-2".into(),
+            done: false,
+        }),
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::AssistantOutput {
+            chunk: "from-agent-1".into(),
+            done: false,
+            is_error: false,
+        },
+        "agent-1's delta must forward as its own message, not merged with agent-2's"
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::AssistantOutput {
+            chunk: "from-agent-2".into(),
+            done: false,
+            is_error: false,
+        },
+        "agent-2's delta must forward as its own message, not merged with agent-1's"
+    );
+}
+
 #[test]
 fn workstream_subcommand_parses_list_and_activate() {
     assert_eq!(workstream_subcommand("/workstream list"), Some("list"));
@@ -290,4 +411,72 @@ fn statusline_segments_reflect_active_workstream_and_clear_on_none() {
         state.statusline_segments().is_empty(),
         "deactivation must clear the segment, not leave a stale one"
     );
+}
+
+/// Regression test for issue #3494: a daemon that accepts the TCP
+/// connection but never sends response headers must not hang
+/// `pump_session_events`'s initial `GET /sessions/{id}/events` forever —
+/// before this fix, `.send().await` had no per-request bound and would wait
+/// indefinitely, completely bypassing `SESSION_STREAM_MAX_RECONNECTS`.
+///
+/// Uses a raw `TcpListener` that accepts every connection and then holds it
+/// open without ever writing a byte — the exact "TCP accepted, headers
+/// never sent" trigger the issue describes (a `wiremock` mock always
+/// completes the HTTP handshake, so it can't reproduce this). If
+/// `CONNECT_TIMEOUT` were removed, `.send().await` would still be pending
+/// when the outer bound below elapses, and no `ConnectionLost` would ever
+/// arrive — this test would fail deterministically on a timeout rather than
+/// hang the test binary, same rationale as
+/// `tests/tui_client_engine.rs`'s exhausted-reconnects test.
+///
+/// Deliberately does NOT wait for `pump_session_events` to exhaust all
+/// `SESSION_STREAM_MAX_RECONNECTS` (every attempt would hang the same way,
+/// ~1 minute total) — observing the FIRST `ConnectionLost` is sufficient
+/// proof the connect attempt is bounded by `CONNECT_TIMEOUT`, not infinite.
+#[tokio::test]
+async fn events_connect_hang_is_bounded_by_connect_timeout_not_infinite() {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    std_listener.set_nonblocking(true).expect("set_nonblocking");
+    let listener = tokio::net::TcpListener::from_std(std_listener).expect("tokio listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    // Accept connections forever, never writing/closing — `mem::forget`
+    // keeps each accepted socket's fd open (dropping it would close the
+    // connection, which reqwest would see as a fast, distinct failure mode,
+    // not the hang this test targets).
+    let accept_task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            std::mem::forget(stream);
+        }
+    });
+
+    let state = EngineState::new(
+        RpcHttpClient::new(reqwest::Client::new(), format!("http://{addr}")),
+        None,
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    let pump_task = tokio::spawn(async move { state.pump_session_events("s-1", &tx).await });
+
+    // CONNECT_TIMEOUT (10s) plus slack — comfortably short of the ~1 minute
+    // a full 5-reconnect exhaustion would take, but generous enough that
+    // this never flakes on a loaded CI box.
+    match tokio::time::timeout(CONNECT_TIMEOUT + Duration::from_secs(10), rx.recv()).await {
+        Ok(Some(ReplEvent::ConnectionLost { reason })) => {
+            assert!(
+                reason.contains("connection failed"),
+                "expected a transport-error ConnectionLost from the timed-out connect, got: \
+                 {reason}"
+            );
+        }
+        Ok(Some(other)) => panic!("expected ConnectionLost, got {other:?}"),
+        Ok(None) => panic!("channel closed with no event — pump_session_events exited silently"),
+        Err(_) => panic!(
+            "no ConnectionLost observed within CONNECT_TIMEOUT + slack — the initial connect \
+             attempt hung past CONNECT_TIMEOUT (issue #3494 regression)"
+        ),
+    }
+
+    pump_task.abort();
+    accept_task.abort();
 }
