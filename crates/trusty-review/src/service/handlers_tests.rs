@@ -156,6 +156,7 @@ impl SearchClient for DegradedButServingSearch {
             embedder: EmbedderState::Bool(true),
             warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
                 warm_boot_degraded: false,
+                ..Default::default()
             }),
         })
     }
@@ -572,14 +573,34 @@ async fn health_stalled_dep_returns_timeout_state_within_bound() {
     );
 }
 
-// ── DepState serialisation + bounded_probe unit tests (#3658) ─────────────────
+// ── DepState serialisation + bounded_probe unit tests (#3658, #4079) ──────────
+
+/// Minimal `classify` closure for the `bounded_probe` unit tests: `true` maps to
+/// a healthy dep, `false` to one that cannot serve.
+///
+/// Why: `bounded_probe` now takes a `(DepState, Option<String>)` classifier
+/// rather than a bool predicate (#4079); sharing one helper keeps the four probe
+/// tests focused on the branch each exercises.
+/// What: `true` → `(DepState::Ok, None)`; `false` → `(DepState::Unreachable, …)`.
+/// Test: used by the `bounded_probe_*` tests below.
+fn classify_bool(v: bool) -> (super::DepState, Option<String>) {
+    if v {
+        (super::DepState::Ok, None)
+    } else {
+        (
+            super::DepState::Unreachable,
+            Some("dep reported itself unable to serve".to_string()),
+        )
+    }
+}
 
 /// `DepState` serialises as the documented lowercase strings.
 ///
 /// Why: `handlers.rs`'s doc comment on `DepState` promises `"ok"` /
-/// `"unreachable"` / `"timeout"` via `#[serde(rename_all = "snake_case")]`;
-/// this test locks that contract in so a future derive-attribute change is
-/// caught immediately rather than surfacing as a silent wire-format break.
+/// `"degraded"` / `"unreachable"` / `"timeout"` via
+/// `#[serde(rename_all = "snake_case")]`; this test locks that contract in so a
+/// future derive-attribute change is caught immediately rather than surfacing as
+/// a silent wire-format break.
 /// What: serialises each variant via `serde_json::to_value` and compares
 /// against the exact lowercase string.
 /// Test: this test itself.
@@ -592,12 +613,76 @@ fn dep_state_serialises_lowercase() {
         serde_json::json!("ok")
     );
     assert_eq!(
+        serde_json::to_value(DepState::Degraded).unwrap(),
+        serde_json::json!("degraded")
+    );
+    assert_eq!(
         serde_json::to_value(DepState::Unreachable).unwrap(),
         serde_json::json!("unreachable")
     );
     assert_eq!(
         serde_json::to_value(DepState::Timeout).unwrap(),
         serde_json::json!("timeout")
+    );
+}
+
+/// REGRESSION (#4079): `reachable` must describe the transport, never the
+/// dependency's capability.
+///
+/// Why: reporting a live, answering daemon as `reachable: false` sent an
+/// operator hunting a process that was running the whole time. `Degraded` is the
+/// state that regression produced, so it is the one that must read as reachable.
+/// What: asserts `is_reachable()` for every variant.
+/// Test: this test itself.
+#[test]
+fn dep_state_degraded_is_reachable() {
+    use super::DepState;
+
+    assert!(
+        DepState::Degraded.is_reachable(),
+        "a dependency that answered the probe is reachable, whatever it reported (#4079)"
+    );
+    assert!(DepState::Ok.is_reachable());
+    assert!(
+        !DepState::Unreachable.is_reachable(),
+        "only a failed probe is unreachable"
+    );
+    assert!(
+        !DepState::Timeout.is_reachable(),
+        "a probe that never answered is not reachable"
+    );
+}
+
+/// `bounded_probe` carries a `Degraded` classification and its reason through
+/// unchanged (#4079).
+///
+/// Why: the whole point of the middle state is the reason attached to it. A
+/// `Degraded` state whose detail was dropped on the floor would be as
+/// unactionable as the single word it replaced.
+/// What: classifies an `Ok` response as `Degraded` with a reason; asserts both
+/// the state and the exact reason survive.
+/// Test: this test itself.
+#[tokio::test]
+async fn bounded_probe_degraded_carries_detail() {
+    use super::{DepState, bounded_probe};
+
+    let (state, detail) = bounded_probe(
+        async { Ok::<bool, &str>(true) },
+        std::time::Duration::from_millis(50),
+        |_| {
+            (
+                DepState::Degraded,
+                Some("3 index(es) failed to open their corpus".to_string()),
+            )
+        },
+    )
+    .await;
+
+    assert_eq!(state, DepState::Degraded);
+    assert_eq!(
+        detail.as_deref(),
+        Some("3 index(es) failed to open their corpus"),
+        "the degradation reason must survive the probe, not be reduced to a state word"
     );
 }
 
@@ -613,13 +698,14 @@ fn dep_state_serialises_lowercase() {
 async fn bounded_probe_ok_on_healthy_response() {
     use super::{DepState, bounded_probe};
 
-    let result = bounded_probe(
-        async { Ok::<bool, ()>(true) },
+    let (result, detail) = bounded_probe(
+        async { Ok::<bool, &str>(true) },
         std::time::Duration::from_millis(50),
-        |v| v,
+        classify_bool,
     )
     .await;
 
+    assert_eq!(detail, None, "a healthy dep needs no detail");
     assert_eq!(
         result,
         DepState::Ok,
@@ -640,10 +726,10 @@ async fn bounded_probe_ok_on_healthy_response() {
 async fn bounded_probe_unreachable_on_error() {
     use super::{DepState, bounded_probe};
 
-    let result = bounded_probe(
-        async { Err::<bool, ()>(()) },
+    let (result, detail) = bounded_probe(
+        async { Err::<bool, &str>("connection refused") },
         std::time::Duration::from_millis(50),
-        |v| v,
+        classify_bool,
     )
     .await;
 
@@ -651,6 +737,11 @@ async fn bounded_probe_unreachable_on_error() {
         result,
         DepState::Unreachable,
         "Ok(Err(_)) must be DepState::Unreachable"
+    );
+    assert_eq!(
+        detail.as_deref(),
+        Some("connection refused"),
+        "the transport error text must reach the caller, not be dropped"
     );
 }
 
@@ -671,10 +762,10 @@ async fn bounded_probe_unreachable_on_error() {
 async fn bounded_probe_unreachable_on_unhealthy_response() {
     use super::{DepState, bounded_probe};
 
-    let result = bounded_probe(
-        async { Ok::<bool, ()>(false) },
+    let (result, _detail) = bounded_probe(
+        async { Ok::<bool, &str>(false) },
         std::time::Duration::from_millis(50),
-        |v| v,
+        classify_bool,
     )
     .await;
 
@@ -699,10 +790,10 @@ async fn bounded_probe_unreachable_on_unhealthy_response() {
 async fn bounded_probe_timeout_on_stalled_future() {
     use super::{DepState, bounded_probe};
 
-    let result = bounded_probe(
-        std::future::pending::<Result<bool, ()>>(),
+    let (result, _detail) = bounded_probe(
+        std::future::pending::<Result<bool, &str>>(),
         std::time::Duration::from_millis(20),
-        |v| v,
+        classify_bool,
     )
     .await;
 

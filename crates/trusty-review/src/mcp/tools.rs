@@ -27,7 +27,7 @@ use crate::{
     config::{InvocationSurface, ReviewConfig},
     integrations::github::{AuthStrategy, GithubClient, RunMode},
     mcp::console_metrics,
-    models::ReviewResult,
+    models::{ReviewResult, ReviewStatus},
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
     service::{
         AppState,
@@ -339,11 +339,13 @@ async fn call_review_health(state: &AppState) -> Value {
                 "required": deps.trusty_search.required,
                 "reachable": deps.trusty_search.reachable,
                 "state": deps.trusty_search.state,
+                "detail": deps.trusty_search.detail,
             },
             "trusty_analyze": {
                 "required": deps.trusty_analyze.required,
                 "reachable": deps.trusty_analyze.reachable,
                 "state": deps.trusty_analyze.state,
+                "detail": deps.trusty_analyze.detail,
             },
         },
     });
@@ -475,6 +477,25 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {
 /// Test: `wrap_result_infra_unavailable_sets_error_and_sentinel` (tools_tests.rs).
 const MCP_STATUS_INFRA_UNAVAILABLE: &str = "infrastructure_unavailable";
 
+/// Machine-readable envelope sentinel signalling that a tool result IS a real
+/// verdict but was produced without complete context (issue #4079).
+///
+/// Why: a degraded review used to be distinguishable from a complete one only
+/// by parsing `content[0].text` and reading `status`/`error`, or by noticing a
+/// Markdown banner inside `review_body`. Every programmatic consumer that
+/// checked the envelope — the only stable, non-prose part of the response — saw
+/// a degraded verdict and a fully-contexted verdict as byte-identical. That is
+/// the silent downgrade: a reviewer cannot act on a caveat it cannot see.
+/// `isError` deliberately stays `false`, because the review DID run and its
+/// findings are real; flipping it would make harnesses discard a useful verdict
+/// and would collapse "incomplete" back into "failed" — the same conflation
+/// #4079 removes on the health side.
+/// What: the literal value written to the envelope's `mcp_status` field,
+/// alongside a `degraded_reason` string naming what was missing.
+/// Test: `wrap_result_degraded_sets_sentinel_and_reason`,
+/// `wrap_result_degraded_stays_isError_false` (tools_tests.rs).
+const MCP_STATUS_DEGRADED_CONTEXT: &str = "degraded_context";
+
 /// Wrap a `ReviewResult` in the MCP content envelope, optionally surfacing a
 /// reviewer-model override-fallback reason (closes #1357 item 2).
 ///
@@ -528,6 +549,22 @@ fn wrap_result(result: &ReviewResult, fallback: Option<&str>) -> Value {
             "mcp_status".to_string(),
             Value::String(MCP_STATUS_INFRA_UNAVAILABLE.to_string()),
         );
+    } else if result.status == ReviewStatus::Degraded
+        && let Some(obj) = envelope.as_object_mut()
+    {
+        // #4079: a real verdict, but produced with incomplete context. Both the
+        // sentinel and the reason live on the envelope so a caller never has to
+        // parse prose to learn the verdict is qualified.
+        obj.insert(
+            "mcp_status".to_string(),
+            Value::String(MCP_STATUS_DEGRADED_CONTEXT.to_string()),
+        );
+        if let Some(reason) = result.error.as_deref() {
+            obj.insert(
+                "degraded_reason".to_string(),
+                Value::String(reason.to_string()),
+            );
+        }
     }
     if let (Some(reason), Some(obj)) = (fallback, envelope.as_object_mut()) {
         obj.insert(
