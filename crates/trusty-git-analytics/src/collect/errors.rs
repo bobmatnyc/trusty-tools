@@ -15,7 +15,16 @@ use thiserror::Error;
 /// failures.
 /// Test: covered indirectly — every provider client and `GitCollector`
 /// test that exercises an error path produces these variants.
+///
+/// `#[non_exhaustive]` because `tga` is a published crate and this enum grows
+/// a variant nearly every time a provider learns a new failure mode
+/// (`Throttled` via #3966, `IncompleteChangelog` / `PagingBudgetExceeded` via
+/// #4084). Without the attribute each of those is a SemVer-major break —
+/// every downstream exhaustive `match` fails to compile with E0004 — which
+/// forces a minor bump for what is genuinely a patch. Downstreams must carry
+/// a wildcard arm; in-tree callers already do.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum CollectError {
     /// A `git2`/libgit2 error occurred during repository operations.
     #[error("git error: {0}")]
@@ -48,6 +57,50 @@ pub enum CollectError {
     /// A configuration value required for this operation was missing.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// A paged JIRA changelog walk finished holding fewer history entries
+    /// than the server reported existed (issue #4084).
+    ///
+    /// Why its own variant: this is the one failure where the collector
+    /// *has* data and it is silently wrong — a short history reads exactly
+    /// like a complete one downstream. Naming the ticket and both counts in
+    /// a dedicated variant makes the shortfall impossible to mistake for a
+    /// generic transport hiccup, and impossible to swallow as a partial
+    /// success.
+    #[error(
+        "incomplete JIRA changelog for {key}: JIRA reported {expected} history \
+         entries but only {retrieved} could be retrieved"
+    )]
+    IncompleteChangelog {
+        /// JIRA issue key whose changelog came up short, e.g. `PROJ-123`.
+        key: String,
+        /// Entry count the server reported via the paged bean's `total`.
+        expected: u64,
+        /// Entry count actually accumulated across the paged walk.
+        retrieved: u64,
+    },
+
+    /// A paged JIRA walk did not terminate within its page budget.
+    ///
+    /// Why: every termination condition on a paged walk trusts the server to
+    /// honour `startAt` or to eventually return an empty page. One that
+    /// replays the same page forever satisfies neither, and these walks run
+    /// once per ticket across a window of up to 10,000 tickets. Surfacing a
+    /// runaway as an error keeps it a bounded, named failure instead of a
+    /// hang, and — unlike the fail-open shapes this module has repeatedly
+    /// produced — it can never be mistaken for a complete result.
+    #[error(
+        "JIRA {endpoint} paging for {key} did not terminate within {pages} pages; \
+         the server is not honouring `startAt`"
+    )]
+    PagingBudgetExceeded {
+        /// Short name of the endpoint being walked, e.g. `changelog`.
+        endpoint: &'static str,
+        /// JIRA issue key whose walk ran away, e.g. `PROJ-123`.
+        key: String,
+        /// Page budget that was exhausted.
+        pages: usize,
+    },
 
     /// The remote asked us to slow down (HTTP 429 / 503).
     ///

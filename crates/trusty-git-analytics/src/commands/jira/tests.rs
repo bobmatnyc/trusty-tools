@@ -915,7 +915,7 @@ mod partial_failure {
             .filter(|r| r.url.path().ends_with("/comment"))
             .count();
         assert_eq!(
-            comment_requests, MAX_CONSECUTIVE_COMMENT_FAILURES,
+            comment_requests, MAX_CONSECUTIVE_TICKET_FAILURES,
             "the walk must stop at the breaker, not grind through all 30 tickets"
         );
     }
@@ -943,6 +943,123 @@ mod partial_failure {
                 .expect("query")
                 .is_none(),
             "dry-run still writes no cursor"
+        );
+    }
+
+    /// An issue whose embedded changelog is provably truncated: JIRA states 3
+    /// history entries and embeds 1, which is what sends the ticket to the
+    /// dedicated `/changelog` endpoint for repair.
+    fn truncated_issue(key: &str, updated: &str) -> serde_json::Value {
+        let mut v = issue(key, updated);
+        v["changelog"]["total"] = serde_json::json!(3);
+        v
+    }
+
+    /// HIGH-3 regression (PR #4155 review).
+    ///
+    /// `PROJ-1`'s changelog repair is unreachable; `PROJ-2` is entirely
+    /// healthy. Before the fix the repair ran inside `search_with_changelog`,
+    /// which `run_sync` awaits IN FULL before writing anything — so one bad
+    /// ticket meant zero rows for every ticket, no cursor movement, and a
+    /// deterministic repeat on the next run. Nothing about that failure was
+    /// per-ticket.
+    ///
+    /// After the fix it is exactly as isolated as a comment failure, which is
+    /// the machinery it now reuses: `PROJ-2` lands in full, the cursor clamps
+    /// to `PROJ-1` so the next run re-reads it, and the run still exits
+    /// non-zero naming the ticket.
+    #[tokio::test]
+    async fn a_broken_changelog_repair_does_not_take_the_whole_run_down() {
+        struct TruncatedSearch;
+        impl Respond for TruncatedSearch {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "issues": [
+                        truncated_issue("PROJ-1", EARLY_UPDATED),
+                        issue("PROJ-2", LATE_UPDATED),
+                    ]
+                }))
+            }
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search"))
+            .respond_with(TruncatedSearch)
+            .mount(&server)
+            .await;
+        // 404 rather than 500: permanent, so no time is spent in real backoff.
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1/changelog"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"^/rest/api/3/issue/PROJ-\d+/comment$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(comment_body("9002")))
+            .mount(&server)
+            .await;
+
+        let mut db = Database::open_in_memory().expect("open");
+        let err = run_sync(base_config(Some(server.uri())), &mut db, sync_args())
+            .await
+            .expect_err("a run that could not repair a ticket is not a success");
+        assert!(
+            err.to_string().contains("PROJ-1"),
+            "the failure must name the ticket: {err}"
+        );
+
+        // The whole point: PROJ-2 was ingested. Before the fix this was 0.
+        let transitions: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM fact_ticket_transitions WHERE ticket_key = 'PROJ-2'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            transitions, 1,
+            "one unreachable ticket must not cost every other ticket its data"
+        );
+        let comments: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM fact_jira_comment_detail WHERE ticket_key = 'PROJ-2'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(comments, 1, "PROJ-2's comments land too");
+
+        // PROJ-1's own transitions are NOT written: the only copy in hand is
+        // the one the server said is missing its oldest entries, and a
+        // knowingly-short history is indistinguishable from a complete one
+        // once it is a row.
+        let short: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM fact_ticket_transitions WHERE ticket_key = 'PROJ-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            short, 0,
+            "a knowingly-truncated history must not be persisted as though complete"
+        );
+
+        // …and the cursor still moves for the healthy work while staying at or
+        // below the failure, so the next run re-reads PROJ-1. Before the fix
+        // there was no cursor row at all.
+        let cursor = get_cursor(db.connection(), "PROJ")
+            .expect("query")
+            .expect("a run that made progress records a cursor");
+        assert_eq!(
+            cursor.last_synced_at, "2026-01-03T10:00:00+00:00",
+            "the cursor must clamp to the failed ticket's `updated`"
         );
     }
 }
