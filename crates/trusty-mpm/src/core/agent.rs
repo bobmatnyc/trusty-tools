@@ -81,6 +81,29 @@ pub fn is_subagent_dispatch_tool(tool_name: &str) -> bool {
     SUBAGENT_DISPATCH_TOOLS.contains(&tool_name)
 }
 
+/// Keys retained from (and recognised in) a subagent-dispatch `tool_response`.
+///
+/// Why: this list is the contract between the two halves of #2864, and both
+/// halves must agree on it or the daemon silently misreads the world. `tm hook`
+/// (S1) projects an incoming `tool_response` down to exactly these keys, so a
+/// subagent's unbounded output is never forwarded; the daemon (S2) treats a
+/// response carrying at least one of them as *understood*, and only an
+/// understood response is evidence about whether the dispatch left a subagent
+/// running. If the two lists drifted, the daemon would either see a response it
+/// could not interpret (fail-closed, merely no tracking) or — worse — treat an
+/// uninterpretable object as a synchronous return. One definition removes the
+/// possibility.
+///
+/// `agentId` is the join between `tool_use_id` and `SubagentStop.agent_id`;
+/// `status`/`isAsync` say whether the dispatch returned synchronously or was
+/// merely launched (`"async_launched"` — subagent still running);
+/// `resolvedModel` refines the model tier; `is_error` distinguishes a failed
+/// dispatch from a successful one.
+/// Test: `compacts_tool_response_to_correlation_keys` (S1),
+/// `post_tool_use_with_unrecognized_response_stays_running` (S2).
+pub const TOOL_RESPONSE_KEYS: &[&str] =
+    &["agentId", "status", "isAsync", "resolvedModel", "is_error"];
+
 /// Stable identifier for one agent delegation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DelegationId(pub Uuid);
@@ -112,6 +135,50 @@ pub enum DelegationStatus {
     Failed,
     /// Delegation was cancelled before completion.
     Cancelled,
+    /// Tracking lost this delegation: it sat in a live status past the liveness
+    /// budget and no terminal signal ever arrived (#2864 review, HIGH 2).
+    ///
+    /// Why this is a distinct status and not `Completed`/`Cancelled`: "we know
+    /// it finished" and "we lost track of it" are different facts, and
+    /// collapsing them is exactly the false report this feature exists to
+    /// prevent. `Stale` asserts only that the record may no longer be trusted as
+    /// evidence of work in flight. It is deliberately **neither live nor
+    /// terminal** — see [`DelegationStatus::is_live`] and
+    /// [`DelegationStatus::is_terminal`] — so it stops suppressing the idle
+    /// nudge, yet a late `SubagentStop` can still resolve it to the truth.
+    /// Test: `stale_running_delegation_stops_suppressing_the_nudge`,
+    /// `late_subagent_stop_still_resolves_a_stale_delegation`.
+    Stale,
+}
+
+impl DelegationStatus {
+    /// Does a delegation in this status still count as work in flight?
+    ///
+    /// Why: the single definition of "live" shared by
+    /// [`crate::daemon::idle_nudge::has_live_children`] (which must not nudge a
+    /// session whose children are still running) and the staleness sweep (which
+    /// must only ever act on live records). Two copies of this predicate would
+    /// eventually disagree, and a disagreement here is a false idle report.
+    /// What: `true` for `Queued` and `Running` only.
+    /// Test: `has_live_children_true_for_running`,
+    /// `has_live_children_false_when_terminal`.
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Queued | Self::Running)
+    }
+
+    /// Is this a settled outcome the tracker will never move away from?
+    ///
+    /// Why: `SubagentStop` must not re-terminalize an already-closed delegation
+    /// (idempotence), but it *must* still be able to close a `Stale` one — that
+    /// recovery path is what keeps the staleness sweep from being a one-way
+    /// false negative for a genuinely long-running agent.
+    /// What: `true` for `Completed`/`Failed`/`Cancelled`. `Stale` is **not**
+    /// terminal.
+    /// Test: `subagent_stop_is_idempotent`,
+    /// `late_subagent_stop_still_resolves_a_stale_delegation`.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
 }
 
 /// How a delegation record came to exist.
@@ -194,7 +261,15 @@ pub struct Delegation {
     /// When the subagent actually started running (UTC), when known.
     #[serde(default)]
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// When the delegation reached a terminal status (UTC), when known.
+    /// When the delegation stopped being live (UTC), when known.
+    ///
+    /// Note this is "when tracking stopped counting it as in flight", not
+    /// necessarily "when the subagent finished": for
+    /// [`DelegationStatus::Stale`] it is the moment the staleness sweep gave up
+    /// on the record, and the subagent may well still be running. The `status`
+    /// field is what disambiguates. It is also the retention clock — a record
+    /// with `ended_at` set is evicted once it ages past
+    /// `daemon::state::sessions::DELEGATION_RETENTION_SECS`.
     #[serde(default)]
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }

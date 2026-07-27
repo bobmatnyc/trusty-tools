@@ -386,7 +386,11 @@ const REAP_INTERVAL_SECS: u64 = 60;
 /// forever; a slow background sweep keeps the registry honest.
 /// What: every [`REAP_INTERVAL_SECS`] seconds, discovers tmux and calls
 /// [`DaemonState::reap_dead_sessions`]; exits cleanly when `cancel` fires
-/// rather than being dropped mid-sweep on SIGTERM.
+/// rather than being dropped mid-sweep on SIGTERM. Also runs
+/// [`DaemonState::sweep_delegations`] (#2864) — unconditionally, since bounding
+/// delegation liveness and map growth has nothing to do with tmux being
+/// discoverable, and it is here rather than on the `PreToolUse` hot path
+/// precisely because it is an O(N) pass.
 /// Test: the reaping rule is unit-tested via `DaemonState::reap_against`;
 /// `cancel_token_stops_reap_loop_cleanly` asserts the loop exits on cancel.
 async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::CancellationToken) {
@@ -398,6 +402,13 @@ async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cancellati
                 break;
             }
             _ = tick.tick() => {
+                let sweep = state.sweep_delegations();
+                if sweep.staled > 0 || sweep.evicted > 0 {
+                    info!(
+                        "delegations: {} marked stale (no terminal signal), {} evicted (#2864)",
+                        sweep.staled, sweep.evicted
+                    );
+                }
                 if let Ok(driver) = tmux::TmuxDriver::discover() {
                     let result = state.reap_dead_sessions(&driver);
                     if result.reaped > 0 {

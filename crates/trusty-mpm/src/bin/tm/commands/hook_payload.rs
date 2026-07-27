@@ -31,6 +31,7 @@
 //! survive the real binary's stdin → HTTP POST path.
 
 use serde_json::Value;
+use trusty_mpm::core::agent::TOOL_RESPONSE_KEYS;
 
 /// Fields copied verbatim from the stdin hook payload when present.
 ///
@@ -49,17 +50,6 @@ const PASSTHROUGH_FIELDS: &[&str] = &[
     "agent_type",
     "agent_transcript_path",
 ];
-
-/// Keys retained from a subagent-dispatch `tool_response`.
-///
-/// Why: `agentId` is the join between `tool_use_id` and `SubagentStop.agent_id`;
-/// `status`/`isAsync` tell the daemon whether the dispatch returned
-/// synchronously (subagent already done) or was merely launched
-/// (`"async_launched"` — subagent still running, so terminalizing here would be
-/// wrong); `resolvedModel` refines the delegation's model tier; `is_error`
-/// distinguishes a failed dispatch from a successful one.
-/// Test: `compacts_tool_response_to_correlation_keys`.
-const TOOL_RESPONSE_KEYS: &[&str] = &["agentId", "status", "isAsync", "resolvedModel", "is_error"];
 
 /// Reduce a subagent-dispatch `tool_response` to its correlation fields.
 ///

@@ -52,6 +52,27 @@
 //! manufacture a false idle, which is the specific failure this design exists to
 //! prevent.
 //!
+//! # Fail direction
+//!
+//! Every branch here fails **closed**: uncertainty leaves a delegation `Running`
+//! and never terminalizes it. A false "still running" delays an idle nudge; a
+//! false "completed" tells a human that no agents are in flight when several
+//! are, which is the one report this feature must never produce. So
+//! [`on_subagent_stop`] acts only on an exact `agent_id`, and [`on_launched`]
+//! acts only on a `tool_response` it [`recognized_response`]-ised — an absent or
+//! unrecognized response is "we do not know", not "it finished".
+//!
+//! The cost of failing closed is that a delegation can enter `Running` with no
+//! route out: `SubagentStop` is not guaranteed to arrive (`tm hook` POSTs fail
+//! open on a 2 s budget, an interrupted subagent emits no stop, a dispatch that
+//! never learned an `agent_id` can never be resolved by one). That is bounded
+//! outside the hot path by
+//! [`DaemonState::sweep_delegations`](crate::daemon::state::DaemonState::sweep_delegations),
+//! which the 60 s reap loop drives: a long-overdue live delegation becomes
+//! `Stale` — explicitly *not* `Completed`, and still recoverable by a late stop —
+//! so it stops suppressing the idle nudge without anyone ever being told it
+//! finished.
+//!
 //! # Cost
 //!
 //! [`observe`] runs inside the synchronous `PreToolUse` hook, which has a 5 s
@@ -76,7 +97,7 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::core::agent::{
-    Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier,
+    Delegation, DelegationId, DelegationSource, DelegationStatus, ModelTier, TOOL_RESPONSE_KEYS,
     is_subagent_dispatch_tool,
 };
 use crate::core::hook::HookEvent;
@@ -88,11 +109,15 @@ use crate::daemon::state::DaemonState;
 ///
 /// Why: a PM that both declares (`agent_delegate`) and dispatches (native tool)
 /// must produce one record, not two. The declaration immediately precedes the
-/// dispatch in practice, so a generous-but-finite window merges the pair while
-/// preventing a long-stale `Queued` record from swallowing an unrelated later
-/// dispatch to the same agent.
+/// dispatch *in the same turn*, so the true gap is seconds; the window only has
+/// to absorb a slow turn, not a whole work item. It was 300 s, which is long
+/// enough for a PM that dispatches the same agent repeatedly — this repo
+/// routinely runs several `rust-engineer`s — to have an unrelated later dispatch
+/// absorbed into an earlier declaration (#2864 review, MEDIUM 2). Two minutes
+/// keeps the legitimate merge and cuts the collision surface; [`tasks_match`] is
+/// the second, independent discriminator.
 /// Test: `dedups_declaration_and_observation`, `dedup_window_expires`.
-const DEDUP_WINDOW_SECS: i64 = 300;
+const DEDUP_WINDOW_SECS: i64 = 120;
 
 /// Observe one hook event and update delegation tracking.
 ///
@@ -184,7 +209,7 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
     let transcript = field(payload, "transcript_path").map(std::path::PathBuf::from);
 
     // Merge with a matching `agent_delegate` declaration when one is pending.
-    if let Some(existing) = dedup(state, session, agent) {
+    if let Some(existing) = dedup(state, session, agent, task) {
         state.mutate_delegation(existing, |d| {
             d.status = DelegationStatus::Running;
             d.started_at = Some(Utc::now());
@@ -213,23 +238,57 @@ fn on_dispatch(state: &DaemonState, session: SessionId, payload: &Value) {
 /// keys).
 /// What: the most recent same-session, same-agent delegation that is still
 /// `Queued`, was `McpDeclared`, has not already been bound to a `tool_use_id`,
-/// and was created within [`DEDUP_WINDOW_SECS`].
+/// was created within [`DEDUP_WINDOW_SECS`], and whose task [`tasks_match`]es
+/// this dispatch's description.
+///
+/// The agent name alone is NOT a sufficient key (#2864 review, MEDIUM 2): this
+/// repo dispatches several `rust-engineer`s concurrently, so "same agent,
+/// recently" false-merges two distinct dispatches — halving the live-child count
+/// and leaving the merged record showing the *declaration's* task text, which is
+/// precisely the string `/tm-session-pause` puts in front of a human. When in
+/// doubt this now declines to merge: two records for one subagent overcounts and
+/// is corrected by the staleness sweep, whereas a false merge undercounts work
+/// in flight and mislabels it, with no recovery.
 /// Test: `dedups_declaration_and_observation`, `dedup_window_expires`,
-/// `dedup_ignores_different_agent`.
-fn dedup(state: &DaemonState, session: SessionId, agent: &str) -> Option<DelegationId> {
+/// `dedup_ignores_different_agent`, `dedup_does_not_merge_a_different_task`.
+fn dedup(state: &DaemonState, session: SessionId, agent: &str, task: &str) -> Option<DelegationId> {
     let cutoff = Utc::now() - chrono::Duration::seconds(DEDUP_WINDOW_SECS);
-    state
-        .delegations_for(session)
-        .into_iter()
-        .filter(|d| {
-            d.source == DelegationSource::McpDeclared
-                && d.status == DelegationStatus::Queued
-                && d.tool_use_id.is_none()
-                && d.agent == agent
-                && d.created_at >= cutoff
-        })
-        .max_by_key(|d| d.created_at)
-        .map(|d| d.id)
+    state.latest_delegation_matching(session, |d| {
+        d.source == DelegationSource::McpDeclared
+            && d.status == DelegationStatus::Queued
+            && d.tool_use_id.is_none()
+            && d.agent == agent
+            && d.created_at >= cutoff
+            && tasks_match(&d.task, task)
+    })
+}
+
+/// Do a declared task and a dispatched description describe the same work?
+///
+/// Why: the task text is the only discriminator available between two dispatches
+/// to the same agent inside the dedup window, and it must tolerate the PM
+/// wording the `agent_delegate` task and the dispatch `description` slightly
+/// differently while still rejecting two plainly different work items.
+/// What: case- and whitespace-insensitive prefix match in either direction
+/// (which subsumes equality), so a short dispatch description matches the longer
+/// declaration it summarises. An empty string on either side means no
+/// discriminator was supplied — the agent name and the window are then all we
+/// have, and merging remains the better guess for a declaration immediately
+/// followed by a description-less dispatch.
+/// Test: `dedups_declaration_and_observation`,
+/// `dedup_does_not_merge_a_different_task`.
+fn tasks_match(declared: &str, dispatched: &str) -> bool {
+    if declared.is_empty() || dispatched.is_empty() {
+        return true;
+    }
+    let normalize = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let (a, b) = (normalize(declared), normalize(dispatched));
+    a.starts_with(&b) || b.starts_with(&a)
 }
 
 /// `PostToolUse` on a dispatch tool: learn `agentId`, terminalize only if the
@@ -239,13 +298,15 @@ fn dedup(state: &DaemonState, session: SessionId, agent: &str) -> Option<Delegat
 /// subagent runs on, so this is primarily the *join* that binds `tool_use_id` to
 /// the `agent_id` that `SubagentStop` will quote.
 /// What: locates the delegation by `tool_use_id`, stores
-/// `tool_response.agentId`, and refines the tier from `resolvedModel`. Leaves
-/// the status `Running` when the response says `isAsync`/`async_launched`;
-/// otherwise terminalizes — `Failed` on a `PostToolUseFailure` event or an
-/// `is_error` response, else `Completed`.
+/// `tool_response.agentId`, and refines the tier from `resolvedModel`. It
+/// terminalizes **only on positive evidence** that the dispatch left nothing
+/// running — see [`recognized_response`] for why an absent or unrecognized
+/// response must not be read as completion.
 /// Test: `async_launch_keeps_delegation_running`,
 /// `synchronous_post_tool_use_completes_delegation`,
-/// `post_tool_use_failure_marks_failed`.
+/// `post_tool_use_failure_marks_failed`,
+/// `post_tool_use_without_tool_response_stays_running`,
+/// `post_tool_use_with_unrecognized_response_stays_running`.
 fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: HookEvent) {
     let Some(tool_use_id) = field(payload, "tool_use_id") else {
         return;
@@ -256,7 +317,10 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
         return;
     };
 
-    let response = payload.get("tool_response");
+    // Only a response we actually recognized carries evidence either way.
+    let response = payload
+        .get("tool_response")
+        .filter(|r| recognized_response(r));
     let agent_id = response
         .and_then(|r| r.get("agentId"))
         .and_then(Value::as_str)
@@ -266,16 +330,21 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
         .and_then(Value::as_str)
         .map(ModelTier::from_model_id);
 
-    // Still running? An async dispatch reports launch, not completion.
-    let still_running = response.is_some_and(|r| {
+    // An async dispatch reports *launch*, not completion — the subagent runs on
+    // for minutes. This is positive evidence that something IS still running,
+    // and it overrides every other signal on this event.
+    let async_launched = response.is_some_and(|r| {
         r.get("isAsync").and_then(Value::as_bool).unwrap_or(false)
             || r.get("status").and_then(Value::as_str) == Some("async_launched")
     });
+    // The dispatch call itself failed: no subagent was left running.
     let errored = event == HookEvent::PostToolUseFailure
         || response
             .and_then(|r| r.get("is_error"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+    // A response we understood, with no async marker: the dispatch returned.
+    let sync_return = response.is_some();
 
     state.mutate_delegation(id, |d| {
         if agent_id.is_some() {
@@ -284,7 +353,10 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
         if let Some(t) = tier {
             d.tier = t;
         }
-        if !still_running {
+        // Fail CLOSED: terminalize only on positive evidence. With no evidence
+        // the delegation stays `Running` for `SubagentStop` (or, ultimately, the
+        // staleness sweep) to close.
+        if !async_launched && (sync_return || errored) {
             d.status = if errored {
                 DelegationStatus::Failed
             } else {
@@ -293,6 +365,32 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
             d.ended_at = Some(Utc::now());
         }
     });
+}
+
+/// Is this `tool_response` one we can draw a conclusion from?
+///
+/// Why (#2864 review, HIGH 1): the previous guard asked "does the response say
+/// async?", so an absent response answered *no* and the delegation was
+/// terminalized `Completed` ~1 ms after launch while the subagent ran on — the
+/// exact false "no agents in flight" this module's header calls strictly worse
+/// than not tracking at all. And absence is not hypothetical: `tm hook`'s S1
+/// projection ([`TOOL_RESPONSE_KEYS`]) emits no `tool_response` at all when the
+/// response is not an object or holds none of those keys, so a Claude Code key
+/// rename or a content-block-array response would trigger it with no code change
+/// and no failing test on our side.
+///
+/// Inverting it costs nothing on the happy path and makes the two hook branches
+/// share one posture: `on_subagent_stop` already refuses to act without an exact
+/// `agent_id`, and now `on_launched` refuses to act without a response it
+/// understood.
+/// What: `true` iff `response` is an object carrying at least one
+/// [`TOOL_RESPONSE_KEYS`] member.
+/// Test: `post_tool_use_without_tool_response_stays_running`,
+/// `post_tool_use_with_unrecognized_response_stays_running`.
+fn recognized_response(response: &Value) -> bool {
+    response
+        .as_object()
+        .is_some_and(|o| TOOL_RESPONSE_KEYS.iter().any(|k| o.contains_key(*k)))
 }
 
 /// `SubagentStop`: terminalize exactly the delegation that ended.
@@ -315,8 +413,10 @@ fn on_subagent_stop(state: &DaemonState, session: SessionId, payload: &Value, ev
         );
         return;
     };
+    // `Stale` is deliberately not terminal, so a stop that arrives after the
+    // staleness sweep gave up still replaces "we lost track" with the truth.
     let Some(id) = state.find_delegation(session, |d| {
-        d.agent_id.as_deref() == Some(agent_id) && !is_terminal(d.status)
+        d.agent_id.as_deref() == Some(agent_id) && !d.status.is_terminal()
     }) else {
         return;
     };
@@ -326,19 +426,6 @@ fn on_subagent_stop(state: &DaemonState, session: SessionId, payload: &Value, ev
         DelegationStatus::Completed
     };
     state.terminate_delegation(id, status);
-}
-
-/// Is this status terminal (i.e. the delegation is no longer live)?
-///
-/// Why: keeps the "live" definition aligned with
-/// [`crate::daemon::idle_nudge::has_live_children`], which counts
-/// `Queued`/`Running` as live.
-/// Test: exercised via `subagent_stop_is_idempotent`.
-fn is_terminal(status: DelegationStatus) -> bool {
-    matches!(
-        status,
-        DelegationStatus::Completed | DelegationStatus::Failed | DelegationStatus::Cancelled
-    )
 }
 
 #[cfg(test)]

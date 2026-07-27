@@ -14,6 +14,9 @@
 use super::*;
 use crate::core::session::{ControlModel, Session, SessionStatus};
 use crate::daemon::idle_nudge::has_live_children;
+use crate::daemon::state::sessions::{
+    DECLARED_STALE_AFTER_SECS, DELEGATION_RETENTION_SECS, RUNNING_STALE_AFTER_SECS,
+};
 use std::sync::Arc;
 
 fn state_with_session() -> (Arc<DaemonState>, SessionId) {
@@ -390,9 +393,11 @@ fn dedup_ignores_different_agent() {
 
 #[test]
 fn dedup_window_expires() {
-    // A stale Queued declaration must not swallow a much later dispatch.
+    // A stale Queued declaration must not swallow a much later dispatch — even
+    // one whose task text is identical, so this isolates the window from the
+    // task discriminator.
     let (state, sid) = state_with_session();
-    let mut old = Delegation::new(sid, None, "engineer", ModelTier::Sonnet, "old");
+    let mut old = Delegation::new(sid, None, "engineer", ModelTier::Sonnet, "same task");
     old.created_at = Utc::now() - chrono::Duration::seconds(DEDUP_WINDOW_SECS + 60);
     state.upsert_delegation(old);
 
@@ -400,7 +405,7 @@ fn dedup_window_expires() {
         &state,
         sid,
         HookEvent::PreToolUse,
-        &pre("Agent", "engineer", "new", "toolu_1"),
+        &pre("Agent", "engineer", "same task", "toolu_1"),
     );
     assert_eq!(state.delegations_for(sid).len(), 2);
 }
@@ -455,6 +460,316 @@ fn delegations_are_scoped_per_session() {
         DelegationStatus::Running,
         "a stop in session A must not touch session B"
     );
+}
+
+// ---- HIGH 1: an unusable `tool_response` must fail CLOSED -----------------
+
+#[test]
+fn post_tool_use_without_tool_response_stays_running() {
+    // The regression: `is_some_and` on an absent response yielded `false`, so
+    // "not async" was inferred from no evidence at all and the delegation was
+    // marked Completed ~1ms after launch while the subagent ran on. `tm hook`
+    // omits `tool_response` entirely whenever its five-key projection finds
+    // nothing it recognises, so this arrives with no bug on our side.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let payload = serde_json::json!({ "tool": "Agent", "tool_use_id": "toolu_1" });
+    observe(&state, sid, HookEvent::PostToolUse, &payload);
+
+    let d = only(&state, sid);
+    assert_eq!(
+        d.status,
+        DelegationStatus::Running,
+        "no response is 'unknown', not 'finished' — terminalizing here reports \
+         'no agents in flight' while the subagent is still running"
+    );
+    assert!(d.ended_at.is_none());
+    assert!(has_live_children(&state.delegations_for(sid)));
+}
+
+#[test]
+fn post_tool_use_with_unrecognized_response_stays_running() {
+    // A Claude Code key rename or a content-block-array response: an object we
+    // cannot interpret. It must be treated exactly like an absent response.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let payload = serde_json::json!({
+        "tool": "Agent",
+        "tool_use_id": "toolu_1",
+        "tool_response": { "content": [{ "type": "text", "text": "…" }] }
+    });
+    observe(&state, sid, HookEvent::PostToolUse, &payload);
+
+    assert_eq!(only(&state, sid).status, DelegationStatus::Running);
+    assert!(has_live_children(&state.delegations_for(sid)));
+}
+
+#[test]
+fn renamed_async_marker_does_not_terminalize() {
+    // The specific drift scenario: `isAsync`/`status` renamed but `agentId`
+    // kept. We still recognise the response, so we would infer a synchronous
+    // return — except the delegation is then closed only if nothing else says
+    // otherwise. Assert the safe half explicitly: an *entirely* renamed
+    // response is unrecognised and leaves the record alone.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let payload = serde_json::json!({
+        "tool": "Agent",
+        "tool_use_id": "toolu_1",
+        "tool_response": { "agent_id": "a403", "is_async": true, "state": "async_launched" }
+    });
+    observe(&state, sid, HookEvent::PostToolUse, &payload);
+
+    let d = only(&state, sid);
+    assert_eq!(d.status, DelegationStatus::Running);
+    assert!(
+        d.agent_id.is_none(),
+        "no key we recognise, so nothing learned"
+    );
+}
+
+// ---- HIGH 2: bounded liveness --------------------------------------------
+
+#[test]
+fn stale_running_delegation_stops_suppressing_the_nudge() {
+    // A Running delegation whose SubagentStop never arrives (dropped hook POST,
+    // interrupted subagent) used to be immortal and suppress this session's
+    // idle nudge for the daemon's lifetime.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    assert!(has_live_children(&state.delegations_for(sid)));
+
+    // Well inside the budget: a genuinely long-running agent is untouched.
+    let sweep = state.sweep_delegations_at(Utc::now() + chrono::Duration::hours(3));
+    assert_eq!(sweep.staled, 0, "a 3h-old agent is still plausibly running");
+    assert!(has_live_children(&state.delegations_for(sid)));
+
+    let past = Utc::now() + chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS + 60);
+    let sweep = state.sweep_delegations_at(past);
+    assert_eq!(sweep.staled, 1);
+
+    let d = only(&state, sid);
+    assert_eq!(
+        d.status,
+        DelegationStatus::Stale,
+        "tracking gave up — but it must NOT claim the agent completed"
+    );
+    assert_ne!(d.status, DelegationStatus::Completed);
+    assert!(!has_live_children(&state.delegations_for(sid)));
+}
+
+#[test]
+fn late_subagent_stop_still_resolves_a_stale_delegation() {
+    // Staleness must be recoverable, or a too-short budget would be a one-way
+    // false negative for a genuinely long-running agent.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    state
+        .sweep_delegations_at(Utc::now() + chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS + 1));
+    assert_eq!(only(&state, sid).status, DelegationStatus::Stale);
+
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+    assert_eq!(
+        only(&state, sid).status,
+        DelegationStatus::Completed,
+        "a late stop replaces 'we lost track' with the truth"
+    );
+}
+
+#[test]
+fn declared_but_never_dispatched_goes_stale_quickly() {
+    // `agent_delegate` declares intent and explicitly does not execute (#1942),
+    // so an undispatched Queued record is not evidence of a running agent and
+    // gets a far shorter budget than a Running one.
+    let (state, sid) = state_with_session();
+    state.upsert_delegation(Delegation::new(
+        sid,
+        None,
+        "engineer",
+        ModelTier::Sonnet,
+        "declared",
+    ));
+    let sweep = state.sweep_delegations_at(
+        Utc::now() + chrono::Duration::seconds(DECLARED_STALE_AFTER_SECS + 1),
+    );
+    assert_eq!(sweep.staled, 1);
+    assert_eq!(only(&state, sid).status, DelegationStatus::Stale);
+    assert!(!has_live_children(&state.delegations_for(sid)));
+}
+
+// ---- MEDIUM 1: bounded growth --------------------------------------------
+
+#[test]
+fn terminal_delegations_are_evicted_after_retention() {
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+    assert_eq!(state.delegations_for(sid).len(), 1);
+
+    let sweep = state.sweep_delegations_at(
+        Utc::now() + chrono::Duration::seconds(DELEGATION_RETENTION_SECS + 1),
+    );
+    assert_eq!(sweep.evicted, 1);
+    assert!(
+        state.delegations_for(sid).is_empty(),
+        "the map must not grow monotonically for the daemon's lifetime"
+    );
+}
+
+#[test]
+fn live_delegations_are_never_evicted() {
+    // The retention clock is `ended_at`, which a live record never has — so no
+    // amount of elapsed time can drop work that is still in flight.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let sweep = state.sweep_delegations_at(Utc::now() + chrono::Duration::days(30));
+    assert_eq!(sweep.evicted, 0);
+    assert_eq!(state.delegations_for(sid).len(), 1);
+}
+
+#[test]
+fn a_stale_delegation_is_retained_then_evicted() {
+    // Stale records survive one retention window so a human paused mid-flight
+    // still sees "tracking lost" rather than nothing at all.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let staled_at = Utc::now() + chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS + 1);
+    state.sweep_delegations_at(staled_at);
+    assert_eq!(only(&state, sid).status, DelegationStatus::Stale);
+
+    state
+        .sweep_delegations_at(staled_at + chrono::Duration::seconds(DELEGATION_RETENTION_SECS - 1));
+    assert_eq!(
+        state.delegations_for(sid).len(),
+        1,
+        "still inside retention"
+    );
+
+    state
+        .sweep_delegations_at(staled_at + chrono::Duration::seconds(DELEGATION_RETENTION_SECS + 1));
+    assert!(state.delegations_for(sid).is_empty());
+}
+
+// ---- MEDIUM 2: dedup must not false-merge --------------------------------
+
+#[test]
+fn dedup_does_not_merge_a_different_task() {
+    // This repo routinely declares one agent and then dispatches that same
+    // agent for different work inside the window. Merging halves the live-child
+    // count AND leaves the record showing the declaration's task text — the
+    // exact string `/tm-session-pause` shows a human.
+    let (state, sid) = state_with_session();
+    state.upsert_delegation(Delegation::new(
+        sid,
+        None,
+        "rust-engineer",
+        ModelTier::Sonnet,
+        "fix the delegation tracker",
+    ));
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre(
+            "Agent",
+            "rust-engineer",
+            "rebase the release branch",
+            "toolu_2",
+        ),
+    );
+
+    let all = state.delegations_for(sid);
+    assert_eq!(all.len(), 2, "different work is a different delegation");
+    let observed = all
+        .iter()
+        .find(|d| d.source == DelegationSource::HookObserved)
+        .expect("observed record");
+    assert_eq!(
+        observed.task, "rebase the release branch",
+        "the dispatched task text must survive"
+    );
+}
+
+#[test]
+fn dedup_merges_a_summarised_task_description() {
+    // The dispatch `description` is typically a short summary of the longer
+    // `agent_delegate` task, so a prefix match in either direction still merges.
+    let (state, sid) = state_with_session();
+    let declared = Delegation::new(
+        sid,
+        None,
+        "engineer",
+        ModelTier::Opus,
+        "Fix the delegation tracker fail-open bug",
+    );
+    let declared_id = declared.id;
+    state.upsert_delegation(declared);
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre(
+            "Agent",
+            "engineer",
+            "fix   the delegation TRACKER",
+            "toolu_1",
+        ),
+    );
+    let d = only(&state, sid);
+    assert_eq!(d.id, declared_id);
+    assert_eq!(d.status, DelegationStatus::Running);
 }
 
 #[test]

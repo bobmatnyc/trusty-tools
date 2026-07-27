@@ -9,13 +9,75 @@
 
 use std::path::PathBuf;
 
-use crate::core::agent::{Delegation, DelegationId, DelegationStatus};
+use crate::core::agent::{Delegation, DelegationId, DelegationSource, DelegationStatus};
 use crate::core::project::ProjectInfo;
 use crate::core::session::{Session, SessionId};
 
 use super::core::PAIR_CODE_TTL;
 use super::core::{DaemonState, ReapResult};
 use crate::daemon::tmux::TmuxDriver;
+
+/// How long a live delegation may go without a terminal signal before tracking
+/// gives up on it and marks it [`DelegationStatus::Stale`] (#2864 review).
+///
+/// Why this exists at all: `SubagentStop` is the only signal that closes a
+/// `Running` delegation, and it is not guaranteed to arrive — `tm hook` POSTs
+/// fail open on a 2 s budget, an interrupted subagent emits no stop at all, and
+/// a dispatch that never learned an `agent_id` can never be resolved by one.
+/// Without a bound, one such delegation suppresses its session's idle nudge for
+/// the daemon's entire lifetime, which is the very bug #2864 set out to fix.
+///
+/// Why six hours and not minutes: agents in this workspace legitimately run for
+/// hours (a foreground `gh pr checks --watch` on a slow CI leg, a multi-crate
+/// release chain). A short TTL would manufacture the false negative it is meant
+/// to prevent. Six hours is well past the longest observed real run (~2 h) while
+/// still bounding the damage to one working day rather than forever.
+///
+/// Why being wrong is survivable: the sweep writes `Stale`, never `Completed`.
+/// A delegation that outlives the budget is reported as "tracking lost", not as
+/// finished, and a late `SubagentStop` still resolves it to the truth because
+/// `Stale` is not terminal.
+/// Test: `stale_running_delegation_stops_suppressing_the_nudge`.
+pub(crate) const RUNNING_STALE_AFTER_SECS: i64 = 6 * 60 * 60;
+
+/// How long a `Queued` `McpDeclared` delegation may sit undispatched before it
+/// is marked [`DelegationStatus::Stale`] (#2864 review).
+///
+/// Why so much shorter than [`RUNNING_STALE_AFTER_SECS`]: a `Queued`
+/// `McpDeclared` record is a *declaration of intent* — `agent_delegate`
+/// explicitly does not execute anything (#1942) — so it is not evidence of a
+/// running agent at all. Nothing but a matching hook observation ever advances
+/// it, and the dedup that would consume it gives up after
+/// `delegation_tracker::DEDUP_WINDOW_SECS`. Past that window an undispatched
+/// declaration is stale by definition; keeping it "live" only suppresses the
+/// idle nudge for a subagent that was never spawned.
+/// Test: `declared_but_never_dispatched_goes_stale_quickly`.
+pub(crate) const DECLARED_STALE_AFTER_SECS: i64 = 15 * 60;
+
+/// How long a non-live delegation is retained before eviction (#2864 review).
+///
+/// Why: without eviction the delegation map grows monotonically for the
+/// daemon's lifetime, and every dispatch pays two O(N) scans over it. An hour
+/// is far longer than any consumer needs — `session_status` and
+/// `/tm-session-pause` both ask "what is in flight *now*" — and it bounds N to
+/// roughly one hour of fleet dispatch volume instead of one uptime's worth.
+/// Test: `terminal_delegations_are_evicted_after_retention`,
+/// `live_delegations_are_never_evicted`.
+pub(crate) const DELEGATION_RETENTION_SECS: i64 = 60 * 60;
+
+/// What one [`DaemonState::sweep_delegations`] pass did.
+///
+/// Why: the sweep runs on a timer with no caller to inspect its effects, so it
+/// returns a count for the log line and gives tests a precise assertion target
+/// instead of forcing them to re-derive the outcome from the map.
+/// Test: every `*_goes_stale_*` / `*_evicted_*` test asserts on this.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DelegationSweep {
+    /// Live delegations marked [`DelegationStatus::Stale`] this pass.
+    pub staled: usize,
+    /// Non-live delegations removed from the map this pass.
+    pub evicted: usize,
+}
 
 impl DaemonState {
     // ---- bot pairing ----------------------------------------------------
@@ -444,6 +506,101 @@ impl DaemonState {
             .iter()
             .find(|e| e.value().session == session && pred(e.value()))
             .map(|e| e.value().id)
+    }
+
+    /// The most recently created delegation of one session matching `pred`.
+    ///
+    /// Why: [`Self::delegations_for`] clones every matching record — including
+    /// its `String`s and `PathBuf`s — which is pure waste when the caller only
+    /// wants an id to mutate. The delegation-tracker dedup runs this on the
+    /// dispatch path, so the allocations were per-dispatch and proportional to
+    /// the whole map. Returning a `Copy` id also keeps the scan's read guards
+    /// from overlapping the subsequent write, exactly as [`Self::find_delegation`]
+    /// does.
+    /// What: scans this session's delegations, keeps those satisfying `pred`,
+    /// and returns the id of the one with the greatest `created_at`.
+    /// Test: `dedups_declaration_and_observation`, `dedup_window_expires`.
+    pub fn latest_delegation_matching(
+        &self,
+        session: SessionId,
+        pred: impl Fn(&Delegation) -> bool,
+    ) -> Option<DelegationId> {
+        self.delegations
+            .iter()
+            .filter(|e| e.value().session == session && pred(e.value()))
+            .max_by_key(|e| e.value().created_at)
+            .map(|e| e.value().id)
+    }
+
+    /// Bound delegation liveness and delegation-map growth (#2864 review).
+    ///
+    /// Why: `SubagentStop` is the only signal that closes a `Running`
+    /// delegation and it is not guaranteed to arrive (dropped hook POST,
+    /// interrupted subagent, a dispatch that never learned an `agent_id`).
+    /// Before this sweep such a record was immortal: it counted as live in
+    /// [`crate::daemon::idle_nudge::has_live_children`] forever, suppressing
+    /// that session's idle nudge for the daemon's lifetime, and it was never
+    /// removed from the map, which therefore grew without bound while every
+    /// dispatch paid an O(N) scan over it. Both are the same root cause — a
+    /// delegation with no route out — so one sweep closes both.
+    ///
+    /// What: one pass over the map, off the `PreToolUse` hot path (it is driven
+    /// by the 60 s reap loop, never by a hook). For each record:
+    /// - live and older than its budget ([`DECLARED_STALE_AFTER_SECS`] for an
+    ///   undispatched `McpDeclared` declaration, else
+    ///   [`RUNNING_STALE_AFTER_SECS`]) → [`DelegationStatus::Stale`] with
+    ///   `ended_at` stamped. **Never `Completed`** — the sweep records that
+    ///   tracking gave up, not that the agent finished, and `Stale` is
+    ///   non-terminal so a late `SubagentStop` still resolves it correctly.
+    /// - not live and `ended_at` older than [`DELEGATION_RETENTION_SECS`] →
+    ///   removed. A live record has no `ended_at` and is never evicted, so work
+    ///   in flight can never be dropped by the retention rule.
+    ///
+    /// The age clock is `started_at` when known, else `created_at`.
+    /// Test: `stale_running_delegation_stops_suppressing_the_nudge`,
+    /// `declared_but_never_dispatched_goes_stale_quickly`,
+    /// `terminal_delegations_are_evicted_after_retention`,
+    /// `live_delegations_are_never_evicted`.
+    pub fn sweep_delegations(&self) -> DelegationSweep {
+        self.sweep_delegations_at(chrono::Utc::now())
+    }
+
+    /// [`Self::sweep_delegations`] with an injected clock.
+    ///
+    /// Why: the budgets are hours long, so the tests must be able to name "now"
+    /// rather than sleep or backdate every field of every fixture.
+    /// Test: as [`Self::sweep_delegations`].
+    pub(crate) fn sweep_delegations_at(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> DelegationSweep {
+        let mut sweep = DelegationSweep::default();
+        self.delegations.retain(|_, d| {
+            if d.status.is_live() {
+                let budget = if d.status == DelegationStatus::Queued
+                    && d.source == DelegationSource::McpDeclared
+                {
+                    DECLARED_STALE_AFTER_SECS
+                } else {
+                    RUNNING_STALE_AFTER_SECS
+                };
+                let since = d.started_at.unwrap_or(d.created_at);
+                if now - since > chrono::Duration::seconds(budget) {
+                    d.status = DelegationStatus::Stale;
+                    d.ended_at = Some(now);
+                    sweep.staled += 1;
+                }
+                return true;
+            }
+            let keep = d
+                .ended_at
+                .is_none_or(|t| now - t <= chrono::Duration::seconds(DELEGATION_RETENTION_SECS));
+            if !keep {
+                sweep.evicted += 1;
+            }
+            keep
+        });
+        sweep
     }
 
     /// Apply `f` to one delegation in place (#2864).
