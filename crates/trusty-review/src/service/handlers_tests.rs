@@ -175,6 +175,84 @@ impl SearchClient for DegradedButServingSearch {
     }
 }
 
+/// A search stub reproducing the LIVE payload from #4079: up, embedder ready,
+/// answering queries, but with a real warm-boot gap (11 indexes skipped on a
+/// scan timeout, 3 with a failed corpus).
+pub(super) struct WarmBootGapSearch;
+
+#[async_trait]
+impl SearchClient for WarmBootGapSearch {
+    async fn health(&self) -> Result<SearchHealth, SearchClientError> {
+        Ok(SearchHealth {
+            status: "degraded".to_string(),
+            embedder: EmbedderState::Str("ready".to_string()),
+            warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
+                indexes_loaded: 20,
+                indexes_skipped_timeout: 11,
+                indexes_corpus_failed: 3,
+                warm_boot_degraded: true,
+                ..Default::default()
+            }),
+        })
+    }
+
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _index_id: &str,
+        _query: &str,
+        _top_k: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        Ok(vec![])
+    }
+}
+
+/// REGRESSION (#4079): `probe_deps` must publish a serving-but-degraded
+/// trusty-search as REACHABLE, with the gap in `state`/`detail`.
+///
+/// Why: the type-level guard (`dep_state_degraded_is_reachable`) proves the
+/// mapping; this proves the whole probe path actually produces it from a real
+/// `SearchClient` response, which is where the false "unreachable" was minted.
+/// What: probes `WarmBootGapSearch`; asserts `reachable`, `state == Degraded`,
+/// a detail naming the corpus failures, and that `compute_status` still reports
+/// `"degraded"` overall so the gap is not swallowed.
+/// Test: this test itself.
+#[tokio::test]
+async fn probe_deps_degraded_search_is_reachable() {
+    use super::{DepState, compute_status, probe_deps};
+    use crate::service::inference_probe::InferenceStatus;
+
+    let state = AppState::new(
+        crate::config::ReviewConfig::load(None),
+        Arc::new(FakeLlm),
+        Arc::new(WarmBootGapSearch),
+        None,
+    );
+    let deps = probe_deps(&state).await;
+
+    assert!(
+        deps.trusty_search.reachable,
+        "a daemon that answered the probe must be reachable, whatever its warm boot did (#4079)"
+    );
+    assert_eq!(deps.trusty_search.state, DepState::Degraded);
+    assert!(
+        deps.trusty_search
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("failed to open their corpus")),
+        "the gap must be explained, not just named; got: {:?}",
+        deps.trusty_search.detail
+    );
+    assert_eq!(
+        compute_status(InferenceStatus::Ok, &deps),
+        "degraded",
+        "correcting the reachability lie must not hide the gap — overall status stays degraded"
+    );
+}
+
 // ── Fake LLM that returns auth error ─────────────────────────────────────────
 
 pub(super) struct AuthErrorLlm;
