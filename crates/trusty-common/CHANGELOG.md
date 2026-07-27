@@ -7,6 +7,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`chat::BedrockProvider` now streams via `ConverseStream` instead of
+  buffering a full `Converse` reply into a single delta (issue #3767).**
+  `chat_stream` drives Bedrock's binary event-stream framing: `ContentBlockDelta`
+  text fragments become incremental `ChatEvent::Delta`s, mid-stream failures
+  (throttling, validation, transport errors) emit `ChatEvent::Error` and
+  return `Err` — mirroring the OpenAI-compatible SSE pump's #3757 dual-channel
+  failure contract — and the terminal `Metadata` event's token tally becomes
+  a new `ChatEvent::Usage` (Bedrock reports usage exactly once, never
+  per-delta, so it needed its own event to avoid being silently dropped).
+  `BedrockProvider` also gained `with_sampling` (parity with
+  `OpenRouterProvider::with_sampling`, #3758) so a Bedrock-routed streamed
+  turn honours the same temperature/token-ceiling/stop-sequences as the
+  blocking path.
+- **`chat::ChatEvent::Usage(ChatUsage)`** — a new event variant carrying
+  prompt/completion/cache token counts for providers that report usage
+  out-of-band from text deltas. `ChatUsage` is re-exported from the crate
+  root alongside `ChatEvent`.
+
 ---
 ## [0.26.2] — 2026-07-26
 

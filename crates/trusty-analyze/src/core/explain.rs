@@ -139,6 +139,9 @@ pub async fn explain_report(
                 ChatEvent::ToolCall(_) => {
                     // Tools aren't used for explain; ignore spurious calls.
                 }
+                // #3767: no usage-accounting consumer wired up here yet;
+                // ignore rather than let the match go non-exhaustive.
+                ChatEvent::Usage(_) => {}
                 ChatEvent::Done => break,
                 ChatEvent::Error(msg) => {
                     stream_error = Some(msg);

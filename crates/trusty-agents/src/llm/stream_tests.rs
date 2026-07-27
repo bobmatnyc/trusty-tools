@@ -15,7 +15,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use tokio::sync::mpsc::{self, Sender};
 use trusty_common::ChatMessage;
-use trusty_common::chat::{ChatEvent, ChatProvider, ToolCall, ToolDef};
+use trusty_common::chat::{ChatEvent, ChatProvider, ChatUsage, ToolCall, ToolDef};
 
 use super::*;
 
@@ -181,6 +181,48 @@ async fn drive_delta_stream_collects_tool_calls() {
     assert_eq!(assembly.content, "hi");
 }
 
+/// Issue #3767: a `ChatEvent::Usage` mid-stream must land on
+/// `assembly.usage` without disturbing the delta batching or the terminal
+/// marker — the exact "usage survives the streaming path" contract.
+#[tokio::test]
+async fn drive_delta_stream_captures_usage() {
+    let usage = ChatUsage {
+        prompt_tokens: 42,
+        completion_tokens: 7,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+    };
+    let (emitted, assembly) = run(
+        vec![
+            ChatEvent::Delta("hi".into()),
+            ChatEvent::Usage(usage),
+            ChatEvent::Done,
+        ],
+        Duration::ZERO,
+    )
+    .await;
+
+    assert_eq!(assembly.usage, Some(usage));
+    assert_eq!(assembly.content, "hi");
+    // Usage must not itself trigger a flush or appear in the emitted text.
+    assert_eq!(
+        emitted,
+        vec![("hi".to_string(), false), (String::new(), true)]
+    );
+}
+
+/// A stream that never reports usage (the current OpenRouter reality) must
+/// leave `assembly.usage` as `None` rather than fabricating a zero value.
+#[tokio::test]
+async fn drive_delta_stream_usage_absent_when_not_reported() {
+    let (_emitted, assembly) = run(
+        vec![ChatEvent::Delta("hi".into()), ChatEvent::Done],
+        Duration::ZERO,
+    )
+    .await;
+    assert!(assembly.usage.is_none());
+}
+
 #[test]
 fn build_messages_shapes_roles() {
     let history = vec![ConversationTurn {
@@ -197,14 +239,20 @@ fn build_messages_shapes_roles() {
 
 #[test]
 fn streaming_supported_gates_on_provider() {
-    // Bedrock routes through the AWS SDK, never the OpenRouter provider —
-    // false regardless of the (default-on) kill switch.
-    assert!(!streaming_supported(
+    // Fireworks has its own base URL / credential and no streaming adapter.
+    assert!(!streaming_supported("fireworks/llama-v3", false));
+}
+
+/// Issue #3767: Bedrock now has a real `ConverseStream` provider
+/// (`trusty_common::chat::BedrockProvider`) wired through `stream_reply`'s
+/// provider dispatch, so the capability gate must allow it — the opposite of
+/// the pre-#3767 assertion this replaces.
+#[test]
+fn streaming_supported_allows_bedrock() {
+    assert!(streaming_supported(
         "bedrock/anthropic.claude-3-sonnet",
         false
     ));
-    // Fireworks has its own base URL / credential.
-    assert!(!streaming_supported("fireworks/llama-v3", false));
 }
 
 #[test]
@@ -278,6 +326,41 @@ async fn stream_with_provider_returns_assembled_content() {
         .expect("stream should succeed");
     assert_eq!(out.content, "Hello, world");
     assert!(out.error.is_none());
+}
+
+/// Issue #3767: when the provider reports usage, `stream_with_provider` must
+/// surface it on the returned `StreamAssembly` — the caller-facing half of
+/// "usage is not silently dropped on the streaming path".
+#[tokio::test]
+async fn stream_with_provider_surfaces_usage_in_assembly() {
+    let usage = ChatUsage {
+        prompt_tokens: 100,
+        completion_tokens: 20,
+        cache_read_tokens: 5,
+        cache_creation_tokens: 0,
+    };
+    let provider = FakeProvider::ok(vec![
+        ChatEvent::Delta("Hello".into()),
+        ChatEvent::Usage(usage),
+        ChatEvent::Done,
+    ]);
+    let out = stream_with_provider(provider, vec![], "s1", "agent", FAST)
+        .await
+        .expect("stream should succeed");
+    assert_eq!(out.usage, Some(usage));
+    assert_eq!(out.content, "Hello");
+}
+
+/// A provider that never reports usage (OpenRouter today) must leave
+/// `assembly.usage` as `None` — no fabricated zero, and the usage-recording
+/// branch inside `stream_with_provider` must be skipped without erroring.
+#[tokio::test]
+async fn stream_with_provider_usage_absent_when_not_reported() {
+    let provider = FakeProvider::ok(vec![ChatEvent::Delta("Hello".into()), ChatEvent::Done]);
+    let out = stream_with_provider(provider, vec![], "s1", "agent", FAST)
+        .await
+        .expect("stream should succeed");
+    assert!(out.usage.is_none());
 }
 
 #[test]
