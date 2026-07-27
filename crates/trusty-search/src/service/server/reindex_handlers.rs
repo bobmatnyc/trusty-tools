@@ -223,6 +223,12 @@ pub(super) async fn reindex_handler(
                     // subsequent reindex will refresh the snapshot.
                     walk_diagnostics: Arc::clone(&handle.walk_diagnostics),
                 };
+                // Issue #3995 round 5 (CRITICAL): snapshot the cold-store
+                // entry (if any) parked under `index_id` BEFORE registering
+                // the override handle below — the "expected" half of the
+                // identity guard, mirrored from `create_index_handler` /
+                // `relocate_index_handler`. See `mark_loaded_if` below.
+                let cold_entry_before_register = state.cold_store.entry_token(&index_id);
                 handle = state.registry.register(new_handle);
                 // Issue #3993 review round 3 (HIGH, applied here for
                 // consistency with create/relocate): reap any stale
@@ -235,7 +241,14 @@ pub(super) async fn reindex_handler(
                 // cold. Defense-in-depth against residual corruption
                 // predating the create-time fix; keyed by `IndexId`, so it
                 // can only ever touch this id's own record.
-                state.cold_store.mark_loaded(&index_id);
+                //
+                // Issue #3995 round 5 (CRITICAL): identity-guarded against
+                // `cold_entry_before_register` — see `create_index_handler`'s
+                // identical comment and `ColdIndexStore::mark_loaded_if` for
+                // the race this closes.
+                state
+                    .cold_store
+                    .mark_loaded_if(&index_id, cold_entry_before_register);
             }
         }
     }

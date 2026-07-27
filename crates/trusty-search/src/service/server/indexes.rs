@@ -579,6 +579,14 @@ pub(super) async fn create_index_handler(
             crate::core::registry::WalkDiagnostics::default(),
         )),
     };
+    // Issue #3995 round 5 (CRITICAL): snapshot whatever cold-store entry is
+    // parked under `id` right now, BEFORE registering the fresh handle below.
+    // This is the "expected" half of the identity guard — see the
+    // `mark_loaded_if` call after `register` for why an unguarded reap here
+    // was proven (round 5 review) to sometimes delete a DIFFERENT writer's
+    // (a concurrent residency-sweep park's) freshly-and-legitimately-inserted
+    // cold entry instead of this id's own stale leftover.
+    let cold_entry_before_register = state.cold_store.entry_token(&id);
     let registered = state.registry.register(handle);
     // Issue #3993 review round 3 (HIGH): `id` is now live at `req.root_path`
     // (which may be a BRAND NEW root, distinct from wherever `id` was last
@@ -590,17 +598,27 @@ pub(super) async fn create_index_handler(
     // by `id` even though nothing live or cold genuinely depends on it any
     // more, permanently blocking any OTHER id from ever registering there —
     // an availability regression discovered in the exact PR meant to make
-    // registration safer. `mark_loaded` keys strictly off `IndexId`, so this
-    // can only ever clear the record for the id just registered, never a
+    // registration safer. `mark_loaded_if` keys strictly off `IndexId`, so
+    // this can only ever clear the record for the id just registered, never a
     // record that merely happens to share a root_path with someone else —
     // reaping by id, not by root, is what keeps this safe against the
     // inverse risk (deleting a cold record that still legitimately owns its
-    // root). No-op (two DashMap removes) when `id` had no cold record, which
-    // is the common case for a genuinely brand-new id — mirrors the cleanup
-    // `get_or_load_index` already performs after a normal cold→live promotion
+    // root). No-op when `id` had no cold record, which is the common case for
+    // a genuinely brand-new id — mirrors the cleanup `get_or_load_index`
+    // already performs after a normal cold→live promotion
     // (`lazy_loader/loader.rs`), just reached via the create-index door
     // instead.
-    state.cold_store.mark_loaded(&id);
+    //
+    // Issue #3995 round 5 (CRITICAL): unlike round 3's original `mark_loaded`
+    // call, this is now identity-guarded against `cold_entry_before_register`
+    // — it only removes the entry that was ALREADY there before this
+    // handler's own `register` call above, never a fresh entry a concurrent
+    // residency-sweep park may have inserted in the window between the
+    // snapshot and here (see `ColdIndexStore::mark_loaded_if` and
+    // `cold_park_index`'s "Concurrent-write guard" doc for the full race).
+    state
+        .cold_store
+        .mark_loaded_if(&id, cold_entry_before_register);
     // Issue #1621 (epic #1619 WI-2): start the filesystem watcher for the
     // freshly-registered index so saves trigger incremental indexing without a
     // manual reindex. No-op when disabled (`TRUSTY_DISABLE_WATCHER=1`) or when

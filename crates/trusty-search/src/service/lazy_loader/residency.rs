@@ -186,53 +186,88 @@ pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<Per
 /// unloadable cold entry for an id whose live registration is either gone or
 /// no longer what we thought it was.
 ///
-/// **Concurrent-write guard (issue #3995 round 4, HIGH):** `mark_loaded`
-/// (`ColdIndexStore`) is called by `create_index_handler`,
-/// `relocate_index_handler`, and `reindex_handler`'s `root_path` override
-/// immediately after each registers a FRESH `IndexHandle` under `id` (issue
-/// #3993 round 3, reaping a stale cold-store record left over from before the
-/// id was re-created). That makes `mark_loaded` a SECOND, uncoordinated
-/// writer of `cold_store.entries` — racing this function's own step 1. Since
-/// steps 1–2 here are two synchronous `DashMap` operations with no `.await`
-/// between them, the only way a writer can land its `register` +
-/// `mark_loaded` pair inside that window is genuine multi-thread parallelism
-/// (this function's caller — the residency-sweep ticker — is not itself
-/// racing anyone; a concurrent HTTP handler on a different tokio worker
-/// thread is). Worked example of the bug this guard closes: (1) this
-/// function's step 1 parks a stale snapshot of `id` into `cold_store`; (2) a
-/// concurrent relocate registers a brand-new live handle for `id` at a new
-/// root, then reaps what it (reasonably) assumes is ITS OWN stale cold
-/// record — but that record is actually the one THIS park just inserted; (3)
-/// this function's step 2 unconditionally removes whatever is now live under
-/// `id` — the relocate's fresh handle, which this function never observed
-/// and has no business touching — leaving `id` in NEITHER store, reachable
-/// again only by an operator manually re-registering it. The `expected`
-/// snapshot closes this: when the handle `remove_and_get` actually removes
-/// is not the SAME `Arc` this function observed at entry, `id`'s registry
-/// slot is IMMEDIATELY restored via `IndexRegistry::restore` (identity-
-/// preserving — no new `Arc`, so no other holder's `Arc::ptr_eq` breaks) and
-/// this function's own cold-store insertion is undone, exactly as in case
-/// (a) above. This makes every interleaving of {this function's steps} and
-/// {a concurrent handler's `register` + `mark_loaded`} resolve to `id`
-/// present in exactly one of {hot registry, cold store} — see the full
+/// **Concurrent-write guard (issue #3995 round 4, HIGH; identity-guarded
+/// reap added round 5, CRITICAL):** `create_index_handler`,
+/// `relocate_index_handler`, and `reindex_handler`'s `root_path` override all
+/// call `cold_store.mark_loaded_if` immediately after each registers a FRESH
+/// `IndexHandle` under `id` (issue #3993 round 3, reaping a stale cold-store
+/// record left over from before the id was re-created). That makes each of
+/// them a SECOND, uncoordinated writer of `cold_store.entries` — racing this
+/// function's own step 1. Since steps 1–2 here are two synchronous `DashMap`
+/// operations with no `.await` between them, the only way a writer can land
+/// its register+reap pair inside that window is genuine multi-thread
+/// parallelism (this function's caller — the residency-sweep ticker — is not
+/// itself racing anyone; a concurrent HTTP handler on a different tokio
+/// worker thread is).
+///
+/// Round 4 closed the REGISTRY side of this race with the `expected` snapshot
+/// and `Arc::ptr_eq` check below, but left the COLD-STORE side of the same
+/// handlers' cleanup as an unconditional `mark_loaded(id)` — round 5 review
+/// proved (by execution, not just paper reasoning — see
+/// `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`)
+/// that this was still enough to orphan `id` in 2 of 10 possible
+/// interleavings: when a handler's `register` lands BEFORE this function's
+/// `expected` snapshot even runs, the identity check below trivially matches
+/// (see the residual paragraph below) and this function's step 2 "succeeds"
+/// without rolling back its own step-1 insertion — so whichever of {this
+/// function's step 1, the handler's reap} runs LAST wins the cold-store slot.
+/// If the handler's reap runs last, it blindly deletes the entry THIS
+/// function just legitimately inserted, having no way to tell it apart from
+/// the stale leftover it meant to clean up — `id` ends up in neither the hot
+/// registry (removed by this function's step 2) nor the cold store (reaped
+/// by the handler), an unrecoverable orphan.
+///
+/// The fix: every writer that reaps a cold entry it does not itself own
+/// outright first captures `cold_store.entry_token(id)` — an opaque identity
+/// token, `Arc::ptr_eq`-comparable exactly like a registry handle — BEFORE
+/// its own register/insert, then reaps via `mark_loaded_if(id, that_token)`
+/// afterward instead of the unconditional `mark_loaded`. This function
+/// itself follows the identical discipline for its OWN insertion: `own_token`
+/// (captured from `register_cold_entries`'s return value at step 1) is what
+/// `mark_loaded_if` rolls back with below, so it only ever removes the entry
+/// IT inserted — never a handler's freshly-registered stale-record reap that
+/// happened to land on the same id in between. Worked example of the bug this
+/// closes: (1) this function's step 1 parks a stale snapshot of `id` into
+/// `cold_store`, capturing `own_token`; (2) a concurrent relocate registers a
+/// brand-new live handle for `id` at a new root, snapshots
+/// `cold_store.entry_token(id)` (observing THIS function's freshly-inserted
+/// entry, not its own old one), then calls `mark_loaded_if` with that
+/// snapshot — sees the entry is still the one it just observed, reaps it, and
+/// in doing so removes what actually was this function's entry (a legitimate,
+/// visible outcome of losing the race, not an orphan — see the residual
+/// paragraph); (3) this function's step 2 unconditionally removes whatever is
+/// now live under `id` — the relocate's fresh handle — but that path is
+/// reached BY THE MISMATCH BRANCH, which calls `mark_loaded_if(id, own_token)`
+/// to undo its own step-1 insertion: `own_token` no longer matches (the
+/// relocate's reap already removed it, or a completely different entry now
+/// sits there), so `mark_loaded_if` is a safe no-op rather than deleting
+/// something it doesn't recognize. Either way `id` never lands in neither
+/// store. This makes every interleaving of {this function's steps} and {a
+/// concurrent handler's register + identity-guarded reap} resolve to `id`
+/// present in at least one of {hot registry, cold store} — see the full
 /// interleaving enumeration on `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`
-/// below. One narrower, PRE-EXISTING risk this guard does not (and cannot)
-/// close: if the concurrent write's `register` lands BEFORE this function's
-/// `expected` snapshot even runs (e.g., mid-sweep, before this specific id's
-/// turn in the sweep's per-id loop — a far wider window than the two-op one
-/// above), `expected` itself observes the writer's fresh handle, the
-/// identity check trivially matches, and the park proceeds "successfully"
-/// with a stale `entry` (describing the id's OLD root_path) — never an
-/// orphan, but a park that silently reverts a very-recent relocate/reindex-
-/// override. This is unchanged by this fix (it existed identically before
-/// `mark_loaded` was introduced in round 3) and is considered out of scope
-/// here — narrowing it would require the sweep to re-read `indexes.toml` (or
-/// re-derive `entry`) per-id at park time rather than once per tick, a
-/// broader change than this fix's remit.
+/// below (and `collision_3993_tests.rs` for the handler-side reproduction).
+///
+/// One narrower, residual (non-orphaning) effect this guard does not — and
+/// structurally cannot — close: if the concurrent write's `register` lands
+/// BEFORE this function's `expected` snapshot even runs (e.g., mid-sweep,
+/// before this specific id's turn in the sweep's per-id loop — a far wider
+/// window than the two-op one above), `expected` itself observes the
+/// writer's fresh handle, the identity check trivially matches, and the park
+/// proceeds "successfully" with a stale `entry` (describing the id's OLD
+/// root_path) — the id ends up parked cold under stale metadata rather than
+/// live at its new location: a park that silently reverts a very-recent
+/// relocate/reindex-override. This is a metadata-staleness issue, not a
+/// reachability one — `id` stays discoverable (in exactly one of the two
+/// stores) throughout, per the identity-guarded reap above — and narrowing it
+/// further would require the sweep to re-read `indexes.toml` (or re-derive
+/// `entry`) per-id at park time rather than once per tick, a broader change
+/// than this fix's remit.
 /// Test: `cold_park_index_moves_hot_to_cold`,
 /// `cold_park_index_absent_returns_false_and_leaves_no_stray_entry`,
 /// `cold_park_index_never_orphans_a_racing_cold_load`,
-/// `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`;
+/// `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`,
+/// `cold_park_index_handler_reap_never_orphans_concurrent_park` (round 5);
 /// full disk-round-trip coverage in `tests/residency_cold_park.rs`.
 pub async fn cold_park_index(
     id: &IndexId,
@@ -275,8 +310,15 @@ async fn cold_park_index_inner(
         return false;
     };
     // 1. Make the index discoverable as "cold" FIRST — closes the gap where a
-    //    concurrent query would otherwise see it in neither store.
-    cold_store.register_cold_entries(vec![entry]);
+    //    concurrent query would otherwise see it in neither store. Capture
+    //    the identity token this specific insertion is stamped with (issue
+    //    #3995 round 5 CRITICAL) so any rollback below reaps precisely THIS
+    //    entry — never a different one a concurrent write installs under the
+    //    same id afterward (see `ColdIndexStore::mark_loaded_if`).
+    let own_token = cold_store
+        .register_cold_entries(vec![entry])
+        .into_iter()
+        .next();
     hook();
     // 2. Atomically detach the live handle. In-flight readers holding the old
     //    Arc finish safely (see `IndexRegistry::remove_and_get`'s own doc).
@@ -290,17 +332,19 @@ async fn cold_park_index_inner(
             // A concurrent create/relocate/reindex-override swapped in a
             // DIFFERENT handle under this id between our snapshot and the
             // removal above. Hand it straight back — identity-preserving, no
-            // new Arc — and undo our own cold-store insertion so `id` is
-            // never left in neither store.
+            // new Arc — and undo our own cold-store insertion (identity-
+            // guarded: only removes it if it's still there unchanged) so
+            // `id` is never left in neither store.
             registry.restore(h);
-            cold_store.mark_loaded(id);
+            cold_store.mark_loaded_if(id, own_token);
             false
         }
         None => {
             // Lost a race with a concurrent delete/orphan-reap: undo the cold
-            // registration we just added so a genuinely-gone index doesn't
-            // linger as an orphaned, permanently-unloadable cold entry.
-            cold_store.mark_loaded(id);
+            // registration we just added (identity-guarded) so a genuinely-
+            // gone index doesn't linger as an orphaned, permanently-unloadable
+            // cold entry.
+            cold_store.mark_loaded_if(id, own_token);
             false
         }
     }
@@ -554,27 +598,31 @@ mod tests {
     }
 
     /// Deterministic reproduction of the round-4 HIGH finding on PR #3995:
-    /// `mark_loaded` (called by `create_index_handler` / `relocate_index_handler`
-    /// / `reindex_handler`'s override, right after each registers a fresh
-    /// handle — issue #3993 round 3) is an uncoordinated SECOND writer of
-    /// `cold_store.entries`, racing this function's own step 1
-    /// (`register_cold_entries`) / step 2 (`remove_and_get`) pair. Uses the
-    /// `cold_park_index_inner` test seam (`hook`) to land the concurrent
-    /// write's exact sequence — `registry.register(new_handle)` then
-    /// `cold_store.mark_loaded(id)` — in the precise window between this
-    /// function's two `DashMap` ops, since that window has no `.await`
-    /// boundary and is therefore not reproducible via ordinary tokio task
-    /// interleaving (see the function doc's "Concurrent-write guard").
+    /// `create_index_handler` / `relocate_index_handler` / `reindex_handler`'s
+    /// override, right after each registers a fresh handle (issue #3993
+    /// round 3), reap the stale cold-store record for the same id — an
+    /// uncoordinated SECOND writer of `cold_store.entries`, racing this
+    /// function's own step 1 (`register_cold_entries`) / step 2
+    /// (`remove_and_get`) pair. Uses the `cold_park_index_inner` test seam
+    /// (`hook`) to land the concurrent write's exact sequence — snapshot,
+    /// `registry.register(new_handle)`, guarded reap — in the precise window
+    /// between this function's two `DashMap` ops, since that window has no
+    /// `.await` boundary and is therefore not reproducible via ordinary
+    /// tokio task interleaving (see the function doc's "Concurrent-write
+    /// guard").
     ///
-    /// At current (unfixed) head this fails: `cold_park_index_inner`
-    /// unconditionally removes whatever is live under `id` — the concurrent
-    /// write's brand-new handle — leaving `id` in NEITHER the hot registry
-    /// (removed by this function) NOR the cold store (removed by the
-    /// concurrent write's `mark_loaded`, which ran on the entry THIS
-    /// function's step 1 had just inserted). With the `Arc::ptr_eq` identity
-    /// check + `IndexRegistry::restore` rollback applied, the mismatch is
-    /// detected and the concurrent write's fresh handle is handed straight
-    /// back, so `id` stays live and discoverable throughout.
+    /// At round-4 head (before issue #3995 round 5) this failed: the
+    /// concurrent write's reap was an unconditional `cold_store.mark_loaded`,
+    /// which unconditionally removed whatever was live under `id` — the
+    /// entry THIS function's step 1 had just inserted — leaving `id` in
+    /// NEITHER the hot registry (removed by this function's step 2, since the
+    /// mismatch it correctly detects still triggers a rollback attempt) NOR
+    /// the cold store (already reaped by the concurrent write before that
+    /// rollback could run). With both sides of the race now using the
+    /// identity-guarded `entry_token` + `mark_loaded_if` pair, each writer
+    /// only ever undoes ITS OWN insertion, so the concurrent write's fresh
+    /// handle is handed straight back and `id` stays live and discoverable
+    /// throughout.
     #[tokio::test]
     async fn cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning() {
         let registry = IndexRegistry::default();
@@ -593,13 +641,17 @@ mod tests {
             mk_entry("race-swap", Some(1)),
             move || {
                 // Mirrors `relocate_index_handler` / `create_index_handler` /
-                // `reindex_handler`'s override arm, post-#3993-round-3:
-                // register a brand-new handle under the SAME id, then reap
-                // any stale cold-store record — landing exactly between this
-                // function's `register_cold_entries` (already ran) and its
-                // `remove_and_get` (about to run).
+                // `reindex_handler`'s override arm, post-issue-#3995-round-5:
+                // snapshot the cold entry token BEFORE registering (this
+                // observes THIS function's step-1 insertion, since the hook
+                // fires right after it), register a brand-new handle under
+                // the SAME id, then reap the cold entry only if it is still
+                // the SAME one observed by the snapshot — landing exactly
+                // between this function's `register_cold_entries` (already
+                // ran) and its `remove_and_get` (about to run).
+                let cold_entry_before_register = hook_cold.entry_token(&hook_id);
                 hook_registry.register(build_mock_handle("race-swap"));
-                hook_cold.mark_loaded(&hook_id);
+                hook_cold.mark_loaded_if(&hook_id, cold_entry_before_register);
             },
         )
         .await;
@@ -621,6 +673,163 @@ mod tests {
             hot,
             "the concurrent write's fresh registration must survive the race, \
              not be silently discarded by the losing park"
+        );
+    }
+
+    /// Deterministic reproduction of the round-5 CRITICAL finding on PR
+    /// #3995: with a handler's `register` landing entirely BEFORE this
+    /// function's `expected` snapshot (issue #3995 round 4's own documented,
+    /// believed-safe residual — "never an orphan, but a park that silently
+    /// reverts a very recent relocate"), an UNGUARDED reap of the cold-store
+    /// entry — the exact `ColdIndexStore::mark_loaded` semantics round 4
+    /// shipped at this call site — still orphans `id`. This is ordering
+    /// (0, *) in the round-5 re-derivation (see the module doc's
+    /// "Concurrent-write guard"): the handler's `register` (mark `g1`) lands
+    /// in gap 0 (before `expected` @ step 0.5), and its reap (mark `g2`)
+    /// lands in gap 2 (between step 1 `register_cold_entries` and step 2
+    /// `remove_and_get`) — one of the 2 (of 4) sub-orderings in that bucket
+    /// where the reap fires AT OR AFTER `register_cold_entries`.
+    ///
+    /// This test uses the OLD unconditional `ColdIndexStore::mark_loaded` —
+    /// still present (and still correct) for `get_or_load_index`'s own,
+    /// differently-guarded call site — to reproduce EXACTLY what round 4's
+    /// three handler call sites did before round 5. It is intentionally kept
+    /// in the permanent suite as a regression tripwire: this proves the bug
+    /// is real and reproducible, not merely a paper concern, and guards
+    /// against any FUTURE call site reintroducing a bare `mark_loaded` reap
+    /// after a `register` without going through `entry_token` +
+    /// `mark_loaded_if`. See `cold_park_index_handler_reap_guarded_before_park_never_orphans`
+    /// immediately below for the fixed counterpart using the pattern the real
+    /// handlers now follow.
+    #[tokio::test]
+    async fn cold_park_index_handler_naive_reap_before_park_orphans_index() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("handler-before-park".to_string());
+
+        // The handler's `register` has ALREADY landed by the time this park
+        // even starts — e.g. mid-sweep, before this specific id's turn in
+        // the sweep's per-id loop (a far wider, entirely ordinary window; no
+        // special timing required).
+        registry.register(build_mock_handle("handler-before-park"));
+
+        let hook_cold = cold.clone();
+        let hook_id = id.clone();
+
+        // The handler's own (unguarded, round-4-shipped) reap fires deep
+        // inside the park's critical section: preempted right after its own
+        // `register` above, it only resumes to run its `mark_loaded` once
+        // this thread yields the core — landing here, between this
+        // function's `register_cold_entries` (already ran) and
+        // `remove_and_get` (about to run).
+        let parked = cold_park_index_inner(
+            &id,
+            &registry,
+            &cold,
+            mk_entry("handler-before-park", Some(1)),
+            move || {
+                hook_cold.mark_loaded(&hook_id);
+            },
+        )
+        .await;
+
+        // `expected` (captured at step 0.5, AFTER the handler's register())
+        // already observed the handler's fresh handle, so the identity check
+        // at step 2 trivially matches and the park reports "success".
+        assert!(
+            parked,
+            "expected snapshot already matched the handler's pre-existing \
+             fresh handle, so the park proceeds \"successfully\""
+        );
+
+        let hot = registry.get(&id).is_some();
+        let is_cold = cold.contains(&id);
+        assert!(
+            !hot && !is_cold,
+            "reproduction of the round-5 CRITICAL orphan: an UNGUARDED reap \
+             deletes this function's own just-inserted cold entry, while \
+             this function's own step 2 has already removed the (matching) \
+             live handle — id ends up in NEITHER store — hot={hot} is_cold={is_cold}"
+        );
+    }
+
+    /// Fixed counterpart of
+    /// `cold_park_index_handler_naive_reap_before_park_orphans_index`: same
+    /// exact interleaving, but the handler's reap uses the issue #3995
+    /// round-5 pattern every real call site (`create_index_handler`,
+    /// `relocate_index_handler`, `reindex_handler`'s override) now follows —
+    /// snapshot `cold_store.entry_token(id)` BEFORE the handler's own
+    /// `register` call, then reap via `mark_loaded_if` afterward instead of
+    /// an unconditional `mark_loaded`.
+    ///
+    /// Because the handler's snapshot is taken before ANY of this park's
+    /// activity (nothing was cold yet), it observes `None`. By the time the
+    /// deferred reap actually runs (inside the hook, after this function's
+    /// `register_cold_entries` has inserted its own entry), the current
+    /// token is `Some` — a mismatch against the handler's `None` snapshot —
+    /// so `mark_loaded_if` correctly refuses to remove an entry it does not
+    /// recognize as its own. This function's own step 2 still detaches the
+    /// (matching) live handle, so the net effect is the documented,
+    /// accepted-out-of-scope residual: the id ends up parked cold under
+    /// stale metadata (a park that silently reverts a very-recent
+    /// relocate/reindex-override) rather than orphaned in neither store.
+    #[tokio::test]
+    async fn cold_park_index_handler_reap_guarded_before_park_never_orphans() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("handler-before-park-guarded".to_string());
+
+        // Handler's pre-register cold-store snapshot: captured before its
+        // own `register` call below, i.e. before ANY of this park's
+        // activity — nothing is cold yet, so this observes `None`.
+        let handler_snapshot = cold.entry_token(&id);
+        assert!(
+            handler_snapshot.is_none(),
+            "sanity: nothing has been parked yet"
+        );
+
+        registry.register(build_mock_handle("handler-before-park-guarded"));
+
+        let hook_cold = cold.clone();
+        let hook_id = id.clone();
+        let handler_snapshot_for_hook = handler_snapshot.clone();
+
+        let parked = cold_park_index_inner(
+            &id,
+            &registry,
+            &cold,
+            mk_entry("handler-before-park-guarded", Some(1)),
+            move || {
+                // Same deferred-reap timing as the naive-reap reproduction
+                // above, but using the round-5 guarded pattern: the reap
+                // only proceeds if the cold entry present now is STILL the
+                // one (`None`, in this ordering) the handler observed before
+                // its own register.
+                hook_cold.mark_loaded_if(&hook_id, handler_snapshot_for_hook);
+            },
+        )
+        .await;
+
+        assert!(
+            parked,
+            "expected snapshot already matched the handler's pre-existing \
+             fresh handle, so the park proceeds \"successfully\" — same as \
+             the naive-reap reproduction above"
+        );
+
+        let hot = registry.get(&id).is_some();
+        let is_cold = cold.contains(&id);
+        assert!(
+            hot ^ is_cold,
+            "after the race `id` must be in EXACTLY one of {{hot, cold}} — \
+             never neither (the round-5 CRITICAL orphan) — hot={hot} is_cold={is_cold}"
+        );
+        assert!(
+            is_cold,
+            "the guarded reap must refuse to remove an entry it did not \
+             observe as its own, so this function's own cold-store insertion \
+             survives — the id ends up parked cold (reverting the handler's \
+             very-recent write), not orphaned"
         );
     }
 }

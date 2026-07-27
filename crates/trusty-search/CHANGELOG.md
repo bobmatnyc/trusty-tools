@@ -92,6 +92,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   proven against a deterministic (synchronization-based, not timing-based)
   reproduction of the exact race.
 
+  **Adversarial re-review (fifth round BLOCK) found the round-4 fix itself
+  incomplete: `ColdIndexStore::mark_loaded` — the reap called by
+  `create_index_handler` / `relocate_index_handler` / `reindex_handler`'s
+  override, and internally by `cold_park_index_inner`'s own rollback path —
+  remained an unconditional `entries.remove(id)` with no identity/generation
+  check analogous to the `Arc::ptr_eq` guard round 4 added on the registry
+  side.** Of the 10 possible interleavings between `cold_park_index_inner`'s
+  three sequential steps and a concurrent handler's register+reap pair, round
+  4 correctly closed 6 (5 where the registry-side `Arc::ptr_eq` mismatch
+  triggers a rollback, plus 1 already-safe ordering) but left 2 of the
+  remaining 4 — where the handler's `register` lands entirely before the
+  park's `expected` snapshot, so the registry-side identity check trivially
+  matches — still able to orphan the index: the handler's later unconditional
+  `mark_loaded` reaps whatever is CURRENTLY parked under `id`, which by then
+  is the park's own freshly-and-legitimately-inserted cold entry, not the
+  stale leftover it believes it's cleaning up. Reproduced by execution
+  (`cold_park_index_handler_naive_reap_before_park_orphans_index`): `parked =
+  true, hot = false, is_cold = false` — reachable in neither store. Fixed by
+  giving `ColdIndexStore` the identical identity discipline
+  `IndexRegistry::restore` already applies: every cold-store insertion
+  (`register_cold_entries`) is now stamped with a fresh, `Arc::ptr_eq`-
+  comparable identity token (`ColdEntry.token`); `entry_token(id)` lets a
+  caller snapshot "the entry I observed" immediately before its own write;
+  and the new `mark_loaded_if(id, expected_token)` — the guarded counterpart
+  to `mark_loaded` — only removes the entry when the CURRENT token still
+  matches what was snapshotted (or both are `None`), leaving a mismatched
+  reap as a safe no-op instead of deleting an entry it doesn't recognize. All
+  three handler call sites and `cold_park_index_inner`'s own rollback now
+  snapshot-then-guard via this pattern instead of calling `mark_loaded`
+  unconditionally; `mark_loaded` itself is unchanged and remains correct for
+  `get_or_load_index`'s call site, which is already serialized by the
+  per-index `loading_gate` mutex and `cold_park_index`'s in-flight guard.
+  `cold_park_index_handler_reap_guarded_before_park_never_orphans` proves the
+  fixed counterpart of the same interleaving no longer orphans the id (it
+  degrades to the pre-existing, disclosed "stale but present" residual
+  instead).
+
 - **Test-side remediation for `create_index`/`relocate_index` tests spuriously
   denied by the sensitive-path denylist (issue #3955).** `SENSITIVE_PATH_PREFIXES`
   denies `/tmp/`, `/private/tmp`, and `/var/folders` — which on macOS is where

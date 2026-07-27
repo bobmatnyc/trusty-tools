@@ -34,6 +34,8 @@ mod typeahead;
 
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
+mod collision_3993_tests;
+#[cfg(test)]
 mod list_repo_identity_tests;
 #[cfg(test)]
 mod test_support;
@@ -45,8 +47,6 @@ mod tests_2336;
 mod tests_2984;
 #[cfg(test)]
 mod tests_3304;
-#[cfg(test)]
-mod tests_3993;
 #[cfg(test)]
 mod tests_829;
 #[cfg(test)]

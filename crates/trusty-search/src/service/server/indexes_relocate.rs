@@ -336,6 +336,12 @@ pub(super) async fn relocate_index_handler(
         walk_diagnostics: Arc::clone(&existing.walk_diagnostics),
     };
 
+    // Issue #3995 round 5 (CRITICAL): snapshot the cold-store entry (if any)
+    // parked under `index_id` BEFORE registering the replacement handle below
+    // — the "expected" half of the identity guard, mirrored from
+    // `create_index_handler`. See `mark_loaded_if` below for why.
+    let cold_entry_before_register = state.cold_store.entry_token(&index_id);
+
     // Atomically replace the in-memory registry entry.
     state.registry.register(new_handle);
 
@@ -354,7 +360,15 @@ pub(super) async fn relocate_index_handler(
     // cheap point to self-heal the invariant rather than leaving the old
     // root permanently poisoned. Keyed by `IndexId`, so it can only ever
     // touch this id's own record.
-    state.cold_store.mark_loaded(&index_id);
+    //
+    // Issue #3995 round 5 (CRITICAL): identity-guarded against
+    // `cold_entry_before_register` — see `create_index_handler`'s identical
+    // comment and `ColdIndexStore::mark_loaded_if` for the race this closes
+    // (a concurrent residency-sweep park inserting a fresh cold entry for
+    // this same id in the window between the snapshot above and here).
+    state
+        .cold_store
+        .mark_loaded_if(&index_id, cold_entry_before_register);
 
     // Update `indexed_root` in the corpus `_meta` table so the root-move
     // detection in `spawn_reindex_with_cleanup` does NOT fire on the next

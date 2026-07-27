@@ -301,7 +301,7 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
 /// second round): `create_index_rejects_root_path_owned_by_cold_entry`,
 /// `relocate_index_rejects_root_path_owned_by_cold_entry`,
 /// `reindex_root_override_rejects_collision_with_cold_entry` in
-/// `tests_3993.rs`.
+/// `collision_3993_tests.rs`.
 pub(crate) fn find_root_path_collision(
     handles: &[std::sync::Arc<IndexHandle>],
     cold_entries: &[crate::service::persistence::PersistedIndex],
