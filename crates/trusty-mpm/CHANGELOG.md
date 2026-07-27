@@ -9,6 +9,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Agent delegations are now tracked automatically, with a real lifecycle**
+  ([#2864](https://github.com/bobmatnyc/trusty-tools/issues/2864), slices
+  S1+S2): the daemon observes every native subagent dispatch from the
+  `PreToolUse` hook it already receives on every managed session, so tracking no
+  longer depends on the PM voluntarily calling `agent_delegate`. Delegations move
+  `Running` → `Completed`/`Failed` instead of sitting in `Queued` forever, and a
+  `Delegation` now carries `source`, `tool_use_id`, `agent_id`,
+  `transcript_path`, `cwd`, `started_at`, and `ended_at`. A dispatch that both
+  declares (`agent_delegate`) and executes produces one record, not two.
+- **`tm hook` forwards Claude Code's subagent correlation keys** (#2864):
+  `tool_use_id` and `transcript_path` on tool events, and `agent_id` /
+  `agent_type` / `agent_transcript_path` on `SubagentStop`. A `tool_response` is
+  relayed only for a subagent-dispatch tool and only as a fixed five-key
+  projection, so an ordinary tool's output is never forwarded. All fields are
+  additive.
+
+### Fixed
+
+- **The idle nudge is no longer suppressed forever by a single delegation**
+  (#2864): `has_live_children` treats `Queued`/`Running` as live, but nothing
+  ever advanced a delegation out of `Queued`, so any session that had delegated
+  once looked permanently busy. Delegations now terminalize on `SubagentStop`,
+  correlated exactly by `agent_id`, so concurrent subagents close independently
+  and finishing one never closes another.
+
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
   (worktree-hygiene follow-up to

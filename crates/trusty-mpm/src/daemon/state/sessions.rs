@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use crate::core::agent::Delegation;
+use crate::core::agent::{Delegation, DelegationId, DelegationStatus};
 use crate::core::project::ProjectInfo;
 use crate::core::session::{Session, SessionId};
 
@@ -422,6 +422,65 @@ impl DaemonState {
             .filter(|e| e.value().session == session)
             .map(|e| e.value().clone())
             .collect()
+    }
+
+    /// Find one session's delegation matching `pred`, returning its id (#2864).
+    ///
+    /// Why: the hook delegation tracker resolves a record by correlation key
+    /// (`tool_use_id` or `agent_id`) and then mutates it. Returning the id
+    /// rather than the record keeps the scan's read guards from overlapping the
+    /// subsequent write, which would deadlock a `DashMap` shard.
+    /// What: scans this session's delegations and returns the first match's
+    /// [`DelegationId`], or `None`. The session filter is what stops one
+    /// session's `SubagentStop` from resolving another's child.
+    /// Test: `daemon::services::delegation_tracker` suite, in particular
+    /// `delegations_are_scoped_per_session`.
+    pub fn find_delegation(
+        &self,
+        session: SessionId,
+        pred: impl Fn(&Delegation) -> bool,
+    ) -> Option<DelegationId> {
+        self.delegations
+            .iter()
+            .find(|e| e.value().session == session && pred(e.value()))
+            .map(|e| e.value().id)
+    }
+
+    /// Apply `f` to one delegation in place (#2864).
+    ///
+    /// Why: hook correlation updates a few fields of an existing record
+    /// (status, `agent_id`, tier, timestamps); a read-clone-reinsert cycle would
+    /// race a concurrent update from another hook event.
+    /// What: takes the entry's write guard and runs `f`. Returns `false` when no
+    /// such delegation exists. `f` must not touch the delegation store — it runs
+    /// under a shard lock.
+    /// Test: `daemon::services::delegation_tracker` suite.
+    pub fn mutate_delegation(&self, id: DelegationId, f: impl FnOnce(&mut Delegation)) -> bool {
+        match self.delegations.get_mut(&id.0) {
+            Some(mut entry) => {
+                f(entry.value_mut());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Move one delegation to a terminal status, stamping `ended_at` (#2864).
+    ///
+    /// Why: before #2864 nothing ever left `Queued`, so
+    /// [`has_live_children`](crate::daemon::idle_nudge::has_live_children)
+    /// reported every delegation as live forever and permanently suppressed the
+    /// idle nudge. This is the mutator that closes a delegation out.
+    /// What: sets `status` and stamps `ended_at` with the current time. Returns
+    /// `false` when no such delegation exists. Callers are responsible for only
+    /// passing a terminal [`DelegationStatus`].
+    /// Test: `subagent_stop_completes_matching_delegation`,
+    /// `concurrent_delegations_terminalize_independently`.
+    pub fn terminate_delegation(&self, id: DelegationId, status: DelegationStatus) -> bool {
+        self.mutate_delegation(id, |d| {
+            d.status = status;
+            d.ended_at = Some(chrono::Utc::now());
+        })
     }
 
     /// Reap managed sessions whose tmux session has disappeared.
