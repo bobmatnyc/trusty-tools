@@ -268,35 +268,39 @@ export interface KnowledgeEndpoint {
 /**
  * Why (DOC-57 §8.5): Phase 1 maps the Knowledge pane's K-c sub-surface onto "a
  * read-only, statically-declared MCP knowledge-endpoint list", because no
- * route exposes `[[tool_registry.endpoints]]` yet. §4.4 is emphatic about WHAT
- * such a list must say: the two endpoints most obviously "MCP connections to
- * knowledge stores" ship `enabled = false` (awaiting `--rpc` on their
- * binaries), so the agent's memory and search capability today flows through
- * in-process tools, not through these endpoints. Rendering a
- * configured-but-disabled endpoint as connected — or omitting it — is the same
- * class of defect as the fabricated listener pane (C-03.2).
+ * route exposes live MCP connection state yet. §4.4 is emphatic about WHAT
+ * such a list must say: `trusty-memory` and `trusty-search` used to ship as
+ * `[[tool_registry.endpoints]]` OpenRPC entries with `enabled = false`
+ * (awaiting a `--rpc` stdio mode neither binary ever implemented — genuinely
+ * dead config, not merely disabled-by-default). Both binaries already
+ * implement the generic MCP-stdio protocol trusty-agents uses for
+ * `trusty-mpm`/`granola-notes`, so the fix moved them to live
+ * `[[mcp.services]]` entries (`enabled = true`, `discover = true`) instead of
+ * waiting on a driver that will never ship. Rendering a
+ * configured-but-disabled endpoint as connected — or a configured-and-enabled
+ * one as disabled — is the same class of defect as the fabricated listener
+ * pane (C-03.2).
  * What: The three knowledge endpoints declared in this crate's shipped
- * `assets/config/default-config.toml:193-243`, verbatim including their
- * `enabled` flags and scopes. This is the DEFAULT declaration; an operator who
+ * `assets/config/default-config.toml` `[[mcp.services]]` section, mirroring
+ * their `enabled` flags. This is the DEFAULT declaration; an operator who
  * has edited `~/.trusty-agents/config.toml` may have flipped a flag, which is
  * why the pane labels the list as declared-not-probed and Phase 3's
  * `GET /api/agents/:name/knowledge` (§4.5) replaces it with resolved state.
- * Test: `knowledgeEndpoints_report_the_shipped_disabled_defaults`.
+ * Test: `knowledgeEndpoints_report_the_shipped_defaults`.
  */
 export const KNOWLEDGE_MCP_ENDPOINTS: KnowledgeEndpoint[] = [
   {
     name: 'trusty-memory',
-    description: 'Trusty memory service — recall/remember/forget',
-    enabled: false,
+    description: 'Trusty memory service — recall/remember/forget over a native MCP-stdio server',
+    enabled: true,
     scopes: ['memory.read', 'memory.write'],
-    reason: 'disabled in the shipped config — awaits `--rpc` mode on the binary',
   },
   {
     name: 'trusty-search',
-    description: 'Trusty search service — semantic + keyword code search',
-    enabled: false,
+    description:
+      'Trusty search service — semantic + keyword code/knowledge search over a native MCP-stdio server',
+    enabled: true,
     scopes: ['search.read'],
-    reason: 'disabled in the shipped config — awaits `--rpc` mode on the binary',
   },
   {
     name: 'gworkspace',
