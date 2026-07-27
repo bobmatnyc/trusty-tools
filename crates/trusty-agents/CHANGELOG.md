@@ -20,7 +20,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   into the SAME persona-chat dispatch gate the route reports on (so the
   claim is never aspirational); every other field (`user_authority`, tiers,
   `autonomy`, `grants`) is honestly `enforced: false`, since none has a live
-  enforcement site yet. `[permissions].scopes` supersedes legacy
+  enforcement site yet. `enforced: true` is **qualified**, not universal:
+  each `scopes[]` element also carries `enforced_on: ["persona_chat"]`,
+  because `effective_scopes` gates the persona-chat dispatch path only — the
+  `--direct`/subprocess path (`runtime::subagent_mode` →
+  `scope_assistant_allowed_tools`) filters by `[tools].allow` name globs and
+  never consults a scope pattern, so an agent invoked via `tagent --direct`
+  is not scope-restricted by anything this pane reports (#3987/#4093 track
+  unifying the two paths). `[permissions].scopes` supersedes legacy
   `[tools].scopes` within one file (CC-9 — the union is deliberately not
   taken) but still unions base-first across `extends` (§2.3), so a
   partially-migrated inheritance chain never silently drops a base's

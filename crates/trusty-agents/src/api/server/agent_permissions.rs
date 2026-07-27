@@ -11,13 +11,25 @@
 //! - Every element carries an `enforced` boolean. `scopes[]` is `enforced:
 //!   true` — `agents::permissions::effective_scopes` (the SAME function
 //!   `ctrl::pm_task::dispatch::persona` calls) feeds the SAME
-//!   `agent_can_use`/`ScopePattern` gate on the persona-chat path, so this is
-//!   not aspirational. Every other field (`user_authority`, `tiers`,
-//!   `autonomy`, `grants`) is `enforced: false` — none has a live enforcement
-//!   site in this crate yet (tiers: DOC-57 §7.1 mechanism 3, "`[rbac]` block
-//!   has no read site"; `user_authority`: #3074/#3075; `autonomy`: PM-2,
-//!   DOC-23 owns the real model; `grants`: PM-1/PM-4, no enforcement site by
-//!   design in this phase).
+//!   `agent_can_use`/`ScopePattern` gate — so this is not aspirational, BUT it
+//!   is **not universal either**. `effective_scopes` is called from exactly
+//!   ONE dispatch path in this crate: the persona-chat gate
+//!   (`ctrl::pm_task::dispatch::persona`). The `--direct`/subprocess path
+//!   (`runtime::subagent_mode` → `runtime::tool_registry::scope_assistant_allowed_tools`)
+//!   filters purely by `[tools].allow` NAME globs and never reads
+//!   `tools.scopes`, `permissions.scopes`, `ScopePattern`, or `agent_can_use`
+//!   at all — an agent invoked via `tagent --direct` is NOT scope-restricted
+//!   by anything this pane reports. Each scope element therefore ALSO carries
+//!   `enforced_on: ["persona_chat"]` ([`SCOPE_ENFORCED_ON`]) so the JSON
+//!   contract itself says so, not just this doc comment — a bare `enforced:
+//!   true` with no qualifier is exactly the half-true "some path enforces
+//!   this" reading that made #4018 a half-fix (#3987/#4093 track unifying the
+//!   two paths; not attempted here). Every other field (`user_authority`,
+//!   `tiers`, `autonomy`, `grants`) is `enforced: false` — none has a live
+//!   enforcement site in this crate yet (tiers: DOC-57 §7.1 mechanism 3,
+//!   "`[rbac]` block has no read site"; `user_authority`: #3074/#3075;
+//!   `autonomy`: PM-2, DOC-23 owns the real model; `grants`: PM-1/PM-4, no
+//!   enforcement site by design in this phase).
 //! - `source` distinguishes `declared` (in this agent's OWN file) from
 //!   `inherited:<base>` (only reachable via its immediate `extends` target),
 //!   so the DOC-57 §7.3 class of defect (an agent granting tools whose
@@ -47,6 +59,21 @@ use super::state::AppState;
 use crate::agents::permissions::{PermissionsConfig, effective_scopes};
 use crate::agents::{AgentConfig, RbacConfig, ToolsConfig};
 use crate::rbac::ServiceTier;
+
+/// The dispatch path(s) `agents::permissions::effective_scopes` actually
+/// gates, named on every `scopes[]` element (`enforced_on`).
+///
+/// Why: `enforced: true` alone reads as universal. It is not — the
+/// `--direct`/subprocess path (`runtime::subagent_mode` →
+/// `runtime::tool_registry::scope_assistant_allowed_tools`) filters by
+/// `[tools].allow` name globs only and never consults a scope pattern at
+/// all. Naming the ONE path that does (module doc) in the wire contract
+/// itself, not only in a comment, is what keeps this pane from overstating
+/// its own reach — the exact failure class (#4018) this crate has already
+/// shipped once.
+/// What: A single-element list today; grows if/when #3987/#4093 unify the
+/// two dispatch paths' scope enforcement.
+const SCOPE_ENFORCED_ON: &[&str] = &["persona_chat"];
 
 /// `GET /api/agents/:name/permissions` — HTTP entry point.
 ///
@@ -150,7 +177,15 @@ pub(super) async fn permissions_at(dirs: &[PathBuf], name: &str) -> Response {
                 // than asserting a provenance we cannot back.
                 "declared".to_string()
             };
-            json!({ "pattern": pattern, "source": source, "enforced": true })
+            json!({
+                "pattern": pattern,
+                "source": source,
+                "enforced": true,
+                // Qualifies the boolean above — see `SCOPE_ENFORCED_ON`'s doc
+                // and the module doc's PM-6 bullet: this is NOT universal,
+                // the `--direct`/subprocess dispatch path never reaches it.
+                "enforced_on": SCOPE_ENFORCED_ON,
+            })
         })
         .collect();
 
