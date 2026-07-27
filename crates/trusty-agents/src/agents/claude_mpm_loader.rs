@@ -98,6 +98,7 @@ impl ClaudeMpmAgent {
                 kind: "assistant".to_string(),
                 prompt_label: None,
                 extends: None,
+                tier: None,
             },
             llm: LlmParams {
                 temperature: 0.3,

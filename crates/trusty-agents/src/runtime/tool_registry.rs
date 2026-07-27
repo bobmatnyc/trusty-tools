@@ -159,6 +159,14 @@ pub(crate) const ASSISTANT_ALLOWED_DELEGATE_ROLES: &[&str] = &[
 /// `delegate_to_agent` tool THIS agent registers narrows whatever it spawns
 /// to this agent's own tool posture. Ignored (and safe to pass `None`) for
 /// every non-assistant-tier role.
+///
+/// `delegator_tier` (#4169, epic #4167 — one-directional L0/L1 delegation
+/// gate): THIS agent's own resolved `AgentInfo::tier()`. Passed straight
+/// through to `build_assistant_tier_registry` so the `delegate_to_agent`
+/// tool this agent registers refuses to target an L0-orchestration
+/// specialist unless this agent is itself L0. Ignored for every
+/// non-assistant-tier role (those never register `delegate_to_agent` at
+/// all — see `build_assistant_tier_registry`'s doc comment).
 pub(super) fn build_registry_for_agent(
     name: &str,
     role: &str,
@@ -167,9 +175,13 @@ pub(super) fn build_registry_for_agent(
     skill_registry: Arc<skills::SkillRegistry>,
     tag_skill_registry: Arc<skills::registry::SkillRegistry>,
     delegator_allow: Option<&[String]>,
+    delegator_tier: crate::agents::AgentTier,
 ) -> Option<ToolRegistry> {
     if role == ASSISTANT_TIER_ROLE {
-        return Some(build_assistant_tier_registry(delegator_allow));
+        return Some(build_assistant_tier_registry(
+            delegator_allow,
+            delegator_tier,
+        ));
     }
     // #222: When `code_dir` is set and distinct from `out_dir`, the code-agent
     // and any future tool that writes *generated source files* should root at
@@ -461,7 +473,22 @@ pub(super) fn build_registry_for_agent(
 /// list rather than skipping tainting — fail-closed, not fail-open: a
 /// mis-configured or absent allow-list denies the child every tool rather
 /// than granting it every tool.
-pub(super) fn build_assistant_tier_registry(delegator_allow: Option<&[String]>) -> ToolRegistry {
+///
+/// `delegator_tier` (#4169, epic #4167 — one-directional L0/L1 delegation
+/// gate): this agent's own resolved `AgentInfo::tier()`, threaded into the
+/// `DelegateToAgentTool` via `with_delegator_tier` (always called here,
+/// alongside `with_allowed_target_roles`) so its pre-flight check refuses
+/// any target that resolves to `AgentTier::L0Orchestration` unless THIS
+/// agent is itself L0. If a call to this function ever omitted the
+/// `with_delegator_tier` wiring, `DelegateToAgentTool` would STILL enforce
+/// the tier gate fail-closed to `AgentTier::L1Standard` (because
+/// `with_allowed_target_roles` is always called here too — see
+/// `DelegateToAgentTool::delegator_tier`'s doc comment for the
+/// belt-and-suspenders rule), never silently skip it.
+pub(super) fn build_assistant_tier_registry(
+    delegator_allow: Option<&[String]>,
+    delegator_tier: crate::agents::AgentTier,
+) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
     let cwd = std::env::current_dir().unwrap_or_default();
 
@@ -515,7 +542,8 @@ pub(super) fn build_assistant_tier_registry(delegator_allow: Option<&[String]>) 
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
-            ),
+            )
+            .with_delegator_tier(delegator_tier),
     ));
 
     // #3745 item C: register the izzie platform-hosted tools

@@ -289,6 +289,43 @@ SYSTEM PROMPT BODY HERE
     assert_eq!(caps.tags, vec!["rest-api"]);
 }
 
+/// #4168 (epic #4167): `.md` frontmatter's `tier` key parses and mirrors
+/// the TOML `[agent].tier` fail-closed contract — absent resolves to L1,
+/// an explicit `tier: orchestration` resolves to L0.
+#[test]
+fn md_frontmatter_tier_parses_and_defaults_absent() {
+    let dir = TempDir::new().unwrap();
+
+    let no_tier = r#"---
+name: md-agent-no-tier
+role: assistant
+model: anthropic/claude-sonnet-4-6
+description: no tier declared
+---
+body
+"#;
+    let path = dir.path().join("md-agent-no-tier.md");
+    fs::write(&path, no_tier).unwrap();
+    let cfg = parse_md_agent(&path).expect("md parses");
+    assert_eq!(cfg.agent.tier, None);
+    assert_eq!(cfg.agent.tier(), crate::agents::AgentTier::L1Standard);
+
+    let with_tier = r#"---
+name: md-agent-l0
+role: assistant
+model: anthropic/claude-sonnet-4-6
+description: declares orchestration tier
+tier: orchestration
+---
+body
+"#;
+    let path = dir.path().join("md-agent-l0.md");
+    fs::write(&path, with_tier).unwrap();
+    let cfg = parse_md_agent(&path).expect("md parses");
+    assert_eq!(cfg.agent.tier.as_deref(), Some("orchestration"));
+    assert_eq!(cfg.agent.tier(), crate::agents::AgentTier::L0Orchestration);
+}
+
 #[test]
 fn registry_picks_up_md_files_alongside_toml() {
     let dir = TempDir::new().unwrap();

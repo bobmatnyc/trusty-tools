@@ -9,6 +9,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **Defined the L0/L1 persona privilege tier and made the L1->L0 delegation
+  path structurally forbidden (#4168, #4169, epic #4167).** Added an
+  explicit `AgentTier` (`AgentInfo::tier`, TOML `[agent].tier` / `.md`
+  frontmatter `tier`), decoupled from `role`, that fails closed to
+  `L1Standard` on an absent, blank, or unrecognized value — never `L0`.
+  `delegate_to_agent` now refuses any call where the resolved TARGET's tier
+  is `L0Orchestration` unless the DELEGATOR's own tier is also
+  `L0Orchestration`, checked at every dispatch path that can construct a
+  `DelegateToAgentTool` (the `--direct`/`--agent` subprocess path, the
+  persona-chat REPL path, and the ctrl history/session path), including
+  through a peer-assistant delegation hop — no chain of L1 hops can reach
+  L0. This PR defines the tier and the boundary only; it grants L0 no new
+  capabilities and creates no L0 persona instance (those are #4170-#4173).
+
 - **Closed a prompt-injection-to-arbitrary-code-execution path through
   `delegate_to_agent` (#4126).** An assistant-tier persona (`assistant`,
   `cto-assistant`, `izzie`) holding live external-content tools

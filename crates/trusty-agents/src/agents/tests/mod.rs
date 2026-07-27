@@ -670,3 +670,97 @@ allowed = ["research", "ticketing"]
         Some(&["git_log".to_string()][..])
     );
 }
+
+// --- `AgentInfo::tier` (#4168, epic #4167 — L0/L1 orchestration model) ---
+//
+// Fail-closed contract: absent, blank, or unrecognized `[agent].tier` must
+// NEVER resolve to `AgentTier::L0Orchestration` — only an explicit,
+// recognized declaration does.
+
+fn agent_toml_with_tier(tier_line: &str) -> String {
+    format!(
+        r#"
+[agent]
+name = "x"
+role = "x"
+model = "x"
+description = "x"
+{tier_line}
+
+[llm]
+temperature = 0.0
+max_tokens = 1024
+
+[system_prompt]
+content = "base"
+"#
+    )
+}
+
+#[test]
+fn agent_tier_defaults_to_l1_when_absent() {
+    // No `tier` key at all — the state of every persona TOML shipped before
+    // #4168, and the overwhelming majority going forward.
+    let cfg: AgentConfig = toml::from_str(&agent_toml_with_tier("")).expect("parses");
+    assert_eq!(cfg.agent.tier, None);
+    assert_eq!(cfg.agent.tier(), crate::agents::AgentTier::L1Standard);
+}
+
+#[test]
+fn agent_tier_parses_l0_orchestration_aliases() {
+    for alias in ["l0", "L0", "orchestration", "Orchestration", "  l0  "] {
+        let cfg: AgentConfig =
+            toml::from_str(&agent_toml_with_tier(&format!(r#"tier = "{alias}""#))).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            crate::agents::AgentTier::L0Orchestration,
+            "alias {alias:?} must resolve to L0Orchestration"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_parses_l1_standard_aliases() {
+    for alias in ["l1", "L1", "standard", "Standard"] {
+        let cfg: AgentConfig =
+            toml::from_str(&agent_toml_with_tier(&format!(r#"tier = "{alias}""#))).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            crate::agents::AgentTier::L1Standard,
+            "alias {alias:?} must resolve to L1Standard"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_unknown_value_fails_closed_to_l1() {
+    // The core fail-closed requirement: a malformed/unrecognized value must
+    // NEVER silently become the elevated tier.
+    for bogus in ["orchestrator", "l2", "yolo", "L0RCHESTRATION", "true"] {
+        let cfg: AgentConfig =
+            toml::from_str(&agent_toml_with_tier(&format!(r#"tier = "{bogus}""#))).expect("parses");
+        assert_eq!(
+            cfg.agent.tier(),
+            crate::agents::AgentTier::L1Standard,
+            "unrecognized tier value {bogus:?} must fail closed to L1Standard, never L0"
+        );
+    }
+}
+
+#[test]
+fn agent_tier_blank_value_fails_closed_to_l1() {
+    let cfg: AgentConfig =
+        toml::from_str(&agent_toml_with_tier(r#"tier = "   ""#)).expect("parses");
+    assert_eq!(cfg.agent.tier(), crate::agents::AgentTier::L1Standard);
+}
+
+#[test]
+fn agent_tier_default_trait_is_l1_standard() {
+    // `AgentTier::default()` (used as the fail-closed default in
+    // `DelegateToAgentTool::new`) must be `L1Standard`, not derived
+    // accidentally onto the wrong variant by a future field reorder.
+    assert_eq!(
+        crate::agents::AgentTier::default(),
+        crate::agents::AgentTier::L1Standard
+    );
+}

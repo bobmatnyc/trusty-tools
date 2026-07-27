@@ -81,6 +81,47 @@ pub struct DelegateToAgentTool {
     /// `delegate_assistant_role_gate_allows_worker_role`,
     /// `delegate_assistant_role_gate_allows_peer_assistant_role`.
     allowed_target_roles: Option<Vec<String>>,
+    /// This instance's OWN privilege tier — the DELEGATOR's tier, not the
+    /// target's (#4169, epic #4167 — one-directional L0/L1 delegation gate).
+    ///
+    /// Why: L0 (orchestration) personas carry PM-tier grants under a YOLO
+    /// posture the owner explicitly accepts; L1 (standard) personas are the
+    /// documented black-box tier and may ingest untrusted content (Gmail/
+    /// Drive/web). If an L1 persona could delegate INTO an L0 target,
+    /// untrusted content would acquire the owner's L0 grant just by asking
+    /// the L1 persona to hand the work down — issue #4126's class,
+    /// reachable through a new path. Privilege must never be acquirable via
+    /// delegation, so this check is layered ON TOP of (never a replacement
+    /// for) the existing taint-composition machinery (#4161's
+    /// `compose_delegation_taint`) and the `allowed_target_roles` gate
+    /// above — an independent dimension, checked whenever EITHER
+    /// `allowed_target_roles` is set OR this field is explicitly set (see
+    /// `execute`'s `needs_full_resolution`).
+    /// What: `None` (the default — every caller that constructs a
+    /// `DelegateToAgentTool` and never calls `with_delegator_tier`, which
+    /// includes `pm`/`ctrl`-as-orchestrator's own unrestricted delegation
+    /// and pre-#4169 tests exercising unrelated resolution behavior with
+    /// bare/incomplete fixture TOMLs) means "this instance was never asked
+    /// to enforce the tier gate" — byte-identical to pre-#4169 behavior,
+    /// including the cheap existence-only pre-flight check when
+    /// `allowed_target_roles` is ALSO unset. `Some(tier)` (every real
+    /// assistant-tier / persona-chat construction site in this crate) means
+    /// "enforce the gate using `tier` as this delegator's own tier" and
+    /// forces full `AgentConfig` resolution so the target's tier can be
+    /// read. When `allowed_target_roles` IS set but this field was left
+    /// `None` (a caller that opted into role-gating but forgot tier), the
+    /// check still runs with a FAIL-CLOSED `AgentTier::L1Standard` default
+    /// (via `unwrap_or_default()`) — belt-and-suspenders: the population
+    /// that cares about role-gating can never silently skip tier-gating
+    /// too. Set explicitly via `with_delegator_tier`.
+    /// Test: `delegate_l1_to_l0_is_refused`, `delegate_l0_to_l1_succeeds`,
+    /// `delegate_l1_to_l1_is_unaffected_by_tier_gate`,
+    /// `delegate_multi_hop_l1_peer_to_l0_is_refused`,
+    /// `delegate_tier_gate_applies_even_without_role_allowlist`,
+    /// `delegate_role_gate_without_declared_tier_fails_closed_to_l1`,
+    /// `no_tier_and_no_role_gate_preserves_cheap_existence_check`,
+    /// `delegator_tier_defaults_to_none_on_construction`.
+    delegator_tier: Option<crate::agents::AgentTier>,
     /// #3737 (per-message chat attribution, epic #3052): the id of the task
     /// whose turn this tool is delegating within, used as the `session_id` on
     /// the `AgentSpawned` event emitted on a successful delegation so the API
@@ -115,6 +156,7 @@ impl DelegateToAgentTool {
             runner,
             config_dirs: Vec::new(),
             allowed_target_roles: None,
+            delegator_tier: None,
             session_id: None,
         }
     }
@@ -207,6 +249,26 @@ impl DelegateToAgentTool {
         self.allowed_target_roles = Some(roles);
         self
     }
+
+    /// Declare THIS instance's own delegator tier (#4169, epic #4167).
+    ///
+    /// Why: See the `delegator_tier` field doc for the full rationale.
+    /// Every production call site that constructs a `DelegateToAgentTool`
+    /// for an assistant-tier (persona) caller must call this with that
+    /// caller's own resolved `AgentInfo::tier()` so the one-directional
+    /// L1->L0 gate has something to check against. Callers representing a
+    /// caller OUTSIDE the persona tier model entirely — `pm`/`ctrl`-as-
+    /// orchestrator, already fully trusted and already unaffected by
+    /// `allowed_target_roles` — pass [`crate::agents::AgentTier::L0Orchestration`]
+    /// explicitly to mean "this caller is not gated by the L0/L1 boundary",
+    /// not because it IS an L0 persona.
+    /// What: Stores `Some(tier)`, which — combined with `config_dirs` being
+    /// non-empty — forces full target resolution so the tier gate can run.
+    /// Test: `delegate_l1_to_l0_is_refused`, `delegate_l0_to_l1_succeeds`.
+    pub fn with_delegator_tier(mut self, tier: crate::agents::AgentTier) -> Self {
+        self.delegator_tier = Some(tier);
+        self
+    }
 }
 
 #[async_trait]
@@ -282,27 +344,68 @@ impl ToolExecutor for DelegateToAgentTool {
         // "unknown name" and "role not allowed" cases return the identical
         // generic message below so neither leaks which one occurred.
         if !self.config_dirs.is_empty() {
-            let rejected = if let Some(allowed_roles) = &self.allowed_target_roles {
+            // #4169 (epic #4167): the one-directional L0/L1 delegation gate.
+            // `needs_full_resolution` decides whether the cheap
+            // existence-only check (pre-#4169 behavior, byte-identical for
+            // every caller that opts into NEITHER gate — `pm`/`ctrl`-as-
+            // orchestrator's own unrestricted delegation, and any test
+            // exercising unrelated resolution behavior with bare fixture
+            // TOMLs) is enough, or whether the target must be fully parsed
+            // so its role AND tier can be inspected. Triggered by EITHER
+            // gate being requested — `allowed_target_roles.is_some()`
+            // (unchanged from pre-#4169) OR `delegator_tier.is_some()` (new):
+            // a caller that opts into tier-gating must get it even if it
+            // never set a role allowlist (this is exactly the persona-chat
+            // dispatch path's historical shape — see
+            // `ctrl::pm_task::dispatch::persona`).
+            let needs_full_resolution =
+                self.allowed_target_roles.is_some() || self.delegator_tier.is_some();
+            let (rejected, tier_blocked) = if needs_full_resolution {
+                // Fail-closed default (#4169 constraint 1): a caller that DID
+                // opt into role-gating but never declared its own tier is
+                // still checked as if it were L1Standard — the population
+                // that cares enough to role-gate can never silently skip
+                // tier-gating too.
+                let delegator_tier = self.delegator_tier.unwrap_or_default();
                 match crate::agents::AgentConfig::by_name_in(&self.config_dirs, agent_name) {
                     Ok(cfg) => {
-                        let allowed = allowed_roles.iter().any(|r| r == &cfg.agent.role);
-                        if !allowed {
-                            tracing::debug!(
+                        let target_tier = cfg.agent.tier();
+                        let tier_blocked = target_tier == crate::agents::AgentTier::L0Orchestration
+                            && delegator_tier != crate::agents::AgentTier::L0Orchestration;
+                        if tier_blocked {
+                            tracing::warn!(
                                 agent_name,
-                                target_role = %cfg.agent.role,
-                                allowed_roles = ?allowed_roles,
-                                "delegate_to_agent: target role not in the assistant-tier allowlist"
+                                delegator_tier = ?delegator_tier,
+                                target_tier = ?target_tier,
+                                "delegate_to_agent: refusing an L1-tier delegation into an \
+                                 L0-orchestration target — privilege cannot be acquired via \
+                                 delegation"
                             );
                         }
-                        !allowed
+                        let role_ok = match &self.allowed_target_roles {
+                            Some(allowed_roles) => {
+                                let allowed = allowed_roles.iter().any(|r| r == &cfg.agent.role);
+                                if !allowed {
+                                    tracing::debug!(
+                                        agent_name,
+                                        target_role = %cfg.agent.role,
+                                        allowed_roles = ?allowed_roles,
+                                        "delegate_to_agent: target role not in the assistant-tier allowlist"
+                                    );
+                                }
+                                allowed
+                            }
+                            None => true,
+                        };
+                        (tier_blocked || !role_ok, tier_blocked)
                     }
                     Err(e) => {
                         tracing::debug!(
                             agent_name,
                             error = %format!("{e:#}"),
-                            "delegate_to_agent: role-gated target failed to resolve"
+                            "delegate_to_agent: gated target failed to resolve"
                         );
-                        true
+                        (true, false)
                     }
                 }
             } else if !crate::agents::agent_name_resolves(&self.config_dirs, agent_name) {
@@ -311,10 +414,28 @@ impl ToolExecutor for DelegateToAgentTool {
                     config_dirs = ?self.config_dirs,
                     "delegate_to_agent: agent not found in any candidate directory"
                 );
-                true
+                (true, false)
             } else {
-                false
+                (false, false)
             };
+            if tier_blocked {
+                // #4169 AC: "error message educates the user on the
+                // constraint" — deliberately DISTINCT from the generic
+                // roster-hiding message below. Unlike the anti-roster-leak
+                // rationale for an unknown-name/disallowed-role rejection
+                // (which must never confirm internal role taxonomy exists),
+                // the L0/L1 tier split is a product-level concept the owner
+                // named directly; explaining it here does not enumerate any
+                // OTHER roster entry, only the one name the caller already
+                // supplied.
+                return ToolResult::err(format!(
+                    "'{agent_name}' cannot be delegated to: it is an orchestration-tier \
+                     (L0) specialist, and this persona is standard-tier (L1). L1 personas \
+                     may not delegate to L0 orchestration targets — this boundary is \
+                     structural and is never bypassable, including through an \
+                     intermediate delegation hop."
+                ));
+            }
             if rejected {
                 return ToolResult::err(format!(
                     "'{agent_name}' is not a recognized specialist. Check your own \

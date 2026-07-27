@@ -393,10 +393,11 @@ pub async fn run_pm_task_with_history(
     let inbound_taint = crate::runtime::tool_registry::parse_delegation_taint_env(
         std::env::var("TAGENT_DELEGATION_TAINT_ALLOW").ok(),
     );
-    let (delegation_taint, allowed_target_roles) = ctrl_delegate_posture(
+    let (delegation_taint, allowed_target_roles, delegator_tier) = ctrl_delegate_posture(
         &pm_cfg.agent.role,
         pm_cfg.tools.allow.as_deref(),
         inbound_taint.as_deref(),
+        pm_cfg.agent.tier(),
     );
     let runner: Arc<dyn AgentRunner> = Arc::new(
         SubprocessAgentRunner::new()
@@ -410,7 +411,8 @@ pub async fn run_pm_task_with_history(
     // specialist that produced it (chat-bubble responder attribution).
     let mut delegate_tool = DelegateToAgentTool::new(runner)
         .with_config_dir(config_dir.clone())
-        .with_session_id(sid.clone());
+        .with_session_id(sid.clone())
+        .with_delegator_tier(delegator_tier);
     if let Some(roles) = allowed_target_roles {
         delegate_tool = delegate_tool.with_allowed_target_roles(roles);
     }
@@ -553,28 +555,45 @@ pub async fn run_pm_task_with_history(
 /// `resolve_agent_config` can resolve `ctrl.toml`, which declares
 /// `role = "assistant"` (#3812).
 /// What: `role != "assistant"` (e.g. a resolved `pm.toml`, `role =
-/// "orchestrator"`) returns `(None, None)` — completely unaffected; `pm` is
-/// the trusted orchestrator, not a sandboxed persona, and this dispatch path
-/// must keep working exactly as before for it. `role == "assistant"`
-/// returns `(Some(taint), Some(roles))`: `taint` is
+/// "orchestrator"`) returns `(None, None, AgentTier::L0Orchestration)` —
+/// completely unaffected on the taint/role front; `pm` is the trusted
+/// orchestrator, not a sandboxed persona, and this dispatch path must keep
+/// working exactly as before for it. The THIRD element is deliberately
+/// `AgentTier::L0Orchestration` here too (#4169, epic #4167) — not because
+/// `pm`/`ctrl`-as-orchestrator IS an L0 persona, but because it sits
+/// OUTSIDE the L0/L1 persona tier model entirely (already fully trusted,
+/// already unrestricted) and must not be newly blocked from reaching a
+/// future L0 persona by a gate that was never meant to restrict it; see
+/// `DelegateToAgentTool::delegator_tier`'s doc comment for the same pattern.
+/// `role == "assistant"` returns `(Some(taint), Some(roles),
+/// declared_tier)`: `taint` is
 /// `compose_delegation_taint(native_allow, inbound_taint).unwrap_or_default()`
 /// — ALWAYS `Some`, even when empty, matching
 /// `build_assistant_tier_registry`'s fail-closed convention (an absent
 /// `[tools].allow` on `ctrl.toml` narrows to deny-all, never skips tainting);
 /// `roles` is always `ASSISTANT_ALLOWED_DELEGATE_ROLES` — the same
 /// worker + peer-assistant allowlist `build_assistant_tier_registry` uses,
-/// deliberately excluding `orchestrator`/`controller`/`observer`/`analysis`.
+/// deliberately excluding `orchestrator`/`controller`/`observer`/`analysis`;
+/// `declared_tier` is `pm_cfg.agent.tier()` verbatim (fail-closed to
+/// `L1Standard` for every persona shipped before #4168).
 /// Test: `ctrl_delegate_posture_orchestrator_role_is_unrestricted`,
 /// `ctrl_delegate_posture_assistant_role_fails_closed_without_allow`,
 /// `ctrl_delegate_posture_assistant_role_forwards_native_allow`,
-/// `ctrl_delegate_posture_assistant_role_always_gates_target_roles`.
+/// `ctrl_delegate_posture_assistant_role_always_gates_target_roles`,
+/// `ctrl_delegate_posture_orchestrator_role_reports_l0_tier`,
+/// `ctrl_delegate_posture_assistant_role_reports_its_declared_tier`.
 fn ctrl_delegate_posture(
     role: &str,
     native_allow: Option<&[String]>,
     inbound_taint: Option<&[String]>,
-) -> (Option<Vec<String>>, Option<Vec<String>>) {
+    declared_tier: crate::agents::AgentTier,
+) -> (
+    Option<Vec<String>>,
+    Option<Vec<String>>,
+    crate::agents::AgentTier,
+) {
     if role != "assistant" {
-        return (None, None);
+        return (None, None, crate::agents::AgentTier::L0Orchestration);
     }
     let taint =
         crate::runtime::tool_registry::compose_delegation_taint(native_allow, inbound_taint)
@@ -583,7 +602,7 @@ fn ctrl_delegate_posture(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    (Some(taint), Some(roles))
+    (Some(taint), Some(roles), declared_tier)
 }
 
 /// Compute `chat_with_tools_gated`'s `allowed_tools` argument from an
