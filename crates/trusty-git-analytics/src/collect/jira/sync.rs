@@ -7,6 +7,9 @@
 //! `commands::jira::run_sync`.
 
 use chrono::{DateTime, Utc};
+use chrono_tz::Tz;
+
+use crate::collect::jira::jql_time::jql_date;
 
 /// The scope of one `tga jira sync` invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,32 +22,28 @@ pub struct SyncScope {
     pub since: Option<DateTime<Utc>>,
 }
 
-/// Format a UTC timestamp in JIRA's JQL date-time literal syntax
-/// (`"yyyy-MM-dd HH:mm"`, minute resolution — JQL does not accept seconds).
-///
-/// Why minute resolution and not RFC3339: JQL's `date`/`datetime` literal
-/// grammar is `"yyyy-MM-dd[ HH:mm]"`; passing a full RFC3339 string (with
-/// seconds, fractional seconds, or a `T`/`Z` separator) is rejected by JIRA
-/// with a 400. Truncating to the minute below the cursor is intentionally
-/// conservative — it can very rarely re-fetch a ticket updated in the same
-/// minute as the previous cursor, but upserts make that a no-op rather than
-/// a correctness problem (never the reverse: never rounds *up* and skips a
-/// ticket).
-pub fn jql_date(dt: DateTime<Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M").to_string()
-}
-
-/// Build the JQL query for one sync scope.
+/// Build the JQL query for one sync scope, rendering the `updated >=` bound
+/// in `tz`.
 ///
 /// Always orders by `updated ASC` so the last issue returned in a run
 /// determines the next cursor (issue's `updated` timestamp becomes the next
 /// `since`).
-pub fn build_jql(scope: &SyncScope) -> String {
+///
+/// Why minute resolution and not RFC3339: JQL's `date`/`datetime` literal
+/// grammar is `"yyyy-MM-dd[ HH:mm]"`; a full RFC3339 string (with seconds,
+/// fractional seconds, or a `T`/`Z` separator) is rejected with a 400.
+///
+/// Why `tz` is a parameter and not `Utc`: the grammar has no timezone syntax,
+/// and JIRA resolves the literal in the *querying account's* profile
+/// timezone. Rendering it as UTC wall-clock on a non-UTC account moves the
+/// window by the account's offset — hours, against a safety margin measured
+/// in seconds. [`jql_date`] carries the full argument and the guarantee.
+pub fn build_jql(scope: &SyncScope, tz: Tz) -> String {
     match scope.since {
         Some(since) => format!(
             "project = {} AND updated >= \"{}\" ORDER BY updated ASC",
             scope.project_key,
-            jql_date(since)
+            jql_date(since, tz)
         ),
         None => format!("project = {} ORDER BY updated ASC", scope.project_key),
     }
@@ -132,13 +131,29 @@ pub enum CursorPlan {
 /// timeline at all, so there is no safe clamp for it — the only correct
 /// answer is [`CursorPlan::Hold`], leaving the whole window unchanged.
 ///
+/// # Why a clean run never moves the cursor backwards
+///
+/// `stored` is the cursor already on record. A *successful* run only ever
+/// advances past it: `--since 2020-01-01`, or a `--backfill` truncated by
+/// `--max-tickets`, would otherwise rewrite a healthy 2026 incremental cursor
+/// back to whatever old window that run happened to read, and the next
+/// incremental run would then re-walk years of history. Nothing is lost when
+/// that happens, but nothing is gained either, and the operator is not told.
+///
+/// A *failure clamp* is exempt and may regress the cursor — regressing is the
+/// entire point of the clamp, and it is bounded by the window the run
+/// actually queried.
+///
 /// Test: `plan_cursor_clamps_to_the_earliest_failure`,
 /// `plan_cursor_holds_when_a_failure_has_no_timestamp`,
 /// `plan_cursor_advances_to_max_when_nothing_failed`,
-/// `plan_cursor_holds_on_an_empty_run`.
+/// `plan_cursor_holds_on_an_empty_run`,
+/// `plan_cursor_never_regresses_a_healthy_cursor`,
+/// `plan_cursor_failure_clamp_may_regress_below_the_stored_cursor`.
 pub fn plan_cursor(
     observed_updated: &[DateTime<Utc>],
     failed_updated: &[Option<DateTime<Utc>>],
+    stored: Option<DateTime<Utc>>,
 ) -> CursorPlan {
     if failed_updated.iter().any(Option::is_none) {
         return CursorPlan::Hold;
@@ -147,7 +162,8 @@ pub fn plan_cursor(
         return CursorPlan::Advance(*earliest_failure);
     }
     match next_cursor(observed_updated) {
-        Some(max) => CursorPlan::Advance(max),
+        // Monotonic: a clean run may only move the cursor forward.
+        Some(max) => CursorPlan::Advance(stored.map_or(max, |s| s.max(max))),
         None => CursorPlan::Hold,
     }
 }
@@ -202,7 +218,21 @@ mod tests {
     #[test]
     fn jql_date_formats_at_minute_resolution() {
         let d = Utc.with_ymd_and_hms(2026, 3, 4, 5, 6, 7).unwrap();
-        assert_eq!(jql_date(d), "2026-03-04 05:06");
+        assert_eq!(jql_date(d, Tz::UTC), "2026-03-04 05:06");
+    }
+
+    /// `build_jql` must thread the account zone through to the literal — a
+    /// bound rendered in UTC on a UTC-5 account queries the wrong five hours.
+    #[test]
+    fn build_jql_renders_the_bound_in_the_account_timezone() {
+        let scope = SyncScope {
+            project_key: "PROJ".into(),
+            since: Some(dt("2026-01-03T10:00:00Z")),
+        };
+        assert_eq!(
+            build_jql(&scope, Tz::America__New_York),
+            "project = PROJ AND updated >= \"2026-01-03 05:00\" ORDER BY updated ASC"
+        );
     }
 
     #[test]
@@ -211,7 +241,10 @@ mod tests {
             project_key: "PROJ".into(),
             since: None,
         };
-        assert_eq!(build_jql(&scope), "project = PROJ ORDER BY updated ASC");
+        assert_eq!(
+            build_jql(&scope, Tz::UTC),
+            "project = PROJ ORDER BY updated ASC"
+        );
     }
 
     #[test]
@@ -221,7 +254,7 @@ mod tests {
             since: Some(dt("2026-01-01T00:00:00Z")),
         };
         assert_eq!(
-            build_jql(&scope),
+            build_jql(&scope, Tz::UTC),
             "project = PROJ AND updated >= \"2026-01-01 00:00\" ORDER BY updated ASC"
         );
     }
@@ -283,14 +316,14 @@ mod tests {
     fn plan_cursor_advances_to_max_when_nothing_failed() {
         let observed = vec![dt("2026-01-01T00:00:00Z"), dt("2026-03-01T00:00:00Z")];
         assert_eq!(
-            plan_cursor(&observed, &[]),
+            plan_cursor(&observed, &[], None),
             CursorPlan::Advance(dt("2026-03-01T00:00:00Z"))
         );
     }
 
     #[test]
     fn plan_cursor_holds_on_an_empty_run() {
-        assert_eq!(plan_cursor(&[], &[]), CursorPlan::Hold);
+        assert_eq!(plan_cursor(&[], &[], None), CursorPlan::Hold);
     }
 
     /// The CRITICAL case: a ticket in the middle of the batch failed, so the
@@ -308,7 +341,7 @@ mod tests {
             Some(dt("2026-04-01T00:00:00Z")),
         ];
         assert_eq!(
-            plan_cursor(&observed, &failed),
+            plan_cursor(&observed, &failed, None),
             CursorPlan::Advance(dt("2026-01-03T00:00:00Z")),
             "the cursor must never move above the earliest failed ticket"
         );
@@ -319,25 +352,75 @@ mod tests {
     #[test]
     fn plan_cursor_holds_when_a_failure_has_no_timestamp() {
         let observed = vec![dt("2026-06-01T00:00:00Z")];
-        assert_eq!(plan_cursor(&observed, &[None]), CursorPlan::Hold);
+        assert_eq!(plan_cursor(&observed, &[None], None), CursorPlan::Hold);
     }
 
-    /// The clamped cursor must survive the JQL round-trip: `jql_date`
-    /// truncates downward and the clause is `>=`, so the failed ticket is
-    /// inside the next window rather than one minute past it.
+    /// The clamped cursor must survive the JQL round-trip **on any account
+    /// timezone**, not just UTC.
+    ///
+    /// This is the round-1 proof re-stated over instants rather than strings.
+    /// Round 1 compared the two rendered literals lexically, which is only
+    /// meaningful if both denote UTC — precisely the assumption round 2
+    /// disputed. Here the emitted bound is resolved back into an instant the
+    /// way JIRA would, and compared against the failed ticket's instant.
     #[test]
     fn clamped_cursor_keeps_the_failed_ticket_inside_the_next_window() {
-        let failed_at = dt("2026-01-03T10:15:45Z");
-        let CursorPlan::Advance(next) =
-            plan_cursor(&[dt("2026-06-01T00:00:00Z")], &[Some(failed_at)])
-        else {
-            panic!("expected an advance");
-        };
-        let bound = jql_date(next);
-        assert_eq!(bound, "2026-01-03 10:15");
-        assert!(
-            jql_date(failed_at) >= bound,
-            "the failed ticket must satisfy `updated >= {bound}` next run"
+        for tz in [
+            Tz::UTC,
+            Tz::America__New_York,
+            Tz::Asia__Kolkata,
+            Tz::Pacific__Kiritimati,
+        ] {
+            let failed_at = dt("2026-01-03T10:15:45Z");
+            let CursorPlan::Advance(next) =
+                plan_cursor(&[dt("2026-06-01T00:00:00Z")], &[Some(failed_at)], None)
+            else {
+                panic!("expected an advance");
+            };
+            let bound = jql_date(next, tz);
+            let naive = chrono::NaiveDateTime::parse_from_str(&bound, "%Y-%m-%d %H:%M")
+                .expect("renderer emits a parseable literal");
+            let window_opens = tz
+                .from_local_datetime(&naive)
+                .latest()
+                .expect("resolvable")
+                .with_timezone(&Utc);
+            assert!(
+                window_opens <= failed_at,
+                "{tz}: window opens at {window_opens}, after the failed ticket at \
+                 {failed_at} — it would be skipped forever"
+            );
+        }
+    }
+
+    /// `--since 2020-01-01` against a healthy 2026 cursor must not rewind it:
+    /// the run read an old window, but that says nothing about the newer
+    /// tickets the stored cursor had already covered.
+    #[test]
+    fn plan_cursor_never_regresses_a_healthy_cursor() {
+        let stored = dt("2026-06-01T00:00:00Z");
+        let observed = vec![dt("2020-01-05T00:00:00Z"), dt("2020-02-01T00:00:00Z")];
+        assert_eq!(
+            plan_cursor(&observed, &[], Some(stored)),
+            CursorPlan::Advance(stored),
+            "a clean run must be monotonic in the cursor"
+        );
+    }
+
+    /// …but the failure clamp is exempt, because regressing is exactly what
+    /// it is for.
+    #[test]
+    fn plan_cursor_failure_clamp_may_regress_below_the_stored_cursor() {
+        let stored = dt("2026-06-01T00:00:00Z");
+        let failed_at = dt("2026-01-03T00:00:00Z");
+        assert_eq!(
+            plan_cursor(
+                &[dt("2026-06-01T00:00:00Z")],
+                &[Some(failed_at)],
+                Some(stored)
+            ),
+            CursorPlan::Advance(failed_at),
+            "a held cursor must be able to move back to re-cover a failure"
         );
     }
 

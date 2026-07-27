@@ -15,8 +15,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `tga jira freshness --project <KEY>` scopes the freshness guard to one project; with no flag it now checks every project carrying a sync cursor individually, so one project's ongoing writes can no longer mask another project's dead sync.
 - Bounded retry with exponential backoff (429 / 5xx / timeouts) on the JIRA paged read paths, so a transient rate-limit response during a backfill no longer turns into a ticket-level ingestion failure.
 
+- `jira.timezone` config key pins the IANA timezone in which the JIRA account evaluates JQL date literals; when unset it is discovered from `GET /rest/api/3/myself` and cached.
+- `tga jira freshness --max-cursor-lag-days N` fails when a project's sync cursor falls that far behind, catching a sync that runs on schedule but never catches up. Cursor lag is always reported; only this flag makes it fail.
+
 ### Fixed
 
+- `tga jira sync` renders its JQL `updated >=` bound in the JIRA account's timezone rather than UTC. JQL date literals are zoneless and JIRA evaluates them in the querying account's profile timezone, so on a non-UTC account every sync window landed hours away from the instant it encoded — silently skipping tickets on negative-offset accounts and stalling the pager on positive-offset ones. The renderer is also correct across DST folds and gaps, where a local literal maps to two instants or none.
+- `tga jira sync` aborts after 10 consecutive comment-fetch failures instead of walking every remaining ticket. Under sustained rate-limiting a 10,000-ticket run previously issued up to 40,000 requests and slept for hours against a server explicitly asking it to stop.
+- JIRA 429/503 responses now honour `Retry-After`, under a whole-run backoff budget (120s) that bounds total time lost to throttling regardless of ticket count.
+- `tga jira sync` reports when a run is incomplete without being an error: `--max-tickets` truncation and any minute that had to be walked by offset are both surfaced in the run summary.
+- A clean `tga jira sync` no longer moves the stored cursor backwards, so `--since 2020-01-01` or a truncated `--backfill` cannot rewind a healthy incremental cursor. A failure clamp may still regress it, which is its purpose.
+- `tga jira freshness` also checks the configured `jira.project_key` even when it has no cursor row, so a project that has never completed a sync is no longer invisible to the default check.
 - `tga jira sync` no longer advances the incremental cursor past a ticket whose comment fetch failed. Previously the cursor moved to the batch maximum, leaving the failed ticket permanently below every later `updated >=` window — its comments were lost silently, with the process still exiting 0. The cursor is now clamped at or below the earliest failure, the failure count is printed in the run summary, and the run exits non-zero.
 - `tga jira sync` paginates the changelog walk by re-anchoring the `updated >=` window instead of by `startAt` offset. Offset paging over `ORDER BY updated ASC` let a ticket edited mid-walk shift an unread ticket across the read boundary, permanently excluding it from later runs.
 - `tga jira sync --dry-run` now fetches comments and reports their real count instead of always printing `0 comment(s)`; it still writes nothing and leaves the cursor untouched.

@@ -29,6 +29,22 @@
 //!
 //! Re-anchoring re-reads the boundary minute, so the caller must deduplicate;
 //! [`KeysetPager::record_page`] reports which items in a page are new.
+//!
+//! # Why the residual is reported, not clamped away
+//!
+//! Inside an offset-paged minute a concurrent edit can still drop exactly one
+//! ticket, and that loss is permanent. The obvious remedy — hold the run's
+//! cursor at the start of such a minute so the next run re-reads it — is
+//! **not** safe: a minute containing more tickets than one page is precisely
+//! the case that triggers the offset branch, so every subsequent run would
+//! offset-page it again, clamp again, and never advance. That converts a
+//! rare, bounded loss into a guaranteed permanent stall with no forward
+//! progress at all.
+//!
+//! So the pager records the minute ([`KeysetPager::offset_paged_minute`]) and
+//! `run_sync` surfaces it in the run summary, letting an operator re-cover
+//! that window explicitly with `--since`. A bounded, *visible* residual beats
+//! an unbounded stall.
 
 use std::collections::HashSet;
 
@@ -69,6 +85,7 @@ pub struct KeysetPager {
     seen: HashSet<String>,
     pages: usize,
     max_pages: usize,
+    offset_paged_minute: Option<DateTime<Utc>>,
 }
 
 impl KeysetPager {
@@ -87,6 +104,7 @@ impl KeysetPager {
             seen: HashSet::new(),
             pages: 0,
             max_pages: max_pages.max(1),
+            offset_paged_minute: None,
         }
     }
 
@@ -96,6 +114,22 @@ impl KeysetPager {
             since: self.since,
             start_at: self.start_at,
         }
+    }
+
+    /// The earliest minute the walk had to traverse by offset rather than by
+    /// window re-anchoring, if any.
+    ///
+    /// Why a caller wants this: inside such a minute the walk is exposed to
+    /// the same shift-under-pagination race that keyset paging exists to
+    /// eliminate, so a concurrent edit there can drop one ticket. The loss is
+    /// bounded (one ticket per concurrent edit, within one minute) but it is
+    /// not self-healing, so `run_sync` reports it rather than letting it pass
+    /// unremarked. See the module header for why the window cannot simply be
+    /// held back to this minute instead.
+    ///
+    /// Test: `pager_reports_the_minute_it_offset_paged`.
+    pub fn offset_paged_minute(&self) -> Option<DateTime<Utc>> {
+        self.offset_paged_minute
     }
 
     /// Record one fetched page and advance the window.
@@ -160,8 +194,15 @@ impl KeysetPager {
             }
             // A full page that did not advance the minute (a bulk edit, or a
             // page with no usable timestamps): keep offset-paging inside the
-            // current window so the walk still makes progress.
+            // current window so the walk still makes progress. Record it —
+            // this is the one band where the shift race survives, and the
+            // caller surfaces it rather than letting it pass silently.
             _ => {
+                let stalled = minute(self.since).or_else(|| minute(page_max));
+                self.offset_paged_minute = match (self.offset_paged_minute, stalled) {
+                    (Some(existing), Some(new)) => Some(existing.min(new)),
+                    (existing, new) => existing.or(new),
+                };
                 self.start_at += items.len() as u64;
             }
         }
@@ -297,6 +338,38 @@ mod tests {
             !pager.record_page(&page2, 2).more,
             "the page cap must stop the walk rather than loop forever"
         );
+    }
+
+    /// The offset branch is the one band where the shift race survives, so
+    /// the pager must name the minute it happened in for the run summary.
+    #[test]
+    fn pager_reports_the_minute_it_offset_paged() {
+        let mut pager = KeysetPager::new(Some(dt("2026-01-01T00:00:30Z")), 10);
+        assert_eq!(pager.offset_paged_minute(), None);
+
+        let page = vec![
+            item("P-1", "2026-01-01T00:00:40Z"),
+            item("P-2", "2026-01-01T00:00:50Z"),
+        ];
+        pager.record_page(&page, 2);
+        assert_eq!(
+            pager.offset_paged_minute(),
+            Some(dt("2026-01-01T00:00:00Z")),
+            "the reported value is the start of the stalled minute"
+        );
+    }
+
+    /// A clean keyset walk must report nothing — the residual warning has to
+    /// mean something when it does fire.
+    #[test]
+    fn pager_reports_no_offset_minute_on_a_clean_walk() {
+        let mut pager = KeysetPager::new(None, 10);
+        let page = vec![
+            item("P-1", "2026-01-01T00:01:00Z"),
+            item("P-2", "2026-01-01T00:02:00Z"),
+        ];
+        pager.record_page(&page, 2);
+        assert_eq!(pager.offset_paged_minute(), None);
     }
 
     /// A full page with no parseable timestamps must still make progress
