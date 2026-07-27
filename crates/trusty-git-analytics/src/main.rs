@@ -362,7 +362,7 @@ async fn run() -> anyhow::Result<()> {
         Commands::Dora(args) => commands::dora::run(config, &mut db, args)?,
         Commands::Jira(args) => match args.subcommand {
             JiraSubcommand::Sync(a) => commands::jira::run_sync(config, &mut db, a).await?,
-            JiraSubcommand::Freshness(a) => commands::jira::run_freshness(&db, a)?,
+            JiraSubcommand::Freshness(a) => commands::jira::run_freshness(&config, &db, a)?,
         },
         // Handled above — match is exhaustive.
         Commands::Install(_) => unreachable!("install dispatched above"),

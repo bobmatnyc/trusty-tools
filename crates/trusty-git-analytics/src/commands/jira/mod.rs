@@ -51,6 +51,26 @@ use tga::core::db::{
 /// wants a smaller run.
 const DEFAULT_MAX_TICKETS: usize = 10_000;
 
+/// Consecutive retry-exhausted comment failures that abort the walk
+/// (PR #4067 review round 2).
+///
+/// Why a circuit breaker at all: `fetch_comments` runs once per ticket, so a
+/// sustained rate-limit makes *every* ticket fail. Without a bound, a
+/// `DEFAULT_MAX_TICKETS` run would issue tens of thousands of requests and
+/// spend hours in backoff against a server that is explicitly asking us to
+/// stop — risking account or IP throttling on the operator's production JIRA,
+/// and reporting all 10,000 tickets failed at the end of it.
+///
+/// Why aborting loses nothing: the cursor is already held at or below the
+/// earliest failure, so an early break resumes from exactly the same place a
+/// full walk would have. It converts a multi-hour hammer into a fast, loud
+/// failure.
+///
+/// Why 10 rather than 1: an isolated permanently-broken ticket (deleted
+/// mid-run, permission-restricted) should not abort an otherwise healthy
+/// backfill. Ten in a row is not an isolated ticket.
+const MAX_CONSECUTIVE_COMMENT_FAILURES: usize = 10;
+
 /// Arguments for `tga jira sync`.
 #[derive(Args, Debug)]
 #[command(
@@ -62,7 +82,12 @@ Incremental by default: resumes from the stored `jira_sync_cursor` for the\n\
 project. Pass --backfill for a full historical pull (first-ever sync of a\n\
 project is always a full pull automatically, even without --backfill).\n\n\
 Requires `jira.url` (and `jira.username`/`jira.token`, which may reference\n\
-`${ENV_VAR}` placeholders) configured in config.yaml.",
+`${ENV_VAR}` placeholders) configured in config.yaml.\n\n\
+JQL date literals carry no timezone and JIRA evaluates them in the querying\n\
+account's profile timezone, so the sync window is rendered in that zone. It\n\
+is read from `GET /rest/api/3/myself`; set `jira.timezone` (an IANA name such\n\
+as `UTC`) to pin it explicitly when that endpoint is not reachable. The sync\n\
+refuses to run rather than guessing.",
     after_help = "EXAMPLES:\n\
   # Incremental sync using the stored cursor (or full history on first run)\n\
   tga jira sync\n\n\
@@ -82,8 +107,11 @@ pub struct JiraSyncArgs {
     #[arg(long, value_name = "KEY")]
     pub project: Option<String>,
     /// Only sync tickets updated on/after this date (ISO8601 YYYY-MM-DD).
-    /// Overrides the stored incremental cursor for this run (the cursor is
-    /// still advanced afterwards based on what was actually observed).
+    /// Overrides the stored incremental cursor for this run only: a
+    /// successful run never moves the stored cursor backwards, so re-reading
+    /// old history cannot rewind an up-to-date cursor. (A run with failed
+    /// tickets is the one exception — it holds the cursor at the earliest
+    /// failure so the next run re-covers it.)
     #[arg(long, value_name = "DATE")]
     pub since: Option<String>,
     /// Full historical backfill: ignore the stored cursor and (unless
@@ -129,9 +157,17 @@ pub struct JiraFreshnessArgs {
     #[arg(long, default_value_t = false)]
     pub report_only: bool,
     /// Check only this JIRA project. Default: check every project that has
-    /// a sync cursor and fail if ANY of them is stale.
+    /// a sync cursor (plus the configured `jira.project_key`) and fail if
+    /// ANY of them is stale.
     #[arg(long, value_name = "KEY")]
     pub project: Option<String>,
+    /// Also fail when a project's sync cursor is more than this many days
+    /// behind — catches a sync that runs on schedule but never catches up
+    /// (e.g. truncating at --max-tickets every run). Off by default: a quiet
+    /// project legitimately has an old cursor, since the cursor tracks the
+    /// newest ticket seen, not the last time the sync looked.
+    #[arg(long, value_name = "DAYS")]
+    pub max_cursor_lag_days: Option<i64>,
 }
 
 /// Parse a `YYYY-MM-DD` CLI date into a UTC midnight `DateTime`.
@@ -222,15 +258,22 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
     let scope = resolve_scope(&project_key, explicit_since, args.backfill, stored_cursor);
     let max_tickets = args.max_tickets.unwrap_or(DEFAULT_MAX_TICKETS);
 
+    // Resolved up front rather than lazily inside the walk so a misconfigured
+    // or undiscoverable timezone fails immediately with its remediation hint,
+    // before any tickets are read — and so the logged JQL is the query that
+    // will actually be sent, not a UTC-shaped approximation of it.
+    let tz = client.account_timezone().await?;
+
     info!(
         project = %project_key,
-        jql = %build_jql(&scope),
+        jql = %build_jql(&scope, tz),
+        timezone = %tz,
         backfill = args.backfill,
         dry_run = args.dry_run,
         "starting tga jira sync"
     );
 
-    let issues = client.search_with_changelog(&scope, max_tickets).await?;
+    let walk = client.search_with_changelog(&scope, max_tickets).await?;
 
     let mut tickets_scanned = 0usize;
     let mut transitions_written = 0usize;
@@ -240,8 +283,13 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
     // timestamps — the inputs the cursor clamp is computed from.
     let mut failed_tickets: Vec<String> = Vec::new();
     let mut failed_updated: Vec<Option<DateTime<Utc>>> = Vec::new();
+    // Circuit breaker: a sustained 429 makes every ticket fail, and walking
+    // all 10,000 of them would issue tens of thousands of doomed requests
+    // against a server explicitly asking us to stop.
+    let mut consecutive_failures = 0usize;
+    let mut tripped = false;
 
-    for issue in &issues {
+    for issue in &walk.issues {
         tickets_scanned += 1;
         if let Some(u) = issue.updated {
             observed_updated.push(u);
@@ -258,6 +306,7 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
         // `0 comment(s)` for every preview.
         match client.fetch_comments(&issue.key).await {
             Ok(comments) => {
+                consecutive_failures = 0;
                 comments_ingested += comments.len();
                 if args.dry_run {
                     continue;
@@ -283,12 +332,24 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
                 );
                 failed_tickets.push(issue.key.clone());
                 failed_updated.push(issue.updated);
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_CONSECUTIVE_COMMENT_FAILURES {
+                    tripped = true;
+                    warn!(
+                        consecutive_failures,
+                        tickets_scanned,
+                        "aborting the walk: too many consecutive comment failures. \
+                         Continuing would issue thousands more requests against a \
+                         remote that is already failing every one of them"
+                    );
+                    break;
+                }
             }
         }
     }
 
     if !args.dry_run {
-        match plan_cursor(&observed_updated, &failed_updated) {
+        match plan_cursor(&observed_updated, &failed_updated, stored_cursor) {
             CursorPlan::Advance(next) => set_cursor(
                 db.connection(),
                 &project_key,
@@ -317,15 +378,53 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
         }
     );
 
+    // Two ways this run can be incomplete without being an error. Both used
+    // to pass unremarked, which is how a warehouse ends up quietly short of
+    // data while every other signal says the sync succeeded.
+    if walk.truncated {
+        println!(
+            "  note: stopped at the --max-tickets limit ({max_tickets}); more tickets match \
+             this window. Re-run to continue from the recorded cursor."
+        );
+        warn!(
+            project = %project_key,
+            max_tickets,
+            "changelog walk truncated at --max-tickets; the window is only partly covered"
+        );
+    }
+    if let Some(minute) = walk.offset_paged_minute {
+        println!(
+            "  note: {} contained more tickets than one page, so that minute was walked by \
+             offset. A ticket edited during that walk could have been missed; re-cover it \
+             with `tga jira sync --project {project_key} --since {}` if in doubt.",
+            minute.to_rfc3339(),
+            minute.date_naive()
+        );
+        warn!(
+            project = %project_key,
+            minute = %minute.to_rfc3339(),
+            "walked a single minute by offset; see `collect::jira::paging` for the residual"
+        );
+    }
+
     if !failed_tickets.is_empty() {
         anyhow::bail!(
-            "JIRA sync ({project_key}) could not ingest comments for {} of {} ticket(s): {}. \
+            "JIRA sync ({project_key}) could not ingest comments for {} of {} ticket(s): {}.{} \
              The sync cursor was held at or below the earliest failure, so the next run \
              re-fetches them — but this run's data is incomplete and must not be treated \
              as a successful sync.",
             failed_tickets.len(),
             tickets_scanned,
-            summarize_keys(&failed_tickets)
+            summarize_keys(&failed_tickets),
+            if tripped {
+                format!(
+                    " The walk was ABORTED after {MAX_CONSECUTIVE_COMMENT_FAILURES} consecutive \
+                     failures rather than continuing through the remaining tickets — the remote \
+                     is likely rate-limiting or down, so retry later rather than immediately."
+                )
+            } else {
+                String::new()
+            },
         );
     }
     Ok(())
@@ -379,22 +478,56 @@ fn write_transitions(db: &mut Database, issue: &ChangelogIssue) -> anyhow::Resul
 /// has not run in weeks. Enumerating the cursors makes the guard correct by
 /// default instead of correct only when invoked carefully.
 ///
-/// A database with no cursors at all (nothing has ever synced) falls back to
-/// the unscoped, all-projects check, which correctly reports the empty
-/// tables as stale.
+/// The configured `jira.project_key` is always included in that set, even
+/// when it has no cursor row. A project that has *never* completed a sync is
+/// the loudest possible version of "the cron was never wired up", and
+/// enumerating only `jira_sync_cursor` would make exactly that case
+/// invisible — the unscoped fallback fires only when the cursor table is
+/// entirely empty.
+///
+/// A database with no cursors and no configured project falls back to the
+/// unscoped, all-projects check, which correctly reports empty tables as
+/// stale.
+///
+/// ## Cursor lag
+///
+/// The verdict measures `synced_at` — *write* recency, i.e. "did the sync
+/// run". That deliberately cannot answer "is the sync keeping up": a run
+/// truncated by `--max-tickets` every time writes fresh rows forever while
+/// falling further behind. So the report also prints cursor lag
+/// (`now − jira_sync_cursor.last_synced_at`). It is informational by default
+/// and only fails the check when `--max-cursor-lag-days` is given, because a
+/// legitimately quiet project has a legitimately old cursor — the cursor
+/// tracks the newest ticket seen, not the last time we looked.
 ///
 /// # Errors
 ///
-/// Returns an error (non-zero exit) if any checked scope is stale/empty and
-/// `--report-only` was not passed, or if the underlying DB query fails.
-pub fn run_freshness(db: &Database, args: JiraFreshnessArgs) -> anyhow::Result<()> {
+/// Returns an error (non-zero exit) if any checked scope is stale/empty (or
+/// exceeds an explicit `--max-cursor-lag-days`) and `--report-only` was not
+/// passed, or if the underlying DB query fails.
+pub fn run_freshness(
+    config: &Config,
+    db: &Database,
+    args: JiraFreshnessArgs,
+) -> anyhow::Result<()> {
     let scopes: Vec<Option<String>> = match &args.project {
         Some(p) => {
             validate_project_key(p).map_err(|e| anyhow::anyhow!(e))?;
             vec![Some(p.clone())]
         }
         None => {
-            let projects = list_cursor_projects(db.connection())?;
+            let mut projects = list_cursor_projects(db.connection())?;
+            if let Some(configured) = config
+                .jira
+                .as_ref()
+                .and_then(|j| j.project_key.clone())
+                .filter(|p| !p.is_empty())
+            {
+                if !projects.contains(&configured) {
+                    projects.push(configured);
+                }
+            }
+            projects.sort();
             if projects.is_empty() {
                 vec![None]
             } else {
@@ -430,6 +563,35 @@ pub fn run_freshness(db: &Database, args: JiraFreshnessArgs) -> anyhow::Result<(
         if s.stale {
             any_stale = true;
         }
+    }
+
+    // Cursor lag: how far behind the ingestion *window* is, as distinct from
+    // how recently it wrote. A permanently-truncating sync keeps the verdict
+    // above green while this number grows without bound.
+    let mut lagging: Vec<String> = Vec::new();
+    for project in scopes.iter().flatten() {
+        let Some(cursor) = get_cursor(db.connection(), project)? else {
+            continue;
+        };
+        let Ok(parsed) = DateTime::parse_from_rfc3339(&cursor.last_synced_at) else {
+            continue;
+        };
+        let lag_days = (Utc::now() - parsed.with_timezone(&Utc)).num_seconds() as f64 / 86_400.0;
+        let flagged = args
+            .max_cursor_lag_days
+            .is_some_and(|max| lag_days > max as f64);
+        println!(
+            "{project:<10} {:<28} cursor={} ({lag_days:.1}d behind){}",
+            "jira_sync_cursor",
+            cursor.last_synced_at,
+            if flagged { " [LAGGING]" } else { "" }
+        );
+        if flagged {
+            lagging.push(project.clone());
+        }
+    }
+    if !lagging.is_empty() {
+        any_stale = true;
     }
 
     if any_stale {

@@ -5,6 +5,10 @@
 //! see `scripts/check_line_cap.sh`).
 
 use super::*;
+// The changelog/comment wire shapes and their parsing moved to
+// `collect::jira::model` when `client.rs` reached that cap; the fixtures
+// exercising them stayed here.
+use crate::collect::jira::model::*;
 
 /// Confirm a JQL search response shape parses end-to-end.
 ///
@@ -343,12 +347,16 @@ mod paged_http {
             max_attempts: 3,
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(1),
+            max_total_delay: Duration::from_millis(100),
         }
     }
 
     fn client_for(server: &MockServer) -> JiraClient {
         let config = JiraConfig {
             url: Some(server.uri()),
+            // Pinned so this fixture needs no /myself route; discovery has
+            // its own tests below.
+            timezone: Some("UTC".to_string()),
             ..Default::default()
         };
         JiraClient::new(&config)
@@ -437,12 +445,12 @@ mod paged_http {
             project_key: "PROJ".into(),
             since: None,
         };
-        let issues = client_for(&server)
+        let walk = client_for(&server)
             .search_with_changelog(&scope, 60)
             .await
             .expect("walk succeeds");
 
-        let keys: Vec<&str> = issues.iter().map(|i| i.key.as_str()).collect();
+        let keys: Vec<&str> = walk.issues.iter().map(|i| i.key.as_str()).collect();
         assert!(
             keys.contains(&"PROJ-51"),
             "the ticket after the page boundary must still be read; got {} issues",
@@ -523,6 +531,157 @@ mod paged_http {
             2,
             "one failed attempt plus one successful retry"
         );
+    }
+
+    // ---- account timezone discovery (PR #4067 review round 2) ----------
+
+    fn myself_body(tz: &str) -> serde_json::Value {
+        json!({"accountId": "abc", "displayName": "Bot", "timeZone": tz})
+    }
+
+    /// An explicitly configured `jira.timezone` wins and issues no request —
+    /// the escape hatch for unauthenticated instances and for hosts that
+    /// cannot reach `/myself`.
+    #[tokio::test]
+    async fn account_timezone_prefers_configured_value() {
+        let server = MockServer::start().await;
+        let config = JiraConfig {
+            url: Some(server.uri()),
+            timezone: Some("Asia/Kolkata".to_string()),
+            ..Default::default()
+        };
+        let client = JiraClient::new(&config).expect("builds");
+        assert_eq!(
+            client.account_timezone().await.expect("resolves"),
+            chrono_tz::Tz::Asia__Kolkata
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded")
+                .is_empty(),
+            "a pinned timezone must not cost a round-trip"
+        );
+    }
+
+    /// With nothing configured, the zone comes from `/myself` — and is cached,
+    /// so a 10,000-ticket run costs exactly one probe.
+    #[tokio::test]
+    async fn account_timezone_discovers_from_myself() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/myself"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(myself_body("America/New_York")))
+            .mount(&server)
+            .await;
+
+        let client = client_for_discovery(&server);
+        assert_eq!(
+            client.account_timezone().await.expect("resolves"),
+            chrono_tz::Tz::America__New_York
+        );
+        assert_eq!(
+            client.account_timezone().await.expect("cached"),
+            chrono_tz::Tz::America__New_York
+        );
+        let probes = server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .filter(|r| r.url.path().ends_with("/myself"))
+            .count();
+        assert_eq!(probes, 1, "the zone must be cached like story_point_field");
+    }
+
+    /// When the zone cannot be determined the run FAILS rather than assuming
+    /// UTC. Silently defaulting to UTC is the exact unstated assumption that
+    /// made this a defect; the error names the config key that fixes it.
+    #[tokio::test]
+    async fn account_timezone_errors_when_undiscoverable() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/myself"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let Err(err) = client_for_discovery(&server).account_timezone().await else {
+            panic!("must not silently assume UTC");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("jira.timezone"),
+            "the error must name the remediation: {msg}"
+        );
+    }
+
+    /// An unparseable zone is a config error naming the value, not a silent
+    /// fallback.
+    #[tokio::test]
+    async fn account_timezone_rejects_an_unknown_zone() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/myself"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(myself_body("Nowhere/Fake")))
+            .mount(&server)
+            .await;
+
+        let Err(err) = client_for_discovery(&server).account_timezone().await else {
+            panic!("must reject an unknown zone");
+        };
+        assert!(err.to_string().contains("Nowhere/Fake"));
+    }
+
+    /// A client with no pinned timezone, for the discovery tests above.
+    fn client_for_discovery(server: &MockServer) -> JiraClient {
+        let config = JiraConfig {
+            url: Some(server.uri()),
+            ..Default::default()
+        };
+        JiraClient::new(&config)
+            .expect("client builds")
+            .with_retry_policy(fast_retry())
+    }
+
+    /// A 429 must be retried *and* its `Retry-After` honoured. Round 1
+    /// claimed the header was unreachable; it is not.
+    #[tokio::test]
+    async fn a_429_is_retried_and_its_retry_after_is_read() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        struct Throttling {
+            calls: Arc<AtomicUsize>,
+        }
+        impl Respond for Throttling {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return ResponseTemplate::new(429).insert_header("Retry-After", "0");
+                }
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "startAt": 0, "maxResults": 100, "total": 1,
+                    "comments": [
+                        {"id": "1", "created": "2026-01-05T09:30:00.000+0000", "body": "ok"}
+                    ]
+                }))
+            }
+        }
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-2/comment"))
+            .respond_with(Throttling {
+                calls: Arc::clone(&calls),
+            })
+            .mount(&server)
+            .await;
+
+        let comments = client_for(&server)
+            .fetch_comments("PROJ-2")
+            .await
+            .expect("the 429 must be retried");
+        assert_eq!(comments.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     /// A permanent 404 must NOT be retried — retrying it wastes the attempt

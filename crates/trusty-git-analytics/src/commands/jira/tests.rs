@@ -1,7 +1,20 @@
 //! Tests for `tga jira sync` / `tga jira freshness` (issue #3966).
 
 use super::*;
+use chrono_tz::Tz;
 use tga::core::config::JiraConfig;
+
+/// Every wiremock-backed test in this file runs against a **non-UTC** JIRA
+/// account.
+///
+/// Why that matters: JQL date literals are zoneless and JIRA resolves them in
+/// the querying account's timezone. Proving the cursor invariant against a
+/// UTC account proves it only for the one deployment where the bug cannot
+/// bite. `America/New_York` is UTC-5/-4, so any regression back to
+/// UTC-rendered bounds moves every window hours out of place and these tests
+/// fail loudly.
+const ACCOUNT_TZ_NAME: &str = "America/New_York";
+const ACCOUNT_TZ: Tz = Tz::America__New_York;
 
 fn base_config(jira_url: Option<String>) -> Config {
     Config {
@@ -10,10 +23,21 @@ fn base_config(jira_url: Option<String>) -> Config {
             username: Some("bot@example.com".to_string()),
             token: Some("test-token".to_string()),
             project_key: Some("PROJ".to_string()),
+            // Pinned so the wiremock servers need no /myself route. The
+            // discovery path has its own coverage in client_tests.rs.
+            timezone: Some(ACCOUNT_TZ_NAME.to_string()),
             ..Default::default()
         }),
         ..Default::default()
     }
+}
+
+/// A config with no `jira.project_key`, for freshness tests that want the
+/// scope set to come purely from the cursor table.
+fn freshness_config() -> Config {
+    let mut config = base_config(None);
+    config.jira.as_mut().expect("jira section").project_key = None;
+    config
 }
 
 // ---- resolve_project_key ------------------------------------------------
@@ -77,8 +101,9 @@ fn run_freshness_fails_loudly_on_empty_tables() {
         max_age_days: 2,
         report_only: false,
         project: None,
+        max_cursor_lag_days: None,
     };
-    let err = run_freshness(&db, args);
+    let err = run_freshness(&base_config(None), &db, args);
     assert!(err.is_err(), "empty tables must fail the freshness check");
 }
 
@@ -89,8 +114,9 @@ fn run_freshness_report_only_never_fails() {
         max_age_days: 2,
         report_only: true,
         project: None,
+        max_cursor_lag_days: None,
     };
-    let result = run_freshness(&db, args);
+    let result = run_freshness(&base_config(None), &db, args);
     assert!(result.is_ok(), "--report-only must never return an error");
 }
 
@@ -126,8 +152,9 @@ fn run_freshness_passes_after_a_fresh_write() {
         max_age_days: 2,
         report_only: false,
         project: None,
+        max_cursor_lag_days: None,
     };
-    assert!(run_freshness(&db, args).is_ok());
+    assert!(run_freshness(&base_config(None), &db, args).is_ok());
 }
 
 /// The HIGH finding from PR #4067 review, at the command level: with two
@@ -180,11 +207,13 @@ fn run_freshness_default_fails_when_any_single_project_is_stale() {
 
     assert!(
         run_freshness(
+            &freshness_config(),
             &db,
             JiraFreshnessArgs {
                 max_age_days: 2,
                 report_only: false,
                 project: None,
+                max_cursor_lag_days: None,
             }
         )
         .is_err(),
@@ -193,15 +222,133 @@ fn run_freshness_default_fails_when_any_single_project_is_stale() {
     );
     assert!(
         run_freshness(
+            &freshness_config(),
             &db,
             JiraFreshnessArgs {
                 max_age_days: 2,
                 report_only: false,
                 project: Some("A".into()),
+                max_cursor_lag_days: None,
             }
         )
         .is_ok(),
         "the healthy project must still pass when checked on its own"
+    );
+}
+
+/// A configured project that has *never* completed a sync has no cursor row,
+/// so enumerating `jira_sync_cursor` alone would skip it entirely — the
+/// loudest possible "the cron was never wired up" would be the one case the
+/// guard could not see.
+#[test]
+fn run_freshness_checks_a_configured_project_with_no_cursor_row() {
+    let db = Database::open_in_memory().expect("open");
+
+    // Another project is healthy and holds the only cursor row.
+    tga::core::db::upsert_ticket_transition(
+        db.connection(),
+        &TicketTransitionRow {
+            ticket_key: "OTHER-1".into(),
+            project_key: "OTHER".into(),
+            from_status: None,
+            to_status: "Open".into(),
+            transitioned_at: chrono::Utc::now().to_rfc3339(),
+            author: None,
+        },
+    )
+    .expect("upsert");
+    tga::core::db::upsert_comment_detail(
+        db.connection(),
+        &CommentDetailRow {
+            ticket_key: "OTHER-1".into(),
+            comment_id: "1".into(),
+            project_key: "OTHER".into(),
+            author: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            body_len: 5,
+        },
+    )
+    .expect("upsert");
+    set_cursor(db.connection(), "OTHER", "2026-01-01T00:00:00+00:00", 1).expect("cursor");
+
+    // `base_config` configures PROJ, which has never synced.
+    assert!(
+        run_freshness(
+            &base_config(None),
+            &db,
+            JiraFreshnessArgs {
+                max_age_days: 2,
+                report_only: false,
+                project: None,
+                max_cursor_lag_days: None,
+            }
+        )
+        .is_err(),
+        "the configured-but-never-synced project must fail the check"
+    );
+}
+
+/// Cursor lag is informational by default — a quiet project legitimately has
+/// an old cursor — and only fails when the operator asks for that bound.
+#[test]
+fn run_freshness_flags_cursor_lag_only_when_asked() {
+    let db = Database::open_in_memory().expect("open");
+    tga::core::db::upsert_ticket_transition(
+        db.connection(),
+        &TicketTransitionRow {
+            ticket_key: "PROJ-1".into(),
+            project_key: "PROJ".into(),
+            from_status: None,
+            to_status: "Open".into(),
+            transitioned_at: chrono::Utc::now().to_rfc3339(),
+            author: None,
+        },
+    )
+    .expect("upsert");
+    tga::core::db::upsert_comment_detail(
+        db.connection(),
+        &CommentDetailRow {
+            ticket_key: "PROJ-1".into(),
+            comment_id: "1".into(),
+            project_key: "PROJ".into(),
+            author: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            body_len: 5,
+        },
+    )
+    .expect("upsert");
+    // Written just now (so `synced_at` is fresh) but the cursor is 30 days
+    // behind — exactly the shape of a sync that runs but never catches up.
+    let thirty_days_ago = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+    set_cursor(db.connection(), "PROJ", &thirty_days_ago, 1).expect("cursor");
+
+    assert!(
+        run_freshness(
+            &base_config(None),
+            &db,
+            JiraFreshnessArgs {
+                max_age_days: 2,
+                report_only: false,
+                project: None,
+                max_cursor_lag_days: None,
+            }
+        )
+        .is_ok(),
+        "write-recency is fresh, so the default check must still pass"
+    );
+    assert!(
+        run_freshness(
+            &base_config(None),
+            &db,
+            JiraFreshnessArgs {
+                max_age_days: 2,
+                report_only: false,
+                project: None,
+                max_cursor_lag_days: Some(7),
+            }
+        )
+        .is_err(),
+        "an explicit cursor-lag bound must catch a sync that never catches up"
     );
 }
 
@@ -450,11 +597,29 @@ mod partial_failure {
         })
     }
 
-    /// A `/search` responder that actually honours the JQL `updated >=`
-    /// bound, so a test can prove what the *next* run's window contains
-    /// rather than assuming it.
+    /// A `/search` responder that honours the JQL `updated >=` bound the way
+    /// **JIRA actually does**: it resolves the zoneless literal in the
+    /// account's profile timezone, not in UTC.
+    ///
+    /// This is the load-bearing detail of PR #4067 review round 2. Round 1's
+    /// version of this mock parsed the literal as `…+0000`, which quietly
+    /// *defined* the semantics that were under dispute — so the end-to-end
+    /// cursor proof was conditional on exactly the assumption it needed to
+    /// establish. Running it under `America/New_York` instead means a
+    /// UTC-rendered bound lands five hours late and the invariant tests fail,
+    /// which is precisely what they should do.
     struct WindowedSearch {
         jqls: Arc<Mutex<Vec<String>>>,
+        account_tz: Tz,
+    }
+
+    impl WindowedSearch {
+        fn new(jqls: Arc<Mutex<Vec<String>>>) -> Self {
+            Self {
+                jqls,
+                account_tz: ACCOUNT_TZ,
+            }
+        }
     }
 
     impl Respond for WindowedSearch {
@@ -463,17 +628,22 @@ mod partial_failure {
             let jql = body["jql"].as_str().unwrap_or_default().to_string();
             self.jqls.lock().expect("lock").push(jql.clone());
 
-            // Extract the `updated >= "..."` literal, if any.
-            let bound = jql.split("updated >= \"").nth(1).and_then(|rest| {
-                rest.split('"')
-                    .next()
-                    .map(|s| format!("{}:00.000+0000", s.replace(' ', "T")))
+            // Resolve `updated >= "yyyy-MM-dd HH:mm"` as local wall-clock in
+            // the account's zone, then compare instants.
+            let bound: Option<DateTime<Utc>> = jql.split("updated >= \"").nth(1).and_then(|rest| {
+                let literal = rest.split('"').next()?;
+                let naive =
+                    chrono::NaiveDateTime::parse_from_str(literal, "%Y-%m-%d %H:%M").ok()?;
+                self.account_tz
+                    .from_local_datetime(&naive)
+                    .earliest()
+                    .map(|t| t.with_timezone(&Utc))
             });
-            let visible = |updated: &str| match &bound {
-                // Both sides are fixed-width UTC strings, so lexical order
-                // is chronological order here.
-                Some(b) => updated >= b.as_str(),
-                None => true,
+            let visible = |updated: &str| {
+                let instant = DateTime::parse_from_str(updated, "%Y-%m-%dT%H:%M:%S%.3f%z")
+                    .expect("fixture timestamp parses")
+                    .with_timezone(&Utc);
+                bound.is_none_or(|b| instant >= b)
             };
 
             let issues: Vec<serde_json::Value> =
@@ -519,7 +689,7 @@ mod partial_failure {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/rest/api/3/search"))
-            .respond_with(WindowedSearch { jqls })
+            .respond_with(WindowedSearch::new(jqls))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -602,9 +772,7 @@ mod partial_failure {
         let healthy = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/rest/api/3/search"))
-            .respond_with(WindowedSearch {
-                jqls: Arc::clone(&jqls),
-            })
+            .respond_with(WindowedSearch::new(Arc::clone(&jqls)))
             .mount(&healthy)
             .await;
         for (key, id) in [("PROJ-1", "9001"), ("PROJ-2", "9002")] {
@@ -621,8 +789,10 @@ mod partial_failure {
 
         let second_jql = jqls.lock().expect("lock")[1].clone();
         assert!(
-            second_jql.contains("updated >= \"2026-01-03 10:00\""),
-            "the second run's window must start at the failed ticket: {second_jql}"
+            // 10:00Z rendered in the account's zone (America/New_York, UTC-5).
+            second_jql.contains("updated >= \"2026-01-03 05:00\""),
+            "the second run's window must start at the failed ticket, expressed \
+             in the account's timezone: {second_jql}"
         );
 
         let recovered: i64 = db
@@ -645,6 +815,108 @@ mod partial_failure {
             cursor.last_synced_at, "2026-06-01T10:00:00+00:00",
             "with nothing left failing, the cursor is free to advance to the \
              batch maximum"
+        );
+    }
+
+    /// The round-2 CRITICAL, end to end: the emitted JQL bound must be
+    /// rendered in the **account's** timezone.
+    ///
+    /// `2026-01-03T10:00Z` is `05:00` in `America/New_York`. Before the fix
+    /// the client emitted the UTC wall-clock `"2026-01-03 10:00"`, which this
+    /// (correctly JIRA-shaped) mock resolves to `15:00Z` — five hours past
+    /// the ticket the cursor was clamped to re-cover.
+    #[tokio::test]
+    async fn the_jql_bound_is_rendered_in_the_account_timezone() {
+        let jqls = Arc::new(Mutex::new(Vec::new()));
+        let failing = server_with_failing_first_ticket(Arc::clone(&jqls)).await;
+        let mut db = Database::open_in_memory().expect("open");
+        run_sync(base_config(Some(failing.uri())), &mut db, sync_args())
+            .await
+            .expect_err("first run fails on PROJ-1");
+        // Run again so the clamped cursor is rendered into a JQL bound; the
+        // first run had no stored cursor and so emitted no `updated >=`.
+        run_sync(base_config(Some(failing.uri())), &mut db, sync_args())
+            .await
+            .expect_err("second run fails on PROJ-1 too");
+
+        let second_run_bound = {
+            let recorded = jqls.lock().expect("lock");
+            recorded[1].clone()
+        };
+        assert!(
+            second_run_bound.contains("updated >= \"2026-01-03 05:00\""),
+            "the bound must be the account-local rendering of 10:00Z, not the \
+             UTC wall-clock: {second_run_bound}"
+        );
+
+        // And the local rendering must denote the intended instant, not merely
+        // look different: resolve it back the way the mock (and JIRA) do.
+        let literal = second_run_bound
+            .split("updated >= \"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("bound present");
+        let naive =
+            chrono::NaiveDateTime::parse_from_str(literal, "%Y-%m-%d %H:%M").expect("parses");
+        let resolved = ACCOUNT_TZ
+            .from_local_datetime(&naive)
+            .earliest()
+            .expect("resolvable")
+            .with_timezone(&Utc);
+        assert!(
+            resolved <= DateTime::parse_from_rfc3339("2026-01-03T10:00:00+00:00").unwrap(),
+            "the bound resolves to {resolved}, which is after the failed ticket"
+        );
+    }
+
+    /// The round-2 HIGH: a remote failing every comment fetch must not be
+    /// walked ticket by ticket to the end. The breaker trips and the run
+    /// stops early, keeping the same held-cursor + non-zero-exit semantics.
+    #[tokio::test]
+    async fn sustained_failures_trip_the_circuit_breaker() {
+        let server = MockServer::start().await;
+        // 30 tickets, every comment fetch permanently failing.
+        struct ManyTickets;
+        impl Respond for ManyTickets {
+            fn respond(&self, _request: &Request) -> ResponseTemplate {
+                let issues: Vec<serde_json::Value> = (1..=30)
+                    .map(|i| issue(&format!("PROJ-{i}"), EARLY_UPDATED))
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"issues": issues}))
+            }
+        }
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search"))
+            .respond_with(ManyTickets)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path_regex(
+                r"^/rest/api/3/issue/PROJ-\d+/comment$",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let mut db = Database::open_in_memory().expect("open");
+        let err = run_sync(base_config(Some(server.uri())), &mut db, sync_args())
+            .await
+            .expect_err("must fail");
+        assert!(
+            err.to_string().contains("ABORTED"),
+            "the error must say the walk was cut short: {err}"
+        );
+
+        let comment_requests = server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .into_iter()
+            .filter(|r| r.url.path().ends_with("/comment"))
+            .count();
+        assert_eq!(
+            comment_requests, MAX_CONSECUTIVE_COMMENT_FAILURES,
+            "the walk must stop at the breaker, not grind through all 30 tickets"
         );
     }
 

@@ -2,16 +2,21 @@
 
 use std::sync::Mutex;
 
-use chrono::{DateTime, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::collect::env_expand::expand_env_var;
+use chrono_tz::Tz;
+
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::jira::http::{expand_credential, get_json, post_json, Credentials};
+use crate::collect::jira::jql_time::parse_timezone;
+use crate::collect::jira::model::{
+    ChangelogIssue, ChangelogSearchResponse, ChangelogWalk, CommentSearchResponse, JiraComment,
+};
 use crate::collect::jira::paging::{KeysetPager, PagedItem};
-use crate::collect::jira::retry::{with_retry, RetryPolicy};
+use crate::collect::jira::retry::{with_retry, RetryBudget, RetryPolicy};
 use crate::collect::jira::sync::{build_jql, SyncScope};
 use crate::core::config::JiraConfig;
 
@@ -29,15 +34,22 @@ pub struct JiraClient {
     client: reqwest::Client,
     base_url: String,
     /// `(username, token)` for HTTP Basic Auth.
-    credentials: Option<(String, String)>,
+    credentials: Option<Credentials>,
     /// Default project key for filtered queries.
     project_key: String,
     /// Cached story-point custom field key (e.g. `customfield_10016`).
     /// `None` = uncached; `Some(None)` = discovered to be absent;
     /// `Some(Some(_))` = discovered key.
     story_point_field: Mutex<Option<Option<String>>>,
+    /// Operator-pinned timezone from `jira.timezone`, bypassing discovery.
+    configured_timezone: Option<String>,
+    /// Cached timezone in which this account's JQL date literals are
+    /// evaluated. `None` = not yet discovered.
+    account_timezone: Mutex<Option<Tz>>,
     /// Retry schedule applied to the paged read paths.
     retry: RetryPolicy,
+    /// Whole-run backoff allowance shared by every request this client makes.
+    budget: RetryBudget,
 }
 
 /// Subset of fields extracted from a JIRA issue payload.
@@ -86,6 +98,14 @@ struct ApiNamed {
 struct FieldDescriptor {
     id: String,
     name: String,
+}
+
+/// Subset of `GET /rest/api/3/myself` — the account's IANA timezone, which
+/// is the zone JIRA uses to evaluate this account's JQL date literals.
+#[derive(Debug, Deserialize)]
+struct MyselfResponse {
+    #[serde(rename = "timeZone", default)]
+    time_zone: Option<String>,
 }
 
 /// Wire shape of a JQL search response.
@@ -140,13 +160,17 @@ impl JiraClient {
             _ => None,
         };
 
+        let retry = RetryPolicy::default();
         Ok(Self {
             client,
             base_url: base,
             credentials,
             project_key: config.project_key.clone().unwrap_or_default(),
             story_point_field: Mutex::new(None),
-            retry: RetryPolicy::default(),
+            configured_timezone: config.timezone.clone(),
+            account_timezone: Mutex::new(None),
+            budget: RetryBudget::new(&retry),
+            retry,
         })
     }
 
@@ -158,8 +182,85 @@ impl JiraClient {
     /// which must not spend real seconds asleep.
     #[must_use]
     pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.budget = RetryBudget::new(&policy);
         self.retry = policy;
         self
+    }
+
+    /// The timezone in which this JIRA account evaluates JQL date literals.
+    ///
+    /// Why this is not simply UTC — and why getting it wrong loses tickets —
+    /// is argued in full in [`super::jql_time`]. Short version: JQL date
+    /// literals carry no zone and JIRA resolves them in the *querying
+    /// account's* profile timezone, so a UTC-rendered bound sent by an
+    /// `America/New_York` account opens five hours late and silently skips
+    /// every ticket in the gap.
+    ///
+    /// Resolution order, cached for the client's lifetime in the same shape
+    /// as [`Self::get_story_point_field`]:
+    ///
+    /// 1. `jira.timezone` from config, when the operator has pinned it.
+    /// 2. `GET /rest/api/3/myself` → `timeZone`.
+    ///
+    /// There is deliberately **no silent UTC fallback**. Defaulting to UTC is
+    /// exactly the unstated assumption that made this a defect; if neither
+    /// source answers, the run fails with an error telling the operator to
+    /// set `jira.timezone`. That is a one-line fix for them and a guaranteed
+    /// invariant for us.
+    ///
+    /// # Errors
+    ///
+    /// [`CollectError::Config`] when the zone cannot be determined or parsed;
+    /// transport errors from the `/myself` probe are wrapped with that same
+    /// remediation hint.
+    ///
+    /// Test: `account_timezone_prefers_configured_value`,
+    /// `account_timezone_discovers_from_myself`,
+    /// `account_timezone_errors_when_undiscoverable`.
+    pub async fn account_timezone(&self) -> Result<Tz> {
+        {
+            let guard = self
+                .account_timezone
+                .lock()
+                .map_err(|e| CollectError::Config(format!("timezone cache poisoned: {e}")))?;
+            if let Some(tz) = *guard {
+                return Ok(tz);
+            }
+        }
+
+        let tz = match &self.configured_timezone {
+            Some(name) => parse_timezone(name)?,
+            None => {
+                let url = format!("{}/rest/api/3/myself", self.base_url);
+                debug!(url = %url, "GET (account timezone)");
+                let me: MyselfResponse =
+                    with_retry("myself", &self.retry, &self.budget, || self.get(&url))
+                        .await
+                        .map_err(|e| {
+                            CollectError::Config(format!(
+                                "could not determine the JIRA account timezone from \
+                                 GET /rest/api/3/myself ({e}). JQL date literals are \
+                                 evaluated in the account's timezone, so tga refuses to \
+                                 guess — set `jira.timezone` in config.yaml (e.g. `UTC`)."
+                            ))
+                        })?;
+                let name = me.time_zone.ok_or_else(|| {
+                    CollectError::Config(
+                        "the JIRA account reports no `timeZone`; set `jira.timezone` in \
+                         config.yaml so JQL date bounds can be rendered correctly."
+                            .to_string(),
+                    )
+                })?;
+                parse_timezone(&name)?
+            }
+        };
+
+        let mut guard = self
+            .account_timezone
+            .lock()
+            .map_err(|e| CollectError::Config(format!("timezone cache poisoned: {e}")))?;
+        *guard = Some(tz);
+        Ok(tz)
     }
 
     /// Fetch a single issue by its key, returning `None` on 404.
@@ -370,27 +471,36 @@ impl JiraClient {
         &self,
         scope: &SyncScope,
         max_results: usize,
-    ) -> Result<Vec<ChangelogIssue>> {
+    ) -> Result<ChangelogWalk> {
         let url = format!("{}/rest/api/3/search", self.base_url);
         let fields = vec!["project".to_string(), "updated".to_string()];
+        // Every JQL bound this walk emits — the initial scope and every
+        // re-anchor — must be rendered in the account's zone, or the window
+        // silently lands hours from the instant it encodes. See `jql_time`.
+        let tz = self.account_timezone().await?;
 
         // Slack over the ideal page count absorbs the deduplicated re-reads
         // that window re-anchoring deliberately causes.
         let max_pages = max_results.div_ceil(SEARCH_PAGE_SIZE) * 2 + 8;
         let mut pager = KeysetPager::new(scope.since, max_pages);
         let mut out: Vec<ChangelogIssue> = Vec::new();
+        let mut truncated = false;
 
         loop {
             let remaining = max_results.saturating_sub(out.len());
             if remaining == 0 {
+                truncated = true;
                 break;
             }
             let page_size = remaining.min(SEARCH_PAGE_SIZE);
             let request = pager.request();
-            let jql = build_jql(&SyncScope {
-                project_key: scope.project_key.clone(),
-                since: request.since,
-            });
+            let jql = build_jql(
+                &SyncScope {
+                    project_key: scope.project_key.clone(),
+                    since: request.since,
+                },
+                tz,
+            );
             let body = json!({
                 "jql": jql,
                 "startAt": request.start_at,
@@ -400,8 +510,8 @@ impl JiraClient {
             });
             debug!(url = %url, %jql, start_at = request.start_at, "POST (with changelog)");
             let parsed: ChangelogSearchResponse =
-                with_retry("search_with_changelog", &self.retry, || {
-                    self.post_json(&url, &body)
+                with_retry("search_with_changelog", &self.retry, &self.budget, || {
+                    self.post(&url, &body)
                 })
                 .await?;
 
@@ -426,26 +536,24 @@ impl JiraClient {
                 break;
             }
         }
-        Ok(out)
+        Ok(ChangelogWalk {
+            issues: out,
+            offset_paged_minute: pager.offset_paged_minute(),
+            truncated,
+        })
     }
 
-    /// `POST` a JSON body and decode the response, applying Basic Auth when
-    /// credentials are configured.
-    ///
-    /// Factored out so [`with_retry`] can re-run the whole request/decode
-    /// round-trip (a `reqwest::RequestBuilder` is single-use, so the
-    /// retry closure has to rebuild it every attempt).
-    async fn post_json<T: serde::de::DeserializeOwned>(
-        &self,
-        url: &str,
-        body: &Value,
-    ) -> Result<T> {
-        let mut req = self.client.post(url).json(body);
-        if let Some((user, token)) = &self.credentials {
-            req = req.basic_auth(user, Some(token));
-        }
-        let resp = req.send().await?.error_for_status()?;
-        Ok(resp.json().await?)
+    /// `POST` a JSON body, carrying this client's credentials. See
+    /// [`super::http::post_json`] — the retry wrapper re-invokes this on
+    /// every attempt because a `RequestBuilder` is single-use.
+    async fn post<T: serde::de::DeserializeOwned>(&self, url: &str, body: &Value) -> Result<T> {
+        post_json(&self.client, self.credentials.as_ref(), url, body).await
+    }
+
+    /// `GET` and decode, carrying this client's credentials. See
+    /// [`super::http::get_json`].
+    async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        get_json(&self.client, self.credentials.as_ref(), url).await
     }
 
     /// Fetch every comment on a JIRA issue, paginating in
@@ -488,7 +596,10 @@ impl JiraClient {
             );
             debug!(url = %url, "GET");
             let parsed: CommentSearchResponse =
-                with_retry("fetch_comments", &self.retry, || self.get_json(&url)).await?;
+                with_retry("fetch_comments", &self.retry, &self.budget, || {
+                    self.get(&url)
+                })
+                .await?;
             let n = parsed.comments.len();
             for c in parsed.comments {
                 if let Some(comment) = JiraComment::from_api(c) {
@@ -505,287 +616,6 @@ impl JiraClient {
         }
         Ok(out)
     }
-
-    /// `GET` a URL and decode the response, applying Basic Auth when
-    /// credentials are configured. See [`Self::post_json`] for why this is
-    /// factored out.
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let mut req = self.client.get(url);
-        if let Some((user, token)) = &self.credentials {
-            req = req.basic_auth(user, Some(token));
-        }
-        let resp = req.send().await?.error_for_status()?;
-        Ok(resp.json().await?)
-    }
-}
-
-/// Expand a `${ENV_VAR}` credential reference, rejecting an expansion that
-/// resolves to nothing.
-///
-/// Why: [`expand_env_var`] returns the empty string for an unset variable,
-/// so `token: "${JIRA_TOKEN}"` with `JIRA_TOKEN` missing from a cron
-/// environment produced an empty password and a bare HTTP 401 — a slow
-/// diagnosis in exactly the unattended context this is built for. (A unified
-/// credential resolver is tracked separately as issue #4037; this is the
-/// local guard, not that.)
-///
-/// No secret can leak through the error message: it is only reachable when
-/// the expansion is empty, which means `raw` is either an empty literal or
-/// an unresolved `${PLACEHOLDER}`. A real credential expands to itself and
-/// never reaches this branch.
-///
-/// # Errors
-///
-/// [`CollectError::Config`] naming the config field and the unresolved value.
-fn expand_credential(field: &str, raw: &str) -> Result<String> {
-    let expanded = expand_env_var(raw);
-    if expanded.is_empty() {
-        return Err(CollectError::Config(format!(
-            "{field} is empty after expansion (config value: `{raw}`) — set the \
-             referenced environment variable, or remove the field to run \
-             unauthenticated"
-        )));
-    }
-    Ok(expanded)
-}
-
-/// One parsed status transition from a JIRA changelog history entry
-/// (issue #3966).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JiraTransition {
-    /// Status before the transition. `None` when this is the first
-    /// changelog entry touching the `status` field on the ticket.
-    pub from_status: Option<String>,
-    /// Status after the transition.
-    pub to_status: String,
-    /// Display name of the author who made the transition, when JIRA
-    /// reports one (some automation-triggered transitions omit an author).
-    pub author: Option<String>,
-    /// Timestamp of the transition.
-    pub created: DateTime<Utc>,
-}
-
-/// A JIRA issue plus its parsed status-transition changelog (issue #3966).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChangelogIssue {
-    /// Issue key, e.g. `PROJ-123`.
-    pub key: String,
-    /// JIRA project key. Falls back to the `key` prefix (everything before
-    /// the last `-`) when the `project` field is absent from the response,
-    /// which should not happen in practice but keeps this infallible.
-    pub project_key: String,
-    /// The issue's `updated` timestamp, when present. Drives the
-    /// incremental-sync cursor (see `collect::jira::sync::next_cursor`).
-    pub updated: Option<DateTime<Utc>>,
-    /// `status`-field transitions extracted from the changelog, oldest
-    /// first (JIRA returns histories in chronological order).
-    pub transitions: Vec<JiraTransition>,
-}
-
-impl ChangelogIssue {
-    fn from_api(api: ChangelogApiIssue) -> Self {
-        let project_key = api
-            .fields
-            .project
-            .map(|p| p.key)
-            .unwrap_or_else(|| project_key_from_issue_key(&api.key));
-        let updated = api.fields.updated.as_deref().and_then(parse_jira_datetime);
-        let mut transitions = Vec::new();
-        if let Some(changelog) = api.changelog {
-            for history in changelog.histories {
-                let author = history.author.map(|a| a.display_name);
-                let Some(created) = parse_jira_datetime(&history.created) else {
-                    warn!(
-                        key = %api.key,
-                        created = %history.created,
-                        "unparseable changelog history timestamp; skipping this history entry"
-                    );
-                    continue;
-                };
-                for item in history.items {
-                    if item.field != "status" {
-                        continue;
-                    }
-                    let Some(to_status) = item.to_string else {
-                        continue;
-                    };
-                    transitions.push(JiraTransition {
-                        from_status: item.from_string,
-                        to_status,
-                        author: author.clone(),
-                        created,
-                    });
-                }
-            }
-        }
-        Self {
-            key: api.key,
-            project_key,
-            updated,
-            transitions,
-        }
-    }
-}
-
-/// Fallback project-key extraction from an issue key (`PROJ-123` -> `PROJ`).
-///
-/// Used only when a search response omits the `project` field, which is not
-/// expected in normal operation but keeps [`ChangelogIssue::from_api`]
-/// infallible rather than panicking on a malformed response.
-fn project_key_from_issue_key(key: &str) -> String {
-    key.rsplit_once('-')
-        .map(|(prefix, _)| prefix.to_string())
-        .unwrap_or_else(|| key.to_string())
-}
-
-/// Parse a JIRA-flavoured ISO8601 timestamp.
-///
-/// JIRA Cloud emits offsets without a colon (e.g.
-/// `2026-01-01T00:00:00.000+0000`); strict RFC3339 parsers reject these. Try
-/// chrono's `%+` (RFC3339) first, then fall back to JIRA's
-/// `%Y-%m-%dT%H:%M:%S%.3f%z` shape.
-///
-/// Duplicated (rather than shared) from the equivalent helper in
-/// `commands/incidents/mod.rs` — that copy is private to its module and
-/// this crate does not currently have a shared date-parsing utility module;
-/// see issue #3966 for context. A future cleanup could hoist both into
-/// `collect::jira` or a new `collect::datetime` module.
-fn parse_jira_datetime(s: &str) -> Option<DateTime<Utc>> {
-    if let Ok(d) = DateTime::parse_from_rfc3339(s) {
-        return Some(d.with_timezone(&Utc));
-    }
-    chrono::DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.3f%z")
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
-}
-
-/// One JIRA comment, reduced to what `fact_jira_comment_detail` needs
-/// (issue #3966).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JiraComment {
-    /// Comment ID (unique per-instance).
-    pub id: String,
-    /// Display name of the comment's author, when JIRA reports one.
-    pub author: Option<String>,
-    /// Comment creation timestamp.
-    pub created: DateTime<Utc>,
-    /// Length of the comment body — see [`JiraClient::fetch_comments`] doc
-    /// comment for the ADF-vs-plain-text caveat.
-    pub body_len: i64,
-}
-
-impl JiraComment {
-    /// Convert one wire-form comment, or `None` if its `created` timestamp
-    /// is unparseable (mirrors `ChangelogIssue::from_api`'s per-entry skip
-    /// behavior — one malformed record must not abort the whole batch, nor
-    /// fabricate a fake timestamp that would corrupt freshness/ordering
-    /// queries downstream).
-    fn from_api(api: ApiComment) -> Option<Self> {
-        let created = match parse_jira_datetime(&api.created) {
-            Some(c) => c,
-            None => {
-                warn!(
-                    comment_id = %api.id,
-                    created = %api.created,
-                    "unparseable comment timestamp; skipping this comment"
-                );
-                return None;
-            }
-        };
-        let body_len = match &api.body {
-            Value::String(s) => s.len() as i64,
-            other => serde_json::to_string(other).map(|s| s.len()).unwrap_or(0) as i64,
-        };
-        Some(Self {
-            id: api.id,
-            author: api.author.map(|a| a.display_name),
-            created,
-            body_len,
-        })
-    }
-}
-
-/// Wire shape of `POST /rest/api/3/search` with `expand=changelog`.
-///
-/// Neither `startAt` nor `total` is modelled: the keyset walk terminates on
-/// a short page and tracks its own window (see [`super::paging`]), so it
-/// depends on no server-side bookkeeping field.
-#[derive(Debug, Deserialize)]
-struct ChangelogSearchResponse {
-    issues: Vec<ChangelogApiIssue>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChangelogApiIssue {
-    key: String,
-    fields: ChangelogApiFields,
-    #[serde(default)]
-    changelog: Option<ApiChangelog>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct ChangelogApiFields {
-    #[serde(default)]
-    project: Option<ApiProjectRef>,
-    #[serde(default)]
-    updated: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiProjectRef {
-    key: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiChangelog {
-    histories: Vec<ApiChangelogHistory>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiChangelogHistory {
-    #[serde(default)]
-    author: Option<ApiAuthor>,
-    created: String,
-    items: Vec<ApiChangelogItem>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiAuthor {
-    #[serde(rename = "displayName")]
-    display_name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiChangelogItem {
-    field: String,
-    #[serde(rename = "fromString", default)]
-    from_string: Option<String>,
-    #[serde(rename = "toString", default)]
-    to_string: Option<String>,
-}
-
-/// Wire shape of `GET /rest/api/3/issue/{key}/comment`.
-#[derive(Debug, Deserialize)]
-struct CommentSearchResponse {
-    comments: Vec<ApiComment>,
-    #[serde(default)]
-    total: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiComment {
-    id: String,
-    #[serde(default)]
-    author: Option<ApiAuthor>,
-    created: String,
-    #[serde(default = "default_comment_body")]
-    body: Value,
-}
-
-/// Default `body` value when JIRA omits it entirely (should not happen in
-/// practice, but keeps deserialization infallible).
-fn default_comment_body() -> Value {
-    Value::String(String::new())
 }
 
 #[cfg(test)]
