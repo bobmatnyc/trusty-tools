@@ -666,36 +666,13 @@ persona name, because `display_name` is absent and the existing fallback
 `display_name: Izzie` via `extends: assistant` is the only path by which an
 agent instance acquires a persona name.
 
-### 2.6 No-code enforcement (NEW)
+### 2.6 Code ownership and responsibility (AMENDED 2026-07-27)
 
-The mechanical guarantee behind §2.0's principle, in two layers:
+Agent skills may contain executable code (e.g., Python packages discovered and loaded via the skill plugin system). The responsibility for vetting, auditing, and managing that code rests with the operator and agent owner, not enforced by the platform.
 
-1. **Closed schema, not a lenient one.** Unlike today's `MdAgentFrontmatter`
-   (which silently ignores unknown YAML keys, `md_agent.rs`, no
-   `deny_unknown_fields`), the manifest parser for **both** surfaces (§2.4)
-   uses a closed key set — any top-level key not in §2.3's schema is a load
-   error, `ManifestUnknownKey { key }`. This is the primary enforcement: a
-   coded-agent design would need a key like `hook:`/`script:`/`exec:` to
-   reference a local file, and no such key exists in the schema to add one
-   to without editing this spec.
-2. **Directory-package file allowlist.** `load_agent_package` additionally
-   validates every file in the package directory against an **allowlist** of
-   data extensions — `.md`, `.yaml`, `.yml`, `.json`, `.txt` — and the two
-   known filenames (`agent.yaml`/`agent.toml`, `instructions.md`/`persona.md`)
-   plus `skills.md`. Any other file (any other extension, or any file with
-   the Unix executable permission bit set regardless of extension —
-   `fs::metadata(path)?.permissions().mode() & 0o111 != 0`) is a load error,
-   `PackageContainsForeignFile { path }`. An allowlist rather than a denylist
-   deliberately: a denylist of script extensions (`.sh`/`.py`/`.js`/…) is
-   leaky (new interpreters, no-extension scripts); an allowlist of known-safe
-   data formats is not.
+**Historical note:** An earlier version of this spec proposed a file allowlist (`PackageContainsForeignFile` error) to exclude executable files from agent packages. That rule was policy-only — never enforced in `load_agent_package` (`loader.rs:764-784`) and has zero occurrences in the codebase. Executable skill code is already loading in production (the `cto-db` skill, loaded via `install_discovered_skill_plugins`, `runtime/startup.rs:153`). This amendment ratifies existing behavior and clarifies that responsibility lies with the owner/operator, not with automated platform controls.
 
-**Explicit boundary, not ambiguous:** this rule governs the **agent's own
-package only**. `~/.trusty-agents/config.toml`'s `McpService.command`
-(§4) legitimately references executables (`slack-mcp`, a stdio MCP server
-binary) — that is operator-controlled platform infrastructure, a different
-trust boundary from agent-authored content, and is explicitly out of scope
-for this rule.
+**Explicit boundary, not ambiguous:** `~/.trusty-agents/config.toml`'s `McpService.command` (§4) legitimately references executables (`slack-mcp`, a stdio MCP server binary) — that is operator-controlled platform infrastructure, a different trust boundary from agent-authored content. This principle extends to agent-bundled code: an operator who deploys an agent with executable skill code accepts responsibility for its provenance and behavior. The platform imposes no gating or validation over such code.
 
 ### 2.7 Directory-convention layout (worked example)
 
@@ -736,9 +713,10 @@ channels:
 
 - A manifest with an unrecognized top-level key (e.g. `run: ./hook.sh`)
   fails to load with `ManifestUnknownKey`, never silently ignored.
-- A directory package containing any file outside the §2.6 allowlist (e.g.
-  `billing-assistant/notify.py`, with or without the executable bit set)
-  fails to load with `PackageContainsForeignFile`.
+- A directory package may contain executable code (e.g., a Python skill package
+  discovered by `install_discovered_skill_plugins`). The operator is responsible
+  for vetting such code; the platform imposes no automated validation over it
+  (§2.6, 2026-07-27 amendment).
 - `extends` resolves scalar override + list-union merge rules for a 2-level
   chain, with **base-first concatenation** of `instructions.md` content
   (§2.5) — not child-replaces; a 9-level chain is rejected with
@@ -1967,6 +1945,17 @@ not a speculative extension.
   personalization overlay per §2.5.1). Izzie reclassified as the reference
   personalization-overlay example rather than a base agent; migrating her
   manifest/prose into that shape is tracked in issue #3087.
+- **2026-07-27 (v3.3)** — Owner decision: Agent skills may carry executable
+  code. Amended §2.6 from "no-code enforcement" to "code ownership and
+  responsibility." The prior proposed ban (`PackageContainsForeignFile` error,
+  file allowlist) was policy-only, never enforced in `load_agent_package`, with
+  zero codebase occurrences. Executable skill code is already in production
+  (the `cto-db` skill loads via `install_discovered_skill_plugins` at
+  `runtime/startup.rs:153`). Amendment ratifies existing behavior and clarifies
+  that the operator, not the platform, bears responsibility for vetting,
+  auditing, and managing such code. Updated conformance in §2.8 to reflect that
+  directory packages may contain executables. Rescinds the earlier proposed
+  rule that executable files would be rejected at load time.
 
 [gallery-doc]: ../research/agent-gallery-validation-20260716.md
 [eve-blog]: https://vercel.com/blog/introducing-eve
