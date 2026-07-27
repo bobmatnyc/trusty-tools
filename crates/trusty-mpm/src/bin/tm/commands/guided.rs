@@ -1097,7 +1097,9 @@ pub(crate) fn managed_pane_settle_pending_message(id: &str) -> String {
 /// `guided_fallback_untracked_ancestor_does_not_redirect`,
 /// `guided_fallback_redirect_success_worktree_not_live_checkout`,
 /// `guided_fallback_non_git_dir_reaches_launch_path` (fast path unaffected),
-/// and `guided_fallback_non_git_dir_with_managed_env_retries_instead_of_hint`
+/// `guided_fallback_non_git_dir_no_managed_env_is_fast`,
+/// `guided_fallback_non_git_dir_with_managed_env_settles_quickly_returns_promptly`,
+/// and `guided_fallback_non_git_dir_with_managed_env_unreachable_daemon_does_not_hang`
 /// (#4061 race) in `tests_behavior_b_tests.rs`.
 pub(crate) async fn fallback_protected(
     client: &reqwest::Client,
