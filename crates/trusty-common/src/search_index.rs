@@ -13,7 +13,10 @@
 //! not copy-pasted — so the two call sites can never silently diverge.
 //!
 //! What: [`ensure_project_indexed`] resolves the git-root, derives the index id
-//! via [`crate::resolve_project_root`] / [`crate::derive_index_id`], and — when
+//! via [`crate::resolve_project_root`] / [`resolve_effective_index_id`] (issue
+//! #4062 — prefers a `RepoIdentity`-derived `owner-repo` id, with an
+//! alias-fallback lookup so a project already registered under the legacy
+//! basename id is reused rather than shadowed), and — when
 //! the daemon is discoverable — best-effort registers the index (`POST
 //! /indexes`, ~1s cap) then best-effort triggers a freshness-gated reindex
 //! (`POST /indexes/{id}/reindex`, ~2s cap, skipped when the index already holds
@@ -64,6 +67,81 @@
 
 use std::path::Path;
 
+/// Resolve the effective trusty-search index id for `project_root`, with
+/// alias-fallback for backward compatibility (issue #4062, scoped follow-up
+/// to DOC-37 / #2611).
+///
+/// Why: [`crate::derive_preferred_index_id`] returns the NEW `owner-repo`-form
+/// id when the project's git origin resolves, but an index already registered
+/// under the OLD bare-basename id (created before this change, or by an older
+/// trusty-mpm/trusty-search build) must keep being found — never shadowed by
+/// a fresh, empty index under the new id. This is the ONE shared resolution
+/// rule both trusty-search's own CLI/MCP auto-detect (`detect::detect_project`)
+/// and trusty-mpm/trusty-code's registration entry point
+/// ([`ensure_project_indexed`]) use, so the two can never diverge on which id
+/// a given project resolves to — mirroring the single-source-of-truth
+/// rationale that already governs [`crate::derive_index_id`] (#1373).
+/// What: derives `preferred_id` ([`crate::derive_preferred_index_id`]) and
+/// `legacy_id` ([`crate::derive_index_id`]) for `project_root`. When they are
+/// identical (no remote, or the remote resolves to a content-hash-only
+/// identity), returns that one id with no daemon round trip. Otherwise, when
+/// the trusty-search daemon is discoverable, probes `GET
+/// /indexes/{legacy_id}/status` first — an index already registered under the
+/// legacy id wins, so it is reused rather than shadowed — then, if that
+/// misses, probes the preferred id (so a project already migrated to the new
+/// id is not accidentally re-registered under the legacy one). If NEITHER id
+/// is registered (a brand-new project) or the daemon is unreachable, returns
+/// `preferred_id`: new registrations default to the `owner-repo` form. Every
+/// probe is best-effort (short timeout, transport errors treated as "not
+/// found") and never blocks longer than the two short-timeout probes.
+/// Test: `resolve_effective_index_id_returns_single_id_when_no_remote`,
+/// `resolve_effective_index_id_prefers_existing_legacy_index`,
+/// `resolve_effective_index_id_defaults_to_preferred_when_daemon_down` in
+/// `tests`.
+pub fn resolve_effective_index_id(project_root: &Path) -> String {
+    let preferred_id = crate::derive_preferred_index_id(project_root);
+    let legacy_id = crate::derive_index_id(project_root);
+    if preferred_id == legacy_id {
+        return preferred_id;
+    }
+    let Some(base) = crate::resolve_daemon_base_url("trusty-search") else {
+        return preferred_id;
+    };
+    if index_is_registered(&base, &legacy_id) {
+        return legacy_id;
+    }
+    if index_is_registered(&base, &preferred_id) {
+        return preferred_id;
+    }
+    preferred_id
+}
+
+/// Probe `GET {base}/indexes/{index_id}/status`; `true` only on a 2xx
+/// response — every other outcome (unreachable, timeout, non-2xx, panicked
+/// thread) is treated as "not registered", never propagated.
+///
+/// Why: extracted so [`resolve_effective_index_id`]'s two probes share one
+/// tiny, tightly-timed implementation (mirrors the dedicated-OS-thread
+/// pattern [`best_effort_create_index`] already uses, so a blocking call here
+/// is safe from both sync and async callers).
+/// What: spawns a dedicated OS thread running a `reqwest::blocking` GET with
+/// an 800ms overall / 500ms connect timeout, joins it, and maps the result to
+/// a bool.
+/// Test: exercised via `resolve_effective_index_id_prefers_existing_legacy_index`.
+fn index_is_registered(base: &str, index_id: &str) -> bool {
+    let url = format!("{base}/indexes/{index_id}/status");
+    let result = std::thread::spawn(move || -> Result<bool, reqwest::Error> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_millis(800))
+            .connect_timeout(std::time::Duration::from_millis(500))
+            .build()?;
+        let resp = client.get(&url).send()?;
+        Ok(resp.status().is_success())
+    })
+    .join();
+    matches!(result, Ok(Ok(true)))
+}
+
 /// Find-or-create the trusty-search index for `project_root`, best-effort
 /// trigger a reindex so it is actually populated, and return its id (issues
 /// #1373, #1908).
@@ -105,7 +183,10 @@ use std::path::Path;
 /// `ensure_project_indexed_sends_allow_sensitive_path_through_to_create_body`.
 pub fn ensure_project_indexed(project_root: &Path, allow_sensitive_path: bool) -> Option<String> {
     let root = crate::resolve_project_root(project_root);
-    let index_id = crate::derive_index_id(&root);
+    // Issue #4062: prefer the org/repo-form id when the git origin resolves,
+    // with alias-fallback so a project already registered under the legacy
+    // basename id is reused rather than shadowed by a fresh empty index.
+    let index_id = resolve_effective_index_id(&root);
     if index_id.trim().is_empty() {
         tracing::warn!(
             "skipping trusty-search index registration: empty index id for {}",
@@ -200,7 +281,11 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
         return;
     }
     let root = crate::resolve_project_root(project_root);
-    let index_id = crate::derive_index_id(&root);
+    // Issue #4062: must resolve to the SAME id `ensure_project_indexed` chose
+    // at task start — otherwise an incremental update could target a
+    // different (org/repo vs legacy basename) index than the one actually
+    // pinned/created for this project.
+    let index_id = resolve_effective_index_id(&root);
     if index_id.trim().is_empty() {
         tracing::debug!(
             "skipping incremental trusty-search index update: empty index id for {}",

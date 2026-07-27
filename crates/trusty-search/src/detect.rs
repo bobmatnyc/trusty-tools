@@ -6,7 +6,13 @@
 //! to identify the current project context.
 //!
 //! What: Provides `detect_project()` which returns a `ProjectContext` containing
-//! the inferred index ID, project root, and detection method used.
+//! the inferred index ID, project root, and detection method used. The index id
+//! itself is derived via `trusty_common::search_index::resolve_effective_index_id`
+//! (issue #4062): prefers a `RepoIdentity`-derived `owner-repo` id when the
+//! project's git origin remote resolves, with an alias-fallback probe against
+//! the daemon so a project already registered under the legacy bare-basename
+//! id (issue #1373's original rule) keeps resolving to that same id rather
+//! than a brand-new, empty index under the new one.
 //!
 //! Test: Create a temp directory with a `.git` subdirectory, call detect_project()
 //! from a nested path, assert the returned root and detection_method::GitRoot.
@@ -45,10 +51,13 @@ pub fn detect_project(start: &Path) -> ProjectContext {
     loop {
         // Prefer .git as the strongest signal of a project root.
         if current.join(".git").exists() {
-            // Single source of truth (#1373): derive the id via the shared
-            // `trusty_common::derive_index_id` so trusty-mpm's register-and-pin
-            // and this CLI path always produce the identical index id.
-            let name = trusty_common::derive_index_id(&current);
+            // Single source of truth (#1373; #4062): derive the id via the
+            // shared `trusty_common::search_index::resolve_effective_index_id`
+            // so trusty-mpm's register-and-pin and this CLI path always
+            // produce the identical index id — preferring the org/repo form
+            // when the git origin resolves, with alias-fallback to the legacy
+            // basename id when one is already registered under it.
+            let name = trusty_common::search_index::resolve_effective_index_id(&current);
             return ProjectContext {
                 index_id: name,
                 root_path: current,
@@ -57,7 +66,7 @@ pub fn detect_project(start: &Path) -> ProjectContext {
         }
         // Then check for an explicit trusty-search marker.
         if current.join(".trusty-search").exists() {
-            let name = trusty_common::derive_index_id(&current);
+            let name = trusty_common::search_index::resolve_effective_index_id(&current);
             return ProjectContext {
                 index_id: name,
                 root_path: current,
@@ -70,7 +79,7 @@ pub fn detect_project(start: &Path) -> ProjectContext {
     }
     // Fallback: use CWD basename so commands still have something to call the index.
     let cwd = start.to_path_buf();
-    let name = trusty_common::derive_index_id(&cwd);
+    let name = trusty_common::search_index::resolve_effective_index_id(&cwd);
     ProjectContext {
         index_id: name,
         root_path: cwd,

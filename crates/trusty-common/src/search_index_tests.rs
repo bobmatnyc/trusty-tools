@@ -29,6 +29,207 @@ fn scratch_dir(tag: &str) -> PathBuf {
     p
 }
 
+/// Run a git subcommand in `dir`, returning whether it succeeded.
+fn git_ok(dir: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Issue #4062 (a): a project with no git origin remote must resolve to the
+/// exact same single id [`crate::derive_index_id`] always has — no daemon
+/// round trip needed since `preferred_id == legacy_id`.
+///
+/// Why: this is the "no remote → legacy basename, unchanged" half of the
+/// alias-fallback contract. It must hold with NO daemon reachable at all
+/// (this test does not touch `TRUSTY_DATA_DIR_OVERRIDE`), proving the
+/// short-circuit never attempts network I/O when the two ids already agree.
+/// What: a plain non-repo scratch dir; asserts `resolve_effective_index_id`
+/// equals `derive_index_id`.
+/// Test: this test.
+#[test]
+fn resolve_effective_index_id_returns_single_id_when_no_remote() {
+    let project = scratch_dir("resolve-no-remote");
+    fs::create_dir_all(&project).unwrap();
+
+    let resolved = resolve_effective_index_id(&project);
+    let expected = crate::derive_index_id(&project);
+
+    let _ = fs::remove_dir_all(&project);
+    assert_eq!(resolved, expected);
+}
+
+/// Issue #4062 (c): when a project's preferred (org-repo) id and legacy
+/// (basename) id differ, AND an index is already registered under the
+/// LEGACY id, `resolve_effective_index_id` must return the legacy id — never
+/// the preferred one — so a pre-existing basename-keyed index is reused
+/// rather than shadowed by a fresh, empty index under the new id.
+///
+/// Why: this is the core alias-fallback regression this issue exists to
+/// prevent: a project migrated to derive a preferred org-repo id must not
+/// silently orphan an index (and any `.mcp.json` `--index <id>` pin) that
+/// already exists under the old basename id.
+/// What: seeds a git repo with a resolvable `origin` remote (so
+/// `preferred_id != legacy_id`), stands up a fake daemon (bound TCP
+/// listener, mirroring `resolve_daemon_base_url`'s on-disk discovery
+/// contract) that answers 200 OK to the FIRST connection it accepts, and
+/// asserts (1) the resolved id equals the legacy basename id, and (2) the
+/// captured request path targeted the legacy id (proving the probe order is
+/// legacy-first, not preferred-first).
+/// Test: this test.
+#[test]
+fn resolve_effective_index_id_prefers_existing_legacy_index() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let data_dir = scratch_dir("resolve-legacy-data");
+    fs::create_dir_all(&data_dir).unwrap();
+    // SAFETY: guarded by ENV_LOCK; removed below before returning.
+    unsafe {
+        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+    }
+
+    let project = scratch_dir("resolve-legacy-project");
+    fs::create_dir_all(&project).unwrap();
+    if !git_ok(&project, &["init"]) {
+        unsafe {
+            std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+        }
+        let _ = fs::remove_dir_all(&project);
+        let _ = fs::remove_dir_all(&data_dir);
+        return; // no usable git on this runner
+    }
+    let _ = git_ok(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:bobmatnyc/trusty-tools.git",
+        ],
+    );
+
+    let legacy_id = crate::derive_index_id(&project);
+    let preferred_id = crate::derive_preferred_index_id(&project);
+    assert_ne!(
+        legacy_id, preferred_id,
+        "test fixture must produce two different ids"
+    );
+
+    // Fake daemon: accept one connection, capture the request path, answer
+    // 200 with a minimal status body so the probe reads as "registered".
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        drop(listener);
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = b"{\"chunk_count\":1}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(body);
+        let _ = stream.flush();
+        let path = request.lines().next().unwrap_or("").to_string();
+        let _ = tx.send(path);
+    });
+
+    let search_data_dir = data_dir.join("trusty-search");
+    fs::create_dir_all(&search_data_dir).unwrap();
+    fs::write(search_data_dir.join("http_addr"), addr.to_string()).unwrap();
+
+    let resolved = resolve_effective_index_id(&project);
+
+    let request_line = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("fake daemon must have received the status probe");
+    let _ = server.join();
+
+    unsafe {
+        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+    }
+    let _ = fs::remove_dir_all(&project);
+    let _ = fs::remove_dir_all(&data_dir);
+
+    assert_eq!(
+        resolved, legacy_id,
+        "an index already registered under the legacy id must win"
+    );
+    assert!(
+        request_line.contains(&format!("/indexes/{legacy_id}/status")),
+        "probe must target the legacy id first; got request line: {request_line}"
+    );
+}
+
+/// Issue #4062 (b, daemon-down half): when the two ids differ and the
+/// trusty-search daemon is NOT discoverable, `resolve_effective_index_id`
+/// must fall back to the preferred (org-repo) id — a brand-new project with
+/// no daemon reachable still gets the new default, since there is nothing to
+/// alias against.
+///
+/// Why: mirrors `ensure_project_indexed_returns_derived_id_when_daemon_down`'s
+/// daemon-down fail-open contract for this new resolver.
+/// What: seeds a git repo with a resolvable `origin` remote, points
+/// `TRUSTY_DATA_DIR_OVERRIDE` at an empty temp dir (no address file, so
+/// `resolve_daemon_base_url` finds nothing), and asserts the resolved id
+/// equals `derive_preferred_index_id`, not `derive_index_id`.
+/// Test: this test.
+#[test]
+fn resolve_effective_index_id_defaults_to_preferred_when_daemon_down() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let data_dir = scratch_dir("resolve-down-data");
+    fs::create_dir_all(&data_dir).unwrap();
+    // SAFETY: guarded by ENV_LOCK; removed below before returning.
+    unsafe {
+        std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, &data_dir);
+    }
+
+    let project = scratch_dir("resolve-down-project");
+    fs::create_dir_all(&project).unwrap();
+    if !git_ok(&project, &["init"]) {
+        unsafe {
+            std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+        }
+        let _ = fs::remove_dir_all(&project);
+        let _ = fs::remove_dir_all(&data_dir);
+        return; // no usable git on this runner
+    }
+    let _ = git_ok(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:bobmatnyc/trusty-tools.git",
+        ],
+    );
+
+    let preferred_id = crate::derive_preferred_index_id(&project);
+    let resolved = resolve_effective_index_id(&project);
+
+    unsafe {
+        std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV);
+    }
+    let _ = fs::remove_dir_all(&project);
+    let _ = fs::remove_dir_all(&data_dir);
+
+    assert_eq!(resolved, preferred_id);
+}
+
 #[test]
 fn ensure_project_indexed_returns_derived_id_when_daemon_down() {
     // Why (#1373): the helper must derive the project's index id (git-root

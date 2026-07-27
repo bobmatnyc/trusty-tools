@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`detect_project` prefers a git-org/repo index id, with alias-fallback for
+  backward compatibility (issue #4062, scoped follow-up to DOC-37 / #2611).**
+  Auto-detected index ids now use
+  `trusty_common::search_index::resolve_effective_index_id`: when the
+  project's git origin remote resolves, the id prefers a `RepoIdentity`-derived
+  `owner-repo` token instead of the bare directory basename; when it doesn't
+  (no remote, or a content-hash-only identity), behavior is unchanged. An
+  alias-fallback probe against the daemon prefers an index already registered
+  under the legacy basename id, so no existing index or pinned `--index <id>`
+  `.mcp.json` stub is orphaned by this change.
+
 ### Fixed
 
 - **Test-side remediation for `create_index`/`relocate_index` tests spuriously

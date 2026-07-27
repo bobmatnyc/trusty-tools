@@ -7,6 +7,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **`derive_preferred_index_id` + `search_index::resolve_effective_index_id`
+  (issue #4062, scoped follow-up to DOC-37 / #2611).** trusty-search index ids
+  were always the bare directory basename (`derive_index_id`), which carries
+  no information about which actual GitHub project a directory is, and
+  collides across unrelated checkouts sharing a directory name.
+  `derive_preferred_index_id` now prefers a `RepoIdentity`-derived
+  `owner-repo` token when the project's git origin remote resolves (falling
+  back to the legacy basename unchanged otherwise); `resolve_effective_index_id`
+  adds the alias-fallback lookup (probing the daemon for an index already
+  registered under the legacy basename id before creating a new one under the
+  preferred id) so this is fully backward-compatible with every
+  already-registered index and pinned `--index <id>` `.mcp.json` stub. Wired
+  into `ensure_project_indexed` (trusty-mpm session launch / trusty-code task
+  start) and `index_files_best_effort`'s incremental per-file update path.
+  Note: the preferred id joins `owner`/`repo` with a single hyphen
+  (`"<owner>-<repo>"`), NOT `RepoIdentity::canonical()`'s `"<owner>/<repo>"`
+  form — an embedded `/` would break every `trusty-search` HTTP route, which
+  matches `{id}` against exactly one path segment.
+
 ---
 ## [0.26.2] — 2026-07-26
 

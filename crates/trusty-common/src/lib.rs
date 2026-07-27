@@ -439,10 +439,16 @@ pub use slug::slugify_string;
 /// another. Centralising the rule here — the crate both already depend on —
 /// keeps them in lockstep without a trusty-mpm → trusty-search dependency edge.
 /// What: Exposes [`index_id::derive_index_id`], [`index_id::resolve_project_root`],
-/// and [`index_id::find_git_root`].
+/// [`index_id::find_git_root`], and [`index_id::derive_preferred_index_id`]
+/// (issue #4062 — prefers the `RepoIdentity` `owner/repo` form for newly
+/// registered indexes; see [`search_index::resolve_effective_index_id`]
+/// (feature `search-index`) for the alias-fallback lookup that keeps this
+/// backward-compatible with already-registered basename-keyed indexes).
 /// Test: `cargo test -p trusty-common -- index_id::tests`.
 pub mod index_id;
-pub use index_id::{derive_index_id, find_git_root, resolve_project_root};
+pub use index_id::{
+    derive_index_id, derive_preferred_index_id, find_git_root, resolve_project_root,
+};
 
 /// Shared best-effort trusty-search "ensure this project is indexed" helper
 /// (issues #1373 / #1908), gated behind the `search-index` feature.

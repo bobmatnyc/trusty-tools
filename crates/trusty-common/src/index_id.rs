@@ -17,10 +17,18 @@
 //! nearest `.git` root (fallback: the start dir itself), and
 //! [`derive_index_id`] turns a project root into its index id (the path
 //! basename, preserved verbatim for backward-compatibility with already-indexed
-//! projects). No global state; pure functions.
+//! projects). [`derive_preferred_index_id`] (issue #4062) is the newer,
+//! preferred derivation: it returns a `RepoIdentity`-derived `owner-repo` token
+//! when the project's git origin resolves, falling back to
+//! [`derive_index_id`]'s basename rule otherwise. Callers that must stay
+//! backward-compatible with indexes already registered under the legacy
+//! basename id should use [`crate::search_index::resolve_effective_index_id`]
+//! (feature `search-index`), which adds the alias-fallback lookup on top of
+//! this module's pure derivation. No global state; pure functions.
 //!
 //! Test: `cargo test -p trusty-common -- index_id::tests` covers basename
-//! derivation, the git-root walk, and the no-marker fallback.
+//! derivation, the git-root walk, the no-marker fallback, and the preferred-id
+//! / legacy-fallback split.
 
 use std::path::{Path, PathBuf};
 
@@ -99,6 +107,48 @@ pub fn derive_index_id(project_root: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned()
+}
+
+/// Derive the PREFERRED trusty-search index id for a project root (issue
+/// #4062, scoped follow-up to DOC-37 / #2611).
+///
+/// Why: [`derive_index_id`]'s bare-basename id carries no information about
+/// which actual GitHub project a directory is, and two unrelated checkouts
+/// that happen to share a directory name collide on it. `RepoIdentity` (used
+/// today only as an ADDITIVE `repo_identity` join-key field on `PersistedIndex`,
+/// #2611) already derives a path-independent `owner/repo` identity from the
+/// git origin remote — this function promotes that identity to the id itself
+/// for *newly-registered* indexes, while leaving [`derive_index_id`]'s
+/// basename rule as the one true fallback for repos with no resolvable
+/// remote, so behavior for local-only / content-hash-only projects is
+/// unchanged. This function alone does NOT make lookups backward-compatible
+/// with already-registered basename-keyed indexes — see
+/// [`crate::search_index::resolve_effective_index_id`] (feature
+/// `search-index`) for the alias-fallback that must be used at any
+/// registration/lookup call site.
+/// What: tries [`crate::repo_identity::RepoIdentity::derive`] first; when it
+/// resolves to the `GitHub(owner/repo)` variant, joins `owner` and `repo` with
+/// a single hyphen (`"<owner>-<repo>"`) — deliberately NOT
+/// [`crate::repo_identity::RepoIdentity::canonical`]'s `"<owner>/<repo>"` form,
+/// because `index_id` is used as a literal, single-segment token in every
+/// `trusty-search` HTTP route (`/indexes/{id}/status`, `/search`, …) and MCP
+/// `--index <id>` arg; an embedded `/` would silently break routing across
+/// that entire surface (axum matches `{id}` against exactly one path
+/// segment). Mirrors the same single-hyphen join
+/// [`crate::palace_id::owner_repo_from_git_remote`] already uses for the
+/// analogous trusty-memory palace-id problem. Otherwise (no git repo, no
+/// origin remote, or a remote-less repo that only yields the `ContentHash`
+/// variant) falls back to [`derive_index_id`]'s bare-basename rule unchanged.
+/// Test: `derive_preferred_index_id_uses_org_repo_when_remote_resolves`,
+/// `derive_preferred_index_id_falls_back_to_basename_without_remote` in
+/// `tests`.
+pub fn derive_preferred_index_id(project_root: &Path) -> String {
+    match crate::repo_identity::RepoIdentity::derive(project_root) {
+        Some(crate::repo_identity::RepoIdentity::GitHub(gp)) => {
+            format!("{}-{}", gp.owner, gp.repo)
+        }
+        _ => derive_index_id(project_root),
+    }
 }
 
 #[cfg(test)]
@@ -186,6 +236,87 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
 
         assert_eq!(find_git_root(&tmp), None);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Run a git subcommand in `dir`, returning whether it succeeded.
+    fn git_ok(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// Why (issue #4062): a project whose git origin remote resolves to a
+    /// GitHub-style identity must get the `owner/repo` form, not the bare
+    /// basename — this is the entire point of the preferred-id derivation.
+    /// What: inits a temp repo named differently from `owner/repo`, adds an
+    /// origin remote, and asserts `derive_preferred_index_id` returns the
+    /// canonical `owner/repo` string (NOT the directory's own basename).
+    /// Test: itself (skips cleanly if git is unavailable on the runner).
+    #[test]
+    fn derive_preferred_index_id_uses_org_repo_when_remote_resolves() {
+        let tmp = scratch_dir("preferred-remote");
+        fs::create_dir_all(&tmp).unwrap();
+        if !git_ok(&tmp, &["init"]) {
+            let _ = fs::remove_dir_all(&tmp);
+            return; // no usable git on this runner
+        }
+        let _ = git_ok(
+            &tmp,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:bobmatnyc/trusty-tools.git",
+            ],
+        );
+
+        assert_eq!(derive_preferred_index_id(&tmp), "bobmatnyc-trusty-tools");
+        // The basename fallback would have been the scratch dir's own name —
+        // proving the preferred id is NOT just falling through to it.
+        assert_ne!(derive_preferred_index_id(&tmp), derive_index_id(&tmp));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Why (issue #4062): a repo with no origin remote (or no repo at all)
+    /// must keep returning the exact same id [`derive_index_id`] always has —
+    /// this is the backward-compatibility half of the preferred-id contract,
+    /// so a local-only / content-hash-only project's id never changes underfoot.
+    /// What: asserts `derive_preferred_index_id` equals `derive_index_id` for
+    /// (a) a plain non-repo directory, and (b) a git repo with a commit but no
+    /// origin remote (content-hash `RepoIdentity` fallback).
+    /// Test: itself (skips cleanly if git is unavailable on the runner).
+    #[test]
+    fn derive_preferred_index_id_falls_back_to_basename_without_remote() {
+        // (a) not a repo at all.
+        let plain = scratch_dir("preferred-plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert_eq!(derive_preferred_index_id(&plain), derive_index_id(&plain));
+        let _ = fs::remove_dir_all(&plain);
+
+        // (b) a repo with a commit but no origin remote.
+        let tmp = scratch_dir("preferred-no-remote");
+        fs::create_dir_all(&tmp).unwrap();
+        if !git_ok(&tmp, &["init"]) {
+            let _ = fs::remove_dir_all(&tmp);
+            return; // no usable git on this runner
+        }
+        let _ = git_ok(&tmp, &["config", "user.email", "t@t.test"]);
+        let _ = git_ok(&tmp, &["config", "user.name", "t"]);
+        fs::write(tmp.join("README.md"), "hi").unwrap();
+        let _ = git_ok(&tmp, &["add", "."]);
+        if !git_ok(&tmp, &["commit", "-m", "init"]) {
+            let _ = fs::remove_dir_all(&tmp);
+            return; // commit failed — skip
+        }
+
+        assert_eq!(derive_preferred_index_id(&tmp), derive_index_id(&tmp));
 
         let _ = fs::remove_dir_all(&tmp);
     }
