@@ -195,6 +195,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `google.tasks.*` (#3985) collapse into the base's by the extends union's
   dedup, and `izzie`'s blanket `google.*` remains a superset.
 
+  **Known gap, tracked in #4054**: the base persona ingests
+  attacker-controllable text (`okg_ingest_gmail`, `okg_ingest_drive`,
+  `get_gmail_message_content`, `web_search`) in the same turn that now holds
+  send/share credentials, and five allowlisted tools are exfiltration-capable
+  (`compose_email`, `manage_file_permissions`, `manage_gmail_settings`,
+  `manage_gmail_filters`, `modify_gmail_messages`). The allow-list bounds
+  which tools exist, not what an injected model does with them. A
+  confirmation gate for those five needs either #3074/#3075's
+  `user_authority` field or an interim read site for
+  `[[permissions.grants]] mode = "ask"` — neither exists yet, so it is filed
+  rather than shipped here.
+
   Consequently the base assistant, and every `extends = "assistant"` overlay,
   is now clean under the #3987 option-C dead-grant diagnostic, which
   discharges the sequencing constraint that forced that check to ship as a

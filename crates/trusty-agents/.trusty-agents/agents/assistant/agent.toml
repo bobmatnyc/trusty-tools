@@ -207,39 +207,35 @@ allow = [
 # support in `ScopePattern` or a scope-naming redesign. If option A is built,
 # these grants shrink naturally.
 #
+# INJECTION SURFACE — the risk this posture creates, named rather than left
+# implicit: this same persona ingests attacker-controllable text in the SAME
+# turn that holds send/share credentials (`okg_ingest_gmail`,
+# `okg_ingest_drive`, `get_gmail_message_content`, `web_search` above all pull
+# in an inbound mail body, a shared Drive doc, or a web page). The
+# exfiltration-capable subset of the allowlist is `compose_email`,
+# `manage_file_permissions`, `manage_gmail_settings`, `manage_gmail_filters`
+# and `modify_gmail_messages` — the allow-list bounds WHICH tools exist, not
+# what an injected model chooses to do with them. A confirmation gate for
+# exactly those five is tracked in #4054 (it needs either #3074/#3075's
+# `user_authority` field or an interim read site for
+# `[[permissions.grants]] mode = "ask"`, neither of which exists yet).
+#
 # THE ALLOW-LIST REMAINS THE BINDING CONSTRAINT. `filter_persona_tool_names`
 # intersects `[tools].allow` (by NAME) AND `[tools].scopes` (by CAPABILITY) —
 # verified in #3985 — so these family grants do not expose a single tool the
 # curated allowlist above does not already name. Widening the reachable
 # surface means editing `allow`, not this line.
 #
-# ONE FAMILY PER SURFACE THE ALLOW-LIST ACTUALLY NAMES — audited tool-by-tool
-# against the real `rpc.discover` document, and pinned by
-# `base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool` (which
-# also fails if a family here has NO allowlisted tool, so this list cannot
-# quietly over-grant):
-#   google.gmail.*    — 9 tools: compose_email, download_gmail_attachment,
-#                       get_gmail_message_content, list_message_attachments,
-#                       manage_gmail_filters, manage_gmail_labels,
-#                       manage_gmail_settings, modify_gmail_messages,
-#                       search_gmail_messages
-#   google.calendar.* — 3 tools: manage_calendars, manage_events,
-#                       query_free_busy
-#   google.drive.*    — 6 tools: get_drive_file_content, list_drive_contents,
-#                       list_shared_drives, manage_drive_file,
-#                       manage_file_permissions, search_drive_files
-#   google.docs.*     — 25 tools: the whole `*_document` / `*_in_document` /
-#                       `*_table_*` cluster (Docs tools request `documents`
-#                       AND `drive`; the resource-specific scope wins, see
-#                       `google_scope`'s priority note)
-#   google.sheets.*   — 5 tools: create_chart, format_sheet, get_spreadsheet,
-#                       manage_spreadsheet, modify_sheet_values
-#   google.slides.*   — 3 tools: add_slide_content, get_slides, manage_slides
-#   google.tasks.*    — 2 tools: manage_task_lists, manage_tasks
-#   google.accounts.* — 1 tool: list_accounts (Google's one genuinely
-#                       read-only scope, `userinfo.profile`)
-# No family is granted speculatively: every one above has at least one
-# allowlisted tool, and no allowlisted scoped gworkspace tool lacks a family.
+# ONE FAMILY PER SURFACE THE ALLOW-LIST ACTUALLY NAMES. No family is granted
+# speculatively: every one below has at least one allowlisted tool, and no
+# allowlisted scoped gworkspace tool lacks a family. That correspondence is
+# ENFORCED, in both directions, by
+# `base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool`
+# (`src/ctrl/pm_task/dispatch/persona_tests.rs`), which derives every tool's
+# dotted scope from the real `rpc.discover` document. Read the test, not a
+# comment, for the per-family tool counts — an enumeration here would drift
+# out of date the first time the allowlist changed, and a stale audit is
+# worse than none.
 #
 # Personalization overlays are UNIONED with this list (`extends::merge_extends`
 # -> `union_opt_vec`, deduped), so `../cto-assistant/`'s narrow
