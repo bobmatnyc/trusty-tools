@@ -293,6 +293,42 @@ impl SessionManager {
             SentinelOwner::Unknown => None,
         }
     }
+
+    /// The I/O half of the #3764 cross-session deletion guard: does the
+    /// worktree AT `path` declare an owner that is a different, still-Active
+    /// session than `target`?
+    ///
+    /// Why: [`Self::known_owner_of`] resolves ownership from the RECORD first
+    /// (`record.worktree_owner`, sentinel only as fallback). That is right for
+    /// the #3649 caller gate but exactly wrong for #3764: the incident shape is
+    /// a record whose `workspace_path` points at a PEER's worktree, so trusting
+    /// the record's own idea of ownership would launder the corruption — the
+    /// impostor record names itself as owner and the guard would never fire.
+    /// This deliberately reads ONLY the on-disk sentinel: the worktree is asked
+    /// who owns it, and the record asking for its removal gets no say.
+    /// What: reads `path`'s ownership sentinel via [`read_sentinel_owner`],
+    /// looks up that owner's current state in the store (absent → `None`
+    /// state), and delegates the decision to
+    /// [`workspace_guard::foreign_active_owner`](super::workspace_guard::foreign_active_owner)
+    /// — see that function for the full allow/refuse matrix.
+    /// Test: `decommission_refuses_to_delete_live_peer_worktree`,
+    /// `decommission_removes_own_worktree_despite_guard` in
+    /// `super::decommission::tests`.
+    pub(crate) async fn foreign_active_worktree_owner(
+        &self,
+        path: &Path,
+        target: ManagedSessionId,
+    ) -> Option<ManagedSessionId> {
+        let declared = match read_sentinel_owner(path) {
+            SentinelOwner::Known(owner, _created_at) => Some(owner),
+            SentinelOwner::Unknown => None,
+        };
+        let owner_state = match declared {
+            Some(owner) => self.get(&owner).await.ok().map(|r| r.state),
+            None => None,
+        };
+        super::workspace_guard::foreign_active_owner(declared, target, owner_state)
+    }
 }
 
 #[cfg(test)]

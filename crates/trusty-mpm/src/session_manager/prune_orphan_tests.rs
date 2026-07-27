@@ -870,6 +870,35 @@ fn canonicalize_streak_escalates_at_threshold() {
     );
 }
 
+/// The forensics runbook the escalated F3 alarm points at must actually
+/// exist in the repo (#3764 item 3).
+///
+/// Why: the alarm's only value at 03:00 is that it names, in-message, the
+/// document telling the operator what to capture before a stop destroys the
+/// pane transcript. A dangling path turns that into a dead end at the worst
+/// possible moment — so the pointer is pinned mechanically rather than trusted
+/// to survive a future docs reshuffle.
+/// What: resolves [`FORENSICS_RUNBOOK`] against the workspace root (two levels
+/// up from this crate's `CARGO_MANIFEST_DIR`) and asserts the file is present
+/// and non-empty.
+/// Test: this function IS the test.
+#[test]
+fn forensics_runbook_path_exists() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crate dir must have a grandparent (the workspace root)");
+    let runbook = workspace_root.join(FORENSICS_RUNBOOK);
+    assert!(
+        runbook.is_file(),
+        "the F3 alarm points operators at {FORENSICS_RUNBOOK}, which must exist; \
+         looked at {}",
+        runbook.display()
+    );
+    let len = std::fs::metadata(&runbook).expect("stat runbook").len();
+    assert!(len > 0, "the forensics runbook must not be empty");
+}
+
 /// A single successful canonicalize must fully reset the streak for that
 /// path — a subsequent failure starts back at 1, not N+1 (#3715 item 3).
 ///

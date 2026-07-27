@@ -1329,11 +1329,19 @@ pub async fn ingest_hook(
 /// What: extracts `cwd` from `payload["cwd"]`; canonicalizes it and each record's
 /// `workspace_path`/`cwd` (falling back to raw path on error so macOS
 /// `/private/tmp` ↔ `/tmp` symlinks resolve); finds Active managed sessions whose
-/// path matches. If more than one Active session matches the cwd (ambiguous) the
-/// correlation is skipped with a warning to avoid mis-attribution. Single match →
-/// `SessionManager::set_claude_session_id`. Best-effort — failures are logged and
-/// silently swallowed so a missing correlation never blocks the hook response.
-/// Test: `session_start_hook_correlates_claude_id` in `api_tests.rs`.
+/// path matches. The matched set is classified by
+/// [`cwd_collision::classify`](crate::daemon::cwd_collision::classify): a single
+/// match → `SessionManager::set_claude_session_id`; ≥2 matches → attribution is
+/// still skipped (mis-assignment remains the worse outcome) but the condition is
+/// now escalated to an ERROR-level corruption alarm via
+/// [`cwd_collision::alarm`](crate::daemon::cwd_collision::alarm) instead of the
+/// pre-#3764 `warn!` that no operator surface ever saw. Two Active records at one
+/// worktree is registry corruption, not an attribution nuisance — see that
+/// module's doc for why ERROR (not WARN) is load-bearing here.
+/// Best-effort otherwise — failures are logged and swallowed so a missing
+/// correlation never blocks the hook response.
+/// Test: `session_start_hook_correlates_claude_id` in `api_tests.rs`;
+/// `classify_*` / `alarm_is_error_level` in `daemon::cwd_collision`.
 async fn correlate_session_start(
     state: &Arc<DaemonState>,
     claude_session_id: &str,
@@ -1364,12 +1372,13 @@ async fn correlate_session_start(
             let cwd_canon = std::fs::canonicalize(&r.cwd).unwrap_or_else(|_| r.cwd.clone());
             ws_canon.as_deref() == Some(hook_cwd.as_path()) || cwd_canon == hook_cwd
         })
+        .map(|r| r.id)
         .collect();
 
-    match matched.len() {
-        0 => {} // no Active managed session at this cwd — silent, not an error
-        1 => {
-            let id = matched[0].id;
+    match crate::daemon::cwd_collision::classify(&matched) {
+        // No Active managed session at this cwd — ordinary, not an error.
+        crate::daemon::cwd_collision::CwdCorrelation::None => {}
+        crate::daemon::cwd_collision::CwdCorrelation::Unique(id) => {
             match mgr.set_claude_session_id(&id, claude_session_id).await {
                 Ok(()) => tracing::info!(
                     managed_id = %id,
@@ -1383,13 +1392,8 @@ async fn correlate_session_start(
                 ),
             }
         }
-        n => {
-            tracing::warn!(
-                cwd = %cwd_str,
-                n,
-                "SessionStart: {n} Active managed sessions share the same cwd — \
-                 skipping claude_session_id attribution to avoid mis-assignment (#1744)"
-            );
+        crate::daemon::cwd_collision::CwdCorrelation::Collision(ids) => {
+            crate::daemon::cwd_collision::alarm(cwd_str, &ids);
         }
     }
 }

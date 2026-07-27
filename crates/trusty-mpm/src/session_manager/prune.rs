@@ -69,6 +69,24 @@ pub const MAX_EPHEMERAL_AGE_HOURS: i64 = 24;
 /// Test: `canonicalize_streak_escalates_at_threshold`.
 const CANONICALIZE_FAILURE_STREAK_THRESHOLD: u32 = 10;
 
+/// Repo-relative path to the worktree-corruption forensics runbook (#3764 item 3).
+///
+/// Why: when the #1845 F3 streak alarm fires, the operator has a window of
+/// minutes before the evidence is destroyed — a stop/reap runs
+/// `snapshot::write_scrollback`, which OVERWRITES the only surviving pane
+/// transcript, and in the #3715 incident every pre-incident transcript was lost
+/// that way before anyone looked. An alarm that says "investigate" without
+/// saying "capture these six things first, in this order" spends that window on
+/// the operator working out what to collect. Naming the runbook IN the alarm
+/// is the cheapest way to close that gap; the alternative (wiring automated
+/// capture into the sweep) was evaluated and rejected — see the runbook's
+/// final section for why.
+/// What: the path, emitted as a `runbook` field and interpolated into the
+/// message of the escalated `error!`.
+/// Test: `forensics_runbook_path_exists` below pins that the file is really
+/// there, so the pointer can never rot into a dead reference.
+const FORENSICS_RUNBOOK: &str = "docs/runbooks/worktree-corruption-forensics.md";
+
 /// In-memory, per-path consecutive-failure counter for the #1845 F3
 /// canonicalize fallback (#3715 item 3).
 ///
@@ -965,11 +983,13 @@ impl SessionManager {
                             session = %session_id,
                             path = %p.display(),
                             streak,
+                            runbook = FORENSICS_RUNBOOK,
                             "prune-worktrees: active session path has failed to \
                              canonicalize for {streak} consecutive real-sweep \
                              observations — sustained failure, investigate before \
                              a stop/reap silently reconstitutes this workspace \
-                             root (#3715)"
+                             root. CAPTURE FORENSICS NOW, before a stop overwrites \
+                             the pane transcript: see {FORENSICS_RUNBOOK} (#3715/#3764)"
                         );
                     } else {
                         warn!(

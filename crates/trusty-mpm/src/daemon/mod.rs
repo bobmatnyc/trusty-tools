@@ -14,6 +14,7 @@ pub mod audit;
 pub mod bug_report;
 pub mod claude_config;
 pub mod coordinator;
+pub(crate) mod cwd_collision;
 pub mod discover;
 pub mod discovery;
 pub mod doctor;
@@ -699,6 +700,22 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                     }
                     Err(e) => tracing::warn!("orphan-GC worktree sweep failed: {e}"),
                 }
+
+                // #3764 item 4: check every Active session's OWN worktree and
+                // alarm loudly on any that has been destroyed underneath it.
+                // Every other guard in this loop asks "should I delete that?";
+                // this is the only one that asks "is MY tree still there?" —
+                // the gap that let a session run for THREE DAYS in a stripped
+                // worktree while `git log` kept answering from the enclosing
+                // repo and `git status`'s fatal rendered as a clean status.
+                // Read-only by construction: it reports, never repairs, because
+                // silently reconstituting a vanished root is the #3715 masking
+                // behaviour. The first tick after daemon start doubles as the
+                // at-start self-check, so no separate startup path is needed.
+                // Both the per-finding alarms and the sweep-level roll-up are
+                // emitted inside the audit; the returned findings exist for its
+                // tests, so the result is deliberately unused here.
+                let _ = mgr.audit_worktree_integrity().await;
 
                 // #2033: sweep orphaned / 0-chunk trusty-search indexes left
                 // behind by managed worktrees — sessions decommissioned before

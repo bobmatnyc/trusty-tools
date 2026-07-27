@@ -9,6 +9,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Detect a session whose own worktree has been destroyed underneath it**
+  ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)): the
+  orphan-GC tick now audits every Active session's own worktree and raises an
+  ERROR-level `WORKTREE DESTROYED` alarm when it is no longer a git work tree.
+  Nothing previously asked this question, which is why a session ran for three
+  days inside a stripped worktree while every surface reported it healthy: with
+  the `.git` pointer gone, git discovery walks up to the enclosing clone, so
+  `git log` still prints plausible commits and `git status`'s fatal renders as
+  `Status: (clean)`. The probe is `git rev-parse --show-toplevel` compared
+  against the session's own root — deliberately **not**
+  `--is-inside-work-tree`, which returns `true` for a fully destroyed worktree
+  whenever the parent clone is non-bare (regression-tested against real git in
+  both layouts). A probe that cannot run reports `Unknown`, never healthy. The
+  audit is read-only: it reports, never repairs.
+- **Forensics runbook for worktree corruption**
+  ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)):
+  `docs/runbooks/worktree-corruption-forensics.md` — what to capture, in what
+  order, before a stop overwrites the only surviving pane transcript, plus the
+  one probe that is safe to trust from inside a suspect directory. The #1845 F3
+  streak alarm now names this runbook in-message; a test pins that the path
+  resolves so the pointer cannot rot.
+
+### Fixed
+
+- **Refuse to delete a live peer session's worktree**
+  ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)):
+  `decommission` now asks the worktree's on-disk ownership sentinel who owns it
+  and refuses, with an ERROR alarm and a new `ForeignActiveWorktree` error, when
+  that owner is a different session that is still Active. The pre-existing
+  containment guard only ever checked that a path was inside the managed root —
+  which every sibling session's worktree also is — and #3649's owner gate only
+  fires when a session self-identifies as `caller`, so every daemon-routed
+  remove path (the `session_decommission` MCP tool, the sm-stdio control
+  channel, the HTTP routes, the idle reaper, `dedup`) passed `None` and skipped
+  it entirely. That left the observed incident shape unguarded: a #1744 cwd
+  collision leaves several Active records pointing at one worktree, and
+  decommissioning any impostor destroys the real owner's live tree. The new
+  guard is independent of `caller`, reads ownership from the tree rather than
+  from the (possibly corrupt) record that asked, and can only ever refuse a
+  deletion — a non-Active owner still reclaims exactly as before, so #3649's
+  orphan-GC and #3721's recreation guard are untouched.
+- **The #1744 cwd collision is now a corruption alarm, not a silent skip**
+  ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)): when ≥2
+  Active session records resolve to the same worktree path,
+  `correlate_session_start` raises an ERROR-level `SESSION REGISTRY CORRUPTION`
+  alarm naming every colliding session id, instead of the previous `warn!` that
+  logged only a count. Two Active records at one worktree describes a state that
+  cannot physically exist, and a 3-way collision on the exact path was the
+  observed precursor hours before the last corruption. The level is
+  load-bearing: the daemon's bug-capture layer persists only ERROR events to
+  `errors.jsonl`, so at WARN this condition was invisible to
+  `list_recent_errors` and `tm doctor` alike.
+
 - **Cross-branch `git push` guard for every worktree of a managed base clone**
   ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): a bundled
   `pre-push` hook now refuses any push that would OVERWRITE AN EXISTING remote

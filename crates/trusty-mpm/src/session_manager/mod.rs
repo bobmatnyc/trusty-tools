@@ -14,6 +14,7 @@ pub mod decommission;
 pub mod dedup;
 pub mod delete;
 pub mod driver;
+pub mod error;
 pub mod hook_sync;
 pub mod injection_status;
 pub mod manager;
@@ -33,6 +34,7 @@ pub mod snapshot;
 pub mod store;
 pub mod task_inject;
 pub mod workspace_guard;
+pub(crate) mod worktree_integrity;
 mod worktree_nested;
 pub(crate) mod worktree_ownership;
 pub mod worktree_safety;
@@ -51,6 +53,12 @@ mod backfill_tests;
 
 #[cfg(test)]
 mod decommission_worktree_tests;
+
+#[cfg(test)]
+mod worktree_identity_guard_tests;
+
+#[cfg(test)]
+mod worktree_integrity_tests;
 
 #[cfg(test)]
 mod delete_tests;
