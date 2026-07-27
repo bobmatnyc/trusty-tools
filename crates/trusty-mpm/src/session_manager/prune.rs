@@ -24,7 +24,7 @@ use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::worktree_safety::{
-    DirtyWorktree, DirtyWorktreePolicy, git_worktree_list_agrees, inspect_dirt,
+    DirtyWorktree, DirtyWorktreePolicy, dirt_blocks_removal, git_worktree_list_agrees, inspect_dirt,
 };
 
 /// Maximum age an EPHEMERAL session may reach before the auto-reaper tears it
@@ -484,6 +484,11 @@ pub(crate) fn find_orphaned_worktrees(
             }
         }
     }
+    // #4118: `read_dir` order is filesystem-dependent, so two runs of the same
+    // sweep could remove the same worktrees in different orders — which makes a
+    // dry-run preview a poor predictor of the real run and makes any ordering
+    // bug unreproducible. Sorting costs nothing at this scale.
+    orphans.sort();
     orphans
 }
 
@@ -817,6 +822,17 @@ impl SessionManager {
     /// --discard-dirty`), never from the default `/tm-session-pause` path.
     /// The gate runs under `dry_run` too, so a preview matches a real run.
     ///
+    /// #4118 DIRTY-GATE TOCTOU: the Phase 1.5 verdict above is computed for
+    /// EVERY candidate before ANY removal happens, so across a ~95-candidate
+    /// sweep the gap between "certified clean" and "deleted" is the sweep's
+    /// whole duration — minutes, not the sub-millisecond window the paragraph
+    /// above describes for the ACTIVE-SESSION check. [`inspect_dirt`] is
+    /// therefore re-run immediately before each individual
+    /// `remove_session_worktree`, so the authoritative verdict is adjacent to
+    /// the deletion. The Phase 1.5 pass is kept because it is what `dry_run`
+    /// reports and what keeps a preview honest. Two extra git invocations per
+    /// candidate is nothing against a `remove_dir_all` of gigabytes.
+    ///
     /// Test: `prune_orphaned_worktrees_removes_orphan`,
     /// `prune_orphaned_worktrees_spares_active`,
     /// `prune_orphaned_worktrees_store_snapshot_blocks_deletion` (item 1),
@@ -893,24 +909,9 @@ impl SessionManager {
                         continue;
                     }
                     // #4091: last gate — never destroy unsaved work.
-                    if let Some(dirt) = inspect_dirt(&candidate) {
-                        if policy == DirtyWorktreePolicy::Skip {
-                            warn!(
-                                path = %candidate.display(),
-                                reason = %dirt.reason,
-                                "prune-worktrees: candidate holds unsaved work — refusing to \
-                                 remove it; re-run with an explicit discard opt-in only if the \
-                                 work is genuinely disposable (#4091)"
-                            );
-                            skipped_dirty.push(dirt);
-                            continue;
-                        }
-                        warn!(
-                            path = %candidate.display(),
-                            reason = %dirt.reason,
-                            "prune-worktrees: DISCARDING unsaved work — explicit \
-                             force-discard opt-in was supplied (#4091)"
-                        );
+                    if let Some(dirt) = dirt_blocks_removal(&candidate, policy, "scan") {
+                        skipped_dirty.push(dirt);
+                        continue;
                     }
                     reclaimable.push(candidate);
                 }
@@ -1019,6 +1020,14 @@ impl SessionManager {
                 continue;
             }
 
+            // #4118 TOCTOU: the scan-time verdict is now minutes old. Re-ask
+            // immediately before THIS removal so the clean-to-deleted window is
+            // sub-millisecond again rather than the whole sweep's duration.
+            if let Some(dirt) = dirt_blocks_removal(&candidate, policy, "pre-removal") {
+                skipped_dirty.push(dirt);
+                continue;
+            }
+
             info!(path = %candidate.display(), "prune-worktrees: removing orphaned worktree");
             let candidate_clone = candidate.clone();
             let removed_ok =
@@ -1110,6 +1119,26 @@ impl SessionManager {
 
         let mut reaped = 0usize;
         for record in stale {
+            // #4118: `decommission` reaches the SAME `remove_session_worktree`
+            // (worktree remove --force + remove_dir_all + branch -D) as the
+            // orphan sweep, but never passed through the #4091 guard — and this
+            // reaper fires automatically on every daemon GC tick. Guarding one
+            // sweep while its sibling deletes freely is a half-measure. There is
+            // no discard opt-in here by design: an automatic reaper must never
+            // be able to destroy work.
+            if let Some(dirt) = record
+                .workspace_path
+                .as_deref()
+                .filter(|p| super::decommission::is_session_worktree(p))
+                .and_then(inspect_dirt)
+            {
+                warn!(
+                    id = %record.id, path = %dirt.path.display(), reason = %dirt.reason,
+                    "auto-reap: workspace holds unsaved work — leaving the session in \
+                     place for an operator (#4118)"
+                );
+                continue;
+            }
             match self.decommission(&record.id, None).await {
                 Ok(_) => {
                     reaped += 1;

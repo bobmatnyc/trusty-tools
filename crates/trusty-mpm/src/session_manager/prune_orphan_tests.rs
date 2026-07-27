@@ -1003,6 +1003,166 @@ async fn prune_orphaned_worktrees_reclaims_clean_pushed_worktree() {
     );
 }
 
+/// #4118 TOCTOU: a candidate that goes dirty AFTER the Phase 1.5 scan but
+/// BEFORE its own removal must not be removed.
+///
+/// Why: the scan classifies every candidate up front and the removal loop runs
+/// afterwards, so across a ~95-candidate / ~730 GB sweep the gap between
+/// "certified clean" and "deleted" is the whole sweep duration — minutes, not
+/// the sub-millisecond window `prune_orphaned_worktrees` documents for the
+/// active-session check. Re-checking adjacent to the deletion is what closes it.
+///
+/// Both candidates scan CLEAN — asserted below, so the test cannot pass because
+/// `zzz-victim` was dirty from the start. `find_orphaned_worktrees` sorts its
+/// candidates, so `aaa-remover` is always processed first. A watcher waits for
+/// `aaa-remover`'s directory to disappear and only then writes an untracked
+/// file into `zzz-victim`: a transition that is impossible during Phase 1.5 and
+/// guaranteed to land before `zzz-victim`'s own removal.
+///
+/// The window is not a gamble. `remove_session_worktree` runs
+/// `git worktree prune` and `git branch -D` AFTER the directory is gone — two
+/// process spawns, tens of milliseconds — while the watcher polls at 200 µs and
+/// the loop needs only a `canonicalize` before re-checking. The watcher also
+/// reports whether it fired, so a lost race FAILS the test rather than passing
+/// it vacuously.
+///
+/// Without the pre-removal re-check, `zzz-victim` is still on the Phase 1.5
+/// `reclaimable` list and is handed to `remove_session_worktree` regardless.
+#[tokio::test]
+async fn prune_orphaned_worktrees_rechecks_dirt_immediately_before_removal() {
+    let (mgr, _store, fx, remover) = reclaimable_fixture("aaa-remover").await;
+    let victim = fx.add_worktree("zzz-victim");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&victim);
+
+    // Both are clean and reclaimable RIGHT NOW — assert it, so the test cannot
+    // pass because the victim was dirty from the start.
+    let preview = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], true, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("dry run must not error");
+    assert!(
+        preview.skipped_dirty.is_empty() && preview.removed.len() == 2,
+        "premise broken: both candidates must scan CLEAN; got removed={:?} skipped={:?}",
+        preview.removed,
+        preview.skipped_dirty
+    );
+
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watcher = {
+        let (remover, victim, fired) = (remover.clone(), victim.clone(), fired.clone());
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while remover.exists() {
+                if std::time::Instant::now() > deadline {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            std::fs::write(victim.join("notes.md"), "written mid-sweep\n").unwrap();
+            fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+    };
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+    watcher.join().expect("watcher thread");
+
+    assert!(
+        fired.load(std::sync::atomic::Ordering::SeqCst),
+        "the watcher never observed the first removal, so nothing was tested"
+    );
+    assert!(
+        outcome.removed.iter().any(|p| p == &remover),
+        "the first candidate was clean throughout and must still be reclaimed; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        !outcome.removed.iter().any(|p| p == &victim),
+        "a candidate dirtied AFTER the scan must NOT be removed; got {:?}",
+        outcome.removed
+    );
+    assert!(
+        victim.join("notes.md").exists(),
+        "the work written mid-sweep must still be on disk"
+    );
+    assert!(
+        outcome.skipped_dirty.iter().any(|d| d.path == victim),
+        "the mid-sweep skip must be REPORTED, not merely logged; got {:?}",
+        outcome.skipped_dirty
+    );
+}
+
+/// #4118: the age-based auto-reaper reaches the SAME destructive sequence
+/// (`worktree remove --force` → `remove_dir_all` → `branch -D`) without going
+/// through the orphan sweep, and it fires automatically on every daemon GC
+/// tick. Guarding one sweep while its sibling deletes freely is a half-measure.
+///
+/// There is deliberately no discard opt-in on this path: an automatic reaper
+/// must never be able to destroy work, whatever an operator asks for elsewhere.
+#[tokio::test]
+async fn reap_aged_ephemeral_spares_a_worktree_holding_unsaved_work() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("aged-ephemeral");
+    std::fs::write(wt.join("rescued.rs"), "// never committed\n").unwrap();
+
+    let id = crate::session_manager::record::ManagedSessionId::new();
+    let record = crate::session_manager::record::SessionRecord {
+        id,
+        tmux_name: format!("tmpm-aged-{id}"),
+        cwd: fx.repo.clone(),
+        task: "aged".into(),
+        state: crate::session_manager::record::ManagedSessionState::Active,
+        created_at: chrono::Utc::now() - chrono::Duration::hours(2),
+        last_activity_at: None,
+        workspace_path: Some(wt.clone()),
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: true,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: Default::default(),
+        worktree_owner: None,
+    };
+    mgr.store.write().await.upsert(record).await.expect("seed");
+
+    let reaped = mgr
+        .reap_aged_ephemeral(chrono::Duration::hours(1))
+        .await
+        .expect("reap must not error");
+
+    assert_eq!(
+        reaped, 0,
+        "an aged ephemeral holding uncommitted work must not be auto-reaped"
+    );
+    assert!(
+        wt.join("rescued.rs").exists(),
+        "the uncommitted work must still be on disk"
+    );
+    assert_eq!(
+        mgr.get(&id).await.unwrap().state,
+        crate::session_manager::record::ManagedSessionState::Active,
+        "the record must be left for an operator, not silently decommissioned"
+    );
+}
+
 /// A worktree with MODIFIED TRACKED files must not be removed, and the skip
 /// must be visible in the return value — not merely logged.
 #[tokio::test]
