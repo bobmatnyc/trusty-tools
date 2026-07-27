@@ -40,6 +40,9 @@ pub(crate) mod worktree_ownership;
 mod tests;
 
 #[cfg(test)]
+mod prune_state_tests;
+
+#[cfg(test)]
 mod restart_tests;
 
 #[cfg(test)]

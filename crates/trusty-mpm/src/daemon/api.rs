@@ -132,12 +132,11 @@ pub use deliverable_routes::{
 use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
     decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
-    get_guard_flags, get_managed_session, get_project_registry_route, get_session_activity,
-    list_managed_sessions, list_projects_registry_route, patch_project_registry_route,
-    project_status_route, proxy_router, prune_managed_route, prune_worktrees_route,
-    reactivate_managed_session, register_project_registry_route, rename_managed_session,
-    resume_managed_session, send_to_session, spawn_session, stop_managed_session,
-    stop_managed_session_runtime,
+    get_managed_session, get_project_registry_route, get_session_activity, list_managed_sessions,
+    list_projects_registry_route, patch_project_registry_route, project_status_route, proxy_router,
+    prune_managed_route, prune_worktrees_route, reactivate_managed_session,
+    register_project_registry_route, rename_managed_session, resume_managed_session,
+    send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 // Layer-3 portfolio manager surface (`/api/v1/manager/*`, epic #2109, DOC-36).
 use super::manager::manager_router;
@@ -319,11 +318,6 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/managed/{id}/resume",
             post(resume_managed_session),
-        )
-        // #3981 Part 2: pm_guard's daemon round-trip for the kill-switch flags.
-        .route(
-            "/api/v1/sessions/managed/{id}/guard-flags",
-            get(get_guard_flags),
         )
         // #2023 C: bare-`tm` in-pane relaunch flips Stopped -> Active in place,
         // with NO tmux mutation — distinct from `/resume` above, which always

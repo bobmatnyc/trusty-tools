@@ -241,27 +241,10 @@ pub async fn spawn_managed(
     )
     .await?;
 
-    // #3981 Part 2: persist the operator-captured guard flags. Non-fatal —
-    // an otherwise-successful spawn must never fail because of this, and the
-    // safe (guard-active) default the record was created with (see
-    // `session_manager::create`) is preserved on failure.
-    if guard_flags != (false, false) {
-        match state
-            .session_manager()
-            .await
-            .set_guard_flags(&record.id, guard_flags.0, guard_flags.1)
-            .await
-        {
-            Ok(()) => {
-                record.disable_hooks = guard_flags.0;
-                record.pm_unrestricted = guard_flags.1;
-            }
-            Err(e) => warn!(
-                id = %record.id,
-                "spawn_managed: set_guard_flags failed: {e}; guard stays fully active"
-            ),
-        }
-    }
+    // #3981 Part 2: persist the operator-captured guard flags (extracted to
+    // `guard_flags::persist_after_spawn` to keep this already-oversized file
+    // from growing further).
+    super::guard_flags::persist_after_spawn(state, &mut record, guard_flags.0, guard_flags.1).await;
 
     // Deliverable linkage (DOC-35 §10.6, #2379): the HTTP route already
     // validated `deliverable_id` exists and belongs to this project BEFORE
@@ -594,6 +577,27 @@ async fn reserve_inproject_worktree(
     Ok((worktree, reserved_name))
 }
 
+/// #3822: explicit spawn-time project registration, shared by all three spawn
+/// variants below (cloned/inproject/local) — the one-shot
+/// `auto_register_from_sessions` boot pass (`ProjectRegistry::
+/// auto_register_from_sessions`) never sees a session created after the
+/// registry's first touch, so `tm project list` reported this project
+/// missing forever without this. Best-effort; never blocks the spawn.
+///
+/// Extracted into one helper (issue #3981 Part 2 review follow-up) rather
+/// than three identical inline call sites — this file is already at its
+/// frozen SLOC budget (`.line-cap-allowlist.tsv`), and the three sites were
+/// already byte-for-byte identical (each commented "mirrors
+/// `spawn_managed_cloned`'s identical explicit spawn-time project
+/// registration").
+async fn register_project_for_spawn(state: &Arc<DaemonState>, record: &SessionRecord) {
+    state
+        .project_registry()
+        .await
+        .register_from_session(record)
+        .await;
+}
+
 /// The clone-based provisioning tail of [`spawn_managed_routed`] (issue #1904).
 ///
 /// Why: split out so the (now-shared, #1919) stage-observer scope installed
@@ -719,16 +723,9 @@ async fn spawn_managed_cloned(
     mgr.set_worktree_owner_best_effort(&session_id, session_id)
         .await;
 
-    // #3822: explicit spawn-time project registration — the one-shot
-    // `auto_register_from_sessions` boot pass (`ProjectRegistry::
-    // auto_register_from_sessions`) never sees a session created after the
-    // registry's first touch, so `tm project list` reported this project
-    // missing forever without this. Best-effort; never blocks the spawn.
-    state
-        .project_registry()
-        .await
-        .register_from_session(&record)
-        .await;
+    // #3822: explicit spawn-time project registration — see
+    // `register_project_for_spawn`'s doc.
+    register_project_for_spawn(state, &record).await;
 
     // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
     //
@@ -1038,12 +1035,8 @@ async fn spawn_managed_inproject(
         .await;
 
     // #3822: mirrors `spawn_managed_cloned`'s identical explicit
-    // spawn-time project registration.
-    state
-        .project_registry()
-        .await
-        .register_from_session(&record)
-        .await;
+    // spawn-time project registration — see `register_project_for_spawn`'s doc.
+    register_project_for_spawn(state, &record).await;
 
     // Front gate with the original repo_url so GitHub identity is parseable.
     if let Some(record) =
@@ -1295,12 +1288,8 @@ async fn spawn_managed_local(
     }
 
     // #3822: mirrors `spawn_managed_cloned`'s identical explicit
-    // spawn-time project registration.
-    state
-        .project_registry()
-        .await
-        .register_from_session(&record)
-        .await;
+    // spawn-time project registration — see `register_project_for_spawn`'s doc.
+    register_project_for_spawn(state, &record).await;
 
     // FRONT gate: origin_url is a real GitHub URL so the gate is active.
     if let Some(record) = front_gate_or_escalate(&mgr, &record, &origin_url, &params.task).await? {

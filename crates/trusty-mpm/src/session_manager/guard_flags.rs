@@ -37,3 +37,50 @@ impl SessionManager {
         self.store.write().await.upsert(r).await.map_err(Into::into)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::session_manager::tests::make_manager;
+
+    #[tokio::test]
+    async fn guard_flags_persist_on_session() {
+        // Why (#3981): set_guard_flags must survive a store reload so that
+        // pm_guard's daemon round-trip reads the operator-captured flags
+        // back correctly even after a daemon restart.
+        // What: create a session (both flags default false), write both
+        // flags true via `set_guard_flags`, reload from disk, assert both
+        // survive.
+        let dir = crate::test_support::hermetic_temp_dir();
+        let (mgr, _fake) = make_manager(&dir).await;
+
+        let record = mgr
+            .create(
+                "task".into(),
+                Some(PathBuf::from("/tmp/wt")),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        assert!(!record.disable_hooks);
+        assert!(!record.pm_unrestricted);
+
+        mgr.set_guard_flags(&record.id, true, true)
+            .await
+            .expect("set_guard_flags");
+
+        let reloaded = mgr.get(&record.id).await.expect("get after set");
+        assert!(
+            reloaded.disable_hooks,
+            "disable_hooks must survive a store reload (#3981)"
+        );
+        assert!(
+            reloaded.pm_unrestricted,
+            "pm_unrestricted must survive a store reload (#3981)"
+        );
+    }
+}

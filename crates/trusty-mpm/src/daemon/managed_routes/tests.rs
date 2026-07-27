@@ -12,10 +12,25 @@ use chrono::Utc;
 
 use super::summary::{reconcile_against_tmux, reconcile_live_state};
 use super::{checked_summaries, record_to_json, record_to_summary};
+use crate::daemon::state::DaemonState;
 use crate::session_manager::{
     InjectionStatus, ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver,
     SessionRecord,
 };
+
+/// Decode an axum `impl IntoResponse` into its JSON body.
+///
+/// Why: the guard-flags route tests below need to read a handler's body to
+/// assert on the flags/pane_id fields. Mirrors the identically-named helper
+/// in `proxy/tests.rs` (a separate module, so it cannot be imported —
+/// duplicated here at ~6 lines).
+async fn decode_response(resp: impl axum::response::IntoResponse) -> serde_json::Value {
+    let resp = resp.into_response();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+}
 
 /// A tmux driver whose `list_sessions` FAILS — used to prove the list handler's
 /// reconciliation fails CLOSED (keeps persisted state) rather than treating a
@@ -827,5 +842,131 @@ async fn checked_summaries_stale_assets_independent_per_session_sharing_one_cata
         !summaries[1].stale_assets,
         "session B deployed against the current v2 catalog — must stay fresh, \
          even though it shares the SAME cached catalog hashes as session A"
+    );
+}
+
+/// GET …/{id}/guard-flags returns the persisted flags (issue #3981 Part 2).
+///
+/// Why: `pm_guard`'s daemon round-trip must read back exactly what
+/// `SessionManager::set_guard_flags` persisted.
+/// What: creates a session (flags default false), flips both flags true via
+/// `set_guard_flags`, calls [`super::guard_flags::get_guard_flags`] directly,
+/// and asserts the decoded JSON body reflects both flags.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn guard_flags_route_returns_persisted_values() {
+    let root = tempfile::TempDir::new().unwrap();
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+
+    let record = mgr
+        .create(
+            "guard flags route test".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.set_guard_flags(&record.id, true, true)
+        .await
+        .expect("set_guard_flags");
+
+    let body = decode_response(
+        super::guard_flags::get_guard_flags(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(record.id.to_string()),
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(body["disable_hooks"], serde_json::json!(true));
+    assert_eq!(body["pm_unrestricted"], serde_json::json!(true));
+}
+
+/// GET …/{id}/guard-flags 404s for an unknown id (issue #3981 Part 2).
+///
+/// Why: an unresolvable id must read as "flags unresolved", never a panic
+/// or a default-false body a caller could mistake for a real answer.
+/// What: calls [`super::guard_flags::get_guard_flags`] with a freshly
+/// generated id that was never created, and asserts `404`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn guard_flags_route_404s_for_unknown_id() {
+    use axum::response::IntoResponse;
+
+    let root = tempfile::TempDir::new().unwrap();
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+
+    let unknown = ManagedSessionId::new();
+    let resp = super::guard_flags::get_guard_flags(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(unknown.to_string()),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+}
+
+/// POST …/{id}/resume?disable_hooks=…&pm_unrestricted=… persists the query's
+/// guard flags onto the record (issue #3981 Part 2).
+///
+/// Why: `ResumeQuery`'s flags are deliberately re-asserted UNCONDITIONALLY on
+/// every resume (never left "sticky" from a prior call) — see
+/// `guard_flags::persist_after_resume`'s doc for the extraction rationale.
+/// What: creates and stops a session (flags default false), calls
+/// [`super::resume_managed_session`] with both flags `true`, and asserts the
+/// STORED record (not just the response) carries both flags afterward.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_route_persists_guard_flags() {
+    let root = tempfile::TempDir::new().unwrap();
+    let workspace = tempfile::TempDir::new().unwrap();
+    let state = std::sync::Arc::new(
+        DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
+    );
+    let mgr = state.session_manager().await;
+
+    let record = mgr
+        .create(
+            "resume route test".into(),
+            Some(workspace.path().to_path_buf()),
+            None,
+            Some(workspace.path().to_path_buf()),
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    mgr.stop(&record.id).await.expect("stop");
+    assert!(!record.disable_hooks);
+    assert!(!record.pm_unrestricted);
+
+    let _ = super::resume_managed_session(
+        axum::extract::State(state.clone()),
+        axum::extract::Path(record.id.to_string()),
+        axum::extract::Query(super::guard_flags::ResumeQuery {
+            disable_hooks: true,
+            pm_unrestricted: true,
+        }),
+    )
+    .await;
+
+    let after = mgr.get(&record.id).await.expect("record after resume");
+    assert!(
+        after.disable_hooks,
+        "resume must persist disable_hooks=true"
+    );
+    assert!(
+        after.pm_unrestricted,
+        "resume must persist pm_unrestricted=true"
     );
 }

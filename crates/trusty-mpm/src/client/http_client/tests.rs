@@ -712,6 +712,24 @@ fn managed_attach_cmd_response_deserializes() {
     assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-x");
 }
 
+/// Why (#3981 Part 2): `GuardFlagsResponse` must mirror
+/// `daemon::managed_routes::GuardFlagsResponse` field-for-field so
+/// `pm_guard`'s daemon round-trip can decode the wire response.
+/// What: deserializes a JSON body carrying both flags plus `pane_id`.
+/// Test: this test.
+#[test]
+fn guard_flags_response_deserializes() {
+    let r: GuardFlagsResponse = serde_json::from_value(serde_json::json!({
+        "disable_hooks": true,
+        "pm_unrestricted": false,
+        "pane_id": "%3"
+    }))
+    .unwrap();
+    assert!(r.disable_hooks);
+    assert!(!r.pm_unrestricted);
+    assert_eq!(r.pane_id.as_deref(), Some("%3"));
+}
+
 #[test]
 fn managed_activity_response_deserializes() {
     // Both with and without the optional classifier overlay.

@@ -154,8 +154,15 @@ pub async fn serve_http(
     // loopback ONLY — there is no secondary (Tailscale) listener anymore, so
     // the router-wide guard always trusts just the loopback default.
     // Non-loopback ingress is exclusively trusty-console's job.
+    //
+    // #3981 Part 2: the guard-flags sub-router is merged in HERE, at the
+    // top-level composition point, rather than inside `api::router` itself —
+    // that file is already at its frozen SLOC budget (`.line-cap-allowlist.tsv`),
+    // while this one has headroom, and merging a state-applied `Router` post-hoc
+    // is identical either way (axum has no notion of "where" a route was added).
     let app = api::origin_guard::guard_router(
-        api::router(Arc::clone(&state)),
+        api::router(Arc::clone(&state))
+            .merge(managed_routes::guard_flags::router().with_state(Arc::clone(&state))),
         trusty_common::server::SelfOrigins::default(),
     );
     // Issue #2332: the startup banner carries the build version + PID so a
