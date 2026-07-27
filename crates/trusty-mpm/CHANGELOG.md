@@ -159,6 +159,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   roster work, which replaces that section wholesale rather than hand-editing
   it.
 
+- **The PM prompt now advertises the agents that are actually deployed**
+  ([#4069](https://github.com/bobmatnyc/trusty-tools/issues/4069)): the
+  delegation roster was computed at every launch (`build_instructions` →
+  `generate_authority`) but never reached the delivered prompt —
+  `resolve_pm_prompt` fell back to the static `AGENT_DELEGATION.md` asset, whose
+  hand-maintained table has named the same 8 agents since 2026-07-03. A real
+  deployment carries ~40, so `ticketing` and `memory-manager` appeared **zero
+  times** in the ~79 KB prompt and the PM could not route to them. The bundled
+  default now appends a live `## Delegation Authority` roster scanned from the
+  tiers a session actually loads agents from — `<project>/.claude/agents`, the
+  managed `CLAUDE_CONFIG_DIR/agents`, and `~/.claude/agents`, deduped with
+  project-tier precedence. The bundled routing doctrine (make/mise routing,
+  keyword routing, the ops table) is appended to, never replaced, and an
+  explicit project/user `AGENT_DELEGATION.md` override still replaces the whole
+  section exactly as documented.
+
 - **The worktree reclaim path no longer force-deletes uncommitted work**
   ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091)): the
   orphaned-worktree sweep had no dirty-tree check anywhere — its entire safety

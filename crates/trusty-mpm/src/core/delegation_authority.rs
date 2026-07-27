@@ -7,11 +7,14 @@
 //! What: [`scan_agents`] reads every `.md` file in an agents directory, parses
 //! its frontmatter, and returns one [`AgentSummary`] per deployable (non-base)
 //! agent; [`generate_authority`] folds those summaries into a Markdown section
-//! injected into the session launch instructions.
+//! injected into the session launch instructions;
+//! [`deployed_roster_section`] resolves the tiers a launched session actually
+//! loads agents from and renders that live roster for the PM prompt (#4069).
 //! Test: `cargo test -p trusty-mpm-core delegation_authority` covers scanning,
 //! base-agent exclusion, the empty directory, and both render branches.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use super::frontmatter::parse_kv_line;
 
@@ -239,6 +242,87 @@ pub fn generate_authority(agents: &[AgentSummary]) -> String {
     out
 }
 
+/// Agent directories a launched session can load composed agents from,
+/// highest precedence first.
+///
+/// Why (#4069): the roster the PM must route to is whatever Claude Code will
+/// actually load, and that destination differs per launch mode — the daemon
+/// managed-spawn path deploys into `<project>/.claude/agents` (and launches
+/// with `--setting-sources project,local`), the standalone `tm run` driver
+/// deploys into the tm-owned `CLAUDE_CONFIG_DIR`, and the plain `tm session
+/// start` path deploys into the operator's `~/.claude/agents`
+/// ([`FrameworkPaths::default`]). Prompt composition only ever receives a
+/// `project_dir`, so it resolves all three tiers here rather than depending on
+/// a launch-mode value it cannot see.
+/// What: returns `<project>/.claude/agents`, then the active managed
+/// `CLAUDE_CONFIG_DIR/agents` (the `CLAUDE_CONFIG_DIR` env var when set,
+/// otherwise [`managed_claude_config_dir`]), then
+/// `FrameworkPaths::default().claude_agents_dir()`. Paths are returned whether
+/// or not they exist; [`scan_agents`] treats an unreadable directory as empty.
+/// Test: `deployed_agent_dirs_puts_project_tier_first`.
+pub fn deployed_agent_dirs(project_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![project_dir.join(".claude").join("agents")];
+
+    let managed = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(crate::core::trusty_tools_config::managed_claude_config_dir);
+    if let Some(managed) = managed {
+        dirs.push(managed.join("agents"));
+    }
+
+    dirs.push(crate::core::paths::FrameworkPaths::default().claude_agents_dir());
+    dirs
+}
+
+/// Merge the agents found across `dirs` into one roster, earlier dirs winning.
+///
+/// Why: the tiers returned by [`deployed_agent_dirs`] overlap — the same agent
+/// is normally deployed into more than one of them — so a naive concatenation
+/// would advertise duplicates. Claude Code resolves a same-named agent by tier
+/// precedence, and the rendered roster must describe the copy that actually
+/// wins.
+/// What: scans each directory in order and keeps the FIRST summary seen per
+/// agent name, returning them name-sorted for a stable prompt.
+/// Test: `roster_from_dirs_dedupes_with_first_dir_winning`.
+pub fn roster_from_dirs(dirs: &[PathBuf]) -> Vec<AgentSummary> {
+    let mut by_name: BTreeMap<String, AgentSummary> = BTreeMap::new();
+    for dir in dirs {
+        for agent in scan_agents(dir) {
+            by_name.entry(agent.name.clone()).or_insert(agent);
+        }
+    }
+    by_name.into_values().collect()
+}
+
+/// Render the LIVE deployed roster for a project, or `None` when none is found.
+///
+/// Why (#4069): `build_instructions` already computed this section via
+/// [`generate_authority`], but its output is merged into a `PipelineOutput`
+/// string that the prompt composer never reads — `resolve_pm_prompt` fell back
+/// to the static `AGENT_DELEGATION.md` asset, so a 42-agent deployment was
+/// advertised to the PM as the asset's hand-maintained 8-row table and agents
+/// such as `ticketing` and `memory-manager` were invisible. Regenerating here
+/// (rather than threading the pipeline's string down) is the only shape that
+/// works for every composer: `build_system_prompt_for*` and its callers —
+/// `tm session instructions`, the tmux connect path, the daemon spawn — receive
+/// a `project_dir` and nothing else, and two of them never run the pipeline at
+/// all, so there is no `PipelineOutput` available to thread.
+/// What: unions [`deployed_agent_dirs`] via [`roster_from_dirs`] and renders it
+/// with [`generate_authority`]. Returns `None` when no agent is deployed
+/// anywhere, so an unprovisioned environment keeps exactly the previous
+/// behaviour (the bundled asset alone) instead of being told it has no agents.
+/// Test: `roster_from_dirs_ignores_missing_dirs` (the `None` branch's input) and
+/// `instruction_overrides::tests::bundled_delegation_appends_deployed_roster`
+/// (the rendered output reaching the delivered prompt). This function itself
+/// consults machine-global tiers, so it has no hermetic direct test.
+pub fn deployed_roster_section(project_dir: &Path) -> Option<String> {
+    let agents = roster_from_dirs(&deployed_agent_dirs(project_dir));
+    if agents.is_empty() {
+        return None;
+    }
+    Some(generate_authority(&agents))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +537,58 @@ mod tests {
             Some("Deployed at 2026-06-05T14:31:34"),
             "timestamp in description must not be truncated"
         );
+    }
+
+    #[test]
+    fn deployed_agent_dirs_puts_project_tier_first() {
+        // Issue #4069: the project tier is the destination the daemon
+        // managed-spawn path deploys into AND the only tier readable under
+        // `--setting-sources project,local`, so it must rank first.
+        let dirs = deployed_agent_dirs(Path::new("/proj"));
+        assert_eq!(dirs[0], PathBuf::from("/proj/.claude/agents"));
+        assert!(
+            dirs.len() >= 2,
+            "the user-level tier(s) must also be consulted"
+        );
+    }
+
+    #[test]
+    fn roster_from_dirs_dedupes_with_first_dir_winning() {
+        // The same agent is normally deployed into more than one tier; the
+        // higher-precedence copy must be the one described, exactly once.
+        let high = TempDir::new().unwrap();
+        let low = TempDir::new().unwrap();
+        write_agent(
+            high.path(),
+            "qa",
+            "---\nname: qa\nrole: qa\ndescription: PROJECT TIER\n---\n\n# QA\n",
+        );
+        write_agent(
+            low.path(),
+            "qa",
+            "---\nname: qa\nrole: qa\ndescription: USER TIER\n---\n\n# QA\n",
+        );
+        write_agent(
+            low.path(),
+            "ops",
+            "---\nname: ops\nrole: ops\ndescription: USER TIER\n---\n\n# Ops\n",
+        );
+
+        let roster = roster_from_dirs(&[high.path().to_path_buf(), low.path().to_path_buf()]);
+
+        assert_eq!(roster.len(), 2, "qa must appear once, plus ops");
+        assert_eq!(roster[0].name, "ops", "roster is name-sorted");
+        assert_eq!(roster[1].name, "qa");
+        assert_eq!(roster[1].description.as_deref(), Some("PROJECT TIER"));
+    }
+
+    #[test]
+    fn roster_from_dirs_ignores_missing_dirs() {
+        // A tier that does not exist is an empty tier, never a failure — this is
+        // the input that makes `deployed_roster_section` return `None`, leaving
+        // an unprovisioned environment with the bundled asset alone.
+        let roster = roster_from_dirs(&[PathBuf::from("/nonexistent/agents")]);
+        assert!(roster.is_empty());
+        assert!(roster_from_dirs(&[]).is_empty());
     }
 }
