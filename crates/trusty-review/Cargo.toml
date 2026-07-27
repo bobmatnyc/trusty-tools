@@ -84,7 +84,13 @@ clap         = { workspace = true }
 # #1359) calls it to surface the resolved ticket/spec intent as a review context
 # source.  The ISR is feature-gated in trusty-common so the 11 non-consumer
 # dependents pay nothing; trusty-review opts in here.
-trusty-common = { workspace = true, features = ["intent-source", "config-cli"] }
+# `search-index` (issue #4062): provides `search_index::resolve_effective_index_id`,
+# the ONE shared index-id resolver `report::analyze_adapter::derive_index_id`
+# now delegates to instead of carrying its own basename copy (which diverged
+# from the org/repo-preferred id and 404'd the --analyze fetch). Pulls in no new
+# dependency — it only turns on `reqwest`'s blocking client, and `reqwest` is
+# already a direct dep of this crate.
+trusty-common = { workspace = true, features = ["intent-source", "config-cli", "search-index"] }
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console is
 # no longer bundled into trusty-review (single-owner-per-binary); the standalone
 # `trusty-console` crate is its sole producer.

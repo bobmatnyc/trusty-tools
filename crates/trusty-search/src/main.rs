@@ -1409,14 +1409,17 @@ async fn run() -> Result<()> {
             index,
             project,
         } => {
-            // Resolve the pinned index id (#1373): `--index` wins; otherwise
-            // derive it from `--project` via the shared derivation so it
-            // matches the CLI / trusty-mpm.
+            // Resolve the pinned index id (#1373, #4062): `--index` wins;
+            // otherwise derive it from `--project` via the shared
+            // `resolve_effective_index_id` — the same alias-fallback rule
+            // `detect::detect_project` and trusty-mpm's register-and-pin use —
+            // so a pinned serve targets the index those paths actually
+            // created, not a legacy-basename id nothing is registered under.
             let pinned_index = index.or_else(|| {
                 project.map(|p| {
                     let start = std::path::PathBuf::from(&p);
                     let root = trusty_common::resolve_project_root(&start);
-                    trusty_common::derive_index_id(&root)
+                    trusty_common::search_index::resolve_effective_index_id(&root)
                 })
             });
             commands::serve::handle_serve(with_http, port, http, pinned_index).await?;

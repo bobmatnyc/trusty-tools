@@ -7,6 +7,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- **Decommission now deletes the index the session actually registered, not a
+  legacy-basename guess** (issue #4062, review fix):
+  `disposable_workspace_index_id` — whose return value is passed straight to
+  `DELETE /indexes/{id}` — still derived a bare `trusty_common::derive_index_id`
+  while registration used the org/repo-preferred id. It now routes through the
+  shared `search_index::resolve_effective_index_id`. Paired with the
+  worktree-disambiguation fix in trusty-common, this also closes a
+  data-destruction hazard: had the org/repo id been adopted here without the
+  worktree suffix, every session worktree would have resolved to one bare
+  `owner-repo` id and tearing down a single throwaway session would have
+  deleted the index shared by the user's main checkout and every sibling
+  worktree. Regression-tested with a real `git worktree add` worktree.
+
 ### Added
 
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,

@@ -19,8 +19,11 @@
 //! basename, preserved verbatim for backward-compatibility with already-indexed
 //! projects). [`derive_preferred_index_id`] (issue #4062) is the newer,
 //! preferred derivation: it returns a `RepoIdentity`-derived `owner-repo` token
-//! when the project's git origin resolves, falling back to
-//! [`derive_index_id`]'s basename rule otherwise. Callers that must stay
+//! when the project's git origin resolves — suffixed with the git worktree name
+//! (`owner-repo-worktree`) for a LINKED worktree, which shares that origin with
+//! every other worktree of the same repo and would otherwise collapse onto one
+//! id — falling back to [`derive_index_id`]'s basename rule otherwise.
+//! Callers that must stay
 //! backward-compatible with indexes already registered under the legacy
 //! basename id should use [`crate::search_index::resolve_effective_index_id`]
 //! (feature `search-index`), which adds the alias-fallback lookup on top of
@@ -139,16 +142,117 @@ pub fn derive_index_id(project_root: &Path) -> String {
 /// analogous trusty-memory palace-id problem. Otherwise (no git repo, no
 /// origin remote, or a remote-less repo that only yields the `ContentHash`
 /// variant) falls back to [`derive_index_id`]'s bare-basename rule unchanged.
+///
+/// Worktree disambiguation (the reason this is not JUST `owner-repo`):
+/// `RepoIdentity::derive` reads `remote.origin.url` via `git config`, which for
+/// a LINKED git worktree transparently resolves to the shared repo config — the
+/// identical value the main checkout and every sibling worktree return. That is
+/// exactly right for `RepoIdentity`'s own purpose (it is a *grouping* key: all
+/// facets of one repo SHOULD share it), but catastrophic for an index id, which
+/// is a *partitioning* key: trusty-search's registry holds one `root_path` per
+/// id, so a bare `owner-repo` would make the second worktree's registration a
+/// silent no-op "find" against the FIRST worktree's index — every subsequent
+/// search and incremental update then targeting the wrong content tree. So when
+/// [`linked_worktree_name`] reports `project_root` is a linked worktree, its git
+/// worktree name is appended (`"<owner>-<repo>-<worktree>"`). Git guarantees
+/// that name is unique within a repo and keeps it stable across
+/// `git worktree move`, so sibling worktrees can never collide and an id does
+/// not churn when a worktree is relocated. The main working tree keeps the bare
+/// `owner-repo` form.
+///
+/// Known limitation (documented, not a bug): the hyphen join is not injective —
+/// `owner=a, repo=b-c` and `owner=a-b, repo=c` both render `a-b-c`, and the
+/// worktree suffix widens that surface by one component. Slugging can likewise
+/// collapse two distinct worktree names (`wt_x` and `wt-x`). Both require
+/// deliberately adversarial naming; the alternative (a separator illegal in a
+/// slug) would break the single-path-segment constraint above. Left as-is
+/// consciously — see the `owner-repo` join rationale in the paragraph above.
 /// Test: `derive_preferred_index_id_uses_org_repo_when_remote_resolves`,
-/// `derive_preferred_index_id_falls_back_to_basename_without_remote` in
-/// `tests`.
+/// `derive_preferred_index_id_falls_back_to_basename_without_remote`,
+/// `derive_preferred_index_id_distinguishes_worktrees_of_same_repo` in `tests`.
 pub fn derive_preferred_index_id(project_root: &Path) -> String {
     match crate::repo_identity::RepoIdentity::derive(project_root) {
         Some(crate::repo_identity::RepoIdentity::GitHub(gp)) => {
-            format!("{}-{}", gp.owner, gp.repo)
+            match linked_worktree_name(project_root) {
+                Some(worktree) => format!("{}-{}-{}", gp.owner, gp.repo, worktree),
+                None => format!("{}-{}", gp.owner, gp.repo),
+            }
         }
         _ => derive_index_id(project_root),
     }
+}
+
+/// The git worktree name of `dir` when it is a LINKED worktree; `None` for a
+/// main working tree, a bare repo, a submodule, or a non-repo (issue #4062).
+///
+/// Why: [`derive_preferred_index_id`] needs to tell "this directory IS the
+/// repo's primary checkout" from "this directory is one of N sibling worktrees
+/// sharing the repo's origin remote", because only the latter needs a
+/// disambiguating suffix to avoid every worktree collapsing onto one index id.
+/// The discriminator has to come from git itself rather than a path heuristic
+/// (a `.git` FILE also appears for submodules, whose origin remote is their own
+/// — they need no suffix).
+/// What: runs one `git -C <dir> rev-parse --git-dir --git-common-dir`. For a
+/// main working tree (and a bare repo) git reports the same directory for both;
+/// for a linked worktree `--git-dir` is `<common>/worktrees/<name>` while
+/// `--git-common-dir` is the shared repo dir, so a mismatch identifies the
+/// linked case and the final component of `--git-dir` is git's own per-repo
+/// worktree name. Both paths are resolved against `dir` (git may print them
+/// relative) and canonicalised before comparison so a relative-vs-absolute or
+/// symlinked rendering never reads as a spurious mismatch. The name is passed
+/// through [`crate::slugify_string`] — the workspace's one slug rule, already
+/// applied to the `owner`/`repo` components — and an empty slug yields `None`
+/// (fall back to the bare `owner-repo` form rather than emit a trailing-hyphen
+/// id). Returns `None` on any git failure: best-effort, never panics, no
+/// network.
+/// Test: `derive_preferred_index_id_distinguishes_worktrees_of_same_repo`
+/// (linked-worktree path) and
+/// `derive_preferred_index_id_uses_org_repo_when_remote_resolves` (main-checkout
+/// path, which must NOT gain a suffix).
+fn linked_worktree_name(dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--git-dir", "--git-common-dir"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let git_dir = absolutise(dir, lines.next()?.trim())?;
+    let common_dir = absolutise(dir, lines.next()?.trim())?;
+    if git_dir == common_dir {
+        return None; // main working tree (or bare repo): no suffix needed.
+    }
+    let slug = crate::slugify_string(&git_dir.file_name()?.to_string_lossy());
+    (!slug.is_empty()).then_some(slug)
+}
+
+/// Resolve a path git printed (possibly relative to `base`) to a comparable
+/// absolute form.
+///
+/// Why: `git rev-parse --git-dir` prints a RELATIVE path (`.git`) for a main
+/// checkout but an absolute one for a linked worktree; comparing the two raw
+/// strings would report a mismatch for every repo and suffix main checkouts
+/// too. Canonicalising both sides makes the comparison meaningful (and immune
+/// to symlinked temp dirs — `/tmp` → `/private/tmp` on macOS).
+/// What: joins a relative `raw` onto `base` (git runs with `-C base`, so that is
+/// its reference point), then canonicalises; falls back to the un-canonicalised
+/// join if the path cannot be resolved. `None` only for an empty `raw`.
+/// Test: exercised via [`linked_worktree_name`]'s tests.
+fn absolutise(base: &Path, raw: &str) -> Option<PathBuf> {
+    if raw.is_empty() {
+        return None;
+    }
+    let path = Path::new(raw);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    Some(std::fs::canonicalize(&joined).unwrap_or(joined))
 }
 
 #[cfg(test)]
@@ -319,5 +423,101 @@ mod tests {
         assert_eq!(derive_preferred_index_id(&tmp), derive_index_id(&tmp));
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Why (issue #4062 BLOCK finding): `RepoIdentity::derive` shells out to
+    /// `git config --get remote.origin.url`, which inside a LINKED worktree
+    /// transparently resolves to the SHARED repo config — the identical origin
+    /// the main checkout and every sibling worktree report. A bare `owner-repo`
+    /// id therefore collapsed every worktree of one repo onto a single id, and
+    /// since trusty-search's registry is one `root_path` per id, the second
+    /// worktree's registration degraded into a silent no-op "find" against the
+    /// FIRST worktree's index — its searches and incremental updates then
+    /// targeting the wrong content tree entirely. Every other test in this
+    /// module uses a single isolated temp repo, so none of them could catch it:
+    /// the collision only exists when TWO roots share ONE remote.
+    /// What: builds a real repo with a real origin remote, adds TWO real
+    /// `git worktree add` worktrees off it, and asserts all three roots derive
+    /// DIFFERENT ids — while the main checkout keeps the bare `owner-repo` form
+    /// and each worktree gets it as a prefix (so the repo is still legible in
+    /// the id). Also re-asserts the single-path-segment invariant every
+    /// trusty-search HTTP route and `--index` arg depends on.
+    /// Test: itself (skips cleanly if git is unavailable on the runner).
+    #[test]
+    fn derive_preferred_index_id_distinguishes_worktrees_of_same_repo() {
+        let main = scratch_dir("wt-main");
+        let wt_a = scratch_dir("wt-a");
+        let wt_b = scratch_dir("wt-b");
+        let cleanup = || {
+            let _ = fs::remove_dir_all(&main);
+            let _ = fs::remove_dir_all(&wt_a);
+            let _ = fs::remove_dir_all(&wt_b);
+        };
+
+        fs::create_dir_all(&main).unwrap();
+        if !git_ok(&main, &["init"]) {
+            cleanup();
+            return; // no usable git on this runner
+        }
+        let _ = git_ok(&main, &["config", "user.email", "t@t.test"]);
+        let _ = git_ok(&main, &["config", "user.name", "t"]);
+        let _ = git_ok(
+            &main,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:bobmatnyc/trusty-tools.git",
+            ],
+        );
+        // `git worktree add` requires at least one commit to check out.
+        fs::write(main.join("README.md"), "hi").unwrap();
+        let _ = git_ok(&main, &["add", "."]);
+        if !git_ok(&main, &["commit", "-m", "init"]) {
+            cleanup();
+            return; // commit failed — skip
+        }
+        let added_a = git_ok(&main, &["worktree", "add", &wt_a.to_string_lossy()]);
+        let added_b = git_ok(&main, &["worktree", "add", &wt_b.to_string_lossy()]);
+        if !(added_a && added_b) {
+            cleanup();
+            return; // this git cannot create worktrees — skip
+        }
+
+        // Pre-condition: the whole hazard is that all three DO share one origin.
+        for root in [&main, &wt_a, &wt_b] {
+            assert_eq!(
+                crate::repo_identity::RepoIdentity::derive(root).map(|r| r.canonical()),
+                Some("bobmatnyc/trusty-tools".to_string()),
+                "expected the shared origin remote to resolve from {}",
+                root.display()
+            );
+        }
+
+        let main_id = derive_preferred_index_id(&main);
+        let a_id = derive_preferred_index_id(&wt_a);
+        let b_id = derive_preferred_index_id(&wt_b);
+
+        // The main working tree keeps the bare org/repo id (#4062's actual fix).
+        assert_eq!(main_id, "bobmatnyc-trusty-tools");
+        // …and each worktree is distinct from it AND from its sibling.
+        assert_ne!(a_id, main_id, "worktree A collided with the main checkout");
+        assert_ne!(b_id, main_id, "worktree B collided with the main checkout");
+        assert_ne!(a_id, b_id, "sibling worktrees collided with each other");
+        // The repo stays legible in a worktree id (prefix), and the id remains
+        // ONE path segment — every trusty-search route matches `{id}` against
+        // exactly one segment.
+        for id in [&main_id, &a_id, &b_id] {
+            assert!(!id.contains('/'), "index id must be one path segment: {id}");
+            assert!(!id.is_empty());
+        }
+        for id in [&a_id, &b_id] {
+            assert!(
+                id.starts_with("bobmatnyc-trusty-tools-"),
+                "worktree id should keep the org/repo prefix: {id}"
+            );
+        }
+
+        cleanup();
     }
 }

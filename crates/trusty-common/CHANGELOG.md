@@ -28,6 +28,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   form — an embedded `/` would break every `trusty-search` HTTP route, which
   matches `{id}` against exactly one path segment.
 
+### Fixed
+
+- **`derive_preferred_index_id` no longer collapses every git worktree of a
+  repo onto ONE index id (issue #4062, review fix).** `RepoIdentity::derive`
+  reads `remote.origin.url`, which inside a linked worktree transparently
+  resolves to the shared repo config — so the main checkout and every worktree
+  derived the identical `owner-repo` id. Because trusty-search's registry holds
+  one `root_path` per id, a second worktree's registration silently degraded
+  into a "find" against the FIRST worktree's index, pointing its searches and
+  incremental updates at the wrong content tree. A linked worktree now gets its
+  git worktree name appended (`"<owner>-<repo>-<worktree>"`, unique per repo and
+  stable across `git worktree move`); the main working tree keeps the bare
+  `owner-repo` form. Regression-tested with two real `git worktree add`
+  worktrees sharing one origin remote.
+- **`search_readiness::probe_index_readiness` now resolves its id through the
+  shared `resolve_effective_index_id`** rather than a bare `derive_index_id`
+  (issue #4062): it was probing the legacy basename id while the warming path
+  created the org/repo one, so a fully-warm index read as "no index" and the
+  session was told it was cold.
+
 ---
 ## [0.26.2] — 2026-07-26
 

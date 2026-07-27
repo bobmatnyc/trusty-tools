@@ -154,8 +154,10 @@ pub fn parse_readiness(index_id: &str, status: &serde_json::Value) -> IndexReadi
 /// daemon, undrivable id, HTTP error, non-2xx, unparseable body — a quiet
 /// `None` at the call site.
 /// What: resolves the canonical `(root, index_id)` the way
-/// [`crate::search_index::ensure_project_indexed`] does (so this always targets
-/// the same index the warming path created), discovers the daemon base URL, and
+/// [`crate::search_index::ensure_project_indexed`] does — via the shared
+/// [`crate::search_index::resolve_effective_index_id`] (issue #4062), so this
+/// always targets the same index the warming path created rather than probing
+/// a legacy-basename id the warming path never used — discovers the daemon base URL, and
 /// — on a dedicated OS thread with a ~1.5s overall / 750ms connect cap (safe
 /// from inside a tokio runtime, mirroring the `search_index` HTTP helpers) —
 /// does one `GET {base}/indexes/{id}/status`, parsing a 2xx body via
@@ -165,7 +167,12 @@ pub fn parse_readiness(index_id: &str, status: &serde_json::Value) -> IndexReadi
 /// parse of a live body is covered by [`parse_readiness`]'s own tests.
 pub fn probe_index_readiness(project_root: &Path) -> Option<IndexReadiness> {
     let root = crate::resolve_project_root(project_root);
-    let index_id = crate::derive_index_id(&root);
+    // Issue #4062: MUST resolve through the same alias-fallback rule
+    // `ensure_project_indexed` / `detect_project` use — a bare
+    // `derive_index_id` here would probe the legacy basename id while the
+    // warming path created (or reused) the org/repo one, so a fully-warm index
+    // would read as "no index" and the session would be told it is cold.
+    let index_id = crate::search_index::resolve_effective_index_id(&root);
     if index_id.trim().is_empty() {
         return None;
     }

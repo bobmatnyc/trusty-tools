@@ -494,15 +494,27 @@ impl AnalyzeMetricsSource for HttpAnalyzeMetricsSource {
 
 /// Derive the trusty-search/analyze index id for a local checkout path.
 ///
-/// Why: trusty-search registers an index under the repo directory's basename
-/// (`trusty-search index .` and the git hooks both derive the id from the
-/// directory name), so the report can address the same index without extra
-/// configuration.
-/// What: returns the final path component as a `String`, or `None` for a
-/// path with no basename (e.g. `/`).
-/// Test: `derive_index_id_uses_basename`.
+/// Why: the report must address the SAME index trusty-search actually
+/// registered for that checkout. This function used to re-implement the
+/// basename rule locally — an independent copy of
+/// `trusty_common::index_id`'s logic that silently stopped agreeing with it
+/// once #4062 promoted the git `owner-repo` identity to the preferred id: the
+/// report would look up `northwind-web` while the daemon held the index under
+/// `acme-northwind-web`, get a 404, and quietly degrade to a scan. Delegating
+/// to the one shared resolver removes the copy and the divergence with it.
+/// What: delegates to `trusty_common::search_index::resolve_effective_index_id`
+/// (via `resolve_project_root`, so a nested path resolves to its git root
+/// exactly as `detect_project` would), returning `None` when that yields an
+/// empty id (e.g. `/`). Naming note: despite the `derive_` name — kept because
+/// this is public API — resolution may issue up to two short-timeout
+/// (~800ms) daemon probes for the alias-fallback lookup; that is bounded, and
+/// this sits immediately before an HTTP metrics fetch anyway.
+/// Test: `derive_index_id_uses_basename` (the no-git fallback, which
+/// short-circuits before any probe).
 pub fn derive_index_id(path: &Path) -> Option<String> {
-    path.file_name().map(|n| n.to_string_lossy().into_owned())
+    let root = trusty_common::resolve_project_root(path);
+    let id = trusty_common::search_index::resolve_effective_index_id(&root);
+    (!id.trim().is_empty()).then_some(id)
 }
 
 // ─── Model enrichment (precedence seam, #2448) ───────────────────────────────

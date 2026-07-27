@@ -22,6 +22,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **`serve --project <path>` now pins the same index id `detect_project`
+  resolves** (issue #4062, review fix): the pinned-serve path still derived the
+  bare legacy basename via `trusty_common::derive_index_id`, so a `serve
+  --project` pinned an id that neither the CLI auto-detect nor trusty-mpm's
+  register-and-pin had created. It now routes through the shared
+  `search_index::resolve_effective_index_id` like every other call site.
+
 - **Test-side remediation for `create_index`/`relocate_index` tests spuriously
   denied by the sensitive-path denylist (issue #3955).** `SENSITIVE_PATH_PREFIXES`
   denies `/tmp/`, `/private/tmp`, and `/var/folders` — which on macOS is where

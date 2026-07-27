@@ -56,8 +56,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(750);
 /// resolves the git-root of `workspace_path` via
 /// `trusty_common::resolve_project_root` (a worktree's OWN `.git` file makes
 /// it its own root — a no-op walk in the common case) and derives the id via
-/// `trusty_common::derive_index_id`, returning `None` if that yields an empty
-/// string. CRITICAL (caller contract): must be invoked BEFORE the workspace
+/// the shared `trusty_common::search_index::resolve_effective_index_id`
+/// (issue #4062 — the SAME rule the registration path uses, so the id deleted
+/// here is the id actually registered), returning `None` if that yields an
+/// empty string. CRITICAL (caller contract): must be invoked BEFORE the workspace
 /// directory is removed from disk — once the directory is gone,
 /// `resolve_project_root`'s upward walk could resolve to an ancestor's (e.g.
 /// the shared base clone's) `.git` and derive the WRONG id.
@@ -74,7 +76,15 @@ pub(super) fn disposable_workspace_index_id(
         return None;
     }
     let root = trusty_common::resolve_project_root(ws);
-    let id = trusty_common::derive_index_id(&root);
+    // Issue #4062: resolve through the SHARED alias-fallback rule, never a bare
+    // `derive_index_id` — the id returned here is DELETED, so it must be the
+    // exact id this workspace registered under (org/repo-form for a new
+    // registration, legacy basename for a pre-existing one). The worktree
+    // suffix `derive_preferred_index_id` adds is load-bearing for safety here:
+    // without it every session worktree of one repo would resolve to the same
+    // bare `owner-repo` id, and decommissioning ONE session would delete the
+    // index shared by the main checkout and every sibling worktree.
+    let id = trusty_common::search_index::resolve_effective_index_id(&root);
     if id.trim().is_empty() { None } else { Some(id) }
 }
 
@@ -407,6 +417,72 @@ mod tests {
 
         let id = disposable_workspace_index_id(Some(&clone_root), true);
         assert_eq!(id.as_deref(), Some("cloned-repo"));
+    }
+
+    /// Why (issue #4062 BLOCK finding): the id this function returns is
+    /// DELETED on decommission. Every worktree of a repo reports the same
+    /// `remote.origin.url`, so an id derived from the origin alone would make
+    /// every session worktree resolve to one bare `owner-repo` id — and
+    /// decommissioning a single throwaway session would then delete the index
+    /// belonging to the user's main checkout and every sibling worktree. The
+    /// other `disposable_index_id_*` tests all use fabricated `.git` stubs that
+    /// no git command can read, so none of them exercises a real shared-origin
+    /// worktree.
+    /// What: builds a real repo with a real origin remote plus a real
+    /// `git worktree add` worktree, and asserts the two decommission ids
+    /// differ — i.e. tearing the worktree down cannot target the main
+    /// checkout's index.
+    /// Test: itself (skips cleanly if git/worktrees are unavailable).
+    #[test]
+    fn disposable_index_id_differs_between_worktree_and_main_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main-checkout");
+        let wt = tmp.path().join("session-worktree");
+        std::fs::create_dir_all(&main).unwrap();
+
+        let git = |dir: &Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&main, &["init"]) {
+            return; // no usable git on this runner
+        }
+        let _ = git(&main, &["config", "user.email", "t@t.test"]);
+        let _ = git(&main, &["config", "user.name", "t"]);
+        // A synthetic owner/repo (never a real one) keeps the alias-fallback
+        // probe from matching an index a developer's live daemon happens to hold.
+        let _ = git(
+            &main,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:acme/widget-xyz.git",
+            ],
+        );
+        std::fs::write(main.join("README.md"), "hi").unwrap();
+        let _ = git(&main, &["add", "."]);
+        if !git(&main, &["commit", "-m", "init"]) {
+            return; // commit failed — skip
+        }
+        if !git(&main, &["worktree", "add", &wt.to_string_lossy()]) {
+            return; // this git cannot create worktrees — skip
+        }
+
+        let main_id = disposable_workspace_index_id(Some(&main), true);
+        let wt_id = disposable_workspace_index_id(Some(&wt), true);
+
+        assert_eq!(main_id.as_deref(), Some("acme-widget-xyz"));
+        assert!(wt_id.is_some(), "a real worktree must resolve to some id");
+        assert_ne!(
+            wt_id, main_id,
+            "decommissioning a worktree must not delete the main checkout's index"
+        );
     }
 
     // ---- is_orphan_index ---------------------------------------------------

@@ -5,6 +5,20 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- **`report --analyze` resolves the index id through the one shared resolver**
+  (issue #4062): `report::analyze_adapter::derive_index_id` carried its own
+  copy of the basename rule, which stopped agreeing with
+  `trusty_common::index_id` once the git `owner-repo` identity became the
+  preferred id — the report looked up `northwind-web` while the daemon held
+  `acme-northwind-web`, took a 404, and quietly degraded to a scan. It now
+  delegates to `trusty_common::search_index::resolve_effective_index_id`
+  (alias-fallback included), and the duplicated logic is gone.
+
+---
 ## [0.10.1] — 2026-07-23
 
 ### Fixed
