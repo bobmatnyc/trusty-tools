@@ -254,8 +254,12 @@ fn comment_with_unparseable_timestamp_is_skipped() {
     assert!(JiraComment::from_api(api).is_none());
 }
 
-/// `GET /issue/{key}/comment` response shape parses end-to-end,
-/// including `total` for pagination termination.
+/// `GET /issue/{key}/comment` response shape parses end-to-end.
+///
+/// The envelope's bookkeeping fields (`startAt`, `maxResults`, `total`) are
+/// deliberately unmodelled — the walk terminates on a short page — so this
+/// also pins that an envelope carrying them still parses rather than erroring
+/// on unknown fields.
 #[test]
 fn comment_search_response_deserializes() {
     let json = r#"{
@@ -268,7 +272,6 @@ fn comment_search_response_deserializes() {
         ]
     }"#;
     let resp: CommentSearchResponse = serde_json::from_str(json).expect("parses");
-    assert_eq!(resp.total, 2);
     assert_eq!(resp.comments.len(), 2);
 }
 
@@ -713,6 +716,458 @@ mod paged_http {
             calls.load(Ordering::SeqCst),
             1,
             "a 404 is permanent for the life of the run"
+        );
+    }
+
+    // ---- Comment pagination termination (PR #4067 review round 3) -------
+    //
+    // The loop used to terminate on `start_at >= parsed.total`, with `total`
+    // a `#[serde(default)] u64`. A response omitting `total` therefore read
+    // as `0` and ended the walk after page 1 — ingesting a prefix of the
+    // ticket's comments and returning `Ok`, so the failed-ticket cursor
+    // clamp let the cursor advance and the loss became permanent. These pin
+    // the short-page termination that replaced it.
+
+    /// One comment page of `n` entries, with NO `total` field at all.
+    fn comment_page(start: usize, n: usize) -> serde_json::Value {
+        let comments: Vec<serde_json::Value> = (start..start + n)
+            .map(|i| json!({"id": i.to_string(), "created": "2026-01-05T09:30:00.000+0000", "body": "x"}))
+            .collect();
+        json!({"startAt": start, "maxResults": 100, "comments": comments})
+    }
+
+    /// Serves pages keyed off the `startAt` query parameter.
+    struct PagedComments {
+        /// Entry count for each successive page, in order.
+        pages: Vec<usize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Respond for PagedComments {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let start_at: usize = request
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "startAt")
+                .and_then(|(_, v)| v.parse().ok())
+                .unwrap_or(0);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // Walk the declared page sizes to find which page `startAt` names.
+            let mut offset = 0usize;
+            for n in &self.pages {
+                if offset == start_at {
+                    return ResponseTemplate::new(200).set_body_json(comment_page(offset, *n));
+                }
+                offset += n;
+            }
+            ResponseTemplate::new(200).set_body_json(comment_page(start_at, 0))
+        }
+    }
+
+    /// THE regression: a server that omits `total` must still yield every
+    /// comment. Demonstrated shortfall before the fix was 100 of 150.
+    #[tokio::test]
+    async fn fetch_comments_pages_every_comment_when_total_is_absent() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-7/comment"))
+            .respond_with(PagedComments {
+                pages: vec![100, 50],
+                calls: Arc::clone(&calls),
+            })
+            .mount(&server)
+            .await;
+
+        let comments = client_for(&server)
+            .fetch_comments("PROJ-7")
+            .await
+            .expect("walk succeeds");
+
+        assert_eq!(
+            comments.len(),
+            150,
+            "every comment must be ingested even with no `total` to terminate on"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the 50-entry short page ends the walk; no third request"
+        );
+    }
+
+    /// When the comment count is an exact multiple of the page size there is
+    /// no short page to stop on, so the walk must spend one more request to
+    /// see the empty page rather than guessing it is done.
+    #[tokio::test]
+    async fn fetch_comments_stops_after_an_empty_page_on_an_exact_multiple() {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-8/comment"))
+            .respond_with(PagedComments {
+                pages: vec![100],
+                calls: Arc::clone(&calls),
+            })
+            .mount(&server)
+            .await;
+
+        let comments = client_for(&server)
+            .fetch_comments("PROJ-8")
+            .await
+            .expect("walk succeeds");
+
+        assert_eq!(comments.len(), 100);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a full final page costs one empty probe to confirm the end"
+        );
+    }
+
+    // ---- Changelog pagination fallback (issue #4084) --------------------
+    //
+    // These exercise the bug directly: JIRA's search-embedded changelog is
+    // itself paged, and the entries it drops are the OLDEST — the exact
+    // transitions a historical backfill exists to capture. Every test below
+    // asserts either that the shortfall self-heals via the dedicated
+    // `/issue/{key}/changelog` walk, or that it is surfaced loudly. None of
+    // them may pass by returning a short history quietly.
+
+    /// One changelog history entry in JIRA wire form. The same entry shape is
+    /// used by the search-embedded `histories` array and the dedicated
+    /// endpoint's `values` array.
+    fn history_entry(created: &str, from: &str, to: &str) -> serde_json::Value {
+        json!({
+            "author": {"displayName": "Jane Doe"},
+            "created": created,
+            "items": [{"field": "status", "fromString": from, "toString": to}]
+        })
+    }
+
+    /// The three-entry history used across these tests, oldest first. Only the
+    /// last entry fits in a truncated embedded changelog.
+    fn oldest() -> serde_json::Value {
+        history_entry("2026-01-01T10:00:00.000+0000", "To Do", "In Progress")
+    }
+    fn middle() -> serde_json::Value {
+        history_entry("2026-02-01T10:00:00.000+0000", "In Progress", "In Review")
+    }
+    fn newest() -> serde_json::Value {
+        history_entry("2026-03-01T10:00:00.000+0000", "In Review", "Done")
+    }
+
+    /// A one-issue search response whose embedded changelog reports `total`
+    /// entries while carrying only `histories`.
+    fn search_body(total: u64, histories: Vec<serde_json::Value>) -> serde_json::Value {
+        json!({
+            "issues": [{
+                "key": "PROJ-1",
+                "fields": {"project": {"key": "PROJ"}, "updated": "2026-03-01T10:00:00.000+0000"},
+                "changelog": {"total": total, "histories": histories}
+            }]
+        })
+    }
+
+    fn scope() -> SyncScope {
+        SyncScope {
+            project_key: "PROJ".into(),
+            since: None,
+        }
+    }
+
+    /// Count how many requests the mock server saw for a path suffix.
+    async fn hits(server: &MockServer, suffix: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .expect("request recording enabled")
+            .iter()
+            .filter(|r| r.url.path().ends_with(suffix))
+            .count()
+    }
+
+    /// The core regression: an embedded changelog reporting more entries than
+    /// it carries must self-heal via the dedicated endpoint, and the recovered
+    /// history must include the OLDEST transition — the one silently dropped
+    /// before this fix.
+    #[tokio::test]
+    async fn search_with_changelog_falls_back_when_embedded_is_truncated() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search"))
+            // Claims 3 entries; embeds only the newest.
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_body(3, vec![newest()])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1/changelog"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "startAt": 0, "maxResults": 100, "total": 3,
+                "values": [oldest(), middle(), newest()]
+            })))
+            .mount(&server)
+            .await;
+
+        let walk = client_for(&server)
+            .search_with_changelog(&scope(), 10)
+            .await
+            .expect("search succeeds");
+
+        assert_eq!(walk.issues.len(), 1);
+        let t = &walk.issues[0].transitions;
+        assert_eq!(
+            t.len(),
+            3,
+            "the full history must be recovered, not the embedded page"
+        );
+        assert_eq!(
+            t[0].from_status.as_deref(),
+            Some("To Do"),
+            "the OLDEST transition is the one truncation drops; it must be present"
+        );
+        assert_eq!(t[0].to_status, "In Progress");
+        assert_eq!(t[2].to_status, "Done", "transitions stay oldest-first");
+        assert_eq!(hits(&server, "/changelog").await, 1);
+    }
+
+    /// A complete embedded changelog must cost nothing extra: no request to the
+    /// dedicated endpoint at all.
+    #[tokio::test]
+    async fn search_with_changelog_skips_fallback_when_embedded_is_complete() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(search_body(2, vec![middle(), newest()])),
+            )
+            .mount(&server)
+            .await;
+        // The changelog endpoint is deliberately NOT mounted: any call would
+        // 404 and fail the search, on top of the explicit hit-count assertion.
+
+        let walk = client_for(&server)
+            .search_with_changelog(&scope(), 10)
+            .await
+            .expect("search succeeds");
+
+        assert_eq!(walk.issues[0].transitions.len(), 2);
+        assert_eq!(
+            hits(&server, "/changelog").await,
+            0,
+            "a complete embedded changelog must not pay for a fallback round trip"
+        );
+    }
+
+    /// A missing `changelog.total` cannot prove truncation, so it must not
+    /// trigger a per-issue round trip (it is warned about instead — see
+    /// `embedded_changelog_is_truncated`).
+    #[tokio::test]
+    async fn missing_changelog_total_does_not_trigger_fallback() {
+        let server = MockServer::start().await;
+        let body = json!({
+            "issues": [{
+                "key": "PROJ-1",
+                "fields": {"project": {"key": "PROJ"}},
+                "changelog": {"histories": [newest()]}
+            }]
+        });
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let walk = client_for(&server)
+            .search_with_changelog(&scope(), 10)
+            .await
+            .expect("search succeeds");
+
+        assert_eq!(walk.issues[0].transitions.len(), 1);
+        assert_eq!(hits(&server, "/changelog").await, 0);
+    }
+
+    /// The dedicated endpoint is itself paged; the walk must exhaust it,
+    /// advancing `startAt` by the number of entries actually received.
+    #[tokio::test]
+    async fn fetch_changelog_pages_to_exhaustion() {
+        use wiremock::matchers::query_param;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-9/changelog"))
+            .and(query_param("startAt", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"startAt": 0, "maxResults": 100, "total": 3, "values": [oldest(), middle()]}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-9/changelog"))
+            .and(query_param("startAt", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"startAt": 2, "maxResults": 100, "total": 3, "values": [newest()]}),
+            ))
+            .mount(&server)
+            .await;
+
+        let transitions = client_for(&server)
+            .fetch_changelog("PROJ-9")
+            .await
+            .expect("full walk succeeds");
+
+        assert_eq!(transitions.len(), 3);
+        assert_eq!(transitions[0].to_status, "In Progress");
+        assert_eq!(transitions[1].to_status, "In Review");
+        assert_eq!(transitions[2].to_status, "Done");
+        assert_eq!(hits(&server, "/changelog").await, 2, "both pages fetched");
+    }
+
+    /// A fallback that comes up short must ERROR with the ticket key and the
+    /// expected-vs-retrieved counts — never return the partial history it did
+    /// manage to collect. Replacing one silent truncation with another would
+    /// be no fix at all.
+    #[tokio::test]
+    async fn fetch_changelog_errors_when_server_returns_fewer_than_total() {
+        use wiremock::matchers::query_param;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-9/changelog"))
+            .and(query_param("startAt", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"startAt": 0, "maxResults": 100, "total": 5, "values": [oldest(), middle()]}),
+            ))
+            .mount(&server)
+            .await;
+        // Server claims 5 entries but has no more to give.
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-9/changelog"))
+            .and(query_param("startAt", "2"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"startAt": 2, "maxResults": 100, "total": 5, "values": []}),
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let err = client_for(&server)
+            .fetch_changelog("PROJ-9")
+            .await
+            .expect_err("a short walk must not pass as a complete history");
+
+        match &err {
+            CollectError::IncompleteChangelog {
+                key,
+                expected,
+                retrieved,
+            } => {
+                assert_eq!(key, "PROJ-9");
+                assert_eq!(*expected, 5);
+                assert_eq!(*retrieved, 2);
+            }
+            other => panic!("expected IncompleteChangelog, got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("PROJ-9"),
+            "message must name the ticket: {msg}"
+        );
+        assert!(
+            msg.contains('5') && msg.contains('2'),
+            "counts missing: {msg}"
+        );
+    }
+
+    /// A failing fallback must abort the whole search rather than yielding
+    /// issues carrying knowingly-truncated histories.
+    #[tokio::test]
+    async fn search_with_changelog_propagates_fallback_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_body(3, vec![newest()])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1/changelog"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let result = client_for(&server)
+            .search_with_changelog(&scope(), 10)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a broken fallback must surface, not degrade to a partial history"
+        );
+    }
+
+    /// The fallback REPLACES the embedded transitions rather than merging with
+    /// them, so the entry present in both copies cannot be emitted twice — and
+    /// the resulting rows cannot collide on `fact_ticket_transitions`'s
+    /// `(ticket_key, transitioned_at, to_status)` primary key.
+    #[tokio::test]
+    async fn fallback_transitions_replace_embedded_without_duplication() {
+        use crate::core::db::{upsert_ticket_transition, Database, TicketTransitionRow};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/rest/api/3/search"))
+            // `newest()` appears in BOTH the embedded page and the full walk.
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_body(3, vec![newest()])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/PROJ-1/changelog"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "startAt": 0, "maxResults": 100, "total": 3,
+                "values": [oldest(), middle(), newest()]
+            })))
+            .mount(&server)
+            .await;
+
+        let walk = client_for(&server)
+            .search_with_changelog(&scope(), 10)
+            .await
+            .expect("search succeeds");
+        let issue = &walk.issues[0];
+        assert_eq!(
+            issue.transitions.len(),
+            3,
+            "the shared entry must appear once, not twice"
+        );
+
+        // Persist through the real writer and confirm the grain key holds.
+        let db = Database::open_in_memory().expect("open");
+        for t in &issue.transitions {
+            upsert_ticket_transition(
+                db.connection(),
+                &TicketTransitionRow {
+                    ticket_key: issue.key.clone(),
+                    project_key: issue.project_key.clone(),
+                    from_status: t.from_status.clone(),
+                    to_status: t.to_status.clone(),
+                    transitioned_at: t.created.to_rfc3339(),
+                    author: t.author.clone(),
+                },
+            )
+            .expect("upsert");
+        }
+        let count: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM fact_ticket_transitions WHERE ticket_key = 'PROJ-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            count, 3,
+            "every recovered transition is a distinct grain row"
         );
     }
 }

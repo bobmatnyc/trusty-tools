@@ -47,10 +47,31 @@ use chrono_tz::Tz;
 
 use crate::collect::errors::{CollectError, Result};
 
-/// Upper bound on the step-back search. Historic DST shifts never exceed two
-/// hours, so 180 minutes cannot be reached by a real transition; it exists so
-/// a pathological zone definition cannot spin.
-const MAX_STEP_BACK_MINUTES: i64 = 180;
+/// Upper bound on the step-back search, in minutes.
+///
+/// The previous value (180) came with the claim that "historic DST shifts
+/// never exceed two hours, so 180 minutes cannot be reached". **That claim is
+/// false.** `Antarctica/Casey` folds exactly three hours (UTC+11 → UTC+08,
+/// e.g. 2010-03-05), so the largest fold in the IANA database landed exactly
+/// ON the old ceiling: an exhaustive sweep of all 19,093 transitions in the
+/// database saturated the loop 8 times (PR #4067 review round 3). The emitted
+/// literals happened to stay safe, but with zero margin — a 181-minute fold
+/// would have placed the literal inside the fold, resolving up to three hours
+/// *after* `dt`, which is precisely the ticket-losing failure this module
+/// exists to prevent.
+///
+/// The bound that actually holds is not about transition sizes at all. Writing
+/// `resolved(c) = c - offset(c)` and `dt ≈ c0 - offset(c0)`, the property
+/// `resolved(c0 - k) <= dt` is satisfied once `k` exceeds the difference
+/// between any two offsets the zone can present, which is bounded by the full
+/// span of UTC offsets in the database: −12:00 … +14:00, i.e. 26 hours. So
+/// 1560 minutes is sufficient for *any* zone, including one with a fold larger
+/// than any yet observed, and does not rest on an empirical claim about
+/// tzdata's contents that a future release could falsify.
+///
+/// It is a ceiling, not a target: every real zone converges in at most one
+/// fold-width (≤180 minutes today), and a UTC account converges immediately.
+const MAX_STEP_BACK_MINUTES: i64 = 1560;
 
 /// Parse an IANA timezone name (as JIRA reports it on `/myself`).
 ///
@@ -81,19 +102,36 @@ pub fn parse_timezone(name: &str) -> Result<Tz> {
 /// Test: `jql_date_is_identity_on_a_utc_account`,
 /// `jql_date_never_opens_after_the_intended_instant`,
 /// `jql_date_stays_within_a_minute_below_the_intended_instant`,
-/// `jql_date_is_safe_across_a_dst_fall_back_fold`.
-pub fn jql_date(dt: DateTime<Utc>, tz: Tz) -> String {
+/// `jql_date_is_safe_across_a_dst_fall_back_fold`,
+/// `jql_date_is_safe_across_the_largest_fold_in_the_tz_database`.
+///
+/// # Errors
+///
+/// [`CollectError::Config`] if no candidate within [`MAX_STEP_BACK_MINUTES`]
+/// satisfies the guarantee. That is unreachable for any zone whose offsets lie
+/// in the −12:00 … +14:00 range the ceiling is derived from, so it means the
+/// zone definition is pathological. The bound is **rejected rather than
+/// emitted**: an unvalidated literal is exactly how this window opens late and
+/// drops tickets, and a run that fails with a remediation hint is recoverable
+/// where a silently-wrong backfill is not.
+pub fn jql_date(dt: DateTime<Utc>, tz: Tz) -> Result<String> {
     let mut candidate = truncate_to_minute(dt.with_timezone(&tz).naive_local());
     for _ in 0..MAX_STEP_BACK_MINUTES {
         match worst_case_instant(candidate, tz) {
-            Some(resolved) if resolved <= dt => return format_literal(candidate),
+            Some(resolved) if resolved <= dt => return Ok(format_literal(candidate)),
             _ => candidate -= Duration::minutes(1),
         }
     }
-    // Unreachable for any real zone: stepping back 3h necessarily leaves any
-    // transition behind. Emit the last candidate rather than panicking — it is
-    // still 3h below `dt`, so it errs in the safe direction.
-    format_literal(candidate)
+    // Saturation. Never emit the last candidate on the assumption that 26h of
+    // step-back "must" be enough — that assumption is what the old 180-minute
+    // ceiling encoded, and it was wrong.
+    Err(CollectError::Config(format!(
+        "could not render a safe JQL date bound for {dt} in timezone '{tz}': no \
+         literal within {MAX_STEP_BACK_MINUTES} minutes below it resolves to an \
+         instant at or before it. This means the zone presents an offset range \
+         wider than the IANA −12:00…+14:00 span. Set `jira.timezone` to `UTC` in \
+         config.yaml to bypass zone resolution."
+    )))
 }
 
 /// The latest instant a naive local literal could denote in `tz` — the worst
@@ -161,7 +199,7 @@ mod tests {
     #[test]
     fn jql_date_is_identity_on_a_utc_account() {
         assert_eq!(
-            jql_date(dt("2026-01-03T10:15:45Z"), Tz::UTC),
+            jql_date(dt("2026-01-03T10:15:45Z"), Tz::UTC).expect("renders"),
             "2026-01-03 10:15"
         );
     }
@@ -194,7 +232,7 @@ mod tests {
         for tz in zones {
             for instant in instants {
                 let intended = dt(instant);
-                let literal = jql_date(intended, tz);
+                let literal = jql_date(intended, tz).expect("renders");
                 let evaluated = evaluate(&literal, tz);
                 assert!(
                     evaluated <= intended,
@@ -211,7 +249,7 @@ mod tests {
     fn jql_date_stays_within_a_minute_below_the_intended_instant() {
         for tz in [Tz::UTC, Tz::America__New_York, Tz::Asia__Kolkata] {
             let intended = dt("2026-06-15T12:34:56Z");
-            let evaluated = evaluate(&jql_date(intended, tz), tz);
+            let evaluated = evaluate(&jql_date(intended, tz).expect("renders"), tz);
             assert!(
                 intended - evaluated < Duration::minutes(1),
                 "{tz}: bound regressed {} below the intended instant",
@@ -229,11 +267,48 @@ mod tests {
         // 2026-11-01: 01:00-02:00 local occurs twice (05:00Z and 06:00Z).
         for minute in 0..60 {
             let intended = dt("2026-11-01T05:00:00Z") + Duration::minutes(minute);
-            let literal = jql_date(intended, tz);
+            let literal = jql_date(intended, tz).expect("renders");
             let evaluated = evaluate(&literal, tz);
             assert!(
                 evaluated <= intended,
                 "fold minute {minute}: `{literal}` -> {evaluated} > {intended}"
+            );
+        }
+    }
+
+    /// The largest fold in the IANA database, which the old 180-minute
+    /// ceiling could absorb only by coincidence (PR #4067 review round 3).
+    ///
+    /// `Antarctica/Casey` steps UTC+11 → UTC+08 — a THREE-hour fold, so the
+    /// required step-back reached exactly the old ceiling and the loop
+    /// saturated, emitting an unvalidated literal. The sweep below covers the
+    /// whole fold with margin either side and asserts both halves of the
+    /// contract: the bound is renderable at all (no saturation error), and it
+    /// never opens after the instant it encodes.
+    ///
+    /// The `<= 3h` assertion is the one that would have caught the original
+    /// defect: it pins the step-back to converging on the fold width rather
+    /// than running to whatever the ceiling happens to be.
+    #[test]
+    fn jql_date_is_safe_across_the_largest_fold_in_the_tz_database() {
+        let tz = Tz::Antarctica__Casey;
+        // 2010-03-05 local 03:00 (+11) rewinds to 00:00 (+08). Sweep a full
+        // day around it so the exact transition instant need not be pinned.
+        let start = dt("2010-03-04T06:00:00Z");
+        for minute in 0..(24 * 60) {
+            let intended = start + Duration::minutes(minute);
+            let literal = jql_date(intended, tz)
+                .unwrap_or_else(|e| panic!("minute {minute}: bound must be renderable: {e}"));
+            let evaluated = evaluate(&literal, tz);
+            assert!(
+                evaluated <= intended,
+                "minute {minute}: `{literal}` -> {evaluated} > {intended}"
+            );
+            assert!(
+                intended - evaluated <= Duration::hours(3),
+                "minute {minute}: stepped back {} — the search must converge on \
+                 the fold width, not run to the ceiling",
+                intended - evaluated
             );
         }
     }
@@ -245,7 +320,7 @@ mod tests {
         let tz = Tz::America__New_York;
         for minute in 0..60 {
             let intended = dt("2026-03-08T07:00:00Z") + Duration::minutes(minute);
-            let literal = jql_date(intended, tz);
+            let literal = jql_date(intended, tz).expect("renders");
             let evaluated = evaluate(&literal, tz);
             assert!(evaluated <= intended, "gap minute {minute}: `{literal}`");
         }

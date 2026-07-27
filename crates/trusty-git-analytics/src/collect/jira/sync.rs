@@ -9,6 +9,10 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
+// Imported under an alias, not as `Result`: `validate_project_key` below
+// returns a plain `std::result::Result<(), String>`, and shadowing the
+// prelude alias in this module would silently retype it.
+use crate::collect::errors::Result as CollectResult;
 use crate::collect::jira::jql_time::jql_date;
 
 /// The scope of one `tga jira sync` invocation.
@@ -38,15 +42,21 @@ pub struct SyncScope {
 /// timezone. Rendering it as UTC wall-clock on a non-UTC account moves the
 /// window by the account's offset — hours, against a safety margin measured
 /// in seconds. [`jql_date`] carries the full argument and the guarantee.
-pub fn build_jql(scope: &SyncScope, tz: Tz) -> String {
-    match scope.since {
+///
+/// # Errors
+///
+/// Propagates [`jql_date`]'s config error when the bound cannot be rendered
+/// safely in `tz`. A scope with no `since` is infallible — it emits no date
+/// literal at all.
+pub fn build_jql(scope: &SyncScope, tz: Tz) -> CollectResult<String> {
+    Ok(match scope.since {
         Some(since) => format!(
             "project = {} AND updated >= \"{}\" ORDER BY updated ASC",
             scope.project_key,
-            jql_date(since, tz)
+            jql_date(since, tz)?
         ),
         None => format!("project = {} ORDER BY updated ASC", scope.project_key),
-    }
+    })
 }
 
 /// Resolve the effective sync scope from CLI/config inputs.
@@ -218,7 +228,7 @@ mod tests {
     #[test]
     fn jql_date_formats_at_minute_resolution() {
         let d = Utc.with_ymd_and_hms(2026, 3, 4, 5, 6, 7).unwrap();
-        assert_eq!(jql_date(d, Tz::UTC), "2026-03-04 05:06");
+        assert_eq!(jql_date(d, Tz::UTC).expect("renders"), "2026-03-04 05:06");
     }
 
     /// `build_jql` must thread the account zone through to the literal — a
@@ -230,7 +240,7 @@ mod tests {
             since: Some(dt("2026-01-03T10:00:00Z")),
         };
         assert_eq!(
-            build_jql(&scope, Tz::America__New_York),
+            build_jql(&scope, Tz::America__New_York).expect("renders"),
             "project = PROJ AND updated >= \"2026-01-03 05:00\" ORDER BY updated ASC"
         );
     }
@@ -242,7 +252,7 @@ mod tests {
             since: None,
         };
         assert_eq!(
-            build_jql(&scope, Tz::UTC),
+            build_jql(&scope, Tz::UTC).expect("renders"),
             "project = PROJ ORDER BY updated ASC"
         );
     }
@@ -254,7 +264,7 @@ mod tests {
             since: Some(dt("2026-01-01T00:00:00Z")),
         };
         assert_eq!(
-            build_jql(&scope, Tz::UTC),
+            build_jql(&scope, Tz::UTC).expect("renders"),
             "project = PROJ AND updated >= \"2026-01-01 00:00\" ORDER BY updated ASC"
         );
     }
@@ -377,7 +387,7 @@ mod tests {
             else {
                 panic!("expected an advance");
             };
-            let bound = jql_date(next, tz);
+            let bound = jql_date(next, tz).expect("renders");
             let naive = chrono::NaiveDateTime::parse_from_str(&bound, "%Y-%m-%d %H:%M")
                 .expect("renderer emits a parseable literal");
             let window_opens = tz

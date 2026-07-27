@@ -264,9 +264,14 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
     // will actually be sent, not a UTC-shaped approximation of it.
     let tz = client.account_timezone().await?;
 
+    // Rendered up front so a zone that cannot produce a safe bound fails here,
+    // with the same "before any tickets are read" guarantee as the timezone
+    // resolution above, rather than mid-walk on page 2.
+    let logged_jql = build_jql(&scope, tz)?;
+
     info!(
         project = %project_key,
-        jql = %build_jql(&scope, tz),
+        jql = %logged_jql,
         timezone = %tz,
         backfill = args.backfill,
         dry_run = args.dry_run,

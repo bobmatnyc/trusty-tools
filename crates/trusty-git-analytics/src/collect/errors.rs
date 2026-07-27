@@ -49,6 +49,28 @@ pub enum CollectError {
     #[error("configuration error: {0}")]
     Config(String),
 
+    /// A paged JIRA changelog walk finished holding fewer history entries
+    /// than the server reported existed (issue #4084).
+    ///
+    /// Why its own variant: this is the one failure where the collector
+    /// *has* data and it is silently wrong — a short history reads exactly
+    /// like a complete one downstream. Naming the ticket and both counts in
+    /// a dedicated variant makes the shortfall impossible to mistake for a
+    /// generic transport hiccup, and impossible to swallow as a partial
+    /// success.
+    #[error(
+        "incomplete JIRA changelog for {key}: JIRA reported {expected} history \
+         entries but only {retrieved} could be retrieved"
+    )]
+    IncompleteChangelog {
+        /// JIRA issue key whose changelog came up short, e.g. `PROJ-123`.
+        key: String,
+        /// Entry count the server reported via the paged bean's `total`.
+        expected: u64,
+        /// Entry count actually accumulated across the paged walk.
+        retrieved: u64,
+    },
+
     /// The remote asked us to slow down (HTTP 429 / 503).
     ///
     /// Distinguished from [`CollectError::Http`] so retry logic can honour a

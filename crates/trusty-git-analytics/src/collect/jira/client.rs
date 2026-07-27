@@ -13,12 +13,18 @@ use crate::collect::errors::{CollectError, Result};
 use crate::collect::jira::http::{expand_credential, get_json, post_json, Credentials};
 use crate::collect::jira::jql_time::parse_timezone;
 use crate::collect::jira::model::{
-    ChangelogIssue, ChangelogSearchResponse, ChangelogWalk, CommentSearchResponse, JiraComment,
+    embedded_changelog_is_truncated, ChangelogIssue, ChangelogSearchResponse, ChangelogWalk,
+    CommentSearchResponse, JiraComment,
 };
 use crate::collect::jira::paging::{KeysetPager, PagedItem};
 use crate::collect::jira::retry::{with_retry, RetryBudget, RetryPolicy};
 use crate::collect::jira::sync::{build_jql, SyncScope};
 use crate::core::config::JiraConfig;
+
+/// Full-history changelog retrieval (issue #4084). A child module rather
+/// than a sibling so it can use `JiraClient`'s private HTTP/retry fields.
+#[path = "changelog.rs"]
+mod changelog;
 
 /// Page size for the `/issue/{key}/comment` pagination (issue #3966).
 const COMMENT_PAGE_SIZE: usize = 100;
@@ -456,17 +462,35 @@ impl JiraClient {
     /// Transient failures (429/5xx/timeouts) are retried with backoff; see
     /// [`super::retry`].
     ///
-    /// KNOWN LIMITATION: JIRA's search-embedded changelog is itself paged
-    /// (`changelog.total` vs `changelog.histories.len()`); a ticket with a
-    /// history longer than one changelog page will have its oldest
-    /// transitions truncated on this path. A full per-issue
-    /// `GET /issue/{key}/changelog` walk would close this gap but is
-    /// deferred — see issue #3966 tracking comment.
+    /// The search-embedded changelog is itself paged, so per issue this
+    /// compares JIRA's `changelog.total` against the number of embedded
+    /// entries; when the embedded copy is short (its OLDEST entries having
+    /// been dropped), [`JiraClient::fetch_changelog`] walks the dedicated
+    /// `GET /issue/{key}/changelog` endpoint and REPLACES the truncated
+    /// transitions with the full history. The extra round trip is paid only
+    /// by the truncated minority — a complete embedded changelog costs
+    /// nothing beyond the search itself (issue #4084).
+    ///
+    /// The fallback runs during conversion, i.e. before the keyset
+    /// deduplication above, so a truncated ticket re-read at a window
+    /// boundary pays for it twice. That is deliberate: the alternative
+    /// threads the truncation verdict through the dedup zip to save a round
+    /// trip on the rare intersection of "history longer than one changelog
+    /// page" and "sits exactly on a re-anchor boundary", which is not worth
+    /// the extra state.
+    ///
+    /// Test: `search_with_changelog_falls_back_when_embedded_is_truncated`,
+    /// `search_with_changelog_skips_fallback_when_embedded_is_complete`,
+    /// `search_with_changelog_propagates_fallback_failure`.
     ///
     /// # Errors
     ///
     /// - [`CollectError::Http`] on transport / non-success HTTP responses.
     /// - [`CollectError::Json`] on payload parse failures.
+    /// - [`CollectError::IncompleteChangelog`] when a truncated ticket's
+    ///   fallback walk cannot retrieve the full history. This aborts the
+    ///   search rather than returning a knowingly-short history: writing
+    ///   confidently-wrong backfill data is strictly worse than failing.
     pub async fn search_with_changelog(
         &self,
         scope: &SyncScope,
@@ -500,7 +524,7 @@ impl JiraClient {
                     since: request.since,
                 },
                 tz,
-            );
+            )?;
             let body = json!({
                 "jql": jql,
                 "startAt": request.start_at,
@@ -515,11 +539,20 @@ impl JiraClient {
                 })
                 .await?;
 
-            let issues: Vec<ChangelogIssue> = parsed
-                .issues
-                .into_iter()
-                .map(ChangelogIssue::from_api)
-                .collect();
+            // Per-issue conversion, with the truncated-changelog fallback
+            // spliced in (issue #4084). This is a loop rather than a `map`
+            // because the fallback is an `await`; the truncation verdict is
+            // taken from the RAW payload, before `from_api` consumes it.
+            let mut issues: Vec<ChangelogIssue> = Vec::with_capacity(parsed.issues.len());
+            for api_issue in parsed.issues {
+                let truncated = embedded_changelog_is_truncated(&api_issue);
+                let key = api_issue.key.clone();
+                let mut issue = ChangelogIssue::from_api(api_issue);
+                if truncated {
+                    issue.transitions = self.fetch_changelog(&key).await?;
+                }
+                issues.push(issue);
+            }
             let items: Vec<PagedItem> = issues.iter().map(|i| (i.key.clone(), i.updated)).collect();
             let step = pager.record_page(&items, page_size);
 
@@ -565,7 +598,9 @@ impl JiraClient {
     /// to get all of them.
     ///
     /// What: `GET /rest/api/3/issue/{key}/comment?startAt=&maxResults=`,
-    /// looping until the server reports no more pages. `body_len` is
+    /// looping until a page comes back SHORT of [`COMMENT_PAGE_SIZE`] — the
+    /// server's `total` is deliberately not consulted, see
+    /// [`super::model::CommentSearchResponse`]. `body_len` is
     /// computed from the raw JSON `body` field:
     /// - plain string body (JIRA Server/DC, or classic-editor Cloud
     ///   comments): UTF-8 byte length of the string.
@@ -580,6 +615,9 @@ impl JiraClient {
     /// client: this is the one request issued *per ticket*, so it is the
     /// request a rate limiter throttles first, and a failure here is what
     /// holds the whole run's incremental cursor back.
+    ///
+    /// Test: `fetch_comments_pages_every_comment_when_total_is_absent`,
+    /// `fetch_comments_stops_after_an_empty_page_on_an_exact_multiple`.
     ///
     /// # Errors
     ///
@@ -606,13 +644,19 @@ impl JiraClient {
                     out.push(comment);
                 }
             }
-            if n == 0 {
+            // Terminate on a SHORT PAGE, never on the server's `total`. A
+            // response omitting `total` used to read as `0` under
+            // `#[serde(default)]` and end the walk after page 1, silently
+            // ingesting a prefix of the ticket's comments — and since the
+            // fetch still returned `Ok`, the failed-ticket cursor clamp did
+            // not protect it: the cursor advanced and the loss was
+            // permanent (PR #4067 review round 3). A full page always costs
+            // one extra request to discover the end; that is the price of
+            // not trusting a field the server may not send.
+            if n < COMMENT_PAGE_SIZE {
                 break;
             }
             start_at += n as u64;
-            if start_at >= parsed.total {
-                break;
-            }
         }
         Ok(out)
     }
