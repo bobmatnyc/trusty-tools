@@ -1006,6 +1006,75 @@ pub(crate) fn untracked_ancestor_message(git_root: &std::path::Path) -> String {
     )
 }
 
+/// Decision for the non-git-project branch of [`fallback_protected`]: does an
+/// env-resolved managed-session id mean the "not in a git project" verdict is
+/// premature (#4061)?
+///
+/// Why: `derive_project`/`classify_cwd_project` finding no usable git root is
+/// exactly right for a genuinely unmanaged directory — but it says nothing
+/// about whether THIS pane is a managed session's own pane whose daemon
+/// record simply has not settled the Active -> Stopped race yet (the same
+/// race [`super::guided_inplace::fetch_managed_session_until_stopped`] bounds
+/// for `try_inplace_relaunch`'s own gate at the top of `run_guided_default`).
+/// Separating this decision from the I/O (the env lookup, and the retry
+/// itself) keeps it exhaustively unit-testable.
+/// What: `Some(id)` — [`super::guided_inplace::resolve_env_managed_session_id`]
+/// found a managed-session id in either the process or tmux SESSION
+/// environment — means retry [`super::guided_inplace::try_inplace_relaunch`]
+/// once more (real wall-clock time has elapsed since its first attempt at the
+/// top of `run_guided_default`, doing the nested-session-guard round trip and
+/// project detection in between) before ever printing a message that blames
+/// "not a git project". `None` — no signal at all — is the ordinary,
+/// unaffected fast path: print [`super::misc::NON_GIT_FALLBACK_HINT`]
+/// immediately, no extra daemon round trip, no added latency.
+/// Test: `plan_non_git_fallback_retries_when_env_id_present`,
+/// `plan_non_git_fallback_ordinary_when_no_env_id`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NonGitFallbackPlan {
+    /// No managed-session signal anywhere — the ordinary "not in a git
+    /// project" hint is correct; print it immediately.
+    OrdinaryNotGit,
+    /// A managed-session id WAS found in the environment — give
+    /// `try_inplace_relaunch` one more bounded attempt before ever printing a
+    /// git-project-shaped message for a pane we have evidence is managed.
+    RetryInPlace(String),
+}
+
+/// Pure decision behind [`NonGitFallbackPlan`] — see its doc for the full
+/// rationale.
+///
+/// Test: `plan_non_git_fallback_retries_when_env_id_present`,
+/// `plan_non_git_fallback_ordinary_when_no_env_id`.
+pub(crate) fn plan_non_git_fallback(env_managed_session_id: Option<&str>) -> NonGitFallbackPlan {
+    match env_managed_session_id {
+        Some(id) => NonGitFallbackPlan::RetryInPlace(id.to_string()),
+        None => NonGitFallbackPlan::OrdinaryNotGit,
+    }
+}
+
+/// Build the operator-facing notice printed when a managed-session id WAS
+/// found in the environment (#4061) but the retried
+/// [`super::guided_inplace::try_inplace_relaunch`] still could not confirm
+/// the in-place relaunch — e.g. the daemon's Active -> Stopped settle race is
+/// taking longer than both bounded attempts combined, or the daemon is
+/// genuinely unreachable.
+///
+/// Why: printing [`super::misc::NON_GIT_FALLBACK_HINT`] here would actively
+/// mislead the operator — this cwd may well not be a git project, but that is
+/// NOT why nothing happened; the pane is a known managed one whose record
+/// just has not settled yet. An honest, actionable message names the session
+/// id and tells the operator the one thing that reliably works: try again.
+/// What: a single-line notice naming `id`. Pure — the caller prints it via
+/// `eprintln!` and returns `Ok(())`, exactly like every other fallback notice
+/// in this module.
+/// Test: `managed_pane_settle_pending_message_names_id`.
+pub(crate) fn managed_pane_settle_pending_message(id: &str) -> String {
+    format!(
+        "tm: this pane belongs to managed session {id}, but its daemon record has not \
+         finished settling yet — run `tm` again in a moment."
+    )
+}
+
 /// Daemon-unreachable fallback that protects ALL live git checkouts (#1724).
 ///
 /// Why: the guided default MUST NOT deploy framework files into ANY git
@@ -1025,9 +1094,11 @@ pub(crate) fn untracked_ancestor_message(git_root: &std::path::Path) -> String {
 /// Test: `guided_fallback_never_pollutes_github_git_checkout`,
 /// `guided_fallback_blocks_non_github_git_checkout`,
 /// `guided_fallback_blocks_github_git_from_subdirectory`,
-/// `guided_fallback_untracked_ancestor_does_not_redirect`, and
-/// `guided_fallback_redirect_success_worktree_not_live_checkout` in
-/// `tests_behavior_b_tests.rs`.
+/// `guided_fallback_untracked_ancestor_does_not_redirect`,
+/// `guided_fallback_redirect_success_worktree_not_live_checkout`,
+/// `guided_fallback_non_git_dir_reaches_launch_path` (fast path unaffected),
+/// and `guided_fallback_non_git_dir_with_managed_env_retries_instead_of_hint`
+/// (#4061 race) in `tests_behavior_b_tests.rs`.
 pub(crate) async fn fallback_protected(
     client: &reqwest::Client,
     url: &str,
@@ -1045,9 +1116,34 @@ pub(crate) async fn fallback_protected(
             return Ok(());
         }
         CwdProject::NotGit => {
-            // Not inside a git working tree: print a helpful note and exit cleanly (#1839).
-            eprintln!("{}", super::misc::NON_GIT_FALLBACK_HINT);
-            return Ok(());
+            // #4061: before blaming "not in a git project", ask whether ANY
+            // signal says this pane belongs (or very recently belonged) to a
+            // managed session — see `plan_non_git_fallback`'s doc for the
+            // full race this closes. A pane with no such signal takes the
+            // ordinary, unaffected fast path below (no extra daemon round
+            // trip). A pane WITH the signal gets one more bounded
+            // `try_inplace_relaunch` attempt — real wall-clock time has
+            // passed since its first attempt at the top of
+            // `run_guided_default` — before this ever prints a
+            // git-project-shaped message for a pane we have evidence is
+            // managed.
+            match plan_non_git_fallback(
+                super::guided_inplace::resolve_env_managed_session_id().as_deref(),
+            ) {
+                NonGitFallbackPlan::RetryInPlace(id) => {
+                    if let Some(result) =
+                        super::guided_inplace::try_inplace_relaunch(client, url).await
+                    {
+                        return result;
+                    }
+                    eprintln!("{}", managed_pane_settle_pending_message(&id));
+                    return Ok(());
+                }
+                NonGitFallbackPlan::OrdinaryNotGit => {
+                    eprintln!("{}", super::misc::NON_GIT_FALLBACK_HINT);
+                    return Ok(());
+                }
+            }
         }
     };
 

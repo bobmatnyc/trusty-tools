@@ -177,6 +177,36 @@ fn read_tmux_env_managed_session_id() -> Option<String> {
     parse_show_environment_value(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Resolve [`MANAGED_SESSION_ID_ENV`] from EITHER the process environment or
+/// the tmux SESSION environment — the exact two-source lookup
+/// [`try_inplace_relaunch`] itself performs (issue #4061).
+///
+/// Why (#4061): the guided-default's non-git fallback (`guided::
+/// fallback_protected`'s `CwdProject::NotGit` arm) previously printed the
+/// "not in a git project" hint unconditionally whenever `derive_project`
+/// found no usable git root — including for a managed pane whose bare `tm`
+/// happened to run from a non-git cwd while the daemon's Active -> Stopped
+/// settle race (the same one [`fetch_managed_session_until_stopped`] guards
+/// against) had not yet resolved by the time [`try_inplace_relaunch`]'s own
+/// bounded retry gave up. That produced the reported two-invocation UX: a
+/// scary "not in a git project" error on the first bare `tm`, then success on
+/// an immediate retry once the daemon's record had settled. Exposing the
+/// SAME env-var resolution `try_inplace_relaunch` uses lets that fallback ask
+/// "does ANY signal say this pane belongs (or very recently belonged) to a
+/// managed session?" before ever blaming "not a git project" — without
+/// duplicating the process-env-then-tmux-env chain a second time.
+/// What: [`read_env_managed_session_id`] first (the exact shell that ran the
+/// `export` prefix), falling back to [`read_tmux_env_managed_session_id`] (a
+/// sibling pane/window in the same tmux session, or a pane spawned before the
+/// durable `tmux set-environment` publish existed). `None` when neither
+/// source has it — meaning there is no evidence at all that this pane is a
+/// managed one, so the ordinary "not in a git project" hint is exactly right.
+/// Test: `resolve_env_managed_session_id_prefers_process_env`,
+/// `resolve_env_managed_session_id_none_when_unset` in `guided_inplace/tests.rs`.
+pub(crate) fn resolve_env_managed_session_id() -> Option<String> {
+    read_env_managed_session_id().or_else(read_tmux_env_managed_session_id)
+}
+
 /// Parse the id out of `tmux show-environment <name>`'s stdout.
 ///
 /// Why: separating the parse from the process spawn makes the format-handling
