@@ -1193,6 +1193,228 @@ async fn guided_fallback_non_git_dir_reaches_launch_path() {
     );
 }
 
+// ── #4061: managed-pane settle race vs. the non-git fallback ─────────────────
+//
+// Root cause: `try_inplace_relaunch` (the FIRST thing bare `tm` tries, at the
+// top of `run_guided_default`) is gated on the daemon's session record
+// actually reading "stopped" within a small bounded retry budget
+// (`FETCH_RETRY_BUDGET`, ~400ms) — the async `SessionEnd` healing step that
+// flips a just-exited managed pane's record from "active" to "stopped" can
+// still be in flight at that exact moment. When that gate misses, control
+// used to fall straight through project detection to `fallback_protected`'s
+// `CwdProject::NotGit` arm, which printed the "not in a git project" hint —
+// actively misleading for a pane that plainly IS (or very recently was) a
+// managed session's own pane. These tests exercise `fallback_protected`
+// directly (the layer the fix lives in) with `TM_MANAGED_SESSION_ID` present,
+// mirroring the exact "operator's shell already has the env var exported"
+// scenario from #2023 component B.
+
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_non_git_dir_no_managed_env_is_fast() {
+    // Why: the common case — no managed-session signal in the environment at
+    // all — must take the ordinary, unaffected fast path: no extra daemon
+    // round trip, no added latency (#4061 must not slow down bare `tm` for a
+    // genuinely non-managed pane).
+    let managed_key = "TM_MANAGED_SESSION_ID";
+    let prev = std::env::var(managed_key).ok();
+    // SAFETY: serialised by `#[serial_test::serial]`.
+    unsafe { std::env::remove_var(managed_key) };
+    let prev_tmux = std::env::var("TMUX").ok();
+    // SAFETY: serialised by `#[serial_test::serial]`.
+    unsafe { std::env::remove_var("TMUX") };
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    assert!(!project.join(".git").exists(), "test precondition");
+
+    let client = reqwest::Client::new();
+    let start = std::time::Instant::now();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+    let elapsed = start.elapsed();
+
+    // Restore before any assertion can panic.
+    unsafe {
+        match prev {
+            Some(ref v) => std::env::set_var(managed_key, v),
+            None => std::env::remove_var(managed_key),
+        }
+        match prev_tmux {
+            Some(ref v) => std::env::set_var("TMUX", v),
+            None => std::env::remove_var("TMUX"),
+        }
+    }
+
+    assert!(
+        result.is_ok(),
+        "non-git dir must exit cleanly; got {result:?}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(150),
+        "no managed-session signal must never pay the #4061 retry budget; took {elapsed:?}"
+    );
+}
+
+/// Local HTTP mock replying `{"id","name","state"}`, walking through `states`
+/// one entry per connection (clamping to the last once exhausted) — mirrors
+/// `commands::guided_inplace::tests::spawn_state_mock`'s convention (that
+/// helper lives in a sibling test module and is not reachable from this file,
+/// hence the small local copy).
+async fn spawn_4061_state_mock(
+    id: &'static str,
+    states: Vec<&'static str>,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_task = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let n = hits_task.fetch_add(1, Ordering::SeqCst);
+            // Drain the request before replying (avoids connection-reset
+            // flakiness on a naive single read).
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    sock.read(&mut buf),
+                )
+                .await
+                {
+                    Ok(Ok(n)) if n > 0 => {
+                        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            let idx = n.min(states.len().saturating_sub(1));
+            let state = states.get(idx).copied().unwrap_or("active");
+            let body = format!(r#"{{"id":"{id}","name":"tm-test-4061","state":"{state}"}}"#);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    (format!("http://{addr}"), hits)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_non_git_dir_with_managed_env_settles_quickly_returns_promptly() {
+    // #4061 race, reproduced: a managed-session id IS present in the
+    // environment, and the daemon record settles to "stopped" on the very
+    // next poll (simulating the `SessionEnd` healing step catching up a
+    // beat after the first bare-`tm` attempt already gave up). The retried
+    // `try_inplace_relaunch` this fix adds must observe that promptly —
+    // never exhausting the full retry budget once the state resolves — and
+    // must exit cleanly rather than ever printing the misleading "not in a
+    // git project" hint for this pane.
+    const TEST_ID: &str = "11111111-2222-3333-4444-555555555555";
+    let (url, hits) = spawn_4061_state_mock(TEST_ID, vec!["active", "stopped"]).await;
+
+    let managed_key = "TM_MANAGED_SESSION_ID";
+    let prev = std::env::var(managed_key).ok();
+    // SAFETY: serialised by `#[serial_test::serial]`.
+    unsafe { std::env::set_var(managed_key, TEST_ID) };
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    let client = reqwest::Client::new();
+    let start = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::commands::guided::fallback_protected(&client, &url, project),
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    // Restore before any assertion can panic.
+    unsafe {
+        match prev {
+            Some(ref v) => std::env::set_var(managed_key, v),
+            None => std::env::remove_var(managed_key),
+        }
+    }
+
+    let result = result.expect("#4061: fallback_protected must never hang");
+    assert!(
+        result.is_ok(),
+        "a managed pane whose record settles must still exit cleanly; got {result:?}"
+    );
+    assert!(
+        !project.join("CLAUDE.md").exists(),
+        "CLAUDE.md must not be written for this non-git cwd"
+    );
+    assert!(
+        hits.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the retried in-place check must actually query the daemon"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(300),
+        "a record that settles on the second poll must not pay the full \
+         retry budget; took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_non_git_dir_with_managed_env_unreachable_daemon_does_not_hang() {
+    // #4061: even in the worst case — a managed-session id present but the
+    // daemon unreachable (or the record never settling) — the fallback must
+    // still resolve promptly (bounded by the SAME small retry budget
+    // `try_inplace_relaunch` already uses) rather than hang, and must still
+    // exit cleanly.
+    const TEST_ID: &str = "11111111-2222-3333-4444-555555555555";
+    let managed_key = "TM_MANAGED_SESSION_ID";
+    let prev = std::env::var(managed_key).ok();
+    // SAFETY: serialised by `#[serial_test::serial]`.
+    unsafe { std::env::set_var(managed_key, TEST_ID) };
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    let client = reqwest::Client::new();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project),
+    )
+    .await;
+
+    // Restore before any assertion can panic.
+    unsafe {
+        match prev {
+            Some(ref v) => std::env::set_var(managed_key, v),
+            None => std::env::remove_var(managed_key),
+        }
+    }
+
+    let result = result.expect("#4061: fallback_protected must never hang, even unreachable");
+    assert!(
+        result.is_ok(),
+        "an unreachable daemon must still exit cleanly; got {result:?}"
+    );
+    assert!(
+        !project.join("CLAUDE.md").exists(),
+        "CLAUDE.md must not be written for this non-git cwd"
+    );
+}
+
 /// Why (#1724 HIGH gap): `fallback_protected` previously used `cwd.join(".git").exists()`
 /// which only fires when `cwd` IS the repo root. Running `tm` from a subdirectory
 /// (e.g. `~/project/src/`) silently bypassed the guard and called `launch(None)`,
