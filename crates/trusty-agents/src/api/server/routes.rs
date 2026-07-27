@@ -22,6 +22,7 @@ use axum::{
 use trusty_common::server::{SelfOrigins, with_guarded_middleware};
 
 use super::agent_create::create_agent_route;
+use super::agent_knowledge::agent_knowledge_route;
 use super::agent_patch::{get_agent_persona_route, get_agent_route, patch_agent_route};
 use super::agent_permissions::agent_permissions_route;
 use super::agent_skills::agent_skills_route;
@@ -174,6 +175,13 @@ pub fn build_router_with_origins(
         .route(
             "/api/agents/{name}/permissions",
             axum::routing::get(agent_permissions_route),
+        )
+        // #3935: the Knowledge pane reads store bindings + knowledge-classified
+        // tools + declared MCP knowledge connections in one call (DOC-57 §4).
+        // Read-only; store editing remains #3890's contract.
+        .route(
+            "/api/agents/{name}/knowledge",
+            axum::routing::get(agent_knowledge_route),
         )
         .route("/api/workstreams", get(list_workstreams_route))
         .route(

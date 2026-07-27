@@ -18,6 +18,8 @@
 //!     (`PATCH /api/agents/:name`, #3246)
 //!   - `agent_permissions` → structured permissions model
 //!     (`GET /api/agents/:name/permissions`, #3936, DOC-57 §7)
+//!   - `agent_knowledge` → unified knows-surface (`GET /api/agents/:name/knowledge`,
+//!     #3935, DOC-57 §4): store bindings + knowledge tools + MCP connections
 //!   - `project_registration` → project register + per-project config lookup
 //!   - `ctrl_sessions`→ CTRL session CRUD (`om session …`)
 //!   - `tm`           → tmux session management (`/api/tm/*`)
@@ -32,6 +34,7 @@
 //! Test: `tests` submodule + each submodule's documented coverage.
 
 mod agent_create;
+mod agent_knowledge;
 mod agent_patch;
 mod agent_permissions;
 mod agent_skills;
