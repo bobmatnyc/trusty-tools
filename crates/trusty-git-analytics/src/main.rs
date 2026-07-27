@@ -18,7 +18,7 @@ use tga::core::db::Database;
 use crate::commands::aliases::AliasesArgs;
 use crate::commands::args::{
     AnalyzeArgs, ClassifyArgs, CollectArgs, DeploymentsSubcommand, DeploymentsSubcommandArgs,
-    IncidentsSubcommand, IncidentsSubcommandArgs, ReportArgs,
+    IncidentsSubcommand, IncidentsSubcommandArgs, JiraSubcommand, JiraSubcommandArgs, ReportArgs,
 };
 use crate::commands::author::AuthorArgs;
 use crate::commands::backfill::BackfillArgs;
@@ -134,6 +134,8 @@ enum Commands {
     Incidents(IncidentsSubcommandArgs),
     /// Compute and display DORA metrics (lead time, deployment frequency, MTTR, CFR).
     Dora(DoraArgs),
+    /// JIRA status-transition and comment ingestion (issue #3966).
+    Jira(JiraSubcommandArgs),
 
     /// Manage inference provider configuration (API keys) — the universal
     /// `config keys set/list/test/unset` surface shared by every trusty-*
@@ -358,6 +360,10 @@ async fn run() -> anyhow::Result<()> {
             IncidentsSubcommand::Collect(a) => commands::incidents::run(config, &mut db, a)?,
         },
         Commands::Dora(args) => commands::dora::run(config, &mut db, args)?,
+        Commands::Jira(args) => match args.subcommand {
+            JiraSubcommand::Sync(a) => commands::jira::run_sync(config, &mut db, a).await?,
+            JiraSubcommand::Freshness(a) => commands::jira::run_freshness(&db, a)?,
+        },
         // Handled above — match is exhaustive.
         Commands::Install(_) => unreachable!("install dispatched above"),
         Commands::Config(_) => unreachable!("config dispatched above"),
