@@ -67,11 +67,43 @@ pub struct ChangelogIssue {
     pub updated: Option<DateTime<Utc>>,
     /// `status`-field transitions extracted from the changelog, oldest
     /// first (JIRA returns histories in chronological order).
+    ///
+    /// KNOWINGLY INCOMPLETE whenever [`Self::truncated_history_total`] is
+    /// `Some` — see that field.
     pub transitions: Vec<JiraTransition>,
+    /// `Some(n)` when JIRA's search-embedded changelog carried fewer than the
+    /// `n` history entries the server said the issue has, i.e. when
+    /// [`Self::transitions`] is missing its OLDEST entries (issue #4084).
+    ///
+    /// Why a recorded verdict rather than a repair performed here: the repair
+    /// is a per-ticket network call, and a network call that can fail belongs
+    /// where per-ticket failure isolation lives. Performing it inside the
+    /// search walk meant one unreachable ticket aborted the walk before
+    /// `run_sync` had written anything at all — no transitions, no comments,
+    /// no cursor movement, for every ticket in the window, deterministically
+    /// repeating next run (PR #4155 review). Carrying the verdict out instead
+    /// puts the repair inside the same failed-ticket / cursor-clamp / circuit
+    /// breaker machinery the comment fetch already uses, so one bad ticket
+    /// holds the cursor and the other 9,999 still land.
+    ///
+    /// It also means the repair runs only for tickets that survived keyset
+    /// deduplication: a boundary re-read that is about to be discarded can no
+    /// longer spend a round trip, let alone kill the run.
+    ///
+    /// `None` means the embedded copy is complete, or that completeness could
+    /// not be determined — never that it was checked and repaired.
+    pub truncated_history_total: Option<u64>,
 }
 
 impl ChangelogIssue {
     pub(crate) fn from_api(api: ChangelogApiIssue) -> Self {
+        // Taken FIRST, while `api` is still whole: both the verdict and the
+        // count it carries are read off fields consumed further down.
+        let truncated_history_total = if embedded_changelog_is_truncated(&api) {
+            api.changelog.as_ref().and_then(|cl| cl.total)
+        } else {
+            None
+        };
         let project_key = api
             .fields
             .project
@@ -87,6 +119,7 @@ impl ChangelogIssue {
             project_key,
             updated,
             transitions,
+            truncated_history_total,
         }
     }
 }
@@ -150,8 +183,10 @@ pub(crate) fn transitions_from_histories(
 }
 
 /// Decide whether an issue's search-embedded changelog is provably
-/// truncated and therefore needs the dedicated-endpoint fallback
-/// (issue #4084).
+/// truncated and therefore needs the dedicated-endpoint repair
+/// (issue #4084). The verdict is recorded on
+/// [`ChangelogIssue::truncated_history_total`], not acted on here — see that
+/// field for why the repair happens in `run_sync` instead.
 ///
 /// Why: JIRA reports the issue's true history-entry count in
 /// `changelog.total` while embedding only the first page of entries — and
@@ -164,9 +199,9 @@ pub(crate) fn transitions_from_histories(
 /// no `total` is warned about by ticket key so the gap is at least visible
 /// in the logs.
 ///
-/// Test: `search_with_changelog_falls_back_when_embedded_is_truncated`,
-/// `search_with_changelog_skips_fallback_when_embedded_is_complete`,
-/// `missing_changelog_total_does_not_trigger_fallback`.
+/// Test: `search_with_changelog_flags_a_truncated_embedded_changelog`,
+/// `search_with_changelog_does_not_flag_a_complete_embedded_changelog`,
+/// `missing_changelog_total_does_not_flag_truncation`.
 pub(crate) fn embedded_changelog_is_truncated(issue: &ChangelogApiIssue) -> bool {
     let Some(cl) = issue.changelog.as_ref() else {
         return false;
@@ -322,14 +357,25 @@ pub(crate) struct ApiChangelog {
 /// bearing: it is the only signal that distinguishes "this ticket's history
 /// is fully retrieved" from "the server stopped early", and
 /// [`super::changelog`] turns a shortfall into an error rather than a short
-/// history. The walk still terminates on an empty page, so a missing `total`
-/// cannot wedge it.
+/// history.
+///
+/// It is an `Option<u64>` and NOT a `#[serde(default)] u64` — that is the
+/// whole point. Under `#[serde(default)]` an absent `total` reads as `0`, a
+/// walk terminating on `start_at >= total` stops after page 1, and the
+/// completeness check `retrieved < 0` passes vacuously: the fallback then
+/// hands back page 1 as a complete history and REPLACES the embedded
+/// transitions with it, i.e. it can return less than the truncated data it
+/// was invoked to repair. That is the identical fail-open this type's own
+/// sibling [`CommentSearchResponse`] documents below, and it was reproduced
+/// against the first cut of this module (PR #4155 review). `None` now means
+/// "the server told us nothing", which is never treated as "there is nothing
+/// left".
 #[derive(Debug, Deserialize)]
 pub(crate) struct ChangelogPageResponse {
     #[serde(default)]
     pub(crate) values: Vec<ApiChangelogHistory>,
     #[serde(default)]
-    pub(crate) total: u64,
+    pub(crate) total: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,10 +412,27 @@ pub(crate) struct ApiChangelogItem {
 /// the fetch returned `Ok` the failed-ticket cursor clamp let the cursor
 /// advance past the ticket, making the loss permanent (PR #4067 review round
 /// 3). [`super::client::JiraClient::fetch_comments`] now terminates on a
-/// short page instead, which depends on no server-side bookkeeping field.
+/// short page instead.
+///
+/// "Short" is measured against `maxResults` — the page size the server
+/// ACTUALLY applied, echoed back on every Atlassian paged bean — and not
+/// against the size we requested. The distinction is not academic: a tenant
+/// limit, a Data Center `jira.search.views.default.max`, or an intermediary
+/// can all shrink the page, and comparing a 50-entry page against a
+/// requested 100 reads as "short" and ends the walk after page 1. That
+/// reproduces the very bug this type's `total` removal was meant to fix —
+/// 50 of 150 comments ingested, returned `Ok`, cursor advanced (PR #4155
+/// review, reproduced). `maxResults` is an `Option` for the same reason
+/// `total` is gone: an absent one must not silently read as `0` and
+/// terminate everything. When it is absent the walk falls back to the only
+/// claim that needs no server bookkeeping at all — an empty page.
 #[derive(Debug, Deserialize)]
 pub(crate) struct CommentSearchResponse {
     pub(crate) comments: Vec<ApiComment>,
+    /// Page size the server applied, which may be smaller than the one
+    /// requested. `None` when the server omits the field.
+    #[serde(rename = "maxResults", default)]
+    pub(crate) max_results: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

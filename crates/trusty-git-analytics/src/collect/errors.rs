@@ -71,6 +71,28 @@ pub enum CollectError {
         retrieved: u64,
     },
 
+    /// A paged JIRA walk did not terminate within its page budget.
+    ///
+    /// Why: every termination condition on a paged walk trusts the server to
+    /// honour `startAt` or to eventually return an empty page. One that
+    /// replays the same page forever satisfies neither, and these walks run
+    /// once per ticket across a window of up to 10,000 tickets. Surfacing a
+    /// runaway as an error keeps it a bounded, named failure instead of a
+    /// hang, and — unlike the fail-open shapes this module has repeatedly
+    /// produced — it can never be mistaken for a complete result.
+    #[error(
+        "JIRA {endpoint} paging for {key} did not terminate within {pages} pages; \
+         the server is not honouring `startAt`"
+    )]
+    PagingBudgetExceeded {
+        /// Short name of the endpoint being walked, e.g. `changelog`.
+        endpoint: &'static str,
+        /// JIRA issue key whose walk ran away, e.g. `PROJ-123`.
+        key: String,
+        /// Page budget that was exhausted.
+        pages: usize,
+    },
+
     /// The remote asked us to slow down (HTTP 429 / 503).
     ///
     /// Distinguished from [`CollectError::Http`] so retry logic can honour a

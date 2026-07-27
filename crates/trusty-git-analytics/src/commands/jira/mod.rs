@@ -38,7 +38,7 @@ use tga::collect::errors::CollectError;
 use tga::collect::jira::sync::{
     build_jql, plan_cursor, resolve_scope, validate_project_key, CursorPlan,
 };
-use tga::collect::jira::{ChangelogIssue, JiraClient};
+use tga::collect::jira::{ChangelogIssue, JiraClient, JiraTransition};
 use tga::core::config::Config;
 use tga::core::db::{
     check_freshness, get_cursor, list_cursor_projects, set_cursor, upsert_comment_detail,
@@ -51,10 +51,15 @@ use tga::core::db::{
 /// wants a smaller run.
 const DEFAULT_MAX_TICKETS: usize = 10_000;
 
-/// Consecutive retry-exhausted comment failures that abort the walk
+/// Consecutive retry-exhausted per-ticket failures that abort the walk
 /// (PR #4067 review round 2).
 ///
-/// Why a circuit breaker at all: `fetch_comments` runs once per ticket, so a
+/// Covers BOTH per-ticket network reads — the comment fetch and the truncated
+/// changelog repair (issue #4084) — because they fail for the same reasons and
+/// a parallel breaker for the second would just be a second thing to get
+/// wrong.
+///
+/// Why a circuit breaker at all: these run once per ticket, so a
 /// sustained rate-limit makes *every* ticket fail. Without a bound, a
 /// `DEFAULT_MAX_TICKETS` run would issue tens of thousands of requests and
 /// spend hours in backoff against a server that is explicitly asking us to
@@ -69,7 +74,7 @@ const DEFAULT_MAX_TICKETS: usize = 10_000;
 /// Why 10 rather than 1: an isolated permanently-broken ticket (deleted
 /// mid-run, permission-restricted) should not abort an otherwise healthy
 /// backfill. Ten in a row is not an isolated ticket.
-const MAX_CONSECUTIVE_COMMENT_FAILURES: usize = 10;
+const MAX_CONSECUTIVE_TICKET_FAILURES: usize = 10;
 
 /// Arguments for `tga jira sync`.
 #[derive(Args, Debug)]
@@ -225,9 +230,10 @@ fn build_client(config: &Config) -> anyhow::Result<JiraClient> {
 ///
 /// ## Partial failure is never silent, and never permanent
 ///
-/// A per-ticket comment fetch can still fail after its retry budget (see
-/// [`tga::collect::jira::retry`]). When it does, two things happen that did
-/// not happen before PR #4067's review round 1:
+/// A ticket's per-ticket network reads — the comment fetch, and the
+/// truncated-changelog repair added by issue #4084 — can still fail after
+/// their retry budget (see [`tga::collect::jira::retry`]). When one does, two
+/// things happen that did not happen before PR #4067's review round 1:
 ///
 /// 1. The ticket is recorded as failed, and the incremental cursor is
 ///    clamped so it never rises above the *earliest* failure — the ticket
@@ -239,13 +245,17 @@ fn build_client(config: &Config) -> anyhow::Result<JiraClient> {
 ///    exits non-zero and a cron schedule surfaces it. Previously it exited 0
 ///    with a `warn!` nobody reads.
 ///
-/// The ticket's transitions are still persisted, and every write is an
-/// upsert, so the re-read on the next run is idempotent.
+/// On a COMMENT failure the ticket's transitions are still persisted, and
+/// every write is an upsert, so the re-read on the next run is idempotent.
+/// On a CHANGELOG-REPAIR failure they are not: the only copy in hand is the
+/// one the server already told us is missing its oldest entries, and a
+/// knowingly-short history is indistinguishable from a complete one once it
+/// is a row. Partial progress is kept only where it is honest.
 ///
 /// # Errors
 ///
 /// Propagates JIRA HTTP/auth failures and database errors, and returns an
-/// error when any ticket's comments could not be ingested.
+/// error when any ticket could not be fully ingested.
 pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> anyhow::Result<()> {
     let project_key = resolve_project_key(&config, args.project.as_deref())?;
     let client = build_client(&config)?;
@@ -300,10 +310,50 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
             observed_updated.push(u);
         }
 
+        // Repair a truncated embedded changelog HERE rather than inside the
+        // search walk (issue #4084, PR #4155 review). Doing it in the walk
+        // meant one unreachable ticket aborted everything before a single row
+        // was written: no transitions, no comments, no cursor movement, for
+        // every ticket in the window, reproducing identically on the next run.
+        // Here it lands in the same failure isolation the comment fetch uses,
+        // so one bad ticket holds the cursor and the rest still land.
+        let repaired = match issue.truncated_history_total {
+            Some(expected) => match client.fetch_changelog(&issue.key, Some(expected)).await {
+                Ok(full) => Some(full),
+                Err(e) => {
+                    // Deliberately BEFORE `write_transitions`: the embedded
+                    // transitions are known to be missing their oldest
+                    // entries, and once written they read exactly like a
+                    // complete history. Partial progress is worth keeping
+                    // only when it is honest about what it is.
+                    warn!(
+                        ticket = %issue.key,
+                        error = %e,
+                        "could not repair this ticket's truncated changelog; skipping its \
+                         transitions rather than persisting a knowingly-short history, and \
+                         holding the sync cursor at or below it"
+                    );
+                    record_failure(
+                        issue,
+                        &mut failed_tickets,
+                        &mut failed_updated,
+                        &mut consecutive_failures,
+                    );
+                    if consecutive_failures >= MAX_CONSECUTIVE_TICKET_FAILURES {
+                        tripped = true;
+                        break;
+                    }
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let transitions = repaired.as_deref().unwrap_or(&issue.transitions);
+
         if !args.dry_run {
-            write_transitions(db, issue)?;
+            write_transitions(db, issue, transitions)?;
         }
-        transitions_written += issue.transitions.len();
+        transitions_written += transitions.len();
 
         // Comments are fetched even in dry-run: the flag suppresses writes,
         // not reads, and its whole purpose is to report the counts a real
@@ -335,22 +385,28 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
                     "failed to fetch comments for this ticket; holding the sync \
                      cursor at or below it so the next run re-fetches it"
                 );
-                failed_tickets.push(issue.key.clone());
-                failed_updated.push(issue.updated);
-                consecutive_failures += 1;
-                if consecutive_failures >= MAX_CONSECUTIVE_COMMENT_FAILURES {
+                record_failure(
+                    issue,
+                    &mut failed_tickets,
+                    &mut failed_updated,
+                    &mut consecutive_failures,
+                );
+                if consecutive_failures >= MAX_CONSECUTIVE_TICKET_FAILURES {
                     tripped = true;
-                    warn!(
-                        consecutive_failures,
-                        tickets_scanned,
-                        "aborting the walk: too many consecutive comment failures. \
-                         Continuing would issue thousands more requests against a \
-                         remote that is already failing every one of them"
-                    );
                     break;
                 }
             }
         }
+    }
+
+    if tripped {
+        warn!(
+            consecutive_failures,
+            tickets_scanned,
+            "aborting the walk: too many consecutive per-ticket failures. Continuing \
+             would issue thousands more requests against a remote that is already \
+             failing every one of them"
+        );
     }
 
     if !args.dry_run {
@@ -414,7 +470,7 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
 
     if !failed_tickets.is_empty() {
         anyhow::bail!(
-            "JIRA sync ({project_key}) could not ingest comments for {} of {} ticket(s): {}.{} \
+            "JIRA sync ({project_key}) could not fully ingest {} of {} ticket(s): {}.{} \
              The sync cursor was held at or below the earliest failure, so the next run \
              re-fetches them — but this run's data is incomplete and must not be treated \
              as a successful sync.",
@@ -423,7 +479,7 @@ pub async fn run_sync(config: Config, db: &mut Database, args: JiraSyncArgs) -> 
             summarize_keys(&failed_tickets),
             if tripped {
                 format!(
-                    " The walk was ABORTED after {MAX_CONSECUTIVE_COMMENT_FAILURES} consecutive \
+                    " The walk was ABORTED after {MAX_CONSECUTIVE_TICKET_FAILURES} consecutive \
                      failures rather than continuing through the remaining tickets — the remote \
                      is likely rate-limiting or down, so retry later rather than immediately."
                 )
@@ -449,13 +505,44 @@ fn summarize_keys(keys: &[String]) -> String {
     )
 }
 
-/// Persist every transition on one [`ChangelogIssue`] via a single
-/// transaction so a mid-loop failure cannot leave a ticket's transitions
-/// half-written.
-fn write_transitions(db: &mut Database, issue: &ChangelogIssue) -> anyhow::Result<()> {
+/// Record one ticket as failed: it joins the cursor clamp's input set and
+/// counts toward the circuit breaker.
+///
+/// Both per-ticket network reads — the truncated-changelog repair and the
+/// comment fetch — go through this single function rather than each keeping
+/// its own bookkeeping. That is the whole point: the changelog fallback's
+/// first cut had no isolation at all and aborted the run, and the fix for
+/// that is to REUSE this machinery, not to grow a second copy of it that can
+/// drift (PR #4155 review).
+///
+/// `updated` is pushed even when `None`; [`plan_cursor`] treats a failure it
+/// cannot place on the timeline as a reason to hold the cursor entirely,
+/// which is the safe reading.
+fn record_failure(
+    issue: &ChangelogIssue,
+    failed_tickets: &mut Vec<String>,
+    failed_updated: &mut Vec<Option<DateTime<Utc>>>,
+    consecutive_failures: &mut usize,
+) {
+    failed_tickets.push(issue.key.clone());
+    failed_updated.push(issue.updated);
+    *consecutive_failures += 1;
+}
+
+/// Persist `transitions` for one [`ChangelogIssue`] via a single transaction
+/// so a mid-loop failure cannot leave a ticket's transitions half-written.
+///
+/// The transitions are passed in rather than read off `issue` because a
+/// truncated embedded changelog is repaired by a separate walk in `run_sync`;
+/// `issue.transitions` may be the knowingly-short copy.
+fn write_transitions(
+    db: &mut Database,
+    issue: &ChangelogIssue,
+    transitions: &[JiraTransition],
+) -> anyhow::Result<()> {
     let conn = db.connection_mut();
     let tx = conn.transaction()?;
-    for t in &issue.transitions {
+    for t in transitions {
         let row = TicketTransitionRow {
             ticket_key: issue.key.clone(),
             project_key: issue.project_key.clone(),

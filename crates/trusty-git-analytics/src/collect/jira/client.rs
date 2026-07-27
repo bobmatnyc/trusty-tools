@@ -13,8 +13,7 @@ use crate::collect::errors::{CollectError, Result};
 use crate::collect::jira::http::{expand_credential, get_json, post_json, Credentials};
 use crate::collect::jira::jql_time::parse_timezone;
 use crate::collect::jira::model::{
-    embedded_changelog_is_truncated, ChangelogIssue, ChangelogSearchResponse, ChangelogWalk,
-    CommentSearchResponse, JiraComment,
+    ChangelogIssue, ChangelogSearchResponse, ChangelogWalk, CommentSearchResponse, JiraComment,
 };
 use crate::collect::jira::paging::{KeysetPager, PagedItem};
 use crate::collect::jira::retry::{with_retry, RetryBudget, RetryPolicy};
@@ -28,6 +27,15 @@ mod changelog;
 
 /// Page size for the `/issue/{key}/comment` pagination (issue #3966).
 const COMMENT_PAGE_SIZE: usize = 100;
+
+/// Hard cap on pages one comment walk may request.
+///
+/// See [`CollectError::PagingBudgetExceeded`]: the walk's termination
+/// conditions all trust the server to honour `startAt` or eventually return a
+/// short page, and this is the one request issued PER TICKET across a window
+/// of up to 10,000 tickets — an unbounded loop here is the most expensive one
+/// in the client. 200 pages is 20,000 comments on a single issue.
+const MAX_COMMENT_PAGES: usize = 200;
 
 /// HTTP `User-Agent` string sent on every request.
 const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
@@ -464,33 +472,27 @@ impl JiraClient {
     ///
     /// The search-embedded changelog is itself paged, so per issue this
     /// compares JIRA's `changelog.total` against the number of embedded
-    /// entries; when the embedded copy is short (its OLDEST entries having
-    /// been dropped), [`JiraClient::fetch_changelog`] walks the dedicated
-    /// `GET /issue/{key}/changelog` endpoint and REPLACES the truncated
-    /// transitions with the full history. The extra round trip is paid only
-    /// by the truncated minority — a complete embedded changelog costs
-    /// nothing beyond the search itself (issue #4084).
+    /// entries and records the verdict on
+    /// [`ChangelogIssue::truncated_history_total`] (issue #4084). It does NOT
+    /// repair the shortfall here: that costs a per-ticket network call, and a
+    /// failure inside this walk aborts the whole walk before the caller has
+    /// written anything. The repair therefore happens in `run_sync`'s
+    /// per-ticket loop, inside the failed-ticket / cursor-clamp / circuit
+    /// breaker machinery — see that field's doc for the full argument.
     ///
-    /// The fallback runs during conversion, i.e. before the keyset
-    /// deduplication above, so a truncated ticket re-read at a window
-    /// boundary pays for it twice. That is deliberate: the alternative
-    /// threads the truncation verdict through the dedup zip to save a round
-    /// trip on the rare intersection of "history longer than one changelog
-    /// page" and "sits exactly on a re-anchor boundary", which is not worth
-    /// the extra state.
+    /// Consequence worth stating: because the verdict is only recorded here,
+    /// a truncated ticket that keyset deduplication is about to discard as a
+    /// window-boundary re-read costs nothing and can no longer influence the
+    /// run at all.
     ///
-    /// Test: `search_with_changelog_falls_back_when_embedded_is_truncated`,
-    /// `search_with_changelog_skips_fallback_when_embedded_is_complete`,
-    /// `search_with_changelog_propagates_fallback_failure`.
+    /// Test: `search_with_changelog_flags_a_truncated_embedded_changelog`,
+    /// `search_with_changelog_does_not_flag_a_complete_embedded_changelog`,
+    /// `missing_changelog_total_does_not_flag_truncation`.
     ///
     /// # Errors
     ///
     /// - [`CollectError::Http`] on transport / non-success HTTP responses.
     /// - [`CollectError::Json`] on payload parse failures.
-    /// - [`CollectError::IncompleteChangelog`] when a truncated ticket's
-    ///   fallback walk cannot retrieve the full history. This aborts the
-    ///   search rather than returning a knowingly-short history: writing
-    ///   confidently-wrong backfill data is strictly worse than failing.
     pub async fn search_with_changelog(
         &self,
         scope: &SyncScope,
@@ -539,20 +541,14 @@ impl JiraClient {
                 })
                 .await?;
 
-            // Per-issue conversion, with the truncated-changelog fallback
-            // spliced in (issue #4084). This is a loop rather than a `map`
-            // because the fallback is an `await`; the truncation verdict is
-            // taken from the RAW payload, before `from_api` consumes it.
-            let mut issues: Vec<ChangelogIssue> = Vec::with_capacity(parsed.issues.len());
-            for api_issue in parsed.issues {
-                let truncated = embedded_changelog_is_truncated(&api_issue);
-                let key = api_issue.key.clone();
-                let mut issue = ChangelogIssue::from_api(api_issue);
-                if truncated {
-                    issue.transitions = self.fetch_changelog(&key).await?;
-                }
-                issues.push(issue);
-            }
+            // Conversion is pure — `from_api` records the truncation verdict
+            // (issue #4084) but issues no request, so nothing in this walk can
+            // fail on a single ticket's account.
+            let issues: Vec<ChangelogIssue> = parsed
+                .issues
+                .into_iter()
+                .map(ChangelogIssue::from_api)
+                .collect();
             let items: Vec<PagedItem> = issues.iter().map(|i| (i.key.clone(), i.updated)).collect();
             let step = pager.record_page(&items, page_size);
 
@@ -598,8 +594,8 @@ impl JiraClient {
     /// to get all of them.
     ///
     /// What: `GET /rest/api/3/issue/{key}/comment?startAt=&maxResults=`,
-    /// looping until a page comes back SHORT of [`COMMENT_PAGE_SIZE`] — the
-    /// server's `total` is deliberately not consulted, see
+    /// looping until a page comes back SHORT of the page size THE SERVER
+    /// APPLIED — the server's `total` is deliberately not consulted, see
     /// [`super::model::CommentSearchResponse`]. `body_len` is
     /// computed from the raw JSON `body` field:
     /// - plain string body (JIRA Server/DC, or classic-editor Cloud
@@ -617,17 +613,21 @@ impl JiraClient {
     /// holds the whole run's incremental cursor back.
     ///
     /// Test: `fetch_comments_pages_every_comment_when_total_is_absent`,
-    /// `fetch_comments_stops_after_an_empty_page_on_an_exact_multiple`.
+    /// `fetch_comments_stops_after_an_empty_page_on_an_exact_multiple`,
+    /// `fetch_comments_honours_the_page_size_the_server_applied`,
+    /// `fetch_comments_pages_to_empty_when_the_server_omits_max_results`.
     ///
     /// # Errors
     ///
     /// - [`CollectError::Http`] on transport / non-success HTTP responses,
     ///   after the retry budget is exhausted.
     /// - [`CollectError::Json`] on payload parse failures.
+    /// - [`CollectError::PagingBudgetExceeded`] when the walk does not
+    ///   terminate within [`MAX_COMMENT_PAGES`].
     pub async fn fetch_comments(&self, key: &str) -> Result<Vec<JiraComment>> {
         let mut out = Vec::new();
         let mut start_at = 0u64;
-        loop {
+        for _ in 0..MAX_COMMENT_PAGES {
             let url = format!(
                 "{}/rest/api/3/issue/{}/comment?startAt={}&maxResults={}",
                 self.base_url, key, start_at, COMMENT_PAGE_SIZE
@@ -639,6 +639,16 @@ impl JiraClient {
                 })
                 .await?;
             let n = parsed.comments.len();
+            // The page size actually in force. A server may apply a smaller
+            // `maxResults` than we asked for (tenant limits, Data Center's
+            // `jira.search.views.default.max`, an intermediary) and echoes
+            // the effective value back on every paged bean. It can never
+            // exceed what we requested, so clamp: a server echoing something
+            // larger must not make every page look short.
+            let page_size = parsed
+                .max_results
+                .map(|m| m.min(COMMENT_PAGE_SIZE))
+                .filter(|m| *m > 0);
             for c in parsed.comments {
                 if let Some(comment) = JiraComment::from_api(c) {
                     out.push(comment);
@@ -650,15 +660,32 @@ impl JiraClient {
             // ingesting a prefix of the ticket's comments — and since the
             // fetch still returned `Ok`, the failed-ticket cursor clamp did
             // not protect it: the cursor advanced and the loss was
-            // permanent (PR #4067 review round 3). A full page always costs
-            // one extra request to discover the end; that is the price of
-            // not trusting a field the server may not send.
-            if n < COMMENT_PAGE_SIZE {
-                break;
+            // permanent (PR #4067 review round 3).
+            //
+            // "Short" is measured against the page size the SERVER applied,
+            // not the one we requested. Comparing against the request
+            // reproduced that same bug from the other end: a server paging 50
+            // while we ask for 100 makes page 1 look short, and 50 of 150
+            // comments were ingested with an `Ok` return (PR #4155 review,
+            // reproduced). When the server states no page size at all the
+            // walk falls back to the only claim needing no server bookkeeping
+            // — an empty page. A full final page always costs one extra
+            // request to discover the end; that is the price of not trusting
+            // a field the server may not send.
+            let ended = match page_size {
+                Some(size) => n < size,
+                None => n == 0,
+            };
+            if ended {
+                return Ok(out);
             }
             start_at += n as u64;
         }
-        Ok(out)
+        Err(CollectError::PagingBudgetExceeded {
+            endpoint: "comment",
+            key: key.to_string(),
+            pages: MAX_COMMENT_PAGES,
+        })
     }
 }
 
