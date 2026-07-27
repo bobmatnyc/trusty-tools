@@ -1115,6 +1115,18 @@ pub struct JiraConfig {
     #[serde(default)]
     pub project_key: Option<String>,
 
+    /// IANA timezone in which this JIRA account evaluates JQL date literals
+    /// (e.g. `UTC`, `America/New_York`).
+    ///
+    /// Why this exists: JQL date literals carry no timezone and JIRA resolves
+    /// them in the querying account's profile timezone, so `tga jira sync`
+    /// must know it to place its `updated >=` window on the right instant.
+    /// Leave unset to discover it from `GET /rest/api/3/myself`; set it to
+    /// pin the value explicitly (required when the account is
+    /// unauthenticated, or when `/myself` is unreachable from the sync host).
+    #[serde(default)]
+    pub timezone: Option<String>,
+
     /// Maps JIRA project keys to canonical work types (subcategory names).
     ///
     /// Used by the Tier 1.6

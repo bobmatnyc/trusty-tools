@@ -36,6 +36,10 @@ path = "src/main.rs"
 trusty-common = { workspace = true, features = ["cli-help", "update-check", "config-cli"] }
 # Async runtime
 tokio = { workspace = true }
+# IANA timezone database: JQL date literals are evaluated in the JIRA
+# account's profile timezone, so the sync bound must be rendered in it
+# (issue #3966; see collect::jira::jql_time).
+chrono-tz = { workspace = true }
 # CLI
 clap = { workspace = true }
 # Serialization

@@ -7,8 +7,21 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::debug;
 
+use chrono_tz::Tz;
+
 use crate::collect::errors::{CollectError, Result};
+use crate::collect::jira::http::{expand_credential, get_json, post_json, Credentials};
+use crate::collect::jira::jql_time::parse_timezone;
+use crate::collect::jira::model::{
+    ChangelogIssue, ChangelogSearchResponse, ChangelogWalk, CommentSearchResponse, JiraComment,
+};
+use crate::collect::jira::paging::{KeysetPager, PagedItem};
+use crate::collect::jira::retry::{with_retry, RetryBudget, RetryPolicy};
+use crate::collect::jira::sync::{build_jql, SyncScope};
 use crate::core::config::JiraConfig;
+
+/// Page size for the `/issue/{key}/comment` pagination (issue #3966).
+const COMMENT_PAGE_SIZE: usize = 100;
 
 /// HTTP `User-Agent` string sent on every request.
 const USER_AGENT_VALUE: &str = "trusty-git-analytics/0.1";
@@ -21,13 +34,22 @@ pub struct JiraClient {
     client: reqwest::Client,
     base_url: String,
     /// `(username, token)` for HTTP Basic Auth.
-    credentials: Option<(String, String)>,
+    credentials: Option<Credentials>,
     /// Default project key for filtered queries.
     project_key: String,
     /// Cached story-point custom field key (e.g. `customfield_10016`).
     /// `None` = uncached; `Some(None)` = discovered to be absent;
     /// `Some(Some(_))` = discovered key.
     story_point_field: Mutex<Option<Option<String>>>,
+    /// Operator-pinned timezone from `jira.timezone`, bypassing discovery.
+    configured_timezone: Option<String>,
+    /// Cached timezone in which this account's JQL date literals are
+    /// evaluated. `None` = not yet discovered.
+    account_timezone: Mutex<Option<Tz>>,
+    /// Retry schedule applied to the paged read paths.
+    retry: RetryPolicy,
+    /// Whole-run backoff allowance shared by every request this client makes.
+    budget: RetryBudget,
 }
 
 /// Subset of fields extracted from a JIRA issue payload.
@@ -78,14 +100,26 @@ struct FieldDescriptor {
     name: String,
 }
 
+/// Subset of `GET /rest/api/3/myself` — the account's IANA timezone, which
+/// is the zone JIRA uses to evaluate this account's JQL date literals.
+#[derive(Debug, Deserialize)]
+struct MyselfResponse {
+    #[serde(rename = "timeZone", default)]
+    time_zone: Option<String>,
+}
+
 /// Wire shape of a JQL search response.
+///
+/// `startAt` is deliberately NOT modelled: the client tracks its own offset.
+/// Deriving the next offset from the server's echo is unsafe under
+/// `#[serde(default)]`, which silently yields `0` when the field is absent —
+/// pinning the loop on page 2 forever. The `/search/jql` successor endpoint
+/// omits `startAt` entirely, so this is a live hazard, not a hypothetical.
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     issues: Vec<ApiIssue>,
     #[serde(default)]
     total: u64,
-    #[serde(rename = "startAt", default)]
-    start_at: u64,
 }
 
 impl JiraClient {
@@ -112,18 +146,121 @@ impl JiraClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
+        // Expand `${ENV_VAR}` placeholders in username/token so YAML configs
+        // can reference credentials via environment indirection, matching
+        // the convention already used by the GitHub/Linear/AZDO clients
+        // (`collect::env_expand`). Previously this client took username/
+        // token as literal strings only, unlike its siblings — issue #3966
+        // aligned it during the JIRA-ingestion-ownership build-out.
         let credentials = match (&config.username, &config.token) {
-            (Some(u), Some(t)) => Some((u.clone(), t.clone())),
+            (Some(u), Some(t)) => Some((
+                expand_credential("jira.username", u)?,
+                expand_credential("jira.token", t)?,
+            )),
             _ => None,
         };
 
+        let retry = RetryPolicy::default();
         Ok(Self {
             client,
             base_url: base,
             credentials,
             project_key: config.project_key.clone().unwrap_or_default(),
             story_point_field: Mutex::new(None),
+            configured_timezone: config.timezone.clone(),
+            account_timezone: Mutex::new(None),
+            budget: RetryBudget::new(&retry),
+            retry,
         })
+    }
+
+    /// Override the retry schedule used by the paged read paths.
+    ///
+    /// Why this is a knob and not a constant: the default is tuned for an
+    /// unattended cron backfill (patient), which is the wrong trade-off for
+    /// an interactive caller that would rather fail fast — and for tests,
+    /// which must not spend real seconds asleep.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.budget = RetryBudget::new(&policy);
+        self.retry = policy;
+        self
+    }
+
+    /// The timezone in which this JIRA account evaluates JQL date literals.
+    ///
+    /// Why this is not simply UTC — and why getting it wrong loses tickets —
+    /// is argued in full in [`super::jql_time`]. Short version: JQL date
+    /// literals carry no zone and JIRA resolves them in the *querying
+    /// account's* profile timezone, so a UTC-rendered bound sent by an
+    /// `America/New_York` account opens five hours late and silently skips
+    /// every ticket in the gap.
+    ///
+    /// Resolution order, cached for the client's lifetime in the same shape
+    /// as [`Self::get_story_point_field`]:
+    ///
+    /// 1. `jira.timezone` from config, when the operator has pinned it.
+    /// 2. `GET /rest/api/3/myself` → `timeZone`.
+    ///
+    /// There is deliberately **no silent UTC fallback**. Defaulting to UTC is
+    /// exactly the unstated assumption that made this a defect; if neither
+    /// source answers, the run fails with an error telling the operator to
+    /// set `jira.timezone`. That is a one-line fix for them and a guaranteed
+    /// invariant for us.
+    ///
+    /// # Errors
+    ///
+    /// [`CollectError::Config`] when the zone cannot be determined or parsed;
+    /// transport errors from the `/myself` probe are wrapped with that same
+    /// remediation hint.
+    ///
+    /// Test: `account_timezone_prefers_configured_value`,
+    /// `account_timezone_discovers_from_myself`,
+    /// `account_timezone_errors_when_undiscoverable`.
+    pub async fn account_timezone(&self) -> Result<Tz> {
+        {
+            let guard = self
+                .account_timezone
+                .lock()
+                .map_err(|e| CollectError::Config(format!("timezone cache poisoned: {e}")))?;
+            if let Some(tz) = *guard {
+                return Ok(tz);
+            }
+        }
+
+        let tz = match &self.configured_timezone {
+            Some(name) => parse_timezone(name)?,
+            None => {
+                let url = format!("{}/rest/api/3/myself", self.base_url);
+                debug!(url = %url, "GET (account timezone)");
+                let me: MyselfResponse =
+                    with_retry("myself", &self.retry, &self.budget, || self.get(&url))
+                        .await
+                        .map_err(|e| {
+                            CollectError::Config(format!(
+                                "could not determine the JIRA account timezone from \
+                                 GET /rest/api/3/myself ({e}). JQL date literals are \
+                                 evaluated in the account's timezone, so tga refuses to \
+                                 guess — set `jira.timezone` in config.yaml (e.g. `UTC`)."
+                            ))
+                        })?;
+                let name = me.time_zone.ok_or_else(|| {
+                    CollectError::Config(
+                        "the JIRA account reports no `timeZone`; set `jira.timezone` in \
+                         config.yaml so JQL date bounds can be rendered correctly."
+                            .to_string(),
+                    )
+                })?;
+                parse_timezone(&name)?
+            }
+        };
+
+        let mut guard = self
+            .account_timezone
+            .lock()
+            .map_err(|e| CollectError::Config(format!("timezone cache poisoned: {e}")))?;
+        *guard = Some(tz);
+        Ok(tz)
     }
 
     /// Fetch a single issue by its key, returning `None` on 404.
@@ -214,7 +351,7 @@ impl JiraClient {
             if n < page_size {
                 break;
             }
-            start_at = parsed.start_at + n as u64;
+            start_at += n as u64;
             if start_at >= parsed.total {
                 break;
             }
@@ -288,85 +425,199 @@ impl JiraClient {
             story_points,
         }
     }
+
+    /// Search JIRA issues by JQL, paginating in `SEARCH_PAGE_SIZE` chunks,
+    /// with each issue's status-changelog embedded (issue #3966).
+    ///
+    /// Why: `fact_ticket_transitions` needs every status transition per
+    /// ticket. JIRA's `expand=changelog` on the search endpoint returns each
+    /// issue's changelog `histories` inline, avoiding an N+1 per-issue
+    /// `/changelog` call for the common case.
+    ///
+    /// What: `POST /rest/api/3/search` with
+    /// `{ jql, startAt, maxResults, fields: ["project", "updated"],
+    /// expand: ["changelog"] }`, looping until `max_results` issues are
+    /// collected or the server reports no more pages. Each returned
+    /// [`ChangelogIssue`] carries only the `status`-field changelog items;
+    /// all other changelog item kinds (e.g. `assignee`, `priority`) are
+    /// dropped since only status transitions are in scope for this fact
+    /// table.
+    ///
+    /// Pagination is **keyset**, not offset: the caller passes the sync
+    /// [`SyncScope`] rather than a pre-built JQL string so each page can
+    /// re-anchor the `updated >=` window onto the previous page's maximum.
+    /// Offset paging over `ORDER BY updated ASC` — paging on the same
+    /// mutable field it sorts by — lets a ticket edited mid-walk shift an
+    /// unread ticket across the read boundary, permanently. See
+    /// [`super::paging`] for the full argument and the residual
+    /// intra-minute case. Boundary re-reads are deduplicated by issue key,
+    /// so the returned vector holds each ticket at most once.
+    ///
+    /// Transient failures (429/5xx/timeouts) are retried with backoff; see
+    /// [`super::retry`].
+    ///
+    /// KNOWN LIMITATION: JIRA's search-embedded changelog is itself paged
+    /// (`changelog.total` vs `changelog.histories.len()`); a ticket with a
+    /// history longer than one changelog page will have its oldest
+    /// transitions truncated on this path. A full per-issue
+    /// `GET /issue/{key}/changelog` walk would close this gap but is
+    /// deferred — see issue #3966 tracking comment.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::Http`] on transport / non-success HTTP responses.
+    /// - [`CollectError::Json`] on payload parse failures.
+    pub async fn search_with_changelog(
+        &self,
+        scope: &SyncScope,
+        max_results: usize,
+    ) -> Result<ChangelogWalk> {
+        let url = format!("{}/rest/api/3/search", self.base_url);
+        let fields = vec!["project".to_string(), "updated".to_string()];
+        // Every JQL bound this walk emits — the initial scope and every
+        // re-anchor — must be rendered in the account's zone, or the window
+        // silently lands hours from the instant it encodes. See `jql_time`.
+        let tz = self.account_timezone().await?;
+
+        // Slack over the ideal page count absorbs the deduplicated re-reads
+        // that window re-anchoring deliberately causes.
+        let max_pages = max_results.div_ceil(SEARCH_PAGE_SIZE) * 2 + 8;
+        let mut pager = KeysetPager::new(scope.since, max_pages);
+        let mut out: Vec<ChangelogIssue> = Vec::new();
+        let mut truncated = false;
+
+        loop {
+            let remaining = max_results.saturating_sub(out.len());
+            if remaining == 0 {
+                truncated = true;
+                break;
+            }
+            let page_size = remaining.min(SEARCH_PAGE_SIZE);
+            let request = pager.request();
+            let jql = build_jql(
+                &SyncScope {
+                    project_key: scope.project_key.clone(),
+                    since: request.since,
+                },
+                tz,
+            );
+            let body = json!({
+                "jql": jql,
+                "startAt": request.start_at,
+                "maxResults": page_size,
+                "fields": fields,
+                "expand": ["changelog"],
+            });
+            debug!(url = %url, %jql, start_at = request.start_at, "POST (with changelog)");
+            let parsed: ChangelogSearchResponse =
+                with_retry("search_with_changelog", &self.retry, &self.budget, || {
+                    self.post(&url, &body)
+                })
+                .await?;
+
+            let issues: Vec<ChangelogIssue> = parsed
+                .issues
+                .into_iter()
+                .map(ChangelogIssue::from_api)
+                .collect();
+            let items: Vec<PagedItem> = issues.iter().map(|i| (i.key.clone(), i.updated)).collect();
+            let step = pager.record_page(&items, page_size);
+
+            for (issue, is_new) in issues.into_iter().zip(step.is_new) {
+                if !is_new {
+                    continue;
+                }
+                out.push(issue);
+                if out.len() >= max_results {
+                    break;
+                }
+            }
+            if !step.more {
+                break;
+            }
+        }
+        Ok(ChangelogWalk {
+            issues: out,
+            offset_paged_minute: pager.offset_paged_minute(),
+            truncated,
+        })
+    }
+
+    /// `POST` a JSON body, carrying this client's credentials. See
+    /// [`super::http::post_json`] — the retry wrapper re-invokes this on
+    /// every attempt because a `RequestBuilder` is single-use.
+    async fn post<T: serde::de::DeserializeOwned>(&self, url: &str, body: &Value) -> Result<T> {
+        post_json(&self.client, self.credentials.as_ref(), url, body).await
+    }
+
+    /// `GET` and decode, carrying this client's credentials. See
+    /// [`super::http::get_json`].
+    async fn get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
+        get_json(&self.client, self.credentials.as_ref(), url).await
+    }
+
+    /// Fetch every comment on a JIRA issue, paginating in
+    /// `COMMENT_PAGE_SIZE` chunks (issue #3966).
+    ///
+    /// Why: `fact_jira_comment_detail` needs the full comment history per
+    /// ticket, not just the first page JIRA embeds inline on `fields.comment`
+    /// during a search — the dedicated `/comment` endpoint is the only way
+    /// to get all of them.
+    ///
+    /// What: `GET /rest/api/3/issue/{key}/comment?startAt=&maxResults=`,
+    /// looping until the server reports no more pages. `body_len` is
+    /// computed from the raw JSON `body` field:
+    /// - plain string body (JIRA Server/DC, or classic-editor Cloud
+    ///   comments): UTF-8 byte length of the string.
+    /// - Atlassian Document Format object (JIRA Cloud v3 default): byte
+    ///   length of the body's JSON-serialized form. This over-counts
+    ///   relative to rendered plain text (ADF markup adds bytes), which is a
+    ///   known, documented approximation for this first slice — full ADF
+    ///   plain-text extraction would need a dedicated renderer.
+    ///
+    /// Transient failures (429/5xx/timeouts) are retried with backoff (see
+    /// [`super::retry`]). This matters more here than anywhere else in the
+    /// client: this is the one request issued *per ticket*, so it is the
+    /// request a rate limiter throttles first, and a failure here is what
+    /// holds the whole run's incremental cursor back.
+    ///
+    /// # Errors
+    ///
+    /// - [`CollectError::Http`] on transport / non-success HTTP responses,
+    ///   after the retry budget is exhausted.
+    /// - [`CollectError::Json`] on payload parse failures.
+    pub async fn fetch_comments(&self, key: &str) -> Result<Vec<JiraComment>> {
+        let mut out = Vec::new();
+        let mut start_at = 0u64;
+        loop {
+            let url = format!(
+                "{}/rest/api/3/issue/{}/comment?startAt={}&maxResults={}",
+                self.base_url, key, start_at, COMMENT_PAGE_SIZE
+            );
+            debug!(url = %url, "GET");
+            let parsed: CommentSearchResponse =
+                with_retry("fetch_comments", &self.retry, &self.budget, || {
+                    self.get(&url)
+                })
+                .await?;
+            let n = parsed.comments.len();
+            for c in parsed.comments {
+                if let Some(comment) = JiraComment::from_api(c) {
+                    out.push(comment);
+                }
+            }
+            if n == 0 {
+                break;
+            }
+            start_at += n as u64;
+            if start_at >= parsed.total {
+                break;
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Confirm a JQL search response shape parses end-to-end.
-    ///
-    /// Why: pagination logic depends on `total` and `startAt` fields; if
-    /// JIRA renames either, our loop terminates incorrectly.
-    /// What: parse a representative search payload with one issue.
-    /// Test: assert `total`, `startAt`, and inner issue fields all populate.
-    #[test]
-    fn jira_search_response_deserializes() {
-        let json = r#"{
-            "startAt": 0,
-            "total": 1,
-            "issues": [
-                {
-                    "key": "PROJ-1",
-                    "fields": {
-                        "summary": "Fix bug",
-                        "status": {"name": "Done"},
-                        "issuetype": {"name": "Bug"},
-                        "customfield_10016": 5.0
-                    }
-                }
-            ]
-        }"#;
-        let resp: SearchResponse = serde_json::from_str(json).expect("parses");
-        assert_eq!(resp.total, 1);
-        assert_eq!(resp.start_at, 0);
-        assert_eq!(resp.issues.len(), 1);
-        let issue = JiraClient::convert_issue(
-            resp.issues.into_iter().next().expect("one"),
-            Some("customfield_10016"),
-        );
-        assert_eq!(issue.key, "PROJ-1");
-        assert_eq!(issue.summary, "Fix bug");
-        assert_eq!(issue.status, "Done");
-        assert_eq!(issue.issue_type, "Bug");
-        assert_eq!(issue.story_points, Some(5.0));
-    }
-
-    /// Confirm field descriptor wire shape deserializes.
-    ///
-    /// Why: cache discovery hinges on this exact shape.
-    /// What: parse a representative `/rest/api/3/field` element.
-    /// Test: assert both fields extract.
-    #[test]
-    fn field_descriptor_deserializes() {
-        let json = r#"[
-            {"id": "customfield_10016", "name": "Story Points"},
-            {"id": "summary", "name": "Summary"}
-        ]"#;
-        let fields: Vec<FieldDescriptor> = serde_json::from_str(json).expect("parses");
-        assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0].id, "customfield_10016");
-        assert_eq!(fields[0].name, "Story Points");
-    }
-
-    /// Story points should be `None` when the custom field is absent.
-    ///
-    /// Why: not every JIRA instance has a configured story-point field;
-    /// missing fields must degrade gracefully.
-    /// What: convert an issue payload that omits the custom field.
-    /// Test: assert `story_points` is `None`.
-    #[test]
-    fn convert_issue_returns_none_when_field_missing() {
-        let json = r#"{
-            "key": "PROJ-2",
-            "fields": {
-                "summary": "x",
-                "status": {"name": "Open"},
-                "issuetype": {"name": "Task"}
-            }
-        }"#;
-        let api: ApiIssue = serde_json::from_str(json).expect("parses");
-        let issue = JiraClient::convert_issue(api, Some("customfield_10016"));
-        assert!(issue.story_points.is_none());
-    }
-}
+#[path = "client_tests.rs"]
+mod tests;

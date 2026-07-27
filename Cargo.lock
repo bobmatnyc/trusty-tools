@@ -10309,6 +10309,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "chrono-tz",
  "clap",
  "criterion",
  "csv",

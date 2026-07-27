@@ -48,6 +48,23 @@ pub enum CollectError {
     /// A configuration value required for this operation was missing.
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// The remote asked us to slow down (HTTP 429 / 503).
+    ///
+    /// Distinguished from [`CollectError::Http`] so retry logic can honour a
+    /// `Retry-After` hint that `reqwest`'s own error type cannot carry, and
+    /// so a caller can tell "the server is throttling us" apart from "the
+    /// request was wrong" (issue #3966).
+    #[error("throttled by remote (HTTP {status}){}", match retry_after {
+        Some(d) => format!("; Retry-After: {}s", d.as_secs()),
+        None => String::new(),
+    })]
+    Throttled {
+        /// HTTP status that triggered the classification.
+        status: u16,
+        /// Server-supplied `Retry-After`, when present and parseable.
+        retry_after: Option<std::time::Duration>,
+    },
 }
 
 /// Module-wide `Result` alias.
