@@ -42,7 +42,6 @@ crates/trusty-agents/src/api/server/projects.rs	list_projects_returns_empty_when
 crates/trusty-agents/src/api/server/projects.rs	load_tm_projects_from_disk_returns_empty_on_missing_file
 crates/trusty-agents/src/api/server/projects.rs	scan_agents_dir_parses_toml
 crates/trusty-agents/src/api/server/state.rs	app_state_persists_and_reloads_tasks
-crates/trusty-agents/src/bin/ompm.rs	parse_task_args_merges_routed
 crates/trusty-agents/src/cli/memories_cmd/mod.rs	memory_export_includes_segment_field
 crates/trusty-agents/src/cli/memories_cmd/ops.rs	memory_export_includes_segment_field
 crates/trusty-agents/src/cli/search_cmd/format.rs	format_memory_results_json
