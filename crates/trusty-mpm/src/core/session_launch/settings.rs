@@ -618,8 +618,17 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
 /// `projects.<workspace>` carries `hasTrustDialogAccepted: true`,
 /// `hasCompletedProjectOnboarding: true`, `projectOnboardingSeenCount >= 1`, and
 /// `enabledMcpjsonServers` set to exactly `trusted_mcp_names`, then writes it
-/// back pretty-printed preserving every other key. Idempotent. The OAuth
-/// fields elsewhere in the file are never touched.
+/// back pretty-printed (ATOMICALLY, temp file + rename) preserving every other
+/// key. Idempotent. The OAuth fields elsewhere in the file are never touched.
+///
+/// **Concurrency (issue #4072):** the whole read → mutate → write cycle runs
+/// under [`crate::core::claude_json_guard::lock`], because
+/// `core::home_trust_seed::preseed_home_trust` load-mutate-stores the SAME file
+/// and the daemon runs both concurrently, once per session it provisions.
+/// Unsynchronised, the slower writer stored a snapshot taken before the faster
+/// writer's store, silently deleting that session's whole
+/// `projects.<workspace>` entry — including the `enabledMcpjsonServers`
+/// approval this function exists to write.
 ///
 /// **Security (issue #3926):** this function does NOT read the workspace's
 /// own `.mcp.json` — `trusted_mcp_names` is the FINAL, already-computed
@@ -653,7 +662,9 @@ pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
 /// Test: `preseed_trust_marks_directory`, `preseed_trust_preserves_other_keys`,
 /// `preseed_trust_is_idempotent`, `preseed_trust_leaves_malformed_file`,
 /// `preseed_trust_enables_given_mcp_names`,
-/// `preseed_trust_enables_empty_when_no_names_given`, plus the full-pipeline
+/// `preseed_trust_enables_empty_when_no_names_given`,
+/// `concurrent_seeds_preserve_every_workspace_entry`,
+/// `concurrent_home_and_workspace_seeds_preserve_both_entries`, plus the full-pipeline
 /// regression coverage in `tests_mcp_trust_seed_e2e.rs`
 /// (`prepare_session_excludes_foreign_mcp_json_entry_from_trust_preseed`,
 /// `prepare_session_preseeds_enabled_mcp_servers`,
@@ -664,6 +675,16 @@ pub(super) fn preseed_workspace_trust(
     trusted_mcp_names: &BTreeSet<String>,
 ) -> Result<(), PrepError> {
     use serde_json::Value;
+
+    // Issue #4072: hold the process-wide `~/.claude.json` lock across the WHOLE
+    // read → mutate → write cycle below, not just the write. This function and
+    // `core::home_trust_seed::preseed_home_trust` both load-mutate-store the
+    // same file, and the daemon runs them concurrently (one pair per session it
+    // provisions); unsynchronised, the slower writer stores a snapshot taken
+    // before the faster writer's store and silently drops that session's whole
+    // `projects.<workspace>` entry — including the `enabledMcpjsonServers`
+    // approval this function exists to write. See `core::claude_json_guard`.
+    let _guard = crate::core::claude_json_guard::lock();
 
     // Read the existing config. If the file exists but is malformed JSON we must
     // NOT overwrite it — it likely holds the operator's OAuth credentials, and
@@ -747,12 +768,15 @@ pub(super) fn preseed_workspace_trust(
     // never blocks the spawned session (issue #1296).
     entry.insert("enabledMcpjsonServers".to_string(), enabled_mcp);
 
-    let serialized =
-        serde_json::to_string_pretty(&config).map_err(|err| PrepError::Deploy(err.to_string()))?;
-    std::fs::write(claude_json, serialized).map_err(|source| PrepError::Io {
-        path: claude_json.to_path_buf(),
-        source,
-    })?;
+    // Issue #4072: write through the shared ATOMIC helper (temp file + rename,
+    // the same one `home_trust_seed::preseed_home_trust` already uses) rather
+    // than a truncating `std::fs::write`. A truncating write is observable
+    // mid-flight: a concurrent reader — the sibling seeder, `tm doctor`, or
+    // Claude Code itself — could read the file while it was half-written and
+    // see malformed JSON, which every reader in this crate treats as "skip,
+    // leave it alone" (silently losing the seed) rather than as an error.
+    trusty_common::claude_config::write_json_atomic(claude_json, &config)
+        .map_err(|err| PrepError::Deploy(format!("write {}: {err}", claude_json.display())))?;
     Ok(())
 }
 

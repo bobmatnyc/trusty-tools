@@ -71,6 +71,13 @@ mod tests_launch_trust_3926;
 #[cfg(test)]
 #[path = "tests_manifest_toggle_trust_3934.rs"]
 mod tests_manifest_toggle_trust_3934;
+// Issue #4072 — concurrency coverage for the shared `~/.claude.json`
+// read-modify-write cycle both trust seeders perform. Its own file because
+// `settings.rs` (485/500 production SLOC) and `tests.rs` (1482/1500 test
+// SLOC) are both effectively at their caps; mirrors the split pattern above.
+#[cfg(test)]
+#[path = "tests_claude_json_concurrency_4072.rs"]
+mod tests_claude_json_concurrency_4072;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
