@@ -301,7 +301,7 @@ pub async fn status_line(port: u16) -> String {
 ///
 /// Why: When the REPL detects an existing service it forwards user
 /// messages over HTTP instead of running them in-process. Centralizing
-/// the submit+poll loop keeps it consistent with `src/bin/ompm.rs`.
+/// the submit+poll loop keeps every HTTP-forwarding call site consistent.
 /// What: POST `/api/task` with `{ "task": ... }`, then GET
 /// `/api/task/:id` every 2s until status leaves "running". Returns the
 /// terminal `narrative` string (or an error string when the server

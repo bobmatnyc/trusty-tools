@@ -419,7 +419,7 @@ fn resolve_extends_in_map(
 ///
 /// Why: Centralizes the discovery policy — project-level overrides beat
 /// user-level overrides beat bundled defaults — so every call site
-/// (`main.rs`, `ompm agents list`, tests) sees the same order.
+/// (`main.rs`, `tagent agents list`, tests) sees the same order.
 /// What: Returns, in order: `.trusty-agents/agents`, `.claude/agents`,
 /// `~/.trusty-agents/agents`, `~/.claude/agents`, `<config_dir>/agents`.
 /// Test: `agent_search_paths_order`.
