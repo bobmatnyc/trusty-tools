@@ -213,6 +213,29 @@ describe('AgentConfigSkills', () => {
     expect(target.textContent).toContain('503');
   });
 
+  // #4022/#4025: a function skill is a BUNDLE — a group header, not a
+  // capability. Counting it defeats the server's `granted_count` rationale:
+  // granting `ticketing` adds ten capabilities, and a pane that says "11 of N"
+  // over ten rendered cards contradicts the route it is displaying.
+  it('does not count a granted function skill as a capability', () => {
+    const bundle = skill({
+      id: 'ticketing',
+      name: 'Ticketing',
+      kind: 'function',
+      tools: [],
+      granted: true,
+      members: ['ticket-create'],
+      granted_members: ['ticket-create'],
+      granted_state: 'all',
+    });
+    const member = skill({ id: 'ticket-create', name: 'Create a Ticket', granted: true });
+    render(payload({ skills: [bundle, member], granted_count: 1 }));
+
+    expect(target.textContent).toContain('1 of 1 known skills granted');
+    expect(target.textContent).toContain('Create a Ticket');
+    expect(target.textContent).not.toContain('2 of 2');
+  });
+
   it('offers no write path in this phase (S-12) and points at the real edit surface', () => {
     render(payload());
     expect(Array.from(target.querySelectorAll('button'))).toHaveLength(0);

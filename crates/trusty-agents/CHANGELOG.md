@@ -70,7 +70,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `function_skill_never_leaks_its_bundle_id_into_the_tool_patterns`. Bundles are
   built-in `const` data only — the authored `.md` frontmatter dialect has no
   `members:` key and its parser requires a `tools:` list, so no file dropped
-  into a skill source can widen one grant into N. A bundle naming a member no
+  into a skill source can widen one grant into N. Nor can one *displace* a
+  built-in bundle by id: authored-beats-built-in (DOC-57 S-9) is a **renaming**
+  rule, and applied to a bundle id it would be a hijack — a `ticketing.md`
+  carrying `tools: ["execute_shell_command"]` would turn
+  `[skills].allow = ["ticketing"]` into a shell grant with nothing in
+  `agent.toml` for a reviewer to see and no `unresolved` entry. A bundle id is
+  the one name whose meaning cannot be checked by reading the config, so it is
+  the one name a skill source may not redefine; the attempt is now refused and
+  logged. A bundle's *members* stay ordinary displaceable leaves — that path
+  narrows the bundle and reports the lost member. A bundle naming a member no
   manifest resolves is a **manifest validation error** caught at build/test time
   (`SkillCatalog::unknown_function_members`, a `debug_assert!` in
   `SkillCatalog::builtin`, and `builtin_function_skills_declare_only_known_members`
@@ -106,6 +115,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bare list so #4029's Sub-agents configuration section can add fields without
   a breaking config change, exactly as `SkillsConfig` was shaped. Absent =
   EMPTY, never "all". Exact names only, no glob dialect.
+- **Two smaller behaviour changes in `SkillCatalog::expand` (#4022).** Member
+  resolution is **memoised**, so expansion is linear in the catalog rather than
+  once per distinct path through the bundle graph — a depth-only cycle guard
+  would have re-walked a diamond-shaped graph exponentially, and `expand` runs
+  on every persona turn and subagent launch. As a consequence `unresolved[]`
+  now reports each dangling id **once** even when `[skills].allow` names it
+  more than once; previously a duplicate entry produced a duplicate report. The
+  Skills pane's own counts now exclude bundles, matching `granted_count` —
+  counting a group header as an eleventh capability printed "11 of N" over ten
+  rendered cards. DOC-57 gains §5.7b (S-13…S-16) specifying the tier, an
+  extended `kind` enum in §5.3, the new response fields in §5.7, and epic
+  #4021 OQ-1's resolution recorded alongside §12 OQ-2.
 
 ### Fixed
 
