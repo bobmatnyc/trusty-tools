@@ -10,6 +10,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **The TUI renders assistant text as it streams (streaming epic #3696,
+  Slice 2).** `forward_session_event` now maps `Event::AgentMessageDelta` onto
+  `ReplEvent::AssistantOutput`, reusing the same chunk-append machinery
+  `Message`/`AgentMessage` already drive — `done: false` appends to the live
+  bubble, `done: true` finalizes it — so no new rendering path was needed in
+  `trusty-tui`. An agent turn finishing is explicitly NOT terminal for the SSE
+  pump: one agent completing does not end the session stream.
+
 - **`ticketing` is now a bundled, dispatchable roster agent (#4027; epic
   #4021 bridge track).** `crates/trusty-code/src/assets/agents/ticketing.md`
   is a byte-for-byte port of `crates/trusty-mpm/src/assets/agents/ticketing.md`

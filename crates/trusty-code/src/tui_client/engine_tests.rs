@@ -159,6 +159,127 @@ fn forward_unrelated_event_is_ignored() {
     assert!(rx.try_recv().is_err());
 }
 
+/// tcode streaming epic #3696 Slice 2: a non-final `AgentMessageDelta`
+/// (`done: false`) must forward as an `AssistantOutput` chunk with
+/// `done: false`, reusing the SAME append machinery `Message`/`AgentMessage`
+/// use (`trusty-tui reduce.rs`'s `streaming_idx`-keyed append) — no new
+/// rendering path.
+#[test]
+fn forward_agent_message_delta_not_done_appends() {
+    let (tx, mut rx) = unbounded_channel();
+    let terminal = forward_session_event(
+        envelope(Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "coder".into(),
+            agent_id: "agent-1".into(),
+            turn_id: "turn-1".into(),
+            delta: "Hello".into(),
+            done: false,
+        }),
+        &tx,
+    );
+    assert!(!terminal);
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::AssistantOutput {
+            chunk: "Hello".into(),
+            done: false,
+            is_error: false,
+        }
+    );
+}
+
+/// The final delta (`done: true`) for a turn must forward `done: true` (so
+/// `apply_assistant_output` finalizes the streaming bubble) — and, unlike
+/// `SessionDone`, is NOT terminal for the SSE pump itself: one agent's turn
+/// finishing doesn't mean the whole session stream is over.
+#[test]
+fn forward_agent_message_delta_done_finalizes() {
+    let (tx, mut rx) = unbounded_channel();
+    let terminal = forward_session_event(
+        envelope(Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "coder".into(),
+            agent_id: "agent-1".into(),
+            turn_id: "turn-1".into(),
+            delta: " world".into(),
+            done: true,
+        }),
+        &tx,
+    );
+    assert!(
+        !terminal,
+        "an agent turn finishing must not end the SSE pump"
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::AssistantOutput {
+            chunk: " world".into(),
+            done: true,
+            is_error: false,
+        }
+    );
+}
+
+/// Two agents streaming concurrently and sharing a `turn_id` (the Slice 0
+/// contract's defensive `(agent_id, turn_id)` grouping scenario,
+/// `events.rs:436-456`) must each forward as their OWN independent
+/// `AssistantOutput` message, in call order — `forward_session_event` never
+/// accumulates or merges chunks itself; it is a stateless 1:1 mapper.
+///
+/// NOTE (see PR description / module doc comment on the `AgentMessageDelta`
+/// arm): this proves `forward_session_event` doesn't merge them. It does
+/// NOT prove the two stay visually separate once downstream in
+/// `trusty-tui` — `ReplEvent::AssistantOutput` carries no `agent_id`/
+/// `turn_id`, and `ReplApp::streaming_idx` is a single unkeyed
+/// `Option<usize>`, so today the reducer WOULD interleave them into one
+/// chat bubble. That gap lives in `trusty-tui` (out of this crate's file
+/// scope) and is tracked as a follow-up, not fixed in this slice.
+#[test]
+fn forward_agent_message_delta_distinct_agent_ids_not_merged() {
+    let (tx, mut rx) = unbounded_channel();
+    forward_session_event(
+        envelope(Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "coder".into(),
+            agent_id: "agent-1".into(),
+            turn_id: "turn-shared".into(),
+            delta: "from-agent-1".into(),
+            done: false,
+        }),
+        &tx,
+    );
+    forward_session_event(
+        envelope(Event::AgentMessageDelta {
+            session_id: "s-1".into(),
+            agent: "reviewer".into(),
+            agent_id: "agent-2".into(),
+            turn_id: "turn-shared".into(),
+            delta: "from-agent-2".into(),
+            done: false,
+        }),
+        &tx,
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::AssistantOutput {
+            chunk: "from-agent-1".into(),
+            done: false,
+            is_error: false,
+        },
+        "agent-1's delta must forward as its own message, not merged with agent-2's"
+    );
+    assert_eq!(
+        rx.try_recv().expect("event"),
+        ReplEvent::AssistantOutput {
+            chunk: "from-agent-2".into(),
+            done: false,
+            is_error: false,
+        },
+        "agent-2's delta must forward as its own message, not merged with agent-1's"
+    );
+}
+
 #[test]
 fn workstream_subcommand_parses_list_and_activate() {
     assert_eq!(workstream_subcommand("/workstream list"), Some("list"));
