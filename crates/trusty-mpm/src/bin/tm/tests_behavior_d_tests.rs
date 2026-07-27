@@ -521,9 +521,14 @@ fn cli_parses_session_prune_worktrees() {
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "prune-worktrees"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::PruneWorktrees { force },
+            action:
+                SessionAction::PruneWorktrees {
+                    force,
+                    discard_dirty,
+                },
         } => {
             assert!(!force, "default must be dry-run (force=false)");
+            assert!(!discard_dirty, "default must never discard dirty work");
         }
         other => panic!("expected session prune-worktrees, got {other:?}"),
     }
@@ -532,9 +537,49 @@ fn cli_parses_session_prune_worktrees() {
         Cli::try_parse_from(["trusty-mpm", "session", "prune-worktrees", "--force"]).unwrap();
     match cli2.command.unwrap() {
         Command::Session {
-            action: SessionAction::PruneWorktrees { force },
+            action:
+                SessionAction::PruneWorktrees {
+                    force,
+                    discard_dirty,
+                },
         } => {
             assert!(force, "--force must set force=true");
+            assert!(
+                !discard_dirty,
+                "#4091: --force alone must NOT imply discarding uncommitted work"
+            );
+        }
+        other => panic!("expected session prune-worktrees, got {other:?}"),
+    }
+}
+
+/// #4091: discarding uncommitted work requires its own explicit flag — it is
+/// never implied by `--force`, and never on by default.
+///
+/// Why: `--force` already means "stop previewing, actually delete", and an
+/// operator reaching for it to clear stale directories must not silently also
+/// authorise destroying another session's unsaved work. Two separate flags
+/// keep those two decisions separate.
+#[test]
+fn cli_prune_worktrees_discard_dirty_is_opt_in() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "prune-worktrees",
+        "--force",
+        "--discard-dirty",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::PruneWorktrees {
+                    force,
+                    discard_dirty,
+                },
+        } => {
+            assert!(force);
+            assert!(discard_dirty, "--discard-dirty must set discard_dirty=true");
         }
         other => panic!("expected session prune-worktrees, got {other:?}"),
     }

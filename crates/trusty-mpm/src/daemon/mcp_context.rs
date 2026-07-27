@@ -133,6 +133,15 @@ pub async fn session_context_catchup(
 /// just called directly instead of over HTTP. A worktree-prune failure is
 /// logged and reported as an empty list rather than failing the whole pause
 /// (the snapshot write is the operation that must not silently fail).
+///
+/// #4091: the prune leg always passes
+/// [`crate::session_manager::DirtyWorktreePolicy::Skip`] — a worktree holding
+/// uncommitted or unpushed work is never removed by a pause, and every such
+/// skip is returned in the `skipped_dirty_worktrees` field (path + reason +
+/// file/commit counts) so the `/tm-session-pause` skill can surface it to the
+/// operator instead of it being a log line nobody reads. There is
+/// deliberately no argument through which the MCP tool could request the
+/// force-discard policy.
 /// Test: `session_context_pause_missing_project_dir_errors`,
 /// `session_context_pause_requires_summary`,
 /// `session_context_pause_writes_snapshot_without_pruning`.
@@ -169,6 +178,7 @@ pub async fn session_context_pause(
     let outcome = trusty_common::catchup::pause::write_pause_snapshot(&project_path, &input)
         .map_err(|e| format!("failed to write pause snapshot: {e}"))?;
 
+    let mut skipped_dirty = Vec::new();
     let pruned_worktrees: Vec<String> = if prune_worktrees {
         let mgr = state.session_manager().await;
         let records = mgr.list().await;
@@ -178,15 +188,27 @@ pub async fn session_context_pause(
             .collect();
         let tt_config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
         let repos_root = crate::core::trusty_tools_config::workspace_root(&tt_config);
+        // #4091: the pause path ALWAYS uses the default skip-dirty policy —
+        // there is deliberately no argument threaded from the MCP tool that
+        // could turn this into a force-discard, so an ordinary
+        // `/tm-session-pause` can never destroy uncommitted work.
         match mgr
-            .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, false)
+            .prune_orphaned_worktrees(
+                &repos_root,
+                &active_workspace_paths,
+                false,
+                crate::session_manager::DirtyWorktreePolicy::Skip,
+            )
             .await
         {
-            Ok(outcome) => outcome
-                .removed
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect(),
+            Ok(sweep) => {
+                skipped_dirty = sweep.skipped_dirty;
+                sweep
+                    .removed
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            }
             Err(e) => {
                 tracing::warn!("session_context_pause: worktree prune failed: {e}");
                 Vec::new()
@@ -200,6 +222,7 @@ pub async fn session_context_pause(
         "snapshot_path": outcome.snapshot_path.display().to_string(),
         "timestamp": outcome.timestamp.to_rfc3339(),
         "pruned_worktrees": pruned_worktrees,
+        "skipped_dirty_worktrees": skipped_dirty,
     }))
 }
 

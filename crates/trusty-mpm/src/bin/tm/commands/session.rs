@@ -391,9 +391,15 @@ pub(crate) async fn session(
             crate::commands::managed::session_prune(client, url, state, dry_run, include_active)
                 .await?
         }
-        SessionAction::PruneWorktrees { force } => {
+        SessionAction::PruneWorktrees {
+            force,
+            discard_dirty,
+        } => {
             // `--force` means "actually delete"; absence means dry-run (#1840).
-            crate::commands::managed::session_prune_worktrees(client, url, !force).await?
+            // `--discard-dirty` is a SEPARATE opt-in that additionally permits
+            // destroying uncommitted/unpushed work (#4091).
+            crate::commands::managed::session_prune_worktrees(client, url, !force, discard_dirty)
+                .await?
         }
         // #2444: re-sync a live session's (or every syncable session's)
         // deployed assets against the current catalog. Fleet-wide store
