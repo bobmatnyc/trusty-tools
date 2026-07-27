@@ -73,6 +73,13 @@ use doctor_tcc::check_tcc_taint;
 mod doctor_scaffold_tracking;
 use doctor_scaffold_tracking::check_scaffold_tracking;
 
+// Split out to keep this file under the 500-SLOC production cap (issue #2867 —
+// the cross-branch push-guard coverage probe, which is what makes an
+// unprotected already-provisioned base clone discoverable at all).
+#[path = "doctor_push_guard.rs"]
+mod doctor_push_guard;
+use doctor_push_guard::check_push_guard;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -127,8 +134,13 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// regenerated locally by tm, the precondition for a `git merge --ff-only`
 /// "would be overwritten" collision; reports the exact true-intersection
 /// paths plus a copy-pasteable `git rm -r --cached` remediation, never runs
-/// it itself) — folding the resulting twenty-one [`DoctorCheck`]s into a
-/// [`DoctorReport`] whose `overall` status is the worst of them.
+/// it itself), and the `push_guard` probe (issue #2867 — warns when
+/// `project_dir`'s clone has no trusty-mpm cross-branch `pre-push` guard, or
+/// carries an older revision of it, naming the `tm repair push-guard`
+/// retrofit; this is the only way a base clone provisioned BEFORE the guard
+/// shipped is discoverable as unprotected) — folding the resulting twenty-two
+/// [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status is the
+/// worst of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
 /// permanent probe here — it is a one-time migration
@@ -150,7 +162,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// silently missing the exact provisioning gap this issue is about. With no
 /// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
 /// [`FrameworkPaths::default`] still probes the home tier.
-/// Test: `run_doctor_produces_twenty_one_checks`,
+/// Test: `run_doctor_produces_twenty_two_checks`,
 /// `agents_check_scopes_to_managed_workspace_when_project_given`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -204,6 +216,10 @@ pub async fn run_doctor(
     // `git merge --ff-only` "would be overwritten" collision. Warn-only;
     // never auto-modifies the git index.
     checks.push(check_scaffold_tracking(project_dir));
+    // Issue #2867: the push guard installs on the CLONE path only, so a base
+    // clone that predates it is silently unprotected. Warn-only, naming the
+    // `tm repair push-guard` retrofit; doctor never writes into a repository.
+    checks.push(check_push_guard(project_dir));
 
     DoctorReport::from_checks(checks)
 }

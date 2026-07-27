@@ -1,0 +1,144 @@
+#!/bin/sh
+# trusty-mpm-push-guard: v3 (#2867)
+#
+# Why: issue #2867 — an agent worktree whose local branch was configured with
+#   `branch.<local>.merge = refs/heads/<someone-else's-PR-branch>` ran a bare
+#   `git push` and clobbered the reviewed lineage of a PR branch it did not
+#   own. Tracking config is not the only way to arm that gun (an explicit
+#   `git push origin HEAD:other-branch` does it too), and the offending push
+#   may come from a process trusty-mpm never created. A pre-push hook is the
+#   only guard that fires regardless of WHO runs the push.
+# What: refuses a push that would OVERWRITE AN EXISTING remote branch with the
+#   history of a branch of a DIFFERENT name. One rule, applied identically
+#   whether HEAD is attached or detached:
+#
+#     updating an existing branch requires source name == destination name
+#
+#   where the source name is the pushed `refs/heads/<name>`, or — when the
+#   source is anonymous (`HEAD`, a raw sha) — the checked-out branch name.
+#   An anonymous source from a DETACHED HEAD has no name, so it can only
+#   CREATE, never update.
+#   Three shapes are deliberately OUT OF SCOPE and pass through untouched:
+#     * non-branch destinations (tags, notes, refs/pull) — cannot clobber a
+#       PR's branch lineage;
+#     * CREATING a branch that does not exist on the remote yet — git reports
+#       an all-zero <remote sha> for these. There is no lineage there to
+#       destroy, so a create can never be the #2867 damage, and `git push
+#       origin <sha>:refs/heads/<new-name>` is the standard way to rescue work
+#       out of a detached worktree;
+#     * branch DELETES (`git push origin --delete X`, `git push origin :X`).
+#       NOT because they cannot happen by accident — they can, see the
+#       warning below — but because a deleted GitHub branch is RECOVERABLE
+#       (the PR retains its commits at `refs/pull/<N>/head`, and the branch
+#       can be re-pushed from any clone) whereas a force-clobbered lineage is
+#       not. Post-merge remote cleanup is routine, and the right layer to
+#       police deletion is branch protection on the server, not a hook the
+#       pusher can remove.
+#   Set TM_ALLOW_CROSS_BRANCH_PUSH=1 to perform a deliberate cross-branch push.
+#
+# WARNING — do NOT reason from "git refuses a bare push while detached". That
+#   `fatal: You are not currently on a branch` comes from `push.default`
+#   resolution ONLY, and git never consults `push.default` when a configured
+#   `remote.<name>.push` refspec supplies the destination. Proven against this
+#   very hook: `git config remote.origin.push '+HEAD:refs/heads/victim'`, then
+#   a BARE `git push` from a detached HEAD, clobbered `victim` with no refspec
+#   typed by anyone. The same mechanism makes a bare `git push` perform a
+#   DELETE (`remote.origin.push = ':refs/heads/victim'`). This is exactly why
+#   the exemption above is keyed on CREATE-vs-UPDATE, which git states in the
+#   <remote sha> field, and never on HEAD state or on how the push was spelled.
+# Test: crates/trusty-mpm/tests/push_guard_hook.rs (real temp repos and a real
+#   bare remote: refuses the cross-branch push attached AND detached, refuses
+#   the `remote.<name>.push` detached-bare-push exploit above, permits the
+#   same-name push and the create in both states, permits deletes and tags,
+#   permits with the override).
+#
+# Note: git aborts the ENTIRE push when a pre-push hook exits non-zero, so a
+# multi-refspec push containing one refused ref sends none of them. That is
+# git's hook contract, not a choice this script makes.
+#
+# stdin lines are: <local ref> <local sha> <remote ref> <remote sha>
+# argv is: $1 = remote name, $2 = remote URL.
+
+if [ "${TM_ALLOW_CROSS_BRANCH_PUSH:-}" = "1" ]; then
+	exit 0
+fi
+
+# Empty when HEAD is detached.
+head_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || head_branch=""
+
+refused=0
+refused_branch=""
+rescue_sha=""
+# `|| [ -n "$local_ref" ]` keeps a final line with no trailing newline from
+# being silently dropped: POSIX `read` returns non-zero at EOF even when it
+# read a partial line, and dropping it here would fail OPEN.
+while read -r local_ref local_sha remote_ref remote_sha || [ -n "$local_ref" ]; do
+	# Only branch destinations can clobber a PR lineage.
+	case "${remote_ref:-}" in
+	refs/heads/*) ;;
+	*) continue ;;
+	esac
+	dest_branch=${remote_ref#refs/heads/}
+
+	src_branch=""
+	case "${local_ref:-}" in
+	refs/heads/*)
+		# A named local branch: compare its name to the destination.
+		src_branch=${local_ref#refs/heads/}
+		;;
+	'(delete)' | '')
+		# Out of scope — see the header.
+		continue
+		;;
+	*)
+		# Anonymous source (`HEAD`, a raw sha). Attached, it IS the
+		# checked-out branch; detached, it has no name at all — which
+		# is why the create check below, NOT the HEAD state, decides.
+		src_branch=$head_branch
+		;;
+	esac
+
+	# A CREATE cannot destroy a lineage that does not exist yet. Git marks
+	# one with an all-zero <remote sha>. Checked BEFORE the name comparison
+	# so it applies identically to a named and an anonymous source, and to
+	# an attached and a detached HEAD — no asymmetry to reason about.
+	case "${remote_sha:-}" in
+	'' | *[!0]*) ;;  # absent or non-zero: the destination branch exists
+	*) continue ;;   # all zeros: a create
+	esac
+
+	if [ -n "$src_branch" ] && [ "$src_branch" = "$dest_branch" ]; then
+		continue
+	fi
+
+	refused=1
+	if [ -n "$src_branch" ]; then
+		refused_branch=$src_branch
+	else
+		rescue_sha=$(printf '%.8s' "$local_sha")
+	fi
+	echo "pre-push: REFUSED cross-branch push (trusty-mpm push guard, #2867)" >&2
+	echo "  checked-out branch : ${head_branch:-<detached HEAD>}" >&2
+	echo "  pushing            : $local_ref" >&2
+	echo "  which is branch    : ${src_branch:-<none — detached HEAD>}" >&2
+	echo "  onto EXISTING      : $remote_ref" >&2
+done
+
+if [ "$refused" -ne 0 ]; then
+	echo "" >&2
+	echo "Overwriting an EXISTING branch from a branch of a different name is" >&2
+	echo "how PR #2863's reviewed lineage was clobbered (#2867)." >&2
+	if [ -n "$refused_branch" ]; then
+		echo "Push onto the matching branch instead:" >&2
+		echo "  git push origin refs/heads/$refused_branch:refs/heads/$refused_branch" >&2
+	else
+		echo "HEAD is detached, so there is no branch name to match. Creating a" >&2
+		echo "NEW branch is always allowed — rescue the work onto one:" >&2
+		echo "  git push origin HEAD:refs/heads/rescue-$rescue_sha" >&2
+	fi
+	echo "If this cross-branch push is deliberate, re-run it with:" >&2
+	echo "  TM_ALLOW_CROSS_BRANCH_PUSH=1 git push ..." >&2
+	exit 1
+fi
+
+exit 0

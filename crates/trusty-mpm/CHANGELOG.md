@@ -9,6 +9,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Cross-branch `git push` guard for every worktree of a managed base clone**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): a bundled
+  `pre-push` hook now refuses any push that would OVERWRITE AN EXISTING remote
+  branch with the history of a branch of a DIFFERENT name — the shape that
+  clobbered PR #2863's reviewed lineage. One rule, applied identically whether
+  `HEAD` is attached or detached: updating an existing branch requires the
+  source branch name to equal the destination branch name. It is installed into
+  `$GIT_COMMON_DIR/hooks` at base-clone time, which every worktree of that base
+  shares, so it also covers ad-hoc `git worktree add` worktrees an agent
+  creates for itself (the actual incident path, which no other trusty-mpm code
+  path ever sees). Three shapes are deliberately out of scope and pass through:
+  non-branch destinations (tags, notes); **creating** a branch that does not
+  exist on the remote yet (git reports an all-zero `<remote sha>`; there is no
+  lineage to destroy, and `git push origin <sha>:refs/heads/<new-name>` is the
+  standard way to rescue work out of a detached worktree); and remote-branch
+  deletes — not because they cannot happen by accident, but because a deleted
+  GitHub branch is recoverable (the PR retains its commits at
+  `refs/pull/<N>/head`) whereas a force-clobbered lineage is not, post-merge
+  cleanup is routine, and server-side branch protection is the right layer to
+  police deletion. Note that a configured `remote.<name>.push` refspec makes a
+  **bare** `git push` land on an arbitrary branch — even from a detached
+  `HEAD`, where `push.default` is never consulted — which is why the exemption
+  is keyed on create-vs-update rather than on `HEAD` state or on how the push
+  was spelled.
+  Installation refuses rather than overwrites whenever the existing `pre-push`
+  is not provably ours — a foreign hook, a symlink, a `core.hooksPath`
+  redirect, or a file that cannot be read at all (invalid UTF-8, a permissions
+  error) — so it never fights husky/lefthook, and a hook that cannot be
+  inspected is never destroyed. The write is atomic (temp file + `rename`)
+  because that one file is executed by every worktree of the clone. Set
+  `TM_ALLOW_CROSS_BRANCH_PUSH=1` for a deliberate cross-branch push.
+
+- **`tm repair push-guard` retrofits that guard onto an already-provisioned
+  clone, and `tm doctor` reports when one is missing**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): the guard
+  installs automatically only on the CLONE path, so every base clone that
+  existed before it shipped — exactly the old, many-worktree clones the
+  incident happened in — was silently unprotected with no supported way to fix
+  that. `tm doctor` now carries a `push_guard` check that warns when the
+  current project's clone has no guard (or an older revision) and names the
+  retrofit command; `tm repair push-guard` performs it. The retrofit is
+  idempotent, writes into the clone's shared hooks directory so ONE invocation
+  from ANY worktree covers them all with no git config write, honours the same
+  never-overwrite-a-foreign-hook refusal, and offers `--dry-run` to report
+  without touching a file that live sessions are executing.
+
 - **Agent delegations are now tracked automatically, with a real lifecycle**
   ([#2864](https://github.com/bobmatnyc/trusty-tools/issues/2864), slices
   S1+S2): the daemon observes every native subagent dispatch from the
@@ -25,6 +71,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   relayed only for a subagent-dispatch tool and only as a fixed five-key
   projection, so an ordinary tool's output is never forwarded. All fields are
   additive.
+
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
   (worktree-hygiene follow-up to
@@ -238,6 +285,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   env-resolved managed session id exists, and if the session still hasn't
   settled it prints an honest "still settling" message instead of the
   misleading non-git hint.
+
+- **A session worktree's branch is no longer left tracking the default branch
+  unless a bare `git push` is provably confined to its own branch**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)):
+  `configure_session_branch_tracking` used to set
+  `branch.<session>.merge = refs/heads/<default>` FIRST and pin
+  `push.default = current` afterwards, both best-effort — so any failure of the
+  pin (old git, unwritable base config, sandboxed `git config`) left the
+  worktree armed with a foreign upstream. The pin is now established first and
+  read back from the effective config stack; when it cannot be confirmed the
+  worktree is left with no upstream at all (`git pull origin <default>` still
+  works) rather than an upstream it does not own.
 
 - **Concurrent workspace-trust seeds no longer clobber each other's
   `~/.claude.json` entries** (closes

@@ -30,7 +30,7 @@ use std::fmt::Write as _;
 /// `doctor_checks_match_run_doctor_names`, which fails the test suite the
 /// moment `run_doctor`'s actual check set diverges from this list.
 /// Test: `doctor_checks_match_run_doctor_names`.
-pub(crate) const DOCTOR_CHECKS: [(&str, &str); 21] = [
+pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
     (
         "instructions",
         "Framework instructions deployed and non-empty for the target project.",
@@ -114,6 +114,10 @@ pub(crate) const DOCTOR_CHECKS: [(&str, &str); 21] = [
     (
         "scaffold_tracking",
         "Warns when a harness-scaffolding path (`.claude/agents/`, `.claude/skills/`, `.claude/output-styles/`) is BOTH tracked in git AND regenerated locally by tm — the precondition for a `git merge --ff-only` \"would be overwritten\" collision; reports the exact true-intersection paths, never auto-modifies the index (issue #3427).",
+    ),
+    (
+        "push_guard",
+        "Warns when the project's clone carries no trusty-mpm cross-branch `pre-push` guard, or an older revision of it — the guard installs itself only on the clone path, so a base provisioned before it shipped is silently unprotected and a worktree tracking a foreign branch can force-push over that branch's reviewed lineage. Names the `tm repair push-guard` retrofit; doctor never writes into a repository (issue #2867).",
     ),
 ];
 
