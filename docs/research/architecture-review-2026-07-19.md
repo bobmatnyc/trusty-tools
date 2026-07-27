@@ -109,10 +109,14 @@ regression.
    `axum-server` feature), console migrates to consume it, then applied
    router-wide to search, memory, analyze. Memory is the worst current
    exposure (unguarded palace/drawer DELETE, full JSON-RPC, daemon shutdown —
-   all CORS-permissive). (S–M)
+   all CORS-permissive). (S–M) — **RESOLVED via #3341**: trusty-console (#3280),
+   trusty-agents (#3329), trusty-search/memory/analyze live on main with
+   `with_guarded_middleware` router-wide.
 8. **trusty-agents: default bind loopback + require token for non-loopback.**
    Qualitatively the worst single gap: unauthenticated LAN-reachable
-   subprocess-spawning service by default. (M) *(queued behind #7)*
+   subprocess-spawning service by default. (M) — **RESOLVED via #3329** (#3341):
+   default bind 127.0.0.1; non-loopback bind requires `--api-token`; router-wide
+   origin guard applied.
 9. **`docs/reference/threat-model.md`** reconciling ADR-0011's "console is the
    only HTTP surface" with reality (five daemons bind their own listeners). (M)
    *(queued)*
@@ -530,7 +534,7 @@ That divergence is itself a process-hygiene finding (see Appendix B).
 | trusty-memory | 127.0.0.1:7070; `--http` any addr | none | same permissive helper | **None** | **Gap (worst)** — unguarded `/admin/stop`, palace/drawer DELETE, KG writes, `/dream/run`, `POST /rpc` (full tool surface) |
 | trusty-analyze | 127.0.0.1 hardcoded | none (outbound key ≠ inbound auth) | same | **None** | **Gap** — `/review`, `/analyze/deep`, `/webhooks/github`, `/facts` CRUD |
 | trusty-review | 127.0.0.1:7891 | webhook HMAC only | **no CorsLayer** | none, but no CORS grant limits browser reach | Lower-risk |
-| trusty-agents (tagent) | **0.0.0.0 literal default** | **optional** bearer, off by default | allow_origin(Any) | none | **Gap, worse class** — unauth LAN-reachable `/api/task` (arbitrary subprocess spawn), session create/attach/terminate, `/rpc` |
+| trusty-agents (tagent) | **127.0.0.1 default** (was 0.0.0.0) | bearer required for non-loopback | guarded | **Yes** (router-wide post-#3329) | Protected — **RESOLVED via #3329** (#3341): loopback-only default; non-loopback bind requires `--api-token`; origin guard applied router-wide |
 | trusty-mpm daemon | 127.0.0.1; optional --tailscale listener | none generic; /pair/* flow | no CorsLayer | **single-handler only** (`coordinator_chat`); /rpc has loopback ConnectInfo check | Partial gap — session pause/stop/decommission, `claude-config/apply`, `/pair/confirm` unguarded under --tailscale |
 | trusty-mpm-gui (Tauri) | n/a (IPC→daemon) | n/a | n/a | `"csp": null`, no capabilities file | Minor gap |
 | trusty-agents/ui (Tauri) | n/a (→0.0.0.0 tagent API) | n/a | n/a | `"csp": null` but explicit minimal capabilities/default.json | Minor gap (better) |
