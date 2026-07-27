@@ -76,7 +76,7 @@ where
     }
 
     // 2. Cold check: if not in cold store either, it's a genuine 404.
-    let entry = match cold_store.entries.get(id).map(|r| r.clone()) {
+    let entry = match cold_store.get_persisted(id) {
         Some(e) => e,
         None => return Err(LazyLoadError::NotFound),
     };

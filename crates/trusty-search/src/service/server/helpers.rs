@@ -220,8 +220,9 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
         .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
-/// Find a registered index whose canonical `root_path` collides with
-/// `candidate`, excluding `exclude_id` (issue #2336).
+/// Find a registered index (live OR cold/unloaded) whose canonical
+/// `root_path` collides with `candidate`, excluding `exclude_id` (issue
+/// #2336, widened for #3993 — see below).
 ///
 /// Why: `create_index_handler` and `relocate_index_handler` previously
 /// guarded only *id* collisions, never *root_path* collisions. Two live
@@ -233,6 +234,33 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
 /// runtime recreation of the #2305 double-registration hazard the warm-boot
 /// dedup fixed only for the boot path. This guard rejects the registration
 /// up front instead of building a broken indexer first.
+///
+/// Issue #3993: also called from `reindex_handlers::reindex_handler`
+/// (Gap E — a `root_path` override previously had no collision check at
+/// all) and from `service::lazy_restore::restore_index_on_demand` (Gap F —
+/// a cold/unloaded entry's on-demand restore previously opened its redb
+/// with no guard, even when a live sibling handle already owned that root).
+/// All four reuse this exact primitive rather than adding a fourth (or
+/// fifth) collision mechanism; visibility is `pub(crate)` (widened from
+/// `pub(super)`) so `lazy_restore` — outside `service::server` — can reach
+/// it.
+///
+/// Issue #3993 adversarial re-review (BLOCK, first round): the original Gap
+/// F fix scanned only `state.registry.list_handles()` (live handles) — it
+/// remained structurally blind to a cold/unloaded entry parked in
+/// `state.cold_store`. A brand-new `create_index`/`relocate_index`/reindex
+/// override could silently claim a pre-existing but not-yet-restored
+/// index's root_path with NO race required at all: the cold entry just sits
+/// parked, untouched, before the write call ever arrives. That inverted
+/// first-claimant-wins for every OTHER guard in this file — the newcomer
+/// won, the legitimate pre-existing (if unluckier) cold entry lost, and lost
+/// permanently once it was later queried and `restore_index_on_demand`
+/// caught the resulting live collision from the far side by marking the
+/// pre-existing entry `Failed` instead of rejecting the interloper up
+/// front. Fix: `cold_entries` below is scanned with the exact same identity
+/// check as `handles`, so a cold entry's root_path is just as claimed as a
+/// live handle's — first claimant (live OR cold) always wins, regardless of
+/// registration order.
 /// What: `candidate` must already be canonicalized — every caller passes the
 /// output of `validate_root_path`, the same normalization every registered
 /// handle's `root_path` went through (directly at create/relocate time, or
@@ -255,19 +283,28 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
 /// and only degrades to string equality for the exotic case of a handle
 /// whose `root_path` has since vanished from disk (e.g. a device was
 /// unmounted after registration), where dev/ino cannot be computed for one
-/// side. Linear scan of `handles` (the registry is small — tens to low
-/// hundreds of entries); returns the first colliding id, skipping
-/// `exclude_id` (used by `relocate_index_handler` so an index is never
-/// compared against itself).
+/// side. Linear scan of `handles` then `cold_entries` (both small — tens to
+/// low hundreds of entries combined); returns the first colliding id (live
+/// handles are checked first, purely because that is the hot/common case —
+/// there is no first-claimant meaning to the scan ORDER itself, only to
+/// which entries are considered candidates at all), skipping `exclude_id`
+/// (used by `relocate_index_handler` so an index is never compared against
+/// itself, and by `restore_index_on_demand` so a cold entry is never
+/// compared against its own not-yet-removed cold-store record).
 /// Test: `create_index_rejects_duplicate_root_path`,
 /// `create_index_same_id_same_root_is_idempotent_not_a_collision`,
 /// `relocate_index_rejects_root_path_owned_by_another_index`,
 /// `relocate_index_onto_own_current_root_is_not_a_collision`,
 /// `create_index_concurrent_same_root_only_one_wins` in `tests_2336.rs`; plus
 /// the macOS-gated `create_index_rejects_case_variant_of_registered_root`
-/// exercising the dev/ino path directly.
-pub(super) fn find_root_path_collision(
+/// exercising the dev/ino path directly. Cold-entry coverage (issue #3993
+/// second round): `create_index_rejects_root_path_owned_by_cold_entry`,
+/// `relocate_index_rejects_root_path_owned_by_cold_entry`,
+/// `reindex_root_override_rejects_collision_with_cold_entry` in
+/// `collision_3993_tests.rs`.
+pub(crate) fn find_root_path_collision(
     handles: &[std::sync::Arc<IndexHandle>],
+    cold_entries: &[crate::service::persistence::PersistedIndex],
     candidate: &std::path::Path,
     exclude_id: Option<&IndexId>,
 ) -> Option<IndexId> {
@@ -275,6 +312,15 @@ pub(super) fn find_root_path_collision(
         .iter()
         .find(|h| exclude_id != Some(&h.id) && identifies_same_root(&h.root_path, candidate))
         .map(|h| h.id.clone())
+        .or_else(|| {
+            cold_entries.iter().find_map(|entry| {
+                let id = IndexId::new(entry.id.clone());
+                if exclude_id == Some(&id) {
+                    return None;
+                }
+                identifies_same_root(&entry.root_path, candidate).then_some(id)
+            })
+        })
 }
 
 /// Decide whether `a` and `b` name the same on-disk root (issue #2519).

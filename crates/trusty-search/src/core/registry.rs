@@ -868,6 +868,32 @@ impl IndexRegistry {
         }
     }
 
+    /// Re-insert an already-constructed `Arc<IndexHandle>` verbatim.
+    ///
+    /// Why (issue #3995 round 4 HIGH): `cold_park_index` must be able to hand
+    /// a handle it just (wrongly) removed back to the registry when it
+    /// discovers — via `Arc::ptr_eq` — that the handle was NOT the one it
+    /// originally observed (a concurrent create/relocate/reindex-override
+    /// swapped in a fresh registration in the race window). `register(handle:
+    /// IndexHandle)` cannot be reused for this: it takes ownership of a plain
+    /// `IndexHandle` and always mints a brand-new `Arc`, which (a) requires
+    /// `IndexHandle: Clone` (it isn't, deliberately — its fields are the
+    /// shared mutable state) and (b) would change the handle's `Arc` identity
+    /// out from under any other code that already captured the original
+    /// `Arc` (e.g. an in-flight search request), silently breaking future
+    /// `Arc::ptr_eq` comparisons against it. `restore` inserts the exact same
+    /// `Arc` back under its own id — identity-preserving, zero-copy.
+    /// What: `DashMap::insert` keyed by `handle.id`. Overwrites whatever is
+    /// currently registered under that id (mirrors `register`'s replace
+    /// semantics) — callers are responsible for only calling this when they
+    /// know the overwrite is correct (i.e., right after their own
+    /// `remove_and_get` of that same id).
+    /// Test: `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`
+    /// in `service::lazy_loader::residency::tests`.
+    pub fn restore(&self, handle: Arc<IndexHandle>) {
+        self.indexes.insert(handle.id.clone(), handle);
+    }
+
     pub fn len(&self) -> usize {
         self.indexes.len()
     }

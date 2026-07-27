@@ -48,6 +48,52 @@ pub(crate) async fn restore_index_on_demand(
         return;
     }
 
+    // Issue #3993 (Gap F): `find_root_path_collision` (issue #2336) originally
+    // scanned only LIVE handles, so it was structurally blind to cold/unloaded
+    // entries. Second round (adversarial BLOCK): the create/relocate/reindex
+    // write-side guards now ALSO consult `state.cold_store` (see
+    // `find_root_path_collision`'s updated doc), so a NEW registration can no
+    // longer silently steal a pre-existing cold entry's root_path — that gap
+    // is closed at the write side, before this function is ever reached for
+    // the interloper. What remains here is the live-handle check: if a live
+    // sibling already owns this root_path — which, post-fix, can only happen
+    // via pre-existing on-disk corruption (indexes.toml entries that already
+    // shared a root_path before any guard ever ran, e.g. hand-edited or
+    // inherited from a pre-#2336 daemon) rather than a new call stealing it —
+    // this cold entry loses and is marked permanently failed. Reuses the
+    // existing primitive rather than adding a fourth collision mechanism.
+    //
+    // Deliberately NOT scanning `state.cold_store` here (passed as `&[]`):
+    // unlike the write-side guards, checking sibling COLD entries at this
+    // point would risk marking BOTH of two genuinely concurrently-restoring
+    // cold entries `Failed` off a stale snapshot — neither has touched disk
+    // yet, so neither check would see the other's restore in flight, and a
+    // naive cold-vs-cold check could fail the LEGITIMATE winner just as
+    // easily as the loser. The `corpus_open_failed` ground-truth check below
+    // (mirroring `create_index_handler`/`relocate_index_handler`) is the
+    // correct backstop for that race instead: redb's real single-open
+    // semantics deterministically decide the actual winner, so only the
+    // restore that truly lost the race is ever marked failed.
+    let live_handles = state.registry.list_handles();
+    if let Some(existing_id) = crate::service::server::helpers::find_root_path_collision(
+        &live_handles,
+        &[],
+        &entry.root_path,
+        Some(&id),
+    ) {
+        tracing::warn!(
+            "lazy-load: refusing to restore cold index '{}' at {} — root_path \
+             already owned by live index '{}' (issue #3993); marking permanently \
+             failed so future queries fail fast instead of retrying the doomed \
+             restore",
+            entry.id,
+            entry.root_path.display(),
+            existing_id,
+        );
+        state.cold_store.mark_failed(&id);
+        return;
+    }
+
     // Guard against missing root_path. For cold indexes the path was valid when
     // they were parked; if it disappeared we skip gracefully (non-colocated path
     // used here — the relocation scan from issue #484 is a warm-boot-only flow).
@@ -87,6 +133,32 @@ pub(crate) async fn restore_index_on_demand(
     // route through Interactive/Background lanes, self-healing across the
     // boot-race window (PR #3784 review finding 1).
     indexer.set_embed_pool_source(Arc::clone(&state.embed_pool));
+
+    // Issue #3993 second round (adversarial BLOCK) ground-truth backstop:
+    // `create_index_handler` and `relocate_index_handler` both check
+    // `indexer.corpus_open_failed` after building — the best-effort collision
+    // guard above is a check-then-act race (same accepted-race shape as
+    // #2519's review for those two handlers), so redb's real single-open
+    // semantics are the only thing that can deterministically decide a
+    // genuine race: e.g. two DIFFERENT cold entries sharing one (corrupted)
+    // root_path, both queried at the same instant, both passing the
+    // live-handle check above because NEITHER is live yet. Before this fix,
+    // `restore_index_on_demand` was the one write path with no such
+    // backstop at all — `corpus_open_failed` was read (below, for warm-boot
+    // stage derivation) but never gated on, so a losing racer's broken
+    // handle would still be registered live. Mirrors the other two handlers'
+    // treatment exactly, and reuses the existing #1106 `mark_failed` outcome
+    // so a repeat query fails fast instead of retrying a doomed restore.
+    if indexer.corpus_open_failed {
+        tracing::error!(
+            "lazy-load: corpus open failed for cold index '{}' at {} — refusing to \
+             register a broken index handle (issue #3993); marking permanently failed",
+            entry.id,
+            entry.root_path.display(),
+        );
+        state.cold_store.mark_failed(&id);
+        return;
+    }
 
     // Build include_paths / extensions, same logic as start_restore.
     let include_paths: Vec<std::path::PathBuf> = entry

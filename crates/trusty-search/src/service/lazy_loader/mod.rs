@@ -229,6 +229,92 @@ mod tests {
         assert_eq!(store.len(), 0);
     }
 
+    // ── ColdIndexStore::mark_loaded_if / entry_token (issue #3995 round 5) ─────
+
+    /// Why: the common case — a caller that snapshotted `entry_token` right
+    /// before its own write, with nothing else touching the store in
+    /// between, must have its reap succeed (the entry is unambiguously its
+    /// own).
+    /// Test: this test.
+    #[test]
+    fn cold_store_mark_loaded_if_removes_matching_token() {
+        let store = ColdIndexStore::new();
+        let id = IndexId::new("a".to_string());
+        let tokens = store.register_cold_entries(vec![mk_entry("a", None, None)]);
+        let token = tokens.into_iter().next();
+        assert!(store.contains(&id));
+
+        store.mark_loaded_if(&id, token);
+
+        assert!(
+            !store.contains(&id),
+            "matching token must allow the reap to proceed"
+        );
+    }
+
+    /// Why: the exact defect this round closes — a token captured BEFORE a
+    /// concurrent `register_cold_entries` replaced the entry must NOT be
+    /// honoured; the entry present now belongs to a different writer.
+    /// Test: this test.
+    #[test]
+    fn cold_store_mark_loaded_if_leaves_mismatched_token() {
+        let store = ColdIndexStore::new();
+        let id = IndexId::new("a".to_string());
+        let stale_tokens = store.register_cold_entries(vec![mk_entry("a", None, None)]);
+        let stale_token = stale_tokens.into_iter().next();
+
+        // A different writer replaces the entry — e.g. a residency-sweep
+        // park landing in between. This mints a brand-new token.
+        store.register_cold_entries(vec![mk_entry("a", Some(1), None)]);
+
+        store.mark_loaded_if(&id, stale_token);
+
+        assert!(
+            store.contains(&id),
+            "a mismatched (stale) token must never remove the CURRENT entry \
+             — it belongs to a different writer"
+        );
+    }
+
+    /// Why: `entry_token` returning `None` (nothing was cold at snapshot
+    /// time) combined with nothing having changed since must be a safe,
+    /// ordinary no-op — not an error, not a panic.
+    /// Test: this test.
+    #[test]
+    fn cold_store_mark_loaded_if_none_expected_and_none_present_is_noop() {
+        let store = ColdIndexStore::new();
+        let id = IndexId::new("never-registered".to_string());
+        assert!(store.entry_token(&id).is_none());
+
+        store.mark_loaded_if(&id, None);
+
+        assert!(!store.contains(&id));
+    }
+
+    /// Why: the OTHER half of the round-5 fix — a caller that observed
+    /// NOTHING cold at snapshot time (`None`) must NOT remove an entry that
+    /// shows up later (a concurrent writer's fresh insertion), even though a
+    /// blind `mark_loaded` would happily delete it.
+    /// Test: this test.
+    #[test]
+    fn cold_store_mark_loaded_if_none_expected_but_entry_present_leaves_it() {
+        let store = ColdIndexStore::new();
+        let id = IndexId::new("a".to_string());
+        assert!(store.entry_token(&id).is_none());
+
+        // A concurrent writer parks a fresh entry after the `None` snapshot
+        // was taken but before the guarded reap runs.
+        store.register_cold_entries(vec![mk_entry("a", None, None)]);
+
+        store.mark_loaded_if(&id, None);
+
+        assert!(
+            store.contains(&id),
+            "a `None` snapshot must never authorize removing an entry that \
+             appeared afterward — it belongs to a different writer"
+        );
+    }
+
     // ── get_or_load_index ────────────────────────────────────────────────────
 
     /// Why: hot-path fast path — index already in registry returns immediately.

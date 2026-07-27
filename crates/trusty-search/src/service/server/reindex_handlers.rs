@@ -22,7 +22,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress, ReindexStatus};
 
-use super::helpers::validate_root_path;
+use super::helpers::{find_root_path_collision, validate_root_path};
 use super::state::SearchAppState;
 
 #[derive(Deserialize, Default)]
@@ -131,6 +131,45 @@ pub(super) async fn reindex_handler(
                     return Err((status, Json(json)));
                 }
             };
+            // Issue #3993 (Gap E): a root_path override previously had NO
+            // collision check at all — `state.registry.register(new_handle)`
+            // below would silently re-point this index onto a root_path a
+            // DIFFERENT live index already owns, the same #2305/#2336 hazard
+            // (two ids claiming one on-disk `<root>/.trusty-search/index.redb`
+            // corpus) `create_index_handler` and `relocate_index_handler`
+            // already guard against. Reuse the exact same primitive rather
+            // than adding a fourth collision mechanism.
+            //
+            // Issue #3993 second round (adversarial BLOCK): also check
+            // `state.cold_store` — a reindex override onto a cold entry's
+            // parked root is the same root-theft as the other two write
+            // paths, so it must go through the same widened primitive.
+            let live_handles = state.registry.list_handles();
+            let cold_entries = state.cold_store.snapshot();
+            if let Some(existing_id) =
+                find_root_path_collision(&live_handles, &cold_entries, &new_root, Some(&index_id))
+            {
+                tracing::warn!(
+                    "reindex_handler: refusing root_path override for '{}' to {} — \
+                     already owned by '{}' (issue #3993)",
+                    index_id.0,
+                    new_root.display(),
+                    existing_id,
+                );
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "root_path {:?} is already registered to index '{}'; two \
+                             indexes cannot share one on-disk corpus (issues #2305, \
+                             #2336, #3993)",
+                            new_root.display(),
+                            existing_id,
+                        ),
+                        "existing_id": existing_id.0,
+                    })),
+                ));
+            }
             if handle.root_path.as_os_str().is_empty() || handle.root_path != new_root {
                 let indexer = Arc::clone(&handle.indexer);
                 // Preserve the filter set / domain vocabulary recorded on the
@@ -184,7 +223,32 @@ pub(super) async fn reindex_handler(
                     // subsequent reindex will refresh the snapshot.
                     walk_diagnostics: Arc::clone(&handle.walk_diagnostics),
                 };
+                // Issue #3995 round 5 (CRITICAL): snapshot the cold-store
+                // entry (if any) parked under `index_id` BEFORE registering
+                // the override handle below — the "expected" half of the
+                // identity guard, mirrored from `create_index_handler` /
+                // `relocate_index_handler`. See `mark_loaded_if` below.
+                let cold_entry_before_register = state.cold_store.entry_token(&index_id);
                 handle = state.registry.register(new_handle);
+                // Issue #3993 review round 3 (HIGH, applied here for
+                // consistency with create/relocate): reap any stale
+                // `state.cold_store` record parked under this SAME id. Same
+                // no-op-under-correct-operation reasoning as
+                // `relocate_index_handler`: reaching this branch already
+                // required `state.registry.get(&index_id)` to succeed at the
+                // top of this handler (404 otherwise), so `id` was already
+                // live before the override ran and cannot simultaneously be
+                // cold. Defense-in-depth against residual corruption
+                // predating the create-time fix; keyed by `IndexId`, so it
+                // can only ever touch this id's own record.
+                //
+                // Issue #3995 round 5 (CRITICAL): identity-guarded against
+                // `cold_entry_before_register` — see `create_index_handler`'s
+                // identical comment and `ColdIndexStore::mark_loaded_if` for
+                // the race this closes.
+                state
+                    .cold_store
+                    .mark_loaded_if(&index_id, cold_entry_before_register);
             }
         }
     }

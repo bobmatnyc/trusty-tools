@@ -142,11 +142,19 @@ pub(super) async fn relocate_index_handler(
     // live registrations sharing one colocated root resolve to the SAME
     // on-disk redb corpus. (This index's own root is handled by the no-op
     // short-circuit above, so `exclude_id` here is defense-in-depth only.)
+    //
+    // Issue #3993 second round (adversarial BLOCK): also check
+    // `state.cold_store` — relocating onto a cold entry's parked root is the
+    // same root-theft as `create_index_handler`'s cold blind spot, just via
+    // the PATCH path instead. One shared primitive, one shared fix.
     let handles = state.registry.list_handles();
-    if let Some(existing_id) = find_root_path_collision(&handles, &new_root, Some(&index_id)) {
+    let cold_entries = state.cold_store.snapshot();
+    if let Some(existing_id) =
+        find_root_path_collision(&handles, &cold_entries, &new_root, Some(&index_id))
+    {
         tracing::warn!(
             "relocate[{id}]: refusing to relocate to {} — root_path already owned by '{}' \
-             (issue #2336)",
+             (issues #2336, #3993)",
             new_root.display(),
             existing_id,
         );
@@ -328,8 +336,39 @@ pub(super) async fn relocate_index_handler(
         walk_diagnostics: Arc::clone(&existing.walk_diagnostics),
     };
 
+    // Issue #3995 round 5 (CRITICAL): snapshot the cold-store entry (if any)
+    // parked under `index_id` BEFORE registering the replacement handle below
+    // — the "expected" half of the identity guard, mirrored from
+    // `create_index_handler`. See `mark_loaded_if` below for why.
+    let cold_entry_before_register = state.cold_store.entry_token(&index_id);
+
     // Atomically replace the in-memory registry entry.
     state.registry.register(new_handle);
+
+    // Issue #3993 review round 3 (HIGH, applied here for consistency): reap
+    // any stale `state.cold_store` record parked under this SAME id. Under
+    // correct operation this is always a no-op — reaching this line already
+    // required `state.registry.get(&index_id)` to return `Some` above (404
+    // otherwise), so `id` was already live BEFORE this handler ran, meaning
+    // it could not simultaneously be a pending cold entry (cold→live
+    // promotion always goes through `get_or_load_index`, which calls
+    // `cold_store.mark_loaded` itself). This call exists purely as
+    // defense-in-depth against residual corruption predating this fix (e.g.
+    // an id that was created — before `create_index_handler`'s fix above
+    // shipped — while a stale cold record for it already existed, so it went
+    // live without ever being reaped): relocating that id is a natural,
+    // cheap point to self-heal the invariant rather than leaving the old
+    // root permanently poisoned. Keyed by `IndexId`, so it can only ever
+    // touch this id's own record.
+    //
+    // Issue #3995 round 5 (CRITICAL): identity-guarded against
+    // `cold_entry_before_register` — see `create_index_handler`'s identical
+    // comment and `ColdIndexStore::mark_loaded_if` for the race this closes
+    // (a concurrent residency-sweep park inserting a fresh cold entry for
+    // this same id in the window between the snapshot above and here).
+    state
+        .cold_store
+        .mark_loaded_if(&index_id, cold_entry_before_register);
 
     // Update `indexed_root` in the corpus `_meta` table so the root-move
     // detection in `spawn_reindex_with_cleanup` does NOT fire on the next

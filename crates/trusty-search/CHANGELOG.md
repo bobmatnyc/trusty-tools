@@ -9,6 +9,126 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Two more index-registration paths had no `root_path` collision guard —
+  fourth occurrence of the #2305/#2336 `DatabaseAlreadyOpen` class (issue
+  #3993).** An audit prompted by #3929 found `find_root_path_collision`
+  (issue #2336) unreached from two call sites that can reproduce the same
+  hazard: two index ids claiming one physical `<root>/.trusty-search/index.redb`
+  corpus. **Gap E:** `POST /indexes/:id/reindex` with a `root_path` override
+  (`reindex_handlers.rs`) registered the new root with no collision check at
+  all — now rejected with `409 Conflict` naming the existing owner, same as
+  `create_index`/`relocate_index`. **Gap F:** `find_root_path_collision` scanned
+  only LIVE handles, so a cold (unloaded) index entry parked in
+  `state.cold_store` was invisible to it; a colliding cold entry's later
+  on-demand restore (`restore_index_on_demand`, `lazy_restore.rs`) opened the
+  same redb with no guard at all, a third source of the hazard.
+
+  **Adversarial re-review (first round BLOCK) found the Gap F fix incomplete:**
+  checking only live handles from `restore_index_on_demand` closes the crash
+  from the cold entry's OWN restore, but the write side
+  (`create_index_handler`, `relocate_index_handler`, and Gap E's reindex
+  override) still never consulted `state.cold_store` — so a brand-new
+  registration could silently claim a pre-existing cold entry's root_path
+  with **no race required at all**, and the resulting live collision would
+  later mark the *pre-existing, legitimate* cold entry failed instead of
+  rejecting the interloper — inverting first-claimant-wins. Fixed for real
+  this round: `find_root_path_collision` now takes both `handles` (live) and
+  `cold_entries` (`state.cold_store.snapshot()`), and all three write-side
+  call sites pass both — still one shared primitive, no fourth (or fifth)
+  collision mechanism. `restore_index_on_demand` also gained a
+  `corpus_open_failed` ground-truth backstop mirroring
+  `create_index_handler`/`relocate_index_handler`, closing the residual
+  genuine race (two different cold entries sharing one root_path only through
+  pre-existing on-disk corruption, restored concurrently) that the best-effort
+  guard alone cannot. A colliding cold entry — live or cold on the losing
+  side — is marked permanently failed (existing #1106 semantics) instead of
+  silently registered broken. Not gated on #1681 or #2611 (neither addresses
+  collision safety).
+
+  **Adversarial re-review (third round WARN) found the round-2 fix itself
+  introduced a HIGH-severity availability regression:** `create_index_handler`
+  never cleared a stale `state.cold_store` record for the id being
+  (re)created. Repro: park cold `foo` → `root_old`; `create_index(foo,
+  root_new)` succeeds and `foo` goes live at `root_new`, but the cold store
+  still claims `root_old` for `foo` forever — nothing ever triggers cleanup,
+  since `foo` now always resolves via the live registry path. A later,
+  wholly unrelated, legitimate `create_index(bar, root_old)` was then falsely
+  rejected with `409` even though nothing live or cold genuinely depended on
+  `root_old` any more. Fixed by reaping any cold-store record for the exact
+  id just (re)registered — `ColdIndexStore::mark_loaded`, keyed strictly by
+  `IndexId`, so it can only ever clear the record for that one id, never a
+  record that merely happens to share a root_path with someone else (the
+  existing collision guard still protects every other id's legitimate
+  claim). `relocate_index_handler` and the reindex `root_path` override gained
+  the identical reap call for consistency and to self-heal any pre-existing
+  residue, though neither can itself *create* the hole — both require the id
+  to already be live to reach the write, so under correct operation a stale
+  cold record for that same id cannot coexist with it. The reindex override's
+  narrower, pre-existing TOCTOU window (two concurrent overrides racing onto
+  one still-unclaimed root, the same accepted-race shape as #2519) is left as
+  a follow-up rather than fixed here — reindex has no synchronous fresh-corpus
+  open to hang a `corpus_open_failed` ground-truth backstop on the way
+  create/relocate do, so closing it properly needs a registration-wide
+  mutex/lock, a materially larger change than this collision-guard fix.
+
+  **Adversarial re-review (fourth round WARN) found the round-3
+  `ColdIndexStore::mark_loaded` reap was itself an uncoordinated SECOND
+  writer of `cold_store.entries`, racing the opt-in
+  `TRUSTY_MAX_RESIDENT_INDEXES` residency-sweep's `cold_park_index`
+  (`lazy_loader::residency`) — both mutate the same map with no `.await`
+  between their two `DashMap` ops, so a relocate (or reindex-override) racing
+  a residency-park of the SAME id could leave it in NEITHER the live
+  registry NOR the cold store (unreachable until an operator manually
+  re-registers it).** Fixed by having `cold_park_index` snapshot the handle
+  it intends to park (`registry.get(id)`) *before* inserting the cold entry,
+  then comparing that snapshot against whatever `remove_and_get` actually
+  removes via `Arc::ptr_eq`. On a match (the common case), parking proceeds
+  as before. On a mismatch — a concurrent write swapped in a different
+  handle in the interim — the swapped-in handle is handed straight back via
+  a new identity-preserving `IndexRegistry::restore` (no new `Arc`, so no
+  other holder's `Arc::ptr_eq` breaks) and the park's own cold-store
+  insertion is undone, so the id is never left in neither store. Only the
+  feature's default-off, sub-microsecond window is affected; the fix is
+  proven against a deterministic (synchronization-based, not timing-based)
+  reproduction of the exact race.
+
+  **Adversarial re-review (fifth round BLOCK) found the round-4 fix itself
+  incomplete: `ColdIndexStore::mark_loaded` — the reap called by
+  `create_index_handler` / `relocate_index_handler` / `reindex_handler`'s
+  override, and internally by `cold_park_index_inner`'s own rollback path —
+  remained an unconditional `entries.remove(id)` with no identity/generation
+  check analogous to the `Arc::ptr_eq` guard round 4 added on the registry
+  side.** Of the 10 possible interleavings between `cold_park_index_inner`'s
+  three sequential steps and a concurrent handler's register+reap pair, round
+  4 correctly closed 6 (5 where the registry-side `Arc::ptr_eq` mismatch
+  triggers a rollback, plus 1 already-safe ordering) but left 2 of the
+  remaining 4 — where the handler's `register` lands entirely before the
+  park's `expected` snapshot, so the registry-side identity check trivially
+  matches — still able to orphan the index: the handler's later unconditional
+  `mark_loaded` reaps whatever is CURRENTLY parked under `id`, which by then
+  is the park's own freshly-and-legitimately-inserted cold entry, not the
+  stale leftover it believes it's cleaning up. Reproduced by execution
+  (`cold_park_index_handler_naive_reap_before_park_orphans_index`): `parked =
+  true, hot = false, is_cold = false` — reachable in neither store. Fixed by
+  giving `ColdIndexStore` the identical identity discipline
+  `IndexRegistry::restore` already applies: every cold-store insertion
+  (`register_cold_entries`) is now stamped with a fresh, `Arc::ptr_eq`-
+  comparable identity token (`ColdEntry.token`); `entry_token(id)` lets a
+  caller snapshot "the entry I observed" immediately before its own write;
+  and the new `mark_loaded_if(id, expected_token)` — the guarded counterpart
+  to `mark_loaded` — only removes the entry when the CURRENT token still
+  matches what was snapshotted (or both are `None`), leaving a mismatched
+  reap as a safe no-op instead of deleting an entry it doesn't recognize. All
+  three handler call sites and `cold_park_index_inner`'s own rollback now
+  snapshot-then-guard via this pattern instead of calling `mark_loaded`
+  unconditionally; `mark_loaded` itself is unchanged and remains correct for
+  `get_or_load_index`'s call site, which is already serialized by the
+  per-index `loading_gate` mutex and `cold_park_index`'s in-flight guard.
+  `cold_park_index_handler_reap_guarded_before_park_never_orphans` proves the
+  fixed counterpart of the same interleaving no longer orphans the id (it
+  degrades to the pre-existing, disclosed "stale but present" residual
+  instead).
+
 - **Test-side remediation for `create_index`/`relocate_index` tests spuriously
   denied by the sensitive-path denylist (issue #3955).** `SENSITIVE_PATH_PREFIXES`
   denies `/tmp/`, `/private/tmp`, and `/var/folders` — which on macOS is where

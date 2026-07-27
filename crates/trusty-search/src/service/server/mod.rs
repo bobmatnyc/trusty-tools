@@ -17,7 +17,7 @@ mod contrib_graph;
 mod fanout;
 mod files;
 mod health;
-mod helpers;
+pub(crate) mod helpers;
 mod index_config;
 mod indexes;
 mod indexes_relocate;
@@ -33,6 +33,8 @@ mod tickers;
 mod typeahead;
 
 // cfg(test) sub-modules — each < 500 lines
+#[cfg(test)]
+mod collision_3993_tests;
 #[cfg(test)]
 mod list_repo_identity_tests;
 #[cfg(test)]
