@@ -2,8 +2,8 @@
 //!
 //! Why: extracted from `cli.rs` (issue #2603) to keep the top-level file
 //! under the 500-SLOC production cap.
-//! What: [`RepairAction`] — currently only `deploy`.
-//! Test: `cli_parses_repair_deploy` in `tests.rs`.
+//! What: [`RepairAction`] — `deploy` and `push-guard`.
+//! Test: `cli_parses_repair_deploy`, `cli_parses_repair_push_guard` in `tests.rs`.
 
 use clap::Subcommand;
 
@@ -11,8 +11,9 @@ use clap::Subcommand;
 ///
 /// Why: scoped sub-actions keep `tm repair` extensible — future variants can
 /// cover other deploy artefacts without changing the top-level command surface.
-/// What: currently only `Deploy` is defined; it covers agent and skill manifests.
-/// Test: `cli_parses_repair_deploy`.
+/// What: `Deploy` covers agent and skill manifests; `PushGuard` retrofits the
+/// #2867 cross-branch push guard onto an already-provisioned clone.
+/// Test: `cli_parses_repair_deploy`, `cli_parses_repair_push_guard`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum RepairAction {
     /// Repair the agent/skill deploy state in `~/.claude/`.
@@ -32,5 +33,31 @@ pub(crate) enum RepairAction {
         /// but not modified.
         #[arg(long)]
         force: bool,
+    },
+
+    /// Retrofit the #2867 cross-branch `pre-push` guard onto an existing clone.
+    ///
+    /// Why: the guard is installed automatically only when trusty-mpm CLONES a
+    /// repository, so every base clone that already existed when the guard
+    /// shipped is unprotected — including long-lived ones shared by dozens of
+    /// worktrees, which is exactly the population #2867 happened in. Without
+    /// this verb there is no supported way to close that gap.
+    /// What: installs the guard into the clone's SHARED hooks directory
+    /// (`$GIT_COMMON_DIR/hooks`), which every linked and ad-hoc worktree of
+    /// that clone consults — so one invocation from any worktree covers them
+    /// all, with no git config write. Idempotent: re-running an up-to-date
+    /// guard writes nothing. It never overwrites a `pre-push` it does not own
+    /// (a foreign hook, a symlink, an unreadable file, or a `core.hooksPath`
+    /// redirect all produce a refusal that names the reason). `--dry-run`
+    /// reports what would happen and writes nothing at all.
+    /// Test: `cli_parses_repair_push_guard`, `cli_parses_repair_push_guard_flags`.
+    PushGuard {
+        /// Repository (or any worktree of it) to protect. Defaults to the
+        /// current directory.
+        #[arg(long)]
+        path: Option<String>,
+        /// Report what would happen without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 }

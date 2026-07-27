@@ -11,9 +11,13 @@
 //! configures — the hook is its only protection).
 //! What: builds a bare `origin` + a clone, installs the guard via the
 //! production `install_pre_push_guard`, then asserts (1) a cross-branch push is
-//! refused and leaves the destination ref untouched, (2) the same-name push
-//! succeeds, (3) `TM_ALLOW_CROSS_BRANCH_PUSH=1` permits the deliberate
-//! cross-branch push, (4) an ad-hoc worktree inherits the guard.
+//! refused and leaves the destination ref untouched, (2) the printed remedy
+//! actually SUCCEEDS rather than being the refused command, (3) the same-name
+//! push succeeds, (4) a detached HEAD permits the explicit rescue refspec but
+//! still refuses a named-branch cross-branch push, (5) the name-preserving
+//! push of another branch gets the same verdict attached and detached, (6)
+//! deletes and tags pass through, (7) `TM_ALLOW_CROSS_BRANCH_PUSH=1` permits
+//! the deliberate cross-branch push, (8) an ad-hoc worktree inherits the guard.
 //! Test: this file IS the test module.
 
 use std::path::{Path, PathBuf};
@@ -138,15 +142,20 @@ fn refuses_cross_branch_push_and_permits_same_name_push() {
         "the victim branch must be byte-identical after a refused push"
     );
 
-    // 2. Deleting a branch you are not on is the same hazard.
-    let (del_ok, _, del_err) = git(&fx.clone, &["push", "origin", ":refs/heads/victim"]);
+    // 2. The refusal must never print a command the guard would itself
+    //    refuse — an agent that follows the guidance would loop forever.
+    let remedy = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with("git push origin"))
+        .expect("the refusal must print a concrete remedy")
+        .trim()
+        .to_string();
+    let remedy_args: Vec<&str> = remedy.split_whitespace().skip(1).collect();
+    let (remedy_ok, _, remedy_err) = git(&fx.clone, &remedy_args);
     assert!(
-        !del_ok,
-        "deleting a foreign branch must be refused; stderr: {del_err}"
-    );
-    assert!(
-        remote_sha(&fx.origin, "refs/heads/victim").is_some(),
-        "the victim branch must still exist after a refused delete"
+        remedy_ok,
+        "the printed remedy `{remedy}` must actually succeed, not be the refused command; \
+         stderr: {remedy_err}"
     );
 
     // 3. The legitimate push — same name — must still work.
@@ -164,6 +173,132 @@ fn refuses_cross_branch_push_and_permits_same_name_push() {
     assert!(
         bare_ok,
         "a bare push to a same-name upstream must succeed; stderr: {bare_err}"
+    );
+}
+
+/// A DETACHED HEAD must not be a blanket refusal.
+///
+/// Why: 13 of the 95 worktrees on this repo's own base clone sit in detached
+/// HEAD at any moment, and `git push origin <sha>:refs/heads/<name>` is the
+/// standard way to rescue work out of one. Refusing that — while printing it
+/// as the remedy — burned the whole point of the guard. There is no #2867
+/// hazard here either: git itself refuses a bare `git push` while detached, so
+/// every push from this state is an explicit operator refspec.
+#[test]
+fn detached_head_permits_explicit_refspec_but_still_refuses_cross_branch() {
+    let Some(fx) = fixture() else {
+        return;
+    };
+    install_pre_push_guard(&fx.clone).expect("install");
+    assert!(git(&fx.clone, &["checkout", "-q", "-b", "mine"]).0);
+    commit(&fx.clone, "work.txt");
+    assert!(git(&fx.clone, &["checkout", "-q", "--detach", "HEAD"]).0);
+
+    // 1. `HEAD:refs/heads/<name>` — the canonical detached rescue push.
+    let (head_ok, _, head_err) = git(&fx.clone, &["push", "origin", "HEAD:refs/heads/detachwork"]);
+    assert!(
+        head_ok,
+        "HEAD:refs/heads/<name> from a detached HEAD must be permitted; stderr: {head_err}"
+    );
+    assert!(remote_sha(&fx.origin, "refs/heads/detachwork").is_some());
+
+    // 2. The explicit-sha form of the same rescue.
+    let (_, sha, _) = git(&fx.clone, &["rev-parse", "HEAD"]);
+    let refspec = format!("{}:refs/heads/detachwork2", sha.trim());
+    let (sha_ok, _, sha_err) = git(&fx.clone, &["push", "origin", &refspec]);
+    assert!(
+        sha_ok,
+        "<sha>:refs/heads/<name> from a detached HEAD must be permitted; stderr: {sha_err}"
+    );
+    assert!(remote_sha(&fx.origin, "refs/heads/detachwork2").is_some());
+
+    // 3. But a NAMED local branch pushed onto a different name is still the
+    //    #2867 shape, detached or not — the rule does not go soft here.
+    let victim_before = remote_sha(&fx.origin, "refs/heads/victim").expect("victim exists");
+    let (cross_ok, _, cross_err) = git(
+        &fx.clone,
+        &["push", "origin", "--force", "mine:refs/heads/victim"],
+    );
+    assert!(
+        !cross_ok,
+        "a named-branch cross-branch push must be refused even when detached; stderr: {cross_err}"
+    );
+    assert_eq!(
+        remote_sha(&fx.origin, "refs/heads/victim").as_deref(),
+        Some(victim_before.as_str()),
+        "the victim ref must be untouched"
+    );
+}
+
+/// The same-name push must get the SAME verdict attached and detached.
+///
+/// Why: the first revision refused `git push origin <other-branch>` when
+/// attached but allowed it when detached — the identical operation, opposite
+/// verdicts, and looser in the less-understood state. A name-preserving push
+/// cannot land one branch's work on another branch's ref, so both states
+/// permit it.
+#[test]
+fn name_preserving_push_of_another_branch_agrees_attached_and_detached() {
+    let Some(fx) = fixture() else {
+        return;
+    };
+    install_pre_push_guard(&fx.clone).expect("install");
+    assert!(git(&fx.clone, &["checkout", "-q", "-b", "sidebranch"]).0);
+    commit(&fx.clone, "side.txt");
+    assert!(git(&fx.clone, &["checkout", "-q", "main"]).0);
+
+    // Attached on `main`, pushing `sidebranch` onto `origin/sidebranch`.
+    let (attached_ok, _, attached_err) = git(&fx.clone, &["push", "origin", "sidebranch"]);
+    assert!(
+        attached_ok,
+        "a name-preserving push of another branch must be permitted while attached; \
+         stderr: {attached_err}"
+    );
+
+    // Detached, the identical operation must get the identical verdict.
+    commit(&fx.clone, "main-extra.txt");
+    assert!(git(&fx.clone, &["checkout", "-q", "sidebranch"]).0);
+    commit(&fx.clone, "side2.txt");
+    assert!(git(&fx.clone, &["checkout", "-q", "--detach", "HEAD"]).0);
+    let (detached_ok, _, detached_err) = git(&fx.clone, &["push", "origin", "sidebranch"]);
+    assert!(detached_ok, "…and while detached; stderr: {detached_err}");
+}
+
+/// Branch DELETES and TAG pushes are out of scope and must pass through.
+///
+/// Why: the hook header promises both, and nothing asserted either. A delete
+/// moves no history onto a branch and no git config can make a bare push
+/// perform one, so it is never the #2867 accident — while post-merge remote
+/// cleanup is routine. Refusing it (as the first revision did) also produced
+/// remediation text that recommended a *push* to accomplish a *delete*.
+#[test]
+fn deletes_and_tags_pass_through() {
+    let Some(fx) = fixture() else {
+        return;
+    };
+    install_pre_push_guard(&fx.clone).expect("install");
+    assert!(git(&fx.clone, &["checkout", "-q", "-b", "mine"]).0);
+    commit(&fx.clone, "work.txt");
+
+    // A tag push, from a worktree standing on a branch of a different name.
+    assert!(git(&fx.clone, &["tag", "-a", "v9.9.9", "-m", "release"]).0);
+    let (tag_ok, _, tag_err) = git(&fx.clone, &["push", "origin", "v9.9.9"]);
+    assert!(
+        tag_ok,
+        "a tag push must pass through untouched; stderr: {tag_err}"
+    );
+    assert!(remote_sha(&fx.origin, "refs/tags/v9.9.9").is_some());
+
+    // Deleting a remote branch you are not standing on — routine cleanup.
+    assert!(remote_sha(&fx.origin, "refs/heads/victim").is_some());
+    let (del_ok, _, del_err) = git(&fx.clone, &["push", "origin", "--delete", "victim"]);
+    assert!(
+        del_ok,
+        "a remote-branch delete must pass through; stderr: {del_err}"
+    );
+    assert!(
+        remote_sha(&fx.origin, "refs/heads/victim").is_none(),
+        "the delete must actually have taken effect"
     );
 }
 

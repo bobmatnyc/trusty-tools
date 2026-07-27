@@ -11,15 +11,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Cross-branch `git push` guard for every worktree of a managed base clone**
   ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): a bundled
-  `pre-push` hook now refuses any push whose destination branch differs from the
-  checked-out branch — the shape that clobbered PR #2863's reviewed lineage. It
+  `pre-push` hook now refuses any push that would land one branch's history on
+  a remote branch of a DIFFERENT name — the shape that clobbered PR #2863's
+  reviewed lineage. One rule, applied identically whether `HEAD` is attached or
+  detached: the source branch name must equal the destination branch name. It
   is installed into `$GIT_COMMON_DIR/hooks` at base-clone time, which every
   worktree of that base shares, so it also covers ad-hoc `git worktree add`
   worktrees an agent creates for itself (the actual incident path, which no
-  other trusty-mpm code path ever sees). Installation refuses rather than
-  overwrites when a foreign `pre-push` hook or a `core.hooksPath` redirect is
-  present, so it never fights husky/lefthook. Set
+  other trusty-mpm code path ever sees). Three shapes are deliberately out of
+  scope and pass through: non-branch destinations (tags, notes), remote-branch
+  deletes (they move no history onto a branch, no config can make a bare push
+  perform one, and post-merge cleanup is routine), and an anonymous source
+  pushed from a detached `HEAD` (`git push origin <sha>:refs/heads/<name>` is
+  the standard way to rescue work out of a detached worktree, and git itself
+  refuses a bare push while detached, so there is no accidental path to guard).
+  Installation refuses rather than overwrites whenever the existing `pre-push`
+  is not provably ours — a foreign hook, a symlink, a `core.hooksPath`
+  redirect, or a file that cannot be read at all (invalid UTF-8, a permissions
+  error) — so it never fights husky/lefthook, and a hook that cannot be
+  inspected is never destroyed. The write is atomic (temp file + `rename`)
+  because that one file is executed by every worktree of the clone. Set
   `TM_ALLOW_CROSS_BRANCH_PUSH=1` for a deliberate cross-branch push.
+
+- **`tm repair push-guard` retrofits that guard onto an already-provisioned
+  clone, and `tm doctor` reports when one is missing**
+  ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): the guard
+  installs automatically only on the CLONE path, so every base clone that
+  existed before it shipped — exactly the old, many-worktree clones the
+  incident happened in — was silently unprotected with no supported way to fix
+  that. `tm doctor` now carries a `push_guard` check that warns when the
+  current project's clone has no guard (or an older revision) and names the
+  retrofit command; `tm repair push-guard` performs it. The retrofit is
+  idempotent, writes into the clone's shared hooks directory so ONE invocation
+  from ANY worktree covers them all with no git config write, honours the same
+  never-overwrite-a-foreign-hook refusal, and offers `--dry-run` to report
+  without touching a file that live sessions are executing.
 
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**

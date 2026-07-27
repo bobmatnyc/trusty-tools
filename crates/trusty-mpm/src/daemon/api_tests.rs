@@ -1096,7 +1096,7 @@ async fn pair_reset_clears_pairing() {
 
 #[tokio::test]
 async fn doctor_endpoint_returns_report() {
-    // `GET /api/v1/doctor` returns a twenty-one-check report (#1840 added the
+    // `GET /api/v1/doctor` returns a twenty-two-check report (#1840 added the
     // worktrees check; DOC-28 R4(a) added the output_style check; A2
     // (tm-skills-portfolio epic) added the skill_source check;
     // #gh-account-awareness added the gh_account check; #2158 added the
@@ -1113,7 +1113,7 @@ async fn doctor_endpoint_returns_report() {
     // HTTP status.
     let state = DaemonState::shared();
     let Json(report) = doctor(State(state), Query(DoctorQuery::default())).await;
-    assert_eq!(report.checks.len(), 21);
+    assert_eq!(report.checks.len(), 22);
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
@@ -1138,7 +1138,8 @@ async fn doctor_endpoint_returns_report() {
             "hooks_contamination",
             "hooks_foreign_conflict",
             "tcc_taint",
-            "scaffold_tracking"
+            "scaffold_tracking",
+            "push_guard"
         ]
     );
 }

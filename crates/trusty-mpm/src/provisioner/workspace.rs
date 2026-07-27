@@ -443,7 +443,9 @@ impl GitBackend for RealGitBackend {
             // path ever sees — so this one file is the only mitigation that
             // covers the actual PR #2863 clobber shape. Best-effort: a refusal
             // (foreign hook / `core.hooksPath` redirect) must never fail
-            // provisioning.
+            // provisioning. An already-provisioned base is retrofitted by the
+            // operator via `tm repair push-guard`, which `tm doctor`'s
+            // `push_guard` check names when it finds a clone unprotected.
             crate::core::push_guard::install_and_log(base_dir);
             Ok(())
         } else {

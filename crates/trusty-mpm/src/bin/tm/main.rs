@@ -75,6 +75,10 @@ mod tests_behavior_generate;
 mod tests_behavior_hooks;
 
 #[cfg(test)]
+#[path = "tests_behavior_repair_tests.rs"]
+mod tests_behavior_repair;
+
+#[cfg(test)]
 #[path = "tests_behavior_reset_agents_tests.rs"]
 mod tests_behavior_reset_agents;
 
@@ -479,6 +483,9 @@ async fn main() -> anyhow::Result<()> {
             use cli::RepairAction;
             match action {
                 RepairAction::Deploy { force } => repair_deploy(force),
+                RepairAction::PushGuard { path, dry_run } => {
+                    commands::push_guard::repair_push_guard(path, dry_run)
+                }
             }
         }
         Some(Command::Auth { action }) => {

@@ -313,7 +313,10 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     // the install to the fresh-clone path deliberately keeps it out of ALREADY
     // PROVISIONED bases: those are shared by concurrent live sessions, and
     // changing hook behaviour underneath them is an operator decision, not a
-    // side effect of a session launch.
+    // side effect of a session launch. That decision has a supported path —
+    // `tm doctor`'s `push_guard` check reports an unprotected clone and
+    // `tm repair push-guard` retrofits it — so "not automatic" does not mean
+    // "not reachable".
     crate::core::push_guard::install_and_log(base_path);
     Ok(())
 }
@@ -523,8 +526,17 @@ pub fn create_session_worktree(
 /// Test: `create_session_worktree_sets_pull_upstream_and_worktree_scoped_push`
 /// and `push_pin_detection_matches_effective_config` (real temp git repos with
 /// a bare `origin` remote).
-/// Is a bare `git push` from `worktree_path` provably confined to the current
+/// Does the effective `push.default` say a bare `git push` targets the current
 /// branch?
+///
+/// Note the deliberately narrow claim: this reports on `push.default` only. It
+/// is NOT a proof that no push can leave the current branch. A configured
+/// `remote.<name>.push` refspec bypasses `push.default` entirely, and the gate
+/// is equally satisfied by a GLOBAL `push.default = current` that trusty-mpm
+/// does not own and the user may change later, re-arming an upstream already
+/// written under it. The `pre-push` guard (`crate::core::push_guard`) is the
+/// backstop for both; this check only decides whether writing a foreign
+/// upstream is defensible in the first place.
 ///
 /// Why: this is the precondition for [`configure_session_branch_tracking`] to
 /// be allowed to write a FOREIGN upstream (#2867). Checking the exit status of

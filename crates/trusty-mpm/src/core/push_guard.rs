@@ -15,8 +15,11 @@
 //! `git worktree add` worktrees alike, and stays shared when
 //! `extensions.worktreeConfig` is enabled — so ONE file covers every worktree
 //! of a base clone with no config change at all. Installation is refused
-//! (never forced) when a foreign `pre-push` hook or a `core.hooksPath`
-//! redirect is already in place, so this never fights husky/lefthook/pre-commit.
+//! (never forced) when a `core.hooksPath` redirect is set, or when an existing
+//! `pre-push` is anything other than provably ours — a foreign hook, a symlink,
+//! or a file that cannot be read at all (non-UTF-8 bytes, a permissions error).
+//! So this never fights husky/lefthook/pre-commit. The write is atomic
+//! (temp + `rename`) because the file is shared by every worktree of the base.
 //! Test: `core::push_guard` unit tests below plus the real-git integration
 //! test `crates/trusty-mpm/tests/push_guard_hook.rs`.
 
@@ -98,44 +101,153 @@ pub fn effective_hooks_dir(repo_path: &Path) -> Result<PathBuf, String> {
     Ok(PathBuf::from(common).join("hooks"))
 }
 
+/// What a repository's `pre-push` slot currently holds — read-only.
+///
+/// Why: `tm doctor` must be able to REPORT whether a base clone is protected
+/// without mutating it (doctor is warn-only by convention), and
+/// [`install_pre_push_guard`] must make exactly the same ownership judgement.
+/// Two implementations of "is this hook ours?" would drift, and a drift here
+/// means either a false all-clear or a clobbered foreign hook.
+/// What: one variant per state the installer branches on. `Missing` and the
+/// two owned variants carry the resolved hook path; `Foreign` carries the
+/// human-readable reason the slot is not ours to touch.
+/// Test: `inspect_reports_missing_then_current`, `refuses_foreign_hook`,
+/// `refuses_non_utf8_foreign_hook`, `refuses_symlinked_hook`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardState {
+    /// No `pre-push` hook exists; the path is where one would be written.
+    Missing(PathBuf),
+    /// Our guard is present and byte-identical to [`PRE_PUSH_HOOK`].
+    Current(PathBuf),
+    /// Our guard is present but an older revision; a reinstall would upgrade it.
+    Outdated(PathBuf),
+    /// The slot belongs to somebody else, or cannot be inspected at all.
+    Foreign(String),
+}
+
+/// Classify `repo_path`'s `pre-push` slot without writing anything.
+///
+/// Why: the read-only half of the installer, so doctor and the installer share
+/// one ownership judgement (see [`GuardState`]).
+/// What: resolves the effective hooks dir, then classifies. A symlink is
+/// [`GuardState::Foreign`] — `fs::write` follows symlinks and would rewrite
+/// another manager's own file. Bytes are read as bytes, never as a `String`: a
+/// foreign hook may legitimately not be UTF-8 (a compiled hook, latin-1 in a
+/// comment), and only `ErrorKind::NotFound` means "absent". Every other read or
+/// stat error is [`GuardState::Foreign`] — a file you cannot inspect is a file
+/// you must not overwrite.
+/// Test: `inspect_reports_missing_then_current`, `refuses_non_utf8_foreign_hook`,
+/// `refuses_symlinked_hook`, `refuses_unreadable_hook`.
+pub fn inspect_pre_push_guard(repo_path: &Path) -> GuardState {
+    let hooks_dir = match effective_hooks_dir(repo_path) {
+        Ok(d) => d,
+        Err(reason) => return GuardState::Foreign(reason),
+    };
+    let hook_path = hooks_dir.join("pre-push");
+
+    match std::fs::symlink_metadata(&hook_path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return GuardState::Foreign(format!(
+                "{} is a symlink; another hook manager owns it",
+                hook_path.display()
+            ));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return GuardState::Missing(hook_path);
+        }
+        Err(e) => {
+            return GuardState::Foreign(format!("cannot stat {}: {e}", hook_path.display()));
+        }
+    }
+
+    match std::fs::read(&hook_path) {
+        Ok(bytes) if !contains_marker(&bytes) => GuardState::Foreign(format!(
+            "a non-trusty-mpm pre-push hook already exists at {}",
+            hook_path.display()
+        )),
+        Ok(bytes) if bytes == PRE_PUSH_HOOK.as_bytes() => GuardState::Current(hook_path),
+        Ok(_) => GuardState::Outdated(hook_path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => GuardState::Missing(hook_path),
+        Err(e) => GuardState::Foreign(format!(
+            "cannot read existing {} ({e}); refusing to overwrite a hook that cannot be inspected",
+            hook_path.display()
+        )),
+    }
+}
+
 /// Install the bundled cross-branch push guard into `repo_path`, idempotently.
 ///
 /// Why: see the module docs — this is the only #2867 mitigation that fires for
 /// a push issued by a process trusty-mpm did not create.
-/// What: resolves the effective hooks directory via [`effective_hooks_dir`],
-/// then writes [`PRE_PUSH_HOOK`] to `<hooks>/pre-push` with mode `0o755`.
-/// Refuses (returns [`HookInstall::Refused`], never an `Err`, and never
-/// overwrites) when a `pre-push` hook exists that does not carry
-/// [`HOOK_MARKER`]. Returns `Err` only for genuine I/O or git failures.
-/// Repeated calls are safe: an identical hook yields
-/// [`HookInstall::AlreadyCurrent`] with no write.
+/// What: classifies the slot with [`inspect_pre_push_guard`], then writes
+/// [`PRE_PUSH_HOOK`] with mode `0o755` only for [`GuardState::Missing`] and
+/// [`GuardState::Outdated`]. [`GuardState::Foreign`] becomes
+/// [`HookInstall::Refused`] — never an `Err`, and never an overwrite. Returns
+/// `Err` only for genuine write-side I/O failures. Repeated calls are safe.
+/// The write is atomic — temp file, chmod, `rename` — because this one file is
+/// shared by every worktree of a base clone and a half-written shell script
+/// exits non-zero, which git's hook contract reads as "refuse every push".
 /// Test: `installs_then_reports_already_current`, `refuses_foreign_hook`,
-/// plus `crates/trusty-mpm/tests/push_guard_hook.rs` end-to-end.
+/// `refuses_non_utf8_foreign_hook`, `refuses_symlinked_hook`, plus
+/// `crates/trusty-mpm/tests/push_guard_hook.rs` end-to-end.
 pub fn install_pre_push_guard(repo_path: &Path) -> Result<HookInstall, String> {
-    let hooks_dir = match effective_hooks_dir(repo_path) {
-        Ok(d) => d,
-        Err(reason) => return Ok(HookInstall::Refused(reason)),
+    let hook_path = match inspect_pre_push_guard(repo_path) {
+        GuardState::Current(p) => return Ok(HookInstall::AlreadyCurrent(p)),
+        GuardState::Foreign(reason) => return Ok(HookInstall::Refused(reason)),
+        GuardState::Missing(p) | GuardState::Outdated(p) => p,
     };
-    let hook_path = hooks_dir.join("pre-push");
-
-    if let Ok(existing) = std::fs::read_to_string(&hook_path) {
-        if !existing.contains(HOOK_MARKER) {
-            return Ok(HookInstall::Refused(format!(
-                "a non-trusty-mpm pre-push hook already exists at {}",
-                hook_path.display()
-            )));
-        }
-        if existing == PRE_PUSH_HOOK {
-            return Ok(HookInstall::AlreadyCurrent(hook_path));
-        }
-    }
+    let hooks_dir = hook_path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", hook_path.display()))?
+        .to_path_buf();
 
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| format!("failed to create {}: {e}", hooks_dir.display()))?;
-    std::fs::write(&hook_path, PRE_PUSH_HOOK)
-        .map_err(|e| format!("failed to write {}: {e}", hook_path.display()))?;
-    set_executable(&hook_path)?;
+    write_hook_atomically(&hooks_dir, &hook_path)?;
     Ok(HookInstall::Installed(hook_path))
+}
+
+/// Does `bytes` carry [`HOOK_MARKER`] anywhere in it?
+///
+/// Why: the ownership test must work on a hook that is not valid UTF-8, so it
+/// cannot go through `str::contains`.
+/// What: a byte-level substring search for the marker.
+/// Test: `refuses_non_utf8_foreign_hook`, `reinstalls_over_an_older_trusty_mpm_revision`.
+fn contains_marker(bytes: &[u8]) -> bool {
+    let needle = HOOK_MARKER.as_bytes();
+    bytes.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Write [`PRE_PUSH_HOOK`] to `hook_path` without ever exposing a partial file.
+///
+/// Why: `hooks_dir` is `$GIT_COMMON_DIR/hooks`, shared by every worktree of the
+/// base clone — on this repo, ~95 of them. An in-place `fs::write` truncates
+/// first, so a concurrent `git push` can exec a truncated script; `sh` exits
+/// non-zero and git's pre-push contract reads that as REFUSE, turning a partial
+/// write into a fleet-wide push outage. `rename(2)` is atomic within a
+/// filesystem and leaves an already-exec'ing shell reading the old inode.
+/// What: writes `pre-push.tmp.<pid>` beside the target, chmods it 0o755, then
+/// renames it over `hook_path`. The temp file is removed on any failure.
+/// Test: `installs_then_reports_already_current` (mode + content survive the
+/// rename), `atomic_write_leaves_no_temp_file_behind`.
+fn write_hook_atomically(hooks_dir: &Path, hook_path: &Path) -> Result<(), String> {
+    let tmp_path = hooks_dir.join(format!("pre-push.tmp.{}", std::process::id()));
+    let cleanup = |e: String| {
+        let _ = std::fs::remove_file(&tmp_path);
+        e
+    };
+    std::fs::write(&tmp_path, PRE_PUSH_HOOK)
+        .map_err(|e| cleanup(format!("failed to write {}: {e}", tmp_path.display())))?;
+    set_executable(&tmp_path).map_err(cleanup)?;
+    std::fs::rename(&tmp_path, hook_path).map_err(|e| {
+        cleanup(format!(
+            "failed to rename {} onto {}: {e}",
+            tmp_path.display(),
+            hook_path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 /// Best-effort [`install_pre_push_guard`] that logs its outcome and never fails.
@@ -368,6 +480,162 @@ mod tests {
             std::fs::read_to_string(hooks.join("pre-push")).expect("read"),
             foreign,
             "a foreign hook must never be overwritten"
+        );
+    }
+
+    /// A foreign hook that is not valid UTF-8 must be refused, not clobbered.
+    ///
+    /// Before the fix `read_to_string` returned `Err(InvalidData)` for these
+    /// bytes and every `Err` fell through to an unconditional `fs::write`,
+    /// destroying the file. Compiled hooks and shell hooks carrying latin-1
+    /// bytes in a comment both land here.
+    #[test]
+    fn refuses_non_utf8_foreign_hook() {
+        let Some((_dir, repo)) = temp_repo() else {
+            return;
+        };
+        let hooks = effective_hooks_dir(&repo).expect("hooks dir");
+        std::fs::create_dir_all(&hooks).expect("mkdir hooks");
+        // Built at runtime, not as a `b"…"` literal: the compiler's
+        // `invalid_from_utf8` lint sees through a literal and the assertion
+        // below — which is what makes this test meaningful — would be a
+        // deny-level warning.
+        let mut foreign: Vec<u8> = b"#!/bin/sh\n# lefthook ".to_vec();
+        foreign.extend_from_slice(&[0xff, 0xfe]);
+        foreign.extend_from_slice(b" binary marker\nexit 0\n");
+        assert!(
+            std::str::from_utf8(&foreign).is_err(),
+            "the fixture must genuinely not be UTF-8, or this test proves nothing"
+        );
+        std::fs::write(hooks.join("pre-push"), &foreign).expect("seed foreign hook");
+
+        match install_pre_push_guard(&repo).expect("install must not hard-error") {
+            HookInstall::Refused(reason) => {
+                assert!(reason.contains("non-trusty-mpm"), "got: {reason}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(hooks.join("pre-push")).expect("read"),
+            foreign,
+            "a non-UTF-8 foreign hook must be byte-identical after a refusal"
+        );
+    }
+
+    /// A `pre-push` symlink belongs to whatever manager created it: writing
+    /// through it would rewrite that manager's own file.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_hook() {
+        let Some((_dir, repo)) = temp_repo() else {
+            return;
+        };
+        let hooks = effective_hooks_dir(&repo).expect("hooks dir");
+        std::fs::create_dir_all(&hooks).expect("mkdir hooks");
+        let target = hooks.join("managed-by-someone-else.sh");
+        let target_body = "#!/bin/sh\n# husky\nexit 0\n";
+        std::fs::write(&target, target_body).expect("seed target");
+        std::os::unix::fs::symlink(&target, hooks.join("pre-push")).expect("symlink");
+
+        match install_pre_push_guard(&repo).expect("install must not hard-error") {
+            HookInstall::Refused(reason) => {
+                assert!(reason.contains("symlink"), "got: {reason}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read target"),
+            target_body,
+            "the symlink target must never be written through"
+        );
+    }
+
+    /// An unreadable existing hook must be refused, never overwritten: the
+    /// installer cannot tell whose it is, so it must not touch it.
+    #[cfg(unix)]
+    #[test]
+    fn refuses_unreadable_hook() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some((_dir, repo)) = temp_repo() else {
+            return;
+        };
+        let hooks = effective_hooks_dir(&repo).expect("hooks dir");
+        std::fs::create_dir_all(&hooks).expect("mkdir hooks");
+        let hook = hooks.join("pre-push");
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("seed hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        if std::fs::read(&hook).is_ok() {
+            // Mode 0 does not bind for this uid (root, or an exotic
+            // filesystem). Restore and skip rather than assert a lie.
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644))
+                .expect("restore");
+            return;
+        }
+
+        let outcome = install_pre_push_guard(&repo).expect("install must not hard-error");
+        // Restore before asserting so the temp dir can always be cleaned up.
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o644)).expect("restore");
+        match outcome {
+            HookInstall::Refused(reason) => {
+                assert!(reason.contains("cannot read"), "got: {reason}");
+            }
+            other => panic!("expected Refused for an unreadable hook, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&hook).expect("read"),
+            "#!/bin/sh\nexit 0\n",
+            "an unreadable hook must be byte-identical after a refusal"
+        );
+    }
+
+    /// The read-only probe must report the same ownership judgement the
+    /// installer acts on — that shared judgement is what lets `tm doctor`
+    /// report without mutating.
+    #[test]
+    fn inspect_reports_missing_then_current() {
+        let Some((_dir, repo)) = temp_repo() else {
+            return;
+        };
+        match inspect_pre_push_guard(&repo) {
+            GuardState::Missing(p) => assert!(p.ends_with("hooks/pre-push"), "{}", p.display()),
+            other => panic!("a fresh repo must report Missing, got {other:?}"),
+        }
+        install_pre_push_guard(&repo).expect("install");
+        match inspect_pre_push_guard(&repo) {
+            GuardState::Current(_) => {}
+            other => panic!("after install the probe must report Current, got {other:?}"),
+        }
+
+        // An older revision must read as Outdated, not Current or Foreign.
+        let hooks = effective_hooks_dir(&repo).expect("hooks dir");
+        std::fs::write(
+            hooks.join("pre-push"),
+            "#!/bin/sh\n# trusty-mpm-push-guard: v0\nexit 0\n",
+        )
+        .expect("downgrade hook");
+        match inspect_pre_push_guard(&repo) {
+            GuardState::Outdated(_) => {}
+            other => panic!("an older revision must report Outdated, got {other:?}"),
+        }
+    }
+
+    /// The atomic write must not leave its temp file in the shared hooks dir.
+    #[test]
+    fn atomic_write_leaves_no_temp_file_behind() {
+        let Some((_dir, repo)) = temp_repo() else {
+            return;
+        };
+        install_pre_push_guard(&repo).expect("install");
+        let hooks = effective_hooks_dir(&repo).expect("hooks dir");
+        let leftovers: Vec<_> = std::fs::read_dir(&hooks)
+            .expect("read hooks dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("pre-push.tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the atomic write must clean up after itself, found: {leftovers:?}"
         );
     }
 }

@@ -190,7 +190,7 @@ async fn register_project_succeeds() {
 
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
-    // `/doctor` returns a twenty-one-check report against a live daemon.
+    // `/doctor` returns a twenty-two-check report against a live daemon.
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
@@ -210,7 +210,7 @@ async fn execute_doctor_against_test_daemon() {
             // bringing the total to 20; issue #3427 added scaffold_tracking,
             // bringing the total to 21. #1905's stale-skill cleanup is a
             // one-time migration, not a probe here.
-            assert_eq!(report.checks.len(), 21);
+            assert_eq!(report.checks.len(), 22);
         }
         other => panic!("expected Doctor, got {other:?}"),
     }

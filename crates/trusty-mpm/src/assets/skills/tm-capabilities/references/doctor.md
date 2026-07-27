@@ -2,7 +2,7 @@
 
 Generated from a maintained literal list cross-checked against `run_doctor`'s actual check names (see this module's `doctor_checks_match_run_doctor_names` test — an added, removed, or renamed check fails the test suite). Source: `crates/trusty-mpm/src/daemon/doctor.rs` and its five sibling `doctor_*.rs` files. Regenerate with `tm generate capabilities`.
 
-21 checks, in execution order.
+22 checks, in execution order.
 
 | # | Check | What it probes |
 |---|---|---|
@@ -27,3 +27,4 @@ Generated from a maintained literal list cross-checked against `run_doctor`'s ac
 | 19 | `hooks_foreign_conflict` | Informational: warns when a project's `.claude/settings*.json` carries foreign (claude-mpm) hook entries that would fire inside a tm session — never auto-removed (issue #2940). |
 | 20 | `tcc_taint` | macOS: whether managed panes spawn `claude` with TCC responsibility disclaimed so its data-access prompts aren't attributed to the shared tmux server (issue #2997). |
 | 21 | `scaffold_tracking` | Warns when a harness-scaffolding path (`.claude/agents/`, `.claude/skills/`, `.claude/output-styles/`) is BOTH tracked in git AND regenerated locally by tm — the precondition for a `git merge --ff-only` "would be overwritten" collision; reports the exact true-intersection paths, never auto-modifies the index (issue #3427). |
+| 22 | `push_guard` | Warns when the project's clone carries no trusty-mpm cross-branch `pre-push` guard, or an older revision of it — the guard installs itself only on the clone path, so a base provisioned before it shipped is silently unprotected and a worktree tracking a foreign branch can force-push over that branch's reviewed lineage. Names the `tm repair push-guard` retrofit; doctor never writes into a repository (issue #2867). |
