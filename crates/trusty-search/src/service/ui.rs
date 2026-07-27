@@ -310,6 +310,9 @@ pub async fn chat_handler(
             // No tools wired up for trusty-search yet — model shouldn't call
             // any since `tools` is empty, but if it does we ignore the call.
             ChatEvent::ToolCall(_) => {}
+            // #3767: no usage-accounting consumer wired up here yet; ignore
+            // rather than let the match go non-exhaustive.
+            ChatEvent::Usage(_) => {}
             ChatEvent::Done => {}
             ChatEvent::Error(e) => stream_error = Some(e),
         }

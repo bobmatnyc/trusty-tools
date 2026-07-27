@@ -15,7 +15,7 @@
 mod core;
 mod overseer;
 mod resources;
-mod sessions;
+pub(crate) mod sessions;
 mod sm;
 
 #[cfg(test)]
@@ -24,3 +24,4 @@ mod tests;
 pub use core::{
     DaemonState, EVENT_CHANNEL_CAPACITY, HOOK_HISTORY_LIMIT, PAIR_CODE_TTL, ReapResult,
 };
+pub use sessions::DelegationSweep;

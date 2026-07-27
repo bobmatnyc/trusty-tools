@@ -17,6 +17,41 @@ use super::base_lock::{LOCK_STALE_AFTER, lock_is_stale};
 use super::*;
 use tempfile::TempDir;
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `core::standalone::load::tests::HomeGuard` and
+/// `session_launch::tests::EnvVarGuard`.
+///
+/// Why (#3965): `WorkspaceProvisioner::provision`/`provision_in` call
+/// `core::home_trust_seed::preseed_home_trust` UNCONDITIONALLY — even under
+/// `without_prepare()` ("must not touch the shared `~/.claude/` tree", per the
+/// comment on `make_provisioner` below) — because that seed is independent of
+/// the full agent/skill deploy step. It resolves `~/.claude.json` from the
+/// REAL process `$HOME`, not from `workspace_root`, so every test using
+/// `make_provisioner`/`.provision(...)` must pin `$HOME` to its own hermetic
+/// root or it writes into the operator's real `~/.claude.json`. Pairs with
+/// `#[serial_test::serial]`.
+/// Test: used by every `.provision(...)`-driving test in this file.
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
+/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
+fn set_home(home: &std::path::Path) -> HomeGuard {
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home) };
+    HomeGuard(prior)
+}
+
 fn make_provisioner(root: &TempDir) -> WorkspaceProvisioner<FakeGitBackend> {
     // Skip the global `prepare_session` deploy: these tests verify path
     // isolation only and must not touch the shared `~/.claude/` tree.
@@ -37,8 +72,10 @@ fn repo_slug_extraction() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_isolation_path() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -53,10 +90,12 @@ fn provisioner_isolation_path() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_path_not_in_existing_project() {
     // The workspace must NOT be inside any real project dir.
     // We simulate this by checking the path is inside workspace_root (a tempdir).
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -71,8 +110,10 @@ fn provisioner_path_not_in_existing_project() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_uses_session_id_subdir() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -86,11 +127,13 @@ fn provisioner_uses_session_id_subdir() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provision_in_uses_explicit_project_dir() {
     // The #1220 path: caller supplies a pre-resolved `<owner>/<repo>` project
     // dir. #1935: the session worktree nests under the project dir's shared
     // `.base/.worktrees/<session-id>/`, not directly under the project dir.
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
     let project_dir = root.path().join("bobmatnyc").join("trusty-tools");
@@ -131,8 +174,10 @@ fn provision_in_uses_explicit_project_dir() {
 /// worktree paths sharing the same `.base/` parent.
 /// Test: this function IS the test.
 #[test]
+#[serial_test::serial]
 fn provision_reuses_base_checkout_across_sessions() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let project_dir = root.path().join("owner").join("repo");
 
@@ -170,8 +215,10 @@ fn provision_reuses_base_checkout_across_sessions() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provisioner_records_repo_url_and_branch() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 
@@ -205,8 +252,10 @@ fn provisioner_records_repo_url_and_branch() {
 /// REQUESTED ref verbatim.
 /// Test: this is the test.
 #[test]
+#[serial_test::serial]
 fn blank_git_ref_omits_branch_flag() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     // Use FakeGitBackend via make_provisioner so we can read its call log.
     // make_provisioner returns a provisioner whose backend is a FakeGitBackend
     // but we cannot access it post-move. We build explicitly here so we can
@@ -242,8 +291,10 @@ fn blank_git_ref_omits_branch_flag() {
 /// contains exactly the task string.
 /// Test: this is the test.
 #[test]
+#[serial_test::serial]
 fn provision_writes_task_md() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
     let task = "Fix the authentication bug in the login flow";
@@ -266,8 +317,10 @@ fn provision_writes_task_md() {
 /// What: provisions with an empty task string and asserts TASK.md is absent.
 /// Test: this is the test.
 #[test]
+#[serial_test::serial]
 fn provision_skips_task_md_when_empty() {
     let root = crate::test_support::hermetic_temp_dir();
+    let _home = set_home(root.path());
     let prov = make_provisioner(&root);
     let id = ManagedSessionId::new();
 

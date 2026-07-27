@@ -276,12 +276,11 @@ async fn explicit_require_skips_even_interactive_surface() {
 
 // ── Degraded-but-serving (#3693) ───────────────────────────────────────────────
 
-/// Search stub whose `/health` reports a fixed `status` + `warmboot_summary`
-/// pair, independent of the `Some(bool)`/`None` shape `StubSearch` uses —
-/// needed to exercise the `"degraded"` status with an explicit
-/// `warm_boot_degraded` value (#3693).
+/// Search stub whose `/health` reports `status: "degraded"` with a caller-chosen
+/// warm-boot summary, independent of the `Some(bool)`/`None` shape `StubSearch`
+/// uses (#3693, #4079).
 struct DegradedSearch {
-    warm_boot_degraded: bool,
+    summary: crate::integrations::health::WarmBootSummary,
 }
 
 #[async_trait]
@@ -290,9 +289,7 @@ impl SearchClient for DegradedSearch {
         Ok(HealthResponse {
             status: "degraded".to_string(),
             embedder: EmbedderState::Bool(true),
-            warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
-                warm_boot_degraded: self.warm_boot_degraded,
-            }),
+            warmboot_summary: Some(self.summary.clone()),
         })
     }
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
@@ -329,35 +326,99 @@ async fn degraded_but_serving_proceeds() {
     let cfg = config(); // defaults: require_search=true
     let d = deps_with_search(
         Arc::new(DegradedSearch {
-            warm_boot_degraded: false,
+            summary: Default::default(),
         }),
         true,
     );
     assert_eq!(
         preflight_context(&cfg, &d, InvocationSurface::Hosted).await,
         GateOutcome::Proceed,
-        "degraded-but-serving (benign watcher disable) must proceed, not skip (#3693)"
+        "degraded-but-serving (benign watcher disable) must proceed cleanly — a clean warm boot \
+         behind a 'degraded' status affects nothing a reviewer can act on (#3693)"
     );
 }
 
-/// A genuinely broken trusty-search (`warm_boot_degraded == true` — TCC
-/// denial, scan timeout, corpus-open failure, or mass index loss) reporting
-/// `status: "degraded"` must still fail-closed under the default
-/// `require_search=true`.
+/// REGRESSION (#4079): a trusty-search with a real warm-boot gap must produce a
+/// LABELLED review, not a blanket skip and not a clean-looking verdict.
+///
+/// Why: this is the live payload that broke — 11 indexes skipped on a scan
+/// timeout and 3 with a failed corpus, on a daemon that was up and answering.
+/// The pre-fix gate hard-skipped every review on the host over it; the failure
+/// mode being avoided in the other direction is a verdict that looks complete.
+/// Proceed-and-label is the only outcome that is neither, and the reason must
+/// name the silent failure mode by hand so a reader can act on it.
+/// Test: this test itself.
 #[tokio::test]
-async fn degraded_not_serving_skips() {
-    let cfg = config();
+async fn degraded_warm_boot_gap_labels_review_instead_of_skipping() {
+    let cfg = config(); // defaults: require_search=true
     let d = deps_with_search(
         Arc::new(DegradedSearch {
-            warm_boot_degraded: true,
+            summary: crate::integrations::health::WarmBootSummary {
+                indexes_loaded: 20,
+                indexes_skipped_timeout: 11,
+                indexes_corpus_failed: 3,
+                warm_boot_degraded: true,
+                ..Default::default()
+            },
         }),
         true,
     );
     match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
-        GateOutcome::Skip(msg) => assert!(msg.contains("trusty-search"), "msg: {msg}"),
-        other => {
-            panic!("genuinely broken (warm_boot_degraded=true) search must Skip, got {other:?}")
+        GateOutcome::Degraded(reason) => {
+            assert!(
+                reason.contains("failed to open their corpus"),
+                "the degraded reason must name the SILENT failure mode; got: {reason}"
+            );
+            assert!(
+                reason.contains("trusty-search at"),
+                "the reason must say which daemon it is about; got: {reason}"
+            );
         }
+        other => panic!(
+            "a serving-but-degraded search must produce a labelled review, not {other:?} (#4079)"
+        ),
+    }
+}
+
+/// A trusty-search that cannot serve at all (embedder not ready) must STILL
+/// fail-closed under the default `require_search=true`.
+///
+/// Why: #4079 relaxes the warm-boot gap, and the risk of that change is
+/// relaxing the genuine outage too. Without an embedder there is no semantic
+/// code context to be had, so there is nothing to label — the review must not
+/// run. This test is the guard on that boundary.
+/// Test: this test itself.
+#[tokio::test]
+async fn not_serving_search_still_skips() {
+    struct EmbedderDownSearch;
+
+    #[async_trait]
+    impl SearchClient for EmbedderDownSearch {
+        async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+            Ok(HealthResponse {
+                status: "ok".to_string(),
+                embedder: EmbedderState::Str("loading".to_string()),
+                warmboot_summary: None,
+            })
+        }
+        async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+            Ok(vec![])
+        }
+        async fn search(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<u32>,
+        ) -> Result<Vec<SearchResult>, SearchClientError> {
+            Ok(vec![])
+        }
+    }
+
+    let cfg = config();
+    let d = deps_with_search(Arc::new(EmbedderDownSearch), true);
+    match preflight_context(&cfg, &d, InvocationSurface::Hosted).await {
+        GateOutcome::Skip(msg) => assert!(msg.contains("trusty-search"), "msg: {msg}"),
+        other => panic!("a search that cannot serve at all must Skip, got {other:?}"),
     }
 }
 

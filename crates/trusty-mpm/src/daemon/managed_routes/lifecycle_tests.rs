@@ -18,6 +18,40 @@
 
 use super::*;
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `core::session_launch::tests::EnvVarGuard`,
+/// `core::standalone::load::tests::HomeGuard`, and
+/// `provisioner::workspace::tests::HomeGuard` (not reachable from here — each
+/// module needs its own copy, see those sites' docs for why `pub(super)`
+/// visibility can't be shared across sibling module trees).
+///
+/// Why (#3965): `prepare_inproject_session` calls
+/// `session_launch::prepare_session_with_repo_url`, which seeds
+/// `$HOME/.claude.json` via the REAL process `$HOME`, not via the `fw`
+/// parameter. Pairs with `#[serial_test::serial]`.
+/// Test: used by `prepare_inproject_session_writes_statusline` and
+/// `prepare_inproject_session_emits_stage_events_in_order`.
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
+/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
+fn set_home(home: &std::path::Path) -> HomeGuard {
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home) };
+    HomeGuard(prior)
+}
+
 /// Minimal `ManagedTmuxDriver` test double scoped to this module.
 ///
 /// Why (issue #1931): [`find_reusable_inproject_session`] only needs
@@ -222,8 +256,11 @@ fn reconnect_candidate_reconnects_when_not_forced() {
 /// this file).
 /// Test: this function IS the test.
 #[test]
+#[serial_test::serial]
 fn prepare_inproject_session_writes_statusline() {
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(tmp_home.path());
     let worktree = tempfile::TempDir::new().expect("tmp worktree");
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     let session_id = ManagedSessionId::new();
@@ -277,10 +314,13 @@ fn prepare_inproject_session_writes_statusline() {
 /// #1919 moved the `StageEmitter` scope up to cover the in-project branch.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn prepare_inproject_session_emits_stage_events_in_order() {
     use crate::core::provisioning_stage::{ProvisioningStage, StageEmitter, scoped};
 
     let tmp_home = tempfile::TempDir::new().expect("tmp home");
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(tmp_home.path());
     let worktree = tempfile::TempDir::new().expect("tmp worktree");
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
     let session_id = ManagedSessionId::new();
@@ -591,8 +631,16 @@ fn warn_if_no_persona_carrier_does_not_panic_when_neither_carrier_present() {
 /// Test: itself. Unix-only (permission bits).
 #[cfg(unix)]
 #[test]
+#[serial_test::serial]
 fn ensure_deployment_complete_does_not_abort_when_no_carrier_reachable() {
     use std::os::unix::fs::PermissionsExt;
+
+    // #3965: the workspace being incomplete means `ensure_deployment_complete`
+    // falls through to `validate_and_repair` -> `prepare_session_with_repo_url`,
+    // which seeds `$HOME/.claude.json` via the REAL process `$HOME` — `#[serial]`
+    // + this override keep it off the operator's real file. See `HomeGuard` above.
+    let fake_home = tempfile::tempdir().unwrap();
+    let _home = set_home(fake_home.path());
 
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("workspace");

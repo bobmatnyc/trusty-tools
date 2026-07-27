@@ -13,10 +13,12 @@
 //! records the failure in [`super::PrepReport::roster_errors`].
 //! Test: this is the test module.
 
+use super::tests::EnvVarGuard;
 use super::*;
 use tempfile::tempdir;
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_continues_after_agent_deploy_failure() {
     // Issue #2149: a corrupt agent manifest at the deploy TARGET must not
     // abort the rest of preparation — the trusty-mpm identity carrier (the
@@ -25,7 +27,12 @@ fn prepare_session_continues_after_agent_deploy_failure() {
     // its agent roster is empty or broken. Before this fix, `?` on
     // `deploy_agents_filtered` short-circuited `prepare_session_inner` before
     // ever reaching the output-style write below it.
+    // #3965: `prepare_session_inner` seeds `$HOME/.claude.json` via the REAL
+    // process `$HOME`, not `fw` — `#[serial]` + the override below keep this
+    // test off the operator's real file and off every sibling test doing the
+    // same (see `session_launch::tests::prepare_session_writes_claude_md_and_stash`).
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
@@ -76,12 +83,16 @@ fn prepare_session_continues_after_agent_deploy_failure() {
 }
 
 #[test]
+#[serial_test::serial]
 fn prepare_session_continues_after_skill_deploy_failure() {
     // Issue #2149: mirrors
     // `prepare_session_continues_after_agent_deploy_failure` for the skill
     // side — a broken skill-deploy TARGET must not abort identity
     // provisioning either.
+    // #3965: `#[serial]` + `$HOME` override — see
+    // `prepare_session_continues_after_agent_deploy_failure` above.
     let tmp_home = tempdir().unwrap();
+    let _home = EnvVarGuard::set("HOME", tmp_home.path());
     let tmp = tempdir().unwrap();
     let project = tmp.path();
     let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());

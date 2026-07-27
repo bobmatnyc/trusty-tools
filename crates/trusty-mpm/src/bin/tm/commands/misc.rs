@@ -664,23 +664,13 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_default();
-    let mut payload = serde_json::json!({ "cwd": cwd });
-    // #2610: forward the idle-parking signal in the structured hook payload so
-    // the daemon can surface it (dashboard / errors feed) and a future pass can
-    // auto-nudge. Additive fields — harmless to existing hook_service consumers.
-    if let Some(phrase) = idle_parking {
-        payload["idle_parking"] = serde_json::Value::Bool(true);
-        payload["idle_parking_phrase"] = serde_json::Value::String(phrase.to_string());
-    }
-    // #1956: enrich the observability payload with tool/input when present —
-    // the daemon's hook_service already reads `payload["tool"]`/`["input"]`
-    // (see `daemon::services::hook_service::OverseerContext` construction).
-    if let Some(name) = tool_name {
-        payload["tool"] = serde_json::Value::String(name.to_string());
-    }
-    if let Some(input) = tool_input {
-        payload["input"] = input.clone();
-    }
+    // #2610 (idle-parking flags), #1956 (tool/input), #2864 (subagent
+    // correlation keys: tool_use_id / agent_id / transcript paths). Built by
+    // `commands::hook_payload` — a pure, unit-tested function that performs no
+    // I/O and never writes to stdout, so the PreToolUse stdout-purity contract
+    // documented above is preserved.
+    let payload =
+        super::hook_payload::build_hook_payload(&cwd, stdin_payload.as_ref(), idle_parking);
     let body = serde_json::json!({
         "session_id": session_id,
         "event": event,

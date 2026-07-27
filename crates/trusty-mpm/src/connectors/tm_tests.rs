@@ -43,6 +43,34 @@ use trusty_agents_common::connectors::{
 
 use super::*;
 
+/// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+/// identical pattern in `core::session_launch::tests::EnvVarGuard` and
+/// siblings (each module needs its own copy; `pub(super)`/module-private
+/// visibility does not cross sibling module trees).
+///
+/// Why (#3450 follow-up, #3965): see the comment at its one call site in
+/// [`create_session_full_lifecycle`].
+struct HomeGuard(Option<String>);
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: paired with `#[serial_test::serial]` — no other thread
+        // reads/writes the environment concurrently.
+        match self.0 {
+            Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at `home` for the duration of the caller's scope. Callers
+/// MUST be `#[serial_test::serial]` — see [`HomeGuard`].
+fn set_home(home: &std::path::Path) -> HomeGuard {
+    let prior = std::env::var("HOME").ok();
+    // SAFETY: serialized via `#[serial_test::serial]`.
+    unsafe { std::env::set_var("HOME", home) };
+    HomeGuard(prior)
+}
+
 /// Spawn the daemon's real HTTP API on a random loopback port (empty fleet,
 /// tmux faked). Mirrors `client::proxy::tests::spawn_test_daemon`, but —
 /// unlike that helper — serves with `into_make_service_with_connect_info`
@@ -261,6 +289,17 @@ async fn create_session_full_lifecycle() {
             _daemon_root.path(),
         );
     }
+
+    // #3965: the REAL `spawn_managed_cloned` handler this test drives also
+    // calls `session_launch::prepare_session_with_repo_url` /
+    // `home_trust_seed::preseed_home_trust`, which seed `$HOME/.claude.json`
+    // via the REAL process `$HOME` — a DIFFERENT resolution path from the
+    // `TRUSTY_MPM_WORKSPACE_ROOT` override above, so pinning that alone still
+    // let this test write real trust entries (keyed by the laundered
+    // `.../origin/.base/...` workspace path, see the comment above) into the
+    // operator's `~/.claude.json`. `#[serial]` (already present, for
+    // `TRUSTY_MPM_WORKSPACE_ROOT`) + this override close that second gap.
+    let _home_guard = set_home(_daemon_root.path());
 
     let req = CreateSessionReq {
         task: "list files".into(),

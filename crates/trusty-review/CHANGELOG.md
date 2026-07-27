@@ -9,6 +9,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **A live trusty-search was reported as `"unreachable"`, and a degraded verdict
+  was indistinguishable from a complete one** (closes
+  [#4086](https://github.com/bobmatnyc/trusty-tools/issues/4086)).
+  - **`reachable` now means the transport worked, nothing more.** `probe_deps`
+    published one boolean as both `reachable` and `state`, so a trusty-search
+    that was up, embedder-ready, and answering queries was reported as
+    `reachable: false, state: "unreachable"` whenever its warm boot had left any
+    index behind. Since trusty-search #3706 folded the whole
+    `warm_boot_degraded` aggregate into the top-level `status`, one unrelated
+    repo's index failing to load on the host was enough to trigger it — and
+    "unreachable" sends an operator hunting a process that is running.
+    `HealthResponse::serving_state()` now returns
+    `Serving`/`Degraded(reason)`/`NotServing(reason)` by reading the individual
+    warm-boot counters instead of the aggregate flag, a new `DepState::Degraded`
+    carries that middle case, and `reachable` covers `Ok | Degraded`. A new
+    `detail` field on each dep names the gap and its query-time consequence.
+    Top-level `status` still reports `"degraded"` (it gates on `state == Ok`),
+    so the fix corrects the misreport without hiding the gap, and the #3693
+    benign network-mount watcher-disable path is unchanged.
+  - **A degraded review is now detectable from the MCP envelope alone.** A
+    `Degraded` result — a real verdict produced WITHOUT full code context —
+    returned `isError: false` and no envelope marker, so any consumer reading
+    the envelope saw it as identical to a fully-contexted verdict; the caveat
+    lived only inside the serialised text blob and a Markdown banner.
+    `wrap_result` now emits `mcp_status: "degraded_context"` plus
+    `degraded_reason`. `isError` deliberately stays `false` — the review ran and
+    its findings are real. A serving-but-degraded search routes to
+    `GateOutcome::Degraded` (labelled review) rather than a blanket skip, while
+    a search that cannot serve at all still hard-Skips.
+
 - **Reliability cluster: fabricated findings, spec-as-implementation, and
   unsound verdicts** (closes
   [#4042](https://github.com/bobmatnyc/trusty-tools/issues/4042),

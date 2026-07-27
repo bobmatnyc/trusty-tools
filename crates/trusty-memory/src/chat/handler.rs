@@ -323,6 +323,9 @@ pub(crate) async fn chat_handler(
                         tool_calls_this_round.push(tc);
                     }
                     ChatEvent::Done => break,
+                    // #3767: no usage-accounting consumer wired up here yet;
+                    // ignore rather than let the match go non-exhaustive.
+                    ChatEvent::Usage(_) => {}
                     ChatEvent::Error(e) => {
                         stream_err = Some(e);
                         break;
