@@ -512,16 +512,27 @@ pub async fn run_pm_task_with_persona(
                         .map(String::from)
                 })
                 .collect();
-            // #3208: agent-declared `[tools].scopes` enforcement. `tool_scopes`
-            // maps the (few) OpenRPC-registry-discovered tools to their scope
-            // string; `agent_scope_patterns` is this persona's own declared
-            // patterns. Native/in-process tools carry no scope and are
-            // unaffected — see `filter_persona_tool_names`.
+            // #3208: agent-declared scope enforcement. `tool_scopes` maps the
+            // (few) OpenRPC-registry-discovered tools to their scope string;
+            // `agent_scope_patterns` is this persona's own declared patterns.
+            // Native/in-process tools carry no scope and are unaffected — see
+            // `filter_persona_tool_names`.
+            //
+            // #3936: resolved via `agents::permissions::effective_scopes`
+            // rather than reading `persona_cfg.tools.scopes` directly, so
+            // `[permissions].scopes` (DOC-57 §7.2) is honoured with the SAME
+            // CC-9 precedence (`[permissions].scopes` wins over legacy
+            // `[tools].scopes` when a file declares both) the
+            // `/permissions` route reports — the ONE place this precedence
+            // is decided, so the route's `enforced: true` claim for a
+            // `[permissions].scopes`-only agent is never aspirational. Byte-
+            // identical to the pre-#3936 read when `[permissions]` is absent.
             let tool_scopes = registry.tool_scopes();
-            let agent_scope_patterns: Vec<ScopePattern> = persona_cfg
-                .tools
-                .scopes
-                .clone()
+            let agent_scope_patterns: Vec<ScopePattern> =
+                crate::agents::permissions::effective_scopes(
+                    &persona_cfg.tools,
+                    &persona_cfg.permissions,
+                )
                 .unwrap_or_default()
                 .into_iter()
                 .map(ScopePattern::new)

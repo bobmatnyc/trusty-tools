@@ -225,6 +225,8 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         // store is a valid state (see `AgentConfig::stores`).
         stores: crate::stores::StoresConfig::default(),
         skills: crate::agents::SkillsConfig::default(),
+        // #3936: markdown agents carry no `[permissions]` table.
+        permissions: crate::agents::PermissionsConfig::default(),
         // #4026: no cross-product grants from an .md-sourced agent yet.
         subagents: crate::agents::SubagentsConfig::default(),
     })
