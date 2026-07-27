@@ -60,21 +60,32 @@
 //!   session worktrees, treating every non-disposable ignored entry as dirt
 //!   would flag `.claude/` in 30 of 31 and disable reclamation outright, which
 //!   is the failure mode of a guard nobody can run.
-//! - **Anything under a [`DISPOSABLE_DIR_NAMES`] directory**, including a
-//!   nested repository inside `target/` or `node_modules/`.
+//! - **Anything under a disposable build directory** (`target/`,
+//!   `node_modules/`, …), including a nested repository inside one — see
+//!   `super::worktree_nested::DISPOSABLE_DIR_NAMES`.
 //! - **`.git/info/exclude`**, which is per-repo and on-disk and cannot be
 //!   overridden from the command line the way `core.excludesFile` can.
-//! - **`git stash` entries** — the stash is repo-level, not per-worktree.
+//! - **The stash — but only for the CANDIDATE ITSELF, and this distinction
+//!   matters.** A session worktree's stash lives in the shared `.base/.git`
+//!   *outside* the candidate, so it survives removal and is genuinely out of
+//!   scope here. A **self-contained nested clone** is the opposite case: its
+//!   `refs/stash` and reflog sit inside the directory being deleted and die
+//!   with it, so [`super::worktree_nested`] counts them. The earlier blanket
+//!   claim that "the stash is repo-level, not per-worktree" was true of the
+//!   top-level candidate and false of a nested clone — the same conflation
+//!   that produced the round-3 CRITICAL.
 //! - **Symlinked subtrees** — not followed, because `remove_dir_all` deletes
 //!   the link and not its target, so no work is at risk there.
 //! - **A repository nested inside a gitignored subtree OF a nested repository**
 //!   — the scan stops descending at the first `.git` it finds.
+//! - **The bare-branch population, partially.** `count_session_branch_unpushed`
+//!   covers both `session/<leaf>` and the bare `<leaf>` spelling, but see its
+//!   own doc for which of the two `decommission` actually force-deletes today.
 //! - **`DirtyWorktreePolicy::ForceDiscard`**, which destroys all of the above
 //!   by explicit operator opt-in.
 //!
 //! Test: `worktree_safety_tests`.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -106,53 +117,6 @@ const DISPOSABLE_TRUSTY_MPM_FILES: &[&str] = &[
     ".trusty-mpm/scrollback.txt",
     ".trusty-mpm/last-instructions.md",
 ];
-
-/// Directory names whose contents are regenerable build/cache output (#4118).
-///
-/// Why: the nested-repository scan ([`nested_repo_roots`]) has to walk
-/// gitignored subtrees, and those are dominated by exactly two things —
-/// enormous disposable build output, and the occasional nested checkout that
-/// holds real work. Walking `target/` on 95 candidates would cost minutes and
-/// find nothing; skipping it by NAME is the difference between a scan that runs
-/// and one that gets disabled. These names are regenerable by definition: no
-/// tool writes work-of-record into them, and losing them costs only CPU.
-/// What: matched against a directory's own file name at any depth. A nested
-/// repository underneath one of these is NOT seen — see the module-level
-/// residual-risk note.
-/// Test: `inspect_dirt_does_not_scan_disposable_build_dirs`.
-const DISPOSABLE_DIR_NAMES: &[&str] = &[
-    "target",
-    "node_modules",
-    "dist",
-    "build",
-    ".next",
-    ".nuxt",
-    ".svelte-kit",
-    ".turbo",
-    ".parcel-cache",
-    ".cache",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".tox",
-    ".venv",
-    "venv",
-    ".gradle",
-    "coverage",
-    ".terraform",
-];
-
-/// Directory entries the gitignored-subtree scan may visit per candidate.
-///
-/// Why: an unbounded walk of an arbitrary ignored tree is a denial-of-service
-/// against the sweep. Measured against this repo's own 31 session worktrees, a
-/// FULL-tree walk with [`DISPOSABLE_DIR_NAMES`] pruning visited 5.6k entries per
-/// worktree on average; the ignored-only subset is far smaller, so 50k is two
-/// orders of magnitude of headroom.
-/// What: exceeding the budget is an ERROR, which the caller turns into DIRTY —
-/// "I could not finish looking" is never "there is nothing there".
-const IGNORED_SCAN_ENTRY_BUDGET: usize = 50_000;
 
 /// Git global options pinned on EVERY invocation this module makes (#4118).
 ///
@@ -239,15 +203,6 @@ const TRUSTY_MPM_STATUS_ARGS: &[&str] = &[
     TRUSTY_MPM_DIR,
 ];
 
-/// Collapsed listing of gitignored entries, used to bound the nested-repo scan.
-const IGNORED_STATUS_ARGS: &[&str] = &[
-    "status",
-    "--porcelain",
-    "--untracked-files=normal",
-    "--ignored",
-    "--ignore-submodules=none",
-];
-
 /// What the reclaim path does when a candidate holds unsaved work (#4091).
 ///
 /// Why: the default must be impossible to trigger accidentally — an ordinary
@@ -299,7 +254,12 @@ pub struct DirtyWorktree {
 
 impl DirtyWorktree {
     /// Build a skip record for `path` with an explicit reason and counts.
-    fn new(path: &Path, reason: impl Into<String>, dirty_files: usize, unpushed: usize) -> Self {
+    pub(super) fn new(
+        path: &Path,
+        reason: impl Into<String>,
+        dirty_files: usize,
+        unpushed: usize,
+    ) -> Self {
         Self {
             path: path.to_path_buf(),
             reason: reason.into(),
@@ -322,7 +282,8 @@ impl DirtyWorktree {
 ///    `.trusty-mpm/` that is not one of two disposable artefacts;
 /// 2. [`count_unpushed`] finds a commit that is on no remote, on `HEAD` or on
 ///    the `session/<leaf>` branch `remove_session_worktree` force-deletes;
-/// 3. [`nested_dirt`] finds a nested repository holding unsaved work,
+/// 3. [`super::worktree_nested::nested_dirt`] finds a nested repository
+///    holding unsaved work,
 ///    regardless of gitignore;
 /// 4. the directory is not a git worktree ROOT at all and is not empty — see
 ///    [`non_git_dirt`];
@@ -351,7 +312,7 @@ pub(crate) fn inspect_dirt(path: &Path) -> Option<DirtyWorktree> {
 /// registered worktrees at EVERY depth in one flat pass.
 /// What: `scan_nested = false` answers only questions 1, 2 and 4 for `path`.
 /// Test: `inspect_dirt_reports_nested_gitignored_worktree`.
-fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWorktree> {
+pub(super) fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWorktree> {
     match is_worktree_root(path) {
         Ok(true) => {}
         // Not a git worktree root (or git cannot tell us) — fall back to the
@@ -389,7 +350,7 @@ fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWorktree> {
         return Some(DirtyWorktree::new(path, reason, dirty_files, unpushed));
     }
     if scan_nested {
-        return nested_dirt(path);
+        return super::worktree_nested::nested_dirt(path);
     }
     None
 }
@@ -406,7 +367,7 @@ fn inspect_dirt_at(path: &Path, scan_nested: bool) -> Option<DirtyWorktree> {
 /// [`trusty_mpm_dirt`], which sees ignored and untracked content alike.
 /// Test: `inspect_dirt_counts_wip_backup_under_trusty_mpm`,
 /// `inspect_dirt_excludes_own_sentinel`.
-fn count_dirty_files(path: &Path) -> Result<usize, String> {
+pub(super) fn count_dirty_files(path: &Path) -> Result<usize, String> {
     let status = git_stdout(path, STATUS_ARGS)?;
     let mut count = 0usize;
     for line in status.lines() {
@@ -463,8 +424,15 @@ fn is_trusty_mpm_scoped(path: &str) -> bool {
 /// Test: `inspect_dirt_counts_wip_backup_under_trusty_mpm`,
 /// `inspect_dirt_counts_pause_snapshots_under_trusty_mpm`.
 fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
-    if !root.join(TRUSTY_MPM_DIR).exists() {
-        return Ok(0);
+    // NOT `Path::exists()`: that collapses every I/O error to `false`, and
+    // pass 1 has already skipped every `.trusty-mpm/`-scoped entry on the
+    // promise that this pass owns them — so a permission error here would
+    // become CLEAN, inverting the module's own fail-safe invariant.
+    let dir = root.join(TRUSTY_MPM_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("`{}` is unreadable: {e}", dir.display())),
     }
     let out = git_stdout(root, TRUSTY_MPM_STATUS_ARGS)?;
     let mut count = 0usize;
@@ -484,174 +452,6 @@ fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
         count += 1;
     }
     Ok(count)
-}
-
-/// Does a NESTED repository under this candidate hold unsaved work (#4118)?
-///
-/// Why: this is the hole that made the whole guard bypassable. Deleting the
-/// candidate deletes everything inside it, but `git status` on the candidate
-/// says nothing about a nested checkout — `.claude/worktrees/` is gitignored on
-/// this repo's `main` (`.gitignore:40`), so seven registered agent worktrees
-/// inside `.base/.worktrees/2eb72dca-…` produced `dirty_files = 0`. Worse, the
-/// #3649 ownership gate deliberately REFUSES to delete those nested worktrees
-/// directly (no sentinel ⇒ owner-unknown), so the sweep would have honoured
-/// that refusal and then deleted the directory they live in — bypassing its own
-/// guard by removing the parent.
-/// What: every nested root from [`nested_repo_roots`] is put through
-/// [`inspect_dirt_at`] with the nested scan off. A nested root that is dirty OR
-/// unassessable makes the PARENT dirty; one that is provably clean and pushed
-/// does not, so a session that merely once spawned an agent worktree stays
-/// reclaimable. The reported counts are the nested root's own, unmodified.
-/// Test: `inspect_dirt_reports_nested_gitignored_worktree`,
-/// `inspect_dirt_reports_unregistered_nested_repo_in_ignored_dir`,
-/// `inspect_dirt_allows_clean_nested_worktree`.
-fn nested_dirt(candidate: &Path) -> Option<DirtyWorktree> {
-    let roots = match nested_repo_roots(candidate) {
-        Ok(r) => r,
-        Err(e) => {
-            return Some(DirtyWorktree::new(
-                candidate,
-                format!("nested-repository scan failed: {e}"),
-                0,
-                0,
-            ));
-        }
-    };
-    for root in roots {
-        // A clean, pushed nested root does not pin the parent — keep looking.
-        let Some(inner) = inspect_dirt_at(&root, false) else {
-            continue;
-        };
-        let shown = root
-            .strip_prefix(candidate)
-            .unwrap_or(&root)
-            .display()
-            .to_string();
-        return Some(DirtyWorktree::new(
-            candidate,
-            format!(
-                "nested git worktree/repository `{shown}` holds unsaved work \
-                 that `git status` on this directory cannot see: {}",
-                inner.reason
-            ),
-            inner.dirty_files,
-            inner.unpushed_commits,
-        ));
-    }
-    None
-}
-
-/// Enumerate every nested repository root strictly beneath `candidate`.
-///
-/// Why: "does this directory contain a checkout" must be answered EXACTLY, not
-/// heuristically, because the answer decides whether gigabytes get deleted. Two
-/// disjoint populations exist and neither subsumes the other: worktrees
-/// REGISTERED with the enclosing repository (the `.claude/worktrees/…` shape,
-/// free to enumerate — git already knows) and independent clones that git has
-/// never heard of (only findable on disk).
-/// What: the union of (a) `worktree list --porcelain` entries that are strict
-/// descendants of `candidate` — exact, at any depth, and immune to gitignore
-/// because git's own bookkeeping is the source — and (b) a bounded walk of the
-/// gitignored subtrees `git status --ignored` reports, looking for a `.git`
-/// entry. Untracked-but-not-ignored nested repos need no walk at all: they
-/// already surface as `??` lines in [`count_dirty_files`].
-/// Test: `inspect_dirt_reports_nested_gitignored_worktree`,
-/// `inspect_dirt_reports_unregistered_nested_repo_in_ignored_dir`.
-fn nested_repo_roots(candidate: &Path) -> Result<Vec<PathBuf>, String> {
-    let canonical =
-        std::fs::canonicalize(candidate).map_err(|e| format!("candidate is unreadable: {e}"))?;
-    let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
-
-    for line in git_stdout(candidate, &["worktree", "list", "--porcelain"])?.lines() {
-        let Some(raw) = line.strip_prefix("worktree ") else {
-            continue;
-        };
-        let listed = PathBuf::from(raw.trim());
-        let listed = std::fs::canonicalize(&listed).unwrap_or(listed);
-        if listed != canonical && listed.starts_with(&canonical) {
-            roots.insert(listed);
-        }
-    }
-
-    let mut budget = IGNORED_SCAN_ENTRY_BUDGET;
-    for line in git_stdout(candidate, IGNORED_STATUS_ARGS)?.lines() {
-        let Some(raw) = line.strip_prefix("!! ") else {
-            continue;
-        };
-        let entry = raw.trim();
-        if entry.starts_with('"') {
-            return Err(format!(
-                "ignored entry `{entry}` has a quoted path this scan cannot interpret"
-            ));
-        }
-        scan_for_repos(
-            &canonical.join(entry.trim_end_matches('/')),
-            &mut roots,
-            &mut budget,
-        )?;
-    }
-    Ok(roots.into_iter().collect())
-}
-
-/// Walk `root`, collecting directories that contain a `.git` entry.
-///
-/// Why: an unregistered clone inside a gitignored directory is invisible to
-/// every git question asked of the CANDIDATE, so the only way to find it is to
-/// look. Iterative rather than recursive so a pathologically deep tree cannot
-/// overflow the stack, and symlinks are never followed — `remove_dir_all`
-/// deletes a link, not its target, so nothing beyond one is at risk.
-/// What: pushes each directory holding a `.git` entry into `out` and stops
-/// descending there. Skips [`DISPOSABLE_DIR_NAMES`] by name at every level.
-/// Exhausting `budget`, or any unreadable entry, is an `Err` the caller turns
-/// into DIRTY.
-/// Test: `inspect_dirt_reports_unregistered_nested_repo_in_ignored_dir`,
-/// `inspect_dirt_does_not_scan_disposable_build_dirs`.
-fn scan_for_repos(
-    root: &Path,
-    out: &mut BTreeSet<PathBuf>,
-    budget: &mut usize,
-) -> Result<(), String> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        match std::fs::symlink_metadata(&dir) {
-            // A plain file, or a symlink of any kind: nothing to descend into.
-            Ok(meta) if !meta.is_dir() => continue,
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("`{}` is unreadable: {e}", dir.display())),
-        }
-        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        if DISPOSABLE_DIR_NAMES.contains(&name) {
-            continue;
-        }
-        let entries = std::fs::read_dir(&dir)
-            .map_err(|e| format!("`{}` is unreadable: {e}", dir.display()))?;
-        let mut children = Vec::new();
-        let mut is_repo = false;
-        for entry in entries {
-            let entry =
-                entry.map_err(|e| format!("an entry of `{}` is unreadable: {e}", dir.display()))?;
-            if *budget == 0 {
-                return Err(format!(
-                    "gitignored-subtree scan exceeded its {IGNORED_SCAN_ENTRY_BUDGET}-entry \
-                     budget at `{}`",
-                    dir.display()
-                ));
-            }
-            *budget -= 1;
-            if entry.file_name() == ".git" {
-                is_repo = true;
-                break;
-            }
-            children.push(entry.path());
-        }
-        if is_repo {
-            out.insert(dir);
-            continue;
-        }
-        stack.extend(children);
-    }
-    Ok(())
 }
 
 /// Classify a candidate that is NOT a git worktree root (#4091).
@@ -786,33 +586,59 @@ fn count_unpushed(path: &Path) -> Result<usize, String> {
 /// switching to `main`, `rev-list --count HEAD --not --remotes` returns 0 while
 /// the branch still carries the commit. HEAD-only counting therefore returned a
 /// false CLEAN for the one branch about to be force-deleted.
-/// What: 0 when no such branch exists (`for-each-ref` exits 0 with empty output,
-/// so absence is distinguishable from a spawn failure, which stays an `Err`).
-/// Otherwise the commits on that branch reachable from no remote AND not
+/// What: BOTH spellings of "the branch named after this directory" are checked
+/// — `refs/heads/session/<leaf>` and the bare `refs/heads/<leaf>` — because the
+/// two halves of trusty-mpm disagree about which one it is, and have since
+/// before this guard existed:
+/// - `core::worktree_naming::worktree_branch_for` (used by
+///   `inproject::create_session_worktree` AND by `remove_session_worktree`'s
+///   `branch -D`) says `session/<leaf>`;
+/// - `provisioner/workspace.rs:803` names the branch for the
+///   `.base/.worktrees/<session-id>` shape **bare** — `session_id.to_string()`
+///   — which is the DOMINANT population of the ~95-worktree sweep.
+///
+/// Today that divergence is not a loss path: `branch -D session/<uuid>` simply
+/// misses, so a bare branch survives the removal. Checking it anyway is
+/// deliberate conservatism, and the reason is the point of this whole PR — the
+/// divergence is a live bug that will be fixed on ONE side or the other, and if
+/// it is fixed on the `remove_session_worktree` side then bare branches start
+/// being destroyed. A guard that silently goes from correct to inert because
+/// somebody repaired an unrelated naming bug is exactly the failure mode this
+/// module exists to prevent. Over-reporting costs an operator one look; the
+/// other direction costs the work. Tracked as a follow-up rather than fixed
+/// here, since renaming branches is not a safety-gate change.
+///
+/// 0 when neither ref exists (`for-each-ref` exits 0 with empty output, so
+/// absence is distinguishable from a spawn failure, which stays an `Err`).
+/// Otherwise the commits on those branches reachable from no remote AND not
 /// already counted via `HEAD` — excluding `HEAD` is what stops the common
-/// "branch IS the checked-out branch" case from being counted twice.
+/// "branch IS the checked-out branch" case from being counted twice, and
+/// passing both refs to ONE `rev-list` stops a commit shared by both spellings
+/// from being counted twice either.
 /// Test: `inspect_dirt_reports_unpushed_session_branch_when_head_moved`,
+/// `inspect_dirt_reports_unpushed_bare_leaf_branch_when_head_moved`,
 /// `inspect_dirt_does_not_double_count_the_checked_out_session_branch`.
 fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
     let Some(leaf) = path.file_name().and_then(|n| n.to_str()) else {
         return Ok(0);
     };
-    let refname = format!("refs/heads/session/{leaf}");
-    let listed = git_stdout(path, &["for-each-ref", "--format=%(refname)", &refname])?;
-    if listed.trim().is_empty() {
+    let mut present = Vec::new();
+    for refname in [
+        format!("refs/heads/session/{leaf}"),
+        format!("refs/heads/{leaf}"),
+    ] {
+        let listed = git_stdout(path, &["for-each-ref", "--format=%(refname)", &refname])?;
+        if !listed.trim().is_empty() {
+            present.push(refname);
+        }
+    }
+    if present.is_empty() {
         return Ok(0);
     }
-    let raw = git_stdout(
-        path,
-        &[
-            "rev-list",
-            "--count",
-            &refname,
-            "--not",
-            "--remotes",
-            "HEAD",
-        ],
-    )?;
+    let mut args: Vec<&str> = vec!["rev-list", "--count"];
+    args.extend(present.iter().map(String::as_str));
+    args.extend(["--not", "--remotes", "HEAD"]);
+    let raw = git_stdout(path, &args)?;
     raw.trim()
         .parse::<usize>()
         .map_err(|e| format!("unparsable rev-list count `{}`: {e}", raw.trim()))
@@ -826,7 +652,7 @@ fn count_session_branch_unpushed(path: &Path) -> Result<usize, String> {
 /// What: non-zero exit and spawn failure both become `Err` carrying the
 /// command and git's own stderr; stdout is lossily decoded.
 /// Test: `inspect_dirt_treats_missing_path_as_dirty`.
-fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
+pub(super) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = git_command(dir, args)
         .output()
         .map_err(|e| format!("`git {}` could not be run: {e}", args.join(" ")))?;

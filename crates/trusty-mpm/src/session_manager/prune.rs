@@ -1126,12 +1126,14 @@ impl SessionManager {
             // sweep while its sibling deletes freely is a half-measure. There is
             // no discard opt-in here by design: an automatic reaper must never
             // be able to destroy work.
-            if let Some(dirt) = record
-                .workspace_path
-                .as_deref()
-                .filter(|p| super::decommission::is_session_worktree(p))
-                .and_then(inspect_dirt)
-            {
+            //
+            // Checked UNCONDITIONALLY, not just for `.worktrees/<leaf>` paths:
+            // `decommission` also `remove_dir_all`s the whole workspace when
+            // `workspace_owned` is true, which an `is_session_worktree` filter
+            // would have excused entirely. No current call site sets that flag,
+            // but it is persisted store data that outlives upgrades — and "no
+            // caller does this today" is not a safety property.
+            if let Some(dirt) = record.workspace_path.as_deref().and_then(inspect_dirt) {
                 warn!(
                     id = %record.id, path = %dirt.path.display(), reason = %dirt.reason,
                     "auto-reap: workspace holds unsaved work — leaving the session in \

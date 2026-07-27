@@ -73,6 +73,40 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     once up front left the whole sweep's duration between "certified clean" and
     "deleted".
 
+- **A nested self-contained clone is no longer assessed with the wrong loss
+  model** ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091),
+  review round 3): the nested-repository scan found unregistered clones in
+  gitignored subtrees and then asked them the *candidate's* questions — `HEAD`
+  and `session/<leaf>` — which are the right questions only when the object
+  store lives outside the candidate and survives it. A self-contained clone
+  keeps its entire `.git` INSIDE the candidate, so every local branch, tag,
+  stash entry and reflog dies with it. A clone whose `HEAD` sat on a pushed
+  `main` while a `feature` branch held the only copy of a commit answered clean
+  on all three questions and was destroyed. The two shapes are now separated by
+  `git rev-parse --path-format=absolute --git-common-dir` — a direct test of
+  *does this repository's object store live inside the directory we are about
+  to delete* — and a self-contained clone is measured with
+  `rev-list --count --all --not --remotes` plus a `refs/stash` check. Registered
+  nested worktrees keep the shared-store model, so a clean agent worktree still
+  does not pin its parent. A clone with no remotes at all counts every commit,
+  which is the correct answer for a scratch clone nobody pushed.
+
+- **`.trusty-mpm/`'s existence probe no longer fails toward CLEAN**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review round
+  3): it used `Path::exists()`, which collapses every I/O error to `false`,
+  while the first status pass had already skipped every `.trusty-mpm/`-scoped
+  entry on the promise that the second pass owned them — so a permission error
+  became CLEAN, inverting the module's own fail-safe invariant.
+
+- **The unpushed-commit check now covers the bare branch spelling too**
+  ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review round
+  3): `core::worktree_naming::worktree_branch_for` says `session/<leaf>`, but
+  `provisioner/workspace.rs` names the branch for the
+  `.base/.worktrees/<session-id>` shape **bare** — the dominant population of a
+  sweep — so the check was inert exactly where most worktrees live. Both
+  spellings are now counted, in one `rev-list` so a shared commit is not counted
+  twice.
+
 - **The age-based ephemeral auto-reaper now honours the dirty-tree guard**
   ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091), review
   round): `reap_aged_ephemeral` reaches the same
@@ -80,7 +114,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   orphan sweep but never passed through the guard, and it fires automatically
   on every daemon GC tick. An aged ephemeral whose workspace holds unsaved work
   is now left in place for an operator. There is deliberately no discard opt-in
-  on this path.
+  on this path, and the check is unconditional rather than restricted to
+  `.worktrees/<leaf>` paths — `decommission` also `remove_dir_all`s the whole
+  workspace for `workspace_owned` records, which a path-shape filter would have
+  excused entirely.
 
 ### Changed
 

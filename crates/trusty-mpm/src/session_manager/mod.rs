@@ -33,6 +33,7 @@ pub mod snapshot;
 pub mod store;
 pub mod task_inject;
 pub mod workspace_guard;
+mod worktree_nested;
 pub(crate) mod worktree_ownership;
 pub mod worktree_safety;
 
