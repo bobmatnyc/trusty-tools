@@ -23,6 +23,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::{InvocationSurface, ReviewConfig},
+    integrations::health::ServingState,
     pipeline::runner::ReviewDeps,
 };
 
@@ -129,22 +130,38 @@ pub async fn preflight_context(
     // guessing from the status string, so this scenario now proceeds (with a
     // WARN noting the reason) while a genuinely broken search (embedder
     // dead, indexes unloadable, TCC-denied, scan-timed-out) still gates shut.
+    //
+    // Issue #4079: a `Degraded` daemon is SERVING — it answers queries — so the
+    // review proceeds and gets real context. But the gap it reported is never
+    // swallowed: it becomes a `GateOutcome::Degraded` reason, which the runner
+    // stamps into the review body as a banner and into `result.error`. That is
+    // the deliberate choice between the two failure modes available here.
+    // Refusing every review because ONE of ~20 unrelated indexes on the host
+    // failed to open its corpus is a false-positive machine that trains callers
+    // to ignore the gate; returning a clean-looking verdict is the silent
+    // downgrade this fix exists to eliminate. Proceed-and-stamp is the only
+    // option that is neither.
     let mut search_error_detail: Option<String> = None;
+    let mut search_degraded_reason: Option<String> = None;
     let search_ok = match &search_health {
-        Ok(h) if h.is_serving() => {
-            if h.status != "ok" {
+        Ok(h) => match h.serving_state() {
+            ServingState::Serving => true,
+            ServingState::Degraded(reason) => {
                 warn!(
                     status = %h.status,
-                    "trusty-search reports a non-'ok' status but is confirmed serving \
-                     (warm_boot_degraded=false) — proceeding (#3693)"
+                    reason = %reason,
+                    "trusty-search is serving with a capability gap — proceeding, review will be \
+                     labelled DEGRADED (#4079)"
                 );
+                search_degraded_reason = Some(reason);
+                true
             }
-            true
-        }
-        Ok(h) => {
-            warn!(status = %h.status, "trusty-search health is not serving");
-            false
-        }
+            ServingState::NotServing(reason) => {
+                warn!(status = %h.status, reason = %reason, "trusty-search health is not serving");
+                search_error_detail = Some(reason);
+                false
+            }
+        },
         Err(e) => {
             warn!("trusty-search health probe failed: {e}");
             search_error_detail = Some(e.to_string());
@@ -194,6 +211,14 @@ pub async fn preflight_context(
             "trusty-analyze unavailable at {analyzer_url}; review produced WITHOUT \
              static-analysis context"
         ));
+    }
+
+    // ── trusty-search serving-but-degraded (#4079) ─────────────────────────
+    // Checked last so a hard analyze outage still wins the reason slot. Search
+    // answered and supplied context, so this is not a skip — but the gap must
+    // reach the reader of the review, not just the daemon's own log.
+    if let Some(reason) = search_degraded_reason {
+        return GateOutcome::Degraded(format!("trusty-search at {search_url}: {reason}"));
     }
 
     GateOutcome::Proceed

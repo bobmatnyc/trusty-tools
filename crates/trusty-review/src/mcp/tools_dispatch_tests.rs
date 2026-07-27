@@ -255,8 +255,9 @@ async fn call_tool_review_diff_returns_non_empty_verdict() {
 /// instead of wasting the developer's time with a hard-Skip.
 /// What: builds `offline_state_search_down_unconfigured()` (search down,
 /// `require_search` unconfigured); calls `call_tool("review_diff", ...)`;
-/// asserts `isError: false`, no infra sentinel, `status == "degraded"` (NOT
-/// `"skipped"`), and a real non-Unknown verdict — proving the LLM actually ran.
+/// asserts `isError: false`, the DEGRADED (not infra) sentinel, `status ==
+/// "degraded"` (NOT `"skipped"`), and a real non-Unknown verdict — proving the
+/// LLM actually ran.
 /// Test: this test itself; no network, no credentials needed.
 #[tokio::test]
 async fn call_tool_review_diff_search_down_interactive_default_degrades() {
@@ -274,9 +275,11 @@ async fn call_tool_review_diff_search_down_interactive_default_degrades() {
         json!(false),
         "a Degraded (not Skipped) outcome must NOT set isError:true"
     );
-    assert!(
-        result.get("mcp_status").is_none(),
-        "a Degraded outcome must not carry the infra-unavailable sentinel"
+    assert_eq!(
+        result["mcp_status"],
+        json!("degraded_context"),
+        "a Degraded outcome must carry the degraded sentinel (#4079), never the \
+         infra-unavailable one — the review ran, it was just incomplete"
     );
 
     let text = result["content"][0]["text"]

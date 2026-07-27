@@ -23,7 +23,10 @@ use tracing::{debug, info};
 
 use crate::{
     config::{InvocationSurface, ReviewConfig},
-    integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
+    integrations::{
+        analyze_client::AnalyzeClient, github::RunMode, health::ServingState,
+        search_client::SearchClient,
+    },
     llm::LlmProvider,
     pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
     service::inference_probe::{InferenceProbe, InferenceStatus},
@@ -214,24 +217,46 @@ pub struct DepInfo {
     /// Whether this dep is required for the service to function.
     pub required: bool,
     /// Whether the dep responded to a liveness probe at last check.
-    /// `true` iff `state == DepState::Ok`.  Kept for back-compat: existing
-    /// consumers gate on this single boolean field (#3658 is additive).
+    ///
+    /// Means exactly what it says: the dependency answered. `true` for
+    /// `DepState::Ok` AND `DepState::Degraded` — a daemon that returns a
+    /// parseable health body is reachable even when that body reports a
+    /// capability gap. Before #4079 this was `state == Ok`, so a live,
+    /// query-answering trusty-search with a warm-boot gap was published as
+    /// `reachable: false, state: "unreachable"`, which operators correctly read
+    /// as "the daemon is down" and acted on — chasing a process that was
+    /// running the whole time. Capability lives in `state`/`detail`; this field
+    /// is about the transport only.
     pub reachable: bool,
-    /// Tri-state probe result: `ok`, `unreachable`, or `timeout` (#3658).
+    /// Probe result: `ok`, `degraded`, `unreachable`, or `timeout`
+    /// (#3658, #4079).
     pub state: DepState,
+    /// Operator-facing explanation for a non-`ok` `state` — which capability is
+    /// missing and what it means for results.
+    ///
+    /// Why: `state: "degraded"` without a reason is not actionable, and the
+    /// whole point of #4079 is that a partial capability gap must be
+    /// explainable rather than collapsed into one misleading word.
+    /// Omitted from the JSON when absent so the payload shape is unchanged for
+    /// a healthy dependency.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
-/// Tri-state outcome of a single bounded dependency probe (#3658).
+/// Outcome of a single bounded dependency probe (#3658, #4079).
 ///
 /// Why: post-#722 the dep probe correctly reported reachability, but a slow
 /// (not down) dependency and a hard-down dependency both collapsed into
-/// `reachable: false`, with no bound on how long the probe could take. This
-/// type distinguishes "probe returned an error / unhealthy response"
-/// (`Unreachable`) from "probe did not complete within the internal deadline"
-/// (`Timeout`), so operators can tell "trusty-search is down" apart from
-/// "trusty-search is just slow right now".
-/// What: serialises as a lowercase string (`"ok"`, `"unreachable"`,
-/// `"timeout"`) via `#[serde(rename_all = "snake_case")]`.
+/// `reachable: false`, with no bound on how long the probe could take (#3658
+/// split those). #4079 found the remaining conflation: a dependency that
+/// answered the probe but reported a partial capability gap was ALSO collapsed
+/// into `Unreachable`, publishing "unreachable" for a daemon that was up and
+/// serving. `Degraded` is that missing middle state, so each word means one
+/// thing: `Unreachable` = the probe failed, `Degraded` = the probe succeeded
+/// and the dependency said it is running with a gap, `Timeout` = no answer in
+/// time.
+/// What: serialises as a lowercase string (`"ok"`, `"degraded"`,
+/// `"unreachable"`, `"timeout"`) via `#[serde(rename_all = "snake_case")]`.
 /// Test: `dep_state_serialises_lowercase`, `bounded_probe_*` in
 /// `handlers_tests.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -239,12 +264,30 @@ pub struct DepInfo {
 pub enum DepState {
     /// Probe completed within the deadline and reported a healthy dependency.
     Ok,
-    /// Probe completed within the deadline but reported an error or an
-    /// unhealthy response (e.g. embedder not ready).
+    /// Probe completed within the deadline; the dependency answered and is
+    /// serving, but reported a capability gap that callers must surface.
+    Degraded,
+    /// Probe completed within the deadline but the dependency errored or
+    /// reported that it cannot serve at all (e.g. embedder not ready).
     Unreachable,
     /// Probe did not complete within `dep_probe_timeout()` — the dependency
     /// is slow, not necessarily down.
     Timeout,
+}
+
+impl DepState {
+    /// Whether the dependency answered the probe.
+    ///
+    /// Why: single source of truth for `DepInfo::reachable`, so the
+    /// "reachable means the transport worked" rule cannot drift back into
+    /// "reachable means fully healthy" (#4079).
+    /// What: `true` for `Ok` and `Degraded`; `false` for `Unreachable` and
+    /// `Timeout`.
+    /// Test: `dep_state_degraded_is_reachable`,
+    /// `probe_deps_degraded_search_is_reachable` in `handlers_tests.rs`.
+    pub fn is_reachable(self) -> bool {
+        matches!(self, DepState::Ok | DepState::Degraded)
+    }
 }
 
 /// Response body for GET /status.
@@ -327,7 +370,12 @@ pub struct ReviewRequest {
 /// `health_status_ok_optional_dep_down`,
 /// `health_status_ok_inference_unknown` in `handlers_status_tests.rs`.
 pub fn compute_status(inference: InferenceStatus, deps: &DepStatus) -> &'static str {
-    let required_deps_ok = deps.trusty_search.reachable || !deps.trusty_search.required;
+    // #4079: gate on `state == Ok`, NOT on `reachable`. `reachable` now
+    // (correctly) includes `Degraded`, and a required dependency running with a
+    // capability gap must still surface as a degraded service — silently
+    // reporting "ok" because the daemon merely answered would be the exact
+    // silent-downgrade this fix exists to remove.
+    let required_deps_ok = deps.trusty_search.state == DepState::Ok || !deps.trusty_search.required;
     // `Unknown` (probe timed out) is treated the same as `Ok` for the purpose of
     // computing the top-level status: we do not degrade because we couldn't confirm
     // reachability within the probe window (#739).
@@ -382,35 +430,34 @@ pub(crate) fn dep_probe_timeout() -> Duration {
 /// `DepState::Unreachable`; a completed `Err(_)` is `DepState::Unreachable`;
 /// an elapsed deadline is `DepState::Timeout` — deliberately distinct from
 /// `Unreachable` so a slow-but-up dependency is never reported as hard-down.
+/// `classify` maps a successful response to its `(DepState, detail)` pair, so a
+/// dependency that answers with a capability gap can report `Degraded` plus the
+/// reason instead of being flattened into `Unreachable` (#4079).
 /// Test: `bounded_probe_ok_on_healthy_response`,
 /// `bounded_probe_unreachable_on_error`,
 /// `bounded_probe_unreachable_on_unhealthy_response`,
+/// `bounded_probe_degraded_carries_detail`,
 /// `bounded_probe_timeout_on_stalled_future`,
 /// `health_unhealthy_search_response_reports_state_unreachable` (the
-/// `Ok(Ok(v))` + `is_healthy(v) == false` branch exercised end-to-end through
-/// a real `SearchClient`, e.g. a degraded embedder),
-/// `health_degraded_but_serving_stays_ok` (issue #3693: `probe_deps` passes
-/// `HealthResponse::is_serving` — not `is_healthy` — as the `is_healthy`
-/// closure param here, so a `status: "degraded"` response caused only by a
-/// benign watcher-disable reports `reachable: true`) in `handlers_tests.rs`.
+/// `Ok(Ok(v))` + not-serving branch exercised end-to-end through a real
+/// `SearchClient`, e.g. a degraded embedder),
+/// `health_degraded_but_serving_stays_ok` (issue #3693) in `handlers_tests.rs`.
 async fn bounded_probe<Fut, T, E>(
     fut: Fut,
     timeout: Duration,
-    is_healthy: impl FnOnce(T) -> bool,
-) -> DepState
+    classify: impl FnOnce(T) -> (DepState, Option<String>),
+) -> (DepState, Option<String>)
 where
     Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
 {
     match tokio::time::timeout(timeout, fut).await {
-        Ok(Ok(v)) => {
-            if is_healthy(v) {
-                DepState::Ok
-            } else {
-                DepState::Unreachable
-            }
-        }
-        Ok(Err(_)) => DepState::Unreachable,
-        Err(_elapsed) => DepState::Timeout,
+        Ok(Ok(v)) => classify(v),
+        Ok(Err(e)) => (DepState::Unreachable, Some(e.to_string())),
+        Err(_elapsed) => (
+            DepState::Timeout,
+            Some(format!("no response within {timeout:?}")),
+        ),
     }
 }
 
@@ -437,31 +484,40 @@ where
 pub async fn probe_deps(state: &AppState) -> DepStatus {
     let timeout = dep_probe_timeout();
 
-    // Issue #3693: `is_serving()` (not `is_healthy()`) — a trusty-search
-    // `status: "degraded"` caused solely by an intentional, benign
-    // watcher-disable on a network-mounted (EFS/NFS) root must still report
-    // `reachable: true` here; a genuinely broken search (embedder dead,
-    // indexes unloadable) still reports `false`. See
-    // `HealthResponse::is_serving` for the full rationale.
-    let search_probe = bounded_probe(state.search.health(), timeout, |r| r.is_serving());
+    // Issue #4079: map trusty-search's own three-way self-assessment straight
+    // through instead of collapsing it to a boolean. A daemon that answered is
+    // reachable; whether it is fully capable is `state` + `detail`.
+    let search_probe = bounded_probe(state.search.health(), timeout, |r| {
+        match r.serving_state() {
+            ServingState::Serving => (DepState::Ok, None),
+            ServingState::Degraded(reason) => (DepState::Degraded, Some(reason)),
+            ServingState::NotServing(reason) => (DepState::Unreachable, Some(reason)),
+        }
+    });
     let analyze_probe = async {
         match &state.analyze {
-            Some(a) => bounded_probe(a.health(), timeout, |_| true).await,
-            None => DepState::Unreachable,
+            Some(a) => bounded_probe(a.health(), timeout, |_| (DepState::Ok, None)).await,
+            None => (
+                DepState::Unreachable,
+                Some("no trusty-analyze client configured".to_string()),
+            ),
         }
     };
-    let (search_state, analyze_state) = tokio::join!(search_probe, analyze_probe);
+    let ((search_state, search_detail), (analyze_state, analyze_detail)) =
+        tokio::join!(search_probe, analyze_probe);
 
     DepStatus {
         trusty_search: DepInfo {
             required: true,
-            reachable: search_state == DepState::Ok,
+            reachable: search_state.is_reachable(),
             state: search_state,
+            detail: search_detail,
         },
         trusty_analyze: DepInfo {
             required: false,
-            reachable: analyze_state == DepState::Ok,
+            reachable: analyze_state.is_reachable(),
             state: analyze_state,
+            detail: analyze_detail,
         },
     }
 }

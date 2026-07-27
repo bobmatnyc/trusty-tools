@@ -274,6 +274,7 @@ mod tests {
                 embedder: EmbedderState::Bool(true),
                 warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
                     warm_boot_degraded: false,
+                    ..Default::default()
                 }),
             })
         }

@@ -149,6 +149,7 @@ impl SearchClient for DegradedButServingSearchTool {
             embedder: EmbedderState::Bool(true),
             warmboot_summary: Some(crate::integrations::health::WarmBootSummary {
                 warm_boot_degraded: false,
+                ..Default::default()
             }),
         })
     }
@@ -499,7 +500,8 @@ fn wrap_result_policy_skip_without_infra_flag_stays_is_error_false() {
 /// Why: distinguishes the "opted-in / interactive-surface-defaulted degrade"
 /// path from the "infra Skip" path — both are non-authoritative, but only the
 /// Skip is a non-result.
-/// What: constructs a `Degraded` result; asserts the envelope stays clean.
+/// What: constructs a `Degraded` result; asserts `isError` stays false and the
+/// envelope carries the degraded sentinel rather than the infra one.
 /// Test: this test itself.
 #[test]
 fn wrap_result_degraded_stays_is_error_false() {
@@ -513,9 +515,60 @@ fn wrap_result_degraded_stays_is_error_false() {
         envelope["isError"], false,
         "a degraded-but-real verdict must not be flagged as an MCP error"
     );
+    assert_eq!(
+        envelope["mcp_status"], "degraded_context",
+        "a degraded result must carry the degraded sentinel, never the infra one"
+    );
+}
+
+/// REGRESSION (#4079): a degraded verdict must be distinguishable from a
+/// complete one WITHOUT parsing `content[0].text`.
+///
+/// Why: before this fix, the only difference between an APPROVE produced with
+/// full code context and an APPROVE produced with none was buried inside a
+/// serialised JSON blob and a Markdown banner. Every programmatic consumer that
+/// looked at the envelope — the stable, non-prose part of the response — saw
+/// two byte-identical results. A caveat nobody can see is not a caveat.
+/// What: builds a `Degraded` APPROVE with a reason, and asserts the envelope
+/// alone carries both the sentinel and the human-readable reason.
+/// Test: this test itself.
+#[test]
+fn wrap_result_degraded_sets_sentinel_and_reason() {
+    let mut result = ReviewResult::new("acme", "backend", 11, "Add Q", "https://example/pr/11");
+    result.status = ReviewStatus::Degraded;
+    result.verdict = Verdict::Approve;
+    result.error = Some(
+        "degraded (non-authoritative): trusty-search at http://localhost:7878: \
+         3 index(es) failed to open their corpus"
+            .to_string(),
+    );
+
+    let envelope = wrap_result(&result, None);
+
+    assert_eq!(
+        envelope["mcp_status"], "degraded_context",
+        "a degraded verdict must be machine-detectable from the envelope alone"
+    );
     assert!(
-        envelope.get("mcp_status").is_none(),
-        "a degraded (non-infra) result must not carry the infra sentinel"
+        envelope["degraded_reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("failed to open their corpus")),
+        "the envelope must name what was missing; got: {:?}",
+        envelope.get("degraded_reason")
+    );
+
+    // The control: an otherwise-identical COMPLETE review must be clean, so the
+    // sentinel is a real signal and not noise attached to every response.
+    let mut complete = ReviewResult::new("acme", "backend", 11, "Add Q", "https://example/pr/11");
+    complete.verdict = Verdict::Approve;
+    let complete_envelope = wrap_result(&complete, None);
+    assert!(
+        complete_envelope.get("mcp_status").is_none(),
+        "a complete review must carry no status sentinel"
+    );
+    assert!(
+        complete_envelope.get("degraded_reason").is_none(),
+        "a complete review must carry no degraded reason"
     );
 }
 

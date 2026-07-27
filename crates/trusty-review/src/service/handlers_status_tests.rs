@@ -33,11 +33,13 @@ fn health_status_ok_all_good() {
             required: true,
             reachable: true,
             state: DepState::Ok,
+            detail: None,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: true,
             state: DepState::Ok,
+            detail: None,
         },
     };
     assert_eq!(
@@ -61,11 +63,13 @@ fn health_status_degraded_required_dep_down() {
             required: true,
             reachable: false, // required dep is down
             state: DepState::Unreachable,
+            detail: None,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: true,
             state: DepState::Ok,
+            detail: None,
         },
     };
     assert_eq!(
@@ -88,11 +92,13 @@ fn health_status_degraded_inference_auth_error() {
             required: true,
             reachable: true,
             state: DepState::Ok,
+            detail: None,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: true,
             state: DepState::Ok,
+            detail: None,
         },
     };
     assert_eq!(
@@ -119,11 +125,13 @@ fn health_status_ok_inference_unknown() {
             required: true,
             reachable: true,
             state: DepState::Ok,
+            detail: None,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: true,
             state: DepState::Ok,
+            detail: None,
         },
     };
     assert_eq!(
@@ -146,11 +154,13 @@ fn health_status_ok_optional_dep_down() {
             required: true,
             reachable: true,
             state: DepState::Ok,
+            detail: None,
         },
         trusty_analyze: DepInfo {
             required: false,
             reachable: false, // optional dep down — must not degrade
             state: DepState::Unreachable,
+            detail: None,
         },
     };
     assert_eq!(
