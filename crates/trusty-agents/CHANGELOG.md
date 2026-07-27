@@ -49,6 +49,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (PM-3) — the previously `#[ignore]`d
   `extends_does_not_inherit_user_authority` regression test is un-ignored.
   Read-only in every phase (PM-4); grants or widens nothing (C-06.4).
+- **`GET /api/agents/:name/knowledge` — the Knowledge pane's unified
+  "what does this agent know" backend (#3935, DOC-57 §4).** One response
+  carries all three sub-surfaces so the pane never has to correlate a store
+  card, a tool glob and a harness endpoint table across three routes: `[[stores]]`
+  bindings resolved live (`/stores`' existing, unchanged logic), the agent's
+  knowledge-classified tools (`kind = Knowledge` in `#3933`'s skill catalog,
+  `vector_search` rendered under its bound store), and the operator-configured
+  MCP knowledge connections (`[[tool_registry.endpoints]]` +
+  `[[mcp.services]]`, read-only, no live probe — a disabled/unenabled service
+  is always reported truthfully, never as connected). Read-only in this slice;
+  store editing remains #3890's contract.
+- **Fixed: stability regression in corpus-open-failed routes (#4115).** Knowledge stores with open() failures now correctly report as not-connected rather than crashing the /knowledge endpoint.
 
 ### Removed
 
