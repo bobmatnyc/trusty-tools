@@ -81,6 +81,49 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Agents can attach arbitrary trusty-search indexes, and `vector_search` now
+  advertises them** (issues #3232, #4009; part of epic #4007): an agent's
+  `[[stores]]` binding is the *curated* knowledge tier — one OKG store per
+  agent, and that stays. Everything else an agent should be able to search (a
+  third-party repo, a shared doc corpus) now has a second, uncurated tier:
+  `[tools] search_indexes = ["apex", "cto-projects"]`, a plain list of
+  trusty-search index ids with no tree, palace, or ingestion behind them. The
+  list unions base-first through `extends` exactly like `[tools].allow` and
+  `scopes`, so a CTO Assistant extending a base Assistant adds `cto-projects`
+  without re-declaring — or being able to silently drop — what the base
+  attached, and it is reported by `GET /api/agents/:name/stores` (alongside the
+  curated stores, not mixed into them) and in the agent catalog. Those two
+  `/stores` fields — `search_indexes` and `enforce_search_indexes` — are an
+  **interim raw surface** licensed by DOC-58 §5: the resolved declared list and
+  the knob state, with no daemon probe behind either. The forthcoming
+  `/knowledge.attached_indexes[]` route is the probed, authoritative surface
+  for the GUI. Both must report the same id set, so declaring one id in *both*
+  tiers — legal, and accepted by the tool from either — is deduped server-side
+  and presented once under its bound role.
+
+  `vector_search` reads that list twice over. Its `index_id` schema description
+  now **enumerates** the agent's bound store plus every attached index, closing
+  the discoverability half of #4009: querying another corpus was always
+  mechanically possible, but the model had to *guess* an id that happened to
+  exist because the tool advertised no list. Second, `[tools]
+  enforce_search_indexes = true` turns that same list into a fail-closed
+  allowlist — an explicit `index_id` outside `{bound store} ∪ search_indexes`
+  is refused with an error naming the permitted set, and is deliberately **not**
+  degraded to the local index, since answering a refused request from a
+  different corpus is worse than refusing.
+
+  **Enforcement is opt-in and defaults to off** (owner decision on epic #4007's
+  OQ-2 — declarative-only at M1). `vector_search` has never gated `index_id` in
+  production, so failing closed by default would break every persona that
+  cross-queries today. An agent that is unenforced *and* declares no attached
+  indexes is byte-identical to before: the same resolution path, and a schema
+  whose bytes are pinned unchanged by test, since a tool definition is prompt
+  input and drift there would alter every existing agent's context. An
+  **enforced** agent's schema always states the restriction, including the
+  bound-store-only lockdown case (`[[stores]]` + `enforce = true` + no
+  `search_indexes`) — the schema describes what the tool accepts, so silence
+  there would advertise an open corpus over closed behaviour.
+
 - **`GET /api/events` can scope the Slack mirror to one channel** (refs #3760):
   `SlackMessageReceived` / `SlackReplySent` carry no `session_id`, and
   `/api/events` treats a missing session as "always include", so every

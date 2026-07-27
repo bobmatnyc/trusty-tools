@@ -290,6 +290,20 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     merged.tools.allowed = union_opt_vec(merged.tools.allowed, child.tools.allowed);
     merged.tools.allow = union_opt_vec(merged.tools.allow, child.tools.allow);
     merged.tools.scopes = union_opt_vec(merged.tools.scopes, child.tools.scopes);
+    // #3232: `[tools].search_indexes` — attached trusty-search indexes, the
+    // tier-2 knowledge mechanism (epic #4007). Same base-first union as
+    // `allow`/`scopes` for the same reason, and it is the overlay case the
+    // ticket names: a base Assistant attaches its project index, a CTO
+    // Assistant extending it unions in `cto-projects` WITHOUT re-declaring
+    // (or being able to silently drop) the base's.
+    merged.tools.search_indexes =
+        union_opt_vec(merged.tools.search_indexes, child.tools.search_indexes);
+    // #4009: `enforce_search_indexes` is a posture, not a list — child
+    // child-declares-wins (an overlay may harden or relax), child-omits
+    // inherits, so a hardened base stays hardened under a silent overlay.
+    if child.tools.enforce_search_indexes.is_some() {
+        merged.tools.enforce_search_indexes = child.tools.enforce_search_indexes;
+    }
     // `[skills].allow` (#3933): same base-first union as `[tools].allow`, for
     // the same reason — an overlay ADDS capability to its base and must never
     // silently remove what the base granted.

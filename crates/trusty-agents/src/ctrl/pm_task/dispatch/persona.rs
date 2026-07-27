@@ -389,13 +389,25 @@ pub async fn run_pm_task_with_persona(
             // behaviour. As with every tool above, registration alone grants
             // nothing — `filter_persona_tool_names` against `patterns` still
             // decides reachability.
+            //
+            // #3232/#4009: the SAME tool also carries this persona's tier-2
+            // attached indexes (`[tools].search_indexes`, already
+            // extends-unioned by the time `persona_cfg` is loaded) and its
+            // enforcement posture. Attached ids are enumerated in the tool
+            // schema so the model can see them; they only GATE anything when
+            // the persona opts in with `enforce_search_indexes = true`. A
+            // persona declaring neither gets `(vec![], false)` — identical to
+            // the pre-#3232 registration above.
             registry.register(Arc::new(
-                crate::tools::memory::VectorSearchTool::new().with_default_index(
-                    persona_cfg
-                        .stores
-                        .default_search_index()
-                        .map(str::to_string),
-                ),
+                crate::tools::memory::VectorSearchTool::new()
+                    .with_default_index(
+                        persona_cfg
+                            .stores
+                            .default_search_index()
+                            .map(str::to_string),
+                    )
+                    .with_attached_indexes(persona_cfg.tools.resolved_search_indexes())
+                    .with_index_enforcement(persona_cfg.tools.search_indexes_enforced()),
             ));
 
             // system_status epic (#3052): lets a persona report on-demand
