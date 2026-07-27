@@ -271,14 +271,23 @@ fn dedup(state: &DaemonState, session: SessionId, agent: &str, task: &str) -> Op
 /// differently while still rejecting two plainly different work items.
 /// What: case- and whitespace-insensitive prefix match in either direction
 /// (which subsumes equality), so a short dispatch description matches the longer
-/// declaration it summarises. An empty string on either side means no
-/// discriminator was supplied — the agent name and the window are then all we
-/// have, and merging remains the better guess for a declaration immediately
-/// followed by a description-less dispatch.
+/// declaration it summarises.
+///
+/// The two empty cases are NOT symmetric (#2864 re-review, LOW 1). A dispatch
+/// with no description offers nothing to discriminate on, and merging it would
+/// keep the *declaration's* text as the label for a dispatch we cannot identify
+/// — precisely the mislabel this discriminator exists to prevent — so it
+/// declines. An unlabelled *declaration* is different: merging adopts the
+/// dispatch's own text (`on_dispatch` fills an empty task), so no wrong label
+/// can survive, and it merges.
 /// Test: `dedups_declaration_and_observation`,
-/// `dedup_does_not_merge_a_different_task`.
+/// `dedup_does_not_merge_a_different_task`,
+/// `dedup_declines_a_description_less_dispatch`.
 fn tasks_match(declared: &str, dispatched: &str) -> bool {
-    if declared.is_empty() || dispatched.is_empty() {
+    if dispatched.is_empty() {
+        return false;
+    }
+    if declared.is_empty() {
         return true;
     }
     let normalize = |s: &str| {
@@ -298,15 +307,16 @@ fn tasks_match(declared: &str, dispatched: &str) -> bool {
 /// subagent runs on, so this is primarily the *join* that binds `tool_use_id` to
 /// the `agent_id` that `SubagentStop` will quote.
 /// What: locates the delegation by `tool_use_id`, stores
-/// `tool_response.agentId`, and refines the tier from `resolvedModel`. It
-/// terminalizes **only on positive evidence** that the dispatch left nothing
-/// running — see [`recognized_response`] for why an absent or unrecognized
-/// response must not be read as completion.
+/// `tool_response.agentId`, and refines the tier from `resolvedModel`. Whether
+/// to terminalize is decided entirely by [`classify_dispatch`], which is a
+/// three-way answer — `Launched` / `Returned` / `Unknown` — not a boolean.
 /// Test: `async_launch_keeps_delegation_running`,
 /// `synchronous_post_tool_use_completes_delegation`,
 /// `post_tool_use_failure_marks_failed`,
 /// `post_tool_use_without_tool_response_stays_running`,
-/// `post_tool_use_with_unrecognized_response_stays_running`.
+/// `post_tool_use_with_unrecognized_response_stays_running`,
+/// `post_tool_use_with_only_an_agent_id_stays_running`,
+/// `changed_async_status_value_with_an_agent_id_stays_running`.
 fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: HookEvent) {
     let Some(tool_use_id) = field(payload, "tool_use_id") else {
         return;
@@ -330,21 +340,13 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
         .and_then(Value::as_str)
         .map(ModelTier::from_model_id);
 
-    // An async dispatch reports *launch*, not completion — the subagent runs on
-    // for minutes. This is positive evidence that something IS still running,
-    // and it overrides every other signal on this event.
-    let async_launched = response.is_some_and(|r| {
-        r.get("isAsync").and_then(Value::as_bool).unwrap_or(false)
-            || r.get("status").and_then(Value::as_str) == Some("async_launched")
-    });
     // The dispatch call itself failed: no subagent was left running.
     let errored = event == HookEvent::PostToolUseFailure
         || response
             .and_then(|r| r.get("is_error"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    // A response we understood, with no async marker: the dispatch returned.
-    let sync_return = response.is_some();
+    let outcome = classify_dispatch(response);
 
     state.mutate_delegation(id, |d| {
         if agent_id.is_some() {
@@ -353,40 +355,128 @@ fn on_launched(state: &DaemonState, session: SessionId, payload: &Value, event: 
         if let Some(t) = tier {
             d.tier = t;
         }
-        // Fail CLOSED: terminalize only on positive evidence. With no evidence
-        // the delegation stays `Running` for `SubagentStop` (or, ultimately, the
-        // staleness sweep) to close.
-        if !async_launched && (sync_return || errored) {
-            d.status = if errored {
+        // Fail CLOSED. `Launched` never terminalizes, whatever else the event
+        // says — a running subagent outranks an errored dispatch call, and
+        // `SubagentStop` will close it. `Unknown` terminalizes only on an
+        // explicit dispatch failure, which is itself positive evidence that
+        // nothing was left running.
+        let terminal = match outcome {
+            DispatchOutcome::Launched => None,
+            DispatchOutcome::Returned => Some(if errored {
                 DelegationStatus::Failed
             } else {
                 DelegationStatus::Completed
-            };
+            }),
+            DispatchOutcome::Unknown if errored => Some(DelegationStatus::Failed),
+            DispatchOutcome::Unknown => None,
+        };
+        if let Some(status) = terminal {
+            d.status = status;
             d.ended_at = Some(Utc::now());
         }
     });
 }
 
+/// What a dispatch `PostToolUse` response says about whether a subagent is
+/// still running.
+///
+/// Why this is three-valued and not a boolean: "I could parse this response"
+/// and "this response says nothing was left running" are different
+/// propositions, and the first round of #2864 review was about exactly that
+/// conflation one layer up. `Unknown` is a first-class answer here for the same
+/// reason [`DelegationStatus::Stale`] is a first-class status: not knowing is
+/// not the same as knowing it finished.
+/// Test: the `post_tool_use_*` suite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchOutcome {
+    /// A subagent is running now — an explicit async marker, or an `agentId`
+    /// handle for a future `SubagentStop` to quote.
+    Launched,
+    /// The call returned rather than launching; nothing is left running.
+    Returned,
+    /// The response is absent or unrecognized — no conclusion is available.
+    Unknown,
+}
+
+/// Classify a dispatch response (#2864 review HIGH 1, re-review MEDIUM 1).
+///
+/// Why: an absent response used to read as "not async, therefore finished",
+/// terminalizing a still-running subagent ~1 ms after launch — and absence is
+/// not hypothetical, since `tm hook`'s S1 projection ([`TOOL_RESPONSE_KEYS`])
+/// omits `tool_response` entirely when the payload is not an object or carries
+/// none of those keys. That is [`DispatchOutcome::Unknown`].
+///
+/// The re-review then found a narrower conflation: a response holding only
+/// `agentId` produced `Completed` *and* stored the `agent_id` in the same
+/// breath — recording "expect a `SubagentStop` for this agent" and "this
+/// already finished" simultaneously. Hence the launch test comes first and
+/// includes `agentId`.
+///
+/// What, in order:
+///
+/// - `Launched` — `isAsync == true`, `status == "async_launched"`, or an
+///   `agentId` is present. An `agentId` is by design the *async* correlation
+///   key; handing one back is evidence of a launch, never of a return. Testing
+///   it first is also what makes a `status` whose **value** drifted (rather than
+///   its key) safe, since such a response still carries its `agentId`.
+/// - `Returned` — any other recognized response.
+/// - `Unknown` — absent, not an object, or carrying no [`TOOL_RESPONSE_KEYS`]
+///   member.
+///
+/// # KNOWN LIMITATION — an `agentId`-less response is read as a return
+///
+/// `Returned` is deliberately still *residual* rather than affirmative
+/// (`isAsync == false` or a non-launch `status`), so a recognized response that
+/// is silent about liveness — `resolvedModel` alone, `is_error` alone — is
+/// treated as a synchronous return. That is a real fail-open band and it is
+/// **knowingly left open** here, because closing it would make things worse
+/// today, not better:
+///
+/// [`on_subagent_stop`] resolves a delegation *only* by `agent_id`, and
+/// `agent_id` is taught *only* by this function. A response with no `agentId`
+/// therefore has **no** route to termination other than this branch — nothing
+/// can ever quote it back to us. Compounding that, `PostToolUse` is installed
+/// `async: true` while `SubagentStop` is synchronous
+/// (`core::standalone::hooks`), so the two are independent `tm hook` processes
+/// whose arrival order at the daemon is not guaranteed; an out-of-order stop
+/// matches nothing and nothing re-checks. Making this branch affirmative without
+/// first giving `on_subagent_stop` a recovery path would convert a rare
+/// fail-open into a guaranteed six-hour phantom "agent in flight" for every such
+/// dispatch.
+///
+/// The band is unobserved: Claude Code 2.1.220 returns
+/// `{isAsync, status, agentId, resolvedModel}` for a dispatch, which takes the
+/// `Launched` branch. Tightening is blocked on the stop-side recovery work and
+/// is tracked with it, not attempted here.
+/// Test: `post_tool_use_without_tool_response_stays_running`,
+/// `post_tool_use_with_unrecognized_response_stays_running`,
+/// `post_tool_use_with_only_an_agent_id_stays_running`,
+/// `changed_async_status_value_with_an_agent_id_stays_running`,
+/// `synchronous_post_tool_use_completes_delegation`,
+/// `liveness_silent_response_is_read_as_a_return_known_gap`.
+fn classify_dispatch(response: Option<&Value>) -> DispatchOutcome {
+    let Some(r) = response else {
+        return DispatchOutcome::Unknown;
+    };
+    if r.get("isAsync").and_then(Value::as_bool) == Some(true)
+        || r.get("status").and_then(Value::as_str) == Some("async_launched")
+        || r.get("agentId").is_some()
+    {
+        return DispatchOutcome::Launched;
+    }
+    DispatchOutcome::Returned
+}
+
 /// Is this `tool_response` one we can draw a conclusion from?
 ///
-/// Why (#2864 review, HIGH 1): the previous guard asked "does the response say
-/// async?", so an absent response answered *no* and the delegation was
-/// terminalized `Completed` ~1 ms after launch while the subagent ran on — the
-/// exact false "no agents in flight" this module's header calls strictly worse
-/// than not tracking at all. And absence is not hypothetical: `tm hook`'s S1
-/// projection ([`TOOL_RESPONSE_KEYS`]) emits no `tool_response` at all when the
-/// response is not an object or holds none of those keys, so a Claude Code key
-/// rename or a content-block-array response would trigger it with no code change
-/// and no failing test on our side.
-///
-/// Inverting it costs nothing on the happy path and makes the two hook branches
-/// share one posture: `on_subagent_stop` already refuses to act without an exact
-/// `agent_id`, and now `on_launched` refuses to act without a response it
-/// understood.
+/// Why: `tm hook`'s S1 projection already restricts the forwarded object to
+/// [`TOOL_RESPONSE_KEYS`], but the daemon must not depend on a filter living in
+/// a different crate target for its fail-direction. Re-asserting it here means a
+/// more permissive S1 (a raw string, a content-block array) cannot silently turn
+/// "unrecognized" back into "understood".
 /// What: `true` iff `response` is an object carrying at least one
 /// [`TOOL_RESPONSE_KEYS`] member.
-/// Test: `post_tool_use_without_tool_response_stays_running`,
-/// `post_tool_use_with_unrecognized_response_stays_running`.
+/// Test: `post_tool_use_with_unrecognized_response_stays_running`.
 fn recognized_response(response: &Value) -> bool {
     response
         .as_object()

@@ -54,16 +54,42 @@ pub(crate) const RUNNING_STALE_AFTER_SECS: i64 = 6 * 60 * 60;
 /// Test: `declared_but_never_dispatched_goes_stale_quickly`.
 pub(crate) const DECLARED_STALE_AFTER_SECS: i64 = 15 * 60;
 
-/// How long a non-live delegation is retained before eviction (#2864 review).
+/// How long a **terminal** delegation is retained after `ended_at` (#2864
+/// review).
 ///
 /// Why: without eviction the delegation map grows monotonically for the
 /// daemon's lifetime, and every dispatch pays two O(N) scans over it. An hour
 /// is far longer than any consumer needs — `session_status` and
 /// `/tm-session-pause` both ask "what is in flight *now*" — and it bounds N to
 /// roughly one hour of fleet dispatch volume instead of one uptime's worth.
+/// Nothing can ever resolve a terminal record, so evicting it loses nothing.
+/// [`DelegationStatus::Stale`] is emphatically NOT terminal and does not use
+/// this window — see [`STALE_RETENTION_SECS`].
 /// Test: `terminal_delegations_are_evicted_after_retention`,
 /// `live_delegations_are_never_evicted`.
 pub(crate) const DELEGATION_RETENTION_SECS: i64 = 60 * 60;
+
+/// How long a [`DelegationStatus::Stale`] delegation is retained, measured from
+/// its own start (#2864 re-review).
+///
+/// Why this is separate from — and 24x — [`DELEGATION_RETENTION_SECS`]: the
+/// entire justification for `Stale` being a distinct, *non-terminal* status is
+/// that a late `SubagentStop` can still resolve it to the truth. Reusing the
+/// terminal retention window silently cancelled that guarantee: a record whose
+/// agent may still be alive was dropped one hour after tracking gave up on it
+/// (about 7 h total), after which a stop resolved nothing because there was no
+/// record left to find. A guarantee that expires unannounced is worse than no
+/// guarantee.
+///
+/// Measuring from `started_at`/`created_at` rather than from a separate
+/// "when we gave up" stamp keeps [`Delegation::ended_at`] meaning exactly one
+/// thing — *reached a terminal status* — which matters because S3 will persist
+/// it. With the current constants a `Running` delegation goes `Stale` at 6 h and
+/// remains resolvable until 24 h: an **18-hour** recovery window, and a hard
+/// bound so the map still cannot grow without limit.
+/// Test: `stale_delegation_stays_resolvable_far_past_the_terminal_window`,
+/// `a_stale_delegation_is_eventually_evicted`.
+pub(crate) const STALE_RETENTION_SECS: i64 = 24 * 60 * 60;
 
 /// What one [`DaemonState::sweep_delegations`] pass did.
 ///
@@ -545,22 +571,37 @@ impl DaemonState {
     /// delegation with no route out — so one sweep closes both.
     ///
     /// What: one pass over the map, off the `PreToolUse` hot path (it is driven
-    /// by the 60 s reap loop, never by a hook). For each record:
-    /// - live and older than its budget ([`DECLARED_STALE_AFTER_SECS`] for an
-    ///   undispatched `McpDeclared` declaration, else
-    ///   [`RUNNING_STALE_AFTER_SECS`]) → [`DelegationStatus::Stale`] with
-    ///   `ended_at` stamped. **Never `Completed`** — the sweep records that
-    ///   tracking gave up, not that the agent finished, and `Stale` is
-    ///   non-terminal so a late `SubagentStop` still resolves it correctly.
-    /// - not live and `ended_at` older than [`DELEGATION_RETENTION_SECS`] →
-    ///   removed. A live record has no `ended_at` and is never evicted, so work
-    ///   in flight can never be dropped by the retention rule.
+    /// by the 60 s reap loop, never by a hook). A record is *aged* from
+    /// `started_at` when known, else `created_at`. Exactly three dispositions,
+    /// and eviction is stated as a guarantee the code actually keeps:
     ///
-    /// The age clock is `started_at` when known, else `created_at`.
+    /// | status | staling | eviction |
+    /// |---|---|---|
+    /// | `Queued`/`Running` (live) | past [`DECLARED_STALE_AFTER_SECS`] for an undispatched `McpDeclared` declaration, else [`RUNNING_STALE_AFTER_SECS`] → [`DelegationStatus::Stale`] | **never, at any age** |
+    /// | `Stale` | — | aged past [`STALE_RETENTION_SECS`] |
+    /// | terminal | — | [`DELEGATION_RETENTION_SECS`] after `ended_at` |
+    ///
+    /// The sweep writes `Stale` and **never** `Completed`: it records that
+    /// tracking gave up, not that the agent finished. It deliberately does NOT
+    /// stamp `ended_at`, which keeps that field meaning exactly *"reached a
+    /// terminal status"* and keeps `Stale` off the terminal retention clock.
+    ///
+    /// So the precise safety property — the one a reader will rely on — is:
+    /// **a record is evicted only once nothing can still resolve it.** A live
+    /// record is never evicted at any age. A `Stale` record stays present, and
+    /// stays resolvable by a late `SubagentStop` (which matches on
+    /// `!is_terminal()`), for `STALE_RETENTION_SECS` minus its staling budget —
+    /// **18 hours** with the current constants — after tracking gave up. A
+    /// terminal record can be resolved by nothing, so its shorter window costs
+    /// nothing. Past 24 h a `Stale` record IS dropped and a later stop finds
+    /// nothing: the recovery window is long, not infinite, because the map must
+    /// stay bounded. That bound is asserted, not incidental.
     /// Test: `stale_running_delegation_stops_suppressing_the_nudge`,
     /// `declared_but_never_dispatched_goes_stale_quickly`,
     /// `terminal_delegations_are_evicted_after_retention`,
-    /// `live_delegations_are_never_evicted`.
+    /// `live_delegations_are_never_evicted`,
+    /// `stale_delegation_stays_resolvable_far_past_the_terminal_window`,
+    /// `a_stale_delegation_is_eventually_evicted`.
     pub fn sweep_delegations(&self) -> DelegationSweep {
         self.sweep_delegations_at(chrono::Utc::now())
     }
@@ -576,6 +617,7 @@ impl DaemonState {
     ) -> DelegationSweep {
         let mut sweep = DelegationSweep::default();
         self.delegations.retain(|_, d| {
+            let age_from = d.started_at.unwrap_or(d.created_at);
             if d.status.is_live() {
                 let budget = if d.status == DelegationStatus::Queued
                     && d.source == DelegationSource::McpDeclared
@@ -584,17 +626,26 @@ impl DaemonState {
                 } else {
                     RUNNING_STALE_AFTER_SECS
                 };
-                let since = d.started_at.unwrap_or(d.created_at);
-                if now - since > chrono::Duration::seconds(budget) {
+                if now - age_from > chrono::Duration::seconds(budget) {
+                    // Status only. Stamping `ended_at` here would both overload
+                    // that field's meaning and put a still-possibly-live record
+                    // on the terminal retention clock, silently expiring the
+                    // recovery guarantee `Stale` exists to provide.
                     d.status = DelegationStatus::Stale;
-                    d.ended_at = Some(now);
                     sweep.staled += 1;
                 }
+                // A live record is never evicted, at any age.
                 return true;
             }
-            let keep = d
-                .ended_at
-                .is_none_or(|t| now - t <= chrono::Duration::seconds(DELEGATION_RETENTION_SECS));
+            let keep = if d.status == DelegationStatus::Stale {
+                // May still be resolvable by a late `SubagentStop`: held far
+                // longer, on its own age clock.
+                now - age_from <= chrono::Duration::seconds(STALE_RETENTION_SECS)
+            } else {
+                // Terminal: nothing can resolve it, so nothing is lost.
+                now - d.ended_at.unwrap_or(d.created_at)
+                    <= chrono::Duration::seconds(DELEGATION_RETENTION_SECS)
+            };
             if !keep {
                 sweep.evicted += 1;
             }

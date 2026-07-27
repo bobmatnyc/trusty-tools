@@ -261,15 +261,15 @@ pub struct Delegation {
     /// When the subagent actually started running (UTC), when known.
     #[serde(default)]
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// When the delegation stopped being live (UTC), when known.
+    /// When the delegation reached a **terminal** status (UTC), when known.
     ///
-    /// Note this is "when tracking stopped counting it as in flight", not
-    /// necessarily "when the subagent finished": for
-    /// [`DelegationStatus::Stale`] it is the moment the staleness sweep gave up
-    /// on the record, and the subagent may well still be running. The `status`
-    /// field is what disambiguates. It is also the retention clock — a record
-    /// with `ended_at` set is evicted once it ages past
-    /// `daemon::state::sessions::DELEGATION_RETENTION_SECS`.
+    /// This means exactly that and nothing broader — every writer sets it
+    /// alongside `Completed`/`Failed`/`Cancelled`. In particular the staleness
+    /// sweep does NOT stamp it: a [`DelegationStatus::Stale`] record has no
+    /// `ended_at`, because it did not end — tracking merely stopped trusting it,
+    /// and the subagent may still be running. Keeping the field single-meaning
+    /// is what lets it serve as the terminal-retention clock without putting a
+    /// possibly-live record on that clock (#2864 re-review).
     #[serde(default)]
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
 }

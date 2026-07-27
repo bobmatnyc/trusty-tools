@@ -16,6 +16,7 @@ use crate::core::session::{ControlModel, Session, SessionStatus};
 use crate::daemon::idle_nudge::has_live_children;
 use crate::daemon::state::sessions::{
     DECLARED_STALE_AFTER_SECS, DELEGATION_RETENTION_SECS, RUNNING_STALE_AFTER_SECS,
+    STALE_RETENTION_SECS,
 };
 use std::sync::Arc;
 
@@ -144,7 +145,8 @@ fn async_launch_keeps_delegation_running() {
 
 #[test]
 fn synchronous_post_tool_use_completes_delegation() {
-    // A dispatch that returns synchronously (no isAsync marker) IS complete.
+    // A dispatch that returns with no launch marker and no `agentId` handle IS
+    // complete — there is nothing left for a `SubagentStop` to quote back.
     let (state, sid) = state_with_session();
     observe(
         &state,
@@ -155,12 +157,46 @@ fn synchronous_post_tool_use_completes_delegation() {
     let payload = serde_json::json!({
         "tool": "Task",
         "tool_use_id": "toolu_s",
-        "tool_response": { "is_error": false }
+        "tool_response": { "isAsync": false, "is_error": false }
     });
     observe(&state, sid, HookEvent::PostToolUse, &payload);
     let d = only(&state, sid);
     assert_eq!(d.status, DelegationStatus::Completed);
     assert!(d.ended_at.is_some());
+}
+
+#[test]
+fn liveness_silent_response_is_read_as_a_return_known_gap() {
+    // KNOWN LIMITATION, asserted so it is visible rather than lurking: a
+    // recognized response that says nothing about liveness (`resolvedModel`
+    // alone) is treated as a synchronous return. Closing this band requires
+    // `on_subagent_stop` to gain a recovery path first — it resolves only by
+    // `agent_id`, which only `on_launched` teaches, so a response with no
+    // `agentId` has no other route to termination and tightening here would
+    // turn a rare fail-open into a guaranteed 6 h phantom "agent in flight".
+    // See `classify_dispatch`'s KNOWN LIMITATION note. Unobserved against
+    // Claude Code 2.1.220, whose dispatch response takes the `Launched` branch.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let payload = serde_json::json!({
+        "tool": "Agent",
+        "tool_use_id": "toolu_1",
+        "tool_response": { "resolvedModel": "claude-haiku-4-5-20251001" }
+    });
+    observe(&state, sid, HookEvent::PostToolUse, &payload);
+    let d = only(&state, sid);
+    assert_eq!(
+        d.status,
+        DelegationStatus::Completed,
+        "documented residual — change this assertion only together with the \
+         stop-side recovery path"
+    );
+    assert_eq!(d.tier, ModelTier::Haiku, "tier is still refined");
 }
 
 #[test]
@@ -515,6 +551,58 @@ fn post_tool_use_with_unrecognized_response_stays_running() {
 }
 
 #[test]
+fn post_tool_use_with_only_an_agent_id_stays_running() {
+    // The self-contradiction case: storing `agent_id` (whose ONLY purpose is to
+    // let a future SubagentStop resolve this record) while marking it Completed
+    // in the same closure. `agentId` is by design the ASYNC correlation key, so
+    // handing one back is evidence of a launch, never of a return.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let payload = serde_json::json!({
+        "tool": "Agent",
+        "tool_use_id": "toolu_1",
+        "tool_response": { "agentId": "aid_p1" }
+    });
+    observe(&state, sid, HookEvent::PostToolUse, &payload);
+
+    let d = only(&state, sid);
+    assert_eq!(d.status, DelegationStatus::Running);
+    assert_eq!(
+        d.agent_id.as_deref(),
+        Some("aid_p1"),
+        "the join key is still learned — it is just not read as completion"
+    );
+    // …and the stop it implies still resolves the record.
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid_p1"));
+    assert_eq!(only(&state, sid).status, DelegationStatus::Completed);
+}
+
+#[test]
+fn changed_async_status_value_with_an_agent_id_stays_running() {
+    // Value drift, not key drift: `status` keeps its name but stops saying
+    // "async_launched". The `agentId` handle is what keeps this safe.
+    let (state, sid) = state_with_session();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    let payload = serde_json::json!({
+        "tool": "Agent",
+        "tool_use_id": "toolu_1",
+        "tool_response": { "status": "launched", "agentId": "aid_p3" }
+    });
+    observe(&state, sid, HookEvent::PostToolUse, &payload);
+    assert_eq!(only(&state, sid).status, DelegationStatus::Running);
+}
+
+#[test]
 fn renamed_async_marker_does_not_terminalize() {
     // The specific drift scenario: `isAsync`/`status` renamed but `agentId`
     // kept. We still recognise the response, so we would infer a synchronous
@@ -660,8 +748,9 @@ fn terminal_delegations_are_evicted_after_retention() {
 
 #[test]
 fn live_delegations_are_never_evicted() {
-    // The retention clock is `ended_at`, which a live record never has — so no
-    // amount of elapsed time can drop work that is still in flight.
+    // The live branch of the sweep unconditionally retains, at ANY age. At
+    // +30 days the record has of course gone Stale (that is the liveness
+    // bound), but nothing evicted it in that pass, and it is still there.
     let (state, sid) = state_with_session();
     observe(
         &state,
@@ -670,14 +759,15 @@ fn live_delegations_are_never_evicted() {
         &pre("Agent", "engineer", "t", "toolu_1"),
     );
     let sweep = state.sweep_delegations_at(Utc::now() + chrono::Duration::days(30));
-    assert_eq!(sweep.evicted, 0);
+    assert_eq!(sweep.evicted, 0, "a live record is never evicted");
     assert_eq!(state.delegations_for(sid).len(), 1);
 }
 
 #[test]
-fn a_stale_delegation_is_retained_then_evicted() {
-    // Stale records survive one retention window so a human paused mid-flight
-    // still sees "tracking lost" rather than nothing at all.
+fn a_stale_delegation_has_no_ended_at() {
+    // `ended_at` means "reached a terminal status" and nothing broader. If the
+    // sweep stamped it, `Stale` would ride the terminal retention clock and the
+    // recovery window would silently collapse from 18 h to 1 h.
     let (state, sid) = state_with_session();
     observe(
         &state,
@@ -685,20 +775,91 @@ fn a_stale_delegation_is_retained_then_evicted() {
         HookEvent::PreToolUse,
         &pre("Agent", "engineer", "t", "toolu_1"),
     );
-    let staled_at = Utc::now() + chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS + 1);
-    state.sweep_delegations_at(staled_at);
+    state
+        .sweep_delegations_at(Utc::now() + chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS + 1));
+    let d = only(&state, sid);
+    assert_eq!(d.status, DelegationStatus::Stale);
+    assert!(
+        d.ended_at.is_none(),
+        "the sweep must not claim the delegation ended — it did not end, we \
+         stopped trusting the record"
+    );
+}
+
+#[test]
+fn stale_delegation_stays_resolvable_far_past_the_terminal_window() {
+    // The guarantee `Stale` is justified by, asserted rather than assumed: it
+    // used to be dropped one terminal-retention window (1 h) after staling —
+    // ~7 h total — after which a late SubagentStop resolved nothing because
+    // there was no record left. It must survive far past that.
+    let (state, sid) = state_with_session();
+    let t0 = Utc::now();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    state.sweep_delegations_at(t0 + chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS + 1));
     assert_eq!(only(&state, sid).status, DelegationStatus::Stale);
 
-    state
-        .sweep_delegations_at(staled_at + chrono::Duration::seconds(DELEGATION_RETENTION_SECS - 1));
+    // The old 7 h horizon, and then a full day short of eviction.
+    state.sweep_delegations_at(
+        t0 + chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS + DELEGATION_RETENTION_SECS + 60),
+    );
     assert_eq!(
         state.delegations_for(sid).len(),
         1,
-        "still inside retention"
+        "the record that used to vanish at ~7 h must still be here"
     );
+    let sweep =
+        state.sweep_delegations_at(t0 + chrono::Duration::seconds(STALE_RETENTION_SECS - 60));
+    assert_eq!(sweep.evicted, 0);
 
-    state
-        .sweep_delegations_at(staled_at + chrono::Duration::seconds(DELEGATION_RETENTION_SECS + 1));
+    // …and it is still resolvable, which is the whole point.
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
+    assert_eq!(
+        only(&state, sid).status,
+        DelegationStatus::Completed,
+        "a stop arriving ~24 h later still replaces 'we lost track' with the truth"
+    );
+}
+
+#[test]
+fn a_stale_delegation_is_eventually_evicted() {
+    // The recovery window is long, not infinite — the map must stay bounded.
+    // This asserts the bound rather than leaving it incidental, and documents
+    // exactly what is lost past it.
+    let (state, sid) = state_with_session();
+    let t0 = Utc::now();
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "t", "toolu_1"),
+    );
+    observe(
+        &state,
+        sid,
+        HookEvent::PostToolUse,
+        &post_async("Agent", "toolu_1", "aid1"),
+    );
+    state.sweep_delegations_at(t0 + chrono::Duration::seconds(RUNNING_STALE_AFTER_SECS + 1));
+
+    let sweep =
+        state.sweep_delegations_at(t0 + chrono::Duration::seconds(STALE_RETENTION_SECS + 60));
+    assert_eq!(sweep.evicted, 1);
+    assert!(state.delegations_for(sid).is_empty());
+
+    // Past the bound there is nothing left to resolve — a documented limit,
+    // not a surprise.
+    observe(&state, sid, HookEvent::SubagentStop, &stop("aid1"));
     assert!(state.delegations_for(sid).is_empty());
 }
 
@@ -740,6 +901,48 @@ fn dedup_does_not_merge_a_different_task() {
         observed.task, "rebase the release branch",
         "the dispatched task text must survive"
     );
+}
+
+#[test]
+fn dedup_declines_a_description_less_dispatch() {
+    // No description on the dispatch means no discriminator at all, and merging
+    // would keep the declaration's text as the label for a dispatch we cannot
+    // identify — the mislabel this discriminator exists to prevent.
+    let (state, sid) = state_with_session();
+    state.upsert_delegation(Delegation::new(
+        sid,
+        None,
+        "engineer",
+        ModelTier::Sonnet,
+        "fix the delegation tracker",
+    ));
+    let payload = serde_json::json!({
+        "tool": "Agent",
+        "tool_use_id": "toolu_1",
+        "input": { "subagent_type": "engineer" }
+    });
+    observe(&state, sid, HookEvent::PreToolUse, &payload);
+    assert_eq!(state.delegations_for(sid).len(), 2);
+}
+
+#[test]
+fn dedup_merges_an_unlabelled_declaration() {
+    // The other empty case is NOT symmetric: an unlabelled declaration supplies
+    // no discriminator of its own, but merging adopts the dispatch's text, so
+    // no wrong label can survive.
+    let (state, sid) = state_with_session();
+    let declared = Delegation::new(sid, None, "engineer", ModelTier::Opus, "");
+    let declared_id = declared.id;
+    state.upsert_delegation(declared);
+    observe(
+        &state,
+        sid,
+        HookEvent::PreToolUse,
+        &pre("Agent", "engineer", "rebase the release branch", "toolu_1"),
+    );
+    let d = only(&state, sid);
+    assert_eq!(d.id, declared_id);
+    assert_eq!(d.task, "rebase the release branch");
 }
 
 #[test]
