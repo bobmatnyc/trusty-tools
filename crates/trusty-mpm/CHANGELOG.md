@@ -8,7 +8,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
-
+- **Agent delegations are now tracked automatically, with a real lifecycle**
+  ([#2864](https://github.com/bobmatnyc/trusty-tools/issues/2864), slices
+  S1+S2): the daemon observes every native subagent dispatch from the
+  `PreToolUse` hook it already receives on every managed session, so tracking no
+  longer depends on the PM voluntarily calling `agent_delegate`. Delegations move
+  `Running` → `Completed`/`Failed` instead of sitting in `Queued` forever, and a
+  `Delegation` now carries `source`, `tool_use_id`, `agent_id`,
+  `transcript_path`, `cwd`, `started_at`, and `ended_at`. A dispatch that both
+  declares (`agent_delegate`) and executes the *same* task produces one record,
+  not two.
+- **`tm hook` forwards Claude Code's subagent correlation keys** (#2864):
+  `tool_use_id` and `transcript_path` on tool events, and `agent_id` /
+  `agent_type` / `agent_transcript_path` on `SubagentStop`. A `tool_response` is
+  relayed only for a subagent-dispatch tool and only as a fixed five-key
+  projection, so an ordinary tool's output is never forwarded. All fields are
+  additive.
 - **`tm hook --pm-guard` now hard-blocks `git worktree add` targeting `/tmp`,
   `/private/tmp`, `/var/folders`, `$TMPDIR`, or the harness scratchpad**
   (worktree-hygiene follow-up to
@@ -47,6 +62,55 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   [#3981](https://github.com/bobmatnyc/trusty-tools/issues/3981).
 
 ### Fixed
+
+- **The idle nudge is no longer suppressed indefinitely by a single delegation**
+  (#2864): `has_live_children` treats `Queued`/`Running` as live, but nothing
+  ever advanced a delegation out of `Queued`, so any session that had delegated
+  once looked permanently busy. Delegations now terminalize on `SubagentStop`,
+  correlated exactly by `agent_id`, so concurrent subagents close independently
+  and finishing one never closes another. `SubagentStop` is not guaranteed to
+  arrive, so a background sweep additionally bounds liveness (below) — together
+  these cover both the hook-observed and the never-observed cases.
+- **A delegation whose `SubagentStop` never arrives can no longer pin a session
+  "busy" for the daemon's lifetime** (#2864 review): a dropped hook POST, an
+  interrupted subagent, or a dispatch that never learned an `agent_id` left a
+  `Running` record with no route out. The 60-second reap loop now sweeps
+  delegations: a live record past its budget (6 hours for `Running`, 15 minutes
+  for a `Queued` `agent_delegate` declaration that was never dispatched) is
+  marked with the new `stale` status. `stale` deliberately means "tracking lost
+  this", **not** "the agent finished" — it stops counting as live but is not
+  terminal, so a late `SubagentStop` still resolves it to the truth.
+- **The delegation map is bounded, without expiring the `stale` recovery
+  window** (#2864 review): a terminal delegation is evicted an hour after
+  `ended_at`; nothing can resolve a terminal record, so that costs nothing. A
+  `stale` one is held for 24 hours from its own start — an **18-hour** window in
+  which a late `SubagentStop` still resolves it — and a live one is never
+  evicted at any age. The sweep does not stamp `ended_at` on `stale`, so that
+  field keeps meaning exactly "reached a terminal status". Past 24 hours a
+  `stale` record is dropped and a later stop finds nothing: the recovery window
+  is long, not infinite, because the map must stay bounded.
+- **A `PostToolUse` no longer marks a running subagent `Completed` on an absent,
+  unparseable, or `agentId`-bearing response** (#2864 review): the launch
+  handler inferred "not async, therefore finished" from an absent response, so a
+  Claude Code response-shape change would have silently reported "no agents in
+  flight" ~1 ms after every dispatch. The response is now classified three ways
+  — *launched* / *returned* / *unknown* — and only *returned* completes. A
+  response carrying an `agentId` counts as *launched*, since that key exists
+  precisely so a future `SubagentStop` can quote it; marking such a dispatch
+  complete while storing the id to expect a stop for was self-contradictory. The
+  recognized key set is defined once and shared by the `tm hook` projection and
+  the daemon so the two cannot drift. *Known limitation:* a recognized response
+  that carries no `agentId` and is silent about liveness is still read as a
+  synchronous return — such a response has no other route to termination, so
+  tightening it is blocked on giving `SubagentStop` a recovery path first.
+- **Two same-agent dispatches inside the dedup window are no longer merged into
+  one record** (#2864 review): dedup matched on the agent name alone, so a
+  declaration plus an unrelated later dispatch of the same agent collapsed
+  together — undercounting work in flight and displaying the declaration's task
+  text for the dispatch that was actually running. The task description is now a
+  required discriminator (whitespace/case-insensitive prefix match either way; a
+  dispatch with no description declines to merge at all), and the window is 120
+  seconds rather than 300.
 
 - **Bare `tm` no longer misreports a managed pane as "not a git project"**
   (closes [#4061](https://github.com/bobmatnyc/trusty-tools/issues/4061)):
