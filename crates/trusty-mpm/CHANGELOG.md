@@ -117,6 +117,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Bundled instructions no longer tell every agent to pass an `index_id` that
+  does not exist**: `BASE_PM.md` instructed "Always pass `index_id` = the
+  project directory name (e.g. `index_id: "trusty-mpm"`)", and the
+  `tm-tool-usage-guide` / `tm-circuit-breaker` skills repeated it in their
+  worked examples. No index is registered under a project *name*, so the call
+  returned `404 unknown index` every time — agents concluded code search was
+  broken and silently degraded to `grep`. It also defeated the fix it sat on
+  top of: the launcher already pins each session to its own index via
+  `trusty-search serve --index <id>` in `.mcp.json` precisely so a bare call
+  cannot reach the wrong project (issue #1373), and the tool schema documents
+  `index_id` as defaulting to that pinned index when omitted. All four sites
+  now instruct OMITTING `index_id`, and the misleading worked examples are
+  gone. Deliberately no id *format* is documented, so the guidance stays
+  correct however ids are derived. Because `BASE_PM.md` is the last,
+  non-overridable instruction layer, no project could correct this locally —
+  it affected every session on every project.
+
 - **The worktree reclaim path no longer force-deletes uncommitted work**
   ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091)): the
   orphaned-worktree sweep had no dirty-tree check anywhere — its entire safety
