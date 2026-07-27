@@ -26,6 +26,29 @@
 //! right side, `scrub_branding` strips every forbidden token from a sample
 //! backend transcript, `name()`/`schema()` stay clean, and an RBAC test
 //! proves both denied tiers never see the tool via `filter_tools_for_user`.
+//!
+//! ## Cross-product specialists (epic #4021, #4026/#4028)
+//!
+//! The tool now also accepts an OPTIONAL `specialist` name, routing the task
+//! to that named external non-coding agent instead of the default opaque
+//! target. Two rules govern it, both enforced here rather than at the caller:
+//!
+//! - **#4026, fail-closed allow-set.** A named specialist is resolved through
+//!   `cross_product::SubagentAllowSet` — the intersection of the bridge's own
+//!   `NON_CODING_TARGETS` floor with the calling agent's `[subagents].allowed`
+//!   config. The default is EMPTY: omitting `with_allow_set` disables named
+//!   targeting entirely. A denial returns before `backend.run`, so nothing is
+//!   dispatched. Per the owner's OQ-7 ruling this is never caller-trusted;
+//!   #4030's domain authority will later feed the same seam.
+//! - **#4028, propose-not-authorize.** A named specialist's result is wrapped
+//!   in `cross_product::ProposalEnvelope` (origin agent, target agent, the
+//!   CALLER's authority tier, and a `Disposition` marker that is always
+//!   `Proposal`) per DOC-41 §5.5 line 1398 and #3078's AUTH-5 pattern. Holding
+//!   `user_authority` is recorded, never an upgrade: the caller acts on the
+//!   proposal in its own turn, under its own identity.
+//!
+//! Omitting `specialist` is byte-identical to pre-#4026 behaviour: same route
+//! derivation, same default target, same bare scrubbed transcript back.
 
 use std::sync::{Arc, OnceLock};
 
@@ -33,16 +56,34 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::intent::route::route_task;
+use crate::intent::route::{BridgeRoute, route_task};
 use crate::rbac::ServiceTier;
+use crate::tools::cross_product::{
+    CallerAuthority, HandoffContext, ProposalEnvelope, SubagentAllowSet,
+};
 use crate::tools::pm_bridge_backend::PmBridgeBackend;
 use crate::tools::traits::{ToolExecutor, ToolResult};
+
+/// Envelope `origin_agent` used when a registration site names none.
+///
+/// Why: `ProposalEnvelope` must always identify an origin, but the older
+/// registration sites have no agent identity to hand in. A generic, non-
+/// branded placeholder keeps the envelope honest without leaking anything.
+/// What: the literal used unless `with_origin` supplies a real name.
+/// Test: `envelope_carries_origin_target_and_authority`.
+const DEFAULT_ORIGIN_AGENT: &str = "assistant";
 
 /// `dispatch_task` — hands a task to whichever backend `route_task` decides,
 /// via an injected `PmBridgeBackend`.
 pub struct PmBridgeTool {
     backend: Arc<dyn PmBridgeBackend>,
     restricted: Vec<ServiceTier>,
+    // #4026: the fail-closed, bridge-owned allow-set for named cross-product
+    // specialists. EMPTY by default — see `with_allow_set`.
+    allow_set: SubagentAllowSet,
+    // #4028: envelope provenance/authority for cross-product results.
+    origin_agent: String,
+    caller_authority: CallerAuthority,
 }
 
 impl PmBridgeTool {
@@ -59,7 +100,54 @@ impl PmBridgeTool {
         Self {
             backend,
             restricted: Vec::new(),
+            // #4026: EMPTY allow-set by default — constructing the tool grants
+            // no cross-product reach whatsoever.
+            allow_set: SubagentAllowSet::empty(),
+            origin_agent: DEFAULT_ORIGIN_AGENT.to_string(),
+            caller_authority: CallerAuthority::Standard,
         }
+    }
+
+    /// Attach the calling agent's cross-product allow-set (#4026).
+    ///
+    /// Why: OQ-7 puts enforcement at the bridge, fail-closed. Injecting the
+    /// resolved set at REGISTRATION time (from the caller's
+    /// `[subagents].allowed`, see `agents::config::SubagentsConfig`) means
+    /// `execute` never consults anything the LLM can influence mid-turn, and
+    /// #4030's domain authority can later feed the same seam without touching
+    /// this tool.
+    /// What: replaces the default EMPTY set. Omitting this call leaves named
+    /// specialist targeting fully disabled — the no-silent-grant default.
+    /// Test: `named_specialist_is_denied_when_no_allow_set_is_configured`,
+    /// `named_specialist_reaches_the_backend_when_allowed`.
+    pub fn with_allow_set(mut self, allow_set: SubagentAllowSet) -> Self {
+        self.allow_set = allow_set;
+        self
+    }
+
+    /// Attach the envelope's origin identity and the CALLER's authority tier
+    /// (#4028).
+    ///
+    /// Why: `ProposalEnvelope` records who dispatched and at what tier so an
+    /// authority-holder can recognise that IT, in its own turn, is the party
+    /// that may act on a returned proposal (DOC-41 §5.5). The tier is supplied
+    /// by the registration site rather than read here because `user_authority`
+    /// has no `AgentConfig` field yet (reserved for #3074/AUTH-1) — this is
+    /// the seam that will read it when it lands, with no new tier invented.
+    /// What: sets `origin_agent` (blank falls back to the generic default) and
+    /// `caller_authority`.
+    /// Test: `envelope_carries_origin_target_and_authority`.
+    pub fn with_origin(
+        mut self,
+        origin_agent: impl Into<String>,
+        caller_authority: CallerAuthority,
+    ) -> Self {
+        let origin = origin_agent.into();
+        if !origin.trim().is_empty() {
+            self.origin_agent = origin;
+        }
+        self.caller_authority = caller_authority;
+        self
     }
 
     /// Attach the RBAC-denied tiers.
@@ -94,6 +182,25 @@ impl ToolExecutor for PmBridgeTool {
                         "task": {
                             "type": "string",
                             "description": "A concrete, self-contained description of the work to hand off."
+                        },
+                        // #4026: optional named specialist. Described without
+                        // naming any backend or enumerating the roster (the
+                        // #3052 PR A CRITICAL-2 rule) — the caller's own
+                        // instructions are the source of legitimate names.
+                        "specialist": {
+                            "type": "string",
+                            "description": "Optional name of a non-coding specialist to hand this to, when your own instructions name one. Omit to let the system choose how to execute the task."
+                        },
+                        // #4028: optional HandoffContext-shaped payload.
+                        "handoff": {
+                            "type": "object",
+                            "description": "Optional context to hand along with the task. Keep it small; it is capped.",
+                            "properties": {
+                                "summary": { "type": "string" },
+                                "relevant_state": { "type": "string" },
+                                "constraints": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "additionalProperties": false
                         }
                     },
                     "required": ["task"],
@@ -111,9 +218,71 @@ impl ToolExecutor for PmBridgeTool {
             return ToolResult::err("dispatch_task: 'task' must not be empty");
         }
 
-        let route = route_task(task);
-        match self.backend.run(route, task).await {
-            Ok(out) => ToolResult::ok(scrub_branding(&out)),
+        // #4028: validate the handoff BEFORE anything is dispatched, so an
+        // over-cap payload is a recoverable caller error and the target is
+        // never invoked.
+        let handoff = match args.get("handoff") {
+            None | Some(Value::Null) => HandoffContext::default(),
+            Some(raw) => match serde_json::from_value::<HandoffContext>(raw.clone()) {
+                Ok(h) => h,
+                Err(e) => return ToolResult::err(format!("dispatch_task: invalid 'handoff': {e}")),
+            },
+        };
+        if let Err(size) = handoff.validate() {
+            return ToolResult::err(format!(
+                "dispatch_task: 'handoff' is too large ({size} bytes; limit {}) — nothing was dispatched",
+                crate::tools::cross_product::HANDOFF_MAX_BYTES
+            ));
+        }
+
+        // #4026: resolve the named specialist against the fail-closed
+        // bridge-layer allow-set. A denial returns BEFORE `backend.run`, so
+        // nothing is dispatched.
+        let requested = args
+            .get("specialist")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty());
+        let target = match requested {
+            Some(name) => match self.allow_set.resolve(name) {
+                Ok(resolved) => Some(resolved),
+                Err(denied) => return ToolResult::err(format!("dispatch_task: {denied}")),
+            },
+            None => None,
+        };
+
+        let body = match handoff.render_preamble() {
+            Some(preamble) => format!("{preamble}\n{task}"),
+            None => task.to_string(),
+        };
+        // #4026: a named specialist always takes the external-roster leg —
+        // that roster is where the non-coding specialists live (#4027), and
+        // re-deriving the route would let an unrelated phrase in `task` send
+        // a named target somewhere it does not exist.
+        let route = match target {
+            Some(_) => BridgeRoute::Tcode,
+            None => route_task(task),
+        };
+
+        match self.backend.run(route, target.as_deref(), &body).await {
+            Ok(out) => {
+                let scrubbed = scrub_branding(&out);
+                match target {
+                    // #4028: a cross-product specialist's result is wrapped in
+                    // the propose-only envelope — DOC-41 §5.5 line 1398.
+                    Some(name) => ToolResult::ok(
+                        ProposalEnvelope::for_cross_product(
+                            self.origin_agent.clone(),
+                            name,
+                            self.caller_authority,
+                            scrubbed,
+                        )
+                        .render(),
+                    ),
+                    // Unnamed dispatch is the pre-#4026 opaque path, returned
+                    // byte-identically to before this change.
+                    None => ToolResult::ok(scrubbed),
+                }
+            }
             // Scrubbed too: a raw backend error can name the process it
             // tried to spawn (see `ProcessPmBridge::run_tcode`/`run_tm`),
             // which would defeat the whole point of a black-boxed tool.

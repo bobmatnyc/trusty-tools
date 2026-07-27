@@ -81,9 +81,17 @@ allow = [
     # vector_search (semantic code/doc search).
     "memory_recall",
     "vector_search",
-    # #472: CTO ops DB query tools — read-only SQLite over ~/Duetto/cto/data/cto.db.
-    # Registered in-process via `src/tools/cto_db.rs` and gated to this persona
-    # in `ctrl::mod.rs` (sensitive HR/budget data; cto-assistant only).
+    # #472/#3656/#3700/#3732: CTO ops DB query tools — read-only SQLite over
+    # ~/Duetto/cto/data/cto.db (a fixture DB ships until the real file is
+    # reachable — see the skill's README). Backed by the "cto-db" Python
+    # skill (`.trusty-agents/skills/cto-db/`), NOT hardcoded Rust: business
+    # logic lives in the skill's `python/` package, discovered and registered
+    # generically at startup by `crate::tools::python_skill` (persona-gated
+    # via the `AgentPlugin`/`install_plugins` mechanism in
+    # `crate::tools::agent_plugin`, matched to this persona by name — the
+    # same gate `crates/cto-assistant` used before its wiring was severed by
+    # PR #3310, now reused by the skill bridge instead of by that unwired
+    # Rust crate).
     "query_headcount",
     "query_budget",
     "query_risks",
@@ -104,14 +112,22 @@ allow = [
 # credential actually holds, and BOTH must pass in
 # `ctrl::pm_task::dispatch::persona::filter_persona_tool_names` (#3208).
 #
-# The base `assistant` deliberately declares read-only `google.read`
-# (`../assistant/agent.toml`, §5.5) — but no gworkspace tool ever advertises
-# that scope: `registry::google_scope` maps every `x-google-scopes` OAuth URL
-# to `google.<family>.<access>` (e.g. `google.gmail.write`,
-# `google.tasks.write`), and `ScopePattern::matches` compares on segment
-# boundaries, so `google.read` matches nothing. Inheriting it by union was
-# therefore inheriting NO Google capability at all, and every Gmail/Tasks tool
-# allowlisted above was silently dropped before the model ever saw it.
+# HISTORY (#3938): the base `assistant` used to declare a read-only
+# `google.read` — but no gworkspace tool ever advertises that scope:
+# `registry::google_scope` maps every `x-google-scopes` OAuth URL to
+# `google.<family>.<access>` (e.g. `google.gmail.write`, `google.tasks.write`),
+# and `ScopePattern::matches` compares on segment boundaries, so `google.read`
+# matched nothing. Inheriting it by union was therefore inheriting NO Google
+# capability at all, and every Gmail/Tasks tool allowlisted above was silently
+# dropped before the model ever saw it.
+#
+# #3987 (option B) has since replaced that dead pattern on the base with
+# explicit family grants, which now INCLUDE `google.gmail.*` and
+# `google.tasks.*` — so the line below is currently redundant and the extends
+# union dedups it away (`union_opt_vec`). It is kept declared on purpose: an
+# overlay whose entire purpose is Gmail triage and Tasks sync should state the
+# capability it depends on rather than rely on the shared base never narrowing
+# it. If the base is ever trimmed, this package keeps working.
 #
 # This overlay is a single named user's private assistant (Masa/Duetto) whose
 # whole point is Gmail triage (#473) and Granola->Google Tasks sync (#472/#485),

@@ -560,15 +560,37 @@ fn base_assistant_package_is_generic_default_and_curated() {
     );
     let scopes = cfg.tools.scopes.expect("base assistant declares scopes");
     assert!(scopes.iter().any(|s| s == "memory.write"));
-    // §5.5: the generic base template defaults to READ-ONLY Google access.
-    // Write (`google.*`) is opted into by a personalization overlay, not the base.
+    // #3987 (option B, owner decision): this assertion used to require
+    // `google.read` per §5.5's read-only intent. That pattern granted
+    // NOTHING — no gworkspace tool advertises it, so all ~60 allowlisted
+    // Google tools were scope-denied at dispatch — and it has been replaced
+    // by explicit per-family grants. What is still worth pinning here is the
+    // NARROWNESS: the base enumerates the families its allowlist names and
+    // must NOT reach for izzie's blanket `google.*`, so a family added to the
+    // base later is a deliberate edit rather than something a wildcard
+    // absorbs silently.
     assert!(
-        scopes.iter().any(|s| s == "google.read"),
-        "base assistant must default to read-only Google (google.read)"
+        !scopes.iter().any(|s| s == "google.read"),
+        "the dead `google.read` pattern must not return to the base (#3987)"
     );
+    for family in [
+        "google.gmail.*",
+        "google.calendar.*",
+        "google.drive.*",
+        "google.docs.*",
+        "google.sheets.*",
+        "google.slides.*",
+        "google.tasks.*",
+        "google.accounts.*",
+    ] {
+        assert!(
+            scopes.iter().any(|s| s == family),
+            "base assistant must grant {family} for the tools it allowlists: {scopes:?}"
+        );
+    }
     assert!(
         !scopes.iter().any(|s| s == "google.*"),
-        "base assistant must NOT grant Google write by default"
+        "base assistant must enumerate families, not take a blanket google.* grant"
     );
     // Generic productivity skills only — NO user-specific skills on the base.
     let skills = cfg.system_prompt.skills.expect("base declares skills");

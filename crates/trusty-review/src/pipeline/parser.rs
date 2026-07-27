@@ -343,7 +343,7 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
         _ => Effort::Low,
     };
     let file = if f.file.is_empty() {
-        "unknown".to_string()
+        crate::models::UNKNOWN_FILE_PLACEHOLDER.to_string()
     } else {
         f.file
     };

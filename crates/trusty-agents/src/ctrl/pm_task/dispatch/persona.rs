@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use crate::agents::AgentConfig;
 use crate::llm;
 use crate::subprocess::SubprocessAgentRunner;
+use crate::tools::registry::dead_scope;
 use crate::tools::registry::scope::{Scope, ScopePattern, agent_can_use};
 use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
 
@@ -304,16 +305,24 @@ pub async fn run_pm_task_with_persona(
             for tool in crate::tools::mcp_service_tools::mcp_service_tool_executors().await {
                 registry.register(tool);
             }
+            // #3987: `advertised_scopes` is the UNFILTERED vocabulary every
+            // endpoint published, captured here because the registry only
+            // keeps what the operator's `[[endpoints]].scopes` policy let
+            // through. Feeding the dead-grant diagnostic the post-policy set
+            // would make an operator's deliberate narrowing look like a
+            // broken agent grant — see `build_with_scope_vocabulary`.
+            let mut advertised_scopes: Vec<String> = Vec::new();
             {
                 let global_config = crate::mcp::config::GlobalConfig::load().await;
                 match crate::tools::registry::ToolRegistryBuilder::from_config(&global_config)
-                    .build()
+                    .build_with_scope_vocabulary()
                     .await
                 {
-                    Ok(execs) => {
+                    Ok((execs, vocabulary)) => {
                         for tool in execs {
                             registry.register(tool);
                         }
+                        advertised_scopes = vocabulary;
                     }
                     Err(e) => {
                         tracing::warn!("tool registry init failed: {e}");
@@ -517,6 +526,31 @@ pub async fn run_pm_task_with_persona(
                 .into_iter()
                 .map(ScopePattern::new)
                 .collect();
+            // #3987 (option C): this is the ONLY place that holds both halves
+            // of the intersection at once — the agent's resolved patterns
+            // (post-`extends` union) AND the scope vocabulary the registry
+            // actually built — so it is where a pattern that can match
+            // nothing becomes detectable. Emitted here, immediately before
+            // the gate that would otherwise drop the surface in silence.
+            // Still a WARN and not a hard failure. #3987's option B has
+            // removed the dead `google.read` from the shipped base, so the
+            // sequencing constraint that forced a warning is discharged and
+            // escalation is unblocked — but promoting this to a fatal would
+            // stop USER-authored agents from loading, which is its own
+            // decision. See `tools::registry::dead_scope`'s module doc.
+            dead_scope::warn_dead_scope_patterns(
+                persona_name,
+                &dead_scope::dead_scope_patterns(
+                    &agent_scope_patterns,
+                    // Both halves: what the registry actually kept AND what
+                    // the endpoints advertised before operator filtering, so
+                    // a narrowed `[[endpoints]].scopes` policy can never be
+                    // mistaken for a dead grant.
+                    &dead_scope::reachable_scopes(
+                        tool_scopes.values().chain(advertised_scopes.iter()),
+                    ),
+                ),
+            );
             let kept = filter_persona_tool_names(
                 all_names,
                 &patterns,

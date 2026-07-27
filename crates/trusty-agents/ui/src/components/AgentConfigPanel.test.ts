@@ -24,6 +24,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, tick, unmount } from 'svelte';
 import AgentConfigPanel from './AgentConfigPanel.svelte';
 
+/**
+ * The C-07.2 "degraded backends" test below asserts that a disabled MCP
+ * knowledge connection renders honestly as DISABLED rather than being hidden.
+ * That guarantee must hold regardless of which endpoints the shipped
+ * `config.toml` defaults currently happen to enable — trusty-memory and
+ * trusty-search moved from disabled OpenRPC stubs to enabled live MCP-stdio
+ * services (#4064), which correctly left zero disabled entries in the real
+ * `KNOWLEDGE_MCP_ENDPOINTS` list. Rather than re-coupling this regression test
+ * to whatever is enabled-by-default today (which would just break again next
+ * time that list changes), append one synthetic always-disabled endpoint so
+ * the "disabled renders as disabled" invariant is tested independently of the
+ * shipped defaults.
+ */
+vi.mock('../lib/agentConfig', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/agentConfig')>();
+  return {
+    ...actual,
+    KNOWLEDGE_MCP_ENDPOINTS: [
+      ...actual.KNOWLEDGE_MCP_ENDPOINTS,
+      {
+        name: 'stub-disabled-endpoint',
+        description: 'Synthetic endpoint fixture — always disabled (regression coverage only).',
+        enabled: false,
+        scopes: ['stub.read'],
+        reason: 'disabled in this test fixture, independent of shipped config.toml defaults',
+      },
+    ],
+  };
+});
+
 let target: HTMLDivElement;
 let instance: Record<string, unknown> | null = null;
 
@@ -86,6 +116,7 @@ const SKILLS_PAYLOAD = {
   unmatched_patterns: [
     { pattern: 'gworkspace_*', reason: 'may resolve to an MCP tool at dispatch time' },
   ],
+  dead_scope_patterns: [],
   declares_capability: true,
 };
 
@@ -130,6 +161,7 @@ function stubBareApiWithFailingStores() {
               granted_count: 0,
               unresolved: [],
               unmatched_patterns: [],
+              dead_scope_patterns: [],
               declares_capability: false,
             }
           : { name: 'bare', display_name: 'Bare', tools_allow: [], scopes: [] };
@@ -335,7 +367,10 @@ describe('AgentConfigPanel — degraded backends (#3932, C-07.2)', () => {
     tabButton('Knowledge').click();
     await waitFor(() => target.textContent?.includes('Could not read store bindings') ?? false);
     // The knowledge-classification gap is named rather than guessed at, and a
-    // disabled endpoint is shown as disabled rather than hidden (C-03.2).
+    // disabled endpoint is shown as disabled rather than hidden (C-03.2). The
+    // synthetic `stub-disabled-endpoint` fixture (see the `agentConfig` mock
+    // above) supplies the disabled entry independently of whatever the
+    // shipped config.toml defaults currently enable.
     expect(target.textContent).toContain('kind = "knowledge"');
     expect(target.textContent).toContain('disabled');
 

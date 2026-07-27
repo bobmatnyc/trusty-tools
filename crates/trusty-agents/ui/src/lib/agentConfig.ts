@@ -268,35 +268,39 @@ export interface KnowledgeEndpoint {
 /**
  * Why (DOC-57 §8.5): Phase 1 maps the Knowledge pane's K-c sub-surface onto "a
  * read-only, statically-declared MCP knowledge-endpoint list", because no
- * route exposes `[[tool_registry.endpoints]]` yet. §4.4 is emphatic about WHAT
- * such a list must say: the two endpoints most obviously "MCP connections to
- * knowledge stores" ship `enabled = false` (awaiting `--rpc` on their
- * binaries), so the agent's memory and search capability today flows through
- * in-process tools, not through these endpoints. Rendering a
- * configured-but-disabled endpoint as connected — or omitting it — is the same
- * class of defect as the fabricated listener pane (C-03.2).
+ * route exposes live MCP connection state yet. §4.4 is emphatic about WHAT
+ * such a list must say: `trusty-memory` and `trusty-search` used to ship as
+ * `[[tool_registry.endpoints]]` OpenRPC entries with `enabled = false`
+ * (awaiting a `--rpc` stdio mode neither binary ever implemented — genuinely
+ * dead config, not merely disabled-by-default). Both binaries already
+ * implement the generic MCP-stdio protocol trusty-agents uses for
+ * `trusty-mpm`/`granola-notes`, so the fix moved them to live
+ * `[[mcp.services]]` entries (`enabled = true`, `discover = true`) instead of
+ * waiting on a driver that will never ship. Rendering a
+ * configured-but-disabled endpoint as connected — or a configured-and-enabled
+ * one as disabled — is the same class of defect as the fabricated listener
+ * pane (C-03.2).
  * What: The three knowledge endpoints declared in this crate's shipped
- * `assets/config/default-config.toml:193-243`, verbatim including their
- * `enabled` flags and scopes. This is the DEFAULT declaration; an operator who
+ * `assets/config/default-config.toml` `[[mcp.services]]` section, mirroring
+ * their `enabled` flags. This is the DEFAULT declaration; an operator who
  * has edited `~/.trusty-agents/config.toml` may have flipped a flag, which is
  * why the pane labels the list as declared-not-probed and Phase 3's
  * `GET /api/agents/:name/knowledge` (§4.5) replaces it with resolved state.
- * Test: `knowledgeEndpoints_report_the_shipped_disabled_defaults`.
+ * Test: `knowledgeEndpoints_report_the_shipped_defaults`.
  */
 export const KNOWLEDGE_MCP_ENDPOINTS: KnowledgeEndpoint[] = [
   {
     name: 'trusty-memory',
-    description: 'Trusty memory service — recall/remember/forget',
-    enabled: false,
+    description: 'Trusty memory service — recall/remember/forget over a native MCP-stdio server',
+    enabled: true,
     scopes: ['memory.read', 'memory.write'],
-    reason: 'disabled in the shipped config — awaits `--rpc` mode on the binary',
   },
   {
     name: 'trusty-search',
-    description: 'Trusty search service — semantic + keyword code search',
-    enabled: false,
+    description:
+      'Trusty search service — semantic + keyword code/knowledge search over a native MCP-stdio server',
+    enabled: true,
     scopes: ['search.read'],
-    reason: 'disabled in the shipped config — awaits `--rpc` mode on the binary',
   },
   {
     name: 'gworkspace',
@@ -322,15 +326,51 @@ export interface AgentSkill {
   name: string;
   /** One line on what invoking it accomplishes. Empty for a derived skill. */
   description: string;
-  kind: 'action' | 'knowledge' | 'system';
+  /**
+   * `function` (#4022) is a BUNDLE — a group header over its member cards, not
+   * a capability of its own. It wraps no tool, so a pane that buckets by kind
+   * must not drop it into the Action bucket; rendering the group is #4024's job.
+   */
+  kind: 'action' | 'knowledge' | 'system' | 'function';
   /** `builtin` | `authored` (with `path`) | `derived`. */
   origin: { kind: string; path?: string };
-  /** Whether THIS agent is granted the skill, per the real dispatch gate. */
+  /**
+   * Whether THIS agent is granted the skill, per the real dispatch gate. For a
+   * `function` card this is the conservative reading of the tri-state below —
+   * `granted_state === 'all'`.
+   */
   granted: boolean;
-  /** The wrapped tool — zero or one name (1:1). */
+  /** The wrapped tool — zero or one name (1:1). Empty for a bundle. */
   tools: string[];
   /** Credential this skill needs, when it needs one. */
   provider: AgentSkillProvider | null;
+  /** #4022 member skill ids for a `function` card; empty for a leaf. */
+  members: string[];
+  /** The subset of `members` this agent holds; empty for a leaf. */
+  granted_members: string[];
+  /**
+   * #4025 tri-state. For a bundle: `all`/`some`/`none` of its members. For a
+   * leaf it simply restates `granted`, so no kind check is needed to read it.
+   */
+  granted_state: 'all' | 'some' | 'none';
+}
+
+/**
+ * One function-skill group from `GET /api/agents/:name/skills` (#4025).
+ *
+ * A convenience index over the `kind: 'function'` cards in `skills[]` — the
+ * server builds both from ONE computation, so a group and its card can never
+ * report different grant states. Members are skill ids to be looked up in
+ * `skills[]`; a member id the catalog cannot resolve is still LISTED here (it is
+ * what the bundle declares) but can never appear in `granted_members`.
+ */
+export interface AgentSkillGroup {
+  id: string;
+  name: string;
+  description: string;
+  members: string[];
+  granted_members: string[];
+  granted_state: 'all' | 'some' | 'none';
 }
 
 /**
@@ -352,11 +392,24 @@ export interface AgentSkillProvider {
 /** `GET /api/agents/:name/skills`'s wire shape. */
 export interface AgentSkills {
   skills: AgentSkill[];
+  /** Granted CAPABILITIES — `function` bundles are excluded (#4025). */
   granted_count: number;
+  /** #4025 function-skill groups, indexing the `kind: 'function'` cards. */
+  groups: AgentSkillGroup[];
   /** `[skills].allow` ids that resolved to nothing (DOC-57 S-11). */
   unresolved: { id: string; reason: string }[];
   /** Allow-patterns no catalog tool matches — may still resolve over MCP. */
   unmatched_patterns: { pattern: string; reason: string }[];
+  /**
+   * `[tools].scopes` patterns that can match NO reachable dotted scope
+   * (#3987). Unlike `unmatched_patterns` — which may still resolve to a
+   * live-discovered MCP tool — these are conclusively broken: every scoped
+   * tool the grant was meant to permit is denied at dispatch, which looks
+   * exactly like "this agent has no tools". `nearest` carries working
+   * alternatives in the same namespace, so the pane can be actionable rather
+   * than merely alarming. Render it as a WARNING, not as an aside.
+   */
+  dead_scope_patterns: { pattern: string; nearest: string[]; reason: string }[];
   /** `false` when the agent declares no capability at all (grants nothing). */
   declares_capability: boolean;
   config_error?: string;

@@ -1,0 +1,35 @@
+[project]
+name = "cto-db-skill"
+version = "0.1.0"
+description = "cto-assistant skill: read-only query tools over the CTO ops database (headcount, budget, risks, work classification)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Duetto Research" }]
+
+# stdlib-only (sqlite3 ships with CPython) — no third-party dependencies
+# needed for the query logic itself, so the skill has nothing to fail to
+# resolve at bootstrap. Kept intentionally minimal per issue #3239 (the
+# uv-venv provisioning helper this skill is designed to work with once it
+# lands) — a skill with zero deps still round-trips through `uv run` today
+# without a helper, which is why this package works standalone right now.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[project.scripts]
+cto-db-skill = "cto_db_skill.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cto_db_skill"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"

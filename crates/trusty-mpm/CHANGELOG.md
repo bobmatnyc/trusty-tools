@@ -63,6 +63,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Concurrent workspace-trust seeds no longer clobber each other's
+  `~/.claude.json` entries** (closes
+  [#4072](https://github.com/bobmatnyc/trusty-tools/issues/4072)):
+  `core::home_trust_seed::preseed_home_trust` and
+  `core::session_launch::settings::preseed_workspace_trust` both perform a
+  load → mutate → store cycle over the same `~/.claude.json`, and the daemon
+  runs them concurrently — once per session it provisions, from independent
+  tokio tasks. Unsynchronised, the slower writer serialised the snapshot it
+  read *before* the faster writer's store, silently deleting that session's
+  whole `projects.<workspace>` entry (trust acceptance **and** its
+  `enabledMcpjsonServers` approval) with nothing logged; the operator then hit
+  the exact "Do you trust the files in this folder?" / "new MCP servers found"
+  dialog the seed exists to dismiss. Both seeders now hold one process-wide
+  lock (`core::claude_json_guard`) across the whole cycle, and
+  `preseed_workspace_trust` writes through
+  `trusty_common::claude_config::write_json_atomic` instead of a truncating
+  `std::fs::write` — a half-written file was observable by any concurrent
+  reader, and every reader in this crate treats malformed JSON as "skip,
+  leave it alone". This also fixes the recurring CI flake in
+  `tests_manifest_toggle_trust_3934` (red on PRs #4057 and #4067, green in
+  isolation), where a non-serial test resolving the process-global `$HOME`
+  clobbered a `#[serial]` test's temp `.claude.json`.
+
 - **Activity monitor no longer misreports a provider stream failure as a
   serialization error** (issue #3757): `LlmActivityClassifier::classify`
   matched only `ChatEvent::Delta` and discarded `ChatEvent::Error`, so once the

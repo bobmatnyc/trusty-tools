@@ -28,6 +28,11 @@ pub mod citation_check;
 pub mod context_gate;
 pub mod diff;
 pub mod diff_analyzer;
+// Why: output-hygiene filters (self-negation / chain-of-thought-leak drop,
+// diff-absent-speculation demotion) closing #4043/#4044 — kept separate from
+// `citation_check` (path/content verification, #4042) since the two concerns
+// have independent marker sets and independent test surfaces.
+pub mod finding_hygiene;
 pub mod grade;
 // Why: reconciles the grade embedded in the raw `review_body` JSON with the
 // authoritative top-level grade so the two can never disagree (issue #1886).

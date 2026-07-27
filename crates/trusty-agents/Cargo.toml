@@ -1,7 +1,6 @@
 [package]
 name = "trusty-agents"
 version = "0.38.6"
-publish = false
 edition = "2024"
 description = "Trusty Agents: Rust-native agentic harness with multi-model routing, tool execution, and subprocess delegation."
 license.workspace = true

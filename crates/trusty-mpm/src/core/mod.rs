@@ -25,6 +25,9 @@ pub mod bundle;
 pub mod catchup;
 pub mod circuit;
 pub mod claude_config;
+// Issue #4072: one process-wide lock every `~/.claude.json` read-modify-write
+// seeder holds, so concurrent daemon provisioning cannot lose a trust entry.
+pub mod claude_json_guard;
 // DOC-28 cutover bridge: cross-format session discovery — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod claude_mpm_registry;
 pub mod claude_mpm_session;

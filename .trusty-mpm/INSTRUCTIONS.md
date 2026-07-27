@@ -164,12 +164,13 @@ application/binary code and `thiserror` for library error types. Reserve
 `expect()` only for cases that are genuinely programmer errors (invariants that
 can never occur at runtime).
 
-🔴 **SLOC file size hard cap (MECHANICALLY ENFORCED, dual-cap since #1131):**
+🔴 **SLOC file size hard cap (MECHANICALLY ENFORCED, dual-cap since #1131,
+TEST_CAP raised #4074):**
 
 | File type | SLOC cap |
 |---|---|
 | Production source files | **500 SLOC** |
-| Test / benchmark files | **1500 SLOC** |
+| Test / benchmark files | **3000 SLOC** |
 
 A file is classified as a **test/benchmark file** when ANY of these match:
 - basename is exactly `tests.rs`
@@ -183,7 +184,7 @@ All other tracked `.rs` files are **production files**, capped at 500 SLOC.
 As of issue #610 the production cap is no longer advice: it is gated by
 `scripts/check_line_cap.sh`, wired into CI (`.github/workflows/line-cap.yml`)
 and the local pre-commit hook (`line-cap`). A new tracked production `.rs` file
-over 500 SLOC **cannot merge**; a new test/benchmark `.rs` file over 1500 SLOC
+over 500 SLOC **cannot merge**; a new test/benchmark `.rs` file over 3000 SLOC
 **cannot merge**. Files approaching their limit are a signal to split into
 focused submodules before the next feature lands on them. When splitting, prefer:
 one public module per logical concept, a thin `mod.rs` that re-exports, and
@@ -671,7 +672,7 @@ For extended explanations, see [docs/reference/common-pitfalls.md](docs/referenc
 - **Daemon stdout:** never log to stdout in daemons or MCP servers
 - **Axum in libraries:** gate behind `axum-server` feature flag
 - **Shared crate changes:** always run `cargo check` + tests for all dependents
-- **SLOC cap:** respect 500/1500 SLOC limits (prod/test); use `bash scripts/check_line_cap.sh`
+- **SLOC cap:** respect 500/3000 SLOC limits (prod/test); use `bash scripts/check_line_cap.sh`
 - **UI build:** install pnpm or set `SKIP_UI_BUILD=1` before `cargo build`
 - **Patch tables:** put all `[patch.crates-io]` in root `Cargo.toml` only
 - **MSRV drift:** prefer stable channel toolchains; don't break `rust-version = "1.91"`

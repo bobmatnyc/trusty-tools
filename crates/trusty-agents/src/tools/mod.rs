@@ -14,6 +14,8 @@ pub mod agent_plugin;
 pub mod always_on;
 pub mod analysis;
 pub mod ast_tools;
+// #4026/#4028: cross-product subagent allow-set + propose-only envelope.
+pub mod cross_product;
 pub mod delegate;
 pub mod file_filter;
 pub mod finish_task;
@@ -33,6 +35,7 @@ pub mod okg;
 pub mod phase_audit;
 pub mod pm_bridge;
 pub mod pm_bridge_backend;
+pub mod python_skill;
 pub mod registry;
 pub mod run_bash;
 pub mod shell;

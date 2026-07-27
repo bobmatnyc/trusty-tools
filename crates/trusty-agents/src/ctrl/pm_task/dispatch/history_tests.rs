@@ -24,6 +24,7 @@ impl PmBridgeBackend for NoopBackend {
     async fn run(
         &self,
         _route: crate::intent::route::BridgeRoute,
+        _target: Option<&str>,
         _task: &str,
     ) -> anyhow::Result<String> {
         Ok("ok".to_string())

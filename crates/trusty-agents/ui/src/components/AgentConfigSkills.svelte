@@ -40,11 +40,22 @@
   $: all = data?.skills ?? [];
   $: unresolved = data?.unresolved ?? [];
   $: unmatched = data?.unmatched_patterns ?? [];
-  $: granted = all.filter((s) => s.granted);
+  // #4022: a `function` card is a BUNDLE — a group header over its member
+  // cards, not a capability of its own. It is excluded from both counts for the
+  // same reason the server excludes it from `granted_count`: granting
+  // `ticketing` adds ten capabilities, and counting the header as an eleventh
+  // would print "11 of N" over ten rendered cards. Rendering the group itself is
+  // #4024's ticket; until then a bundle is simply not shown.
+  $: leaves = all.filter((s) => s.kind !== 'function');
+  $: granted = leaves.filter((s) => s.granted);
+  // #3987: scope grants that can match nothing. Defaulted like every array
+  // above so an older sidecar (which has no such field) renders the rest of
+  // the pane rather than throwing.
+  $: deadScopes = data?.dead_scope_patterns ?? [];
   $: actions = granted.filter((s) => s.kind === 'action');
   $: knowledge = granted.filter((s) => s.kind === 'knowledge');
   $: system = granted.filter((s) => s.kind === 'system');
-  $: catalogSize = all.length;
+  $: catalogSize = leaves.length;
 
   /** Credential line for a card, or `null` when the skill needs none. */
   function credential(skill: AgentSkill): { label: string; tone: string; title: string } | null {
@@ -64,8 +75,11 @@
 
 <div class="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
   <p class="text-xs text-foundry-light-muted dark:text-foundry-text/60">
-    What this agent can do. Each card is one skill wrapping exactly one tool, named for what
-    invoking it accomplishes. Edit the grants in <code class="font-mono">agent.toml</code> —
+    What this agent can do. Each card below is one skill wrapping exactly one tool, named for what
+    invoking it accomplishes. A grant may also name a <em>function skill</em> — a bundle such as
+    <code class="font-mono">ticketing</code> that grants all of its member skills at once; its
+    members appear here as their own cards. Edit the grants in
+    <code class="font-mono">agent.toml</code> —
     <code class="font-mono">[skills].allow</code> (skill ids) or
     <code class="font-mono">[tools].allow</code> (tool globs); the two are unioned, so neither
     removes what the other grants. Editing from here arrives in a later phase (DOC-57 §5.7).
@@ -167,6 +181,36 @@
         {#each unresolved as u (u.id)}
           <p class="mt-1 text-[11px] text-foundry-light-muted dark:text-foundry-text/60">
             <code class="font-mono">{u.id}</code> — {u.reason}
+          </p>
+        {/each}
+      </div>
+    {/if}
+
+    <!--
+      #3987: dead scope grants. Given the SAME visual weight as
+      "Unresolved skill grants" above rather than the muted `details`
+      treatment used for `unmatched_patterns` below, because the two are not
+      equally severe: an unmatched allow-pattern MAY still resolve to a
+      live-discovered MCP tool, whereas a dead scope pattern conclusively
+      denies every scoped tool it names. Without this the pane would render
+      those tools as granted cards while dispatch silently drops them — the
+      exact confusion this issue exists to end.
+    -->
+    {#if deadScopes.length > 0}
+      <div class="rounded-md border border-foundry-amber/40 px-3 py-2">
+        <h4 class="font-mono text-[10px] uppercase tracking-wide text-foundry-amber">
+          Dead scope grants ({deadScopes.length})
+        </h4>
+        {#each deadScopes as d (d.pattern)}
+          <p class="mt-1 text-[11px] text-foundry-light-muted dark:text-foundry-text/60">
+            <code class="font-mono">{d.pattern}</code> — {d.reason}
+            {#if d.nearest.length > 0}
+              <span class="block mt-0.5">
+                Nearest reachable: {#each d.nearest as n, i (n)}<code class="font-mono"
+                    >{n}</code
+                  >{i < d.nearest.length - 1 ? ', ' : ''}{/each}
+              </span>
+            {/if}
           </p>
         {/each}
       </div>

@@ -221,6 +221,21 @@ pub enum FindingCategory {
 
 // ─── Finding ──────────────────────────────────────────────────────────────────
 
+/// Sentinel `Finding::file` value used when the LLM omits a file (a genuinely
+/// general, non-file-scoped observation).
+///
+/// Why: `citation_check::enforce_citation_integrity` (#4042) requires every
+/// finding's `file` to resolve against the diff — but a finding with no
+/// specific file at all is a legitimate shape, not a fabrication, and must not
+/// be dropped for "not resolving" a path it never claimed. Naming the sentinel
+/// once (rather than repeating the `"unknown"` literal in `parser.rs` and
+/// `citation_check.rs`) keeps the two call sites from drifting apart.
+/// What: the literal string `parser::convert_llm_finding` substitutes when the
+/// LLM's `file` field is empty.
+/// Test: `parse_finding_missing_file_defaults_to_unknown` (parser_tests.rs),
+/// `unknown_file_sentinel_is_exempt_from_path_check` (citation_check_tests.rs).
+pub const UNKNOWN_FILE_PLACEHOLDER: &str = "unknown";
+
 /// A single code-review finding / fix suggestion.
 ///
 /// Why: the pipeline extracts findings from the LLM review body and attaches

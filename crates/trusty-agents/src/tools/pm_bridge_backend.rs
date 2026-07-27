@@ -61,10 +61,27 @@ const ACTIVITY_LINES: u64 = 200;
 /// processes named `tcode`/`tm`.
 /// Test: `RecordingBackend` in `pm_bridge_tests.rs`; `ProcessPmBridge` in
 /// `pm_bridge_backend_tests.rs`.
+///
+/// #4026: `run` gained a `target` parameter naming a specific external
+/// specialist. `None` preserves the pre-#4026 behaviour exactly (the `Tcode`
+/// leg's hardcoded default agent, the `Tm` leg unchanged). The name is
+/// ALREADY validated against the bridge-layer allow-set
+/// (`crate::tools::cross_product::SubagentAllowSet`) by the time it reaches
+/// here — this trait never re-decides admissibility, it only executes.
 #[async_trait]
 pub trait PmBridgeBackend: Send + Sync {
-    async fn run(&self, route: BridgeRoute, task: &str) -> Result<String>;
+    async fn run(&self, route: BridgeRoute, target: Option<&str>, task: &str) -> Result<String>;
 }
+
+/// The external agent the `Tcode` leg targets when no specialist is named.
+///
+/// Why: #4026 requires that omitting a specialist stay byte-identical to
+/// pre-change `dispatch_task` calls — which always ran this one agent. Naming
+/// the constant keeps that guarantee greppable instead of a bare string
+/// literal inside the command builder.
+/// What: the opaque orchestrator agent the bridge has always used.
+/// Test: `default_tcode_agent_is_unchanged_by_the_4026_widening`.
+const DEFAULT_TCODE_AGENT: &str = "pm";
 
 /// Production `PmBridgeBackend`: subprocess `tcode` for `Tcode`, MCP-over-
 /// stdio `tm` for `Tm`.
@@ -106,14 +123,22 @@ impl ProcessPmBridge {
     /// not on PATH, mirroring `TrustySearchPlugin::try_spawn`'s
     /// graceful-degradation contract.
     /// Test: `process_pm_bridge_tcode_route_fails_closed_without_binary`;
-    /// `tcode_route_smoke` (binary-gated).
-    async fn run_tcode(&self, task: &str) -> Result<String> {
+    /// `tcode_route_smoke` (binary-gated);
+    /// `default_tcode_agent_is_unchanged_by_the_4026_widening`.
+    ///
+    /// #4026: `target` names the external specialist to run. `None` uses
+    /// [`DEFAULT_TCODE_AGENT`], preserving the exact pre-#4026 command line.
+    /// The remote CLI already accepts any agent name (`run-task <AGENT>
+    /// <TASK>`, `crates/trusty-code/src/cli/run_task.rs`) — the bottleneck was
+    /// only ever this hardcoded argument.
+    async fn run_tcode(&self, target: Option<&str>, task: &str) -> Result<String> {
         if !binary_on_path("tcode") {
             bail!("tcode backend unavailable: binary not found on PATH");
         }
+        let agent = target.unwrap_or(DEFAULT_TCODE_AGENT);
         let output = Command::new("tcode")
             .arg("run-task")
-            .arg("pm")
+            .arg(agent)
             .arg(task)
             .arg("--project")
             .arg(&self.project_dir)
@@ -246,9 +271,12 @@ impl ProcessPmBridge {
 
 #[async_trait]
 impl PmBridgeBackend for ProcessPmBridge {
-    async fn run(&self, route: BridgeRoute, task: &str) -> Result<String> {
+    async fn run(&self, route: BridgeRoute, target: Option<&str>, task: &str) -> Result<String> {
         match route {
-            BridgeRoute::Tcode => self.run_tcode(task).await,
+            // #4026: only the Tcode leg can name a specialist; the Tm leg's
+            // managed-session lifecycle has no per-agent selector, so a target
+            // is deliberately ignored there rather than silently mis-routed.
+            BridgeRoute::Tcode => self.run_tcode(target, task).await,
             BridgeRoute::Tm => self.run_tm(task).await,
         }
     }

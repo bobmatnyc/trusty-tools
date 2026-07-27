@@ -562,3 +562,199 @@ fn cto_assistant_package_gmail_and_tasks_tools_survive_scope_intersection() {
         cfg.tools.scopes
     );
 }
+
+/// #3987 (option B) pinned against the SHIPPED base template: the bundled
+/// `assistant` declares NO dead scope pattern.
+///
+/// Why assert on the checked-in config rather than a literal: the diagnostic's
+/// value is that it fires on the real defect, and the real defect was in the
+/// file we ship. Resolving through the real loader also proves the check sees
+/// the POST-`extends` scope set, which is the set the dispatch gate uses.
+///
+/// **This assertion was INVERTED by option B**, and the inversion is the
+/// point. Option C (the preceding PR) landed this test asserting the base's
+/// `google.read` WAS dead — that is why option C shipped as a `warn!` rather
+/// than a hard load error, since failing closed would have broken every
+/// `extends = "assistant"` load. Option B removed the dead pattern, so the
+/// base is now clean and the sequencing constraint is discharged: escalating
+/// `persona.rs`'s warning to a hard error is unblocked, and this test is what
+/// will keep it unblocked.
+#[test]
+fn base_assistant_declares_no_dead_scope_patterns() {
+    use crate::tools::registry::dead_scope;
+
+    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".trusty-agents")
+        .join("agents");
+    let cfg = AgentConfig::by_name_in(&[agents_dir], "assistant")
+        .expect("bundled assistant template resolves");
+    let scopes = cfg
+        .tools
+        .scopes
+        .clone()
+        .expect("the base assistant declares [tools].scopes");
+    let patterns: Vec<ScopePattern> = scopes.iter().cloned().map(ScopePattern::new).collect();
+
+    // No live registry: the static Google vocabulary alone settles this under
+    // ANY registry state.
+    let dead = dead_scope::dead_scope_patterns(
+        &patterns,
+        &dead_scope::reachable_scopes(std::iter::empty::<String>()),
+    );
+    assert!(
+        dead.is_empty(),
+        "the base assistant carries dead scope grants: {dead:?} (declared: {scopes:?})"
+    );
+    // Guard against a vacuous pass in the other direction: the dead pattern
+    // this issue is about must be GONE, not merely un-flagged because the
+    // whole scopes line was deleted.
+    assert!(
+        !scopes.iter().any(|s| s == "google.read"),
+        "the dead `google.read` pattern is still declared: {scopes:?}"
+    );
+    assert!(
+        scopes.iter().any(|s| s == "google.gmail.*"),
+        "the base must still grant the Gmail surface its allowlist names: {scopes:?}"
+    );
+}
+
+/// #3987 (option B): every scoped gworkspace tool the base assistant
+/// allowlists must survive the dispatch-time scope intersection — and every
+/// Google family the base grants must be earned by at least one allowlisted
+/// tool.
+///
+/// Why both directions: the first half is the defect (#3987 — all ~60
+/// allowlisted gworkspace tools were denied). The second half is the guard on
+/// the FIX: option B is a posture change on the shared base, so a family
+/// added here without an allowlisted tool behind it would be exactly the
+/// speculative widening the issue warned against. Asserting it in code is
+/// what keeps the audit table in `assistant/agent.toml` honest as the
+/// allowlist evolves.
+/// What: resolves the SHIPPED base through the real loader, derives each
+/// tool's dotted scope from the real `trusty-gworkspace` `rpc.discover`
+/// document through the real `parse_manifest`, and runs the real
+/// `filter_persona_tool_names` gate. No daemon, no network, no LLM — same
+/// harness shape as `cto_assistant_package_gmail_and_tasks_tools_survive_scope_intersection`
+/// (#3985).
+#[test]
+fn base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool() {
+    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".trusty-agents")
+        .join("agents");
+    let cfg = AgentConfig::by_name_in(&[agents_dir], "assistant")
+        .expect("bundled assistant template resolves");
+
+    let manifest = crate::tools::registry::discovery::parse_manifest(
+        "gworkspace",
+        &trusty_gworkspace::openrpc::discover_response(),
+    )
+    .expect("gworkspace rpc.discover document parses");
+    // A tool whose scope could not be derived gets `""` from discovery and is
+    // dropped by the ENDPOINT scope filter long before an agent sees it
+    // (`format_email_content`, a pure local transform, is the only such tool
+    // the base allowlists). Excluding those here keeps the assertion about
+    // agent scope grants rather than about discovery.
+    let tool_scopes: std::collections::HashMap<String, String> = manifest
+        .tools
+        .iter()
+        .filter(|t| !t.scope.is_empty())
+        .map(|t| (t.name.clone(), t.scope.clone()))
+        .collect();
+
+    let allow = cfg
+        .tools
+        .allow
+        .clone()
+        .expect("the base assistant declares [tools].allow");
+    let scopes = cfg
+        .tools
+        .scopes
+        .clone()
+        .expect("the base assistant declares [tools].scopes");
+    let patterns: Vec<ScopePattern> = scopes.iter().cloned().map(ScopePattern::new).collect();
+
+    // Exact allowlist entries that ARE scoped gworkspace tools. Glob entries
+    // (`granola_*`) and names gworkspace no longer exposes (`sync_drive`,
+    // `convert_document`, `publish_markdown_to_doc`, `render_mermaid_to_doc`,
+    // `format_slide`) are filtered by REGISTRATION, not by scope, so they are
+    // not this test's subject.
+    let scoped: Vec<String> = allow
+        .iter()
+        .filter(|n| !n.contains('*'))
+        .filter(|n| tool_scopes.contains_key(*n))
+        .cloned()
+        .collect();
+    assert!(
+        scoped.len() >= 50,
+        "expected the base's large gworkspace surface, got {} — has the \
+         allowlist or the manifest changed? {scoped:?}",
+        scoped.len()
+    );
+
+    let allowed_by_tier: std::collections::HashSet<String> = scoped.iter().cloned().collect();
+    let survivors = filter_persona_tool_names(
+        scoped.clone(),
+        &allow,
+        &allowed_by_tier,
+        &tool_scopes,
+        &patterns,
+    );
+    assert_eq!(
+        survivors, scoped,
+        "base assistant gworkspace tools were scope-denied at dispatch; \
+         resolved [tools].scopes = {scopes:?}"
+    );
+
+    // No speculative grants: every declared `google.*` family must be needed.
+    for pattern in patterns
+        .iter()
+        .filter(|p| p.as_str().starts_with("google."))
+    {
+        assert!(
+            scoped
+                .iter()
+                .any(|name| { pattern.matches(&Scope::new(tool_scopes[name].clone())) }),
+            "`{}` is granted but no allowlisted tool needs it — grant only \
+             families the allow-list actually names (#3987)",
+            pattern.as_str()
+        );
+    }
+}
+
+/// #3987 the negative half: a live family/wildcard pattern is never flagged,
+/// and option B introduces no double-grant weirdness in the overlays.
+/// `izzie` ships blanket `google.*`; `cto-assistant` ships the narrow
+/// `google.gmail.*` / `google.tasks.*` pair (#3985), which the base now also
+/// grants — `extends::union_opt_vec` dedups exact string matches, so the
+/// duplicates collapse rather than accumulating.
+#[test]
+fn shipped_agents_with_live_google_patterns_are_not_flagged() {
+    use crate::tools::registry::dead_scope;
+
+    let agents_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(".trusty-agents")
+        .join("agents");
+    let reachable = dead_scope::reachable_scopes(std::iter::empty::<String>());
+    for name in ["izzie", "cto-assistant"] {
+        let cfg = AgentConfig::by_name_in(std::slice::from_ref(&agents_dir), name)
+            .unwrap_or_else(|e| panic!("bundled {name} resolves: {e}"));
+        let scopes = cfg.tools.scopes.clone().unwrap_or_default();
+        let patterns: Vec<ScopePattern> = scopes.iter().cloned().map(ScopePattern::new).collect();
+        let dead = dead_scope::dead_scope_patterns(&patterns, &reachable);
+        // Post-option-B these overlays inherit only live patterns, so the
+        // resolved set must be completely clean — no `google.read` left to
+        // tolerate.
+        assert!(
+            dead.is_empty(),
+            "{name}: dead scope grants after option B: {dead:?} (declared: {scopes:?})"
+        );
+        let mut deduped = scopes.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            scopes.len(),
+            "{name}: the extends union produced duplicate scope patterns: {scopes:?}"
+        );
+    }
+}

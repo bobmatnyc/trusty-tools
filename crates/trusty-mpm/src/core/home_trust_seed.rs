@@ -39,12 +39,29 @@ use anyhow::Context as _;
 /// using `trusty_common::claude_config::write_json_atomic`. All existing keys are
 /// preserved. Idempotent: no write when every target field already has the required
 /// value.
+///
+/// **Concurrency (issue #4072):** the whole read → mutate → write cycle runs
+/// under [`crate::core::claude_json_guard::lock`], because
+/// `session_launch::settings::preseed_workspace_trust` load-mutate-stores the
+/// SAME file and the daemon runs both concurrently, once per session it
+/// provisions. Without that lock the two silently clobber each other's
+/// `projects.<workspace>` entries.
 /// Test: `seeds_trust_dialog_accepted`, `seeds_fullscreen_upsell_count`,
-/// `is_idempotent`, `preserves_existing_keys`.
+/// `is_idempotent`, `preserves_existing_keys`,
+/// `concurrent_home_and_workspace_seeds_preserve_both_entries`.
 pub fn preseed_home_trust(workspace: &Path) -> anyhow::Result<()> {
     use serde_json::Value;
 
     let claude_json = home_claude_json()?;
+
+    // Issue #4072: hold the process-wide `~/.claude.json` lock across the WHOLE
+    // read → mutate → write cycle below, not just the write. This function and
+    // `session_launch::settings::preseed_workspace_trust` both load-mutate-store
+    // the same file, and the daemon runs them concurrently (one pair per session
+    // it provisions); unsynchronised, the slower writer stores a snapshot taken
+    // before the faster writer's store and silently drops that session's whole
+    // `projects.<workspace>` entry. See `core::claude_json_guard`.
+    let _guard = crate::core::claude_json_guard::lock();
 
     // Read existing config, defaulting to `{}` when absent. Skip gracefully on
     // I/O or parse errors: the user's home config may contain OAuth state we must

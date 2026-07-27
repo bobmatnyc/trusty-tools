@@ -20,6 +20,7 @@ use crate::intent::{IntentClass, classify_intent};
 use crate::llm;
 use crate::rbac::ServiceTier;
 use crate::subprocess::SubprocessAgentRunner;
+use crate::tools::cross_product::{CallerAuthority, SubagentAllowSet};
 use crate::tools::pm_bridge::PmBridgeTool;
 use crate::tools::pm_bridge_backend::ProcessPmBridge;
 use crate::tools::{AgentRunner, ToolRegistry, delegate::DelegateToAgentTool};
@@ -393,11 +394,23 @@ pub async fn run_pm_task_with_history(
     ));
     // #3052 PR B (lane 3): the opaque tm<->tcode bridge, distinct from lane 2
     // (`delegate_to_agent` above). RBAC-locked to deny ReadOnly + Analytics.
+    // #4026/#4028: the caller's `[subagents].allowed` list is resolved into the
+    // bridge's fail-closed allow-set here, at registration, so `execute` never
+    // consults anything the LLM can influence mid-turn. Absent section = EMPTY
+    // = named cross-product targeting stays off. #4030's domain authority will
+    // feed the same `SubagentAllowSet` seam.
     registry.register(Arc::new(
         PmBridgeTool::new(Arc::new(ProcessPmBridge::from_project(
             project_path.to_path_buf(),
         )))
-        .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics]),
+        .with_restricted_tiers(vec![ServiceTier::ReadOnly, ServiceTier::Analytics])
+        .with_allow_set(SubagentAllowSet::from_allowed(
+            pm_cfg.subagents.allowed.as_deref(),
+        ))
+        // `user_authority` has no `AgentConfig` field yet (#3074/AUTH-1), so
+        // the fail-closed `Standard` tier is reported until it lands — never
+        // an invented tier.
+        .with_origin(pm_cfg.agent.name.clone(), CallerAuthority::Standard),
     ));
     let stop_pending: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let active_project_slot: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));

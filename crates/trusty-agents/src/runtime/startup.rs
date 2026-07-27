@@ -60,7 +60,7 @@ use anyhow::Result;
 use super::cli_def::check_credentials_and_warn;
 use crate::{
     agents, api, build_info, bus, ctrl, logging, mcp, memory, process_tracker, registry, repl,
-    search, session_registry, workflow,
+    search, session_registry, tools, workflow,
 };
 
 use build_info::BuildInfo;
@@ -139,6 +139,19 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     //       up when it builds the persona's tool surface.
     // Test: `trusty-agents-local` integration; `trusty-agents` standalone has an
     //       empty plugin list.
+
+    // #3700/#3656/#3732: unlike the launcher-injected plugins above, a Python
+    // *skill*'s tools are generic and CTO-agnostic (`tools::python_skill`),
+    // so `trusty-agents` can safely discover and install them itself — no
+    // private launcher crate needed. Scans
+    // `<project_dir>/.trusty-agents/skills/*/manifest.json` and installs
+    // every hit as an `AgentPlugin` via the SAME `install_plugins` OnceLock
+    // as above (first writer wins; harmless if a launcher already won it).
+    // Best-effort: a missing skills dir (most projects) or a malformed
+    // manifest is logged and skipped, never fatal.
+    if let Some(project_dir) = ctrl::detect_self_project() {
+        tools::python_skill::install_discovered_skill_plugins(&project_dir);
+    }
 
     // #3405/#3406 follow-up (v2: #3556): deploy/refresh the bundled agent
     // roster (`assistant`, `ctrl`, `pm`, the specialist set) at
