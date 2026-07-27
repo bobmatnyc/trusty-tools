@@ -1,9 +1,9 @@
-//! Unit tests for the citation-verification layer (#2881, extended #4042).
+//! Unit tests for the #2881 citation-verification layer.
 
 use super::*;
 use crate::models::{Effort, Finding};
 use crate::pipeline::diff_analyzer::models::{
-    DroppedFile, FileDisposition, FilteredDiff, FilteredFile, FilteredHunk,
+    FileDisposition, FilteredDiff, FilteredFile, FilteredHunk,
 };
 use std::collections::HashMap;
 
@@ -78,11 +78,6 @@ fn code_provable_finding(file: &str, description: &str) -> Finding {
     f
 }
 
-/// Helper: wrap a single finding into a `Vec` (kept local to avoid churn).
-fn findings_of(f: Finding) -> Vec<Finding> {
-    vec![f]
-}
-
 // ─── Index tests ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -94,21 +89,11 @@ fn index_from_filtered_indexes_each_file() {
 }
 
 #[test]
-fn index_indexes_dropped_files_with_empty_content() {
-    // #4042: a Stage-A-excluded file (lockfile, snapshot, generated code) is a
-    // REAL file in the diff — its path must resolve — but no content was ever
-    // shown to the model, so it is indexed with an EMPTY body.
-    let mut diff = filtered(vec![]);
-    diff.dropped_files.push(DroppedFile {
-        path: "build/gen.js".to_string(),
-        reason: "generated".to_string(),
-    });
-    let idx = DiffContentIndex::from_filtered(&diff);
-    assert_eq!(
-        idx.lookup("build/gen.js"),
-        Some(""),
-        "path resolves; content is empty"
-    );
+fn index_omits_dropped_files() {
+    let mut dropped = kept_file("build/gen.js", vec![hunk("@@ -1 +1 @@", &["+x"])]);
+    dropped.disposition = FileDisposition::Dropped;
+    let idx = DiffContentIndex::from_filtered(&filtered(vec![dropped]));
+    assert!(idx.lookup("build/gen.js").is_none());
 }
 
 #[test]
@@ -135,10 +120,10 @@ fn contains_is_whitespace_tolerant() {
     assert_eq!(normalize("a   b\n\tc"), "a b c");
 }
 
-// ─── enforce_citation_integrity: drop behaviour ───────────────────────────────
+// ─── Downgrade behaviour ─────────────────────────────────────────────────────
 
 #[test]
-fn drops_cross_file_misattribution() {
+fn downgrades_cross_file_misattribution() {
     // THE #2881 REPRO: a code_provable finding cites the bundle but quotes the
     // vitest test content, which lives in a different changed file.
     let idx = repro_index();
@@ -149,9 +134,15 @@ fn drops_cross_file_misattribution() {
     )];
     findings[0].line = Some(35271);
 
-    let n = enforce_citation_integrity(&mut findings, &idx);
-    assert_eq!(n, 1, "the misattributed finding must be dropped");
-    assert!(findings.is_empty());
+    let n = downgrade_uncitable_findings(&mut findings, &idx);
+    assert_eq!(n, 1, "the misattributed finding must be downgraded");
+    assert!(!findings[0].code_provable, "code_provable must be cleared");
+    assert!(
+        findings[0].confidence <= DOWNGRADED_CITATION_CONFIDENCE,
+        "confidence must be lowered to the advisory floor"
+    );
+    // And it must no longer be able to drive the BLOCK floor.
+    assert!(!crate::pipeline::grade::drives_block_floor(&findings[0]));
 }
 
 #[test]
@@ -163,259 +154,194 @@ fn keeps_grounded_code_provable() {
         "api/chat.js",
         "Suspicious call `const bundleVar = compiledThing(42);` may overflow.",
     )];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = downgrade_uncitable_findings(&mut findings, &idx);
     assert_eq!(n, 0, "a grounded finding must survive");
-    assert_eq!(findings.len(), 1);
     assert!(findings[0].code_provable);
     assert!((findings[0].confidence - 0.75).abs() < f32::EPSILON);
 }
 
 #[test]
-fn drops_citation_to_path_outside_diff() {
-    // #4042: a finding citing a file that was NEVER part of the diff at all
-    // (not Kept, not SummaryOnly, not even Stage-A-dropped) must be DROPPED,
-    // not fail-open — this is the standalone `hotelPage.ts:207` incident shape.
+fn fail_open_when_cited_file_not_indexed() {
+    // FAIL OPEN: a finding citing a file we did not index (outside the diff, or a
+    // header the parser could not attribute) is never downgraded — without the
+    // file's content there is nothing to verify against, and citing an
+    // out-of-diff file is not, by itself, proof of fabrication.
     let idx = repro_index();
     let mut findings = vec![code_provable_finding(
         "src/never/changed.rs",
         "Off-by-one in the loop bound `for i in 0..=len { arr[i] }`.",
     )];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = downgrade_uncitable_findings(&mut findings, &idx);
     assert_eq!(
-        n, 1,
-        "a citation to a path outside the diff must be dropped"
+        n, 0,
+        "an un-indexed cited file must not trigger a downgrade"
     );
-    assert!(findings.is_empty());
+    assert!(findings[0].code_provable);
 }
 
 #[test]
 fn fail_open_when_no_quote() {
-    // A finding whose cited file resolves but quotes nothing concrete cannot be
-    // verified further — leave it alone (fail open) rather than risk a
-    // false-positive drop.
+    // A code_provable finding that quotes nothing concrete cannot be verified —
+    // leave it alone (fail open) rather than risk a false-positive downgrade.
     let idx = repro_index();
     let mut findings = vec![code_provable_finding(
         "api/chat.js",
         "There may be a subtle logic issue in this function.",
     )];
-    let n = enforce_citation_integrity(&mut findings, &idx);
+    let n = downgrade_uncitable_findings(&mut findings, &idx);
     assert_eq!(n, 0, "no verifiable quote → fail open");
-    assert_eq!(findings.len(), 1);
+    assert!(findings[0].code_provable);
 }
 
 #[test]
-fn every_finding_is_checked_not_just_code_provable() {
-    // #4042's NAMED coverage gap: a finding that is neither `code_provable` nor
-    // `code:`-cited must STILL have its `file` path verified against the diff —
-    // the #2882 fix scoped verification to the code_provable subset, which is
-    // exactly the gap #4042 exploited.
+fn ignores_non_diff_grounded_findings() {
+    // A finding that is neither code_provable nor code:-cited is out of scope,
+    // even if it cites content absent from its file.
     let idx = repro_index();
     let mut f = Finding::new(
-        "src/never/changed.rs",
+        "api/chat.js",
         "style",
-        "Minor formatting nit.",
+        "Consider `import { describe } from 'vitest';` elsewhere.",
         "n/a",
         0.9,
         Effort::Low,
     );
     f.source_citation = Some("jira:PROJ-1".to_string());
     let mut findings = vec![f];
-    let n = enforce_citation_integrity(&mut findings, &idx);
-    assert_eq!(
-        n, 1,
-        "path resolution now applies to every finding, not only code_provable ones"
-    );
+    let n = downgrade_uncitable_findings(&mut findings, &idx);
+    assert_eq!(n, 0, "non-diff-grounded findings are untouched");
+    assert_eq!(findings[0].source_citation.as_deref(), Some("jira:PROJ-1"));
 }
 
 #[test]
-fn unknown_file_sentinel_is_exempt_from_path_check() {
-    // A genuinely general, file-less finding (the LLM omitted `file`, parsed as
-    // the `UNKNOWN_FILE_PLACEHOLDER` sentinel) must never be dropped for "not
-    // resolving" a path it never claimed.
+fn downgrades_code_citation_to_unverifiable_content() {
+    // A `code:`-cited finding whose quote is not in the cited file is downgraded,
+    // and its citation is stripped (see
+    // `apply_downgrade_clears_provability_and_all_citations`).
     let idx = repro_index();
-    let mut findings = vec![Finding::new(
-        crate::models::UNKNOWN_FILE_PLACEHOLDER,
-        "style",
-        "Overall the PR could use a changelog entry.",
-        "n/a",
-        0.6,
-        Effort::Low,
-    )];
-    let n = enforce_citation_integrity(&mut findings, &idx);
-    assert_eq!(
-        n, 0,
-        "the unknown-file sentinel is exempt from path checking"
-    );
-    assert_eq!(findings.len(), 1);
-}
-
-#[test]
-fn code_citation_bracket_content_is_now_verified() {
-    // #4042's OTHER named gap: the mandated `[code: …]` citation's own excerpt
-    // was previously EXEMPTED from verification entirely. A finding whose ONLY
-    // "evidence" lives inside that bracket, and which is fabricated, must now
-    // be dropped.
-    let idx = repro_index();
-    let mut f = code_provable_finding(
+    let mut f = Finding::new(
         "api/chat.js",
-        "The bundle embeds the test suite \
-         [code: `api/chat.js:1` — \"import { describe, it, expect } from 'vitest';\"].",
+        "logic-error",
+        "Bundle embeds `it('contains aria prompt', () => expect(INSTRUCTIONS)` verbatim.",
+        "fix",
+        0.8,
+        Effort::High,
     );
-    f.line = Some(1);
-    let n = enforce_citation_integrity(&mut findings_of_mut(&mut f), &idx);
-    assert_eq!(
-        n, 1,
-        "a fabricated bracket-citation excerpt must now be caught"
+    f.code_provable = false;
+    f.source_citation = Some("code:api/chat.js:35271".to_string());
+    let mut findings = vec![f];
+    let n = downgrade_uncitable_findings(&mut findings, &idx);
+    assert_eq!(n, 1);
+    assert!(
+        findings[0].source_citation.is_none(),
+        "code citation must be stripped"
     );
-}
-
-/// Helper: wrap a `&mut Finding` clone into an owned `Vec` for the drop-based API.
-fn findings_of_mut(f: &mut Finding) -> Vec<Finding> {
-    vec![f.clone()]
-}
-
-#[test]
-fn code_citation_bracket_grounded_content_survives() {
-    // A correctly-grounded `[code: …]` excerpt (matches the real cited content)
-    // must NOT be dropped — the new bracket-verification must not over-fire.
-    let idx = repro_index();
-    let mut f = code_provable_finding(
-        "api/chat.js",
-        "Suspicious overflow risk \
-         [code: `api/chat.js:35271` — \"const bundleVar = compiledThing(42);\"].",
-    );
-    f.line = Some(35271);
-    let mut findings = findings_of(f);
-    let n = enforce_citation_integrity(&mut findings, &idx);
-    assert_eq!(n, 0, "a grounded bracket citation must survive");
-    assert_eq!(findings.len(), 1);
-}
-
-#[test]
-fn code_citation_bracket_path_outside_diff_is_dropped() {
-    // A `[code: …]` citation whose OWN path is not part of the diff at all
-    // (independent of `f.file`) must be dropped — the `hotelPage.ts:207` shape
-    // expressed via the bracket grammar instead of `f.file`.
-    let idx = repro_index();
-    let mut f = code_provable_finding(
-        "api/chat.js",
-        "Race condition in the loser branch \
-         [code: `hotelPage.ts:207` — \"await Promise.race([a, b])\"].",
-    );
-    let n = enforce_citation_integrity(&mut findings_of_mut(&mut f), &idx);
-    assert_eq!(
-        n, 1,
-        "an unresolvable bracket citation path must be dropped"
-    );
-}
-
-// ─── Mutual contradiction ──────────────────────────────────────────────────────
-
-#[test]
-fn drops_findings_with_line_contradiction() {
-    // #4042 centerpiece shape: two findings cite the SAME file+line via the
-    // `[code: …]` bracket grammar but quote mutually exclusive content — at
-    // least one must be invented, so both are dropped.
-    let idx = repro_index();
-    let mut findings = vec![
-        code_provable_finding(
-            "api/chat.js",
-            "This is a Drizzle JSON snapshot \
-             [code: `api/chat.js:1` — \"id: 893644d4-fabricated-snapshot-content\"].",
-        ),
-        code_provable_finding(
-            "api/chat.js",
-            "This is a Vitest suite for draft-form \
-             [code: `api/chat.js:1` — \"import { describe, expect, it } from 'vitest'\"].",
-        ),
-    ];
-    let n = enforce_citation_integrity(&mut findings, &idx);
-    assert_eq!(n, 2, "both contradictory findings must be dropped");
-    assert!(findings.is_empty());
-}
-
-#[test]
-fn distinct_lines_are_never_contradictory() {
-    // Two REAL, distinct findings about DIFFERENT lines of the same file are
-    // normal — must never be flagged as contradictory.
-    let idx = repro_index();
-    let mut findings = vec![
-        code_provable_finding(
-            "api/chat.js",
-            "Overflow risk \
-             [code: `api/chat.js:35271` — \"const bundleVar = compiledThing(42);\"].",
-        ),
-        code_provable_finding(
-            "api/chat.js",
-            "Missing null check \
-             [code: `api/chat.js:35272` — \"return bundleVar;\"].",
-        ),
-    ];
-    let n = enforce_citation_integrity(&mut findings, &idx);
-    assert_eq!(
-        n, 0,
-        "distinct real lines in the same file must not be treated as contradictory"
-    );
-    assert_eq!(findings.len(), 2);
 }
 
 // ─── Helper unit tests ───────────────────────────────────────────────────────
 
 #[test]
-fn split_locator_extracts_line() {
-    assert_eq!(
-        split_locator("src/lib/foo.ts:42"),
-        ("src/lib/foo.ts".to_string(), Some(42))
+fn is_diff_grounded_detects_code_provable_and_code_citation() {
+    let mut f = Finding::new("f", "k", "d", "s", 0.5, Effort::Low);
+    assert!(!is_diff_grounded(&f));
+    f.code_provable = true;
+    assert!(is_diff_grounded(&f));
+    f.code_provable = false;
+    f.source_citation = Some("code:f:1".to_string());
+    assert!(is_diff_grounded(&f));
+    f.source_citation = Some("gh:owner/repo#1".to_string());
+    assert!(!is_diff_grounded(&f));
+}
+
+#[test]
+fn apply_downgrade_clears_provability_and_all_citations() {
+    let mut f = code_provable_finding("f", "d");
+    f.source_citation = Some("code:f:1".to_string());
+    f.confidence = 0.9;
+    apply_downgrade(&mut f);
+    assert!(!f.code_provable);
+    assert!(f.source_citation.is_none());
+    assert!(f.confidence <= DOWNGRADED_CITATION_CONFIDENCE);
+
+    // A non-code citation is ALSO cleared: the finding's factual basis was
+    // disproven, and leaving it would keep the finding escalation-eligible.
+    let mut g = code_provable_finding("f", "d");
+    g.source_citation = Some("jira:X-1".to_string());
+    apply_downgrade(&mut g);
+    assert!(g.source_citation.is_none());
+}
+
+#[test]
+fn downgrade_neutralizes_surviving_non_code_citation() {
+    // A fabricated code_provable finding that ALSO carries a spec/ticket citation
+    // must fully lose block-floor eligibility after downgrade — otherwise the
+    // surviving citation keeps `drives_block_floor` true (code-critic WARN).
+    let idx = repro_index();
+    let mut f = code_provable_finding(
+        "api/chat.js",
+        "Bundle embeds `import { describe, it, expect } from 'vitest';` from the test file.",
+    );
+    f.source_citation = Some("jira:PROJ-123".to_string());
+    assert!(
+        crate::pipeline::grade::drives_block_floor(&f),
+        "precondition: forces floor"
+    );
+
+    let mut findings = vec![f];
+    let n = downgrade_uncitable_findings(&mut findings, &idx);
+    assert_eq!(n, 1);
+    assert!(
+        findings[0].source_citation.is_none(),
+        "surviving citation must be cleared"
+    );
+    assert!(
+        !crate::pipeline::grade::drives_block_floor(&findings[0]),
+        "downgraded finding must no longer drive the BLOCK floor"
     );
 }
 
 #[test]
-fn split_locator_no_line() {
+fn keeps_finding_using_only_bracket_citation_grammar() {
+    // A correctly-grounded code_provable finding that cites via the prompt-mandated
+    // `[code: `path:line` — "excerpt"]` grammar (whose path:line + paraphrased
+    // excerpt never appear verbatim in diff content) must NOT be false-downgraded.
+    let idx = repro_index();
+    let mut f = code_provable_finding(
+        "api/chat.js",
+        "The bundle symbol is unsafe [code: `api/chat.js:35271` — \"a paraphrased summary \
+         of the concern that is not a literal diff line\"].",
+    );
+    f.line = Some(35271);
+    let n = downgrade_uncitable_findings(&mut findings_of(f), &idx);
     assert_eq!(
-        split_locator("docs/specs/foo.md"),
-        ("docs/specs/foo.md".to_string(), None)
+        n, 0,
+        "a bracket-cited finding with no standalone diff quote must survive"
     );
 }
 
-#[test]
-fn code_citation_re_captures_path_line_and_excerpt() {
-    let f = Finding::new(
-        "f",
-        "k",
-        "See [code: `src/big/File.ts:4242` — \"a verbatim excerpt right here\"].",
-        "s",
-        0.5,
-        Effort::Low,
-    );
-    let extracted = extract_citations(&f);
-    assert_eq!(extracted.code_citations.len(), 1);
-    assert_eq!(extracted.code_citations[0].path, "src/big/File.ts");
-    assert_eq!(extracted.code_citations[0].line, Some(4242));
-    assert_eq!(
-        extracted.code_citations[0].excerpt,
-        "a verbatim excerpt right here"
-    );
+/// Helper: wrap a single finding into a `Vec` (kept local to avoid churn).
+fn findings_of(f: Finding) -> Vec<Finding> {
+    vec![f]
 }
 
 #[test]
 fn extract_spans_skips_prompt_mandated_citation_grammar() {
-    // The non-`code:` bracket forms are stripped before generic quote
-    // extraction — `jira`/`gh`/`apex` citations are out of this module's scope.
+    // The four bracket-citation forms are stripped before quote extraction, so
+    // their inner path:line token and excerpt are never treated as verifiable.
     let f = Finding::new(
         "f",
         "k",
-        "See [jira: PROJ-9 — \"ticket paraphrase text goes here\"].",
+        "See [code: `src/big/File.ts:4242` — \"brief excerpt from the file here\"] and \
+         [jira: PROJ-9 — \"ticket paraphrase text goes here\"].",
         "s",
         0.5,
         Effort::Low,
     );
-    let extracted = extract_citations(&f);
+    let spans = extract_quoted_spans(&f);
     assert!(
-        extracted.generic.is_empty(),
-        "non-code bracket contents must not be treated as generic quotes: {:?}",
-        extracted.generic
+        spans.is_empty(),
+        "bracket-citation contents must not be treated as quotes: {spans:?}"
     );
-    assert!(extracted.code_citations.is_empty());
 }
 
 #[test]
@@ -429,32 +355,17 @@ fn extract_spans_pulls_backtick_and_quotes() {
         Effort::Low,
     );
     f.consequence = "single 'yet_another_fragment(z)' here".to_string();
-    let extracted = extract_citations(&f);
-    assert!(
-        extracted
-            .generic
-            .iter()
-            .any(|s| s.contains("let x = compute(y);"))
-    );
-    assert!(
-        extracted
-            .generic
-            .iter()
-            .any(|s| s.contains("another_long_snippet()"))
-    );
-    assert!(
-        extracted
-            .generic
-            .iter()
-            .any(|s| s.contains("yet_another_fragment(z)"))
-    );
+    let spans = extract_quoted_spans(&f);
+    assert!(spans.iter().any(|s| s.contains("let x = compute(y);")));
+    assert!(spans.iter().any(|s| s.contains("another_long_snippet()")));
+    assert!(spans.iter().any(|s| s.contains("yet_another_fragment(z)")));
 }
 
 #[test]
 fn extract_spans_skips_short() {
     let f = Finding::new("f", "k", "tiny `x` and `ab`", "s", 0.5, Effort::Low);
     assert!(
-        extract_citations(&f).generic.is_empty(),
+        extract_quoted_spans(&f).is_empty(),
         "short quotes are not evidence"
     );
 }

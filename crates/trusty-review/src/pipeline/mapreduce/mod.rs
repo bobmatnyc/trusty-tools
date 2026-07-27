@@ -77,33 +77,16 @@ pub async fn run_map_reduce(
     );
     let mut outcomes = run_map_stage(&units, llm, ctx, config.concurrency).await;
 
-    // Sanitize + verify citation integrity BEFORE reduce derives the aggregate
-    // verdict (#2881, #4042, #4044): a per-unit reviewer can self-negate a
-    // finding in its own text, leak raw deliberation, or confabulate a
-    // `code_provable: true` finding whose cited content is not in the file it
-    // reviewed. Drop any such finding against the whole filtered diff so it can
-    // never force the deterministic BLOCK / REQUEST_CHANGES floor in
-    // `reduce`/`synthesize`, nor reach the rendered review.
+    // Verify diff-provable citations BEFORE reduce derives the aggregate verdict
+    // (#2881): a per-unit reviewer can confabulate a `code_provable: true` finding
+    // whose cited content is not in the file it reviewed (the repro attributed a
+    // new test file's content to a large regenerated bundle).  Downgrade any such
+    // finding against the whole filtered diff so it can never force the deterministic
+    // BLOCK / REQUEST_CHANGES floor in `reduce`/`synthesize`.
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
     for outcome in &mut outcomes {
-        if let MapOutcome::Reviewed {
-            findings, verdict, ..
-        } = outcome
-        {
-            let findings_before = findings.len();
-            crate::pipeline::finding_hygiene::sanitize_findings(findings);
-            crate::pipeline::citation_check::enforce_citation_integrity(findings, &cite_index);
-            // This chunk's own `verdict` field rested on the SAME findings we
-            // may have just wiped out — relax it too so a wiped-out chunk
-            // cannot poison `reduce`'s stricter-of-all-chunks seed (#4042,
-            // #4044).
-            let mut grade_unused = None;
-            crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
-                verdict,
-                &mut grade_unused,
-                findings_before,
-                findings,
-            );
+        if let MapOutcome::Reviewed { findings, .. } = outcome {
+            crate::pipeline::citation_check::downgrade_uncitable_findings(findings, &cite_index);
         }
     }
 

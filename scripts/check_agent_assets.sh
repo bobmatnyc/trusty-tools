@@ -265,11 +265,6 @@ done
 
 # --- 2. Parity files: every tracked tcode .md not in TCODE_ONLY or
 #        DEVIATED_FILES must byte-match its trusty-mpm source. ---
-# #4027: PARITY_COUNT is tallied rather than hardcoded in the summary line —
-# the roster grows (ticketing was added for epic #4021's cross-product bridge)
-# and a stale literal in a PASSING message is the kind of quiet lie this gate
-# exists to prevent.
-PARITY_COUNT=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   base="${f##*/}"
@@ -292,7 +287,6 @@ while IFS= read -r f; do
     continue
   fi
 
-  PARITY_COUNT=$((PARITY_COUNT + 1))
   if ! cmp -s "$f" "$mpm_path"; then
     echo "FAIL: COPY DRIFTED — $f no longer byte-matches $mpm_path." >&2
     echo "      Either restore byte-parity (unintentional edit), or if this is a" >&2
@@ -309,5 +303,5 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-echo "agent-assets: ${PARITY_COUNT} byte-parity file(s) match, ${#DEVIATED_ARR[@]} pinned deviation(s) match upstream — OK."
+echo "agent-assets: 29 byte-parity file(s) match, ${#DEVIATED_ARR[@]} pinned deviation(s) match upstream — OK."
 exit 0

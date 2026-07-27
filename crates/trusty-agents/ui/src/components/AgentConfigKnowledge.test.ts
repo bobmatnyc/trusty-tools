@@ -119,17 +119,12 @@ describe('AgentConfigKnowledge — knowledge tools (K-b)', () => {
 });
 
 describe('AgentConfigKnowledge — MCP connections (K-c)', () => {
-  it('lists every declared endpoint, never hidden, with a reason iff disabled (C-03.2)', () => {
+  it('lists a configured-but-disabled endpoint with its reason, never hidden (C-03.2)', () => {
     render();
     expect(target.textContent).toContain('trusty-memory');
     expect(target.textContent).toContain('trusty-search');
     expect(target.textContent).toContain('gworkspace');
-    // trusty-memory/trusty-search moved from dead `[[tool_registry.endpoints]]`
-    // OpenRPC stubs to live `[[mcp.services]]` MCP-stdio entries, so they no
-    // longer carry a disabled-reason — asserting the OLD `--rpc` reason text
-    // would now be asserting a fabricated status (the exact defect C-03.2
-    // guards against), so it must be ABSENT.
-    expect(target.textContent).not.toContain('awaits `--rpc` mode');
+    expect(target.textContent).toContain('awaits `--rpc` mode');
     // The list is the shipped declaration, not a probe — saying so is the
     // difference between honest scaffolding and an invented status.
     expect(target.textContent).toContain('not probed');

@@ -94,13 +94,8 @@ allow = [
   #     ~/.gnupg are refused without being enumerated). Widen it deliberately —
   #     anything reachable becomes searchable and quotable in chat, and
   #     ingested content is itself untrusted input.
-  # #3987: the Google-backed ingest tools reuse the credentials the
-  # gworkspace surface below already holds — which are WRITE-CAPABLE Google
-  # OAuth grants, not read-only ones (the "read-only `google.read`" this
-  # comment used to claim never existed; see the `[tools].scopes` note
-  # below). These three are in-process tools that return `None` from
-  # `ToolExecutor::scope()`, so they are not scope-gated at all; they read
-  # Gmail/Drive through the same credential the scoped tools use.
+  # The Google-backed tools reuse the existing read-only `google.read`
+  # credentials and never prompt for auth.
   "okg_ingest_docstore",
   "okg_ingest_gmail",
   "okg_ingest_drive",
@@ -180,82 +175,12 @@ allow = [
 ]
 # OpenRPC (https://spec.open-rpc.org/) over stdio scopes (#455, #454). The base
 # assistant remembers facts across sessions (memory.write), recalls them
-# (memory.read), and reads notes/snippets via search (search.read).
-#
-# #3987 (option B, Bob's explicit decision — see the issue's PM-recommendation
-# comment): the Google grants below REPLACE the former `google.read`.
-#
-# WHAT `google.read` ACTUALLY DID: nothing. It was a dead pattern. Discovery
-# maps every `x-google-scopes` OAuth URL to `google.<family>.<access>`
-# (`tools::registry::google_scope::FAMILY_TABLE`), so the vocabulary contains
-# `google.gmail.write`, `google.calendar.write`, … and never a bare
-# `google.read`; `ScopePattern::matches` takes the no-wildcard branch for it
-# and requires string equality. Every one of the ~60 gworkspace tools
-# allowlisted above was therefore scope-denied at dispatch on the persona-chat
-# path, and had been since the scopes line was written. There was no
-# read-only enforcement to preserve here — the posture was fictional, which is
-# why replacing it is a correction of the config to match reality and not a
-# widening of a boundary that was holding.
-#
-# HONEST POSTURE STATEMENT (replacing the old §5.5 read-only claim): a base
-# assistant granted the tools above holds WRITE-CAPABLE Google credentials.
-# Every OAuth scope `trusty-gworkspace` requests is the full-access variant of
-# its API, never a `.readonly` one (`trusty-gworkspace/src/openrpc.rs::scopes`),
-# so the same `gmail.modify` token a "search" tool uses can also delete mail.
-# A genuinely read-only tier is #3987's option A and is DEFERRED: it needs
-# `.readonly` OAuth variants, user re-consent, and either middle-wildcard
-# support in `ScopePattern` or a scope-naming redesign. If option A is built,
-# these grants shrink naturally.
-#
-# INJECTION SURFACE — the risk this posture creates, named rather than left
-# implicit: this same persona ingests attacker-controllable text in the SAME
-# turn that holds send/share credentials (`okg_ingest_gmail`,
-# `okg_ingest_drive`, `get_gmail_message_content`, `web_search` above all pull
-# in an inbound mail body, a shared Drive doc, or a web page). The
-# exfiltration-capable subset of the allowlist is `compose_email`,
-# `manage_file_permissions`, `manage_gmail_settings`, `manage_gmail_filters`
-# and `modify_gmail_messages` — the allow-list bounds WHICH tools exist, not
-# what an injected model chooses to do with them. A confirmation gate for
-# exactly those five is tracked in #4054 (it needs either #3074/#3075's
-# `user_authority` field or an interim read site for
-# `[[permissions.grants]] mode = "ask"`, neither of which exists yet).
-#
-# THE ALLOW-LIST REMAINS THE BINDING CONSTRAINT. `filter_persona_tool_names`
-# intersects `[tools].allow` (by NAME) AND `[tools].scopes` (by CAPABILITY) —
-# verified in #3985 — so these family grants do not expose a single tool the
-# curated allowlist above does not already name. Widening the reachable
-# surface means editing `allow`, not this line.
-#
-# ONE FAMILY PER SURFACE THE ALLOW-LIST ACTUALLY NAMES. No family is granted
-# speculatively: every one below has at least one allowlisted tool, and no
-# allowlisted scoped gworkspace tool lacks a family. That correspondence is
-# ENFORCED, in both directions, by
-# `base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool`
-# (`src/ctrl/pm_task/dispatch/persona_tests.rs`), which derives every tool's
-# dotted scope from the real `rpc.discover` document. Read the test, not a
-# comment, for the per-family tool counts — an enumeration here would drift
-# out of date the first time the allowlist changed, and a stale audit is
-# worse than none.
-#
-# Personalization overlays are UNIONED with this list (`extends::merge_extends`
-# -> `union_opt_vec`, deduped), so `../cto-assistant/`'s narrow
-# `google.gmail.*` / `google.tasks.*` (#3985) now collapse into these as exact
-# duplicates, and `../izzie/`'s blanket `google.*` remains a superset. Both are
-# deliberately left declared: an overlay whose whole purpose is Gmail should
-# say so itself rather than depend on the base keeping a grant forever.
-scopes = [
-  "memory.read",
-  "memory.write",
-  "search.read",
-  "google.gmail.*",
-  "google.calendar.*",
-  "google.drive.*",
-  "google.docs.*",
-  "google.sheets.*",
-  "google.slides.*",
-  "google.tasks.*",
-  "google.accounts.*",
-]
+# (memory.read), and reads notes/snippets via search (search.read). Google
+# access defaults to READ-ONLY (`google.read`) on the base template per §5.5 —
+# a generic, un-personalized assistant should not mutate a user's mailbox /
+# calendar / drive by default. A personalization overlay opts into write
+# (`google.*`) explicitly (see `../izzie/agent.toml`).
+scopes = ["memory.read", "memory.write", "search.read", "google.read"]
 
 [system_prompt]
 # Generic productivity skills only — resolved by name from the skill registry.

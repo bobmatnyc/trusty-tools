@@ -105,7 +105,6 @@ fn test_agent_config(name: &str, model: &str, system_prompt: &str) -> AgentConfi
         listeners: Vec::new(),
         stores: crate::stores::StoresConfig::default(),
         skills: crate::agents::SkillsConfig::default(),
-        subagents: crate::agents::SubagentsConfig::default(),
     }
 }
 

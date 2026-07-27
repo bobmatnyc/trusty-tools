@@ -104,22 +104,14 @@ allow = [
 # credential actually holds, and BOTH must pass in
 # `ctrl::pm_task::dispatch::persona::filter_persona_tool_names` (#3208).
 #
-# HISTORY (#3938): the base `assistant` used to declare a read-only
-# `google.read` — but no gworkspace tool ever advertises that scope:
-# `registry::google_scope` maps every `x-google-scopes` OAuth URL to
-# `google.<family>.<access>` (e.g. `google.gmail.write`, `google.tasks.write`),
-# and `ScopePattern::matches` compares on segment boundaries, so `google.read`
-# matched nothing. Inheriting it by union was therefore inheriting NO Google
-# capability at all, and every Gmail/Tasks tool allowlisted above was silently
-# dropped before the model ever saw it.
-#
-# #3987 (option B) has since replaced that dead pattern on the base with
-# explicit family grants, which now INCLUDE `google.gmail.*` and
-# `google.tasks.*` — so the line below is currently redundant and the extends
-# union dedups it away (`union_opt_vec`). It is kept declared on purpose: an
-# overlay whose entire purpose is Gmail triage and Tasks sync should state the
-# capability it depends on rather than rely on the shared base never narrowing
-# it. If the base is ever trimmed, this package keeps working.
+# The base `assistant` deliberately declares read-only `google.read`
+# (`../assistant/agent.toml`, §5.5) — but no gworkspace tool ever advertises
+# that scope: `registry::google_scope` maps every `x-google-scopes` OAuth URL
+# to `google.<family>.<access>` (e.g. `google.gmail.write`,
+# `google.tasks.write`), and `ScopePattern::matches` compares on segment
+# boundaries, so `google.read` matches nothing. Inheriting it by union was
+# therefore inheriting NO Google capability at all, and every Gmail/Tasks tool
+# allowlisted above was silently dropped before the model ever saw it.
 #
 # This overlay is a single named user's private assistant (Masa/Duetto) whose
 # whole point is Gmail triage (#473) and Granola->Google Tasks sync (#472/#485),

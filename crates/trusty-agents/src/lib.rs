@@ -7,7 +7,7 @@
 //!      branches. Exposing the existing module tree through a library
 //!      target enables that without duplicating code.
 //! What: Declares every top-level module of the crate as `pub mod` so both
-//!       the `tagent` and `ompm` binaries (which now consume this lib via
+//!       the `tagent` binary (which now consumes this lib via
 //!       `use trusty_agents::...`) and downstream agent crates can reach the
 //!       internals. Also publishes a curated `agent_api` facade that pins
 //!       the minimal stable surface external agents should depend on

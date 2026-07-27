@@ -119,7 +119,7 @@ code itself.
 ### 3. trusty-agents — the Agentic Harness
 
 **Crate:** `crates/open-mpm/` (current name; planned rename to `trusty-agents`)
-**Package:** `-p open-mpm`, binaries: `open-mpm` / `ompm` (REPL + API server)
+**Package:** `-p open-mpm`, binary: `tagent` (REPL + API server)
 **Analogy:** OpenClaw / Hermes — a general agentic harness for knowledge-worker tasks.
 
 **Purpose:** Provides a general-purpose agentic harness for non-coding workflows:
@@ -168,7 +168,7 @@ for the rationale.
 | **Analogy** | Claude Code | Claude MPM | OpenClaw / Hermes |
 | **Primary user** | Developer / CI pipeline | Operator / PM role | Knowledge worker |
 | **Scope** | One project, coding tasks | Many projects, orchestration control | Any domain, non-coding workflows |
-| **Main binary** | `tcode` | `tm` / `trusty-mpmd` | `open-mpm` / `ompm` |
+| **Main binary** | `tcode` | `tm` / `trusty-mpmd` | `tagent` |
 | **Core loop** | PM main loop (per project) | Session daemon + hook relay | PM main loop (per persona) |
 | **Agent model** | Coding sub-agents (engineer, QA, ticketing) | Overseer / delegation authority | Domain personas + MCP bridge |
 | **Tool source** | Claude Code tools + project skill files | Orchestration tools (MCP) | Any MCP service + native tools |

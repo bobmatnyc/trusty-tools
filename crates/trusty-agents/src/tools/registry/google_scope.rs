@@ -129,34 +129,6 @@ const FAMILY_TABLE: &[(&str, &str, ScopeAccess)] = &[
     ),
 ];
 
-/// Every dotted scope this build can EVER emit for the `google` namespace.
-///
-/// Why (#3987): `dead_scope::dead_scope_patterns` needs to know the closed
-/// vocabulary an agent's `[tools].scopes` patterns are matched against, and
-/// for Google that vocabulary is a compile-time property of
-/// [`FAMILY_TABLE`] — NOT of whether a `gworkspace` endpoint happens to be
-/// reachable right now. Deriving it here rather than only from a live
-/// `rpc.discover` is what makes the diagnostic sound: `google.read` is dead
-/// because no table entry can ever produce it, a fact that holds with the
-/// daemon down, and a pattern must never be reported dead merely because an
-/// endpoint is offline.
-/// What: the de-duplicated `google.<family>.<access>` set produced by
-/// walking [`FAMILY_TABLE`], in table (priority) order with duplicates
-/// dropped — several OAuth URLs collapse to the same dotted scope (the
-/// four Gmail scopes all yield `google.gmail.write`).
-/// Test: `known_dotted_scopes_covers_every_family`,
-/// `known_dotted_scopes_never_contains_the_dead_google_read_pattern`.
-pub fn known_dotted_scopes() -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for (_, family, access) in FAMILY_TABLE {
-        let dotted = format!("google.{family}.{}", access.as_str());
-        if !out.contains(&dotted) {
-            out.push(dotted);
-        }
-    }
-    out
-}
-
 /// Resolve a tool's `x-google-scopes` list to one dotted scope string.
 ///
 /// Why: `DiscoveredTool.scope` is a single `String` (the shape every
@@ -281,43 +253,5 @@ mod tests {
             dotted_scope_for_google_scopes(&s(&["https://www.googleapis.com/auth/unknown.thing"])),
             None
         );
-    }
-
-    /// #3987: the vocabulary must name every family the table maps, and must
-    /// collapse the several OAuth URLs that share a family/access pair.
-    #[test]
-    fn known_dotted_scopes_covers_every_family() {
-        let vocab = known_dotted_scopes();
-        for expected in [
-            "google.docs.write",
-            "google.sheets.write",
-            "google.slides.write",
-            "google.calendar.write",
-            "google.gmail.write",
-            "google.drive.write",
-            "google.tasks.write",
-            "google.accounts.read",
-        ] {
-            assert!(
-                vocab.iter().any(|s| s == expected),
-                "vocabulary is missing {expected}: {vocab:?}"
-            );
-        }
-        let mut deduped = vocab.clone();
-        deduped.sort();
-        deduped.dedup();
-        assert_eq!(
-            deduped.len(),
-            vocab.len(),
-            "vocabulary must be deduplicated"
-        );
-    }
-
-    /// #3987 the point of the whole exercise: `google.read` — the base
-    /// assistant's declared pattern — is not in the vocabulary and cannot be,
-    /// because `FAMILY_TABLE` only ever emits three-segment scopes.
-    #[test]
-    fn known_dotted_scopes_never_contains_the_dead_google_read_pattern() {
-        assert!(!known_dotted_scopes().iter().any(|s| s == "google.read"));
     }
 }

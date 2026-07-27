@@ -121,7 +121,7 @@ async fn process_pm_bridge_tcode_route_fails_closed_without_binary() {
 
     let tmp = tempfile::tempdir().unwrap();
     let bridge = ProcessPmBridge::from_project(tmp.path().to_path_buf());
-    let err = with_empty_path(|| bridge.run(BridgeRoute::Tcode, None, "fix the parser"))
+    let err = with_empty_path(|| bridge.run(BridgeRoute::Tcode, "fix the parser"))
         .await
         .expect_err("must fail closed when tcode is not on PATH");
     assert!(
@@ -138,7 +138,7 @@ async fn process_pm_bridge_tm_route_fails_closed_without_binary() {
 
     let tmp = tempfile::tempdir().unwrap();
     let bridge = ProcessPmBridge::from_project(tmp.path().to_path_buf());
-    let err = with_empty_path(|| bridge.run(BridgeRoute::Tm, None, "spawn a new session"))
+    let err = with_empty_path(|| bridge.run(BridgeRoute::Tm, "spawn a new session"))
         .await
         .expect_err("must fail closed when tm is not on PATH");
     assert!(
@@ -198,11 +198,7 @@ async fn tcode_route_smoke() {
     std::fs::create_dir_all(tmp.path().join(".claude/agents")).unwrap();
     let bridge = ProcessPmBridge::from_project(tmp.path().to_path_buf());
     let result = bridge
-        .run(
-            BridgeRoute::Tcode,
-            None,
-            "reply with a one-line status only",
-        )
+        .run(BridgeRoute::Tcode, "reply with a one-line status only")
         .await;
     match result {
         Ok(out) => assert_no_branded_word(&crate::tools::pm_bridge::scrub_branding(&out)),
@@ -229,28 +225,11 @@ async fn tm_route_smoke() {
     }
     let tmp = tempfile::tempdir().unwrap();
     let bridge = ProcessPmBridge::from_project(tmp.path().to_path_buf());
-    let result = bridge
-        .run(BridgeRoute::Tm, None, "report session status")
-        .await;
+    let result = bridge.run(BridgeRoute::Tm, "report session status").await;
     match result {
         Ok(out) => assert_no_branded_word(&crate::tools::pm_bridge::scrub_branding(&out)),
         Err(e) => {
             eprintln!("tm_route_smoke: run failed (acceptable in an unconfigured env): {e:#}");
         }
     }
-}
-
-/// #4026 regression pin: widening `run_tcode` to accept a named target must
-/// not change what an UNNAMED dispatch runs. The default agent argument is the
-/// same literal the bridge has always passed, so a caller omitting a
-/// specialist produces a byte-identical command line.
-///
-/// Why: #4026's acceptance requires "omitting `agent_name` preserves today's
-/// exact behavior". A one-line constant is easy to edit by accident; this pins
-/// it without needing the real binary on PATH.
-/// What: asserts `DEFAULT_TCODE_AGENT` is still `"pm"`.
-/// Test: this test.
-#[test]
-fn default_tcode_agent_is_unchanged_by_the_4026_widening() {
-    assert_eq!(super::DEFAULT_TCODE_AGENT, "pm");
 }

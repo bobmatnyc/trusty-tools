@@ -179,49 +179,10 @@ pub struct AgentConfig {
     /// Test: `skills::manifest::tests`.
     #[serde(default)]
     pub skills: SkillsConfig,
-
-    // #4026: cross-product subagent grants — the config source for the
-    // bridge-layer allow-set (epic #4021, OQ-3/OQ-7).
-    /// Optional `[subagents]` section (#4026, epic #4021) — which external
-    /// non-coding specialists this agent may target through `dispatch_task`.
-    ///
-    /// Why: OQ-7's owner ruling puts enforcement at the BRIDGE, fail-closed,
-    /// but OQ-3's ruling makes the caller's config the source of the set until
-    /// #4030's runtime-built domain authority exists to feed it. This section
-    /// is that source. Absent = EMPTY, never "all" — an agent with no
-    /// `[subagents]` section cannot reach any cross-product specialist, the
-    /// same deny-by-default posture `[skills].allow` takes.
-    /// What: [`SubagentsConfig`], whose `allowed` list is intersected with
-    /// `tools::cross_product::NON_CODING_TARGETS` by
-    /// `tools::cross_product::SubagentAllowSet` — config can only ever narrow
-    /// that floor, never widen it.
-    /// Test: `subagents_config_defaults_empty`, `subagents_config_parses_allowed`.
-    #[serde(default)]
-    pub subagents: SubagentsConfig,
 }
 
 fn default_adapter() -> Arc<dyn ModelAdapter> {
     Arc::new(crate::llm::adapter::GenericAdapter)
-}
-
-// #4026: minimal, forward-compatible shape — a struct (not a bare `Vec`) so
-// #4029's Sub-agents configuration section can add `deny`/`domain` keys
-// without a breaking config change, exactly as `SkillsConfig` was shaped.
-/// Optional `[subagents]` section in agent TOML (#4026, epic #4021).
-///
-/// Why: kept as its own struct rather than a bare list so #4029's Sub-agents
-/// configuration section — and #4030's domain-authority feed — can add fields
-/// later without a breaking change, mirroring [`SkillsConfig`]'s rationale.
-/// What: `allowed` is a list of external specialist names. `None` (missing
-/// section) and `Some(vec![])` both resolve to an EMPTY allow-set; the
-/// distinction is deliberately NOT load-bearing here because neither may grant
-/// anything (unlike `[skills]`, where absence leaves `[tools].allow` as the
-/// sole source). No glob dialect — exact names only.
-/// Test: `subagents_config_defaults_empty`, `subagents_config_parses_allowed`.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct SubagentsConfig {
-    #[serde(default)]
-    pub allowed: Option<Vec<String>>,
 }
 
 /// Optional `[skills]` section in agent TOML (#3933).
@@ -300,85 +261,9 @@ pub struct ToolsConfig {
     /// `tools_config_parses_*` cases when the field is present.
     #[serde(default)]
     pub scopes: Option<Vec<String>>,
-
-    /// Arbitrary trusty-search indexes attached to this agent (#3232, epic
-    /// #4007's tier-2 mechanism).
-    ///
-    /// Why: `[[stores]]` is the CURATED tier — exactly one OKG store per
-    /// agent by the 2026-07-24 owner decision, and that ceiling stays. The
-    /// multiplicity an agent needs ("also let me search the APEX repo")
-    /// belongs to a second, uncurated tier: a plain list of trusty-search
-    /// `index_id`s over any corpus, with no OKG tree, palace, or ingestion
-    /// requirement behind them. Declaring them in config (rather than
-    /// leaving the model to guess an id that happens to exist) is what makes
-    /// them discoverable — `vector_search`'s schema enumerates this list
-    /// (#4009) so the model sees real, queryable options.
-    /// What: Optional list of index ids (`["apex", "cto-projects"]`).
-    /// `None` (missing section/field) means "no attached indexes" and is the
-    /// pre-#3232 state exactly. Unioned base-first through `extends` — like
-    /// `allow`/`scopes`, an overlay ADDS reach and never silently removes
-    /// what its base attached. Use [`Self::resolved_search_indexes`] rather
-    /// than reading the field directly, so blank ids and duplicates from a
-    /// hand-edited file are normalized once.
-    /// Test: `tools_config_parses_search_indexes`,
-    /// `extends_unions_search_indexes`,
-    /// `resolved_search_indexes_normalizes_blanks_and_dupes`.
-    #[serde(default)]
-    pub search_indexes: Option<Vec<String>>,
-
-    /// Opt-in allowlist enforcement for `vector_search`'s `index_id` (#4009).
-    ///
-    /// Why: Owner decision on epic #4007's OQ-2 — enforcement is OPT-IN with
-    /// declarative-only as the default at M1. Today `vector_search` forwards
-    /// ANY `index_id` string to the daemon unchecked; flipping that to
-    /// fail-closed by default would silently break every persona that
-    /// currently cross-queries an index it never declared. So the default is
-    /// `false` = today's behaviour, byte-identical; an operator who wants a
-    /// hard boundary sets `[tools] enforce_search_indexes = true` and gets a
-    /// fail-closed allowlist of `{bound OKG index} ∪ search_indexes`.
-    /// Schema enrichment (#4009's other half) ships regardless of this flag.
-    /// What: `Option<bool>`, read through [`Self::search_indexes_enforced`].
-    /// `None`/`Some(false)` = declarative-only. Through `extends`, a child
-    /// that declares the key wins; a child that omits it inherits the base's
-    /// posture (so a hardened base stays hardened under an overlay).
-    /// Test: `tools_config_parses_enforce_search_indexes`,
-    /// `extends_child_overrides_enforce_search_indexes`,
-    /// `vector_search_default_is_unenforced`.
-    #[serde(default)]
-    pub enforce_search_indexes: Option<bool>,
 }
 
 impl ToolsConfig {
-    /// The agent's attached search indexes, normalized (#3232).
-    ///
-    /// Why: The field is hand-editable TOML and is produced by a union
-    /// merge, so it can carry blanks (`""`, `"  "`) and — across a deep
-    /// `extends` chain re-declaring the same id — duplicates. Normalizing at
-    /// the single read point means neither the tool schema nor the API
-    /// response has to re-derive the rule.
-    /// What: Trimmed, blank-dropped, first-occurrence-wins dedup, declaration
-    /// order preserved. Empty vec when the field is absent.
-    /// Test: `resolved_search_indexes_normalizes_blanks_and_dupes`.
-    pub fn resolved_search_indexes(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for id in self.search_indexes.iter().flatten() {
-            let id = id.trim();
-            if id.is_empty() || out.iter().any(|e| e == id) {
-                continue;
-            }
-            out.push(id.to_string());
-        }
-        out
-    }
-
-    /// Whether `vector_search` should fail closed on an undeclared index id
-    /// (#4009). Absent = `false` = today's behaviour.
-    ///
-    /// Test: `tools_config_parses_enforce_search_indexes`.
-    pub fn search_indexes_enforced(&self) -> bool {
-        self.enforce_search_indexes.unwrap_or(false)
-    }
-
     /// Whether the AST-native tool bundle should be registered for this agent.
     ///
     /// Why: There are two equally-valid TOML spellings (`[tools] ast_native = true`

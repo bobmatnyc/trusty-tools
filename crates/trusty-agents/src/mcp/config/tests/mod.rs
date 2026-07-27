@@ -45,13 +45,12 @@ async fn load_or_create_writes_default_when_absent() {
     );
 
     // Defaults after ADR-0014 (#256, native-MCP retire) + #3203/#3204:
-    // trusty-mpm (enabled, native), granola-notes (enabled), trusty-memory
-    // (enabled, native — moved off the dead OpenRPC tool_registry.endpoints
-    // stub), trusty-search (same), duetto-memory (disabled). slack-user-proxy
-    // was retired as a dead external stub; gworkspace-mcp was removed
-    // (#3204) — its static tool list had drifted from the real binary and is
-    // superseded by the OpenRPC "gworkspace" tool_registry.endpoints entry.
-    assert_eq!(cfg.mcp.services.len(), 5);
+    // trusty-mpm (enabled, native), granola-notes (enabled), duetto-memory
+    // (disabled). slack-user-proxy was retired as a dead external stub;
+    // gworkspace-mcp was removed (#3204) — its static tool list had drifted
+    // from the real binary and is superseded by the OpenRPC "gworkspace"
+    // tool_registry.endpoints entry.
+    assert_eq!(cfg.mcp.services.len(), 3);
     let tm = cfg
         .mcp
         .services
@@ -59,23 +58,6 @@ async fn load_or_create_writes_default_when_absent() {
         .find(|s| s.name == "trusty-mpm")
         .expect("trusty-mpm present in defaults (#3203)");
     assert!(tm.enabled);
-    let mem = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-memory")
-        .expect("trusty-memory present as a live mcp.services entry");
-    assert!(mem.enabled, "trusty-memory must ship enabled, not DISABLED");
-    let search = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-search")
-        .expect("trusty-search present as a live mcp.services entry");
-    assert!(
-        search.enabled,
-        "trusty-search must ship enabled, not DISABLED"
-    );
     assert!(
         !cfg.mcp
             .services
@@ -175,11 +157,9 @@ async fn load_returns_documented_defaults_when_absent() {
     let path = home.join(".trusty-agents").join("config.toml");
     assert!(!path.exists(), "load() must not create the config file");
     // #245/#256 + ADR-0014 + #3203/#3204: defaults mirror DEFAULT_CONFIG_TOML —
-    // 5 services (trusty-mpm, granola-notes, trusty-memory, trusty-search,
-    // duetto-memory) after slack-user-proxy retire and gworkspace-mcp
-    // removal. trusty-memory/trusty-search moved here from the dead
-    // tool_registry.endpoints OpenRPC stubs (see default-config.toml).
-    assert_eq!(cfg.mcp.services.len(), 5);
+    // 3 services (trusty-mpm, granola-notes, duetto-memory) after
+    // slack-user-proxy retire and gworkspace-mcp removal.
+    assert_eq!(cfg.mcp.services.len(), 3);
     assert!(cfg.mcp.services.iter().any(|s| s.name == "trusty-mpm"));
     assert!(!cfg.mcp.services.iter().any(|s| s.name == "gworkspace-mcp"));
     assert!(
@@ -190,23 +170,6 @@ async fn load_returns_documented_defaults_when_absent() {
     );
     assert!(cfg.mcp.services.iter().any(|s| s.name == "granola-notes"));
     assert!(cfg.mcp.services.iter().any(|s| s.name == "duetto-memory"));
-    let mem = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-memory")
-        .expect("trusty-memory present in defaults");
-    assert!(mem.enabled, "trusty-memory must ship enabled, not DISABLED");
-    let search = cfg
-        .mcp
-        .services
-        .iter()
-        .find(|s| s.name == "trusty-search")
-        .expect("trusty-search present in defaults");
-    assert!(
-        search.enabled,
-        "trusty-search must ship enabled, not DISABLED"
-    );
 }
 
 #[tokio::test]

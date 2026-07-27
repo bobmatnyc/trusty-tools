@@ -425,19 +425,18 @@ pub fn available_agent_names(dir: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// The 33-name default embedded roster, in `crate::assets::DEFAULT_AGENTS`'s
-    /// declared order (Slice E3, #2958; `pm` added for #3437, `ticketing` for
-    /// #4027) — shared by
+    /// The 32-name default embedded roster, in `crate::assets::DEFAULT_AGENTS`'s
+    /// declared order (Slice E3, #2958; `pm` added for #3437) — shared by
     /// every fallback test in this module so the expected list is written
     /// once, not duplicated per-test with the risk of one copy drifting from
     /// another.
     ///
     /// Why: three separate fallback scenarios (empty dir, all-invalid dir,
-    /// only-orphaned-toml dir) all assert the identical 33-name outcome; a
+    /// only-orphaned-toml dir) all assert the identical 32-name outcome; a
     /// single source avoids a silent typo in one copy passing review
     /// unnoticed.
     /// What: tcode's original 4 (`engineer`, `qa-agent`, `code-reviewer`,
-    /// `pm`) followed by the 29 roster names, alphabetical, matching
+    /// `pm`) followed by the 28 roster names, alphabetical, matching
     /// `DEFAULT_AGENTS`'s literal declaration order.
     /// Test: every `load_all_agents_falls_back_*` test below.
     fn expected_default_agent_names() -> Vec<&'static str> {
@@ -471,8 +470,6 @@ mod tests {
             "security",
             "svelte-engineer",
             "tauri-engineer",
-            // #4027: non-coding ticketing specialist for the cross-product bridge.
-            "ticketing",
             "typescript-engineer",
             "web-qa",
             "web-ui-engineer",

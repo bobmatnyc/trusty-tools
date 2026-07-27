@@ -161,28 +161,15 @@ A K-d entry carries **no** `tree`, **no** `palace`, and **no** curation requirem
 ### 5.3 Interim raw surface on `/stores` (#3232/#4009)
 
 The concurrent implementation branch landing #3232 and #4009
-(`feat-3232-4009-attached-search-indexes`) adds two top-level fields directly
-to the existing `GET /api/agents/:name/stores` route, in
-`crates/trusty-agents/src/api/server/agent_stores.rs`, function `stores_at`
-(the `"search_indexes"`/`"enforce_search_indexes"` insertion into the
-response body, currently at lines 127-128), ahead of `/knowledge` (#3935)
-shipping:
+(`feat-3232-4009-attached-search-indexes`, commit `7dc401dd`) adds two
+top-level fields directly to the existing `GET /api/agents/:name/stores`
+route (`crates/trusty-agents/src/api/server/agent_stores.rs:115-116`), ahead
+of `/knowledge` (#3935) shipping:
 
 | Field | Type | Source | Meaning |
 |---|---|---|---|
-| `search_indexes` | `string[]` | `attached_indexes_deduped()` (`agent_stores.rs`, function `attached_indexes_deduped`, currently line 151) | `ToolsConfig::resolved_search_indexes()` (§3.2) — trimmed, blank-dropped, deduped, **after `extends` union-merge** (KD-3) — **with any id whose RESOLVED index matches a `[[stores]]` binding's `resolved_index()` filtered out**, so that id is reported once, under its bound (K-a) role, instead of twice (KD-21). Dedupe keys on the binding's *resolved* index — the id `vector_search` actually sends — not the store's display name, matching `VectorSearchTool::allowed_index_ids()`'s bound-first resolution. **No daemon connectivity probe.** |
-| `enforce_search_indexes` | `bool` | `ToolsConfig::search_indexes_enforced()` (`config.rs`, function `search_indexes_enforced`) | Whether #4009's optional allowlist enforcement is active for this agent (§4.2). |
-
-**Why `search_indexes` is not `resolved_search_indexes()` verbatim:** KD-21
-requires an id that is both bound (K-a) and attached (K-d) to be deduped and
-presented once, under its bound role; KD-18/C-KD.8 require this route's id
-set to match `/knowledge.attached_indexes[]` exactly once that route ships.
-A verbatim `resolved_search_indexes()` would report such an id under
-`search_indexes` as well as under `stores`, which is a second rendering of
-the same corpus KD-21 forbids and a divergence from the future
-`/knowledge` route KD-18/C-KD.8 forbid — so the source column names the
-deduped derivation, not the raw resolver. Do not "fix" this back to
-`resolved_search_indexes()`.
+| `search_indexes` | `string[]` | `ToolsConfig::resolved_search_indexes()` (`config.rs:323`) | The agent's resolved `tools.search_indexes` list (§3.2) — trimmed, blank-dropped, deduped, **after `extends` union-merge** (KD-3). **No daemon connectivity probe.** |
+| `enforce_search_indexes` | `bool` | `ToolsConfig::search_indexes_enforced()` (`config.rs:339`) | Whether #4009's optional allowlist enforcement is active for this agent (§4.2). |
 
 - **KD-17 (licensed, not a violation)** `/stores` MAY carry these two fields
   ahead of `/knowledge` shipping. This is a **licensed interim raw surface**,
@@ -312,6 +299,5 @@ This walks the two-tier principle (§2) and K-d (§3–§7) through epic #4007's
 
 ## 12. Change Log
 
-- **2026-07-26 (second revision)** — Amended per code-critic review of PR #4019: §5.3's source table said `/stores.search_indexes` sources verbatim from `ToolsConfig::resolved_search_indexes()`, which the critic ruled wrong and self-contradictory — KD-21 requires an id that is both bound (K-a) and attached (K-d) to be deduped and presented once under its bound role, and KD-18/C-KD.8 require this route's id set to match `/knowledge.attached_indexes[]` exactly, so a verbatim list would carry an id absent from the future `attached_indexes[]`. Changed the `search_indexes` source column to `attached_indexes_deduped()` — the resolved attached list with any id whose resolved index matches a store binding filtered out, dedupe keyed on `resolved_index()` per KD-21 — and added a one-sentence rationale citing KD-18/KD-21/C-KD.8 so the derivation is not "fixed" back to the verbatim resolver. Also fixed §5.3's citations: commit `7dc401dd` is superseded and no longer reachable on `feat-3232-4009-attached-search-indexes` (PR #4019 is the current implementation), and `agent_stores.rs:115-116` had drifted to the `"search_indexes"`/`"enforce_search_indexes"` insertion at lines 127-128 in `stores_at` and `attached_indexes_deduped` at line 151 — now cited by symbol name first, with line numbers as a secondary, degrading pointer, since the branch is still in-flight.
 - **2026-07-26 (revision)** — Amended per code-critic review of PR #4017 (WARN, one HIGH): the concurrent `feat-3232-4009-attached-search-indexes` implementation branch (commit `7dc401dd`) already adds `search_indexes`/`enforce_search_indexes` to `GET /api/agents/:name/stores`, which contradicted the original KD-8/C-KD.7 "byte-identical" wording. Added §5.3 ("Interim raw surface on `/stores`") licensing those two fields as an interim, non-authoritative-for-UI raw surface, and defining the id-set consistency relationship to the future `/knowledge.attached_indexes[]` (KD-17…KD-20, C-KD.8). Reworded KD-8 and C-KD.7 to scope the "unchanged" guarantee to *pre-existing* fields rather than to the whole route, so they no longer contradict the licensed addition. Added KD-21 resolving the reviewer's minor note: an id legally overlapping both `[[stores]]` (K-a) and `tools.search_indexes` (K-d) MUST be deduped and presented once, under its bound (K-a) role.
 - **2026-07-26** — Initial addendum (DOC-58, `SPEC-KDIDX-01~draft` … `-06~draft`). Introduces K-d (attached search indexes) as a fourth Knowledge sub-surface alongside DOC-57 §4's K-a/K-b/K-c, backed by `tools.search_indexes` (#3232) with union-extends merge semantics. Specifies the `attached_indexes[]` addition to #3935's `/knowledge` route (declarative, degrade-never-fail, read-only), an M1 enforcement posture of opt-in-allowlist-declared-but-not-enforced, GUI expectations for #4010 (attach/detach existing indexes only, creation stays CLI-only per #4011), and the permissions interaction with `search.read` (category-level, unchanged). Records the APEX/`cto-assistant` driver (#4015) as a worked example and lists explicit non-goals, including the #4013/#4014 stretch tiers. Amends #3935's scope per #4008's acceptance criteria; does not edit DOC-57's or #3935's existing text.

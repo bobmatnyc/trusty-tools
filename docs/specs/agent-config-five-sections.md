@@ -16,7 +16,7 @@ spec_refs:
 **Status:** Draft
 **Subsystem:** trusty-agents — agent configuration model, capability declaration, permissions surface, GUI config pane
 **Owner:** Engineering (trusty-agents) / Bob Matsuoka
-**Last-updated:** 2026-07-26
+**Last-updated:** 2026-07-25
 **Spec ID:** `SPEC-AGENTCFG-01~draft` … `SPEC-AGENTCFG-09~draft` (DOC-57)
 **Epic:** #3052 (Assistant M1)
 **Builds on:** DOC-54 [Trusty Agents Product Specification](./trusty-agents-product-spec.md) §5 (the config triple this spec supersedes) and §8.4 (the in-pane config sections); DOC-41 [Eve-Style Agent Framework](./trusty-agents-eve-style-agents-spec.md) §2.3/§2.6/§5.5 (manifest schema, no-code enforcement, user-authority singleton); DOC-42 [Agent-Bundled Skills](./agent-bundled-skills.md) (the `skills:` declaration + co-deployment model on the trusty-mpm side); DOC-23 [Learned-Autonomy Auto-Answer](./learned-autonomy-auto-answer.md) (the only designed approval/undo/audit model in the repo)
@@ -358,7 +358,7 @@ scopes: [google.gmail.*]           # NEW, optional — scopes that tool requires
 | `name` | yes | Existing. Skill identity; the allow-list unit (§5.4). |
 | `description` | yes | Existing. Rendered as the skill card's subtitle. |
 | `tags` | yes | Existing, and **already required** by `scan.rs:204-206`. |
-| `kind` | no, default `action` | `action` \| `knowledge` \| `system` \| `function`. `knowledge` routes the skill's tools into the Knowledge pane (§4.3) **instead of** the Skills pane. `function` is the **bundling tier** (§5.7b, #4022): a group header naming member skill ids rather than a tool. `function` is **not authorable** — the frontmatter dialect has no `members` key and this parser requires `tools`, so a `kind: function` frontmatter value is read as `action` (S-14). |
+| `kind` | no, default `action` | `action` \| `knowledge` \| `system`. `knowledge` routes the skill's tools into the Knowledge pane (§4.3) **instead of** the Skills pane. |
 | `tools` | no, default `[]` | The exact tool name this skill wraps — **at most one** (OQ-2). A skill with no `tools` is a **tool-less skill**: pure procedure or guidance with no executable member, a first-class shape and today's behavior, still valid. A manifest listing several tools is split into one skill per tool at load time rather than being rejected. |
 | `scopes` | no | Scopes the wrapped tools require. Advisory in Phase 2, enforcement input in Phase 4 (§10). |
 
@@ -436,10 +436,7 @@ what the existing three gates permit.
 The owner's directive is that *every* tool is wrapped, 1:1. Authoring ~170
 Markdown files before the Skills pane can render a single honest card would
 block the GUI slice on a content project. Two mechanisms close that gap without
-grouping anything — the 1:1 base tier described here introduces **no** grouping
-of any kind. (A separate, explicitly-declared **bundling tier** was added later
-by owner directive; it sits *above* this tier and changes nothing in S-7…S-10.
-See §5.7b.)
+grouping anything:
 
 - **S-7** The crate ships a **compile-time catalog** — one named row per tool,
   covering every in-process tool trusty-agents registers plus the first-party
@@ -492,27 +489,9 @@ the config does not keep (§5.1).
       "provider": { "provider": "Google Workspace",
                     "requirement": "An authorized Google account profile…",
                     "env_var": null,
-                    "configured": null },  // tri-state; null = NOT verified
-      "members": [],                        // NEW (§5.7b) — [] on a leaf
-      "granted_members": [],                // NEW (§5.7b) — [] on a leaf
-      "granted_state": "all" },             // NEW (§5.7b) — restates `granted`
-    { "id": "ticketing", "name": "Ticketing",
-      "description": "Everything needed to work a tracker end to end…",
-      "kind": "function",                   // NEW — the bundling tier
-      "origin": { "kind": "builtin" },
-      "granted": false,                     // === (granted_state == "all")
-      "tools": [],                          // a bundle wraps no tool
-      "provider": null,
-      "members": ["ticket-create", "ticket-read", "…"],
-      "granted_members": ["ticket-create"],
-      "granted_state": "some" }             // all | some | none of the members
+                    "configured": null } }  // tri-state; null = NOT verified
   ],
-  "granted_count": 1,                       // capabilities; EXCLUDES bundles
-  "groups": [ { "id": "ticketing", "name": "Ticketing", "description": "…",
-                "members": ["ticket-create", "…"],
-                "granted_members": ["ticket-create"],
-                "granted_state": "some" } ],  // NEW (§5.7b) — index over the
-                                              // kind:"function" cards
+  "granted_count": 1,
   "unresolved": [ { "id": "typo-skill", "reason": "no skill with this id…" } ],
   "unmatched_patterns": [ { "pattern": "granola_*", "reason": "…may still resolve
                             to an MCP tool discovered at dispatch time" } ],
@@ -538,68 +517,6 @@ granted subset, so the Phase-3 editor renders the full choice from one route.
   mirroring the existing `tools_allow` field on `PatchAgentRequest`
   (`agent_patch.rs:128-148`), including its empty-array-clears semantics. Ships
   in Phase 3 (§10); Phase 1 is read-only.
-
-### 5.7b Function skills — the bundling tier (NORMATIVE)
-
-**Added 2026-07-26 by owner directive, one day after OQ-2 resolved the base tier
-at 1:1.** The directive: *"Skills also need to be organized by function. So
-'ticketing' is a skill with various capabilities including all the skills
-[under] one."* Epic #4021's OQ-1 was resolved **grant-the-bundle** (owner,
-2026-07-26): naming a bundle in `[skills].allow` grants every member. Implemented
-by #4022 (primitive), #4023 (the `ticketing` exemplar) and #4025 (the route).
-
-This tier sits **above** the 1:1 base and supersedes nothing. Every tool still
-maps to exactly one leaf skill (OQ-2 stands); every leaf remains independently
-grantable; S-1…S-12 are unchanged. It is also **not** the prefix grouping S-8
-rejects — membership is an explicit, closed list, never a `ticket-*` scan, so a
-future `ticket-`-prefixed skill is not silently absorbed into an existing grant.
-
-- **S-13 A bundle resolves to its members, and compiles down before the gates.**
-  A `kind: function` skill declares `members: [skill_id]` and wraps **no** tool
-  (`tools` and `members` are mutually exclusive). `SkillCatalog::expand` replaces
-  a bundle id with the union of its members' tools *before returning*, so the 1:1
-  layer and all three permission gates (allow-glob, RBAC tier, scope) see **only
-  exact leaf tool names — never a bundle id**. Every S-1…S-6 property therefore
-  holds for a bundle by construction rather than through a second resolution
-  rule: no new glob dialect, narrow-never-widen, and a bundle can only ever reach
-  tools its members already wrap. Member resolution is memoised, making expansion
-  linear in the catalog and cycle-safe.
-- **S-14 Bundles are built-in only; a bundle id may not be redefined by a skill
-  source.** Member lists are compile-time `const` data. The authored `.md`
-  dialect has no `members` key and its parser requires `tools`, so no authored
-  file can *declare* a bundle. Nor may one *displace* a built-in bundle by id:
-  S-9's authored-beats-built-in is a **renaming** rule, and applied to a bundle id
-  it becomes a hijack (`ticketing.md` with `tools: [execute_shell_command]` would
-  turn `[skills].allow = ["ticketing"]` into a shell grant with nothing in
-  `agent.toml` for a reviewer to see, and no `unresolved` entry). A bundle id is
-  the one name whose meaning cannot be checked by reading the config, so it is the
-  one name a skill source may not redefine; the attempt is refused and logged. A
-  bundle's **members** are ordinary leaves and remain displaceable under S-9 —
-  that path narrows the bundle and reports the lost member in `unresolved[]`.
-- **S-15 An unknown member is a manifest error at build time, and narrows at
-  runtime.** A bundle naming a member no manifest resolves fails a catalog
-  validation check (`unknown_function_members`, asserted in debug builds and
-  gated in CI) so a renamed leaf fails the build rather than quietly shrinking an
-  agent's capability. If one reaches runtime regardless, expansion still narrows:
-  that member contributes zero tools and is reported in `unresolved[]`, never
-  "all tools". Partial resolution is reported, never dropped — revoking nine
-  working capabilities over one typo is the worse failure.
-- **S-16 The route is additive, and tri-state.** `GET /api/agents/:name/skills`
-  gains no new route. Every field a pre-#4022 consumer reads keeps its name, type
-  and meaning. Every card — leaf or bundle — carries `members`,
-  `granted_members` and `granted_state` (`all` | `some` | `none` of the members),
-  so a consumer needs no `kind` check before reading a field; on a leaf the first
-  two are `[]` and the third restates `granted`. `groups[]` indexes the
-  `kind: "function"` cards for the pane and MUST be built from the same
-  computation as those cards, so a group and its card can never report different
-  grant states. For a bundle, `granted` is exactly `granted_state == "all"` — the
-  conservative reading an existing consumer gets for free. `granted_count` counts
-  **capabilities** and therefore EXCLUDES bundles; the Skills pane's own counts
-  MUST match it, since a header counted as an eleventh capability would print
-  "11 of N" over ten rendered cards.
-
-Rendering bundles as group headers in the Skills pane is #4024; until it lands a
-`function` card is excluded from the pane's buckets rather than mis-filed.
 
 ### 5.8 No executable payload in skills (NORMATIVE)
 
@@ -804,14 +721,6 @@ active on the persona-chat path.
 
 - **PM-5** This is filed separately rather than fixed inside a docs PR (OQ-6,
   §12). It is cited here as motivating evidence, not as spec content.
-- **RESOLVED (historical record above).** The overlay half was filed as #3938
-  and fixed in PR #3985 (the package now declares `google.gmail.*` /
-  `google.tasks.*`). The base half — `google.read` matching nothing at all —
-  was filed as #3987 and fixed in two parts: a dead-scope-pattern diagnostic
-  (`tools::registry::dead_scope`, warning at registry build and surfaced in
-  `GET /api/agents/:name/skills` as `dead_scope_patterns`), and explicit
-  per-family grants on the base `assistant`. §7.3's quoted scope line is the
-  pre-fix state, retained because it is what motivated this section.
 
 ### 7.4 Backend contract (NEW)
 
@@ -1153,19 +1062,6 @@ not about grouping:
 
 Implemented by #3933. This supersedes the family assumption this spec carried
 in §5.5/S-8; those sections are rewritten accordingly.
-
-**OQ-2 addendum — epic #4021 OQ-1, RESOLVED 2026-07-26 (owner): GRANT-THE-BUNDLE.**
-One day after the ruling above, the owner directed that *"skills also need to be
-organized by function"*. This does **not** reopen OQ-2: the 1:1 base is
-unchanged and every tool still maps to exactly one leaf skill. What was added is
-a separate **bundling tier** above it — a `kind: function` skill naming an
-explicit list of member skill ids, where granting the bundle grants all members.
-The alternative considered and rejected was presentation-only grouping (a
-collapsible pane header with no resolution change); the owner's wording
-(*"including all the skills under one"*) is a grant, not a display affordance.
-Because a bundle compiles down to leaf ids before any permission gate runs, the
-defence-in-depth this spec pins in S-1…S-6 is untouched. Specified in §5.7b
-(S-13…S-16); implemented by #4022/#4023/#4025.
 
 **OQ-3 — Converge the two skill implementations, or keep them separate?**
 trusty-agents (flat `<name>.md`, **`tags` required**) vs trusty-mpm

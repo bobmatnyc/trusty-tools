@@ -171,21 +171,9 @@ allow = [
   "create_chart",
   "list_accounts",
 ]
-# Izzie opts into BLANKET Google access (`google.*`) — one pattern covering
-# every family, present and future.
-#
-# #3987: this used to be described as opting "into write on top of the base
-# template's read-only `google.read` default (§5.5)". That framing was wrong in
-# both halves: `google.read` matched nothing (no gworkspace tool advertises it —
-# discovery only emits `google.<family>.<access>`), so there was no read-only
-# default to sit on top of; and every Google OAuth scope `trusty-gworkspace`
-# requests is the full-access variant of its API, so "write" was never a
-# separate tier. The base now grants the eight families its allowlist names
-# (`../assistant/agent.toml`); `google.*` is a strict superset of those and is
-# kept deliberately — izzie is a single named user's private assistant and is
-# meant to reach new Google families as they appear without a config edit.
-# The rest of the scope list matches the base and is redundant until #3055
-# (see header note).
+# Izzie opts INTO Google write (`google.*`) — a personalization decision on top
+# of the base template's read-only `google.read` default (§5.5). The rest of the
+# scope list matches the base and is redundant until #3055 (see header note).
 scopes = ["memory.read", "memory.write", "search.read", "google.*"]
 
 [system_prompt]

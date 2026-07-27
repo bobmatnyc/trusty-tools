@@ -10,24 +10,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- **`ticketing` is now a bundled, dispatchable roster agent (#4027; epic
-  #4021 bridge track).** `crates/trusty-code/src/assets/agents/ticketing.md`
-  is a byte-for-byte port of `crates/trusty-mpm/src/assets/agents/ticketing.md`
-  — the same treatment `research.md` already gets — so trusty-agents' widened
-  cross-product `dispatch_task` bridge (#4026) reaches ONE roster instead of
-  growing a second dispatch leg into trusty-mpm (the owner's OQ-4 ruling).
-  `tcode run-task ticketing "<task>"` resolves through the existing
-  `resolve_agent` embedded tier with no CLI change; the roster is now 33
-  dispatchable agents and `EMBEDDED_TM_AGENT_SOURCES` 34 entries. It is a
-  PARITY copy, not a pinned deviation: it carries no tcode-only `tools:`
-  restriction, so `scripts/check_agent_assets.sh` keeps it in lockstep with
-  upstream automatically. Its non-coding property is enforced where the owner
-  put enforcement — the bridge's fail-closed `NON_CODING_TARGETS` floor in
-  `crates/trusty-agents/src/tools/cross_product.rs` — not by an asset-level
-  allowlist a direct `tcode run-task` invocation would bypass anyway.
-
-### Added
-
 - **`session.get_context_budget` now surfaces the real working-context
   floor, not just a point-in-time snapshot (#3912).** The load-realistic
   compression soak (epic #3866, PR #3909) proved the RPC's cached

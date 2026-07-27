@@ -26,26 +26,6 @@
 //!   `unmatched_patterns`, not dropped: it may still resolve to a live-
 //!   discovered MCP tool at dispatch time, and saying so is more useful than
 //!   either hiding it or claiming it is broken.
-//! - #3987: a `[tools].scopes` pattern that can match NO reachable dotted
-//!   scope is surfaced in `dead_scope_patterns` — the scope-side analogue of
-//!   `unmatched_patterns`, and for the same reason. A dead scope grant denies
-//!   every scoped tool it was meant to permit while looking exactly like "this
-//!   agent has no tools"; a panel that renders `granted: true` cards for tools
-//!   the dispatch gate will drop is the audit-surface form of that same lie.
-//!
-//! **#4025 — function-skill groups.** The response is ADDITIVE only: every field
-//! a pre-#4022 consumer reads keeps its name, type and meaning. Function skills
-//! (#4022) appear as ordinary `skills[]` cards with `kind: "function"`, plus a
-//! top-level `groups[]` index so #4024's pane can render group headers without
-//! re-deriving membership from the catalog. Both are built from ONE computation
-//! ([`function_groups`]) rather than two, so a card and its group entry can never
-//! report different grant states. `granted_state` is the tri-state
-//! (`"all"`/`"some"`/`"none"` of the members) and the boolean `granted` stays
-//! what it always was — for a bundle it is `granted_state == "all"`, the
-//! conservative answer an existing consumer gets for free. `granted_count`
-//! deliberately EXCLUDES function cards: it counts capabilities, and a bundle is
-//! not a capability of its own — counting it would inflate the number the pane
-//! shows without the agent gaining anything.
 //! Test: `super::tests::agent_skills`.
 
 use std::path::{Path, PathBuf};
@@ -63,8 +43,6 @@ use super::state::AppState;
 use crate::agents::{SkillsConfig, ToolsConfig};
 use crate::ctrl::pm_task::match_any_glob;
 use crate::skills::manifest::{SkillCatalog, SkillManifest, effective_tool_patterns};
-use crate::tools::registry::dead_scope;
-use crate::tools::registry::scope::ScopePattern;
 
 /// `GET /api/agents/:name/skills` — HTTP entry point.
 ///
@@ -144,32 +122,25 @@ pub(super) async fn skills_at(dirs: &[PathBuf], name: &str, project_root: &Path)
     let (patterns, unresolved) =
         effective_tool_patterns(tools.allow.as_ref(), skills.allow.as_ref(), &catalog);
     let granted_ids = granted_skill_ids(&catalog, patterns.as_deref(), skills.allow.as_ref());
-    // #4025: one computation feeds both the function cards and `groups[]`.
-    let groups = function_groups(&catalog, &granted_ids);
 
     let mut cards: Vec<Value> = catalog
         .manifests()
         .iter()
-        .map(|m| {
-            let group = groups.iter().find(|g| g.id == m.id);
-            render_skill(m, granted_ids.contains(&m.id), group)
-        })
+        .map(|m| render_skill(m, granted_ids.contains(&m.id)))
         .collect();
     cards.extend(
         derived_skills(&catalog, patterns.as_deref())
             .iter()
-            .map(|m| render_skill(m, true, None)),
+            .map(|m| render_skill(m, true)),
     );
-    // A bundle is not a capability, so it does not move this count (#4025).
     let granted_count = cards
         .iter()
-        .filter(|c| c["granted"] == Value::Bool(true) && c["kind"] != "function")
+        .filter(|c| c["granted"] == Value::Bool(true))
         .count();
 
     let mut body = json!({
         "skills": cards,
         "granted_count": granted_count,
-        "groups": groups.iter().map(FunctionGroup::to_json).collect::<Vec<_>>(),
         "unresolved": unresolved
             .iter()
             .map(|id| json!({
@@ -178,8 +149,6 @@ pub(super) async fn skills_at(dirs: &[PathBuf], name: &str, project_root: &Path)
             }))
             .collect::<Vec<_>>(),
         "unmatched_patterns": unmatched_patterns(&catalog, patterns.as_deref()),
-        // #3987 (option C): scope grants that can never match anything.
-        "dead_scope_patterns": dead_scope_cards(tools.scopes.as_ref()),
         // Deny-on-absent polarity, stated rather than implied: `None` here is a
         // persona with no capability declaration at all, which grants nothing.
         "declares_capability": patterns.is_some(),
@@ -218,99 +187,12 @@ fn granted_skill_ids(
     }
     if let Some(ids) = skills_allow {
         for id in ids {
-            // #4022: a FUNCTION skill is deliberately excluded from this clause.
-            // It is tool-less, so it would otherwise be granted merely by being
-            // named — asserting a grant this route never verified. Its state is
-            // derived from its members instead (`function_groups`), which is the
-            // only answer that stays true when a member fails to resolve.
-            if catalog
-                .get(id)
-                .is_some_and(|m| m.tool().is_none() && !m.is_function())
-            {
+            if catalog.get(id).is_some_and(|m| m.tool().is_none()) {
                 granted.insert(id.clone());
             }
         }
     }
     granted
-}
-
-/// One function skill resolved against this agent's grants (#4022/#4025).
-///
-/// Why: The pane needs "7 of 10 granted", which is neither a boolean nor
-/// derivable from the bundle id alone. Computing it ONCE here — from the
-/// `granted_ids` set the leaf cards already use — is what stops the group header
-/// and its member cards from disagreeing, which is the display-layer form of the
-/// same drift `granted_skill_ids` exists to prevent against dispatch.
-/// What: The bundle's identity plus its declared members and the subset of them
-/// this agent holds.
-/// Test: `skills_route_surfaces_function_skill_tri_state`.
-struct FunctionGroup {
-    id: String,
-    name: String,
-    description: String,
-    members: Vec<String>,
-    granted_members: Vec<String>,
-}
-
-impl FunctionGroup {
-    /// `"all"` / `"some"` / `"none"` of the members are granted.
-    ///
-    /// Why/What: A memberless bundle reports `"none"` rather than the vacuous
-    /// `"all"` — claiming a group is fully granted when it contains nothing is
-    /// the fabrication #3945 forbids.
-    /// Test: `skills_route_surfaces_function_skill_tri_state`.
-    fn state(&self) -> &'static str {
-        if self.members.is_empty() || self.granted_members.is_empty() {
-            "none"
-        } else if self.granted_members.len() == self.members.len() {
-            "all"
-        } else {
-            "some"
-        }
-    }
-
-    fn to_json(&self) -> Value {
-        json!({
-            "id": self.id,
-            "name": self.name,
-            "description": self.description,
-            "members": self.members,
-            "granted_members": self.granted_members,
-            "granted_state": self.state(),
-        })
-    }
-}
-
-/// Resolve every function skill in the catalog against this agent's grants.
-///
-/// Why: See [`FunctionGroup`] — one computation, two render sites.
-/// What: One entry per `kind: Function` manifest, members in declaration order.
-/// A member id no manifest resolves is still LISTED (it is what the bundle
-/// declares) but can never appear in `granted_members`, so an unresolvable
-/// member drags the state down to `"some"`/`"none"` rather than being hidden.
-/// Test: `skills_route_surfaces_function_skill_tri_state`,
-/// `function_group_never_reports_all_when_a_member_is_missing`.
-fn function_groups(
-    catalog: &SkillCatalog,
-    granted_ids: &std::collections::BTreeSet<String>,
-) -> Vec<FunctionGroup> {
-    catalog
-        .manifests()
-        .iter()
-        .filter(|m| m.is_function())
-        .map(|m| FunctionGroup {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            description: m.description.clone(),
-            members: m.members.clone(),
-            granted_members: m
-                .members
-                .iter()
-                .filter(|id| granted_ids.contains(*id))
-                .cloned()
-                .collect(),
-        })
-        .collect()
 }
 
 /// Derived 1:1 skills for exactly-named tools the catalog does not know.
@@ -379,58 +261,6 @@ fn unmatched_patterns(catalog: &SkillCatalog, patterns: Option<&[String]>) -> Ve
         .collect()
 }
 
-/// Declared `[tools].scopes` patterns that can match no reachable scope
-/// (#3987, option C).
-///
-/// Why: this route is the config-introspection surface the GUI/CLI reads, and
-/// until now it could show an agent a page full of `granted: true` gworkspace
-/// cards that the dispatch-time scope gate silently drops — the base
-/// `assistant`'s `google.read` grants literally nothing. Surfacing the dead
-/// pattern here is what lets a client say "this agent has dead scope grants"
-/// instead of leaving the user to conclude the tools simply do not work.
-///
-/// Honesty rules, matching the rest of this module:
-/// - The reachable set here is the STATIC vocabulary only
-///   (`dead_scope::reachable_scopes` with no live registry) — this route runs
-///   in the API process and has no built tool registry to consult. That is the
-///   conservative direction: the static vocabulary is a superset of what an
-///   offline endpoint would contribute for namespaces we know, and
-///   `dead_scope`'s namespace guard declines to judge namespaces we do not.
-///   A pattern reported here is dead under ANY registry state.
-/// - Scopes are read from the agent's OWN file, without resolving `extends`
-///   (same partial-read posture as the rest of this route — see
-///   `parse_capability_sections`). An agent that declares no `[tools].scopes`
-///   of its own reports nothing here even if it inherits a dead pattern from
-///   its base; the dispatch-time `warn!` in
-///   `ctrl::pm_task::dispatch::persona` sees the resolved set and covers that
-///   case. Under-reporting is the correct failure direction for an audit
-///   surface — it never claims a working grant is broken.
-/// What: one `{ pattern, nearest, reason }` object per dead pattern.
-/// Test: `dead_scope_cards_flags_the_google_read_pattern`,
-/// `dead_scope_cards_ignores_live_family_patterns`,
-/// `super::tests::agent_skills::skills_route_reports_dead_scope_patterns`.
-fn dead_scope_cards(scopes: Option<&Vec<String>>) -> Vec<Value> {
-    let Some(scopes) = scopes else {
-        return Vec::new();
-    };
-    let patterns: Vec<ScopePattern> = scopes.iter().cloned().map(ScopePattern::new).collect();
-    let reachable = dead_scope::reachable_scopes(std::iter::empty::<String>());
-    dead_scope::dead_scope_patterns(&patterns, &reachable)
-        .into_iter()
-        .map(|d| {
-            json!({
-                "pattern": d.pattern,
-                "nearest": d.nearest,
-                "reason": format!(
-                    "no reachable tool advertises a scope matching this pattern, so every \
-                     scoped tool it was meant to grant is denied at dispatch — {}",
-                    d.describe(),
-                ),
-            })
-        })
-        .collect()
-}
-
 /// Render one manifest as the pane's card payload.
 ///
 /// Why/What: Keeps the JSON shape in one place. `provider.configured` is
@@ -439,17 +269,8 @@ fn dead_scope_cards(scopes: Option<&Vec<String>>) -> Vec<Value> {
 /// OAuth grant or MCP wiring that this endpoint does not verify. Rendering
 /// `null` as "not verified" is the whole point — a `false` there would assert a
 /// check nobody ran.
-///
-/// #4025: `members` and `granted_state` are present on EVERY card, not just
-/// function ones. A consumer that has to check the kind before it knows whether
-/// a field exists writes the branch wrong once and then renders a leaf skill as
-/// an empty group; a uniform shape costs two empty arrays and removes the
-/// branch. For a leaf, `members` is empty and `granted_state` restates `granted`.
-/// For a bundle, `granted` is `granted_state == "all"` — the boolean an existing
-/// consumer already reads keeps its conservative meaning.
-/// Test: `skill_card_reports_env_credential_state`,
-/// `skills_route_surfaces_function_skill_tri_state`.
-fn render_skill(manifest: &SkillManifest, granted: bool, group: Option<&FunctionGroup>) -> Value {
+/// Test: `skill_card_reports_env_credential_state`.
+fn render_skill(manifest: &SkillManifest, granted: bool) -> Value {
     let provider = manifest.provider.map(|p| {
         let configured = p.env_var.map(|var| {
             std::env::var(var)
@@ -463,23 +284,15 @@ fn render_skill(manifest: &SkillManifest, granted: bool, group: Option<&Function
             "configured": configured,
         })
     });
-    let granted_state = match group {
-        Some(g) => g.state(),
-        None if granted => "all",
-        None => "none",
-    };
     json!({
         "id": manifest.id,
         "name": manifest.name,
         "description": manifest.description,
         "kind": manifest.kind,
         "origin": manifest.origin,
-        "granted": group.map_or(granted, |g| g.state() == "all"),
+        "granted": granted,
         "tools": manifest.tools,
         "provider": provider,
-        "members": group.map(|g| g.members.clone()).unwrap_or_default(),
-        "granted_members": group.map(|g| g.granted_members.clone()).unwrap_or_default(),
-        "granted_state": granted_state,
     })
 }
 
@@ -625,7 +438,7 @@ mod unit_tests {
         let catalog = SkillCatalog::builtin();
         // OAuth-backed: `configured` must stay null — unknown, never asserted.
         let gmail = catalog.skill_for_tool("search_gmail_messages").unwrap();
-        let card = render_skill(gmail, true, None);
+        let card = render_skill(gmail, true);
         assert_eq!(card["provider"]["configured"], Value::Null);
         assert_eq!(card["provider"]["provider"], "Google Workspace");
         assert_eq!(card["granted"], true);
@@ -634,100 +447,16 @@ mod unit_tests {
         // environment. Its VALUE depends on the machine, so assert only that a
         // boolean — not null — is produced.
         let mta = catalog.skill_for_tool("get_train_schedule").unwrap();
-        let card = render_skill(mta, false, None);
+        let card = render_skill(mta, false);
         assert!(card["provider"]["configured"].is_boolean());
         assert_eq!(card["provider"]["env_var"], "MTA_API_KEY");
-    }
-
-    /// #3987: the base assistant's `google.read` must reach the panel as a
-    /// dead grant, with actionable alternatives.
-    ///
-    /// NOTE: #3987's option B has removed `google.read` from the shipped
-    /// base; this test asserts on a LITERAL pattern, not on the shipped
-    /// config, so it survived that change — a USER can still hand-write
-    /// `google.read` in their own agent, and the panel must still say so.
-    /// The shipped-config assertion lives in
-    /// `ctrl::pm_task::dispatch::persona_tests`.
-    #[test]
-    fn dead_scope_cards_flags_the_google_read_pattern() {
-        let scopes = vec![
-            "memory.read".to_string(),
-            "search.read".to_string(),
-            "google.read".to_string(),
-        ];
-        let cards = dead_scope_cards(Some(&scopes));
-        assert_eq!(cards.len(), 1, "{cards:?}");
-        assert_eq!(cards[0]["pattern"], "google.read");
-        assert!(
-            cards[0]["nearest"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|v| v == "google.gmail.write"),
-            "the card must name a working alternative: {cards:?}"
-        );
-    }
-
-    /// The shape option B will declare must produce a clean panel.
-    #[test]
-    fn dead_scope_cards_ignores_live_family_patterns() {
-        let scopes = vec![
-            "google.gmail.*".to_string(),
-            "google.calendar.*".to_string(),
-            "google.accounts.*".to_string(),
-        ];
-        assert!(dead_scope_cards(Some(&scopes)).is_empty());
-    }
-
-    #[test]
-    fn dead_scope_cards_are_empty_when_no_scopes_are_declared() {
-        assert!(dead_scope_cards(None).is_empty());
-    }
-
-    #[test]
-    fn granted_ids_do_not_grant_a_function_skill_by_id_alone() {
-        // #4022: a bundle is tool-less, so the tool-less clause would otherwise
-        // grant it just for being named — asserting a grant nobody verified.
-        // Its state comes from its members, computed by `function_groups`.
-        let catalog = SkillCatalog::builtin();
-        let allow = vec!["ticketing".to_string()];
-        let granted = granted_skill_ids(&catalog, Some(&[]), Some(&allow));
-        assert!(!granted.contains("ticketing"));
-    }
-
-    #[test]
-    fn function_group_never_reports_all_when_a_member_is_missing() {
-        // Tri-state honesty: nine of ten is `"some"`, never `"all"`. A member
-        // that fails to resolve can never enter `granted_ids`, so this is also
-        // the shape an unresolvable member produces.
-        let catalog = SkillCatalog::builtin();
-        let ticketing = catalog.get("ticketing").expect("ticketing bundle");
-        let mut granted: std::collections::BTreeSet<String> =
-            ticketing.members.iter().cloned().collect();
-        let dropped = ticketing.members.last().unwrap().clone();
-        granted.remove(&dropped);
-
-        let groups = function_groups(&catalog, &granted);
-        let g = groups.iter().find(|g| g.id == "ticketing").unwrap();
-        assert_eq!(g.members.len(), 10);
-        assert_eq!(g.granted_members.len(), 9);
-        assert_eq!(g.state(), "some");
-        assert!(!g.granted_members.contains(&dropped));
-
-        // And the full set is `"all"` — the tri-state is not stuck.
-        let full: std::collections::BTreeSet<String> = ticketing.members.iter().cloned().collect();
-        let groups = function_groups(&catalog, &full);
-        assert_eq!(
-            groups.iter().find(|g| g.id == "ticketing").unwrap().state(),
-            "all"
-        );
     }
 
     #[test]
     fn skill_card_carries_one_tool_and_a_human_name() {
         let catalog = SkillCatalog::builtin();
         let mta = catalog.skill_for_tool("get_train_schedule").unwrap();
-        let card = render_skill(mta, true, None);
+        let card = render_skill(mta, true);
         assert_eq!(card["name"], "MTA Train Time");
         assert_eq!(card["tools"], json!(["get_train_schedule"]));
         assert_eq!(card["origin"]["kind"], "builtin");

@@ -16,7 +16,7 @@ use crate::tools::ToolRegistry;
 /// fixed, caller-supplied transcript — mirrors `delegate.rs`'s
 /// `RecordingRunner`.
 struct RecordingBackend {
-    invoked_with: Mutex<Vec<(BridgeRoute, Option<String>, String)>>,
+    invoked_with: Mutex<Vec<(BridgeRoute, String)>>,
     response: String,
 }
 
@@ -31,12 +31,11 @@ impl RecordingBackend {
 
 #[async_trait]
 impl PmBridgeBackend for RecordingBackend {
-    async fn run(&self, route: BridgeRoute, target: Option<&str>, task: &str) -> Result<String> {
-        self.invoked_with.lock().unwrap().push((
-            route,
-            target.map(str::to_string),
-            task.to_string(),
-        ));
+    async fn run(&self, route: BridgeRoute, task: &str) -> Result<String> {
+        self.invoked_with
+            .lock()
+            .unwrap()
+            .push((route, task.to_string()));
         Ok(self.response.clone())
     }
 }
@@ -48,7 +47,7 @@ struct FailingBackend {
 
 #[async_trait]
 impl PmBridgeBackend for FailingBackend {
-    async fn run(&self, _route: BridgeRoute, _target: Option<&str>, _task: &str) -> Result<String> {
+    async fn run(&self, _route: BridgeRoute, _task: &str) -> Result<String> {
         Err(anyhow::anyhow!(self.message.clone()))
     }
 }
@@ -310,206 +309,4 @@ fn dispatch_task_denies_read_only_and_analytics_tiers() {
             .any(|t| t.name() == "dispatch_task"),
         "All tier must still see dispatch_task"
     );
-}
-
-// =====================================================================
-// Cross-product specialists (#4026 allow-set, #4028 envelope)
-// =====================================================================
-
-use crate::tools::cross_product::{CallerAuthority, HANDOFF_MAX_BYTES, SubagentAllowSet};
-
-/// EMPTY-DEFAULT PIN (#4026): a tool constructed without `with_allow_set`
-/// grants no cross-product reach — a named specialist is denied and, crucially,
-/// the backend is never invoked.
-#[tokio::test]
-async fn named_specialist_is_denied_when_no_allow_set_is_configured() {
-    let backend = Arc::new(RecordingBackend::new("done"));
-    let tool = PmBridgeTool::new(backend.clone());
-
-    let result = tool
-        .execute(json!({ "task": "triage the backlog", "specialist": "ticketing" }))
-        .await;
-
-    assert!(result.is_error(), "expected denial: {}", result.content());
-    assert!(
-        backend.invoked_with.lock().unwrap().is_empty(),
-        "FAIL-CLOSED: nothing may be dispatched on denial"
-    );
-}
-
-/// FAIL-CLOSED PIN (#4026, OQ-7): a coding target is denied AT THE BRIDGE even
-/// when the calling agent's own config lists it, and nothing is dispatched.
-#[tokio::test]
-async fn coding_specialist_is_denied_at_the_bridge_despite_caller_config() {
-    let backend = Arc::new(RecordingBackend::new("done"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "rust-engineer".to_string(),
-            "research".to_string(),
-        ])));
-
-    let result = tool
-        .execute(json!({ "task": "rewrite the parser", "specialist": "rust-engineer" }))
-        .await;
-
-    assert!(result.is_error(), "expected denial: {}", result.content());
-    assert!(
-        backend.invoked_with.lock().unwrap().is_empty(),
-        "FAIL-CLOSED: nothing may be dispatched on denial"
-    );
-}
-
-/// An allowed named specialist reaches the backend as an explicit target on
-/// the external-roster leg (#4026).
-#[tokio::test]
-async fn named_specialist_reaches_the_backend_when_allowed() {
-    let backend = Arc::new(RecordingBackend::new("findings"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "research".to_string(),
-        ])));
-
-    let result = tool
-        .execute(json!({ "task": "map the auth flow", "specialist": "research" }))
-        .await;
-
-    assert!(!result.is_error(), "expected success: {}", result.content());
-    let invoked = backend.invoked_with.lock().unwrap();
-    assert_eq!(invoked.len(), 1);
-    assert_eq!(invoked[0].0, BridgeRoute::Tcode);
-    assert_eq!(invoked[0].1.as_deref(), Some("research"));
-}
-
-/// #4027: the ported ticketing specialist is reachable through the same leg.
-#[tokio::test]
-async fn ticketing_specialist_is_reachable_through_the_bridge() {
-    let backend = Arc::new(RecordingBackend::new("drafted ISS-1"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "ticketing".to_string(),
-        ])));
-
-    let result = tool
-        .execute(json!({ "task": "file an issue for the flaky test", "specialist": "ticketing" }))
-        .await;
-
-    assert!(!result.is_error(), "expected success: {}", result.content());
-    let invoked = backend.invoked_with.lock().unwrap();
-    assert_eq!(invoked[0].1.as_deref(), Some("ticketing"));
-}
-
-/// #4028: the result of a named specialist is wrapped in the propose-only
-/// envelope carrying origin, target, authority tier and the proposal marker —
-/// and holding `user_authority` does NOT upgrade it (DOC-41 §5.5, #3078
-/// AUTH-5).
-#[tokio::test]
-async fn envelope_carries_origin_target_and_authority() {
-    let backend = Arc::new(RecordingBackend::new("drafted the reply"));
-    let tool = PmBridgeTool::new(backend)
-        .with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "ticketing".to_string()
-        ])))
-        .with_origin("izzie", CallerAuthority::UserAuthority);
-
-    let result = tool
-        .execute(json!({ "task": "close the stale tickets", "specialist": "ticketing" }))
-        .await;
-
-    assert!(!result.is_error(), "expected success: {}", result.content());
-    let body = result.content();
-    assert!(body.contains("\"origin_agent\": \"izzie\""), "{body}");
-    assert!(body.contains("\"target_agent\": \"ticketing\""), "{body}");
-    assert!(body.contains("\"authority\": \"user_authority\""), "{body}");
-    assert!(
-        body.contains("\"disposition\": \"proposal\""),
-        "a user_authority caller must NOT upgrade a cross-product result: {body}"
-    );
-    assert!(!body.contains("\"disposition\": \"action\""), "{body}");
-}
-
-/// Regression guard (#4026): omitting `specialist` preserves the pre-change
-/// contract exactly — route derived from the task, no explicit target, and the
-/// bare scrubbed transcript back with no envelope.
-#[tokio::test]
-async fn omitting_specialist_preserves_pre_change_behaviour() {
-    let backend = Arc::new(RecordingBackend::new("all done"));
-    let tool = PmBridgeTool::new(backend.clone());
-
-    let result = tool
-        .execute(json!({ "task": "fix the failing unit test in parser.rs" }))
-        .await;
-
-    assert!(!result.is_error(), "expected success: {}", result.content());
-    assert_eq!(result.content(), "all done");
-    let invoked = backend.invoked_with.lock().unwrap();
-    assert_eq!(invoked[0].0, BridgeRoute::Tcode);
-    assert_eq!(invoked[0].1, None, "no target when no specialist is named");
-    assert_eq!(invoked[0].2, "fix the failing unit test in parser.rs");
-}
-
-/// #4028: an over-cap handoff is a recoverable error and the target is NEVER
-/// invoked.
-#[tokio::test]
-async fn oversized_handoff_is_rejected_without_invoking_the_target() {
-    let backend = Arc::new(RecordingBackend::new("done"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "research".to_string(),
-        ])));
-
-    let result = tool
-        .execute(json!({
-            "task": "map the auth flow",
-            "specialist": "research",
-            "handoff": { "summary": "y".repeat(HANDOFF_MAX_BYTES + 1) }
-        }))
-        .await;
-
-    assert!(
-        result.is_error(),
-        "expected rejection: {}",
-        result.content()
-    );
-    assert!(
-        backend.invoked_with.lock().unwrap().is_empty(),
-        "target must not be invoked when the handoff is over cap"
-    );
-}
-
-/// A within-cap handoff is rendered into the dispatched task text (#4028).
-#[tokio::test]
-async fn handoff_is_prepended_to_the_dispatched_task() {
-    let backend = Arc::new(RecordingBackend::new("done"));
-    let tool =
-        PmBridgeTool::new(backend.clone()).with_allow_set(SubagentAllowSet::from_allowed(Some(&[
-            "research".to_string(),
-        ])));
-
-    let result = tool
-        .execute(json!({
-            "task": "map the auth flow",
-            "specialist": "research",
-            "handoff": { "summary": "prior pass covered login only" }
-        }))
-        .await;
-
-    assert!(!result.is_error(), "expected success: {}", result.content());
-    let invoked = backend.invoked_with.lock().unwrap();
-    assert!(invoked[0].2.contains("prior pass covered login only"));
-    assert!(invoked[0].2.contains("map the auth flow"));
-}
-
-/// The widened schema stays black-boxed: no backend identity, and no roster
-/// enumeration in the `specialist` description.
-#[test]
-fn widened_schema_names_no_backend_or_roster() {
-    let tool = PmBridgeTool::new(Arc::new(RecordingBackend::new("x")));
-    let schema = tool.schema().to_string().to_lowercase();
-    for forbidden in ["tcode", "trusty-code", "trusty-mpm", "run-task", "research"] {
-        assert!(
-            !schema.contains(forbidden),
-            "schema leaks '{forbidden}': {schema}"
-        );
-    }
-    assert!(schema.contains("specialist"));
 }

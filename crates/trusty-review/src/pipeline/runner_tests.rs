@@ -300,28 +300,6 @@ fn local_diff_source(diff: &str) -> (DiffSource, tempfile::NamedTempFile) {
     (DiffSource::LocalFile { path }, tmp)
 }
 
-/// Build a local-diff source as a PROPER unified diff (with a `+++ b/<file>`
-/// header) whose path matches a `FakeLlm` fixture's finding `file` (#4042).
-///
-/// Why: `citation_check::enforce_citation_integrity` now requires every
-/// finding's `file` to resolve against the diff actually under review — a
-/// bare `"+<line>\n"` fragment with no `diff --git`/`+++ b/` header (what
-/// `local_diff_source` alone produces) contains no file path at all, so a
-/// fixture finding citing e.g. `"file":"src/a.rs"` would be (correctly)
-/// dropped as unresolvable. Tests that exist to exercise VERIFICATION-ROUND /
-/// grade-envelope plumbing — not citation checking — need a diff whose file
-/// path actually matches the fixture finding so that unrelated machinery
-/// keeps working.
-fn local_diff_source_for_file(
-    file: &str,
-    added_line: &str,
-) -> (DiffSource, tempfile::NamedTempFile) {
-    let diff = format!(
-        "diff --git a/{file} b/{file}\nindex 0000000..1111111 100644\n--- a/{file}\n+++ b/{file}\n@@ -1 +1 @@\n{added_line}\n"
-    );
-    local_diff_source(&diff)
-}
-
 // ── Helper to build a two-commit git repo for GitRange tests (#2993) ───
 
 /// Build a tiny git repo in a tempdir with two commits, returning the dir and
@@ -408,9 +386,8 @@ async fn run_review_with_fake_provider_approves() {
 
 #[tokio::test]
 async fn run_review_request_changes_parsed_correctly() {
-    let (source, _tmp) = local_diff_source_for_file(
-        "src/a.rs",
-        "+fn bad_query(id: &str) { db.exec(format!(\"SELECT * FROM users WHERE id={id}\")) }",
+    let (source, _tmp) = local_diff_source(
+        "+fn bad_query(id: &str) { db.exec(format!(\"SELECT * FROM users WHERE id={id}\")) }\n",
     );
     let config = default_config();
     let input = ReviewInput {
@@ -1497,7 +1474,7 @@ async fn run_review_writes_dry_run_log_on_log_only_path() {
 /// verdict (Phase 2, #583 deliverable 2/3).
 #[tokio::test]
 async fn run_review_verification_refutes_and_relaxes_verdict() {
-    let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
+    let (source, _tmp) = local_diff_source("+fn bad() {}\n");
     let config = default_config();
     let input = ReviewInput {
         diff_source: source,
@@ -1544,7 +1521,7 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
 /// (a confirmed, well-evidenced finding must not be silently softened).
 #[tokio::test]
 async fn run_review_verification_confirms_and_preserves_verdict() {
-    let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
+    let (source, _tmp) = local_diff_source("+fn bad() {}\n");
     let config = default_config();
     let input = ReviewInput {
         diff_source: source,
@@ -1580,7 +1557,7 @@ async fn run_review_verification_confirms_and_preserves_verdict() {
 /// the verdict is the un-verified grade.
 #[tokio::test]
 async fn run_review_verification_disabled_skips_round() {
-    let (source, _tmp) = local_diff_source_for_file("src/a.rs", "+fn bad() {}");
+    let (source, _tmp) = local_diff_source("+fn bad() {}\n");
     let mut config = default_config();
     config.verification.enabled = false; // disable the round
     let input = ReviewInput {
@@ -1652,10 +1629,7 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
 ```json
 {"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 5 unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":5}]}
 ```"#;
-    let (source, _tmp) = local_diff_source_for_file(
-        "src/render.rs",
-        "+fn render(s: &str) { println!(\"{s}\"); }",
-    );
+    let (source, _tmp) = local_diff_source("+fn render(s: &str) { println!(\"{s}\"); }\n");
     let config = default_config();
     let input = ReviewInput {
         diff_source: source,
@@ -1724,7 +1698,7 @@ async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
 ```json
 {"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 10","severity":"high","confidence":0.95,"file":"src/auth.rs","line":10,"code_provable":true}]}
 ```"#;
-    let (source, _tmp) = local_diff_source_for_file("src/auth.rs", "+fn auth(t: &str) {}");
+    let (source, _tmp) = local_diff_source("+fn auth(t: &str) {}\n");
     let config = default_config();
     let input = ReviewInput {
         diff_source: source,

@@ -31,10 +31,9 @@ pub(crate) mod tests;
 
 // Re-export the config data shapes so `crate::agents::<Type>` keeps resolving
 // for every external consumer after the #358 file split.
-// #4026 adds `SubagentsConfig` (the `[subagents]` cross-product grants).
 pub use config::{
     AgentCapabilities, AgentConfig, AgentInfo, NativeToolsConfig, RunnerKind, SkillsConfig,
-    SubagentsConfig, SystemPrompt, TicketingTomlConfig, ToolsConfig,
+    SystemPrompt, TicketingTomlConfig, ToolsConfig,
 };
 pub use params::{
     AgentCompressConfig, AgentPluginsConfig, LlmParams, RbacConfig, RunnerConfig,

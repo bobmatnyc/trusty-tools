@@ -20,7 +20,7 @@ use crate::agents::md_loader::{project_embedded_md, project_embedded_md_with_ext
 /// Why: A typo in either the `.md` frontmatter or the table entry would
 /// silently break `agents::load_all_agents`'s embedded-fallback at runtime
 /// instead of failing fast in CI. This is also the acceptance test for Slice
-/// E3 (#2958): every one of the 33 entries must actually compose (a `Composed`
+/// E3 (#2958): every one of the 32 entries must actually compose (a `Composed`
 /// variant that panics here rather than resolving would otherwise only be
 /// caught at runtime by `load_embedded_default_agents`'s log-and-skip path).
 /// Test: this test.
@@ -28,9 +28,8 @@ use crate::agents::md_loader::{project_embedded_md, project_embedded_md_with_ext
 fn default_agents_parse_and_names_match() {
     assert_eq!(
         DEFAULT_AGENTS.len(),
-        33,
-        "4 originals (engineer, qa-agent, code-reviewer, pm) + 28 roster agents \
-         + ticketing (#4027)"
+        32,
+        "4 originals (engineer, qa-agent, code-reviewer, pm) + 28 roster agents"
     );
     for agent in DEFAULT_AGENTS {
         let cfg = match agent {
@@ -143,7 +142,7 @@ fn default_agents_field_identical_to_retired_toml() {
 }
 
 /// The embedded fallback still fires when the disk `.claude/agents` dir is
-/// empty, and yields the full 33-agent roster with the original 4 defaults
+/// empty, and yields the full 32-agent roster with the original 4 defaults
 /// intact as the first four entries — proving Slice E3's roster expansion
 /// (and #3437's `pm` addition) did not disturb the original fallback wiring
 /// `.md` (#2897 Slice C) established.
@@ -151,24 +150,20 @@ fn default_agents_field_identical_to_retired_toml() {
 /// Why: #2897 Slice C's non-breaking claim rests on this: a fresh project
 /// with no `.claude/agents/` must still boot with `engineer`/`qa-agent`/
 /// `code-reviewer`/`pm` available, exactly as it did when the defaults were
-/// TOML — Slice E3 only ADDS the roster agents after them (28, plus
-/// `ticketing` from #4027), never replaces or reorders the originals.
+/// TOML — Slice E3 only ADDS the 28 roster agents after them, never replaces
+/// or reorders the originals.
 /// What: calls `crate::agents::load_all_agents` on a nonexistent directory;
 /// asserts the returned names' first four entries are exactly
-/// `["engineer", "qa-agent", "code-reviewer", "pm"]` and the full 33-name
+/// `["engineer", "qa-agent", "code-reviewer", "pm"]` and the full 32-name
 /// list matches `crate::assets::DEFAULT_AGENTS`'s declared order with no
 /// duplicates.
 /// Test: this test.
 #[test]
-fn embedded_fallback_still_fires_and_yields_33_agents_with_original_4_intact() {
+fn embedded_fallback_still_fires_and_yields_32_agents_with_original_4_intact() {
     let agents = crate::agents::load_all_agents(std::path::Path::new("/nonexistent/agents/dir"));
     let names: Vec<&str> = agents.iter().map(|a| a.agent.name.as_str()).collect();
 
-    assert_eq!(
-        names.len(),
-        33,
-        "33-agent roster: 4 originals + 28 roster + ticketing (#4027)"
-    );
+    assert_eq!(names.len(), 32, "32-agent roster: 4 originals + 28 roster");
     assert_eq!(
         &names[..4],
         &["engineer", "qa-agent", "code-reviewer", "pm"],
@@ -195,7 +190,7 @@ fn embedded_fallback_still_fires_and_yields_33_agents_with_original_4_intact() {
 /// `BASE-*` entry leaking into the dispatchable roster would let a caller
 /// invoke a template fragment (no concrete role, designed to be composed
 /// into a leaf agent, not run standalone) as if it were a real agent.
-/// What: asserts none of the 33 `DEFAULT_AGENTS` names matches any of the 5
+/// What: asserts none of the 32 `DEFAULT_AGENTS` names matches any of the 5
 /// base template names (case-insensitive, since the source table keys them
 /// `BASE-QA.md` while `extends:` references use `base-qa`).
 /// Test: this test.
@@ -211,7 +206,7 @@ fn base_templates_are_never_dispatchable() {
     }
 }
 
-/// No two entries in the 33-agent `DEFAULT_AGENTS` roster share a dispatch
+/// No two entries in the 32-agent `DEFAULT_AGENTS` roster share a dispatch
 /// name — in particular, trusty-mpm's own `engineer` agent (excluded from
 /// the roster upstream specifically because it collides with tcode's
 /// `engineer` default) does not sneak back in under any composed entry.
@@ -221,13 +216,13 @@ fn base_templates_are_never_dispatchable() {
 /// default)" — this test is the regression pin for that exclusion, and a
 /// general guard against any future roster addition silently shadowing an
 /// existing dispatch name.
-/// What: collects all 33 names, dedupes, asserts the length is unchanged;
+/// What: collects all 32 names, dedupes, asserts the length is unchanged;
 /// separately asserts `"engineer"` appears exactly once.
 /// Test: this test.
 #[test]
-fn no_name_collisions_across_the_33_agent_roster() {
+fn no_name_collisions_across_the_32_agent_roster() {
     let names: Vec<&str> = DEFAULT_AGENTS.iter().map(|a| a.name()).collect();
-    assert_eq!(names.len(), 33);
+    assert_eq!(names.len(), 32);
 
     let mut deduped = names.clone();
     deduped.sort_unstable();
@@ -235,7 +230,7 @@ fn no_name_collisions_across_the_33_agent_roster() {
     assert_eq!(
         deduped.len(),
         names.len(),
-        "no name collisions across the 33-agent roster: {names:?}"
+        "no name collisions across the 32-agent roster: {names:?}"
     );
 
     assert_eq!(
@@ -473,7 +468,7 @@ fn default_skills_names_are_unique() {
     }
 }
 
-/// `EMBEDDED_TM_AGENT_SOURCES` (Slice E2, #2958) has exactly 34 entries (5
+/// `EMBEDDED_TM_AGENT_SOURCES` (Slice E2, #2958) has exactly 33 entries (5
 /// `BASE-*` templates + 28 roster agents), every key is unique, and every
 /// entry's raw content opens with a frontmatter fence.
 ///
@@ -487,8 +482,8 @@ fn default_skills_names_are_unique() {
 /// content string opens with `---`.
 /// Test: this test.
 #[test]
-fn embedded_tm_agent_sources_has_34_entries_and_unique_keys() {
-    assert_eq!(EMBEDDED_TM_AGENT_SOURCES.len(), 34);
+fn embedded_tm_agent_sources_has_33_entries_and_unique_keys() {
+    assert_eq!(EMBEDDED_TM_AGENT_SOURCES.len(), 33);
     let mut keys: Vec<String> = EMBEDDED_TM_AGENT_SOURCES
         .iter()
         .map(|(name, _)| name.to_lowercase())
@@ -503,56 +498,4 @@ fn embedded_tm_agent_sources_has_34_entries_and_unique_keys() {
             "embedded tm agent source '{name}' must open with a frontmatter fence"
         );
     }
-}
-
-/// #4027 (epic #4021): the ported `ticketing` agent is a real, dispatchable
-/// roster entry that resolves through the SAME resolver `tcode run-task
-/// <AGENT>` uses — the reachability guarantee trusty-agents' widened
-/// cross-product bridge (#4026) depends on.
-///
-/// Why: the bridge dispatches `run-task ticketing <task>`; if the name did not
-/// resolve here, that call would fail at the far end with an unresolved-agent
-/// error the bridge cannot distinguish from a real task failure. Asserting
-/// resolution through `resolve_agent` (not just table membership) is what makes
-/// this an end-to-end reachability pin rather than a table-shape assertion.
-/// What: resolves `ticketing` against an EMPTY disk dir so the embedded tier is
-/// exercised, and asserts the composed config carries the ticketing persona's
-/// own identity (not a fallback to `pm` and not a `NotFound`).
-/// Test: this test.
-#[test]
-fn ticketing_is_dispatchable_for_cross_product_delegation() {
-    assert!(
-        DEFAULT_AGENTS.iter().any(|a| a.name() == "ticketing"),
-        "ticketing must be a dispatchable roster entry"
-    );
-
-    let cfg =
-        crate::agents::resolve_agent(std::path::Path::new("/nonexistent/agents/dir"), "ticketing")
-            .expect("ticketing must resolve via the embedded roster");
-    assert_eq!(cfg.agent.name, "ticketing");
-    assert_ne!(cfg.agent.name, "pm", "must not silently fall back to pm");
-}
-
-/// #4027: the ported copy stays byte-identical to its trusty-mpm source, the
-/// same treatment `research` gets — it is a PARITY copy, never a pinned
-/// deviation.
-///
-/// Why: `scripts/check_agent_assets.sh` enforces this in CI, but a unit test
-/// makes the intent visible at the point of use: the ticketing persona has no
-/// tcode-specific restriction, because its non-coding property is enforced at
-/// the trusty-agents bridge (#4026's `NON_CODING_TARGETS` floor), not here.
-/// What: asserts the embedded source carries no `tools:` frontmatter override
-/// (which is what the four deliberately-deviated files add).
-/// Test: this test; `scripts/check_agent_assets.sh` is the byte-parity gate.
-#[test]
-fn ticketing_copy_carries_no_tcode_only_tools_restriction() {
-    let (_, md) = EMBEDDED_TM_AGENT_SOURCES
-        .iter()
-        .find(|(k, _)| *k == "ticketing.md")
-        .expect("ticketing.md must be in the embedded source table");
-    let frontmatter = md.split("---").nth(1).expect("frontmatter fence");
-    assert!(
-        !frontmatter.contains("tools:"),
-        "ticketing is a byte-parity copy, not a pinned deviation"
-    );
 }

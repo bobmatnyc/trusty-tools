@@ -18,12 +18,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A concrete scope advertised by a discovered tool, e.g. `google.gmail.read`.
-///
-/// #3987: `Ord`/`PartialOrd` are derived so a reachable-scope vocabulary can
-/// live in a `BTreeSet` — `dead_scope` needs set membership AND a stable,
-/// sorted iteration order, because the "nearest reachable scopes" it puts in
-/// a warning must not reshuffle between runs.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Scope(String);
 
 impl Scope {

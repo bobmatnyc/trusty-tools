@@ -155,7 +155,6 @@ describe('fetchAgentSkills', () => {
       granted_count: 1,
       unresolved: [],
       unmatched_patterns: [],
-      dead_scope_patterns: [],
       declares_capability: true,
     };
     globalThis.fetch = (async () =>
@@ -176,15 +175,11 @@ describe('fetchAgentSkills', () => {
 });
 
 describe('KNOWLEDGE_MCP_ENDPOINTS', () => {
-  it('reports the shipped defaults, with a reason iff disabled, never fabricated (C-03.2)', () => {
+  it('reports the shipped disabled defaults with a reason, never as connected (C-03.2)', () => {
     const byName = Object.fromEntries(KNOWLEDGE_MCP_ENDPOINTS.map((e) => [e.name, e]));
-    // trusty-memory/trusty-search moved from dead `[[tool_registry.endpoints]]`
-    // OpenRPC stubs to live `[[mcp.services]]` MCP-stdio entries — both now
-    // ship enabled by default, same as gworkspace.
-    expect(byName['trusty-memory'].enabled).toBe(true);
-    expect(byName['trusty-memory'].reason).toBeFalsy();
-    expect(byName['trusty-search'].enabled).toBe(true);
-    expect(byName['trusty-search'].reason).toBeFalsy();
+    expect(byName['trusty-memory'].enabled).toBe(false);
+    expect(byName['trusty-memory'].reason).toBeTruthy();
+    expect(byName['trusty-search'].enabled).toBe(false);
     expect(byName['gworkspace'].enabled).toBe(true);
     // A disabled endpoint carries a reason; an enabled one has nothing to
     // explain. The invariant, not the individual flags, is what must hold.

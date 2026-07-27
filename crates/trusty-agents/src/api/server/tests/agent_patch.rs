@@ -705,31 +705,6 @@ scopes = ["memory.read", "google.*"]
     );
 }
 
-/// #3232: `[tools].search_indexes` is part of the agent's declared capability
-/// surface, so the catalog reports it next to `tools_allow`/`scopes` — same
-/// `[tools]`-table source and same empty-array-not-absent convention, so a
-/// client rendering "what can this agent reach" never re-reads the TOML.
-#[test]
-fn parse_agent_toml_reads_search_indexes_from_tools_table() {
-    let toml = r#"
-[agent]
-name = "cto-assistant"
-role = "assistant"
-
-[tools]
-allow = ["vector_search"]
-search_indexes = ["apex", "cto-projects"]
-"#;
-    let parsed = parse_agent_toml(toml, "cto-assistant").expect("valid TOML");
-    assert_eq!(
-        parsed["search_indexes"],
-        serde_json::json!(["apex", "cto-projects"])
-    );
-    // Absent → empty array, never a missing key.
-    let bare = parse_agent_toml("[agent]\nname = \"a\"\n", "a").expect("valid TOML");
-    assert_eq!(bare["search_indexes"], serde_json::json!([]));
-}
-
 #[test]
 fn parse_agent_toml_hidden_defaults_false_and_parses_true() {
     let visible = "[agent]\nname = \"a\"\n";

@@ -25,8 +25,7 @@ cargo run -- --ctrl
 RUST_LOG=debug cargo run -- --workflow prescriptive --task-file ./t.md
 ```
 
-The release binary lands in `target/release/open-mpm`. A second binary
-`ompm` (a thin client wrapping the API server) is also produced.
+The release binary lands in `target/release/tagent`.
 
 ## Embedded web UI
 

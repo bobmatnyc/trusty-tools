@@ -5,52 +5,7 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
-
-### Fixed
-
-- **Reliability cluster: fabricated findings, spec-as-implementation, and
-  unsound verdicts** (closes
-  [#4042](https://github.com/bobmatnyc/trusty-tools/issues/4042),
-  [#4043](https://github.com/bobmatnyc/trusty-tools/issues/4043),
-  [#4044](https://github.com/bobmatnyc/trusty-tools/issues/4044)):
-  three related emit-time integrity gaps that let trusty-review publish
-  claims it could not support.
-  - **#4042 — citation verification is now DROP, not downgrade, and covers
-    every finding.** The #2882 fix scoped verification to
-    `code_provable`/`code:`-cited findings and, critically, exempted the
-    mandated `[code: \`path:line\` — "excerpt"]` citation's own excerpt from
-    verification — exactly where #4042 showed the model puts its fabricated
-    "evidence." `citation_check::enforce_citation_integrity` now verifies
-    EVERY finding's `file` against the diff (Kept, SummaryOnly, AND
-    Stage-A-dropped files are all indexed so path existence is checkable
-    regardless of disposition), verifies `[code: …]` excerpts against their
-    own cited path, and adds a same-file/same-line mutual-contradiction
-    backstop for findings that assert incompatible content at one locator. A
-    finding that fails is DROPPED, never downgraded-in-place.
-  - **#4044 — self-withdrawn findings and chain-of-thought leaks.** New
-    `finding_hygiene::drop_self_negated_or_leaked_findings` removes any
-    finding whose own text already negates it ("Withdrawing…", "The code is
-    correct.") or leaks raw mid-reasoning deliberation ("Wait — actually
-    looking at the code more carefully…") before it can reach the rendered
-    review or the verdict floor. `finding_hygiene::relax_verdict_if_evidence_wiped`
-    additionally relaxes a model's own raw `verdict`/`grade` fields to
-    APPROVE when hygiene + citation-integrity wiped out every finding this
-    run — closing the loop so a BLOCK that rested entirely on
-    fabricated/withdrawn evidence cannot survive as the model's untouched
-    self-report.
-  - **#4043 — spec/doc reported as implementation.** New
-    `finding_hygiene::demote_diff_absent_speculation` demotes (never drops —
-    the documentation-drift signal is real) any High/Critical finding whose
-    own text admits it is reasoning about an implementation absent from the
-    diff ("no implementation of…", "if implementation follows the interface
-    literally…"), capping it below the BLOCK floor.
-  - Known residual scope (disclosed, not fully closed): (a) `[code: …]`
-    citation verification checks path+content, not the cited LINE number
-    specifically — no hunk-line-number arithmetic is performed; (b) #4043's
-    fix is marker-based on the finding's own admission and does not catch a
-    finding grounded in an in-code COMMENT's hypothetical (the code file
-    itself is real, so extension/path-based detection does not apply there).
+## [0.10.1] — 2026-07-23
 
 ### Fixed
 
