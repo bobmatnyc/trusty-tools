@@ -7,6 +7,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **The token-streaming chat path now streams Bedrock models via
+  `ConverseStream` instead of silently falling back to the blocking
+  `Converse` call (#3767).** `streaming_supported()` no longer excludes
+  `Provider::Bedrock`; `stream_reply` routes `bedrock/*` models to a new
+  `trusty_common::chat::BedrockProvider` (real event-stream) branch, with the
+  `bedrock` feature now enabled on the `trusty-common` dependency (zero added
+  weight — this crate already links the AWS Bedrock SDK unconditionally).
+  `StreamAssembly` gained a `usage: Option<ChatUsage>` field so per-call token
+  usage — which Bedrock reports exactly once, in a terminal event — survives
+  the streaming path instead of being dropped.
+
 ### Removed
 
 - **Removed the unused `ompm` `[[bin]]` target.** It was a thin HTTP client

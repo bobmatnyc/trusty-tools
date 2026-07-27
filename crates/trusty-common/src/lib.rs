@@ -654,7 +654,7 @@ pub mod tmux;
 // ─── Re-exports preserving the pre-split public API ───────────────────────
 
 pub use chat::{
-    BedrockProvider, ChatEvent, ChatProvider, DEFAULT_BEDROCK_MODEL, LocalModelConfig,
+    BedrockProvider, ChatEvent, ChatProvider, ChatUsage, DEFAULT_BEDROCK_MODEL, LocalModelConfig,
     OllamaProvider, OpenRouterProvider, SamplingParams, ToolCall, ToolDef,
     auto_detect_local_provider,
 };

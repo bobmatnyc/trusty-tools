@@ -169,13 +169,43 @@ impl SamplingParams {
     }
 }
 
+/// Token-usage tally surfaced at the end of a streamed response.
+///
+/// Why (issue #3767): Bedrock's `ConverseStream` reports usage only once, in
+/// a terminal `metadata` event — unlike the per-token deltas, it has no
+/// natural home in [`ChatEvent::Delta`]. Without a dedicated variant a
+/// streaming provider has no way to hand token counts back to the caller, so
+/// a downstream cost-reporting consumer would silently see zero usage for
+/// every streamed call. Kept as a small standalone struct (rather than
+/// reusing `trusty_common::inference::types::Usage`) so the `chat` module —
+/// which compiles unconditionally, unlike the `inference-client`-gated
+/// `types` module — never depends on a feature-gated type.
+/// What: four token buckets mirroring the shape every provider in this
+/// workspace already reports (prompt/completion split, plus the two
+/// prompt-cache buckets); a provider that has none of the cache fields
+/// simply leaves them zero.
+/// Test: `bedrock_stream_reports_usage_from_metadata_event` (bedrock_impl).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ChatUsage {
+    /// Prompt (input) tokens billed, including any cached-read tokens.
+    pub prompt_tokens: u32,
+    /// Completion (output) tokens produced.
+    pub completion_tokens: u32,
+    /// Prompt tokens served from the provider's prompt cache.
+    pub cache_read_tokens: u32,
+    /// Prompt tokens newly written into the prompt cache this turn.
+    pub cache_creation_tokens: u32,
+}
+
 /// Streaming chat event.
 ///
 /// Why: replaces the previous "string-only" channel so callers can
 /// distinguish text deltas from tool invocations and from terminal
 /// success/error without parsing magic markers out of the text stream.
 /// What: `Delta` is a content chunk; `ToolCall` is a fully-accumulated tool
-/// invocation; `Done` signals the upstream stream terminated normally;
+/// invocation; `Usage` carries the call's token tally (emitted zero or one
+/// times, whenever the provider's wire format reports it — see
+/// [`ChatUsage`]); `Done` signals the upstream stream terminated normally;
 /// `Error` carries a human-readable message for stream-mid failures (the
 /// provider also returns `Err` from `chat_stream`, but `Error` lets the
 /// caller display partial-stream failures inline).
@@ -184,6 +214,7 @@ impl SamplingParams {
 pub enum ChatEvent {
     Delta(String),
     ToolCall(ToolCall),
+    Usage(ChatUsage),
     Done,
     Error(String),
 }
