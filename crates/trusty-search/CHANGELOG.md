@@ -71,6 +71,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   create/relocate do, so closing it properly needs a registration-wide
   mutex/lock, a materially larger change than this collision-guard fix.
 
+  **Adversarial re-review (fourth round WARN) found the round-3
+  `ColdIndexStore::mark_loaded` reap was itself an uncoordinated SECOND
+  writer of `cold_store.entries`, racing the opt-in
+  `TRUSTY_MAX_RESIDENT_INDEXES` residency-sweep's `cold_park_index`
+  (`lazy_loader::residency`) — both mutate the same map with no `.await`
+  between their two `DashMap` ops, so a relocate (or reindex-override) racing
+  a residency-park of the SAME id could leave it in NEITHER the live
+  registry NOR the cold store (unreachable until an operator manually
+  re-registers it).** Fixed by having `cold_park_index` snapshot the handle
+  it intends to park (`registry.get(id)`) *before* inserting the cold entry,
+  then comparing that snapshot against whatever `remove_and_get` actually
+  removes via `Arc::ptr_eq`. On a match (the common case), parking proceeds
+  as before. On a mismatch — a concurrent write swapped in a different
+  handle in the interim — the swapped-in handle is handed straight back via
+  a new identity-preserving `IndexRegistry::restore` (no new `Arc`, so no
+  other holder's `Arc::ptr_eq` breaks) and the park's own cold-store
+  insertion is undone, so the id is never left in neither store. Only the
+  feature's default-off, sub-microsecond window is affected; the fix is
+  proven against a deterministic (synchronization-based, not timing-based)
+  reproduction of the exact race.
+
 - **Test-side remediation for `create_index`/`relocate_index` tests spuriously
   denied by the sensitive-path denylist (issue #3955).** `SENSITIVE_PATH_PREFIXES`
   denies `/tmp/`, `/private/tmp`, and `/var/folders` — which on macOS is where

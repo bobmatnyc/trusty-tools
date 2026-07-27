@@ -24,6 +24,8 @@
 //! `cold_park_index_*` below; end-to-end round-trip coverage lives in
 //! `tests/residency_cold_park.rs`.
 
+use std::sync::Arc;
+
 use crate::core::registry::{IndexId, IndexRegistry};
 use crate::service::persistence::PersistedIndex;
 
@@ -171,22 +173,91 @@ pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<Per
 /// deliberate, documented choice rather than something this primitive does.
 ///
 /// What: (0) bail out with `false` if `id` is already in `cold_store`
-/// (in-flight load guard, see above); (1) `cold_store.register_cold_entries([entry])`;
-/// (2) `registry.remove_and_get(id)`. Returns `true` when an index was
-/// actually resident and got parked. Returns `false` — and rolls back the
-/// cold-store registration — when the id had already been removed by a
-/// concurrent delete / orphan-reap (benign race: nothing to park, and we must
-/// not leave a stray, unloadable cold entry for an index that no longer
-/// exists).
+/// (in-flight load guard, see above); (0.5) snapshot the handle currently
+/// registered under `id` as `expected` — see "Concurrent-write guard" below;
+/// (1) `cold_store.register_cold_entries([entry])`; (2)
+/// `registry.remove_and_get(id)`, compared by `Arc::ptr_eq` against
+/// `expected`. Returns `true` when an index was actually resident and got
+/// parked. Returns `false` in two distinct cases, both of which roll back the
+/// cold-store registration: (a) the id had already been removed by a
+/// concurrent delete / orphan-reap (benign race: nothing to park); (b) a
+/// concurrent create/relocate/reindex-override swapped in a DIFFERENT handle
+/// under this id — see below. Either way we must not leave a stray,
+/// unloadable cold entry for an id whose live registration is either gone or
+/// no longer what we thought it was.
+///
+/// **Concurrent-write guard (issue #3995 round 4, HIGH):** `mark_loaded`
+/// (`ColdIndexStore`) is called by `create_index_handler`,
+/// `relocate_index_handler`, and `reindex_handler`'s `root_path` override
+/// immediately after each registers a FRESH `IndexHandle` under `id` (issue
+/// #3993 round 3, reaping a stale cold-store record left over from before the
+/// id was re-created). That makes `mark_loaded` a SECOND, uncoordinated
+/// writer of `cold_store.entries` — racing this function's own step 1. Since
+/// steps 1–2 here are two synchronous `DashMap` operations with no `.await`
+/// between them, the only way a writer can land its `register` +
+/// `mark_loaded` pair inside that window is genuine multi-thread parallelism
+/// (this function's caller — the residency-sweep ticker — is not itself
+/// racing anyone; a concurrent HTTP handler on a different tokio worker
+/// thread is). Worked example of the bug this guard closes: (1) this
+/// function's step 1 parks a stale snapshot of `id` into `cold_store`; (2) a
+/// concurrent relocate registers a brand-new live handle for `id` at a new
+/// root, then reaps what it (reasonably) assumes is ITS OWN stale cold
+/// record — but that record is actually the one THIS park just inserted; (3)
+/// this function's step 2 unconditionally removes whatever is now live under
+/// `id` — the relocate's fresh handle, which this function never observed
+/// and has no business touching — leaving `id` in NEITHER store, reachable
+/// again only by an operator manually re-registering it. The `expected`
+/// snapshot closes this: when the handle `remove_and_get` actually removes
+/// is not the SAME `Arc` this function observed at entry, `id`'s registry
+/// slot is IMMEDIATELY restored via `IndexRegistry::restore` (identity-
+/// preserving — no new `Arc`, so no other holder's `Arc::ptr_eq` breaks) and
+/// this function's own cold-store insertion is undone, exactly as in case
+/// (a) above. This makes every interleaving of {this function's steps} and
+/// {a concurrent handler's `register` + `mark_loaded`} resolve to `id`
+/// present in exactly one of {hot registry, cold store} — see the full
+/// interleaving enumeration on `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`
+/// below. One narrower, PRE-EXISTING risk this guard does not (and cannot)
+/// close: if the concurrent write's `register` lands BEFORE this function's
+/// `expected` snapshot even runs (e.g., mid-sweep, before this specific id's
+/// turn in the sweep's per-id loop — a far wider window than the two-op one
+/// above), `expected` itself observes the writer's fresh handle, the
+/// identity check trivially matches, and the park proceeds "successfully"
+/// with a stale `entry` (describing the id's OLD root_path) — never an
+/// orphan, but a park that silently reverts a very-recent relocate/reindex-
+/// override. This is unchanged by this fix (it existed identically before
+/// `mark_loaded` was introduced in round 3) and is considered out of scope
+/// here — narrowing it would require the sweep to re-read `indexes.toml` (or
+/// re-derive `entry`) per-id at park time rather than once per tick, a
+/// broader change than this fix's remit.
 /// Test: `cold_park_index_moves_hot_to_cold`,
 /// `cold_park_index_absent_returns_false_and_leaves_no_stray_entry`,
-/// `cold_park_index_never_orphans_a_racing_cold_load`; full disk-round-trip
-/// coverage in `tests/residency_cold_park.rs`.
+/// `cold_park_index_never_orphans_a_racing_cold_load`,
+/// `cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning`;
+/// full disk-round-trip coverage in `tests/residency_cold_park.rs`.
 pub async fn cold_park_index(
     id: &IndexId,
     registry: &IndexRegistry,
     cold_store: &ColdIndexStore,
     entry: PersistedIndex,
+) -> bool {
+    cold_park_index_inner(id, registry, cold_store, entry, || {}).await
+}
+
+/// Test seam for [`cold_park_index`] (issue #3995 round 4 HIGH): `hook` runs
+/// synchronously right after step 1 (`register_cold_entries`) and before
+/// step 2 (`remove_and_get`) — the exact window a concurrent
+/// create/relocate/reindex-override write can land in. Production code only
+/// ever calls this via [`cold_park_index`], which passes a no-op `hook`
+/// (`impl FnOnce()`, zero runtime cost when inlined). Tests use `hook` to
+/// force the precise interleaving deterministically instead of relying on
+/// real OS-thread scheduling to hit a multi-microsecond window — the same
+/// need documented on [`cold_park_index`]'s "Concurrent-write guard" section.
+async fn cold_park_index_inner(
+    id: &IndexId,
+    registry: &IndexRegistry,
+    cold_store: &ColdIndexStore,
+    entry: PersistedIndex,
+    hook: impl FnOnce(),
 ) -> bool {
     // 0. In-flight-cold-load guard: `id` still being a member of `cold_store`
     //    means a concurrent `get_or_load_index` call has this id's cold entry
@@ -196,19 +267,43 @@ pub async fn cold_park_index(
     if cold_store.contains(id) {
         return false;
     }
+    // 0.5. Snapshot the handle we intend to park (issue #3995 round 4 HIGH —
+    //    see "Concurrent-write guard" on `cold_park_index`). `None` means the
+    //    id has already been removed (concurrent delete/orphan-reap) —
+    //    nothing to park.
+    let Some(expected) = registry.get(id) else {
+        return false;
+    };
     // 1. Make the index discoverable as "cold" FIRST — closes the gap where a
     //    concurrent query would otherwise see it in neither store.
     cold_store.register_cold_entries(vec![entry]);
+    hook();
     // 2. Atomically detach the live handle. In-flight readers holding the old
     //    Arc finish safely (see `IndexRegistry::remove_and_get`'s own doc).
-    let (removed, _handle) = registry.remove_and_get(id);
-    if !removed {
-        // Lost a race with a concurrent delete/orphan-reap: undo the cold
-        // registration we just added so a genuinely-gone index doesn't linger
-        // as an orphaned, permanently-unloadable cold entry.
-        cold_store.mark_loaded(id);
+    let (_removed, handle) = registry.remove_and_get(id);
+    match handle {
+        Some(h) if Arc::ptr_eq(&h, &expected) => {
+            // We parked the exact handle we observed at entry. Normal path.
+            true
+        }
+        Some(h) => {
+            // A concurrent create/relocate/reindex-override swapped in a
+            // DIFFERENT handle under this id between our snapshot and the
+            // removal above. Hand it straight back — identity-preserving, no
+            // new Arc — and undo our own cold-store insertion so `id` is
+            // never left in neither store.
+            registry.restore(h);
+            cold_store.mark_loaded(id);
+            false
+        }
+        None => {
+            // Lost a race with a concurrent delete/orphan-reap: undo the cold
+            // registration we just added so a genuinely-gone index doesn't
+            // linger as an orphaned, permanently-unloadable cold entry.
+            cold_store.mark_loaded(id);
+            false
+        }
     }
-    removed
 }
 
 #[cfg(test)]
@@ -455,6 +550,77 @@ mod tests {
         assert!(
             hot,
             "the load won the race and must leave the index resident, not cold"
+        );
+    }
+
+    /// Deterministic reproduction of the round-4 HIGH finding on PR #3995:
+    /// `mark_loaded` (called by `create_index_handler` / `relocate_index_handler`
+    /// / `reindex_handler`'s override, right after each registers a fresh
+    /// handle — issue #3993 round 3) is an uncoordinated SECOND writer of
+    /// `cold_store.entries`, racing this function's own step 1
+    /// (`register_cold_entries`) / step 2 (`remove_and_get`) pair. Uses the
+    /// `cold_park_index_inner` test seam (`hook`) to land the concurrent
+    /// write's exact sequence — `registry.register(new_handle)` then
+    /// `cold_store.mark_loaded(id)` — in the precise window between this
+    /// function's two `DashMap` ops, since that window has no `.await`
+    /// boundary and is therefore not reproducible via ordinary tokio task
+    /// interleaving (see the function doc's "Concurrent-write guard").
+    ///
+    /// At current (unfixed) head this fails: `cold_park_index_inner`
+    /// unconditionally removes whatever is live under `id` — the concurrent
+    /// write's brand-new handle — leaving `id` in NEITHER the hot registry
+    /// (removed by this function) NOR the cold store (removed by the
+    /// concurrent write's `mark_loaded`, which ran on the entry THIS
+    /// function's step 1 had just inserted). With the `Arc::ptr_eq` identity
+    /// check + `IndexRegistry::restore` rollback applied, the mismatch is
+    /// detected and the concurrent write's fresh handle is handed straight
+    /// back, so `id` stays live and discoverable throughout.
+    #[tokio::test]
+    async fn cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("race-swap".to_string());
+        registry.register(build_mock_handle("race-swap"));
+
+        let hook_registry = registry.clone();
+        let hook_cold = cold.clone();
+        let hook_id = id.clone();
+
+        let parked = cold_park_index_inner(
+            &id,
+            &registry,
+            &cold,
+            mk_entry("race-swap", Some(1)),
+            move || {
+                // Mirrors `relocate_index_handler` / `create_index_handler` /
+                // `reindex_handler`'s override arm, post-#3993-round-3:
+                // register a brand-new handle under the SAME id, then reap
+                // any stale cold-store record — landing exactly between this
+                // function's `register_cold_entries` (already ran) and its
+                // `remove_and_get` (about to run).
+                hook_registry.register(build_mock_handle("race-swap"));
+                hook_cold.mark_loaded(&hook_id);
+            },
+        )
+        .await;
+
+        assert!(
+            !parked,
+            "the park must detect the concurrent swap and report failure, not success"
+        );
+
+        let hot = registry.get(&id).is_some();
+        let is_cold = cold.contains(&id);
+        assert!(
+            hot ^ is_cold,
+            "after the race `id` must be in EXACTLY one of {{hot, cold}} — never \
+             neither (an orphan, issue #3995 round 4 HIGH) and never both — \
+             hot={hot} is_cold={is_cold}"
+        );
+        assert!(
+            hot,
+            "the concurrent write's fresh registration must survive the race, \
+             not be silently discarded by the losing park"
         );
     }
 }
