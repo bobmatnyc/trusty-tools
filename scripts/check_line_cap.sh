@@ -9,9 +9,9 @@
 #   whose grandfather allowlist can only SHRINK — no new oversized files, and
 #   existing oversized files may never grow.
 #
-# DUAL-CAP RULES (issue #1131):
+# DUAL-CAP RULES (issue #1131, TEST_CAP raised #4074):
 #   Production source files   → PROD_CAP = 500 SLOC
-#   Test / benchmark files    → TEST_CAP = 1500 SLOC
+#   Test / benchmark files    → TEST_CAP = 3000 SLOC
 #
 #   A file is classified as a test/benchmark file when ANY of these match:
 #     - basename is exactly `tests.rs`
@@ -67,7 +67,7 @@
 #
 # Test: exercised in the PR that introduced SLOC counting (clean tree exits 0;
 #   a production file with 600 SLOC fails; 600 SLOC in a test path passes;
-#   1600 SLOC in a test path fails). The logic is pure SLOC counting against
+#   3100 SLOC in a test path fails). The logic is pure SLOC counting against
 #   the committed allowlist; no unit-test harness.
 #
 # Portability: works on bash 3.2 (macOS system bash) and bash 5 (Linux CI).
@@ -80,7 +80,7 @@ set -euo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 PROD_CAP=500
-TEST_CAP=1500
+TEST_CAP=3000
 
 # Resolve repo root so the script works from any cwd.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

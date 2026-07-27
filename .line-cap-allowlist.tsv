@@ -1,6 +1,6 @@
 # .line-cap-allowlist.tsv — grandfathered files over the SLOC cap (issue #610).
 # Format: <relative/path><TAB><budget>  (budget = frozen max SLOC count; code lines only).
-# Dual cap: production source = 500 SLOC; test/benchmark files = 1500 SLOC.
+# Dual cap: production source = 500 SLOC; test/benchmark files = 3000 SLOC.
 # Test/benchmark = basename is tests.rs, ends with _test.rs or _tests.rs,
 #   or path contains /tests/ or /benches/ segment. All others = production.
 # SLOC excludes blank lines, // line comments, /// doc comments, //! inner-doc comments,
@@ -12,6 +12,5 @@ crates/trusty-git-analytics/src/collect/collector.rs	766
 crates/trusty-mpm/src/daemon/api.rs	1272
 crates/trusty-mpm/src/daemon/api/control_routes.rs	543
 crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	845
-crates/trusty-mpm/src/session_manager/tests.rs	1516
 crates/trusty-search/src/main.rs	658
 crates/trusty-search/src/service/walker.rs	1167

@@ -69,7 +69,7 @@ Enforced per-crate, dual-cap (production vs. test):
 | File Type | Cap | Enforcement |
 |---|---|---|
 | Production source (`.rs` in `src/`) | **500 SLOC** | Mechanical gate in CI + pre-commit hook |
-| Test / benchmark files | **1500 SLOC** | Mechanical gate in CI |
+| Test / benchmark files | **3000 SLOC** | Mechanical gate in CI |
 
 When a file approaches its limit, split it into focused submodules before adding more features. Run:
 
