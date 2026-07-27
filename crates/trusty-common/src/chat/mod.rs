@@ -182,16 +182,28 @@ impl SamplingParams {
 /// `types` module — never depends on a feature-gated type.
 /// What: four token buckets mirroring the shape every provider in this
 /// workspace already reports (prompt/completion split, plus the two
-/// prompt-cache buckets); a provider that has none of the cache fields
-/// simply leaves them zero.
+/// prompt-cache buckets). The four fields are SEPARATE and ADDITIVE — not
+/// nested — matching both the Bedrock `TokenUsage` wire shape
+/// (`input_tokens`/`output_tokens`/`cache_read_input_tokens`/
+/// `cache_write_input_tokens` are independent fields, verified against
+/// `aws-sdk-bedrockruntime` 1.132.0) and this workspace's existing
+/// convention (`crate::perf::TokenUsage`,
+/// `trusty-agents/src/llm/anthropic_native/mod.rs`'s usage parsing, and
+/// `chat::bedrock_impl::parse_usage`'s non-streaming counterpart). A
+/// provider that has none of the cache fields simply leaves them zero.
 /// Test: `bedrock_stream_reports_usage_from_metadata_event` (bedrock_impl).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ChatUsage {
-    /// Prompt (input) tokens billed, including any cached-read tokens.
+    /// Prompt (input) tokens. Separate from `cache_read_tokens` — a
+    /// cost-accounting consumer that assumes this already includes cache
+    /// reads will double-count; one that assumes it excludes the full
+    /// prompt will undercount. Sum with `cache_read_tokens` for the total
+    /// prompt-side token count when that is what's needed.
     pub prompt_tokens: u32,
     /// Completion (output) tokens produced.
     pub completion_tokens: u32,
-    /// Prompt tokens served from the provider's prompt cache.
+    /// Prompt tokens served from the provider's prompt cache — additive
+    /// with `prompt_tokens`, not a subset of it.
     pub cache_read_tokens: u32,
     /// Prompt tokens newly written into the prompt cache this turn.
     pub cache_creation_tokens: u32,

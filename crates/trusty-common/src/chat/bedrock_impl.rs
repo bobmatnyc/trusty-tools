@@ -260,14 +260,8 @@ impl ChatProvider for BedrockProvider {
         }
 
         // #3767/#3758 parity: forward the caller's sampling knobs instead of
-        // the previous hardcoded `max_tokens(4096)` — `unwrap_or(4096)` keeps
-        // that exact default when the caller supplies nothing.
-        let stop_sequences = (!self.sampling.stop.is_empty()).then(|| self.sampling.stop.clone());
-        let inference = InferenceConfiguration::builder()
-            .max_tokens(self.sampling.max_tokens.unwrap_or(4096) as i32)
-            .set_temperature(self.sampling.temperature)
-            .set_stop_sequences(stop_sequences)
-            .build();
+        // the previous hardcoded `max_tokens(4096)`.
+        let inference = build_inference_config(&self.sampling);
 
         let mut req = self
             .client
@@ -304,6 +298,34 @@ impl ChatProvider for BedrockProvider {
             }
         }
     }
+}
+
+/// Build the `ConverseStream` request's `InferenceConfiguration` from the
+/// caller's sampling knobs.
+///
+/// Why (#3767/#3758 parity, code-critic MEDIUM on PR #4112): pulled out of
+/// `chat_stream` so the sampling-forwarding contract has a unit test that
+/// calls the SAME code the live request builds, rather than a test asserting
+/// against its own copy-pasted expression — the latter would keep passing
+/// even if `chat_stream` regressed (e.g. reverted to the pre-#3767 hardcoded
+/// `max_tokens(4096)`, or dropped `.set_temperature()`), since nothing would
+/// call the changed line. This is also the only CI-run coverage of #3758
+/// parity on this path — the live smoke test is `#[ignore]`d.
+/// What: `max_tokens` defaults to `4096` when the caller supplies nothing
+/// (preserves the exact pre-#3767 hardcoded behaviour); `temperature` and
+/// `stop` are forwarded via `set_*` so an absent value omits the field
+/// (matches `SamplingParams::stop_slice`'s empty-means-omitted convention —
+/// an empty `stop` array is never sent, since some servers reject `"stop":
+/// []`).
+/// Test: `bedrock_stream_forwards_sampling_params`,
+/// `bedrock_stream_sampling_defaults_when_unset`.
+fn build_inference_config(sampling: &SamplingParams) -> InferenceConfiguration {
+    let stop_sequences = (!sampling.stop.is_empty()).then(|| sampling.stop.clone());
+    InferenceConfiguration::builder()
+        .max_tokens(sampling.max_tokens.unwrap_or(4096) as i32)
+        .set_temperature(sampling.temperature)
+        .set_stop_sequences(stop_sequences)
+        .build()
 }
 
 /// What the event loop should do after one decoded (or failed) `recv()`.
@@ -735,12 +757,20 @@ mod tests {
         assert!(matches!(collected[0], ChatEvent::Done));
     }
 
-    /// `with_sampling` must forward temperature/max_tokens/stop onto the
-    /// `InferenceConfiguration` the request builds — parity with #3758's
-    /// OpenRouter fix. This is a construction-only check (no network): it
-    /// verifies the provider stores what it's given rather than silently
-    /// discarding it, mirroring `sampling_params_serialize_into_request_body`
-    /// in the `openai_compat` module.
+    /// `build_inference_config` — the exact function `chat_stream` calls —
+    /// must forward temperature/max_tokens/stop onto the
+    /// `InferenceConfiguration` it builds, parity with #3758's OpenRouter
+    /// fix.
+    ///
+    /// Why (code-critic MEDIUM on PR #4112): the prior version of this test
+    /// duplicated the `InferenceConfiguration::builder()...` expression
+    /// instead of calling production code, so it would keep passing even if
+    /// `chat_stream` regressed (e.g. reverted to the hardcoded
+    /// `max_tokens(4096)`, or dropped `.set_temperature()`) — this is the
+    /// only CI-run coverage of #3758 parity on this path, since the live
+    /// smoke test is `#[ignore]`d. Calling `build_inference_config` directly
+    /// closes that gap: a regression in the real function now fails this
+    /// test.
     #[test]
     fn bedrock_stream_forwards_sampling_params() {
         let sampling = SamplingParams {
@@ -748,19 +778,22 @@ mod tests {
             max_tokens: Some(512),
             stop: vec!["STOP".to_string()],
         };
-        // `BedrockProvider` has no live-network-free way to introspect the
-        // built request, so this pins the builder contract directly: the
-        // same `InferenceConfiguration` construction `chat_stream` performs
-        // must not panic and must carry the caller's values through
-        // (exercised end-to-end by the live smoke test above).
-        let inference = InferenceConfiguration::builder()
-            .max_tokens(sampling.max_tokens.unwrap_or(4096) as i32)
-            .set_temperature(sampling.temperature)
-            .set_stop_sequences((!sampling.stop.is_empty()).then(|| sampling.stop.clone()))
-            .build();
+        let inference = build_inference_config(&sampling);
         assert_eq!(inference.max_tokens(), Some(512));
         assert_eq!(inference.temperature(), Some(0.2));
         assert_eq!(inference.stop_sequences(), &["STOP".to_string()][..]);
+    }
+
+    /// With no sampling knobs supplied, `build_inference_config` must
+    /// reproduce the exact pre-#3767 hardcoded behaviour: `max_tokens(4096)`,
+    /// no temperature, no stop sequences (an empty `stop` array is never
+    /// sent — some servers reject `"stop": []`).
+    #[test]
+    fn bedrock_stream_sampling_defaults_when_unset() {
+        let inference = build_inference_config(&SamplingParams::default());
+        assert_eq!(inference.max_tokens(), Some(4096));
+        assert_eq!(inference.temperature(), None);
+        assert!(inference.stop_sequences().is_empty());
     }
 
     /// Helper: a `ContentBlockDelta::Text` event carrying `text`.
