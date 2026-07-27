@@ -179,24 +179,23 @@ impl ToolExecutor for PythonSkillToolExecutor {
             drop(stdin);
         }
 
-        let output = match tokio::time::timeout(SKILL_SUBPROCESS_TIMEOUT, child.wait_with_output())
-            .await
-        {
-            Err(_) => {
-                return ToolResult::err(format!(
-                    "python skill '{}' timed out after {}s",
-                    self.tool.name,
-                    SKILL_SUBPROCESS_TIMEOUT.as_secs()
-                ));
-            }
-            Ok(Err(e)) => {
-                return ToolResult::err(format!(
-                    "python skill '{}': failed while waiting for exit: {e}",
-                    self.tool.name
-                ));
-            }
-            Ok(Ok(o)) => o,
-        };
+        let output =
+            match tokio::time::timeout(SKILL_SUBPROCESS_TIMEOUT, child.wait_with_output()).await {
+                Err(_) => {
+                    return ToolResult::err(format!(
+                        "python skill '{}' timed out after {}s",
+                        self.tool.name,
+                        SKILL_SUBPROCESS_TIMEOUT.as_secs()
+                    ));
+                }
+                Ok(Err(e)) => {
+                    return ToolResult::err(format!(
+                        "python skill '{}': failed while waiting for exit: {e}",
+                        self.tool.name
+                    ));
+                }
+                Ok(Ok(o)) => o,
+            };
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if stdout.is_empty() {
@@ -406,8 +405,7 @@ mod tests {
             "expected success against the bundled fixture db, got: {}",
             result.content()
         );
-        let parsed: Value =
-            serde_json::from_str(result.content()).expect("content must be JSON");
+        let parsed: Value = serde_json::from_str(result.content()).expect("content must be JSON");
         assert_eq!(parsed["filter_by"], "team");
         assert!(parsed["groups"].as_array().is_some_and(|g| !g.is_empty()));
     }
@@ -427,8 +425,14 @@ mod tests {
 
         // "bogus" is not one of query_headcount's documented filter_by values.
         let result = tool.execute(json!({ "filter_by": "bogus" })).await;
-        assert!(result.is_error(), "unknown filter_by should surface as an error");
-        assert!(!result.is_fatal(), "python skill errors must be recoverable");
+        assert!(
+            result.is_error(),
+            "unknown filter_by should surface as an error"
+        );
+        assert!(
+            !result.is_fatal(),
+            "python skill errors must be recoverable"
+        );
     }
 
     #[tokio::test]
