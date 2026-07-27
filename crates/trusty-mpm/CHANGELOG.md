@@ -117,6 +117,48 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Two wrong instructions corrected in the bundled assets composed into every
+  session's prompt.** Both were static text that no project could override, and
+  both had demonstrably misrouted live sessions.
+
+  *Code search.* Agents were told to pass an `index_id` that
+  does not exist: `BASE_PM.md` instructed "Always pass `index_id` = the
+  project directory name (e.g. `index_id: "trusty-mpm"`)", and the
+  `tm-tool-usage-guide` / `tm-circuit-breaker` skills repeated it in their
+  worked examples. No index is registered under a project *name*, so the call
+  returned `404 unknown index` every time — agents concluded code search was
+  broken and silently degraded to `grep`. It also defeated the fix it sat on
+  top of: the launcher already pins each session to its own index via
+  `trusty-search serve --index <id>` in `.mcp.json` precisely so a bare call
+  cannot reach the wrong project (issue #1373), and the tool schema documents
+  `index_id` as defaulting to that pinned index when omitted. All four sites
+  now instruct OMITTING `index_id`, and the misleading worked examples are
+  gone. Deliberately no id *format* is documented, so the guidance stays
+  correct however ids are derived. Because `BASE_PM.md` is the last,
+  non-overridable instruction layer, no project could correct this locally —
+  it affected every session on every project.
+
+  *Ticket routing.* Issue bookkeeping was routed to the `version-control`
+  agent instead of `ticketing`. `PM_INSTRUCTIONS.md` sent
+  `gh issue list/view/create/close` (prohibition P6) and all "ticket
+  references" to Version Control; `tm-bug-reporting` sent manual issue filing
+  there too; and `tm-ticketing` actively argued for the split, on the premise
+  that the `ticketing` agent only spoke `mcp-ticketer`/`aitrackdown` and so
+  could not touch GitHub. That premise is false — `ticketing` is granted the
+  full tool set and uses `gh` directly — so the rationale was stale, not a
+  competing design. One line is now drawn consistently across all four assets:
+  issue/ticket **bookkeeping** (create, update, close, label, triage, comment)
+  is `ticketing`; **git and PR mechanics** (branch, push, rebase, conflict
+  resolution, merge, release, tag) stay `version-control`; opening or editing
+  a PR *body* is bookkeeping, pushing or merging it is not. `P6` is split into
+  `P6` (issues → Ticketing) and `P7` (PRs/git → Version Control), and the
+  bundled `ticketing` agent now documents GitHub as a first-class backend
+  alongside the other two, with GitHub-native ids (`#4069`) and states
+  (open/closed). `AGENT_DELEGATION.md` carries the same defect and is
+  deliberately untouched here — its content diff is owned by the delegation
+  roster work, which replaces that section wholesale rather than hand-editing
+  it.
+
 - **The worktree reclaim path no longer force-deletes uncommitted work**
   ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091)): the
   orphaned-worktree sweep had no dirty-tree check anywhere — its entire safety

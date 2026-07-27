@@ -78,7 +78,7 @@ You have native MCP access to trusty-search and trusty-memory. Always use these 
 - `mcp__trusty-memory__memory_note` — append a lightweight note to the palace
 
 ### Code/Architecture Search — use BEFORE grep/find
-- `mcp__trusty-search__search` — unified hybrid BM25+vector+KG search (replaces the legacy `search_code`); pass `index_id` matching the project name
+- `mcp__trusty-search__search` — unified hybrid BM25+vector+KG search (replaces the legacy `search_code`); omit `index_id` so it resolves to this session's pinned project index
 - `mcp__trusty-search__search_all` — cross-project search when scope is unclear
 - `mcp__trusty-search__search_similar` — find semantically similar code
 - `mcp__trusty-search__search_health` — verify daemon is live (NOT curl/lsof)
@@ -89,7 +89,7 @@ You have native MCP access to trusty-search and trusty-memory. Always use these 
 - If key is `mcp-vector-search` (legacy) → `mcp__mcp-vector-search__*`
 - Check `.mcp.json` first if uncertain.
 
-**Always pass `index_id`** = the project directory name (e.g. `index_id: "trusty-mpm"`, `index_id: "aipowerranking"`).
+**Omit `index_id`** — your `.mcp.json` pins this session to its own project index, so a bare call already resolves to the right one (issue #1373). A guessed id fails with `404 unknown index`. Pass `index_id` only to target a *different* index, using an id from `list_indexes`.
 
 ### Service health checks — MCP only, never bash
 - trusty-search alive: `mcp__trusty-search__search_health`
