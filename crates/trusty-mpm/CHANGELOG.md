@@ -48,6 +48,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- **Bare `tm` no longer misreports a managed pane as "not a git project"**
+  (closes [#4061](https://github.com/bobmatnyc/trusty-tools/issues/4061)):
+  when a managed pane was still settling, the in-place relaunch could observe
+  the session as not-yet-resolvable and fall through to the generic
+  non-git-project hint — telling the operator their repo wasn't a git project
+  when it plainly was. Bare `tm` now retries the in-place relaunch when an
+  env-resolved managed session id exists, and if the session still hasn't
+  settled it prints an honest "still settling" message instead of the
+  misleading non-git hint.
+
 - **Concurrent workspace-trust seeds no longer clobber each other's
   `~/.claude.json` entries** (closes
   [#4072](https://github.com/bobmatnyc/trusty-tools/issues/4072)):

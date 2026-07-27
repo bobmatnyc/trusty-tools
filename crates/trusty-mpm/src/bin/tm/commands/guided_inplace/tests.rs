@@ -278,6 +278,88 @@ fn parse_show_environment_value_none_when_empty() {
     );
 }
 
+// ── resolve_env_managed_session_id (#4061) ───────────────────────────────────
+//
+// Mutates the real process environment (`TM_MANAGED_SESSION_ID`, `TMUX`), so
+// these are `#[serial_test::serial]` — mirroring the convention already used
+// by env-mutating tests elsewhere in this binary (e.g.
+// `tests_behavior_b_tests.rs`'s `REPOS_ROOT_ENV` tests) — and each restores
+// whatever was there before via an RAII-style guard so no other test in the
+// suite ever observes a leaked value.
+
+/// Restores a named env var to its prior value (or removes it if it was
+/// unset) when dropped — keeps env-mutating tests exception-safe and
+/// leak-free regardless of assertion panics.
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: serialised by `#[serial_test::serial]` at every call site.
+        unsafe { std::env::set_var(key, value) };
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: serialised by `#[serial_test::serial]` at every call site.
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn resolve_env_managed_session_id_prefers_process_env() {
+    let _g1 = EnvVarGuard::set(MANAGED_SESSION_ID_ENV, TEST_ID);
+    // Ensure the tmux fallback path is not what's answering — unset $TMUX so
+    // a bug that skipped straight to the tmux branch could not accidentally
+    // pass by returning None from a real `tmux` shell-out on this host.
+    let _g2 = EnvVarGuard {
+        key: "TMUX",
+        prev: std::env::var("TMUX").ok(),
+    };
+    // SAFETY: serialised by `#[serial_test::serial]`.
+    unsafe { std::env::remove_var("TMUX") };
+
+    assert_eq!(
+        resolve_env_managed_session_id(),
+        Some(TEST_ID.to_string()),
+        "the process env value must be returned even with no tmux session"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn resolve_env_managed_session_id_none_when_unset() {
+    let _g1 = EnvVarGuard {
+        key: MANAGED_SESSION_ID_ENV,
+        prev: std::env::var(MANAGED_SESSION_ID_ENV).ok(),
+    };
+    // SAFETY: serialised by `#[serial_test::serial]`.
+    unsafe { std::env::remove_var(MANAGED_SESSION_ID_ENV) };
+    let _g2 = EnvVarGuard {
+        key: "TMUX",
+        prev: std::env::var("TMUX").ok(),
+    };
+    // SAFETY: serialised by `#[serial_test::serial]`.
+    unsafe { std::env::remove_var("TMUX") };
+
+    assert_eq!(
+        resolve_env_managed_session_id(),
+        None,
+        "neither source has a value — must resolve to None, never a stale leak"
+    );
+}
+
 #[test]
 fn plan_inplace_selected_when_env_set_and_stopped() {
     assert_eq!(

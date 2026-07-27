@@ -26,11 +26,12 @@ use crate::commands::first_run::needs_first_run_clone;
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
-    CwdProject, NestedFallbackAction, classify_cwd_project, cwd_owns_git_entry, derive_project,
-    fallback_protected, format_project_context_row, github_host, inplace_self_relaunch_hint,
-    is_github_remote, ls_tree_reports_tracked_dir, nested_fallback_action, nested_guard_notice,
-    non_github_refusal_message, print_non_tty_hint, print_project_context, tty_gate,
-    untracked_ancestor_message,
+    CwdProject, NestedFallbackAction, NonGitFallbackPlan, classify_cwd_project, cwd_owns_git_entry,
+    derive_project, fallback_protected, format_project_context_row, github_host,
+    inplace_self_relaunch_hint, is_github_remote, ls_tree_reports_tracked_dir,
+    managed_pane_settle_pending_message, nested_fallback_action, nested_guard_notice,
+    non_github_refusal_message, plan_non_git_fallback, print_non_tty_hint, print_project_context,
+    tty_gate, untracked_ancestor_message,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
@@ -1859,6 +1860,49 @@ fn guided_non_github_refusal_message_reassures_live_checkout_untouched() {
     assert!(
         msg.contains("not touched"),
         "refusal must use the phrase 'not touched': {msg}"
+    );
+}
+
+// ── #4061: bare-`tm` "not in a git project" vs. managed-pane settle race ─────
+
+#[test]
+fn plan_non_git_fallback_retries_when_env_id_present() {
+    // Why: a managed-session id resolved from the environment (process or
+    // tmux SESSION table) is evidence THIS pane belongs to a managed session
+    // — the fallback must retry `try_inplace_relaunch` rather than
+    // immediately declaring "not in a git project" (#4061).
+    assert_eq!(
+        plan_non_git_fallback(Some("11111111-2222-3333-4444-555555555555")),
+        NonGitFallbackPlan::RetryInPlace("11111111-2222-3333-4444-555555555555".to_string())
+    );
+}
+
+#[test]
+fn plan_non_git_fallback_ordinary_when_no_env_id() {
+    // Why: the common case — a genuinely unmanaged pane/directory — must take
+    // the ordinary fast path with no extra daemon round trip (no added
+    // latency, no behavior change from pre-#4061).
+    assert_eq!(
+        plan_non_git_fallback(None),
+        NonGitFallbackPlan::OrdinaryNotGit
+    );
+}
+
+#[test]
+fn managed_pane_settle_pending_message_names_id() {
+    // Why: the operator must see the specific session id this pane is bound
+    // to, and the message must NOT read like the misleading "not in a git
+    // project" hint it replaces for this case.
+    let id = "11111111-2222-3333-4444-555555555555";
+    let msg = managed_pane_settle_pending_message(id);
+    assert!(msg.contains(id), "message must name the session id: {msg}");
+    assert!(
+        !msg.to_ascii_lowercase().contains("not in a git project"),
+        "must not reuse the misleading non-git wording: {msg}"
+    );
+    assert!(
+        msg.contains("run `tm` again"),
+        "message must give the operator an actionable retry hint: {msg}"
     );
 }
 
