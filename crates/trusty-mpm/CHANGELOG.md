@@ -7,6 +7,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- `core::instruction_package`: the sectioned-JSON instruction-package schema
+  ([#4184](https://github.com/bobmatnyc/trusty-tools/issues/4184), epic #4183) —
+  the eight-section taxonomy (Core, Memory, Search, Workflow, Agent Delegation
+  plus the absorbed BASE_PM floor sections Identity, Non-Overridable Rules,
+  Framework-Guaranteed Conventions), the `fixed | project | user`
+  customization-tier axis, an ordered block stream with explicit join literals,
+  structural validation, and a pure deterministic `compose`. The JSON Schema
+  ships as `assets/instructions/instruction-package.schema.json`. Types and
+  validation only — no instruction content is authored (#4185) and no build is
+  re-sourced (#4186); nothing in the session-launch path composes from it yet.
+  Every object in the package's deserialization path rejects unknown keys, and
+  the error names the offending key. Strictness is deliberate over
+  forward compatibility here: `validate` gates on `schema_version` before
+  inspecting any field, so lenient field handling could only ever matter for a
+  change that added a field while leaving the version at 1 — precisely the case
+  that must not be tolerated, since an older binary would then compose a prompt
+  missing the new field's effect and report success. Any field addition that can
+  change composed bytes must bump `SCHEMA_VERSION`. That version is now checked
+  *before* the package is deserialized, so a package from a later schema reports
+  the actionable "unsupported schema_version" rather than blaming one of its own
+  perfectly valid new keys. Floor blocks are
+  deliberately *not* constrained to canonical section order: `BASE_PM.md` places
+  `## Trusty Tool Priority` after `## Framework-Guaranteed Conventions`, so
+  requiring non-decreasing order would reject a faithful byte-identical lift of
+  that asset. A declared section must own at least one *non-optional* block.
+  Owning blocks is not the same as emitting: a section covered only by
+  `optional` blocks passed validation and still composed to nothing,
+  recreating the very silent-missing-section shape the coverage check exists
+  to prevent.
+
 ### Fixed
 
 - Worktree discovery is derived from `git worktree list --porcelain` instead of
