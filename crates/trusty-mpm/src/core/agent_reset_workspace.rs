@@ -138,10 +138,13 @@ pub enum WorkspaceSweepError {
 /// calls [`reset_project_agents`] with `names` and the plan's `agent_selected`
 /// predicate. Returns one [`WorkspaceResetOutcome`] per swept workspace, in
 /// session-store iteration order.
+/// A workspace whose liveness could NOT be determined is served, not skipped,
+/// and logged at WARN — see [`crate::core::workspace_liveness`]'s invariant.
 /// Test: `sweep_resets_intact_workspace`, `sweep_skips_decommissioned_session`,
 /// `sweep_skips_session_without_workspace`,
 /// `sweep_respects_per_workspace_manifest_exclude`,
-/// `sweep_skips_unowned_non_worktree_session`.
+/// `sweep_skips_unowned_non_worktree_session`,
+/// `sweep_reports_session_whose_workspace_vanished`.
 pub async fn reset_active_workspace_agents(
     fw_root: &Path,
     names: Option<&[String]>,
@@ -171,11 +174,28 @@ pub async fn reset_active_workspace_agents(
         // writing into a dead one.
         let liveness = workspace_liveness(workspace_path, session.workspace_owned);
         match &liveness {
-            // Pre-#4204 behavior, preserved verbatim: a never-provisioned or
-            // already-removed workspace is skipped silently — there is no
-            // `.claude/agents/` to reconcile and nothing for the operator to act
-            // on.
-            WorkspaceLiveness::Absent => continue,
+            // A DEFINITE observation that the path is gone (or is not a
+            // directory) — `workspace_liveness` routes an unreadable path to
+            // `Indeterminate`, so this arm can no longer be reached by a mere
+            // I/O failure. It is still REPORTED rather than skipped silently
+            // (the pre-#4204 behavior): a live session record pointing at a
+            // workspace that has vanished is a stale-record anomaly, and the
+            // returned outcome is what surfaces it to the operator running
+            // `tm install --reset-agents-workspaces`.
+            WorkspaceLiveness::Absent => {
+                tracing::warn!(
+                    workspace = %workspace_path.display(),
+                    session = %session.tmux_name,
+                    "session workspace is gone — skipping its agent reset"
+                );
+                outcomes.push(WorkspaceResetOutcome {
+                    tmux_name: session.tmux_name,
+                    workspace_path: workspace_path.clone(),
+                    result: ResetResult::default(),
+                    skipped_reason: Some(format!("skipped — {liveness}")),
+                });
+                continue;
+            }
             // The #4204 husk. Unlike `Absent` this IS reported, because a
             // surviving directory that lost its checkout is an anomaly the
             // operator should see (and is exactly what #3764 / PR #4202 detect).
@@ -398,6 +418,33 @@ mod tests {
             outcomes.is_empty(),
             "a decommissioned session has no workspace to reconcile"
         );
+    }
+
+    #[tokio::test]
+    async fn sweep_reports_session_whose_workspace_vanished() {
+        // An active record pointing at a path that is DEFINITELY gone. This is
+        // reported rather than skipped in silence, so the operator can see the
+        // stale record. (Before PR #4209's review fix this arm was also where
+        // an unreadable-but-live workspace landed; that case is now
+        // `Indeterminate` and is served, per
+        // `liveness_unreadable_parent_is_indeterminate_never_dead`.)
+        let fw_base = TempDir::new().unwrap();
+        let fw_root = fw_root_under(&fw_base);
+        write_sources(&fw_root.join("framework").join("agents"));
+
+        let gone = fw_base.path().join("vanished-workspace");
+        assert!(!gone.exists());
+        seed_sessions(&fw_root, vec![intact_session("tm-vanished", &gone)]).await;
+
+        let outcomes = reset_active_workspace_agents(&fw_root, None).await.unwrap();
+        assert_eq!(outcomes.len(), 1, "a vanished workspace must be reported");
+        assert_eq!(outcomes[0].tmux_name, "tm-vanished");
+        let reason = outcomes[0]
+            .skipped_reason
+            .as_deref()
+            .expect("a vanished workspace must carry a skip reason");
+        assert!(reason.contains("no longer exists"), "{reason}");
+        assert!(outcomes[0].result.recomposed.is_empty());
     }
 
     #[tokio::test]
