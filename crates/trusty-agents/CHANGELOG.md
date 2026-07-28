@@ -7,6 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- `trusty-memory` requirement raised to `^0.22` (was `^0.21.1`). trusty-memory
+  goes 0.21.3 -> 0.22.0 because it publicly re-exports `trusty_common::palace_id`
+  items and its `trusty-common` requirement moved to `^0.27`; `^0.21.1` resolves
+  to `>=0.21.1, <0.22.0` and would not have admitted the new version. Requirement
+  edit only — this crate's own version is unchanged.
+
 ### Security
 
 - **Defined the L0/L1 persona privilege tier and made the L1->L0 delegation
