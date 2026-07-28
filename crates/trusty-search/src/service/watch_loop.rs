@@ -204,6 +204,25 @@ async fn handle_modified(
         return;
     }
 
+    // Issue #4122: refuse the write outright when this index is
+    // write-quarantined because its durable redb corpus failed to open. This
+    // is the exact path that caused unrecoverable data loss in production —
+    // ordinary saves in the worktree kept feeding a handle whose corpus had
+    // never opened, so a fresh PARTIAL corpus was built and persisted over
+    // the original. `CodeIndexer::index_file` carries the same guard (it is
+    // the choke point for the reconcile and HTTP incremental paths too);
+    // checking here as well means a quarantined index does not read and chunk
+    // every saved file just to throw the result away, and it keeps the
+    // refusal attributable to the watcher in the ERROR record's `op` field.
+    // Placed AFTER the exclusion filters so excluded saves — which would
+    // never have been indexed anyway — are not reported as refused writes.
+    {
+        let idx = indexer.read().await;
+        if idx.refuse_incremental_write("watcher-modified", &path.display().to_string()) {
+            return;
+        }
+    }
+
     // Issue #2923: pdf/docx/xls/xlsx/xlsm route through the office document
     // extractor instead of being treated as UTF-8 text — mirrors
     // `service::reindex::batch`'s dispatch so the watcher and the

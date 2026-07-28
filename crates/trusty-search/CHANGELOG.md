@@ -25,6 +25,28 @@ MINOR, not patch: `service::lazy_loader::store`'s public
 
 ### Fixed
 
+- **An index whose durable corpus failed to open kept accepting watcher
+  writes, permanently destroying the corpus (issue #4122, P0 data loss).**
+  When `CorpusStore::open` failed at load time the loader set
+  `corpus_open_failed` but left the handle fully live, watcher included, so
+  ordinary unrelated file saves rebuilt a fresh PARTIAL corpus over the
+  never-opened original — in production `chunk_count` climbed `0 → 68 → 1334`
+  and the index came back "healthy" on the next restart holding the wrong
+  content. A `corpus_open_failed` index is now **write-quarantined**: every
+  incremental write path (`service::watch_loop`, `service::reconcile`, and
+  `POST /indexes/{id}/index-file`) is refused at the shared
+  `CodeIndexer::index_file` choke point, and the watcher additionally bails
+  before it reads and chunks the saved file. Refusals are emitted at ERROR
+  (the only level `trusty_common::error_capture` persists to `errors.jsonl` /
+  `list_recent_errors` / `tm doctor`), throttled to the 1st and every 100th,
+  and counted on `CodeIndexer::refused_incremental_writes`. The quarantine is
+  **not permanent**: a successful `set_corpus_store` lifts it and resets the
+  counter, so the clean-restart recovery path (the incident's `cto-duetto`,
+  restored at its full 200,090 chunks) is unaffected. Bulk reindex is
+  deliberately not gated — it is the documented way out of this state. Reads
+  are unchanged; corpus-failed indexes still return empty results (that is
+  issue #4087, not fixed here).
+
 - **Two more index-registration paths had no `root_path` collision guard —
   fourth occurrence of the #2305/#2336 `DatabaseAlreadyOpen` class (issue
   #3993).** An audit prompted by #3929 found `find_root_path_collision`
