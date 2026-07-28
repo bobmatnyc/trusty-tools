@@ -178,11 +178,13 @@ impl GitWorktreeFixture {
     /// Mark `wt` as git-`locked` — the operator's explicit "do not remove
     /// this" (#4224 review).
     ///
-    /// Why: `decommission::remove_session_worktree` runs `git worktree remove
-    /// --force`, which overrides a lock outright, so the lock can only be
-    /// honoured by never enumerating the worktree in the first place. Proving
-    /// that requires a really-locked worktree; setting the flag on a parsed
-    /// record instead would test the parser, not the filter.
+    /// Why: git itself honours the lock — `git worktree remove --force` exits
+    /// 128 rather than removing it. But `decommission::remove_session_worktree`
+    /// treats that non-zero exit as a git failure and falls back to
+    /// `std::fs::remove_dir_all`, which deletes the directory regardless, so the
+    /// lock can only be honoured by never enumerating the worktree in the first
+    /// place. Proving that requires a really-locked worktree; setting the flag
+    /// on a parsed record instead would test the parser, not the filter.
     /// What: `git -C <repo> worktree lock <wt>`.
     /// Test: `enumerate_excludes_a_locked_worktree`.
     pub(crate) fn lock_worktree(&self, wt: &Path) {
