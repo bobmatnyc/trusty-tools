@@ -19,6 +19,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   ships as `assets/instructions/instruction-package.schema.json`. Types and
   validation only — no instruction content is authored (#4185) and no build is
   re-sourced (#4186); nothing in the session-launch path composes from it yet.
+  Every object in the package's deserialization path rejects unknown keys, and
+  the error names the offending key. Strictness is deliberate over
+  forward compatibility here: `validate` gates on `schema_version` before
+  inspecting any field, so lenient field handling could only ever matter for a
+  change that added a field while leaving the version at 1 — precisely the case
+  that must not be tolerated, since an older binary would then compose a prompt
+  missing the new field's effect and report success. Any field addition that can
+  change composed bytes must bump `SCHEMA_VERSION`. Floor blocks are
+  deliberately *not* constrained to canonical section order: `BASE_PM.md` places
+  `## Trusty Tool Priority` after `## Framework-Guaranteed Conventions`, so
+  requiring non-decreasing order would reject a faithful byte-identical lift of
+  that asset.
 
 ### Fixed
 
