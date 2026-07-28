@@ -37,6 +37,28 @@
 //!   would render empty is a hard error, so a roster can never be silently lost
 //!   the way #4196 lost it.
 //!
+//! Strictness, and why it beats forward compatibility here. Every object in the
+//! deserialization path carries `deny_unknown_fields`, so an unrecognised key is
+//! a named parse error rather than dropped instruction content. The usual
+//! argument against that — an older binary should be able to read a newer
+//! package — does not apply to this format, because [`Self::validate`] gates on
+//! [`SCHEMA_VERSION`] *before* any field is inspected: a package written against
+//! a later schema is already rejected outright. Lenient field handling could
+//! therefore only matter for a change that added a field while leaving
+//! `schema_version` at 1, and that is exactly the case that must not be
+//! tolerated — the old binary would compose a prompt missing the new field's
+//! effect, silently, and report success. Since this artifact *is* the
+//! instruction set for every PM and agent, a loud "unsupported schema_version"
+//! is strictly better than a quiet, subtly wrong system prompt.
+//!
+//! The resulting evolution policy, which #4185/#4186 and any later schema work
+//! must follow: **any field addition that can change composed bytes bumps
+//! [`SCHEMA_VERSION`]**. Strict rejection is what makes that policy enforceable
+//! rather than advisory.
+//!
+//! Floor block ordering is deliberately *not* constrained to canonical section
+//! order — see `validate_floor_is_last` for the asset evidence.
+//!
 //! Scope: this module defines and validates the shape. It authors no
 //! instruction content (#4185) and re-sources no build (#4186) — nothing in the
 //! session-launch path calls it yet.
@@ -274,9 +296,20 @@ impl Join {
 /// validation insist that generated content is actually consumed.
 /// What: `Text` carries markdown authored in the package; `Generated` names the
 /// generator that supplies it.
-/// Test: `schema_example_deserializes_validates_and_round_trips`, `composes_blocks_in_array_order_with_declared_joins`.
+///
+/// `deny_unknown_fields` is load-bearing, not decoration. Without it a key
+/// misplaced *inside* `body` — `{"kind":"text","text":"…","join_before":"blank"}`
+/// — was silently discarded, the block fell back to the [`Join::Rule`] default,
+/// and a spurious horizontal rule appeared in the composed system prompt while
+/// the package parsed, validated and composed without complaint. That is the
+/// #4196 failure shape (a package reporting success while composing the wrong
+/// instructions), and it also restores parity with the shipped JSON Schema,
+/// which sets `additionalProperties: false` on both `body` variants. The tag
+/// key itself (`kind`) is consumed by the internal tagging and never reported
+/// as unknown.
+/// Test: `rejects_unknown_fields_at_every_level_and_names_the_key`, `schema_document_closes_every_object`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum BlockBody {
     /// Markdown authored inline in the package.
     Text {
@@ -356,8 +389,12 @@ pub struct InstructionSection {
 /// Why: one versioned, validatable artifact replaces four `include_str!` blobs
 /// whose ordering and override semantics lived only in prose.
 /// What: schema version, identity, the eight-section taxonomy, and the ordered
-/// block stream. `trailing_newline` reproduces the exact tail byte of whichever
-/// legacy composer is being replaced.
+/// block stream. Because the last block is trimmed before emission, the tail is
+/// always either `X` or `X\n`; `trailing_newline` selects between those two,
+/// which covers both legacy composers (`resolve_pm_prompt` emits none, a
+/// file-shaped artifact emits one). Two or more trailing newlines are
+/// deliberately inexpressible — if a future target needs them, they belong in a
+/// final block's [`Join`], not in this flag.
 /// Test: the whole of `instruction_package_tests.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -515,7 +552,7 @@ impl InstructionPackage {
     /// instruction content.
     /// What: `serde_json::from_str`, without validation — call [`Self::validate`]
     /// or [`Self::compose`] for that.
-    /// Test: `schema_example_deserializes_validates_and_round_trips`, `rejects_unknown_fields`.
+    /// Test: `schema_example_deserializes_validates_and_round_trips`, `rejects_unknown_fields_at_every_level_and_names_the_key`.
     pub fn from_json(raw: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(raw)
     }
@@ -605,6 +642,25 @@ impl InstructionPackage {
     }
 
     /// The roster must reach the output, and must not be droppable (#4196).
+    ///
+    /// Scope limit #4186 must resolve explicitly, recorded here so it is a
+    /// decision rather than a mid-implementation discovery: this check makes the
+    /// roster's *consumption* structurally mandatory, but #4196's root cause was
+    /// upstream of composition. `instruction_overrides::resolve_pm_prompt` still
+    /// builds the launch prompt from the static `AGENT_DELEGATION` asset, while
+    /// the computed roster lands in `PipelineOutput::merged`, which the launch
+    /// path never reads. So #4186 must choose one of:
+    ///
+    /// * pass the real computed roster — fixes #4196, but the output then
+    ///   *cannot* be byte-identical to today's `resolve_pm_prompt`; or
+    /// * pass the static `AGENT_DELEGATION.md` text as `agent_roster` — bytes
+    ///   match, but #4196 survives into the new format.
+    ///
+    /// "Byte-identical to today's output" and "fixes #4196" are mutually
+    /// exclusive. #4186's acceptance criterion should therefore read
+    /// *byte-identical across runs for the same manifest and roster* — which
+    /// this module does fully guarantee — plus an explicitly reviewed diff
+    /// against today's bytes, not strict equality with the legacy output.
     fn validate_roster(&self) -> Result<(), ValidationError> {
         let mut seen = false;
         for (index, block) in self.blocks.iter().enumerate() {
@@ -633,6 +689,33 @@ impl InstructionPackage {
     /// "nothing overridable after the floor" preserves that without dictating a
     /// single global order — which the byte-identical lift in #4186 needs to
     /// stay free to choose.
+    ///
+    /// Deliberately NOT enforced: that floor blocks run in [`SectionId`]
+    /// canonical order relative to each other. That constraint looks free — the
+    /// floor is the contiguous tail — but it would make a byte-identical lift of
+    /// `assets/instructions/BASE_PM.md` impossible. That file's headings run:
+    ///
+    /// | `BASE_PM.md` heading | section | canonical index |
+    /// |---|---|---|
+    /// | `## Identity` | `Identity` | 0 |
+    /// | `## Non-Overridable Rules` | `NonOverridableRules` | 6 |
+    /// | `## Customizing PM Behavior` | `NonOverridableRules` | 6 |
+    /// | `## Framework-Guaranteed Conventions (Non-Overridable)` | `FrameworkGuaranteedConventions` | 7 |
+    /// | `## Trusty Tool Priority (Non-Overridable)` | `NonOverridableRules` | 6 |
+    ///
+    /// The tool-priority block sits *after* framework-guaranteed-conventions in
+    /// the real asset, so the faithful block stream is `0, 6, 6, 7, 6` — a
+    /// canonical-order inversion. Requiring non-decreasing floor order would
+    /// reject the only lift this schema exists to enable, and would do it by
+    /// forcing #4186 to move bytes. The floor is in fact the sharpest example of
+    /// why `sections` and `blocks` are separate arrays: one section owning
+    /// non-contiguous positions is the normal case, not the exotic one.
+    ///
+    /// The residual risk — a semantically incoherent floor order that still
+    /// validates — is the same trade-off already accepted for the five content
+    /// sections, and is caught by #4186's byte comparison against today's
+    /// output rather than by structural validation.
+    /// Test: `base_pm_floor_block_order_is_valid`.
     fn validate_floor_is_last(&self) -> Result<(), ValidationError> {
         let Some(floor_index) = self.blocks.iter().position(|b| b.section.is_floor()) else {
             return Ok(());
