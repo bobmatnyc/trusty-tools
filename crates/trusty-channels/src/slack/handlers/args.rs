@@ -3,7 +3,9 @@
 //!
 //! Why: every handler needs the same small set of primitives — pull a
 //! required/optional argument out of the caller's JSON, clamp a page size into
-//! Slack's accepted range, and (for the two `conversations.*`-backed read
+//! the accepted range for the *specific* Slack method being called (the
+//! ceilings differ per method — 999 for `conversations.*`, 100 for
+//! `search.messages`), and (for the two `conversations.*`-backed read
 //! tools) forward/consume Slack's cursor-pagination fields. Centralising them
 //! here keeps each handler in [`super::read`], [`super::search`], etc. focused
 //! on its own request shape.
@@ -22,13 +24,24 @@ use crate::slack::server::ToolCallError;
 /// Lower bound on a caller-supplied page size (`limit`/`count`).
 pub(super) const MIN_PAGE_SIZE: i64 = 1;
 
-/// Upper bound on a caller-supplied page size (`limit`/`count`); matches the
-/// widest window Slack's `search.messages` accepts.
-pub(super) const MAX_PAGE_SIZE: i64 = 1000;
+/// Upper bound on `count` for `search.messages` specifically. Slack's
+/// reference for that method states "Pass the number of results you want per
+/// 'page'. Maximum of `100`." and, under Usage info, "the max `count` value is
+/// `100` and the max `page` value is `100`"
+/// (<https://docs.slack.dev/reference/methods/search.messages>, retrieved
+/// 2026-07-28). A `count` above 100 is rejected live with
+/// `{"ok": false, "error": "invalid_arguments"}`.
+///
+/// This is deliberately NOT shared with [`MAX_CONVERSATION_PAGE_SIZE`]: the
+/// ceilings are per-method and an order of magnitude apart. The predecessor
+/// constant (`MAX_PAGE_SIZE = 1000`) claimed to be the widest window
+/// `search.messages` accepts; that claim was false and broke every search whose
+/// `count` landed in 101..=1000 (issue: this PR).
+pub(super) const MAX_SEARCH_COUNT: i64 = 100;
 
 /// Upper bound on `limit` for `conversations.history` / `conversations.replies`
 /// specifically — Slack documents a hard maximum of 999 for these two methods
-/// (distinct from [`MAX_PAGE_SIZE`], which governs `search.messages`).
+/// (distinct from [`MAX_SEARCH_COUNT`], which governs `search.messages`).
 pub(super) const MAX_CONVERSATION_PAGE_SIZE: i64 = 999;
 
 /// Require a string argument, erroring before any network call if absent.
@@ -236,8 +249,12 @@ pub(super) fn has_more(resp: &Value) -> bool {
 /// value (a negative, zero, or absurdly large `limit`/`count`) is sloppy —
 /// clamp it to `[MIN_PAGE_SIZE, max]` as defense-in-depth so the body we build
 /// is always well-formed before it ever reaches the network. `max` is caller-
-/// supplied because Slack's per-method ceilings differ (999 for the
-/// `conversations.*` family vs 1000 for `search.messages`).
+/// supplied because Slack's per-method ceilings differ — see
+/// [`MAX_CONVERSATION_PAGE_SIZE`] (999, `conversations.*`) and
+/// [`MAX_SEARCH_COUNT`] (100, `search.messages`), each citing its own doc
+/// source. Passing the wrong one here forwards an out-of-range value that
+/// Slack rejects with `invalid_arguments`, so the ceiling is always named at
+/// the call site rather than defaulted.
 /// What: returns `n` clamped to `MIN_PAGE_SIZE..=max`.
 /// Test: `clamp_page_size_bounds_hostile_values`.
 pub(super) fn clamp_page_size(n: i64, max: i64) -> i64 {
@@ -308,20 +325,50 @@ mod tests {
     fn clamp_page_size_bounds_hostile_values() {
         // Hostile / degenerate inputs are pulled into the valid window before a
         // request body is ever built.
-        assert_eq!(clamp_page_size(i64::MIN, MAX_PAGE_SIZE), MIN_PAGE_SIZE);
-        assert_eq!(clamp_page_size(-100, MAX_PAGE_SIZE), MIN_PAGE_SIZE);
-        assert_eq!(clamp_page_size(0, MAX_PAGE_SIZE), MIN_PAGE_SIZE);
+        assert_eq!(clamp_page_size(i64::MIN, MAX_SEARCH_COUNT), MIN_PAGE_SIZE);
+        assert_eq!(clamp_page_size(-100, MAX_SEARCH_COUNT), MIN_PAGE_SIZE);
+        assert_eq!(clamp_page_size(0, MAX_SEARCH_COUNT), MIN_PAGE_SIZE);
         // In-range values pass through untouched.
-        assert_eq!(clamp_page_size(1, MAX_PAGE_SIZE), 1);
-        assert_eq!(clamp_page_size(MAX_PAGE_SIZE, MAX_PAGE_SIZE), MAX_PAGE_SIZE);
+        assert_eq!(clamp_page_size(1, MAX_SEARCH_COUNT), 1);
+        assert_eq!(
+            clamp_page_size(MAX_SEARCH_COUNT, MAX_SEARCH_COUNT),
+            MAX_SEARCH_COUNT
+        );
         // Absurdly large values collapse to the upper bound.
-        assert_eq!(clamp_page_size(1_000_000, MAX_PAGE_SIZE), MAX_PAGE_SIZE);
-        assert_eq!(clamp_page_size(i64::MAX, MAX_PAGE_SIZE), MAX_PAGE_SIZE);
-        // The conversations.* family uses a distinct (lower) ceiling.
+        assert_eq!(
+            clamp_page_size(1_000_000, MAX_SEARCH_COUNT),
+            MAX_SEARCH_COUNT
+        );
+        assert_eq!(
+            clamp_page_size(i64::MAX, MAX_SEARCH_COUNT),
+            MAX_SEARCH_COUNT
+        );
+        // The conversations.* family uses a distinct (higher) ceiling.
         assert_eq!(
             clamp_page_size(i64::MAX, MAX_CONVERSATION_PAGE_SIZE),
             MAX_CONVERSATION_PAGE_SIZE
         );
+    }
+
+    #[test]
+    fn search_and_conversation_ceilings_match_slack_docs() {
+        // Pins the two documented per-method ceilings and, critically, that
+        // they are NOT the same number. Sharing one constant is what let a
+        // `count` of 101..=1000 pass local validation and be rejected live by
+        // `search.messages` with `invalid_arguments`.
+        assert_eq!(MAX_SEARCH_COUNT, 100);
+        assert_eq!(MAX_CONVERSATION_PAGE_SIZE, 999);
+        assert_ne!(MAX_SEARCH_COUNT, MAX_CONVERSATION_PAGE_SIZE);
+
+        // The formerly-unguarded band: every value Slack's search rejects must
+        // now be pulled down to the documented maximum.
+        for n in [101, 200, 999, 1000] {
+            assert_eq!(
+                clamp_page_size(n, MAX_SEARCH_COUNT),
+                MAX_SEARCH_COUNT,
+                "search count {n} must clamp to {MAX_SEARCH_COUNT}"
+            );
+        }
     }
 
     #[test]

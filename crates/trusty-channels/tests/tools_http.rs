@@ -513,6 +513,75 @@ async fn search_messages_with_user_token_returns_matches() {
 }
 
 #[tokio::test]
+async fn search_messages_clamps_count_to_slack_maximum_before_request() {
+    // Regression: `count` was clamped against a shared 1000 ceiling, but Slack
+    // documents a maximum of 100 for `search.messages` ("the max `count` value
+    // is `100`" — https://docs.slack.dev/reference/methods/search.messages).
+    // Anything in 101..=1000 therefore passed local validation and was rejected
+    // live with `{"ok": false, "error": "invalid_arguments"}`.
+    //
+    // This asserts on the OUTGOING request body, not merely on a success
+    // response: the pre-existing happy-path mock answers `ok:true` regardless
+    // of `count`, which is exactly why the defect shipped unnoticed. The route
+    // below only matches when the clamped `count` is 100, so a regressed
+    // ceiling yields no matching route (wiremock 404 → handler error) and the
+    // `expect` fails.
+    for requested in [101, 500, 1000, 9_999_999] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search.messages"))
+            .and(body_partial_json(
+                json!({ "query": "deploy", "count": 100 }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "messages": { "total": 0, "matches": [] }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_with_user_for(&server);
+        dispatch(
+            &client,
+            "slack_search_messages",
+            json!({ "query": "deploy", "count": requested }),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("count {requested} must be clamped to 100 before the request; got {e:?}")
+        });
+        // MockServer verifies the `.expect(1)` on drop.
+    }
+}
+
+#[tokio::test]
+async fn search_messages_forwards_in_range_count_unchanged() {
+    // The clamp must not cap values Slack actually accepts: 100 is the
+    // documented maximum and must reach Slack verbatim, not be reduced.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search.messages"))
+        .and(body_partial_json(json!({ "count": 100 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "messages": { "total": 0, "matches": [] }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = client_with_user_for(&server);
+    dispatch(
+        &client,
+        "slack_search_messages",
+        json!({ "query": "deploy", "count": 100 }),
+    )
+    .await
+    .expect("a count of exactly 100 is within Slack's documented limit");
+}
+
+#[tokio::test]
 async fn search_messages_without_user_token_errors() {
     // A server that fails the test if it is ever hit — the missing user token
     // must be caught before any network call, and must NOT fall back to the bot
