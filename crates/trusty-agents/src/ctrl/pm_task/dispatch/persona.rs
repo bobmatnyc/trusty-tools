@@ -387,6 +387,22 @@ pub async fn run_pm_task_with_persona(
             } else {
                 None
             };
+            // #4169 (epic #4167): the one-directional L0/L1 delegation gate.
+            // This persona-chat dispatch path (backing the REPL `/agent`
+            // command) is the SECOND site — besides `runtime::subagent_mode`
+            // — that builds a `DelegateToAgentTool` for a persona that may
+            // hold live external-content tools. `role == "assistant"` is the
+            // SAME population `delegation_taint` above already gates; a
+            // non-assistant-tier role here is treated the same way the
+            // taint above treats it — outside the persona tier model
+            // entirely (mirrors `ctrl_delegate_posture`'s `role !=
+            // "assistant"` branch in `history.rs`) — so it is never gated by
+            // the L1->L0 boundary, exactly as it is never tainted.
+            let delegator_tier = if persona_cfg.agent.role == "assistant" {
+                persona_cfg.agent.tier()
+            } else {
+                crate::agents::AgentTier::L0Orchestration
+            };
             let runner: Arc<dyn AgentRunner> = Arc::new(
                 SubprocessAgentRunner::new()
                     .with_config_dir(Some(config_dir.clone()))
@@ -398,7 +414,8 @@ pub async fn run_pm_task_with_persona(
                 // it (chat-bubble responder attribution).
                 DelegateToAgentTool::new(runner)
                     .with_config_dir(config_dir.clone())
-                    .with_session_id(sid.clone()),
+                    .with_session_id(sid.clone())
+                    .with_delegator_tier(delegator_tier),
             ));
             registry.register(Arc::new(AddProjectTool));
             registry.register(Arc::new(ListProjectsTool));

@@ -196,9 +196,34 @@ fn ctrl_delegate_posture_orchestrator_role_is_unrestricted() {
     // "orchestrator"`) instead of `ctrl.toml`. That case must be completely
     // unaffected — `pm` is the trusted orchestrator, not a sandboxed
     // persona — so this dispatch path keeps working exactly as before for it.
-    let (taint, roles) = ctrl_delegate_posture("orchestrator", None, None);
+    let (taint, roles, _tier) = ctrl_delegate_posture(
+        "orchestrator",
+        None,
+        None,
+        crate::agents::AgentTier::L1Standard,
+    );
     assert_eq!(taint, None, "pm/orchestrator must not be tainted");
     assert_eq!(roles, None, "pm/orchestrator must not be role-gated");
+}
+
+/// #4169 (epic #4167): the orchestrator branch reports `L0Orchestration`
+/// for the THIRD tuple element regardless of what `declared_tier` was
+/// passed in — `pm`/`ctrl`-as-orchestrator sits outside the L0/L1 persona
+/// model entirely and must never be newly blocked from reaching a future
+/// L0 persona.
+#[test]
+fn ctrl_delegate_posture_orchestrator_role_reports_l0_tier() {
+    let (_taint, _roles, tier) = ctrl_delegate_posture(
+        "orchestrator",
+        None,
+        None,
+        crate::agents::AgentTier::L1Standard,
+    );
+    assert_eq!(
+        tier,
+        crate::agents::AgentTier::L0Orchestration,
+        "pm/orchestrator must be treated as unrestricted by the tier gate too"
+    );
 }
 
 #[test]
@@ -207,7 +232,12 @@ fn ctrl_delegate_posture_assistant_role_fails_closed_without_allow() {
     // `None` — and there is no inbound taint (ctrl is always a top-level
     // dispatch, never itself a delegation target). The fix must still
     // produce an EXPLICIT empty (deny-all) taint, not skip tainting.
-    let (taint, roles) = ctrl_delegate_posture("assistant", None, None);
+    let (taint, roles, _tier) = ctrl_delegate_posture(
+        "assistant",
+        None,
+        None,
+        crate::agents::AgentTier::L1Standard,
+    );
     assert_eq!(
         taint,
         Some(Vec::new()),
@@ -227,8 +257,32 @@ fn ctrl_delegate_posture_assistant_role_forwards_native_allow() {
     // `[tools].allow`, that posture is what gets forwarded as the taint —
     // not silently dropped to empty.
     let native = vec!["web_search".to_string(), "delegate_to_agent".to_string()];
-    let (taint, _roles) = ctrl_delegate_posture("assistant", Some(&native), None);
+    let (taint, _roles, _tier) = ctrl_delegate_posture(
+        "assistant",
+        Some(&native),
+        None,
+        crate::agents::AgentTier::L1Standard,
+    );
     assert_eq!(taint, Some(native));
+}
+
+/// #4169: the assistant branch forwards `declared_tier` verbatim (unlike
+/// the orchestrator branch, which always reports `L0Orchestration`
+/// regardless of input) — `ctrl.toml`'s own declared tier genuinely governs
+/// what it may delegate to.
+#[test]
+fn ctrl_delegate_posture_assistant_role_reports_its_declared_tier() {
+    let (_taint, _roles, tier) = ctrl_delegate_posture(
+        "assistant",
+        None,
+        None,
+        crate::agents::AgentTier::L0Orchestration,
+    );
+    assert_eq!(
+        tier,
+        crate::agents::AgentTier::L0Orchestration,
+        "an assistant-role caller's OWN declared tier must be forwarded verbatim"
+    );
 }
 
 #[test]
@@ -237,7 +291,12 @@ fn ctrl_delegate_posture_assistant_role_always_gates_target_roles() {
     // the same privilege-escalation targets #3555 closed for the other two
     // dispatch paths — and must include the worker roster ctrl legitimately
     // delegates to.
-    let (_taint, roles) = ctrl_delegate_posture("assistant", None, None);
+    let (_taint, roles, _tier) = ctrl_delegate_posture(
+        "assistant",
+        None,
+        None,
+        crate::agents::AgentTier::L1Standard,
+    );
     let roles = roles.expect("assistant-tier ctrl must be role-gated");
     for expected in [
         "engineer",

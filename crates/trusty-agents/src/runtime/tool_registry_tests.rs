@@ -72,6 +72,7 @@ fn research_agent_registry_has_web_tools() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("research-agent builds a registry");
     assert!(
@@ -95,6 +96,7 @@ fn research_agent_registry_has_memory_tools() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("research-agent builds a registry");
     assert!(reg.contains("memory_recall"), "memory_recall missing");
@@ -113,6 +115,7 @@ fn research_agent_registry_has_readonly_fs_tools() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("research-agent builds a registry");
     assert!(reg.contains("read_file"), "read_file missing");
@@ -132,6 +135,7 @@ fn plan_agent_registry_has_memory_tools() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("plan-agent builds a registry");
     assert!(reg.contains("memory_recall"), "memory_recall missing");
@@ -161,6 +165,7 @@ fn all_known_agents_get_skill_tools() {
             empty_skill_registry(),
             empty_tag_registry(),
             None,
+            crate::agents::AgentTier::L1Standard,
         )
         .unwrap_or_else(|| panic!("{agent} should get a registry"));
         assert!(reg.contains("load_skill"), "{agent}: load_skill missing");
@@ -180,6 +185,7 @@ fn plan_agent_registry_has_write_file_tool() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("plan-agent builds a registry");
     assert!(
@@ -200,6 +206,7 @@ fn docs_agent_registry_has_write_and_read_tools() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("docs-agent builds a registry");
     assert!(reg.contains("write_file"), "write_file missing");
@@ -239,6 +246,7 @@ async fn list_skills_uses_tag_registry_when_wired() {
         empty_skill_registry(),
         tag_reg,
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("research-agent builds a registry");
     assert!(reg.contains("list_skills"));
@@ -274,6 +282,7 @@ async fn list_skills_falls_back_to_legacy_when_tag_registry_empty() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("research-agent builds a registry");
     assert!(reg.contains("list_skills"));
@@ -347,6 +356,7 @@ fn assistant_tier_registry_excludes_skill_catalog_tools() {
         empty_skill_registry(),
         tag_reg,
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("assistant-tier agent builds a registry");
 
@@ -374,6 +384,7 @@ fn assistant_tier_registry_includes_curated_tools() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("assistant-tier agent builds a registry");
     assert!(
@@ -404,6 +415,7 @@ fn assistant_tier_registry_includes_izzie_tools() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("assistant-tier agent builds a registry");
     for expected in ["get_weather", "get_train_schedule", "get_train_alerts"] {
@@ -423,7 +435,7 @@ fn izzie_allow_list_surfaces_persona_tools_through_scoping() {
     // it — proving the fix at the exact seam that dropped it (the allow list
     // was correct; the tool simply was not in the registry to survive the
     // intersection).
-    let reg = build_assistant_tier_registry(None);
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L1Standard);
     let allow = vec![
         "delegate_to_agent".to_string(),
         "web_search".to_string(),
@@ -448,7 +460,7 @@ fn non_opted_in_persona_does_not_get_izzie_tools() {
     // allowed_tools` still gates by the persona's own `[tools].allow`. A
     // persona allowing only `web_search` gets only `web_search`, never
     // `get_weather`.
-    let reg = build_assistant_tier_registry(None);
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L1Standard);
     let allow = vec!["web_search".to_string()];
     let kept =
         scope_assistant_allowed_tools(true, None, Some(&allow), Some(&reg)).unwrap_or_default();
@@ -473,6 +485,7 @@ fn role_takes_precedence_over_name_for_assistant_tier() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("builds a registry");
     assert!(
@@ -495,6 +508,7 @@ fn scope_assistant_allowed_tools_filters_by_glob() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("assistant-tier agent builds a registry");
 
@@ -547,6 +561,7 @@ fn scope_assistant_allowed_tools_fails_closed_when_allow_absent() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("assistant-tier agent builds a registry");
 
@@ -583,6 +598,7 @@ fn scope_for_delegation_untainted_assistant_tier_fails_closed_without_allow() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("assistant-tier agent builds a registry");
 
@@ -713,6 +729,7 @@ fn multi_hop_delegation_narrows_at_every_hop() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("engineer-shaped registry builds");
     assert!(engineer_reg.contains("shell_exec"));
@@ -757,6 +774,7 @@ fn tainted_delegation_cannot_reach_tool_delegator_lacked() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("local-ops-agent builds a registry");
     assert!(
@@ -804,6 +822,7 @@ fn untainted_delegation_is_unaffected() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("local-ops-agent builds a registry");
 
@@ -827,6 +846,7 @@ fn tainted_delegation_intersects_with_existing_allowed() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("docs-agent builds a registry");
     assert!(reg.contains("write_file"));
@@ -872,6 +892,7 @@ fn assistant_delegate_to_engineer_path_is_scoped() {
         empty_skill_registry(),
         empty_tag_registry(),
         None,
+        crate::agents::AgentTier::L1Standard,
     )
     .expect("engineer-shaped registry builds");
     assert!(reg.contains("shell_exec"));
@@ -920,7 +941,7 @@ fn assistant_delegate_to_engineer_path_is_scoped() {
 /// `src/tools/delegate.rs` (`delegate_assistant_role_gate_rejects_*`), using
 /// a hand-built `DelegateToAgentTool` + tempdir so they're fast and
 /// environment-independent. This test instead exercises the REAL production
-/// wiring — `build_assistant_tier_registry(None)` unmodified, resolving against
+/// wiring — `build_assistant_tier_registry(None, AgentTier::L1Standard)` unmodified, resolving against
 /// whatever roster is ACTUALLY deployed at `$HOME/.trusty-agents/agents/` on
 /// the machine running it (via `agents::bundled::ensure_bundled_agents_deployed`,
 /// which every `tagent` invocation runs at startup) — as an end-to-end proof
@@ -939,7 +960,7 @@ fn assistant_delegate_to_engineer_path_is_scoped() {
 #[tokio::test]
 #[ignore]
 async fn live_assistant_registry_rejects_pm_role() {
-    let reg = build_assistant_tier_registry(None);
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L1Standard);
     assert!(
         reg.contains("delegate_to_agent"),
         "sanity: delegate_to_agent must be registered"
@@ -1040,7 +1061,7 @@ fn deployed_assistant_config_survives_scoping_with_delegate_to_agent() {
         cfg.tools.allow
     );
 
-    let reg = build_assistant_tier_registry(None);
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L1Standard);
     let kept = scope_assistant_allowed_tools(
         true,
         cfg.tools.allowed.clone(),
@@ -1100,5 +1121,109 @@ fn parse_delegation_taint_env_malformed_fails_closed() {
         parsed,
         Some(Vec::new()),
         "a malformed taint env var must fail closed (deny-all), never silently untainted"
+    );
+}
+
+// --- `build_assistant_tier_registry`'s `delegator_tier` wiring (#4169,
+// epic #4167 — one-directional L0/L1 delegation gate) ---
+//
+// Mirrors `deployed_assistant_config_survives_scoping_with_delegate_to_agent`'s
+// approach: drive the REAL production wiring end-to-end (the actual
+// `agents_dir_candidates()` resolution via `TAGENT_CONFIG_DIR`, the REAL
+// `build_assistant_tier_registry`, dispatched through `reg.dispatch`) rather
+// than constructing a `DelegateToAgentTool` by hand — proving `delegator_tier`
+// genuinely reaches the tool this function registers, not just the
+// `DelegateToAgentTool` unit tests in `tools::delegate`.
+#[tokio::test]
+async fn assistant_tier_registry_delegator_tier_blocks_l0_target_end_to_end() {
+    use crate::agents::tests::loading::ENV_LOCK;
+
+    let _guard = ENV_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("orchestration-assistant.toml"),
+        "[agent]\nname = \"orchestration-assistant\"\nrole = \"assistant\"\ntier = \"orchestration\"\nmodel = \"m\"\ndescription = \"d\"\n\n[llm]\ntemperature = 0.2\nmax_tokens = 1024\n\n[system_prompt]\ncontent = \"x\"\n",
+    )
+    .unwrap();
+
+    // SAFETY: guarded by ENV_LOCK, same convention as every other
+    // TAGENT_CONFIG_DIR mutator in this crate.
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", tmp.path());
+    }
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L1Standard);
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+
+    let result = reg
+        .dispatch(
+            "delegate_to_agent",
+            serde_json::json!({
+                "agent_name": "orchestration-assistant",
+                "task": "escalate"
+            }),
+        )
+        .await;
+
+    assert!(
+        result.is_error(),
+        "an L1-tier assistant registry must refuse to delegate to an L0 target \
+         resolved via the REAL agents_dir_candidates() wiring, got: {}",
+        result.content()
+    );
+}
+
+/// Counter-test: an L0-declared `delegator_tier` reaching the SAME L0
+/// target must NOT be rejected by the tier gate through the identical real
+/// wiring.
+///
+/// Why this doesn't assert overall success: `build_assistant_tier_registry`
+/// wires a REAL `SubprocessAgentRunner` (unlike the mock-runner unit tests
+/// in `tools::delegate`), so a call that clears pre-flight validation goes
+/// on to actually spawn a subprocess — which fails in this test environment
+/// for unrelated reasons (no real `orchestration-assistant` binary/roster to
+/// spawn), exactly as the pre-existing `live_assistant_registry_rejects_pm_role`
+/// test's doc comment notes for the same wiring. What THIS test pins is
+/// narrower and fully verifiable without a live spawn: the error, if any,
+/// must NOT be the tier-gate's specific refusal text — proving the gate
+/// itself let the call through.
+#[tokio::test]
+async fn assistant_tier_registry_l0_delegator_tier_reaches_l0_target_end_to_end() {
+    use crate::agents::tests::loading::ENV_LOCK;
+
+    let _guard = ENV_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("orchestration-assistant.toml"),
+        "[agent]\nname = \"orchestration-assistant\"\nrole = \"assistant\"\ntier = \"orchestration\"\nmodel = \"m\"\ndescription = \"d\"\n\n[llm]\ntemperature = 0.2\nmax_tokens = 1024\n\n[system_prompt]\ncontent = \"x\"\n",
+    )
+    .unwrap();
+
+    unsafe {
+        std::env::set_var("TAGENT_CONFIG_DIR", tmp.path());
+    }
+    let reg = build_assistant_tier_registry(None, crate::agents::AgentTier::L0Orchestration);
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
+    }
+
+    let result = reg
+        .dispatch(
+            "delegate_to_agent",
+            serde_json::json!({
+                "agent_name": "orchestration-assistant",
+                "task": "escalate"
+            }),
+        )
+        .await;
+
+    assert!(
+        !result
+            .content()
+            .contains("orchestration-tier (L0) specialist"),
+        "an L0-tier delegator must NOT be refused by the tier gate when reaching \
+         an L0 target, got: {}",
+        result.content()
     );
 }

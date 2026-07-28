@@ -387,6 +387,7 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         skill_registry.clone(),
         tag_skill_registry.clone(),
         outbound_delegate_allow.as_deref(),
+        cfg.agent.tier(),
     );
 
     // #57: If the agent opts into `use_finish_task`, auto-register the

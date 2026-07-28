@@ -575,6 +575,83 @@ search_indexes = ["apex"]
     assert!(merged.tools.search_indexes_enforced());
 }
 
+// --- `tier` merge (#4168, epic #4167 — L0/L1 orchestration model) ---------
+//
+// Same posture as `enforce_search_indexes` above: child-declares-wins,
+// child-omits-inherits. This is a PRIVILEGE boundary though, so each
+// direction (an L0 base's tier traveling to a silent child overlay, AND a
+// child explicitly downgrading it) is pinned separately.
+
+fn agent_with_tier(name: &str, extends: &str, tier_line: &str) -> AgentConfig {
+    cfg(&format!(
+        r#"
+[agent]
+name = "{name}"
+role = "agent"
+model = "m"
+description = "d"
+{extends}
+{tier_line}
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "x"
+"#
+    ))
+}
+
+#[test]
+fn extends_tier_child_inherits_l0_from_base_when_omitted() {
+    // An L0 base's tier travels to a child overlay that never redeclares
+    // `tier` — the same "hardened base stays hardened under a silent
+    // overlay" rule `enforce_search_indexes` follows, applied to a
+    // privilege boundary instead of a search-index posture.
+    let base = agent_with_tier("base", "", r#"tier = "orchestration""#);
+    let child = agent_with_tier("child", "extends = \"base\"", "");
+    let merged = merge_extends(base, child);
+    assert_eq!(
+        merged.agent.tier(),
+        crate::agents::AgentTier::L0Orchestration,
+        "a child overlay that never declares its own tier must inherit the \
+         base's L0 tier, exactly like every other un-redeclared field"
+    );
+}
+
+#[test]
+fn extends_tier_child_can_downgrade_l0_base_to_l1() {
+    // A child that explicitly declares its own tier always wins — including
+    // downgrading an L0 base to L1.
+    let base = agent_with_tier("base", "", r#"tier = "orchestration""#);
+    let child = agent_with_tier("child", "extends = \"base\"", r#"tier = "l1""#);
+    let merged = merge_extends(base, child);
+    assert_eq!(merged.agent.tier(), crate::agents::AgentTier::L1Standard);
+}
+
+#[test]
+fn extends_tier_omitted_everywhere_resolves_l1() {
+    // Neither base nor child ever declares `tier` — the chain must resolve
+    // to the fail-closed default, never accidentally L0.
+    let base = agent_with_tier("base", "", "");
+    let child = agent_with_tier("child", "extends = \"base\"", "");
+    let merged = merge_extends(base, child);
+    assert_eq!(merged.agent.tier(), crate::agents::AgentTier::L1Standard);
+}
+
+#[test]
+fn extends_tier_child_can_declare_l0_over_l1_base() {
+    // The reverse direction: an L1 (or tier-less) base, and a child that
+    // explicitly opts INTO L0 — a deliberate, explicit declaration, which
+    // is the only way `tier()` ever resolves to L0.
+    let base = agent_with_tier("base", "", r#"tier = "l1""#);
+    let child = agent_with_tier("child", "extends = \"base\"", r#"tier = "orchestration""#);
+    let merged = merge_extends(base, child);
+    assert_eq!(
+        merged.agent.tier(),
+        crate::agents::AgentTier::L0Orchestration
+    );
+}
+
 #[test]
 fn extends_unions_listener_bindings_by_name() {
     let base = cfg(r#"

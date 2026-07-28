@@ -260,6 +260,18 @@ async fn delegate_rejects_agent_absent_from_all_config_dirs() {
 /// requires, unlike the bare `[agent]\nname = "..."` fixtures the
 /// existence-only tests above use (those never parse the file).
 fn write_agent_toml_with_role(dir: &std::path::Path, name: &str, role: &str) {
+    write_agent_toml_with_role_and_tier(dir, name, role, None);
+}
+
+/// Sibling to `write_agent_toml_with_role` that also declares `[agent].tier`
+/// when `tier` is `Some` (#4169, epic #4167).
+fn write_agent_toml_with_role_and_tier(
+    dir: &std::path::Path,
+    name: &str,
+    role: &str,
+    tier: Option<&str>,
+) {
+    let tier_line = tier.map(|t| format!(r#"tier = "{t}""#)).unwrap_or_default();
     std::fs::write(
         dir.join(format!("{name}.toml")),
         format!(
@@ -269,6 +281,7 @@ name = "{name}"
 role = "{role}"
 model = "anthropic/claude-sonnet-4-6"
 description = "test fixture"
+{tier_line}
 
 [llm]
 temperature = 0.2
@@ -517,4 +530,353 @@ fn session_id_gate_normalizes_blank_to_none() {
             .as_deref(),
         Some("task-42")
     );
+}
+
+// ============================================================================
+// #4169 (epic #4167) — the one-directional L0/L1 delegation gate.
+//
+// L0 (orchestration tier) carries PM-tier grants under a YOLO posture the
+// owner explicitly accepts. L1 (standard tier) is today's black-box
+// assistant/cto-assistant/izzie and may ingest untrusted content. If an L1
+// persona could delegate INTO an L0 target, untrusted content would acquire
+// the owner's L0 grant just by asking the L1 persona to hand the work down
+// — issue #4126's class, reachable through a new path. These tests exercise
+// the REAL `DelegateToAgentTool::execute()` call path (the same one
+// `build_assistant_tier_registry` / `ctrl_delegate_posture` /
+// `run_pm_task_with_persona` wire in production), not a hand-rolled
+// reimplementation of the gate.
+// ============================================================================
+
+/// THE single most important test in this PR: an L1-tier delegator must be
+/// refused when the resolved target's own declared tier is L0
+/// (orchestration). The runner must never be invoked.
+#[tokio::test]
+async fn delegate_l1_to_l0_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role_and_tier(
+        dir.path(),
+        "orchestration-assistant",
+        "assistant",
+        Some("orchestration"),
+    );
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_delegator_tier(crate::agents::AgentTier::L1Standard);
+
+    let result = tool
+        .execute(json!({
+            "agent_name": "orchestration-assistant",
+            "task": "run cargo check and push a fix"
+        }))
+        .await;
+
+    assert!(
+        result.is_error(),
+        "an L1 delegator must be refused when targeting an L0 specialist"
+    );
+    assert!(
+        result.content().contains("L0") && result.content().contains("L1"),
+        "error should educate the user on the tier boundary, got: {}",
+        result.content()
+    );
+    assert!(
+        runner.invoked.lock().unwrap().is_empty(),
+        "runner must NEVER be invoked when the tier gate refuses"
+    );
+}
+
+/// The counter-test: an L0-tier delegator reaching an L1 (standard) target
+/// must succeed — this PR must not break legitimate downward delegation.
+#[tokio::test]
+async fn delegate_l0_to_l1_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role(dir.path(), "izzie", "assistant");
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_delegator_tier(crate::agents::AgentTier::L0Orchestration);
+
+    let result = tool
+        .execute(json!({
+            "agent_name": "izzie",
+            "task": "consult on train schedules"
+        }))
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "L0 -> L1 delegation must succeed: {}",
+        result.content()
+    );
+    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+}
+
+/// L1 -> L1 (a target with no `tier` declared, or explicitly `l1`) must be
+/// completely unaffected by the new gate — it existed before #4169 and must
+/// keep working.
+#[tokio::test]
+async fn delegate_l1_to_l1_is_unaffected_by_tier_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role(dir.path(), "cto-assistant", "assistant");
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_delegator_tier(crate::agents::AgentTier::L1Standard);
+
+    let result = tool
+        .execute(json!({
+            "agent_name": "cto-assistant",
+            "task": "consult on architecture"
+        }))
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "L1 -> L1 must be unaffected: {}",
+        result.content()
+    );
+    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+}
+
+/// `delegator_tier` defaults to `None` on construction ("this instance was
+/// never asked to enforce the tier gate") — the field-level contract
+/// `with_delegator_tier` overrides. Mirrors
+/// `session_id_gate_normalizes_blank_to_none`'s same-module field check.
+/// The BEHAVIORAL consequence of `None` splits in two, covered separately:
+/// `no_tier_and_no_role_gate_preserves_cheap_existence_check` (neither gate
+/// opted in — untouched) and
+/// `delegate_role_gate_without_declared_tier_fails_closed_to_l1` (role gate
+/// opted in, tier forgotten — still fails closed to L1Standard).
+#[test]
+fn delegator_tier_defaults_to_none_on_construction() {
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    assert_eq!(
+        DelegateToAgentTool::new(runner.clone()).delegator_tier,
+        None
+    );
+    assert_eq!(
+        DelegateToAgentTool::new(runner)
+            .with_delegator_tier(crate::agents::AgentTier::L0Orchestration)
+            .delegator_tier,
+        Some(crate::agents::AgentTier::L0Orchestration)
+    );
+}
+
+/// A target whose `tier` is malformed/unrecognized must resolve to L1 (per
+/// `AgentInfo::tier()`'s fail-closed contract) and therefore NOT be blocked
+/// by the tier gate — proving the gate composes correctly with the
+/// fail-closed resolution rather than double-failing or crashing.
+#[tokio::test]
+async fn delegate_malformed_target_tier_resolves_l1_and_is_not_tier_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role_and_tier(dir.path(), "engineer", "engineer", Some("bogus-value"));
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_delegator_tier(crate::agents::AgentTier::L1Standard)
+        .with_allowed_target_roles(vec!["engineer".to_string()]);
+
+    let result = tool
+        .execute(json!({ "agent_name": "engineer", "task": "run cargo check" }))
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "a malformed target tier must resolve to L1 (not block), got: {}",
+        result.content()
+    );
+    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
+}
+
+/// The tier gate is checked EVEN WHEN no `allowed_target_roles` allowlist is
+/// set — proving it is not merely piggybacking on the role gate's existing
+/// resolution, but an independent, unconditional check. This is the
+/// specific regression #4169 exists to prevent: a dispatch path (like
+/// `ctrl::pm_task::dispatch::persona`, historically) that builds a
+/// `DelegateToAgentTool` with a `config_dir` but no role allowlist must
+/// still be tier-gated.
+#[tokio::test]
+async fn delegate_tier_gate_applies_even_without_role_allowlist() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role_and_tier(
+        dir.path(),
+        "orchestration-assistant",
+        "assistant",
+        Some("orchestration"),
+    );
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    // No `.with_allowed_target_roles(...)` call at all.
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_delegator_tier(crate::agents::AgentTier::L1Standard);
+
+    let result = tool
+        .execute(json!({
+            "agent_name": "orchestration-assistant",
+            "task": "do orchestration-tier things"
+        }))
+        .await;
+
+    assert!(
+        result.is_error(),
+        "the tier gate must apply even without a role allowlist configured"
+    );
+    assert!(runner.invoked.lock().unwrap().is_empty());
+}
+
+/// TRANSITIVE / multi-hop escalation: `assistant (L1) -> izzie (L1 peer) ->
+/// orchestration-assistant (L0)` must be impossible. This builds TWO real
+/// `DelegateToAgentTool` instances — one per hop — using the SAME
+/// construction shape production code uses (role-allowlisted,
+/// tier-declared), and drives them in sequence: hop 1 succeeds (peer-assistant
+/// delegation is legitimate), but when the spawned peer (izzie, itself L1)
+/// attempts hop 2 into the L0 target, ITS OWN `DelegateToAgentTool` (built
+/// with izzie's own L1 tier, exactly as `build_assistant_tier_registry`
+/// would build it for the real izzie subprocess) refuses. No chain of L1
+/// hops can ever reach L0.
+#[tokio::test]
+async fn delegate_multi_hop_l1_peer_to_l0_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role(dir.path(), "izzie", "assistant");
+    write_agent_toml_with_role_and_tier(
+        dir.path(),
+        "orchestration-assistant",
+        "assistant",
+        Some("orchestration"),
+    );
+
+    // Hop 1: assistant (L1) -> izzie (L1 peer). Legitimate; must succeed.
+    let hop1_runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let hop1_tool = DelegateToAgentTool::new(hop1_runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_allowed_target_roles(vec!["assistant".to_string()])
+        .with_delegator_tier(crate::agents::AgentTier::L1Standard);
+    let hop1_result = hop1_tool
+        .execute(json!({ "agent_name": "izzie", "task": "hand off to izzie" }))
+        .await;
+    assert!(
+        !hop1_result.is_error(),
+        "hop 1 (L1 -> L1 peer) must succeed: {}",
+        hop1_result.content()
+    );
+
+    // Hop 2: izzie (itself L1 — no tier declared, so `tier()` resolves
+    // L1Standard) attempts to reach the L0 target. Built exactly as
+    // `build_assistant_tier_registry` builds izzie's OWN delegate tool when
+    // izzie is spawned: role-allowlisted to `ASSISTANT_ALLOWED_DELEGATE_ROLES`-
+    // equivalent, tier-declared from izzie's OWN resolved config.
+    let hop2_runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let hop2_tool = DelegateToAgentTool::new(hop2_runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_allowed_target_roles(vec!["assistant".to_string()])
+        .with_delegator_tier(crate::agents::AgentTier::L1Standard);
+    let hop2_result = hop2_tool
+        .execute(json!({
+            "agent_name": "orchestration-assistant",
+            "task": "escalate to orchestration tier"
+        }))
+        .await;
+
+    assert!(
+        hop2_result.is_error(),
+        "hop 2 (L1 peer -> L0) must be refused — no chain of L1 hops may reach L0"
+    );
+    assert!(
+        hop2_runner.invoked.lock().unwrap().is_empty(),
+        "the L0 target's runner must never be invoked via the transitive path"
+    );
+}
+
+/// A caller that opts into role-gating (`with_allowed_target_roles`) but
+/// never declares its own tier must still be tier-gated, fail-closed to
+/// `L1Standard` — belt-and-suspenders: the population that cares enough to
+/// role-gate can never silently skip tier-gating too.
+#[tokio::test]
+async fn delegate_role_gate_without_declared_tier_fails_closed_to_l1() {
+    let dir = tempfile::tempdir().unwrap();
+    write_agent_toml_with_role_and_tier(
+        dir.path(),
+        "orchestration-assistant",
+        "assistant",
+        Some("orchestration"),
+    );
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    // Role-gated, but no `.with_delegator_tier(...)` call at all.
+    let tool = DelegateToAgentTool::new(runner.clone())
+        .with_config_dirs(vec![dir.path().to_path_buf()])
+        .with_allowed_target_roles(vec!["assistant".to_string()]);
+
+    let result = tool
+        .execute(json!({
+            "agent_name": "orchestration-assistant",
+            "task": "escalate"
+        }))
+        .await;
+
+    assert!(
+        result.is_error(),
+        "role-gated caller with no declared tier must still fail closed against an L0 target"
+    );
+    assert!(runner.invoked.lock().unwrap().is_empty());
+}
+
+/// A caller that opts into NEITHER gate (no role allowlist, no declared
+/// tier) must keep the pre-#4169 cheap existence-only pre-flight check —
+/// proven by resolving a BARE, otherwise-unparseable fixture (missing
+/// `model`/`description`/`[llm]`/`[system_prompt]`) that only
+/// `agent_name_resolves` (not a full `AgentConfig::by_name_in` parse) can
+/// succeed against. This is the exact regression guard for the mistake
+/// this PR's first draft made: threading the tier gate in naively broke
+/// `known_agent_reaches_runner`/`delegate_resolves_agent_from_secondary_config_dir`
+/// by forcing full resolution unconditionally.
+#[tokio::test]
+async fn no_tier_and_no_role_gate_preserves_cheap_existence_check() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("bare-agent.toml"),
+        "[agent]\nname = \"bare-agent\"\n",
+    )
+    .unwrap();
+
+    let runner = Arc::new(RecordingRunner {
+        invoked: std::sync::Mutex::new(Vec::new()),
+    });
+    let tool =
+        DelegateToAgentTool::new(runner.clone()).with_config_dirs(vec![dir.path().to_path_buf()]);
+
+    let result = tool
+        .execute(json!({ "agent_name": "bare-agent", "task": "do the thing" }))
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "a caller opted into neither gate must keep the cheap existence-only check: {}",
+        result.content()
+    );
+    assert_eq!(runner.invoked.lock().unwrap().len(), 1);
 }
