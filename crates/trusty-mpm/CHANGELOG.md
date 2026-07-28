@@ -168,6 +168,23 @@ so a 2.0.0 would signal a break that cannot reach anyone.
 
 ### Fixed
 
+- **Two paths no longer write into a destroyed worktree**
+  ([#4204](https://github.com/bobmatnyc/trusty-tools/issues/4204)):
+  `tm install --reset-agents --reset-agents-workspaces` and the bare-`tm`
+  in-place relaunch both gated on `workspace_path.is_dir()` alone, which a
+  gutted worktree — `.git` and source tree stripped, directory node surviving —
+  passes. The sweep recomposed 45 agent files into such a husk and the relaunch
+  exec'd `claude` into it. Both now share one predicate,
+  `core::workspace_liveness::workspace_liveness`, which skips ONLY on positive
+  evidence of death: it accepts `.git` as a FILE (the `gitdir:` pointer every
+  linked worktree carries, so no legitimate managed workspace is refused),
+  requires a `.git` only where one is owed (a tm-provisioned workspace or a
+  `.worktrees/<id>` path), and reports an unreadable filesystem as
+  `Indeterminate` — explicitly not dead — so a permission or network-mount
+  failure can never silently stop servicing a live workspace. A gutted
+  workspace is now reported to the operator with a skip reason rather than
+  dropped silently.
+
 - **Two wrong instructions corrected in the bundled assets composed into every
   session's prompt.** Both were static text that no project could override, and
   both had demonstrably misrouted live sessions.
