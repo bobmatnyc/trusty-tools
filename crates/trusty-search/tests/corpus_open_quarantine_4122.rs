@@ -54,30 +54,49 @@ use trusty_search::service::watch_loop::spawn_watch_loop;
 ///
 /// Why: the watcher tests depend on OS filesystem notifications plus the
 /// 500 ms debounce window, so they need a real wall-clock budget — but the
-/// waits are condition-based (`await_condition`), not fixed sleeps, so a
-/// healthy machine finishes in well under a second.
+/// waits are condition-based (`await_condition_resaving`), not fixed sleeps,
+/// so a healthy machine finishes in well under a second.
 const WAIT_BUDGET: Duration = Duration::from_secs(30);
 
-/// Poll `cond` until it returns `true` or [`WAIT_BUDGET`] elapses.
+/// Poll `cond` while RE-SAVING `name` into every root in `roots`.
 ///
-/// Why: asserting "the watcher processed this event" with a fixed sleep is
-/// both slow and flaky. Every wait here has a concrete observable to latch
-/// onto (`chunk_count() > 0`, `refused_incremental_writes() > 0`), so poll
-/// for it instead.
-/// What: returns `true` if the condition held within the budget.
-async fn await_condition<F, Fut>(mut cond: F) -> bool
+/// Why: a single save is a ONE-SHOT event. If the OS watch registration has
+/// not finished when it lands — routine on a loaded CI runner, where this test
+/// first failed by burning its full 30 s budget with a control that never
+/// indexed — the event is lost permanently and no later event ever arrives, so
+/// the race becomes a hang and a red build. Re-saving keeps producing events
+/// for the whole budget, so the wait ends as soon as the watcher is genuinely
+/// live rather than depending on a startup sleep being long enough.
+///
+/// This STRENGTHENS the quarantine assertions rather than weakening them: the
+/// broken index gets MORE chances to wrongly accept a write, not fewer, and
+/// the control must still demonstrably index before the test proceeds.
+/// What: polls `cond` every 25 ms (so a healthy machine still finishes in well
+/// under a second) and rewrites the file once per 500 ms debounce window with
+/// CHANGING content, so no content-equality dedupe can swallow the rewrite.
+async fn await_condition_resaving<F, Fut>(roots: &[&Path], name: &str, mut cond: F) -> bool
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
     let deadline = Instant::now() + WAIT_BUDGET;
+    let mut generation: u32 = 0;
+    let mut last_save: Option<Instant> = None;
     while Instant::now() < deadline {
         if cond().await {
             return true;
         }
+        if last_save.is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
+            generation += 1;
+            let body = format!("pub fn quarantine_probe() -> u32 {{ 4122 + {generation} }}\n");
+            for root in roots {
+                save_source_file(root, name, &body);
+            }
+            last_save = Some(Instant::now());
+        }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    false
+    cond().await
 }
 
 fn mock_embedder() -> Arc<dyn Embedder> {
@@ -132,7 +151,11 @@ fn save_source_file(root: &Path, name: &str, content: &str) {
 /// reached the guard.
 /// Test: this IS the test. Against pre-fix code the quarantined index's
 /// `chunk_count()` grows past 0 exactly as it did in production.
-#[tokio::test]
+// `multi_thread` is REQUIRED, not stylistic: the watcher bridges its OS
+// notification thread into the async loop, and on the default current-thread
+// runtime that pipeline can starve — which is how this test passed on macOS
+// and failed on Linux CI. Mirrors `watch_loop::tests::modified_file_triggers_indexing`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero() {
     let broken_dir = tempdir().expect("tempdir");
     let healthy_dir = tempdir().expect("tempdir");
@@ -176,15 +199,15 @@ async fn quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero() {
     let _healthy_watch = spawn_watch_loop(&healthy_root, Arc::clone(&healthy), IndexedFiles::new())
         .expect("spawn healthy watch loop");
 
-    // An ordinary, unrelated save in each worktree — the production trigger.
-    let source = "pub fn quarantine_probe() -> u32 { 4122 }\n";
-    save_source_file(&broken_root, "probe.rs", source);
-    save_source_file(&healthy_root, "probe.rs", source);
+    // Ordinary, unrelated saves in each worktree — the production trigger.
+    // Driven by `await_condition_resaving` so a save that lands before the OS
+    // watch is armed cannot strand the test (see that helper's docs).
+    let roots: [&Path; 2] = [&broken_root, &healthy_root];
 
     // Positive control: the watcher pipeline demonstrably works here.
     let healthy_indexed = {
         let healthy = Arc::clone(&healthy);
-        await_condition(move || {
+        await_condition_resaving(&roots, "probe.rs", move || {
             let healthy = Arc::clone(&healthy);
             async move { healthy.read().await.chunk_count() > 0 }
         })
@@ -203,7 +226,7 @@ async fn quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero() {
     // instead of a missing counter bump.
     let decided = {
         let broken = Arc::clone(&broken);
-        await_condition(move || {
+        await_condition_resaving(&roots, "probe.rs", move || {
             let broken = Arc::clone(&broken);
             async move {
                 let broken = broken.read().await;
