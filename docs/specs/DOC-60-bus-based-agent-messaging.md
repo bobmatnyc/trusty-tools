@@ -1,16 +1,23 @@
-# DOC-60 — Bus-Based Agent Messaging
+# DOC-60 — Unified Agent Communication: User ↔ Assistant, Assistant ↔ Sub-Agent, Assistant ↔ Assistant
 
 **Status:** Draft
 **Spec ID:** `SPEC-AGENTBUS-01~draft`
 **Subsystem:** trusty-mpm (bus host, daemon) — trusty-agents (assistants, sub-agents, ctrl) — trusty-channels (Slack/Telegram/etc.) — trusty-memory (consolidation target) — trusty-search (index target)
+**Last-updated:** 2026-07-28 (Rev 1: unified all three communication edges — user↔assistant, assistant↔sub-agent, assistant↔assistant — into equally-specified first-class sections per owner instruction; documents assistant↔assistant as the replacement for the delegation lane closed by PR #4240/ADR-0024)
 
 ## 1. Summary
 
-This spec defines **one** addressed, durable, searchable message bus for every
-cross-boundary message in the system — user↔assistant, assistant↔sub-agent,
-assistant↔assistant, and inbound/outbound channel traffic — and retires the
-five independent broadcast implementations that exist today because none of
-them address the unit that actually needs addressing: an **agent instance**.
+This spec unifies **three** communication paths onto **one** addressed,
+durable, searchable message bus, as equally-specified first-class edges:
+
+1. **User ↔ Assistant/PM** (§5.1)
+2. **Assistant/PM ↔ Sub-Agent** (§5.2)
+3. **Assistant ↔ Assistant, peer-to-peer** (§5.3)
+
+Every cross-boundary message in the system — these three edges plus
+inbound/outbound channel traffic (§8) — rides this one bus, retiring the five
+independent broadcast implementations that exist today because none of them
+address the unit that actually needs addressing: an **agent instance**.
 
 The bus is hosted by the `tm` (trusty-mpm) daemon. This makes `tm` a hard,
 already-accepted runtime dependency of `trusty-agents` (§4). Delivery follows
@@ -22,12 +29,29 @@ laterally with other assistants; sub-agents are Level-1, in-process leaves
 that never delegate and never talk out-of-process. Three distinct identifiers
 — agent definition, agent instance, and caller — are established for the
 first time (§6), because none of the five existing buses carries more than an
-ad hoc subset of them. Channels (Slack, Telegram, …) are a **transport that
-originates a user-identity message**, not a fourth participant kind, and they
-ride this same bus rather than a parallel path (§8). The bus **is** the
-searchable log; memory consolidation is the only sanctioned bridge from bus
-traffic into `trusty-memory`'s curated index, and a promoted memory carries a
-provenance pointer back to the message that produced it (§10).
+ad hoc subset of them, and the same three identifiers govern all three edges
+uniformly. Channels (Slack, Telegram, …) are a **transport that originates a
+user-identity message**, not a fourth participant kind, and they ride this
+same bus rather than a parallel path (§8). The bus **is** the searchable log;
+memory consolidation is the only sanctioned bridge from bus traffic into
+`trusty-memory`'s curated index, and a promoted memory carries a provenance
+pointer back to the message that produced it (§10).
+
+**Why the peer-to-peer edge (§5.3) is load-bearing, not aspirational.**
+PR #4240 (merged 2026-07-28, squash `5d99e385`) closed the one working
+assistant-to-assistant interaction the codebase had — the tested Izzie ↔
+cto-assistant peer-consult lane — as the direct, owner-authorized consequence
+of [ADR-0024](../adr/0024-subagents-in-process-only-assistants-communicate-not-delegate.md)'s
+kind-based delegation gate (assistants may never delegate to other
+assistants, only to sub-agents). PR #4240's own description states this
+plainly: *"This closes the Izzie ↔ cto-assistant peer-consult lane, and the
+replacement mechanism does not exist... ADR-0019 is accepted but
+unimplemented, and a bus-based messaging spec is being drafted separately."*
+That spec is this one. §5.3 is therefore not a speculative future edge
+alongside two already-real ones — it is the specified replacement for a
+capability that is already live-removed from the codebase, and until it is
+implemented, trusty-agents personas have **no** agent-to-agent messaging path
+of any kind.
 
 This is a DRAFT. It resolves what is answerable from the current codebase and
 flags the rest explicitly in §12 for the owner.
@@ -158,53 +182,152 @@ startup on the bus becoming available — connect is attempted asynchronously
 and retried with backoff, consistent with how `MessageBus::start` today binds
 its socket without blocking the caller on a peer being reachable.
 
-## 5. Delivery model: the two-level tree
+## 5. Delivery model: three edges over one tree
 
 Per [ADR-0024](../adr/0024-subagents-in-process-only-assistants-communicate-not-delegate.md)
 (ratified, same-day as this draft), the net shape is a strict two-level tree
-rooted at a user action:
+rooted at a user action, with three distinct edges — each specified below to
+the same depth: addressing, wake semantics, the three identifiers (§6), the
+searchability path (§9), and the messages-vs-memories boundary (§10):
 
 ```
                  user
-                  |  (bidirectional: user <-> assistant)
-              assistant (L0) ---- lateral ---- assistant (L0)
-                  |  (bidirectional: assistant <-> sub-agent)
+                  |  (5.1  bidirectional: user <-> assistant)
+              assistant (L0) ---- 5.3 lateral ---- assistant (L0)
+                  |  (5.2  bidirectional: assistant <-> sub-agent)
               sub-agent (L1, leaf)
 ```
 
-- **User ↔ assistant/PM.** Bidirectional. Every assistant is ALWAYS
-  instantiated by a user action (interactive session, a scheduled/cron
-  trigger acting with delegated user authority, or an inbound channel
-  message treated as a user action — §8). This edge rides the bus so the
-  user-facing surface (CLI, TUI, GUI, channel) can be swapped without the
-  assistant knowing which one is listening.
-- **Assistant/PM ↔ sub-agent.** Bidirectional. A sub-agent is an in-process
-  LEAF: it never delegates further (not up, not laterally, not to another
-  sub-agent), never talks out-of-process, and only ever responds to the one
-  assistant that invoked it. This edge is the in-process `delegate_to_agent`
-  / `dispatch_task` call today (ADR-0024 §2); this spec does **not** move
-  it onto the network bus — an in-process call has no addressing problem to
-  solve, and forcing it through the daemon would add a round-trip and a
-  `tm`-availability dependency to a path that today has neither. What DOES
-  go on the bus is the **record** of that exchange (§9) — durability and
-  search, not delivery mechanics — so the sub-agent's request/response is
-  bus-searchable without the sub-agent process itself being a bus
-  publisher.
-- **Assistant ↔ assistant, laterally.** ADR-0024 decision 1 & 3: assistants
-  "can communicate with each other, but never delegate." **Decision: this
-  lateral edge DOES ride the same bus** as user↔assistant, not a private
-  side-channel. Rationale: (a) it needs the identical guarantees — durable,
-  acknowledged, searchable, addressed by agent instance — that motivated
-  ADR-0019's rejection of `tm sessions send` and `memory_send_message` for
-  the equivalent `tm`-side problem; inventing a second unaddressed channel
-  for assistant-to-assistant traffic would reproduce exactly the bug this
-  spec exists to fix. (b) A lateral message and a user message look
-  identical from the receiving assistant's side — both are "a message from
-  a caller I must address a reply to" (§6) — so one delivery path handles
-  both without a special case. The only distinction the bus enforces is
-  that a lateral message's caller identity is another assistant's instance
-  id, never granting delegate authority (an assistant cannot make another
-  assistant delegate on its behalf — communication, not command).
+### 5.1 User ↔ Assistant/PM
+
+**Relationship.** Bidirectional. Every assistant is ALWAYS instantiated by a
+user action (interactive session, a scheduled/cron trigger acting with
+delegated user authority, or an inbound channel message treated as a user
+action — §8). This edge rides the bus so the user-facing surface (CLI, TUI,
+GUI, channel) can be swapped without the assistant knowing which one is
+listening.
+
+- **Addressing.** A user message addresses an assistant `definition_id`
+  (§6a) — "talk to izzie" — resolved at send time to a live `instance_id`
+  (§6b) when one exists for that user+definition pair, or queued when none
+  does (§7). The user's own identity is the `from.kind = "user"` caller
+  (§6c); no instance id is minted for the user side of this edge.
+- **Wake semantics.** Full rule in §7. Summary: a running instance receives
+  directly; a stopped/never-started definition queues to a durable inbox and
+  is NOT auto-spawned by message arrival — only an explicit user
+  instantiation (or an opt-in auto-resume policy) starts one.
+- **Identifiers.** All three of §6 apply: `definition_id` always present on
+  `to`; `instance_id` present on `to` once resolved; `caller` on `from` is
+  `kind = "user"` (or `kind = "channel"` for a channel-originated user
+  message, §8).
+- **Searchability.** Every envelope on this edge is JSONL-logged per §9;
+  `GET /bus/replay?instance=<id>` and `/bus/thread?message_id=<id>` cover it
+  identically to the other two edges — no edge-specific query surface.
+- **Messages vs. memories.** Governed by §10 uniformly: nothing on this edge
+  is memory-eligible by default; promotion is consolidation's explicit act,
+  carrying the `message_id` provenance pointer back to this edge's traffic
+  exactly as it does for the other two.
+
+### 5.2 Assistant/PM ↔ Sub-Agent
+
+**Relationship.** Bidirectional. A sub-agent is an in-process LEAF: it never
+delegates further (not up, not laterally, not to another sub-agent), never
+talks out-of-process, and only ever responds to the one assistant that
+invoked it. This edge is the in-process `delegate_to_agent` / `dispatch_task`
+call today (ADR-0024 §2); this spec does **not** move it onto the network
+bus — an in-process call has no addressing problem to solve, and forcing it
+through the daemon would add a round-trip and a `tm`-availability dependency
+to a path that today has neither. What DOES go on the bus is the **record**
+of that exchange (§9) — durability and search, not delivery mechanics — so
+the sub-agent's request/response is bus-searchable without the sub-agent
+process itself being a bus publisher.
+
+- **Addressing.** Not bus-addressed at all — the invoking assistant's own
+  process holds the direct in-process reference to the sub-agent task it
+  spawned. There is no `definition_id`/`instance_id` resolution step because
+  there is no delivery to solve (the call IS the delivery). The bus-side
+  record of the exchange still carries `from`/`to` (§6) for search purposes,
+  populated by the assistant after the in-process call returns.
+- **Wake semantics.** Already fully answered by existing machinery (§7):
+  `dispatch_task`/`delegate_to_agent` invocation IS the instantiation event.
+  There is no "queued to an idle sub-agent" state — a sub-agent is never
+  idle-and-addressable, so this spec adds nothing new here. This is the one
+  deliberate asymmetry with §5.1/§5.3's queue-not-spawn rule, and it exists
+  because a sub-agent has no independent, user-instantiation-gated existence
+  to protect (§7).
+- **Identifiers.** `definition_id` (§6a) names the sub-agent's config;
+  `instance_id` (§6b) is minted at spawn by the invoking assistant, scoped to
+  that one call's lifetime; `caller` (§6c) is always the invoking assistant's
+  own `instance_id` — a sub-agent can never receive a message whose caller is
+  anything else, by construction (ADR-0024's single-edge-leaf rule).
+- **Searchability.** Identical mechanism to §5.1/§5.3 (§9) — the
+  request/response pair is written to the bus JSONL log as the record of an
+  in-process exchange, not as evidence of bus-mediated delivery.
+- **Messages vs. memories.** Governed by §10 uniformly, with one added note:
+  because this edge's "message" is a post-hoc record rather than a live
+  delivery, the provenance pointer (§10) it contributes to a promoted memory
+  points at the recorded exchange, not at a delivery event.
+
+### 5.3 Assistant ↔ Assistant, Peer-to-Peer
+
+**Relationship.** ADR-0024 decision 1 & 3: assistants "can communicate with
+each other, but never delegate." **Decision: this lateral edge DOES ride the
+same bus** as user↔assistant, not a private side-channel. Rationale: (a) it
+needs the identical guarantees — durable, acknowledged, searchable, addressed
+by agent instance — that motivated ADR-0019's rejection of `tm sessions send`
+and `memory_send_message` for the equivalent `tm`-side problem; inventing a
+second unaddressed channel for assistant-to-assistant traffic would reproduce
+exactly the bug this spec exists to fix. (b) A lateral message and a user
+message look identical from the receiving assistant's side — both are "a
+message from a caller I must address a reply to" (§6) — so one delivery path
+handles both without a special case. The only distinction the bus enforces is
+that a lateral message's caller identity is another assistant's instance id,
+never granting delegate authority (an assistant cannot make another assistant
+delegate on its behalf — communication, not command).
+
+**This edge closes a gap that is currently open, not a theoretical one — see
+§1.** As of PR #4240 (squash `5d99e385`, merged today), no code path lets one
+trusty-agents assistant persona reach another: the in-process
+`delegate_to_agent` tool now structurally refuses any assistant→assistant
+edge, at every tier pairing, per ADR-0024's kind predicate; ADR-0019's
+unified IPC bus — the nearest candidate foundation — is Accepted but, per its
+own Consequences section, unimplemented, with "no code... landed since
+[2026-07-18]"; and ADR-0019's role model is itself built on ADR-0016's
+singleton "ASSISTANT," a different sense of the word than `trusty-agents`'
+plural per-persona population this spec addresses (§6a). Until this section
+is implemented, **there is no substitute** for the closed Izzie ↔
+cto-assistant lane.
+
+- **Addressing.** Same shape as §5.1: a peer message addresses a
+  `definition_id` (§6a) — one assistant naming another by its persona name —
+  resolved to a live `instance_id` (§6b) when the target is running. Whether
+  a peer message may instead target a specific running `instance_id`
+  directly (bypassing definition-level resolution when the sender already
+  knows which instance it is talking to) is **not decided by this spec** —
+  see Open Question 8 (§12).
+- **Wake semantics.** Governed by the same rule as §5.1 (§7), explicitly: a
+  peer message to a running instance delivers directly; a peer message to a
+  stopped/never-started assistant definition queues to that definition's
+  durable inbox and does **not** spawn a new instance — the queue-not-spawn
+  rule is not a user-only protection, it applies identically when the
+  sender is another assistant, because auto-spawning on ANY inbound message
+  (peer or user) would manufacture an implicit user-instantiation event with
+  no user behind it (§7). A peer message can never itself count as the "user
+  action" that legitimately starts a new assistant instance.
+- **Identifiers.** All three of §6 apply exactly as specified there: `to`
+  carries the target's `definition_id` always and `instance_id` once
+  resolved; `from.kind = "assistant_instance"` with the sending assistant's
+  own `instance_id` and `definition_id` populated (§6c) — this is the field
+  that structurally prevents a peer message from being mistaken for a user
+  message or from carrying delegate authority (ADR-0024: communication, not
+  command).
+- **Searchability.** Identical mechanism to §5.1/§5.2 (§9) — no
+  peer-specific query surface; `/bus/thread?message_id=<id>` walks a
+  multi-hop peer conversation the same way it walks a user↔assistant thread.
+- **Messages vs. memories.** Governed by §10 uniformly: a peer exchange is
+  not memory-eligible by default and is promoted only through consolidation,
+  carrying the same `message_id` provenance pointer. No special-casing for
+  the peer edge is introduced.
 
 **What is explicitly NOT a node in this tree:** a channel (Slack, Telegram)
 is not a third participant kind; it is a transport that originates a
@@ -238,7 +361,11 @@ which itself references an instance_id when the caller is an agent.
 
 A stopped or idle agent cannot receive anything by definition — the question
 is what happens to a message addressed to one. One coherent answer, covering
-both edges of the tree (§5):
+all three edges of the tree (§5) — the rules below are edge-agnostic by
+design: they key on the RECIPIENT's state (running instance vs. stopped
+definition vs. sub-agent), never on whether the sender is a user or a peer
+assistant, which is precisely what "apply coherently to all three" (§5.1,
+§5.3) requires:
 
 **Sub-agent invocation (assistant → sub-agent): delivery spawns an instance,
 always.** A sub-agent has no durable existence between calls — `dispatch_task`
@@ -515,6 +642,25 @@ not this spec.
    Today's `dream_consolidate_room` runs against a room's existing content
    on its own schedule; whether/how it is pointed at the bus replay API (poll
    on a cadence, triggered by a threshold, or manual) is not designed here.
+8. **Is a peer message addressed to an assistant DEFINITION or a specific
+   INSTANCE (§5.3)?** §5.1's user↔assistant edge addresses by definition and
+   resolves to an instance at send time; whether an assistant that already
+   knows a specific peer instance's id (e.g. from a prior reply on the same
+   thread) may address that instance directly, bypassing definition-level
+   resolution, is not decided here.
+9. **May a peer message carry a request the recipient can decline (§5.3)?**
+   ADR-0024 is explicit that lateral communication never carries delegate
+   authority — a peer cannot compel another peer to act. Whether the
+   envelope (§11) needs an explicit accept/decline response shape for a
+   peer-to-peer *request* (as distinct from a plain informational message),
+   and what a declined request looks like on the bus, is unresolved.
+10. **Is there any ordering or delivery guarantee between peers (§5.3)?**
+    §11's `delivery_state` field tracks a single envelope's own lifecycle
+    (queued/delivered/acked/dropped), but does not establish whether two
+    peer messages from the same sending instance to the same target are
+    guaranteed to arrive in send order, or whether a peer conversation may
+    interleave with messages from other senders with no ordering guarantee
+    at all. This spec does not resolve it.
 
 ## 13. DOC-N numbering note
 
