@@ -704,10 +704,10 @@ impl InstructionPackage {
     /// section through `bundled_delegation`, which since #4196 (closing #4069)
     /// appends the LIVE computed roster from
     /// `delegation_authority::deployed_roster_section` to the bundled
-    /// `AGENT_DELEGATION` asset, separated by `ROSTER_PRECEDENCE_NOTE`. The
-    /// delivered prompt therefore already carries the real roster; the stale
-    /// `PipelineOutput::merged` path that originally caused #4069 is no longer
-    /// the launch path.
+    /// `AGENT_DELEGATION` asset, separated by `ROSTER_PRECEDENCE_NOTE`. On this
+    /// path the delivered prompt therefore already carries the real roster; the
+    /// stale `PipelineOutput::merged` path that originally caused #4069 is no
+    /// longer the launch path.
     ///
     /// Consequence for #4186, stated because an earlier revision of this comment
     /// got it wrong: byte-identity and roster consumption are **not** in
