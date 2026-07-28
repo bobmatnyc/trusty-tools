@@ -1002,20 +1002,35 @@ async fn persona_delegate_tool_allows_worker_role_target() {
     assert_eq!(spawned, 1, "runner must be reached exactly once");
 }
 
-/// The peer-consult lane (Izzie <-> cto-assistant) must survive the gate.
+/// CONVERTED by ADR-0023 (was `persona_delegate_tool_allows_peer_assistant_
+/// role_target`, asserting the OPPOSITE): the Izzie <-> cto-assistant
+/// peer-consult lane is CLOSED on this path too.
 ///
-/// Why: `ASSISTANT_TIER_ROLE` is in the allowlist precisely so a peer spawn
-/// keeps working — safe because the peer is ALSO routed through the
-/// restricted assistant-tier registry, never an unrestricted one.
-/// What: role `assistant` reaches the runner.
+/// Why: the owner ratified "assistants can communicate with each other, but
+/// never delegate". The persona path is where an L1/L0 assistant would reach
+/// a peer, so the kind rule must hold HERE and not only in `tools::delegate`'s
+/// own tests — the #3745-item-C discipline: a capability model that holds on
+/// one dispatch path is a bug that surfaces as "it works in chat". Kept
+/// rather than deleted so the history of this reversal stays legible.
+/// What: the persona path's own tool refuses an assistant-role target and
+/// never reaches the runner. Note the role allowlist this path applies STILL
+/// admits `assistant` — the refusal comes from the kind predicate in the
+/// shared `execute()` choke point, not from allowlist curation.
 /// Test: this function IS the test.
 #[tokio::test]
-async fn persona_delegate_tool_allows_peer_assistant_role_target() {
+async fn persona_delegate_tool_refuses_peer_assistant_target() {
     let (is_error, msg, spawned) =
         persona_delegate_attempt("cto-assistant", "assistant", "assistant").await;
 
-    assert!(!is_error, "peer assistant role must pass: {msg}");
-    assert_eq!(spawned, 1, "runner must be reached exactly once");
+    assert!(
+        is_error,
+        "an assistant persona must not be able to delegate to a peer assistant"
+    );
+    assert_eq!(spawned, 0, "runner must never be reached: {msg}");
+    assert!(
+        msg.contains("peer assistant"),
+        "the refusal must explain the kind rule, got: {msg}"
+    );
 }
 
 /// A persona whose OWN role is outside the assistant tier model is unchanged

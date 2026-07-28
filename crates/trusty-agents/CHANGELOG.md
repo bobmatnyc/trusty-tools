@@ -51,6 +51,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- **Delegation authority is now governed by agent KIND, not by tier order
+  (ADR-0023).** The shipped L0/L1 gate expressed its rule as a tier
+  comparison, which is a proxy: a total order cannot forbid an edge WITHIN a
+  rank, for any numbering. It appeared to work only because every assistant
+  was L1 and L0 was empty. Under the ratified model — where all assistants
+  become L0 and "assistants communicate with each other, but never delegate"
+  — that check becomes vacuous for exactly the case it must forbid, and no
+  renumbering fixes it. `DelegateToAgentTool::execute` now refuses any
+  assistant-to-assistant delegation edge by reading the two endpoints' `role`
+  (the KIND discriminator), never a tier. The check lives in the shared
+  `execute()` choke point every delegation traverses rather than in a
+  per-call-site builder method, and the delegator's role and tier are declared
+  through a single `with_delegator(role, tier)` call (superseding
+  `with_delegator_tier`), so no construction site can acquire one gate while
+  silently missing the other — the failure shape the persona-path fix above
+  was filed for. The tier gate is RETAINED unchanged as defense-in-depth over
+  a different config field. `pm`/`ctrl`-as-orchestrator are explicitly outside
+  this rule and are unaffected. The `GET /api/agents/:name/subagents` route
+  reports peer assistants as unreachable with the kind reason, reading the
+  same predicate the gate enforces rather than a second copy of it.
+
+  **Known regression, accepted by the owner:** this closes the Izzie <->
+  cto-assistant peer-consult lane, and the replacement mechanism
+  ("assistants communicate") does not exist yet — there is no implemented
+  agent-to-agent messaging path for trusty-agents personas today.
+
 - **Applied the `ASSISTANT_ALLOWED_DELEGATE_ROLES` gate on the persona-chat
   dispatch path (#4201).** The REPL `/agent` persona path built its
   `DelegateToAgentTool` with the #4169 L0/L1 tier gate but WITHOUT the role

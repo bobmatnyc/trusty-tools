@@ -77,10 +77,10 @@ pub(super) fn build_persona_delegate_tool(
     let tool = DelegateToAgentTool::new(runner)
         .with_config_dir(config_dir)
         .with_session_id(session_id);
-    if persona_role != crate::runtime::tool_registry::ASSISTANT_TIER_ROLE {
-        return tool.with_delegator_tier(crate::agents::AgentTier::L0Orchestration);
+    if !crate::agents::delegation::is_assistant_kind(persona_role) {
+        return tool.with_delegator(persona_role, crate::agents::AgentTier::L0Orchestration);
     }
-    tool.with_delegator_tier(declared_tier)
+    tool.with_delegator(persona_role, declared_tier)
         // #4201: the allowlist this path was missing — see the fn doc.
         .with_allowed_target_roles(
             crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
