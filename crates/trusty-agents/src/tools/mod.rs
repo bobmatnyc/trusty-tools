@@ -38,6 +38,8 @@ pub mod pm_bridge_backend;
 pub mod python_skill;
 pub mod registry;
 pub mod run_bash;
+// #4171 (epic #4167): L0-only read-only session-state visibility.
+pub mod session_state;
 pub mod shell;
 pub mod shell_exec;
 pub mod skill_loader;

@@ -493,7 +493,18 @@ pub(super) fn build_registry_for_agent(
 /// `with_allowed_target_roles` is always called here too — see
 /// `DelegateToAgentTool::delegator_tier`'s doc comment for the
 /// belt-and-suspenders rule), never silently skip it.
-pub(super) fn build_assistant_tier_registry(
+///
+/// `delegator_tier` also selects the READ-ONLY SESSION-STATE surface (#4171,
+/// epic #4167): `crate::tools::session_state::session_state_tools` returns
+/// `session_state_list`/`session_state_status`/`session_state_snapshot` for
+/// an L0 agent and NOTHING for an L1 one, so the L1 black-box posture — which
+/// excludes session-state tools by name — becomes structural on this path
+/// rather than a convention held only by each persona's `[tools].allow`.
+/// Test: `assistant_tier_registry_omits_session_state_tools_for_l1`,
+/// `assistant_tier_registry_includes_session_state_tools_for_l0`,
+/// `l1_persona_declaring_session_state_tools_gets_none`,
+/// `l0_persona_declaring_session_state_tools_gets_them`.
+pub(crate) fn build_assistant_tier_registry(
     delegator_allow: Option<&[String]>,
     delegator_tier: crate::agents::AgentTier,
 ) -> ToolRegistry {
@@ -583,6 +594,22 @@ pub(super) fn build_assistant_tier_registry(
         reg.register(tool);
     }
 
+    // #4171 (epic #4167): L0-only read-only session-state tools. Unlike every
+    // other block in this function, registration here is CONDITIONAL —
+    // `session_state_tools` returns an empty vector for any tier other than
+    // `AgentTier::L0Orchestration`, so an L1 registry never contains these
+    // executors at all and `scope_assistant_allowed_tools` (which intersects a
+    // persona's `[tools].allow` globs against THIS registry's schema names)
+    // cannot resolve them even for a persona that declares them verbatim. The
+    // name-level gate in `crate::tools::session_state::retain_tier_permitted`,
+    // applied by `runtime::subagent_mode` after scoping, is the second,
+    // independent barrier that also covers names arriving from live MCP
+    // discovery. Rooted at CWD, matching the `git_tools` block above — the
+    // project the subprocess dispatch was launched in.
+    for tool in crate::tools::session_state::session_state_tools(&cwd, delegator_tier) {
+        reg.register(tool);
+    }
+
     reg
 }
 
@@ -622,7 +649,7 @@ pub(super) fn build_assistant_tier_registry(
 /// `[tools].allow`) or a registry that failed to build must never silently
 /// grant full access. `scope_for_delegation`'s `!is_tainted` branch is the
 /// caller that exercises this in practice — see its own doc comment.
-pub(super) fn scope_assistant_allowed_tools(
+pub(crate) fn scope_assistant_allowed_tools(
     is_assistant_tier: bool,
     existing_allowed: Option<Vec<String>>,
     allow: Option<&[String]>,

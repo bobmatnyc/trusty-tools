@@ -465,6 +465,27 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         delegation_taint_allow.as_deref(),
         registry.as_ref(),
     );
+    // #4171 (epic #4167): the L0-only read-only session-state gate. Applied
+    // AFTER `scope_for_delegation` because it must be the last word on this
+    // path's allowlist: `build_assistant_tier_registry` already withholds the
+    // native `session_state_*` executors from a non-L0 agent, but the
+    // live-MCP discovery step above registers whatever the trusty-mpm service
+    // advertises (`session_list`, `session_status`, `project_list`,
+    // `console_metrics`) into the SAME registry, where a persona's own
+    // `[tools].allow` — or a personalization overlay unioned into it — could
+    // otherwise resolve them. Restricted to the assistant tier for the same
+    // reason `delegator_tier` is at the persona-chat site (#4169): a
+    // non-assistant-tier role is outside the persona tier model entirely and
+    // is never gated by the L0/L1 boundary. Deny-only — it can remove names,
+    // never add one — so an L0 agent still gets exactly what it declares.
+    if is_assistant_tier {
+        if let Some(allowed) = cfg.tools.allowed.take() {
+            cfg.tools.allowed = Some(crate::tools::session_state::retain_tier_permitted(
+                allowed,
+                cfg.agent.tier(),
+            ));
+        }
+    }
     if is_assistant_tier || is_tainted_delegation {
         tracing::info!(
             agent = %name,
