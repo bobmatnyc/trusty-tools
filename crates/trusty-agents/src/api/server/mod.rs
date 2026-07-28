@@ -39,6 +39,7 @@ mod agent_patch;
 mod agent_permissions;
 mod agent_skills;
 mod agent_stores;
+mod agent_subagents;
 mod auth;
 mod cancel;
 mod ctrl_sessions;

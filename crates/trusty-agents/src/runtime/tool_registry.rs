@@ -87,7 +87,15 @@ use tools::{ToolRegistry, shell_exec::ShellExecTool};
 /// TOML/overlay sets `role = "assistant"` regardless of its display name.
 /// Test: `assistant_tier_registry_excludes_skill_catalog_tools`,
 /// `assistant_tier_registry_includes_curated_tools`.
-pub(super) const ASSISTANT_TIER_ROLE: &str = "assistant";
+///
+/// `pub(crate)` (#4029, fourth reader): `api::server::agent_subagents` — the
+/// Sub-agents configuration section — must report whether `delegate_to_agent`
+/// is registered for a given agent AT ALL, which is exactly the
+/// `role == ASSISTANT_TIER_ROLE` branch in `build_registry_for_agent` below.
+/// Reading the constant (rather than re-typing the literal `"assistant"`, as
+/// `ctrl::pm_task::dispatch::persona` was forced to) keeps the config surface
+/// from claiming a mechanism the registry would not wire.
+pub(crate) const ASSISTANT_TIER_ROLE: &str = "assistant";
 
 /// Fail-closed allowlist of `agent.role` values an assistant-tier
 /// `delegate_to_agent` call may target — see
