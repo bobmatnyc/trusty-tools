@@ -496,6 +496,143 @@ async fn reactivate_omits_caller_pane_id_query_when_absent() {
     );
 }
 
+/// A `ManagedSessionSummary` whose workspace is `workspace`, in the `stopped`
+/// shape `run_inplace_relaunch` is normally handed.
+///
+/// Why: the struct has ~20 fields and three #4204 tests need it; inlining it
+/// three more times would be pure noise.
+/// What: `TEST_ID`/`tm-test`/`stopped` with `workspace_path` set and every
+/// other field at its empty default.
+/// Test: used by `run_inplace_relaunch_falls_through_on_gutted_worktree` and
+/// `run_inplace_relaunch_serves_live_linked_worktree`.
+fn stopped_record_at(workspace: &std::path::Path) -> trusty_mpm::client::ManagedSessionSummary {
+    trusty_mpm::client::ManagedSessionSummary {
+        id: TEST_ID.to_string(),
+        name: "tm-test".to_string(),
+        state: "stopped".to_string(),
+        persisted_state: None,
+        workspace_path: Some(workspace.to_string_lossy().to_string()),
+        repo_url: None,
+        branch: None,
+        created_at: None,
+        last_activity_at: None,
+        pending_decision: None,
+        proposed_default: None,
+        source_id: None,
+        task: None,
+        cwd: None,
+        claude_session_id: None,
+        deliverable_id: None,
+        pane_id: None,
+        injection_status: None,
+        unresumable: false,
+        stale_assets: false,
+        attached: false,
+        slot: 0,
+        deleted: false,
+    }
+}
+
+#[tokio::test]
+async fn run_inplace_relaunch_falls_through_on_gutted_worktree() {
+    // ISSUE #4204: a worktree whose `.git` and source tree were stripped keeps
+    // its directory node, so the old `cwd.is_dir()` gate passed and this
+    // function exec'd `claude` into the husk (observed 2026-07-27: PID 63302
+    // plus four MCP children parked on the dead cwd of
+    // `.base/.worktrees/f443c12d-…`). It must now fall through to the picker
+    // instead, BEFORE any daemon mutation.
+    //
+    // The mock answers 409 so that even on pre-fix code — where `claude` may
+    // resolve and the flow would continue — the reactivate is REFUSED and the
+    // real `exec` (which would replace this test process) is never reached.
+    // The decisive assertion is therefore `hits == 0`, not the outcome alone:
+    // against main this test fails either way — with `claude` absent the
+    // outcome is `Result(Err(..))`, and with `claude` present the daemon is
+    // contacted and `hits == 1`.
+    let base = tempfile::tempdir().expect("tempdir");
+    let gutted = base
+        .path()
+        .join(".worktrees")
+        .join("f443c12d-2fb6-4ce1-9f70-2e7695306e47");
+    std::fs::create_dir_all(gutted.join(".claude")).expect("create gutted worktree");
+    assert!(
+        gutted.is_dir() && !gutted.join(".git").exists(),
+        "fixture must be exactly what the old is_dir() gate waved through"
+    );
+
+    let (url, hits) = spawn_mock("HTTP/1.1 409 Conflict").await;
+    let client = reqwest::Client::new();
+
+    let outcome = run_inplace_relaunch(
+        &client,
+        &url,
+        TEST_ID,
+        stopped_record_at(&gutted),
+        None,
+        false,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, InPlaceOutcome::FallThrough),
+        "a gutted worktree must fall through to the picker, never be exec'd into"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "the liveness gate must abort BEFORE any daemon mutation (#2790/#4204)"
+    );
+}
+
+#[tokio::test]
+async fn run_inplace_relaunch_serves_live_linked_worktree() {
+    // THE ANTI-OVER-REFUSAL COUNTERPART. In a linked worktree `.git` is a FILE
+    // holding a `gitdir:` pointer — every managed workspace looks like this. A
+    // guard that assumed a `.git` DIRECTORY would fall through for all of them,
+    // silently breaking in-place relaunch entirely.
+    //
+    // The observable proof that the gate was PASSED is that control reached the
+    // next step: either command resolution failed (no `claude` on this machine)
+    // or the daemon was contacted. The one outcome that must NOT occur is the
+    // gutted signature — `FallThrough` with zero daemon hits.
+    let base = tempfile::tempdir().expect("tempdir");
+    let live = base
+        .path()
+        .join(".worktrees")
+        .join("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    std::fs::create_dir_all(&live).expect("create worktree");
+    std::fs::write(
+        live.join(".git"),
+        "gitdir: /repo/.base/.git/worktrees/live\n",
+    )
+    .expect("write .git pointer file");
+    assert!(
+        live.join(".git").is_file() && !live.join(".git").is_dir(),
+        "fixture must model the linked-worktree .git FILE this test exists for"
+    );
+
+    let (url, hits) = spawn_mock("HTTP/1.1 409 Conflict").await;
+    let client = reqwest::Client::new();
+
+    let outcome = run_inplace_relaunch(
+        &client,
+        &url,
+        TEST_ID,
+        stopped_record_at(&live),
+        None,
+        false,
+    )
+    .await;
+
+    let build_failed = matches!(outcome, InPlaceOutcome::Result(Err(_)));
+    let daemon_contacted = hits.load(Ordering::SeqCst) > 0;
+    assert!(
+        build_failed || daemon_contacted,
+        "a LIVE linked worktree must get past the liveness gate — it fell through \
+         with the daemon never contacted, which is the gutted-workspace verdict"
+    );
+}
+
 #[tokio::test]
 async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
     // #2027 MEDIUM fix: command resolution (resolve `claude` + build the
@@ -515,31 +652,7 @@ async fn run_inplace_relaunch_never_reactivates_when_command_build_fails() {
     }
 
     let (url, hits) = spawn_mock("HTTP/1.1 200 OK").await;
-    let record = trusty_mpm::client::ManagedSessionSummary {
-        id: TEST_ID.to_string(),
-        name: "tm-test".to_string(),
-        state: "stopped".to_string(),
-        persisted_state: None,
-        workspace_path: Some(tmp.path().to_string_lossy().to_string()),
-        repo_url: None,
-        branch: None,
-        created_at: None,
-        last_activity_at: None,
-        pending_decision: None,
-        proposed_default: None,
-        source_id: None,
-        task: None,
-        cwd: None,
-        claude_session_id: None,
-        deliverable_id: None,
-        pane_id: None,
-        injection_status: None,
-        unresumable: false,
-        stale_assets: false,
-        attached: false,
-        slot: 0,
-        deleted: false,
-    };
+    let record = stopped_record_at(tmp.path());
     let client = reqwest::Client::new();
 
     let outcome = run_inplace_relaunch(&client, &url, TEST_ID, record, None, false).await;
