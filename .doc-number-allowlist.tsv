@@ -1,0 +1,25 @@
+# .doc-number-allowlist.tsv — grandfathered document-number allocation
+# violations (see scripts/check_doc_numbers.sh).
+# Format: <CODE><TAB><key>. CODE is one of:
+#   DUP-DOC          key = the DOC number claimed by more than one file
+#   DUP-ADR          key = the ADR number claimed by more than one file
+#   LABEL-MISMATCH   key = the path whose filename and self-label disagree
+#   CATALOG-DANGLING key = the DOC number of a catalog row with no such file
+#   NEXT-FREE        key = the already-claimed number README advertises as free
+# The message column is NEVER part of the key, so rewording a diagnostic
+# never silently un-suppresses a grandfathered row.
+#
+# Ratchet: rows may only be REMOVED. The gate FAILS on any row that no
+# longer describes a real violation, forcing prompt cleanup. Prune with:
+#   scripts/check_doc_numbers.sh --update
+# Do NOT add rows by hand for new work — a new collision must be fixed by
+# picking a free number, not grandfathered.
+#
+# Seeded 2026-07-28 by --seed: the first-ever run of this gate.
+# These are pre-existing allocations, several tangled with open issues
+# (renumbering a live DOC-N rewrites every inbound reference), so they are
+# recorded here for an owner decision rather than rewritten by this gate.
+DUP-ADR	21
+DUP-DOC	28
+DUP-DOC	32
+DUP-DOC	33

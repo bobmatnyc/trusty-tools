@@ -4,7 +4,8 @@
 - **Date:** 2026-07-28
 - **Scope:** crate `trusty-agents` (the `delegate_to_agent` / `dispatch_task` boundary; the L0/L1 tier model, #4167/#4200; touches the `trusty-code` cross-product bridge target and the Sub-agents API/pane, `#4029`/`#4211`)
 - **Reversibility Cost:** High — reverses/re-scopes shipped, tested, owner-directed machinery from epic #4021 (#4026/#4027/#4028/#4211, merged within 48 hours of this ADR), INVERTS the population assignment of the L0/L1 tier model merged the SAME DAY as this decision (PR #4200, squash `ada4d351`), and requires new, currently nonexistent machinery (an editable sub-agent whitelist, an assistant-to-assistant messaging primitive, and a tool-call-counted skill/delegate router)
-- **Decision Drivers:** Product framing clarity (the Sub-agents pane could not honestly present a name that means two different things), the owner's rejection of a UI-only fix, the owner's explicit generalization of the YOLO risk posture to every assistant, a documentation gap (DOC-57 does not yet cover Sub-agents at all, #4182), and the owner's own PM/trusty-mpm prior art as an explicit analogy with an owner-named limit
+- **Decision Drivers:** Product framing clarity (the Sub-agents pane could not honestly present a name that means two different things), the owner's rejection of a UI-only fix, the owner's explicit generalization of the YOLO risk posture to every assistant, a documentation gap (DOC-57 does not yet cover Sub-agents at all, #4182), the owner's own PM/trusty-mpm prior art as an explicit analogy with an owner-named limit, and — underlying all of the above — the owner's virtual-twin authority principle (see "Rationale" below): each assistant must take authority over its own actions, and that authority is not transferable between assistants
+
 - **Supersedes / Superseded by:** — this ADR's OWN prior revision (same document, same day) recommended a hand-authored constant (`ASSISTANT_ALLOWED_DELEGATE_ROLES`-style) as the reachable-target model; decision 2 below explicitly supersedes that recommendation in favor of an editable config whitelist. See "Conflicts and open questions" for the still-unresolved tension with the owner's 2026-07-26 ruling on epic #4021's OQ-2.
 
 ## Context
@@ -301,6 +302,48 @@ This ADR does not yet decide, and defers to the owner (see "Consequences"
 and "Conflicts and open questions"), the mechanics each clause raises but
 does not itself answer — enumerated in the Consequences sections below,
 each ending in an explicit recommendation marked owner-ratify.
+
+## Rationale: The Virtual-Twin Authority Principle
+
+The owner gave the underlying reason the boundary above falls exactly where
+it does, in these words:
+
+> "assistants and COMMUNICATE with each other, the difference is each
+> assistant is a virtual twin that must take authority over its own
+> actions."
+
+**The principle:** each assistant is a virtual twin — it must take authority
+over its own actions. Delegation TRANSFERS authority: one agent commanding
+another to act on its behalf. Communication transfers nothing: it is an
+exchange between two parties, each still acting under its own authority. Two
+twins cannot command each other, because neither can surrender authority
+over its own actions — that authority is not transferable.
+
+This DERIVES the boundary stated in the Decision above, rather than merely
+stipulating it:
+
+- **A sub-agent holds no independent authority.** It is an in-process
+  extension of the assistant that invoked it (single-edge leaf, Context §2),
+  so delegating to it exercises the assistant's OWN authority rather than
+  transferring authority to a second, independent holder. Delegation is
+  coherent for this edge.
+- **An assistant owns its own actions.** One assistant commanding another
+  would require the target to surrender authority over its own actions to
+  the source — the one thing a virtual twin cannot do. Only communication
+  (decisions 1/3/4 above; DOC-60 §5.3) is coherent on this edge.
+- **This is also why YOLO / owner-accepted responsibility attaches to
+  assistants, never to sub-agents** (decision 5): responsibility follows
+  authority, and only assistants hold any.
+
+**Terminology note.** "Virtual twin" also appears elsewhere in this corpus —
+DOC-42 ("Engineering Lead / Virtual Twin Cross-Tool Orchestration
+Architecture," PR #3006, closed unmerged, its live claim since moved to
+DOC-44) and ADR-0016 (which cites DOC-42) use it as a **role name** for the
+Engineering Lead, a persistent, portfolio-level supervisor above PM. Here,
+by contrast, "virtual twin" is **philosophical framing, not a technical
+identifier**: it names the sense in which each assistant owns its own
+actions, motivating the authority principle above. The two usages coexist
+and neither constrains the other.
 
 ## Normative Rule: Delegation Authority Is Governed by Kind, Not by Tier Order
 
@@ -855,7 +898,9 @@ Vetted against prior ADRs (`docs/adr/INDEX.md`) on 2026-07-28 (revision 2):
   "assistant" population are still different things sharing one name.
   Additionally, §7 above uses ADR-0016's PM-analogy sibling (the trusty-mpm
   PM, not ADR-0016 itself) as prior art — worth a forward cross-reference
-  from ADR-0016 once this ADR is accepted.
+  from ADR-0016 once this ADR is accepted. "Rationale" above also uses
+  "virtual twin" in a philosophical sense distinct from ADR-0016's Engineering
+  Lead role name of the same phrase; the two are not in tension.
 - **ADR-0018 (Loopback-only doctrine, Accepted):** Consistent — unchanged.
 - **ADR-0019 (Unified IPC messaging, Accepted, unimplemented):** Extends —
   unchanged, still the most likely foundation for the "communicate"

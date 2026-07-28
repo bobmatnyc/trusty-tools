@@ -1,0 +1,47 @@
+# Document-number allocation gate for the trusty-tools workspace.
+#
+# Nothing owned `DOC-N` / ADR-number allocation, so concurrent authors kept
+# claiming the same number (DOC-42, DOC-46, ADR-0023, plus a stale "next free"
+# hint that misled an author — see scripts/check_doc_numbers.sh's header).
+# This job enforces, via a ratcheted allowlist:
+#   - no two files may claim the same DOC-N or ADR-NNNN (by filename OR by
+#     their own header self-label);
+#   - a file's filename number and its own header self-label must agree;
+#   - every `| DOC-N |` row in the spec catalog must point at a file that
+#     exists (the OTHER direction — every spec needs a catalog row — is already
+#     owned by sld-lint's `spec-catalog` check and is NOT duplicated here);
+#   - the catalog's "next free `DOC-N`" hint must actually be free.
+#
+# Pure text scanning — no Rust toolchain or build needed, so this runs as its
+# own lightweight job (matches line-cap.yml / test-pointers.yml checkout style).
+name: Doc numbers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs for the same ref to save CI minutes (matches
+# line-cap.yml).
+concurrency:
+  group: doc-numbers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  doc-numbers:
+    name: DOC-N / ADR number allocation lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      # Gate on the parser's own fixtures first: the label/filename/catalog
+      # extraction is the part that can silently rot into "0 violations", so a
+      # broken parser must fail loudly rather than make the real gate look
+      # clean. Mirrors line-cap.yml's selftest-then-gate ordering.
+      - name: Doc-number parser selftest (fixtures)
+        run: bash scripts/check_doc_numbers.sh --self-test
+
+      - name: Enforce DOC-N / ADR number allocation (ratcheted allowlist)
+        run: bash scripts/check_doc_numbers.sh
