@@ -67,7 +67,7 @@ use tools::shell::ShellExecTool as LocalOpsShellTool;
 use tools::skill_loader::{FsSkillResolver, SkillListTool, SkillLoaderTool};
 use tools::web_search::{BraveSearchTool, FetchUrlTool};
 use tools::write_file::WriteFileTool;
-use tools::{ToolRegistry, shell_exec::ShellExecTool};
+use tools::{ToolExecutor, ToolRegistry, shell_exec::ShellExecTool};
 
 /// Role string shared by every black-box persona/assistant-tier agent
 /// (`assistant`, `cto-assistant`, `izzie`, `personal-assistant`, …).
@@ -398,6 +398,85 @@ pub(super) fn build_registry_for_agent(
     }
 }
 
+/// Resolve the taint posture forwarded to `SubprocessAgentRunner::with_delegation_taint`
+/// — the fail-closed default, pulled out as its own pure function purely so
+/// it is independently unit-testable (security fix — delegate_to_agent
+/// injection-to-RCE path, code-critic HIGH 2 follow-up on PR #4161: a doc
+/// comment must not cite a test that doesn't exist, and this behavior is
+/// small enough that inlining it left nothing directly testable — the
+/// surrounding `build_assistant_delegate_tool` returns an opaque
+/// `Arc<dyn ToolExecutor>` with no seam to inspect the runner it built).
+/// What: `Some(patterns)` -> `patterns.to_vec()`. `None` -> `Vec::new()` — an
+/// EMPTY (deny-all) list, never a sentinel that skips tainting. This is the
+/// fail-closed guarantee: a caller that couldn't resolve a posture (e.g. no
+/// `[tools].allow` at all) still gets its spawn tainted to nothing, rather
+/// than the taint silently not applying.
+/// Test: `resolve_taint_posture_defaults_to_deny_all_when_none`,
+/// `resolve_taint_posture_preserves_some`.
+fn resolve_taint_posture(posture: Option<&[String]>) -> Vec<String> {
+    posture.map(<[String]>::to_vec).unwrap_or_default()
+}
+
+/// Build this agent's own OUTBOUND `delegate_to_agent` tool, tagged with a
+/// taint posture (security fix — delegate_to_agent injection-to-RCE path,
+/// code-critic HIGH 1 follow-up on PR #4161).
+///
+/// Why: Factored out of `build_assistant_tier_registry` so the taint value
+/// can be RECOMPUTED and the tool RE-REGISTERED after this agent's own
+/// effective posture is known — see the call sites in `run_subagent`
+/// (`runtime/subagent_mode.rs`) and `run_pm_task_with_persona`
+/// (`ctrl/pm_task/dispatch/persona.rs`). The taint composition bug this
+/// closes: `build_registry_for_agent` (and therefore this function) is
+/// necessarily called with only this agent's NATIVE `[tools].allow` before
+/// `scope_for_delegation` can compute whether THIS agent's own spawn was
+/// itself tainted by an upstream delegator. For a single-hop delegation
+/// (`assistant → engineer`) that native value is correct — `engineer` has no
+/// outbound `delegate_to_agent` of its own, so it never calls this function
+/// at all. But for the peer-assistant lane `ASSISTANT_ALLOWED_DELEGATE_ROLES`
+/// explicitly supports (`assistant → izzie → engineer`), izzie DOES call
+/// this function for its OWN outbound delegation — and if izzie forwards its
+/// native allow-list instead of the (possibly narrower) taint IT received,
+/// a 3-hop chain lets a tainted izzie spawn an engineer with izzie's full
+/// native tool surface, violating "a taint only ever narrows, never widens"
+/// from hop 2 onward. The caller closes this by calling this function TWICE
+/// when it is itself assistant-tier: once with the native posture (so
+/// `scope_for_delegation` has a `delegate_to_agent` tool name to resolve
+/// against), then again — replacing the first registration via
+/// `ToolRegistry::replace` — with `cfg.tools.allowed.clone().or(cfg.tools.allow.clone())`
+/// once that effective, already-narrowed-by-any-inbound-taint value is known.
+/// What: Resolves the multi-tier `agents_dir_candidates()`, builds a
+/// `SubprocessAgentRunner` tagged via `with_delegation_taint(Some(posture))`
+/// (defaulting to an empty/deny-all `Vec` when `posture` is `None` — fail
+/// closed, never fail open), and wraps it in a `DelegateToAgentTool` gated
+/// to [`ASSISTANT_ALLOWED_DELEGATE_ROLES`].
+/// Test: `resolve_taint_posture_defaults_to_deny_all_when_none` (the
+/// fail-closed default this function forwards to `with_delegation_taint`),
+/// `multi_hop_delegation_taint_narrows_not_widens` (3-hop chain regression).
+pub(super) fn build_assistant_delegate_tool(posture: Option<&[String]>) -> Arc<dyn ToolExecutor> {
+    let config_dirs = crate::agents::agents_dir_candidates();
+    let primary_config_dir = config_dirs.first().cloned();
+    let runner: Arc<dyn AgentRunner> = Arc::new(
+        crate::subprocess::SubprocessAgentRunner::new()
+            .with_config_dir(primary_config_dir)
+            .with_delegation_taint(Some(resolve_taint_posture(posture))),
+    );
+    // #3555 CRITICAL follow-up: role-gate the assistant tier's delegation
+    // target to workers + peer assistants ONLY — see
+    // `ASSISTANT_ALLOWED_DELEGATE_ROLES`. `pm`/`ctrl` build their own
+    // `DelegateToAgentTool` elsewhere (`ctrl/pm_task/dispatch/*.rs`) and never
+    // call `with_allowed_target_roles`, so they are completely unaffected.
+    Arc::new(
+        DelegateToAgentTool::new(runner)
+            .with_config_dirs(config_dirs)
+            .with_allowed_target_roles(
+                ASSISTANT_ALLOWED_DELEGATE_ROLES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+    )
+}
+
 /// Curated tool registry for black-box persona/assistant-tier agents
 /// (`role == "assistant"`) dispatched via the `--direct`/`--agent`
 /// subprocess path.
@@ -438,20 +517,19 @@ pub(super) fn build_registry_for_agent(
 ///
 /// `delegator_allow` (security fix — delegate_to_agent injection-to-RCE
 /// path, see `ASSISTANT_ALLOWED_DELEGATE_ROLES`'s doc comment and
-/// `scope_assistant_allowed_tools`): this agent's own resolved
-/// `[tools].allow` glob patterns. Threaded into the `DelegateToAgentTool`
-/// this function registers via `SubprocessAgentRunner::with_delegation_taint`
-/// so EVERY spawn this assistant-tier agent makes is tagged with its own
-/// tool posture — regardless of the spawned agent's declared role. Without
-/// this, `delegate_to_agent(agent_name="engineer", ...)` handed a fully
-/// unrestricted `claude-code` subprocess to whatever text reached this
-/// agent's turn (including live Gmail/Drive/web content the untrusted-data
-/// envelope in `persona_memory.rs` never covers, because it only wraps
-/// persisted memory-drawer recall — not live tool return values). `None`
-/// (no `[tools].allow` resolved) still tags the spawn with an EMPTY pattern
-/// list rather than skipping tainting — fail-closed, not fail-open: a
-/// mis-configured or absent allow-list denies the child every tool rather
-/// than granting it every tool.
+/// `scope_assistant_allowed_tools`): the patterns representing THIS agent's
+/// CURRENT effective tool posture — see `build_assistant_delegate_tool`'s
+/// doc comment for why this must be the effective, multi-hop-safe posture
+/// and not merely this agent's native `[tools].allow`. Threaded into the
+/// `DelegateToAgentTool` this function registers via
+/// `SubprocessAgentRunner::with_delegation_taint` so EVERY spawn this
+/// assistant-tier agent makes is tagged with that posture — regardless of
+/// the spawned agent's declared role. Without this, `delegate_to_agent(
+/// agent_name="engineer", ...)` handed a fully unrestricted `claude-code`
+/// subprocess to whatever text reached this agent's turn (including live
+/// Gmail/Drive/web content the untrusted-data envelope in
+/// `persona_memory.rs` never covers, because it only wraps persisted
+/// memory-drawer recall — not live tool return values).
 pub(super) fn build_assistant_tier_registry(delegator_allow: Option<&[String]>) -> ToolRegistry {
     let mut reg = ToolRegistry::new();
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -464,50 +542,7 @@ pub(super) fn build_assistant_tier_registry(delegator_allow: Option<&[String]>) 
 
     reg.register(Arc::new(BraveSearchTool::from_env()));
 
-    // #3555 delegate-resolve follow-up: previously this was a single
-    // hand-rolled `cwd.join(".trusty-agents").join("agents")` — invisible to
-    // the bundled worker roster (`engineer`, `qa-agent`, …) that
-    // `agents::bundled::ensure_bundled_agents_deployed` deploys to
-    // `$HOME/.trusty-agents/agents/` at startup. Any assistant launched from
-    // a directory without its OWN local `.trusty-agents/agents/` (e.g. a bare
-    // worktree root, `/tmp`) failed `delegate_to_agent`'s pre-flight check
-    // before ever reaching the runner — `is_error=true` with no engineer
-    // sub-agent ever spawned. `agents_dir_candidates()` is the exact
-    // multi-tier list `AgentConfig::by_name` uses for the actual spawn (see
-    // `run_subagent`), so validation and spawn now share one source of truth
-    // and can never diverge.
-    let config_dirs = crate::agents::agents_dir_candidates();
-    let primary_config_dir = config_dirs.first().cloned();
-    // Security fix (delegate_to_agent injection-to-RCE path): tag every
-    // spawn from this DelegateToAgentTool with this agent's own
-    // `[tools].allow` posture. `run_subagent` (the child process) reads this
-    // back via `TAGENT_DELEGATION_TAINT_ALLOW` and applies it through
-    // `scope_assistant_allowed_tools` REGARDLESS of the spawned agent's own
-    // role/`[tools].allow` — closing the gap where `scope_assistant_allowed_tools`
-    // previously no-op'd for any target whose OWN role wasn't `"assistant"`
-    // (e.g. `engineer`, which declares no `[tools].allow` at all and would
-    // otherwise get its full unrestricted `claude-code` tool surface).
-    let taint_allow: Vec<String> = delegator_allow.map(<[String]>::to_vec).unwrap_or_default();
-    let runner: Arc<dyn AgentRunner> = Arc::new(
-        crate::subprocess::SubprocessAgentRunner::new()
-            .with_config_dir(primary_config_dir)
-            .with_delegation_taint(Some(taint_allow)),
-    );
-    // #3555 CRITICAL follow-up: role-gate the assistant tier's delegation
-    // target to workers + peer assistants ONLY — see
-    // `ASSISTANT_ALLOWED_DELEGATE_ROLES`. `pm`/`ctrl` build their own
-    // `DelegateToAgentTool` elsewhere (`ctrl/pm_task/dispatch/*.rs`) and never
-    // call `with_allowed_target_roles`, so they are completely unaffected.
-    reg.register(Arc::new(
-        DelegateToAgentTool::new(runner)
-            .with_config_dirs(config_dirs)
-            .with_allowed_target_roles(
-                ASSISTANT_ALLOWED_DELEGATE_ROLES
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            ),
-    ));
+    reg.register(build_assistant_delegate_tool(delegator_allow));
 
     // #3745 item C: register the izzie platform-hosted tools
     // (`get_weather`, `get_train_schedule`, `get_train_alerts`) into the

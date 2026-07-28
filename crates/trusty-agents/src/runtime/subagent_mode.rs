@@ -460,6 +460,40 @@ pub(super) async fn run_subagent(name: &str) -> Result<()> {
         );
     }
 
+    // Security fix (delegate_to_agent injection-to-RCE path, code-critic
+    // HIGH 1 follow-up on PR #4161): multi-hop taint composition.
+    //
+    // `build_registry_for_agent` above (and therefore `build_assistant_
+    // delegate_tool`, when `is_assistant_tier`) was necessarily called with
+    // this agent's NATIVE `cfg.tools.allow` — `cfg.tools.allowed` (the
+    // EFFECTIVE posture, already narrowed by any inbound taint via
+    // `scope_for_delegation` just above) could not exist yet, because
+    // `scope_for_delegation` itself needs the registry to already contain a
+    // `delegate_to_agent` entry to resolve glob patterns against. For a
+    // single-hop delegation (`assistant → engineer`) that ordering is
+    // harmless — `engineer` has no outbound `delegate_to_agent` of its own.
+    // But for the peer-assistant lane `ASSISTANT_ALLOWED_DELEGATE_ROLES`
+    // explicitly supports (`assistant → izzie → engineer`), izzie DOES reach
+    // this code with `is_assistant_tier == true`: without this fix-up,
+    // izzie's OWN outbound `delegate_to_agent` would forward izzie's full
+    // NATIVE allow-list even when izzie itself was spawned via a narrower
+    // inbound taint — a tainted izzie could hand engineer izzie's full
+    // native tool surface, violating "a taint only ever narrows, never
+    // widens" from hop 2 onward. Recompute the effective outbound posture
+    // now that it is known and RE-REGISTER (never re-`register`, which
+    // panics in debug builds on the duplicate name) the delegate tool with
+    // it.
+    if is_assistant_tier && let Some(reg) = registry.as_mut() {
+        let effective_posture = cfg
+            .tools
+            .allowed
+            .clone()
+            .or_else(|| cfg.tools.allow.clone());
+        reg.replace(super::tool_registry::build_assistant_delegate_tool(
+            effective_posture.as_deref(),
+        ));
+    }
+
     let result = if let Some(reg) = registry {
         super::subagent_exec::run_subagent_with_tools(
             &client,

@@ -127,3 +127,101 @@ async fn nonzero_exit_without_result_still_errors() {
         "unexpected error: {err_msg}"
     );
 }
+
+// --- `build_command` env-var wiring (security fix: delegate_to_agent
+// injection-to-RCE path, code-critic HIGH 2 follow-up on PR #4161) ---
+//
+// Why these exist: every OTHER test covering this fix (`scope_for_delegation`,
+// `parse_delegation_taint_env`, `ToolRegistry::replace`) exercises pure
+// functions with hand-constructed arguments. NONE of them proves
+// `spawn.rs` actually sets `TAGENT_DELEGATION_TAINT_ALLOW` on the real
+// `Command`, or that a missing/malformed value is handled the way the doc
+// comments claim. A typo in the env var name, a dropped `cmd.env(...)`
+// call, or an early return that skips it would silently reopen #4126 with
+// every other test still green. `build_command` never spawns anything, so
+// these run instantly and need no `#[cfg(unix)]` guard.
+
+use super::spawn::{SpawnConfig, build_command};
+
+/// Read back a single env var `Command::env` set on a not-yet-spawned
+/// `tokio::process::Command`, via the underlying `std::process::Command`
+/// (`get_envs()` is stable API `tokio::process::Command::as_std()` exposes).
+fn get_env<'a>(cmd: &'a tokio::process::Command, key: &str) -> Option<&'a std::ffi::OsStr> {
+    cmd.as_std()
+        .get_envs()
+        .find(|(k, _)| *k == key)
+        .and_then(|(_, v)| v)
+}
+
+fn minimal_spawn_config<'a>(
+    agent_name: &'a str,
+    delegation_taint_allow: Option<&'a [String]>,
+) -> SpawnConfig<'a> {
+    SpawnConfig {
+        agent_name,
+        task: "irrelevant for Command construction",
+        out_dir: None,
+        code_dir: None,
+        history: &[],
+        ctx: None,
+        config_dir: None,
+        project_dir: None,
+        delegation_taint_allow,
+    }
+}
+
+#[test]
+fn build_command_sets_delegation_taint_env_when_configured() {
+    let patterns = vec!["delegate_to_agent".to_string(), "web_search".to_string()];
+    let cfg = minimal_spawn_config("engineer", Some(&patterns));
+
+    let cmd = build_command(&cfg).expect("build_command should succeed");
+
+    let value = get_env(&cmd, "TAGENT_DELEGATION_TAINT_ALLOW")
+        .expect("TAGENT_DELEGATION_TAINT_ALLOW must be set on the child Command when a taint is configured")
+        .to_str()
+        .expect("env value should be valid UTF-8");
+    let decoded: Vec<String> =
+        serde_json::from_str(value).expect("env value should round-trip as JSON");
+    assert_eq!(decoded, patterns);
+
+    // Also sanity-check the other half of the contract: the child is told
+    // which agent to run.
+    let args: Vec<&std::ffi::OsStr> = cmd.as_std().get_args().collect();
+    assert_eq!(args, vec!["--agent", "engineer"]);
+}
+
+#[test]
+fn build_command_omits_delegation_taint_env_by_default() {
+    // Every non-assistant-tier, non-delegated spawn (the overwhelming
+    // majority — every `pm`/`ctrl`-initiated coding sub-agent) must see NO
+    // `TAGENT_DELEGATION_TAINT_ALLOW` at all, not merely an empty one — the
+    // env var's ABSENCE is what `run_subagent`'s `parse_delegation_taint_env`
+    // treats as "untainted" (`None` in, `None` out). Setting it to anything,
+    // even `"[]"`, would (correctly, but needlessly) taint every ordinary
+    // spawn.
+    let cfg = minimal_spawn_config("engineer", None);
+    let cmd = build_command(&cfg).expect("build_command should succeed");
+    assert_eq!(
+        get_env(&cmd, "TAGENT_DELEGATION_TAINT_ALLOW"),
+        None,
+        "TAGENT_DELEGATION_TAINT_ALLOW must be entirely absent for an untainted spawn"
+    );
+}
+
+#[test]
+fn build_command_empty_taint_is_still_set_as_deny_all() {
+    // `Some(vec![])` (an assistant with no resolved `[tools].allow` at
+    // all — the fail-closed default `build_assistant_delegate_tool` uses
+    // when `posture` is `None`) must still be FORWARDED as an explicit
+    // empty JSON array, not treated the same as "no taint at all" — the
+    // child must see a deny-all taint, not fall through to unrestricted.
+    let empty: Vec<String> = Vec::new();
+    let cfg = minimal_spawn_config("engineer", Some(&empty));
+    let cmd = build_command(&cfg).expect("build_command should succeed");
+    let value = get_env(&cmd, "TAGENT_DELEGATION_TAINT_ALLOW")
+        .expect("an empty taint must still be SET, not omitted")
+        .to_str()
+        .unwrap();
+    assert_eq!(value, "[]");
+}

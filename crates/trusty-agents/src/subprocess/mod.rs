@@ -165,9 +165,13 @@ impl SubprocessAgentRunner {
     /// content fetched in an earlier turn and still present in history).
     /// `None` (every caller except `build_assistant_tier_registry`) leaves
     /// behavior byte-identical to before this field existed.
-    /// Test: `delegation_taint_allow_env_set_when_configured`,
-    /// `delegation_taint_allow_env_absent_by_default` (`subprocess::tests`);
-    /// `scope_assistant_allowed_tools_*` (`tool_registry_tests`).
+    /// Test: `build_command_sets_delegation_taint_env_when_configured`,
+    /// `build_command_omits_delegation_taint_env_by_default`,
+    /// `build_command_empty_taint_is_still_set_as_deny_all` (`subprocess::tests`
+    /// — exercise the real `Command` env wiring via the `build_command` seam,
+    /// not just the pure scoping functions below); `tainted_delegation_cannot_reach_tool_delegator_lacked`,
+    /// `assistant_delegate_to_engineer_path_is_scoped`,
+    /// `multi_hop_delegation_taint_narrows_not_widens` (`tool_registry_tests`).
     pub fn with_delegation_taint(mut self, patterns: Option<Vec<String>>) -> Self {
         self.delegation_taint_allow = patterns;
         self

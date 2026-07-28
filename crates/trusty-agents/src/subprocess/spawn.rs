@@ -114,7 +114,14 @@ pub async fn spawn_subagent_and_run_with_full_env_ctx(
 /// optional per-call `RunContext`, and optional `config_dir` (which when
 /// present is forwarded to the child as `TAGENT_CONFIG_DIR`).
 /// Test: Both public callers exercise this struct end-to-end via the
-/// existing subprocess integration tests.
+/// existing subprocess integration tests; `build_command`'s own doc comment
+/// covers the env/`Command`-construction-specific unit tests.
+///
+/// `Clone, Copy`: every field is a borrowed reference or `Option` thereof,
+/// so this is free — lets `spawn_and_run_inner` pass `&cfg` into
+/// `build_command` and then destructure the original `cfg` by value for the
+/// fields `build_command` doesn't need (`task`, `history`).
+#[derive(Clone, Copy)]
 pub(super) struct SpawnConfig<'a> {
     pub(super) agent_name: &'a str,
     pub(super) task: &'a str,
@@ -152,17 +159,165 @@ pub(super) struct SpawnConfig<'a> {
 /// `rescue_valid_result_on_nonzero_exit` and
 /// `nonzero_exit_without_result_still_errors` unit tests in this module.
 pub(super) async fn spawn_and_run_inner(cfg: SpawnConfig<'_>) -> Result<IpcMessage> {
+    let mut cmd = build_command(&cfg)?;
     let SpawnConfig {
         agent_name,
         task,
+        history,
+        ..
+    } = cfg;
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn sub-agent '{agent_name}'"))?;
+
+    // #199: emit `AgentStarted` once the subprocess is alive and ready to
+    // accept its task on stdin. Distinct from `AgentSpawned` (which fires
+    // when the parent decides to delegate) — this signals the work loop is
+    // actually under way.
+    crate::events::publish(crate::events::Event::AgentStarted {
+        session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
+            .unwrap_or_default(),
+        agent_name: agent_name.to_string(),
+        runner_type: "subprocess".to_string(),
+    });
+
+    let mut child_stdin = child.stdin.take().context("sub-agent stdin not captured")?;
+    let child_stdout = child
+        .stdout
+        .take()
+        .context("sub-agent stdout not captured")?;
+
+    let task_msg = if history.is_empty() {
+        IpcMessage::new_task(task)
+    } else {
+        IpcMessage::new_task_with_history(task, history.to_vec())
+    };
+    let task_line = serialize_message(&task_msg)?;
+
+    let write_handle = tokio::spawn(async move {
+        child_stdin
+            .write_all(task_line.as_bytes())
+            .await
+            .context("failed to write task to sub-agent stdin")?;
+        child_stdin
+            .shutdown()
+            .await
+            .context("failed to close sub-agent stdin")?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    let read_handle = tokio::spawn(async move {
+        let mut reader = BufReader::new(child_stdout);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .await
+            .context("failed to read sub-agent stdout")?;
+        Ok::<String, anyhow::Error>(line)
+    });
+
+    let (write_res, read_res) = tokio::join!(write_handle, read_handle);
+    write_res.context("writer task panicked")??;
+    let line = read_res.context("reader task panicked")??;
+
+    let status = child.wait().await.context("failed to wait for sub-agent")?;
+    tracing::debug!(?status, "sub-agent exited");
+
+    if line.trim().is_empty() {
+        bail!("sub-agent produced no output");
+    }
+
+    // #147: Rescue valid NDJSON result even when sub-agent exits non-zero.
+    let msg = parse_message(&line)?;
+    if !status.success() {
+        match &msg {
+            IpcMessage::Result { .. } => {
+                tracing::warn!(
+                    exit_code = ?status.code(),
+                    agent = %agent_name,
+                    "sub-agent exited non-zero but produced valid output — treating as success (#147)"
+                );
+            }
+            _ => {
+                record_mistake_fire_and_forget(
+                    agent_name,
+                    crate::mistake_log::MistakeType::NonzeroExit,
+                    status.code(),
+                    "",
+                    &line,
+                    task,
+                );
+                bail!(
+                    "sub-agent '{}' exited with status {} and no valid result",
+                    agent_name,
+                    status
+                );
+            }
+        }
+    }
+
+    // #199: emit `ReportGenerated` when the agent produced a final result
+    // before handing it back to the PM. Word count is a cheap whitespace
+    // split — exact accuracy isn't important; we just want a coarse
+    // productivity signal for the UI.
+    if let IpcMessage::Result {
+        content, status, ..
+    } = &msg
+    {
+        let word_count = content.split_whitespace().count();
+        crate::events::publish(crate::events::Event::ReportGenerated {
+            session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
+                .unwrap_or_default(),
+            agent_name: agent_name.to_string(),
+            word_count,
+            status: status.clone(),
+        });
+    }
+
+    Ok(msg)
+}
+
+/// Construct the (unspawned) child `Command` for a sub-agent invocation —
+/// the `Command`-building half of `spawn_and_run_inner`, pulled out as its
+/// own seam (security fix — delegate_to_agent injection-to-RCE path,
+/// code-critic HIGH 2 follow-up on PR #4161).
+///
+/// Why: Before this seam existed, NOTHING tested that `TAGENT_DELEGATION_TAINT_ALLOW`
+/// actually gets set on the child `Command` — every existing test exercised
+/// `scope_for_delegation`/`parse_delegation_taint_env` with hand-constructed
+/// arguments, never the real env var round-trip. A typo in the var name, a
+/// dropped `cmd.env(...)` call, or a reordering that puts it behind an early
+/// `return`/`?` would silently reopen #4126 with every other test still
+/// green. Spawning a real subprocess just to inspect its env is slow and
+/// awkward to assert against; splitting `Command` construction out lets a
+/// test call `build_command` directly and read back `.get_envs()` — no
+/// process ever starts.
+/// What: Everything `spawn_and_run_inner` used to do before `cmd.spawn()`:
+/// resolves `current_exe`, sets `--agent <name>` + stdio, and applies every
+/// `cmd.env(...)`/`cmd.current_dir(...)` override from `cfg` (`TAGENT_CONFIG_DIR`,
+/// `TAGENT_DELEGATION_TAINT_ALLOW`, the MPM sub-agent marker, identity vars,
+/// `TAGENT_OUT_DIR`/`TAGENT_CODE_DIR`/`TAGENT_PROJECT_DIR`, and the `ctx`-driven
+/// overrides). Returns the built (not yet spawned) `Command`.
+/// Test: `build_command_sets_delegation_taint_env_when_configured`,
+/// `build_command_omits_delegation_taint_env_by_default`,
+/// `build_command_empty_taint_is_still_set_as_deny_all` (`subprocess::tests`
+/// — none of the three spawn anything, so none need `#[cfg(unix)]`). The
+/// `serde_json::to_string` `Err` branch below is NOT separately unit-tested
+/// — it is genuinely unreachable for a `Vec<String>` (string serialization
+/// cannot fail structurally); the fallback exists as defense-in-depth, not
+/// because a Vec<String> is expected to ever fail to encode.
+pub(super) fn build_command(cfg: &SpawnConfig<'_>) -> Result<Command> {
+    let SpawnConfig {
+        agent_name,
         out_dir,
         code_dir,
-        history,
         ctx,
         config_dir,
         project_dir,
         delegation_taint_allow,
-    } = cfg;
+        ..
+    } = *cfg;
 
     let exe_path: PathBuf = std::env::current_exe().context("failed to resolve current_exe")?;
 
@@ -310,115 +465,7 @@ pub(super) async fn spawn_and_run_inner(cfg: SpawnConfig<'_>) -> Result<IpcMessa
         // `Command` inherits the parent environment by default.
     }
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn sub-agent '{agent_name}'"))?;
-
-    // #199: emit `AgentStarted` once the subprocess is alive and ready to
-    // accept its task on stdin. Distinct from `AgentSpawned` (which fires
-    // when the parent decides to delegate) — this signals the work loop is
-    // actually under way.
-    crate::events::publish(crate::events::Event::AgentStarted {
-        session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
-            .unwrap_or_default(),
-        agent_name: agent_name.to_string(),
-        runner_type: "subprocess".to_string(),
-    });
-
-    let mut child_stdin = child.stdin.take().context("sub-agent stdin not captured")?;
-    let child_stdout = child
-        .stdout
-        .take()
-        .context("sub-agent stdout not captured")?;
-
-    let task_msg = if history.is_empty() {
-        IpcMessage::new_task(task)
-    } else {
-        IpcMessage::new_task_with_history(task, history.to_vec())
-    };
-    let task_line = serialize_message(&task_msg)?;
-
-    let write_handle = tokio::spawn(async move {
-        child_stdin
-            .write_all(task_line.as_bytes())
-            .await
-            .context("failed to write task to sub-agent stdin")?;
-        child_stdin
-            .shutdown()
-            .await
-            .context("failed to close sub-agent stdin")?;
-        Ok::<(), anyhow::Error>(())
-    });
-
-    let read_handle = tokio::spawn(async move {
-        let mut reader = BufReader::new(child_stdout);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .await
-            .context("failed to read sub-agent stdout")?;
-        Ok::<String, anyhow::Error>(line)
-    });
-
-    let (write_res, read_res) = tokio::join!(write_handle, read_handle);
-    write_res.context("writer task panicked")??;
-    let line = read_res.context("reader task panicked")??;
-
-    let status = child.wait().await.context("failed to wait for sub-agent")?;
-    tracing::debug!(?status, "sub-agent exited");
-
-    if line.trim().is_empty() {
-        bail!("sub-agent produced no output");
-    }
-
-    // #147: Rescue valid NDJSON result even when sub-agent exits non-zero.
-    let msg = parse_message(&line)?;
-    if !status.success() {
-        match &msg {
-            IpcMessage::Result { .. } => {
-                tracing::warn!(
-                    exit_code = ?status.code(),
-                    agent = %agent_name,
-                    "sub-agent exited non-zero but produced valid output — treating as success (#147)"
-                );
-            }
-            _ => {
-                record_mistake_fire_and_forget(
-                    agent_name,
-                    crate::mistake_log::MistakeType::NonzeroExit,
-                    status.code(),
-                    "",
-                    &line,
-                    task,
-                );
-                bail!(
-                    "sub-agent '{}' exited with status {} and no valid result",
-                    agent_name,
-                    status
-                );
-            }
-        }
-    }
-
-    // #199: emit `ReportGenerated` when the agent produced a final result
-    // before handing it back to the PM. Word count is a cheap whitespace
-    // split — exact accuracy isn't important; we just want a coarse
-    // productivity signal for the UI.
-    if let IpcMessage::Result {
-        content, status, ..
-    } = &msg
-    {
-        let word_count = content.split_whitespace().count();
-        crate::events::publish(crate::events::Event::ReportGenerated {
-            session_id: crate::env_compat::env_var("TAGENT_RUN_ID", "OPEN_MPM_RUN_ID")
-                .unwrap_or_default(),
-            agent_name: agent_name.to_string(),
-            word_count,
-            status: status.clone(),
-        });
-    }
-
-    Ok(msg)
+    Ok(cmd)
 }
 
 /// #186: Fire-and-forget mistake logger used by both subprocess paths.

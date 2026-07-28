@@ -711,6 +711,150 @@ fn assistant_delegate_to_engineer_path_is_scoped() {
     );
 }
 
+#[test]
+fn multi_hop_delegation_taint_narrows_not_widens() {
+    // Code-critic HIGH 1 follow-up on PR #4161: taint composition across a
+    // 3-hop chain `assistant -> izzie -> engineer`, the peer-assistant lane
+    // `ASSISTANT_ALLOWED_DELEGATE_ROLES` explicitly supports.
+    //
+    // The bug: `build_registry_for_agent` (and therefore izzie's OWN
+    // outbound `delegate_to_agent`, built by `build_assistant_delegate_tool`
+    // when izzie's role is itself "assistant") is necessarily constructed
+    // using izzie's NATIVE `[tools].allow` — `cfg.tools.allowed` (izzie's
+    // EFFECTIVE, already-taint-narrowed posture) cannot exist yet at that
+    // point, because computing it needs the registry to already contain a
+    // `delegate_to_agent` entry. If izzie's outbound taint is never
+    // corrected afterward, a tainted izzie forwards its full NATIVE
+    // allow-list to whatever it delegates to next — even patterns izzie's
+    // OWN inbound taint from `assistant` never granted it. This is
+    // exploitable precisely because a native `[tools].allow` glob list is
+    // just strings: a pattern like `"shell_exec"` sitting in izzie's TOML
+    // matches nothing in izzie's OWN curated registry (which never
+    // registers a real `shell_exec` tool), so it is inert for izzie's own
+    // turn — but the SAME string, forwarded verbatim as the next hop's
+    // taint, matches a real `shell_exec` tool in engineer's registry.
+    //
+    // This test mirrors, at the pure-function level, the exact composition
+    // `runtime::subagent_mode::run_subagent` performs: build the registry
+    // with the native posture (unavoidable, first pass), compute the
+    // effective posture via `scope_for_delegation`, then recompute the
+    // OUTBOUND taint as `cfg.tools.allowed.or(cfg.tools.allow)` — the fixed
+    // formula — and contrasts it against the PRE-FIX formula (always
+    // forward the native list) to prove the fix is load-bearing, not
+    // incidental.
+    // Test: this test IS the regression coverage code-critic asked for
+    // ("fails without this fix").
+
+    // izzie's native `[tools].allow` (hop 2's own TOML) — deliberately
+    // broader than what `assistant` (hop 1) actually grants it, including a
+    // pattern ("shell_exec") that resolves to nothing in izzie's OWN
+    // registry but WOULD resolve against a coding agent's registry. This
+    // models exactly the risk the code-critic flagged: "a user-authored
+    // peer persona could reintroduce it."
+    let izzie_native_allow = vec![
+        "delegate_to_agent".to_string(),
+        "web_search".to_string(),
+        "shell_exec".to_string(),
+    ];
+
+    // The taint `assistant` (hop 1) actually forwards to izzie — narrower:
+    // no `shell_exec`.
+    let inbound_taint_from_assistant =
+        vec!["delegate_to_agent".to_string(), "web_search".to_string()];
+
+    // Hop 1 -> 2: build izzie's registry (first pass, native posture —
+    // unavoidable per the doc comment on `build_assistant_delegate_tool`),
+    // then compute izzie's EFFECTIVE posture given the inbound taint.
+    let izzie_reg = build_registry_for_agent(
+        "izzie",
+        "assistant",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        Some(&izzie_native_allow),
+    )
+    .expect("izzie (role=assistant) builds a registry");
+    assert!(
+        !izzie_reg.contains("shell_exec"),
+        "fixture assumption: izzie's own curated registry never registers a real \
+         shell_exec tool, regardless of what strings its [tools].allow lists"
+    );
+
+    let izzie_effective = scope_for_delegation(
+        true,
+        true,
+        None,
+        None,
+        Some(&inbound_taint_from_assistant),
+        Some(&izzie_reg),
+    )
+    .expect("a tainted assistant-tier spawn is always scoped");
+    assert!(
+        !izzie_effective.iter().any(|n| n == "shell_exec"),
+        "izzie's effective posture must not contain shell_exec: {izzie_effective:?}"
+    );
+
+    // Hop 2 -> 3: the FIXED outbound formula (`cfg.tools.allowed.or(cfg.tools.allow)`,
+    // `runtime::subagent_mode::run_subagent`'s post-scoping fix-up) vs. the
+    // PRE-FIX formula (always the native list, ignoring any inbound taint).
+    let izzie_outbound_fixed: Option<Vec<String>> =
+        Some(izzie_effective.clone()).or_else(|| Some(izzie_native_allow.clone()));
+    let izzie_outbound_pre_fix: Vec<String> = izzie_native_allow.clone();
+
+    let engineer_reg = build_registry_for_agent(
+        "local-ops-agent",
+        "engineer",
+        None,
+        None,
+        empty_skill_registry(),
+        empty_tag_registry(),
+        None,
+    )
+    .expect("engineer-shaped registry builds");
+    assert!(
+        engineer_reg.contains("shell_exec"),
+        "fixture assumption: engineer's registry has a REAL shell_exec tool"
+    );
+
+    let fixed_result = scope_for_delegation(
+        false,
+        true,
+        None,
+        None,
+        izzie_outbound_fixed.as_deref(),
+        Some(&engineer_reg),
+    )
+    .expect("tainted spawn is always scoped");
+    assert!(
+        !fixed_result.iter().any(|n| n == "shell_exec"),
+        "FIXED: a 3-hop assistant -> izzie -> engineer chain must not let engineer reach \
+         shell_exec, which izzie's own inbound taint never granted; kept={fixed_result:?}"
+    );
+
+    // Prove the test actually distinguishes fixed from buggy behavior: the
+    // PRE-FIX formula (izzie always forwarding its native list) DOES leak
+    // shell_exec to engineer. If a future change reintroduces the bug (e.g.
+    // reverts the `.or_else` fix-up to always use the native list), this
+    // assertion pins the exact failure mode `fixed_result` above must never
+    // exhibit.
+    let buggy_result = scope_for_delegation(
+        false,
+        true,
+        None,
+        None,
+        Some(&izzie_outbound_pre_fix),
+        Some(&engineer_reg),
+    )
+    .expect("tainted spawn is always scoped");
+    assert!(
+        buggy_result.iter().any(|n| n == "shell_exec"),
+        "sanity: the PRE-FIX formula (forwarding izzie's native allow-list unconditionally) \
+         must actually be exploitable in this fixture, or this test proves nothing; \
+         kept={buggy_result:?}"
+    );
+}
+
 /// #3555 CRITICAL follow-up (code-critic) — live wiring check, `#[ignore]`d
 /// by default.
 ///
@@ -852,6 +996,155 @@ fn deployed_assistant_config_survives_scoping_with_delegate_to_agent() {
         "delegate_to_agent must survive the refresh -> deployed-config -> \
          registry-scoping chain, got: {kept:?}"
     );
+}
+
+// --- `resolve_taint_posture` (security fix: delegate_to_agent
+// injection-to-RCE path, code-critic HIGH 2 follow-up on PR #4161) ---
+
+#[test]
+fn resolve_taint_posture_defaults_to_deny_all_when_none() {
+    // `build_assistant_delegate_tool`'s fail-closed default: `None` (no
+    // resolved posture) must become an EMPTY Vec, not skip tainting.
+    assert_eq!(resolve_taint_posture(None), Vec::<String>::new());
+}
+
+#[test]
+fn resolve_taint_posture_preserves_some() {
+    let patterns = vec!["delegate_to_agent".to_string(), "web_search".to_string()];
+    assert_eq!(resolve_taint_posture(Some(&patterns)), patterns);
+}
+
+// --- Structural backstop: every `DelegateToAgentTool::new(...)` construction
+// site in the crate (code-critic MEDIUM follow-up on PR #4161) ---
+
+/// The fail-open default this fix deliberately keeps (absent taint signal ->
+/// `None` -> pre-fix behavior) means a FUTURE construction site that
+/// registers `DelegateToAgentTool` for an assistant-tier role but forgets to
+/// wire `.with_delegation_taint(...)` fails OPEN — silently, in production —
+/// exactly how #4126 happened (`engineer.toml` had no `[tools].allow` and
+/// nobody noticed `scope_assistant_allowed_tools` never applied to it).
+///
+/// Why: A missed call site is a code-review failure mode, not something a
+/// pure-function unit test can catch (`scope_for_delegation`,
+/// `resolve_taint_posture`, etc. are all correct in isolation — the risk is
+/// a NEW site never calling into them at all). This test is a structural
+/// scan, not a functional one: it enumerates every real
+/// `DelegateToAgentTool::new(` occurrence under `src/`, asserts the found
+/// set EXACTLY matches `EXPECTED_SITES` (so an added OR removed site fails
+/// the test immediately, forcing a conscious audit — see the assertion
+/// message), then for every site flagged `must_taint = true`, asserts the
+/// file actually contains a `.with_delegation_taint(` call.
+/// What: `EXPECTED_SITES` is a hand-audited table, current as of PR #4161:
+///   - `runtime/tool_registry.rs` (`build_assistant_delegate_tool`) — ALWAYS
+///     assistant-tier (only ever called when `role == ASSISTANT_TIER_ROLE`).
+///   - `ctrl/pm_task/dispatch/persona.rs` (`run_pm_task_with_persona`) —
+///     conditionally assistant-tier (any agent name via `/agent`); the file
+///     must still contain a `.with_delegation_taint(` call reachable when
+///     `persona_cfg.agent.role == "assistant"`.
+///   - `ctrl/pm_task/dispatch/history.rs` (`run_pm_task_with_history`) — the
+///     CTRL orchestrator's OWN top-level session; role is always
+///     `"controller"`/`"orchestrator"`, never assistant-tier. No taint.
+///   - `runtime/pm_mode.rs` (`run_pm`) — the `pm` orchestrator's OWN
+///     registry; role is always `"orchestrator"`. No taint.
+/// Test: this IS the test — `every_delegate_to_agent_construction_site_has_an_audited_taint_posture`.
+#[test]
+fn every_delegate_to_agent_construction_site_has_an_audited_taint_posture() {
+    /// (path relative to the crate root, must this site's file contain a
+    /// `.with_delegation_taint(` call).
+    const EXPECTED_SITES: &[(&str, bool)] = &[
+        ("src/runtime/tool_registry.rs", true),
+        ("src/ctrl/pm_task/dispatch/persona.rs", true),
+        ("src/ctrl/pm_task/dispatch/history.rs", false),
+        ("src/runtime/pm_mode.rs", false),
+    ];
+
+    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            // Exclude test-support files (this test's OWN file included —
+            // `tool_registry_tests.rs` necessarily contains the literal
+            // string `"DelegateToAgentTool::new("` as part of ITS OWN
+            // detection logic + doc comments, which would otherwise
+            // self-match and corrupt `found_sites`). Production call sites
+            // never live in a `*_test.rs`/`*_tests.rs` file.
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if stem.ends_with("_test") || stem.ends_with("_tests") {
+                continue;
+            }
+            out.push(path);
+        }
+    }
+
+    let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut rs_files = Vec::new();
+    collect_rs_files(&crate_root.join("src"), &mut rs_files);
+
+    let mut found_sites: Vec<String> = Vec::new();
+    for file in &rs_files {
+        let Ok(content) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        // A REAL construction call, not a doc-comment mention (e.g.
+        // `tools/delegate.rs`'s own `/// Test: DelegateToAgentTool::new(...)`
+        // doc comment) or this test's own literal string above. `.contains`
+        // (not `.starts_with`) because a real call is sometimes nested,
+        // e.g. `registry.register(Arc::new(DelegateToAgentTool::new(runner)))`
+        // (`runtime/pm_mode.rs`) — only doc-comment lines (`///`/`//!`/`//`)
+        // are excluded.
+        let has_real_call = content.lines().any(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//") && trimmed.contains("DelegateToAgentTool::new(")
+        });
+        if has_real_call {
+            let rel = file
+                .strip_prefix(crate_root)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .replace('\\', "/");
+            found_sites.push(rel);
+        }
+    }
+    found_sites.sort();
+
+    let mut expected: Vec<&str> = EXPECTED_SITES.iter().map(|(p, _)| *p).collect();
+    expected.sort();
+
+    assert_eq!(
+        found_sites, expected,
+        "DelegateToAgentTool::new(...) construction sites in the crate have \
+         changed since this test's EXPECTED_SITES table was last audited \
+         (PR #4161). A NEW site (or a removed one) must be reflected here \
+         WITH an explicit, hand-verified taint-posture decision — do not \
+         just add the path to make this test pass. found={found_sites:?} \
+         expected={expected:?}"
+    );
+
+    for (path, must_taint) in EXPECTED_SITES {
+        if !*must_taint {
+            continue;
+        }
+        let content = std::fs::read_to_string(crate_root.join(path))
+            .unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        assert!(
+            content.contains(".with_delegation_taint("),
+            "{path}: registers DelegateToAgentTool for a path that reaches \
+             assistant-tier, but the file has no `.with_delegation_taint(` \
+             call anywhere — this is the exact gap that caused #4126"
+        );
+    }
 }
 
 // --- `parse_delegation_taint_env` (security fix: delegate_to_agent

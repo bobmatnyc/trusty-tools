@@ -118,6 +118,33 @@ impl ToolRegistry {
         self.tools.insert(name, tool);
     }
 
+    /// Deliberately overwrite a tool that was already registered under the
+    /// same name — the `register`-vs-`replace` counterpart to #101's
+    /// duplicate-registration guard.
+    ///
+    /// Why: `register`'s `debug_assert!` exists to catch ACCIDENTAL
+    /// double-registration bugs; it is not a ban on ever correcting an
+    /// entry. One legitimate case: `runtime::tool_registry::
+    /// build_assistant_delegate_tool` is registered once with a PROVISIONAL
+    /// taint posture (the only value available before this agent's own
+    /// effective `[tools].allowed` can be computed, since that computation
+    /// itself needs the registry to already contain a `delegate_to_agent`
+    /// entry to resolve glob patterns against — see that function's doc
+    /// comment for the full multi-hop-delegation-taint rationale), then
+    /// intentionally re-registered with the corrected value once known. Any
+    /// other caller wanting to swap a tool's implementation after the fact
+    /// should use this instead of a second `register` call, which panics in
+    /// debug builds.
+    /// What: Same underlying `HashMap::insert` as `register`, minus the
+    /// duplicate-name assertion — inserting a name that was never registered
+    /// is also valid (acts as `register`).
+    /// Test: `replace_overwrites_existing_tool_without_panicking`,
+    /// `replace_on_unregistered_name_acts_like_register`.
+    pub fn replace(&mut self, tool: Arc<dyn ToolExecutor>) {
+        let name = tool.name().to_string();
+        self.tools.insert(name, tool);
+    }
+
     /// Check whether a tool is registered.
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)

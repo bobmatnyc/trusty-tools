@@ -148,6 +148,66 @@ async fn register_panics_on_duplicate_name_in_debug() {
     reg.register(Arc::new(FakeTool));
 }
 
+/// Second tool registered under the SAME name ("fake") as [`FakeTool`], with
+/// a distinguishable output — lets `replace_overwrites_existing_tool_without_panicking`
+/// prove the second registration actually took effect, not merely that no
+/// panic occurred.
+struct FakeToolV2;
+
+#[async_trait]
+impl ToolExecutor for FakeToolV2 {
+    fn name(&self) -> &str {
+        "fake"
+    }
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "fake",
+                "description": "A fake tool for tests (v2).",
+                "parameters": {"type":"object","properties":{},"additionalProperties":false}
+            }
+        })
+    }
+    async fn execute(&self, _args: Value) -> ToolResult {
+        ToolResult::ok("fake-output-v2")
+    }
+}
+
+#[tokio::test]
+async fn replace_overwrites_existing_tool_without_panicking() {
+    // `ToolRegistry::replace` (security fix, code-critic HIGH 1 follow-up on
+    // PR #4161 — see `runtime::tool_registry::build_assistant_delegate_tool`)
+    // is the deliberate-overwrite counterpart to `register`'s panic-on-dup
+    // guard. Registering "fake" twice via `register` would panic in debug
+    // builds (see `register_panics_on_duplicate_name_in_debug` above);
+    // `replace` must not panic, and the SECOND tool's behavior must win.
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(FakeTool));
+    reg.replace(Arc::new(FakeToolV2));
+    assert!(reg.contains("fake"));
+    let out = reg.dispatch("fake", serde_json::json!({})).await;
+    assert!(!out.is_error());
+    assert_eq!(
+        out.content(),
+        "fake-output-v2",
+        "replace must overwrite the first registration, not merely coexist with it"
+    );
+}
+
+#[tokio::test]
+async fn replace_on_unregistered_name_acts_like_register() {
+    // `replace` on a name that was never registered is also valid — it
+    // behaves exactly like `register` (a fresh insert), so callers never
+    // need to branch on "is this the first registration or a correction".
+    let mut reg = ToolRegistry::new();
+    reg.replace(Arc::new(FakeTool));
+    assert!(reg.contains("fake"));
+    let out = reg.dispatch("fake", serde_json::json!({})).await;
+    assert!(!out.is_error());
+    assert_eq!(out.content(), "fake-output");
+}
+
 #[test]
 fn delegate_tool_schema_is_valid() {
     let tool = delegate_to_agent_tool().unwrap();
