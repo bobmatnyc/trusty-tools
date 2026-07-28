@@ -47,6 +47,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **A read-only GitHub PR/CI inspection surface granted to the L0
+  orchestration tier ONLY** (#4170, epic #4167). Five tools in a new
+  `tools::gh_tools` — `gh_pr_list`, `gh_pr_view`, `gh_pr_checks`,
+  `gh_run_list`, `gh_run_view` — returning `gh`'s own output verbatim rather
+  than re-shaped JSON. **No mutating capability is granted**: there is no
+  `pr create`/`merge`/`edit`/`comment`/`close`, no `run rerun`, no
+  `workflow run`, and a test fails the build if a mutating verb ever appears
+  in a tool's name or description. The tier gate lives INSIDE the factory
+  (which returns an empty vector for any tier but `L0Orchestration`), so a
+  future call site that forgets to guard its loop still registers nothing,
+  and an L1 persona declaring `gh_pr_view`, `gh_*` or `*` matches nothing and
+  is granted nothing. Registered on BOTH assistant dispatch paths — the
+  `--direct`/`--agent` subprocess path and the persona-chat path — since
+  registering in only one is the divergence #3745 item C had to fix.
+  Every LLM-supplied operand is passed as argv, never through a shell, and
+  must be non-empty, ≤200 chars, free of a leading `-`, and drawn from
+  `[A-Za-z0-9._/#:@-]`; `repo` must be exactly `owner/repo`, `state`/`status`
+  are closed enums, and `limit` clamps to 1–100. `gh pr checks` reports check
+  state through its exit code, so a non-zero exit is returned as normal
+  output rather than an error — otherwise the most useful CI primitive would
+  report failure on exactly the state an orchestrator calls it to observe.
 - **`l0_shell_exec` — a shell/build/test executor granted to the L0
   orchestration tier ONLY** (#4173, epic #4167). `tools::l0_exec` returns an
   empty tool vector for `AgentTier::L1Standard`, so an L1 persona never has the

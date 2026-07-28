@@ -21,6 +21,8 @@ pub mod file_filter;
 pub mod finish_task;
 pub mod format_translator;
 pub mod fs_reader;
+// #4170 (epic #4167): GitHub PR/CI inspection, grantable to L0 only.
+pub mod gh_tools;
 pub mod git_tools;
 pub mod izzie;
 // #4173 (epic #4167): the L0-orchestration-tier-only shell/build/test grant.
