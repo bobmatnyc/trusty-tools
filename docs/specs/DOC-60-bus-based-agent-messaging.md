@@ -3,7 +3,13 @@
 **Status:** Draft
 **Spec ID:** `SPEC-AGENTBUS-01~draft`
 **Subsystem:** trusty-mpm (bus host, daemon) — trusty-agents (assistants, sub-agents, ctrl) — trusty-channels (Slack/Telegram/etc.) — trusty-memory (consolidation target) — trusty-search (index target)
-**Last-updated:** 2026-07-28 (Rev 1: unified all three communication edges — user↔assistant, assistant↔sub-agent, assistant↔assistant — into equally-specified first-class sections per owner instruction; documents assistant↔assistant as the replacement for the delegation lane closed by PR #4240/ADR-0024)
+**Last-updated:** 2026-07-28 (Rev 2: §12 Open Question 9, decline-ability of a
+peer request, moved into §5.3 as a normative consequence derived from
+ADR-0024's virtual-twin authority principle; remaining open questions
+renumbered. Rev 1: unified all three communication edges — user↔assistant,
+assistant↔sub-agent, assistant↔assistant — into equally-specified
+first-class sections per owner instruction; documents assistant↔assistant as
+the replacement for the delegation lane closed by PR #4240/ADR-0024)
 
 ## 1. Summary
 
@@ -328,6 +334,20 @@ cto-assistant lane.
   not memory-eligible by default and is promoted only through consolidation,
   carrying the same `message_id` provenance pointer. No special-casing for
   the peer edge is introduced.
+- **Decline-ability.** Answered by derivation, not left open: per
+  [ADR-0024](../adr/0024-subagents-in-process-only-assistants-communicate-not-delegate.md)'s
+  virtual-twin authority principle — each assistant must take authority over
+  its own actions, and that authority is not transferable — a peer message
+  that carries a request for action MUST be decline-able. A non-decline-able
+  request would compel the recipient to act on the sender's behalf, which is
+  delegation under another name and indistinguishable in effect from the
+  assistant→assistant edge ADR-0024 forbids. The envelope (§11) therefore
+  needs an explicit accept/decline response shape for a peer *request*, as
+  distinct from a plain informational message — the recipient's standing
+  authority to decline is what keeps this edge coherent as communication
+  rather than command. The exact wire shape of that accept/decline response
+  is left to §11's eventual normative revision; this spec settles only that
+  decline-ability itself is required, not optional.
 
 **What is explicitly NOT a node in this tree:** a channel (Slack, Telegram)
 is not a third participant kind; it is a transport that originates a
@@ -648,19 +668,17 @@ not this spec.
    knows a specific peer instance's id (e.g. from a prior reply on the same
    thread) may address that instance directly, bypassing definition-level
    resolution, is not decided here.
-9. **May a peer message carry a request the recipient can decline (§5.3)?**
-   ADR-0024 is explicit that lateral communication never carries delegate
-   authority — a peer cannot compel another peer to act. Whether the
-   envelope (§11) needs an explicit accept/decline response shape for a
-   peer-to-peer *request* (as distinct from a plain informational message),
-   and what a declined request looks like on the bus, is unresolved.
-10. **Is there any ordering or delivery guarantee between peers (§5.3)?**
-    §11's `delivery_state` field tracks a single envelope's own lifecycle
-    (queued/delivered/acked/dropped), but does not establish whether two
-    peer messages from the same sending instance to the same target are
-    guaranteed to arrive in send order, or whether a peer conversation may
-    interleave with messages from other senders with no ordering guarantee
-    at all. This spec does not resolve it.
+9. **Is there any ordering or delivery guarantee between peers (§5.3)?**
+   §11's `delivery_state` field tracks a single envelope's own lifecycle
+   (queued/delivered/acked/dropped), but does not establish whether two
+   peer messages from the same sending instance to the same target are
+   guaranteed to arrive in send order, or whether a peer conversation may
+   interleave with messages from other senders with no ordering guarantee
+   at all. This spec does not resolve it.
+
+   *(Former Open Question 9 — whether a peer request may be decline-able —
+   is no longer open: it is answered by derivation from ADR-0024's
+   virtual-twin authority principle and is now normative text in §5.3.)*
 
 ## 13. DOC-N numbering note
 
