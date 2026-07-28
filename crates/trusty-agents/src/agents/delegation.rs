@@ -1,4 +1,11 @@
-//! Delegation authority as a function of agent KIND (ADR-0023).
+//! Delegation authority as a function of agent KIND (ADR-0024).
+//!
+//! The governing decision is ADR-0024, "Assistants Are Level-0 Delegators;
+//! Sub-Agents Are In-Process, Single-Edge Leaves That Never Delegate" — cited
+//! by number AND title because it is not on `main` yet (it lands with PR
+//! #4243; it was drafted as ADR-0023 and renumbered when the worktree-
+//! authority ADR took that slot, so an older draft reference to "ADR-0023"
+//! elsewhere means a DIFFERENT document).
 //!
 //! Why: the shipped delegation gate encoded its rule against TIER
 //! (`delegate.rs`: `target_tier == L0Orchestration && delegator_tier !=
@@ -6,7 +13,7 @@
 //! happened to coincide with kind — every assistant was `L1Standard` and `L0`
 //! was an empty tier, so "assistant delegating to assistant" and "L1
 //! delegating to L1" were the same event and no L0-vs-L0 edge could exist.
-//! ADR-0023 decision 3 breaks that coincidence deliberately (every assistant
+//! ADR-0024 decision 3 breaks that coincidence deliberately (every assistant
 //! becomes L0), and a total order over tiers is structurally incapable of
 //! forbidding an edge WITHIN a rank, for ANY numbering — so no renumbering
 //! fixes it and any future check leaning on tier values reintroduces the same
@@ -29,7 +36,7 @@ use crate::runtime::tool_registry::ASSISTANT_TIER_ROLE;
 
 /// Is `role` the assistant KIND?
 ///
-/// Why: ADR-0023 predicate 1 fixes `KIND` as the EXISTING `agent.role` field —
+/// Why: ADR-0024 predicate 1 fixes `KIND` as the EXISTING `agent.role` field —
 /// specifically `role == ASSISTANT_TIER_ROLE` — and not a new attribute.
 /// Deliberately NOT `AgentInfo::kind`: that field is picker-grouping metadata
 /// whose own doc comment forbids exactly this use ("Conflating any of the
@@ -50,7 +57,7 @@ pub(crate) fn is_assistant_kind(role: &str) -> bool {
 }
 
 /// Does the KIND rule refuse a delegation edge from `source_role` to
-/// `target_role`? (ADR-0023 predicates 1 + 2.)
+/// `target_role`? (ADR-0024 predicates 1 + 2.)
 ///
 /// Why: "assistants communicate with each other, but never delegate" (owner,
 /// 2026-07-28). Expressed on the edge rather than on ranks, this is the ONLY
@@ -60,7 +67,7 @@ pub(crate) fn is_assistant_kind(role: &str) -> bool {
 /// reads a tier at all.
 /// What: `true` — refuse — exactly when BOTH endpoints are the assistant kind.
 /// A non-assistant SOURCE is outside this rule's population entirely, which is
-/// deliberate and is ADR-0023 predicate 1's explicit scope caveat: `pm`/`ctrl`
+/// deliberate and is ADR-0024 predicate 1's explicit scope caveat: `pm`/`ctrl`
 /// -as-orchestrator (role `orchestrator`/`controller`) delegate today through
 /// separately-trusted, pre-existing paths this rule does not revisit, so their
 /// edges are never refused here. A non-assistant TARGET (a sub-agent) is the
@@ -102,7 +109,7 @@ mod tests {
         }
     }
 
-    /// ADR-0023 predicate 2, the peer prohibition.
+    /// ADR-0024 predicate 2, the peer prohibition.
     #[test]
     fn kind_refuses_assistant_to_assistant() {
         assert!(kind_refuses_delegation("assistant", "assistant"));

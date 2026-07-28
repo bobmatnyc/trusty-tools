@@ -151,10 +151,10 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(named.contains(&"engineer"), "{named:?}");
-    // ADR-0023: a peer assistant is still REPORTED (role-eligible, so it is
+    // ADR-0024: a peer assistant is still REPORTED (role-eligible, so it is
     // not silently dropped) but is no longer REACHABLE — assistants
     // communicate with each other rather than delegating. This assertion
-    // replaces the pre-ADR-0023 one that treated izzie as a live target; the
+    // replaces the pre-ADR-0024 one that treated izzie as a live target; the
     // pane must never advertise a capability the gate refuses.
     let izzie = targets
         .iter()
@@ -220,7 +220,7 @@ async fn subagents_route_reports_both_mechanisms_for_an_assistant() {
 /// config surface reporting it as reachable would advertise a capability the
 /// runtime denies.
 ///
-/// ADR-0023 update: the L0 fixture is now a SUB-AGENT (`engineer`), not an
+/// ADR-0024 update: the L0 fixture is now a SUB-AGENT (`engineer`), not an
 /// assistant. An assistant-role L0 target is refused by the kind predicate
 /// before the tier comparison is consulted, which would leave this test
 /// green while testing nothing about tier — the same isolation applied to
@@ -253,7 +253,7 @@ async fn subagents_route_hides_l0_target_from_l1_delegator() {
     assert!(reason.contains("L0/L1"), "{reason}");
     assert!(reason.contains("#4169"), "{reason}");
 
-    // Not a blanket denial: an L1 SUB-AGENT is still reachable. (Pre-ADR-0023
+    // Not a blanket denial: an L1 SUB-AGENT is still reachable. (Pre-ADR-0024
     // this assertion used the peer assistant `izzie`; a peer is now refused by
     // kind, so the "one-directional, not blanket" property is demonstrated
     // with a target the kind rule permits.)
@@ -266,7 +266,7 @@ async fn subagents_route_hides_l0_target_from_l1_delegator() {
 /// L1 ones). Without this, a bug that reported every L0 target as unreachable
 /// would pass the test above.
 ///
-/// ADR-0023 update: the L0 target is a sub-agent (`engineer` role) for the
+/// ADR-0024 update: the L0 target is a sub-agent (`engineer` role) for the
 /// same isolation reason as the test above — an assistant-role target would
 /// be refused by kind, so this would no longer prove anything about tier.
 #[tokio::test]
@@ -327,7 +327,7 @@ async fn subagents_route_tier_fails_closed_for_an_unrecognized_value() {
         &["delegate_to_agent"],
         None,
     );
-    // ADR-0023: sub-agent-kind L0 target, so the tier fail-closed posture is
+    // ADR-0024: sub-agent-kind L0 target, so the tier fail-closed posture is
     // what this test observes rather than the kind predicate.
     write_agent(dir.path(), "orch", "engineer", Some("l0"), &[], None);
 

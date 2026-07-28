@@ -16,7 +16,7 @@ pub mod claude_code_runner;
 pub mod claude_mpm_loader;
 mod config;
 pub mod context_filter;
-// ADR-0023: the KIND delegation predicate. `pub(crate)` — it is an
+// ADR-0024: the KIND delegation predicate. `pub(crate)` — it is an
 // enforcement primitive, not part of the crate's public surface.
 pub(crate) mod delegation;
 pub mod extends;

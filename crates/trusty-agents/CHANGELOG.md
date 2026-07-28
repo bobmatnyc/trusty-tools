@@ -52,7 +52,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Security
 
 - **Delegation authority is now governed by agent KIND, not by tier order
-  (ADR-0023).** The shipped L0/L1 gate expressed its rule as a tier
+  (ADR-0024, "Assistants Are Level-0 Delegators; Sub-Agents Are In-Process,
+  Single-Edge Leaves That Never Delegate" — cited by title as well as number
+  because the ADR is not on `main` yet; it lands with PR #4243).** The
+  shipped L0/L1 gate expressed its rule as a tier
   comparison, which is a proxy: a total order cannot forbid an edge WITHIN a
   rank, for any numbering. It appeared to work only because every assistant
   was L1 and L0 was empty. Under the ratified model — where all assistants

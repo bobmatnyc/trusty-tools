@@ -98,7 +98,7 @@ pub(super) async fn run_pm() -> Result<()> {
     // called here) — pre-flight validation, including the new one-directional
     // L0/L1 tier gate, is entirely skipped for it (see
     // `DelegateToAgentTool::execute`'s `config_dirs.is_empty()` guard), so
-    // `run_pm` needs no `with_delegator` call to be correct (ADR-0023: it
+    // `run_pm` needs no `with_delegator` call to be correct (ADR-0024: it
     // therefore also declares no delegator KIND, so the peer-assistant
     // predicate is a no-op here — deliberate, this is predicate 1's explicit
     // orchestrator scope caveat, and unreachable from any assistant anyway).

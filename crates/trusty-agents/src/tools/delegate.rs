@@ -79,7 +79,7 @@ pub struct DelegateToAgentTool {
     /// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
     /// `delegate_assistant_role_gate_rejects_controller_role`,
     /// `delegate_assistant_role_gate_allows_worker_role`,
-    /// `delegate_peer_assistant_is_refused_despite_role_allowlist` (ADR-0023:
+    /// `delegate_peer_assistant_is_refused_despite_role_allowlist` (ADR-0024:
     /// this list still ADMITS the assistant role — the peer edge is refused
     /// by the kind predicate in `execute`, never by curating this list).
     allowed_target_roles: Option<Vec<String>>,
@@ -124,10 +124,10 @@ pub struct DelegateToAgentTool {
     /// `no_tier_and_no_role_gate_preserves_cheap_existence_check`,
     /// `delegator_identity_defaults_to_none_on_construction`.
     delegator_tier: Option<crate::agents::AgentTier>,
-    /// This instance's OWN `agent.role` — the DELEGATOR's KIND (ADR-0023,
+    /// This instance's OWN `agent.role` — the DELEGATOR's KIND (ADR-0024,
     /// issue #4201 follow-up).
     ///
-    /// Why: ADR-0023 makes delegation authority a function of KIND
+    /// Why: ADR-0024 makes delegation authority a function of KIND
     /// (assistant vs. sub-agent), never of tier order, because a total order
     /// over tiers cannot forbid an edge WITHIN a rank — see
     /// [`crate::agents::delegation`] for the structural argument. Enforcing
@@ -141,7 +141,7 @@ pub struct DelegateToAgentTool {
     /// where a per-gate builder method one call site simply forgot to call
     /// left that path ungated with nothing to catch it.
     /// What: `None` — no delegator identity was declared — means the kind
-    /// predicate does not run, byte-identical to pre-ADR-0023 behavior. That
+    /// predicate does not run, byte-identical to pre-ADR-0024 behavior. That
     /// population is `runtime::pm_mode::run_pm` (which also attaches no
     /// `config_dirs`, so it skips the entire pre-flight block regardless) and
     /// tests exercising unrelated resolution behavior. `Some(role)` means
@@ -283,10 +283,10 @@ impl DelegateToAgentTool {
     }
 
     /// Declare THIS instance's own delegator identity — its `agent.role`
-    /// (KIND, ADR-0023) and its `AgentInfo::tier()` (#4169, epic #4167).
+    /// (KIND, ADR-0024) and its `AgentInfo::tier()` (#4169, epic #4167).
     ///
     /// Why: See the `delegator_role` and `delegator_tier` field docs. Role and
-    /// tier are taken TOGETHER, in one call, on purpose (ADR-0023 conformance;
+    /// tier are taken TOGETHER, in one call, on purpose (ADR-0024 conformance;
     /// superseded the tier-only `with_delegator_tier`): they are two readings
     /// of one fact — who this delegator is — and the gates derived from them
     /// are meant to be indivisible. A per-gate builder method that each caller
@@ -444,7 +444,7 @@ impl ToolExecutor for DelegateToAgentTool {
                             }
                             None => true,
                         };
-                        // ADR-0023 predicates 1+2, the PRIMARY carrier of the
+                        // ADR-0024 predicates 1+2, the PRIMARY carrier of the
                         // rule: an assistant may never DELEGATE to another
                         // assistant ("assistants communicate with each other,
                         // but never delegate"). Enforced here, in the shared
@@ -470,7 +470,7 @@ impl ToolExecutor for DelegateToAgentTool {
                                 target_role = %cfg.agent.role,
                                 "delegate_to_agent: refusing an assistant-to-assistant \
                                  delegation — assistants communicate, they do not delegate \
-                                 to one another (ADR-0023)"
+                                 to one another (ADR-0024)"
                             );
                         }
                         (
@@ -499,7 +499,7 @@ impl ToolExecutor for DelegateToAgentTool {
                 (false, false, false)
             };
             if kind_blocked {
-                // ADR-0023 AC, same rationale as the tier message below: the
+                // ADR-0024 AC, same rationale as the tier message below: the
                 // assistant/sub-agent split is a product-level concept the
                 // owner named directly, so explaining it educates rather than
                 // leaking — it enumerates no roster entry beyond the one name
@@ -541,7 +541,7 @@ impl ToolExecutor for DelegateToAgentTool {
                      as tools instead of via delegate_to_agent."
                 ));
             }
-            // ADR-0023 observability gap: until now ONLY refusals logged, so a
+            // ADR-0024 observability gap: until now ONLY refusals logged, so a
             // gate that had silently stopped matching (exactly #4201's shape)
             // produced no signal at all — an operator could not tell an
             // authorized delegation from an unenforced one. One line on the

@@ -256,7 +256,7 @@ async fn in_product_surface(
                 let target_tier = target.agent.tier();
                 let tier_blocked = target_tier == AgentTier::L0Orchestration
                     && delegator_tier != AgentTier::L0Orchestration;
-                // ADR-0023: the KIND predicate the gate now enforces, read
+                // ADR-0024: the KIND predicate the gate now enforces, read
                 // from the SAME function `DelegateToAgentTool::execute` calls
                 // — not a second copy of the comparison. Without this the
                 // pane would advertise every peer assistant as reachable
@@ -277,7 +277,7 @@ async fn in_product_surface(
                         Some(
                             "refused by the delegation kind rule: this target is a peer \
                              assistant, and assistants communicate with each other rather \
-                             than delegating to one another (ADR-0023). Delegation targets \
+                             than delegating to one another (ADR-0024). Delegation targets \
                              are sub-agents (specialists)."
                                 .to_string(),
                         )

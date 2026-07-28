@@ -63,7 +63,9 @@ use super::super::helpers::match_any_glob;
 /// Test: `persona_delegate_tool_refuses_orchestrator_role_target`,
 /// `persona_delegate_tool_refuses_controller_role_target`,
 /// `persona_delegate_tool_allows_worker_role_target`,
-/// `persona_delegate_tool_allows_peer_assistant_role_target`,
+/// `persona_delegate_tool_refuses_peer_assistant_target` (ADR-0024 renamed
+/// this from `..._allows_peer_assistant_role_target` when the peer-consult
+/// lane closed — the pointer must track the rename, not the old name),
 /// `persona_delegate_tool_leaves_non_assistant_roles_ungated`.
 pub(super) fn build_persona_delegate_tool(
     runner: Arc<dyn AgentRunner>,

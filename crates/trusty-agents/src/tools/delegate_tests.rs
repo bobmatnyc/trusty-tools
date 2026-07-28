@@ -401,7 +401,7 @@ async fn delegate_assistant_role_gate_allows_worker_role() {
     assert_eq!(runner.invoked.lock().unwrap().len(), 1);
 }
 
-/// CONVERTED by ADR-0023 (was `delegate_assistant_role_gate_allows_peer_
+/// CONVERTED by ADR-0024 (was `delegate_assistant_role_gate_allows_peer_
 /// assistant_role`, which asserted the OPPOSITE): the Izzie <-> cto-assistant
 /// peer-consult lane is now CLOSED. The owner ratified "assistants can
 /// communicate with each other, but never delegate", so a peer assistant is
@@ -567,7 +567,7 @@ fn session_id_gate_normalizes_blank_to_none() {
 /// An L1-tier delegator must be refused when the resolved target's own
 /// declared tier is L0 (orchestration). The runner must never be invoked.
 ///
-/// ADR-0023 update: the L0 fixture's role is now `engineer`, not `assistant`.
+/// ADR-0024 update: the L0 fixture's role is now `engineer`, not `assistant`.
 /// With an assistant-role target this test would be satisfied by the KIND
 /// predicate before the tier gate ever ran, silently becoming a duplicate of
 /// `delegate_assistant_to_assistant_is_refused` and leaving predicate 3 (the
@@ -615,7 +615,7 @@ async fn delegate_l1_to_l0_is_refused() {
 /// The counter-test: an L0-tier delegator reaching an L1 (standard) target
 /// must succeed — this must not break legitimate downward delegation.
 ///
-/// ADR-0023 update: the target is now a sub-agent (`engineer`), not `izzie`
+/// ADR-0024 update: the target is now a sub-agent (`engineer`), not `izzie`
 /// (role `assistant`). An assistant target would now be refused by the kind
 /// predicate for reasons that have nothing to do with tier, which would make
 /// this tier test assert the opposite of what it is named for.
@@ -650,7 +650,7 @@ async fn delegate_l0_to_l1_succeeds() {
 /// ("this instance was never asked to enforce the kind or tier gates") and
 /// are both set by the single `with_delegator` call.
 ///
-/// ADR-0023 update (was `delegator_tier_defaults_to_none_on_construction`):
+/// ADR-0024 update (was `delegator_tier_defaults_to_none_on_construction`):
 /// the two fields are asserted TOGETHER because the builder sets them
 /// together on purpose — a call site must not be able to declare its tier
 /// while leaving its kind undeclared, which is the structural property that
@@ -708,7 +708,7 @@ async fn delegate_malformed_target_tier_resolves_l1_and_is_not_tier_blocked() {
 /// specific regression #4169 exists to prevent: a dispatch path (like
 /// `ctrl::pm_task::dispatch::persona`, historically) that builds a
 /// `DelegateToAgentTool` with a `config_dir` but no role allowlist must
-/// still be tier-gated. (ADR-0023 update: sub-agent-kind L0 fixture, so the
+/// still be tier-gated. (ADR-0024 update: sub-agent-kind L0 fixture, so the
 /// kind predicate cannot be what refuses this — see
 /// `delegate_l1_to_l0_is_refused`'s note.)
 #[tokio::test]
@@ -743,7 +743,7 @@ async fn delegate_tier_gate_applies_even_without_role_allowlist() {
     assert!(runner.invoked.lock().unwrap().is_empty());
 }
 
-/// TRANSITIVE / multi-hop escalation must be impossible, and ADR-0023 now
+/// TRANSITIVE / multi-hop escalation must be impossible, and ADR-0024 now
 /// severs it at the FIRST edge rather than the second.
 ///
 /// CONVERTED from `delegate_multi_hop_l1_peer_to_l0_is_refused`, whose hop 1
@@ -889,7 +889,7 @@ async fn no_tier_and_no_role_gate_preserves_cheap_existence_check() {
 }
 
 // ============================================================================
-// ADR-0023: delegation authority is governed by KIND, never by tier order.
+// ADR-0024: delegation authority is governed by KIND, never by tier order.
 //
 // "Assistants can communicate with each other, but never delegate." These
 // tests are written entirely against ROLE/KIND fixtures. None of them
@@ -941,7 +941,7 @@ async fn delegate_assistant_to_assistant_is_refused() {
 /// ratified inversion creates and the one a tier-ordering gate is
 /// structurally incapable of refusing.
 ///
-/// Why: if a future change moves assistants from L1 to L0 (as ADR-0023
+/// Why: if a future change moves assistants from L1 to L0 (as ADR-0024
 /// decision 3 requires), or swaps the labels, or adds a third tier, a gate or
 /// a test phrased in tier values silently stops testing the real rule. This
 /// test cannot: its fixtures are built from ROLES, and it asserts the SAME
@@ -1035,7 +1035,7 @@ async fn delegate_assistant_to_sub_agent_still_succeeds() {
     }
 }
 
-/// ADR-0023 predicate 1's scope caveat, pinned: `pm`/`ctrl`-as-orchestrator
+/// ADR-0024 predicate 1's scope caveat, pinned: `pm`/`ctrl`-as-orchestrator
 /// sit OUTSIDE the assistant/sub-agent model and must NOT be newly blocked.
 ///
 /// Why: this fix must not silently change orchestrator behavior. `pm`
@@ -1068,7 +1068,7 @@ async fn delegate_kind_gate_does_not_touch_orchestrator_sources() {
     assert_eq!(runner.invoked.lock().unwrap().len(), 1);
 }
 
-/// A delegator that declares no identity at all keeps pre-ADR-0023 behavior.
+/// A delegator that declares no identity at all keeps pre-ADR-0024 behavior.
 ///
 /// Why: `runtime::pm_mode::run_pm` constructs the tool with neither identity
 /// nor `config_dirs`; pinning the `None` semantics here documents that the

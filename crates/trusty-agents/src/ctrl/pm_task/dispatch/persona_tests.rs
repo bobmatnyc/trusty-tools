@@ -1002,7 +1002,7 @@ async fn persona_delegate_tool_allows_worker_role_target() {
     assert_eq!(spawned, 1, "runner must be reached exactly once");
 }
 
-/// CONVERTED by ADR-0023 (was `persona_delegate_tool_allows_peer_assistant_
+/// CONVERTED by ADR-0024 (was `persona_delegate_tool_allows_peer_assistant_
 /// role_target`, asserting the OPPOSITE): the Izzie <-> cto-assistant
 /// peer-consult lane is CLOSED on this path too.
 ///

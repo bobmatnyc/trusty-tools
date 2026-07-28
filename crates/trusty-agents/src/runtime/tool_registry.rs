@@ -94,7 +94,7 @@ use tools::{ToolRegistry, shell_exec::ShellExecTool};
 /// `role == ASSISTANT_TIER_ROLE` branch in `build_registry_for_agent` below.
 /// Reading the constant (rather than re-typing the literal `"assistant"`)
 /// keeps the config surface from claiming a mechanism the registry would not
-/// wire. ADR-0023 gave this constant a second reader of the same shape:
+/// wire. ADR-0024 gave this constant a second reader of the same shape:
 /// `crate::agents::delegation::is_assistant_kind`, the ONE definition of the
 /// assistant KIND, which `ctrl::pm_task::dispatch::persona_gate` now calls
 /// instead of comparing the literal inline.
@@ -119,14 +119,14 @@ pub(crate) const ASSISTANT_TIER_ROLE: &str = "assistant";
 /// `agent.toml` (NOT the agent/file name — `qa-agent.toml` declares
 /// `role = "qa"`, not `"qa-agent"`) plus [`ASSISTANT_TIER_ROLE`] itself. That
 /// last entry was added for the Izzie <-> cto-assistant peer-consult lane;
-/// ADR-0023 has since CLOSED that lane (see the note below), so it no longer
+/// ADR-0024 has since CLOSED that lane (see the note below), so it no longer
 /// admits any delegation edge on its own. Any role not in this list —
 /// including anything not yet declared in the bundled roster — is rejected.
 /// Test: `delegate_assistant_role_gate_rejects_orchestrator_role`,
 /// `delegate_assistant_role_gate_rejects_controller_role`,
 /// `delegate_assistant_role_gate_allows_worker_role`,
 /// `delegate_peer_assistant_is_refused_despite_role_allowlist`
-/// (`src/tools/delegate.rs`). ADR-0023 note: `ASSISTANT_TIER_ROLE` remains in
+/// (`src/tools/delegate.rs`). ADR-0024 note: `ASSISTANT_TIER_ROLE` remains in
 /// this list, but an assistant-to-assistant EDGE is now refused by the kind
 /// predicate inside `DelegateToAgentTool::execute`
 /// (`crate::agents::delegation`) — the peer-consult lane this entry was added
@@ -571,7 +571,7 @@ pub(crate) fn build_assistant_tier_registry(
                     .map(|s| s.to_string())
                     .collect(),
             )
-            // ADR-0023: the delegator's KIND is `ASSISTANT_TIER_ROLE` by
+            // ADR-0024: the delegator's KIND is `ASSISTANT_TIER_ROLE` by
             // construction, not by assumption — `build_registry_for_agent`
             // (line ~188) routes into this function on exactly that role and
             // on no other, so every caller of this registry IS an assistant.
