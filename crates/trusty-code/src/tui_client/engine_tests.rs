@@ -291,3 +291,71 @@ fn statusline_segments_reflect_active_workstream_and_clear_on_none() {
         "deactivation must clear the segment, not leave a stale one"
     );
 }
+
+/// Regression test for issue #3494: a daemon that accepts the TCP
+/// connection but never sends response headers must not hang
+/// `pump_session_events`'s initial `GET /sessions/{id}/events` forever —
+/// before this fix, `.send().await` had no per-request bound and would wait
+/// indefinitely, completely bypassing `SESSION_STREAM_MAX_RECONNECTS`.
+///
+/// Uses a raw `TcpListener` that accepts every connection and then holds it
+/// open without ever writing a byte — the exact "TCP accepted, headers
+/// never sent" trigger the issue describes (a `wiremock` mock always
+/// completes the HTTP handshake, so it can't reproduce this). If
+/// `CONNECT_TIMEOUT` were removed, `.send().await` would still be pending
+/// when the outer bound below elapses, and no `ConnectionLost` would ever
+/// arrive — this test would fail deterministically on a timeout rather than
+/// hang the test binary, same rationale as
+/// `tests/tui_client_engine.rs`'s exhausted-reconnects test.
+///
+/// Deliberately does NOT wait for `pump_session_events` to exhaust all
+/// `SESSION_STREAM_MAX_RECONNECTS` (every attempt would hang the same way,
+/// ~1 minute total) — observing the FIRST `ConnectionLost` is sufficient
+/// proof the connect attempt is bounded by `CONNECT_TIMEOUT`, not infinite.
+#[tokio::test]
+async fn events_connect_hang_is_bounded_by_connect_timeout_not_infinite() {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    std_listener.set_nonblocking(true).expect("set_nonblocking");
+    let listener = tokio::net::TcpListener::from_std(std_listener).expect("tokio listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    // Accept connections forever, never writing/closing — `mem::forget`
+    // keeps each accepted socket's fd open (dropping it would close the
+    // connection, which reqwest would see as a fast, distinct failure mode,
+    // not the hang this test targets).
+    let accept_task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            std::mem::forget(stream);
+        }
+    });
+
+    let state = EngineState::new(
+        RpcHttpClient::new(reqwest::Client::new(), format!("http://{addr}")),
+        None,
+    );
+    let (tx, mut rx) = unbounded_channel();
+
+    let pump_task = tokio::spawn(async move { state.pump_session_events("s-1", &tx).await });
+
+    // CONNECT_TIMEOUT (10s) plus slack — comfortably short of the ~1 minute
+    // a full 5-reconnect exhaustion would take, but generous enough that
+    // this never flakes on a loaded CI box.
+    match tokio::time::timeout(CONNECT_TIMEOUT + Duration::from_secs(10), rx.recv()).await {
+        Ok(Some(ReplEvent::ConnectionLost { reason })) => {
+            assert!(
+                reason.contains("connection failed"),
+                "expected a transport-error ConnectionLost from the timed-out connect, got: \
+                 {reason}"
+            );
+        }
+        Ok(Some(other)) => panic!("expected ConnectionLost, got {other:?}"),
+        Ok(None) => panic!("channel closed with no event — pump_session_events exited silently"),
+        Err(_) => panic!(
+            "no ConnectionLost observed within CONNECT_TIMEOUT + slack — the initial connect \
+             attempt hung past CONNECT_TIMEOUT (issue #3494 regression)"
+        ),
+    }
+
+    pump_task.abort();
+    accept_task.abort();
+}

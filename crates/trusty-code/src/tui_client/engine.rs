@@ -52,6 +52,31 @@ use super::workstream_subscription::run_workstream_subscription;
 /// and `workstream_subscription.rs`.
 pub(super) const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// Bound on the initial `GET /sessions/{id}/events` request — from
+/// connecting through receiving response headers — before
+/// `EngineState::pump_session_events` treats it as a failed attempt (issue
+/// #3494).
+///
+/// Why: `build_http_client()` sets a `connect_timeout(5s)` at the
+/// `reqwest::Client` level, which only bounds the TCP handshake. A daemon
+/// that accepts the connection but then never sends response headers (e.g.
+/// wedged, deadlocked, or slow-lorising) leaves `.send().await` pending
+/// forever — hanging `pump_session_events` indefinitely and completely
+/// bypassing `SESSION_STREAM_MAX_RECONNECTS`, since that reconnect budget
+/// only starts counting once `.send().await` actually resolves. A
+/// request-level `.timeout(CONNECT_TIMEOUT)` (applied only to THIS request,
+/// not the whole client) closes that gap: reqwest's per-request timeout
+/// bounds the connect-through-headers future `.send()` awaits (the same
+/// future `Response` resolves from) — it does NOT extend to the
+/// already-established `resp.bytes_stream()` body read afterward, which
+/// stays governed by [`SSE_IDLE_TIMEOUT`] via the existing
+/// `tokio::time::timeout(SSE_IDLE_TIMEOUT, lines.next_data())` below. A
+/// timed-out connect surfaces as a `reqwest::Error` from `.send()`, so it
+/// falls into the SAME retryable `Err(source)` branch as any other
+/// transport failure — counted against `SESSION_STREAM_MAX_RECONNECTS`
+/// like every other failure mode, not a new silent-hang path.
+pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Fixed backoff between SSE reconnect attempts. Not exponential — MVP
 /// scope (DOC-50 §5 Slice 3); a persistently-down daemon retries at a
 /// steady, human-visible cadence rather than hot-looping. Shared with
