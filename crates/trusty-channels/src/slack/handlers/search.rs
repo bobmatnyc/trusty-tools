@@ -33,7 +33,7 @@
 
 use serde_json::{json, Value};
 
-use super::args::{clamp_page_size, opt_i64, opt_str, require_str, MAX_PAGE_SIZE};
+use super::args::{clamp_page_size, opt_i64, opt_str, require_str, MAX_SEARCH_COUNT};
 use super::clean::{clean_search_matches, filter_channels, filter_emoji, filter_users};
 use super::{
     CONVERSATIONS_LIST, DEFAULT_CHANNEL_SCAN_LIMIT, DEFAULT_SEARCH_COUNT, DEFAULT_USER_SCAN_LIMIT,
@@ -55,7 +55,11 @@ const SCOPE_PUBLIC: &str = "public";
 /// network call, which surfaces here as a clear typed tool error rather than a
 /// confusing Slack rejection or a silent bot-token fallback.
 /// What: requires `query`; honours `count` (default [`DEFAULT_SEARCH_COUNT`],
-/// clamped to `MIN_PAGE_SIZE..=MAX_PAGE_SIZE`) and an optional `scope`
+/// clamped to `MIN_PAGE_SIZE..=`[`MAX_SEARCH_COUNT`] — Slack documents a
+/// maximum `count` of 100 for this method and rejects anything larger with
+/// `invalid_arguments`, so an over-large request is silently reduced to 100
+/// rather than failed; the returned `count` reports how many matches actually
+/// came back) and an optional `scope`
 /// (`"public"` | `"public_and_private"`, default `"public_and_private"` —
 /// see the module doc for the design rationale); returns
 /// `{query, count, matches:[{channel_id, channel_name, user, ts, text,
@@ -64,7 +68,9 @@ const SCOPE_PUBLIC: &str = "public";
 /// Slack user ID, forwarded verbatim.
 /// Test: `tests/tools_http.rs::search_messages_with_user_token_returns_matches`,
 /// `::search_messages_without_user_token_errors`,
-/// `::search_messages_scope_public_excludes_private_matches`.
+/// `::search_messages_scope_public_excludes_private_matches`,
+/// `::search_messages_clamps_count_to_slack_maximum_before_request`,
+/// `::search_messages_forwards_in_range_count_unchanged`.
 pub(super) async fn search_messages(
     client: &BaseClient,
     args: Value,
@@ -72,7 +78,7 @@ pub(super) async fn search_messages(
     let query = require_str(&args, "query")?;
     let count = clamp_page_size(
         opt_i64(&args, "count").unwrap_or(DEFAULT_SEARCH_COUNT),
-        MAX_PAGE_SIZE,
+        MAX_SEARCH_COUNT,
     );
     let body = json!({ "query": query.as_str(), "count": count });
     let resp = client.call_method_user(SEARCH_MESSAGES, &body).await?;
