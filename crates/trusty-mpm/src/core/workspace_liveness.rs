@@ -55,6 +55,7 @@
 //! `liveness_reports_gutted_worktree_missing_git`,
 //! `liveness_never_requires_git_for_unowned_non_worktree_path`,
 //! `liveness_reports_absent_directory`, `liveness_indeterminate_is_never_dead`,
+//! `liveness_symlink_loop_is_indeterminate_never_dead`,
 //! `liveness_unreadable_parent_is_indeterminate_never_dead`,
 //! `liveness_reports_non_directory_as_absent`.
 
@@ -165,6 +166,7 @@ impl std::fmt::Display for WorkspaceLiveness {
 /// `liveness_reports_gutted_worktree_missing_git`,
 /// `liveness_never_requires_git_for_unowned_non_worktree_path`,
 /// `liveness_reports_absent_directory`,
+/// `liveness_symlink_loop_is_indeterminate_never_dead`,
 /// `liveness_unreadable_parent_is_indeterminate_never_dead`,
 /// `liveness_reports_non_directory_as_absent`.
 pub fn workspace_liveness(path: &Path, workspace_owned: bool) -> WorkspaceLiveness {
@@ -275,14 +277,76 @@ mod tests {
         assert!(!liveness.is_dead());
     }
 
+    /// The `NotFound` half still means what it always meant.
+    ///
+    /// Why: THE MUTATION KILLER for the fix above. Routing every stat error to
+    /// `Indeterminate` would satisfy both ambiguity tests while making a dead
+    /// verdict unreachable — a liveness guard that can never report death,
+    /// which is the #4204 bug restored. The premise is asserted (the path is
+    /// genuinely absent, not merely unresolvable) so this cannot pass for the
+    /// wrong reason.
+    /// Test: this function IS the test.
     #[test]
     fn liveness_reports_absent_directory() {
         let base = TempDir::new().unwrap();
         let gone = base.path().join("never-existed");
+        assert_eq!(
+            std::fs::metadata(&gone).err().map(|e| e.kind()),
+            Some(std::io::ErrorKind::NotFound),
+            "test premise: the path must be absent, not merely unresolvable"
+        );
 
         let liveness = workspace_liveness(&gone, true);
         assert_eq!(liveness, WorkspaceLiveness::Absent);
         assert!(liveness.is_dead());
+    }
+
+    /// A workspace path that cannot be stat'd for a NON-`NotFound` reason is
+    /// [`WorkspaceLiveness::Indeterminate`] — never `Absent`, never dead.
+    ///
+    /// Why: this is the HIGH from PR #4209's review stated in its most general
+    /// form. `path.is_dir()` threw the error KIND away, mapping
+    /// `PermissionDenied`, `FilesystemLoop`, `NotADirectory` and a stalled
+    /// mount's `ESTALE` to `false` — i.e. to `Absent`, whose `is_dead()` is
+    /// `true` — so any ambiguous filesystem error stopped the caller servicing
+    /// a workspace that was, as far as anyone knew, alive.
+    /// What: a symlink loop, chosen over a permission trick because it produces
+    /// a non-`NotFound` error DETERMINISTICALLY FOR EVERY UID INCLUDING ROOT,
+    /// so this test can never pass vacuously in a privileged container the way
+    /// a `chmod 000` test can. Adapted from
+    /// `session_manager::worktree_integrity_tests::
+    /// symlink_loop_root_is_unknown_not_destroyed` (#3764), which fixed this
+    /// same defect shape in the detection path.
+    /// Test: this function IS the test.
+    #[cfg(unix)]
+    #[test]
+    fn liveness_symlink_loop_is_indeterminate_never_dead() {
+        let base = TempDir::new().unwrap();
+        let a = base.path().join("a");
+        let b = base.path().join("b");
+        std::os::unix::fs::symlink(&b, &a).expect("symlink a -> b");
+        std::os::unix::fs::symlink(&a, &b).expect("symlink b -> a");
+
+        // The premise, asserted rather than assumed.
+        let kind = std::fs::metadata(&a)
+            .expect_err("test premise: a symlink loop must not stat")
+            .kind();
+        assert_ne!(
+            kind,
+            std::io::ErrorKind::NotFound,
+            "test premise: the loop must produce a non-NotFound error kind"
+        );
+
+        let liveness = workspace_liveness(&a, true);
+        assert!(
+            !liveness.is_dead(),
+            "an ambiguous stat failure ({kind:?}) must never be treated as \
+             death; got {liveness:?}"
+        );
+        assert!(
+            matches!(liveness, WorkspaceLiveness::Indeterminate(_)),
+            "got {liveness:?}"
+        );
     }
 
     /// THE CRITIC'S PROBE (PR #4209 review, HIGH). A genuinely LIVE linked
