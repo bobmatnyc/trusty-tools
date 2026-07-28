@@ -132,8 +132,15 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// immediately after `PM_INSTRUCTIONS`, which the launched PM reads as the
 /// authoritative, later-and-more-specific memory instruction.
 ///
+/// Delegation roster: the DEFAULT delegation section is composed by
+/// [`bundled_delegation`], which appends the LIVE deployed-agent roster to the
+/// bundled asset (#4069). Like the stack profile it is auto-derived framework
+/// context — but unlike it, it lives inside the overridable delegation section,
+/// so an `AGENT_DELEGATION.md` override still replaces section and roster alike.
+///
 /// Test: `no_overrides_uses_bundled`, `instructions_appended`,
 /// `workflow_override_replaces`, `agent_delegation_override_replaces`,
+/// `bundled_delegation_appends_deployed_roster`,
 /// `pm_deployed_replaces_body_but_keeps_base_floor`,
 /// `memory_override_is_slotted_after_pm_instructions`,
 /// `stack_profile_present_when_detected`, `stack_profile_neutral_when_undetected`,
@@ -164,7 +171,7 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     let workflow =
         read_override(&dir, FILE_WORKFLOW).unwrap_or_else(|| WORKFLOW.trim().to_string());
     let delegation = read_override(&dir, FILE_AGENT_DELEGATION)
-        .unwrap_or_else(|| AGENT_DELEGATION.trim().to_string());
+        .unwrap_or_else(|| bundled_delegation(project_dir));
 
     let mut sections: Vec<String> = vec![PM_INSTRUCTIONS.trim().to_string(), stack];
 
@@ -185,6 +192,71 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
     sections.push(floor.trim().to_string());
 
     join_sections(sections)
+}
+
+/// Note slotted between the bundled doctrine and the live roster.
+///
+/// Why: it resolves two ambiguities the append creates, both raised in review.
+///
+/// (1) PRECEDENCE. The retained asset contradicts the roster on concrete points
+/// — it calls the generic `ops` agent DEPRECATED while the roster lists `ops`,
+/// and it advertises agents the roster may not carry. Reconciling the asset is
+/// #4183's job; until then the PM needs one unambiguous tie-break rule.
+///
+/// (2) LOADABILITY. The roster is the UNION of three tiers, but no launch mode
+/// reads all three: the daemon managed-spawn passes `--setting-sources
+/// project,local`, which excludes both user-level tiers. A narrower per-mode
+/// tier set is not available here — `tm launch` / `tm connect` deploy into
+/// `~/.claude/agents` (`FrameworkPaths::default()`) and then spawn with that
+/// very flag, so the tier they populate is the tier the flag excludes. Passing
+/// "the tier the flag reads" would render an EMPTY roster there and silently
+/// revert those paths to the stale asset — reintroducing #4069. Passing "the
+/// tier that was deployed to" would advertise unloadable agents anyway. Until
+/// that deploy/read mismatch is fixed, the union plus an explicit re-route
+/// instruction is the shape that cannot silently under-advertise; a failed
+/// dispatch is self-correcting, a missing agent is not.
+///
+/// What: a Markdown blockquote stating the roster wins on WHICH agents exist,
+/// and to re-route rather than retry on an unknown-agent-type error.
+/// Test: `bundled_delegation_appends_deployed_roster`.
+const ROSTER_PRECEDENCE_NOTE: &str = "\
+> The live roster below is authoritative for WHICH agents exist and what each handles; the \
+tables above are routing doctrine only. Where the two disagree, trust the roster.\n\
+>\n\
+> Depending on how this session was launched, a listed agent may not be loadable. If a \
+dispatch fails with an unknown agent type, re-route to the closest listed alternative — do \
+not retry the same agent.";
+
+/// The DEFAULT delegation section: bundled routing doctrine + the live roster.
+///
+/// Why (#4069): the delegation section is meant to be constructed from what is
+/// actually deployed, and `build_instructions` does compute that roster via
+/// `generate_authority` — but its output lands in a `PipelineOutput` string no
+/// prompt composer reads, so the fallback here shipped the static
+/// `AGENT_DELEGATION.md` asset verbatim. That asset's agent table has been
+/// hand-maintained since 2026-07-03 and names 8 agents; a real deployment
+/// carries ~40, so agents like `ticketing` and `memory-manager` appeared **zero
+/// times** in the delivered prompt and the PM could not route to them. The
+/// bundled asset is still emitted in full because it carries routing doctrine
+/// the roster does not (make/mise routing, keyword routing, the ops-agent
+/// table) — the live roster is *appended*, never substituted, so no doctrine is
+/// lost. Restructuring the asset itself is out of scope (epic #4183).
+///
+/// This is the FALLBACK only: a project/user `AGENT_DELEGATION.md` override
+/// still replaces the whole section, unchanged, exactly as documented.
+///
+/// What: returns the trimmed bundled asset, with
+/// [`crate::core::delegation_authority::deployed_roster_section`]'s rendered
+/// `## Delegation Authority` block appended when any agent is deployed. With no
+/// deployed agents the asset is returned alone (pre-#4069 behaviour).
+/// Test: `bundled_delegation_appends_deployed_roster`,
+/// `no_overrides_uses_bundled`, `agent_delegation_override_replaces`.
+fn bundled_delegation(project_dir: &Path) -> String {
+    let bundled = AGENT_DELEGATION.trim();
+    match crate::core::delegation_authority::deployed_roster_section(project_dir) {
+        Some(roster) => format!("{bundled}\n\n{ROSTER_PRECEDENCE_NOTE}\n\n{}", roster.trim()),
+        None => bundled.to_string(),
+    }
 }
 
 /// Join resolved sections with the framework separator, dropping empties.
@@ -215,6 +287,85 @@ mod tests {
         let dir = project.join(OVERRIDE_DIR_NAME);
         fs::create_dir_all(&dir).expect("create .trusty-mpm");
         fs::write(dir.join(name), content).expect("write override");
+    }
+
+    /// Deploy a composed agent into the PROJECT tier (`<project>/.claude/agents`).
+    ///
+    /// Why: the project tier is the highest-precedence roster source and the one
+    /// the daemon managed-spawn path actually deploys into, so a test that writes
+    /// here asserts the real launch shape without depending on the machine's
+    /// `~/.claude/agents` (which these tests must never require or forbid).
+    fn deploy_agent(project: &Path, name: &str) {
+        let dir = project.join(".claude").join("agents");
+        fs::create_dir_all(&dir).expect("create .claude/agents");
+        fs::write(
+            dir.join(format!("{name}.md")),
+            format!(
+                "---\nname: {name}\nrole: {name}\ndescription: Handles {name} work.\n\
+                 model: sonnet\n---\n\n# {name}\n"
+            ),
+        )
+        .expect("write agent");
+    }
+
+    #[test]
+    fn bundled_delegation_appends_deployed_roster() {
+        // Issue #4069 REGRESSION GATE. The delegation section must describe the
+        // agents that are actually deployed, not the static asset's
+        // hand-maintained table. `ticketing` and `memory-manager` are deployed
+        // in reality but appear NOWHERE in any bundled asset, so a rendered
+        // `### <name>` roster entry for them can only come from the live scan.
+        // Against the pre-fix code this assertion fails: `resolve_pm_prompt`
+        // returned the static `AGENT_DELEGATION.md` verbatim.
+        let tmp = TempDir::new().unwrap();
+        deploy_agent(tmp.path(), "ticketing");
+        deploy_agent(tmp.path(), "memory-manager");
+
+        let prompt = resolve_pm_prompt(tmp.path());
+
+        assert!(
+            prompt.contains("## Delegation Authority"),
+            "the live roster section must be present"
+        );
+        assert!(
+            prompt.contains("### ticketing"),
+            "a deployed agent absent from the static asset must reach the prompt"
+        );
+        assert!(
+            prompt.contains("### memory-manager"),
+            "a deployed agent absent from the static asset must reach the prompt"
+        );
+        assert!(
+            prompt.contains("Handles ticketing work."),
+            "the agent's own description must reach the prompt"
+        );
+
+        // The bundled routing doctrine is APPENDED to, never replaced: the
+        // roster carries no make/mise or keyword routing rules.
+        assert!(prompt.contains("# Agent Delegation Routing"));
+        assert!(prompt.contains("## Make / Mise Command Routing"));
+
+        // Review HIGH-2 / MEDIUM-2: the two blocks contradict each other on
+        // concrete points, and the roster is a tier UNION that no single launch
+        // mode fully loads. Both are resolved by the note between them, which
+        // must be present whenever a roster is rendered.
+        assert!(
+            prompt.contains("trust the roster"),
+            "the roster must be declared authoritative over the stale doctrine table"
+        );
+        assert!(
+            prompt.contains("re-route to the closest listed alternative"),
+            "an advertised-but-unloadable agent must carry a recovery instruction"
+        );
+
+        // Ordering: doctrine first, note, roster after, BASE_PM floor last.
+        let doctrine = prompt.find("# Agent Delegation Routing").expect("doctrine");
+        let note = prompt.find("trust the roster").expect("note");
+        let roster = prompt.find("## Delegation Authority").expect("roster");
+        let base = prompt.find("# BASE_PM Framework Floor").expect("base");
+        assert!(doctrine < note, "doctrine precedes the note");
+        assert!(note < roster, "the note precedes the roster it governs");
+        assert!(roster < base, "BASE_PM floor stays last");
     }
 
     #[test]
@@ -281,8 +432,11 @@ mod tests {
     #[test]
     fn agent_delegation_override_replaces() {
         // AGENT_DELEGATION.md replaces the bundled delegation section; others
-        // intact.
+        // intact. Issue #4069 must not weaken this precedence: an agent is
+        // deployed here, and the override still replaces the WHOLE section, so
+        // neither the bundled doctrine nor the auto-generated roster is emitted.
         let tmp = TempDir::new().unwrap();
+        deploy_agent(tmp.path(), "ticketing");
         write_override(
             tmp.path(),
             FILE_AGENT_DELEGATION,
@@ -294,6 +448,10 @@ mod tests {
         assert!(
             !prompt.contains("# Agent Delegation Routing"),
             "bundled delegation heading must be replaced"
+        );
+        assert!(
+            !prompt.contains("### ticketing"),
+            "an override replaces the section outright — the roster is not re-appended"
         );
         assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# PM Workflow Configuration"));

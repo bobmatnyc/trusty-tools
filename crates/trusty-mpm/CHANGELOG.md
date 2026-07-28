@@ -159,6 +159,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   roster work, which replaces that section wholesale rather than hand-editing
   it.
 
+- **The PM prompt now advertises the agents that are actually deployed**
+  ([#4069](https://github.com/bobmatnyc/trusty-tools/issues/4069)): the
+  delegation roster was computed at every launch (`build_instructions` →
+  `generate_authority`) but never reached the delivered prompt —
+  `resolve_pm_prompt` fell back to the static `AGENT_DELEGATION.md` asset, whose
+  hand-maintained table has named the same 8 agents since 2026-07-03. The
+  bundled roster carries 37 delegatable agents, so `ticketing` and
+  `memory-manager` appeared **zero times** in the delivered prompt and the PM
+  could not route to them. The bundled default now appends a live
+  `## Delegation Authority` roster scanned from the tiers a session loads agents
+  from — `<project>/.claude/agents`, the managed `CLAUDE_CONFIG_DIR/agents`, and
+  `~/.claude/agents`, deduped case-insensitively with project-tier precedence.
+  The bundled routing doctrine (make/mise routing, keyword routing, the ops
+  table) is appended to, never replaced, with a note between the two declaring
+  the roster authoritative on WHICH agents exist and instructing the PM to
+  re-route rather than retry if a listed agent turns out not to be loadable in
+  the current launch mode. An explicit project/user `AGENT_DELEGATION.md`
+  override still replaces the whole section exactly as documented. A tier that
+  cannot be enumerated (permissions, bad mount) now warns instead of being
+  silently indistinguishable from an empty one.
+
+- **Three bundled agents were invisible to every delegation roster**
+  ([#4069](https://github.com/bobmatnyc/trusty-tools/issues/4069)):
+  `memory-manager`, `mpm-agent-manager`, and `mpm-skills-manager` declared
+  `role: base` in their own frontmatter despite being ordinary delegatable
+  agents. `scan_agents` drops any role beginning with `base` — a deliberate rule
+  that catches foundation agents whose file name does not follow the `BASE-`
+  convention — so all three were silently discarded from every tier they deploy
+  into, on every launch path. Their `role` is now their own name; `extends:
+  base-agent` already carried the inheritance. A new asset-level invariant test
+  asserts every non-`BASE-*` bundled agent survives the scan, so a future
+  misfiling fails CI rather than silently shrinking the roster.
+
 - **The worktree reclaim path no longer force-deletes uncommitted work**
   ([#4091](https://github.com/bobmatnyc/trusty-tools/issues/4091)): the
   orphaned-worktree sweep had no dirty-tree check anywhere — its entire safety
