@@ -241,8 +241,13 @@ impl CodeIndexer {
     /// `"indexed": true` — the ERROR-level diagnostic is emitted by
     /// `refuse_incremental_write` either way. The BULK path
     /// (`index_files_batch*`, used by a full reindex) is intentionally NOT
-    /// gated: a reindex is an explicit operator action that rebuilds the
-    /// corpus wholesale and is the documented way out of this state.
+    /// gated. Note this is NOT because reindexes are operator-initiated —
+    /// `service::reconcile` auto-fires them at boot with no
+    /// `corpus_open_failed` check. It is safe because of the invariant in
+    /// `core::indexer::quarantine`: a quarantined index holds no
+    /// `CorpusStore`, so `commit_corpus_to_redb` early-returns and
+    /// `staging::should_stage` is `false` — a bulk reindex on a quarantined
+    /// index writes nothing durable at all.
     /// Test: covered by every `index_file`-based test in `indexer::tests`;
     /// the quarantine branch by
     /// `quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero`.

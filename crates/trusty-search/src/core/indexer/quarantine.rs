@@ -31,6 +31,30 @@
 //! answering with silent empty results is issue #4087 and is deliberately out
 //! of scope here.
 //!
+//! # LOAD-BEARING INVARIANT: `corpus_open_failed == true` ⇒ `self.corpus == None`
+//!
+//! This — NOT "reindexes are operator-initiated" — is what makes the ungated
+//! BULK path safe. Boot reconcile auto-fires full reindexes
+//! (`service::reconcile`) with no `corpus_open_failed` check at all, so a
+//! quarantined index CAN be reindexed without any human involved. That is
+//! harmless only because every durable redb write funnels through
+//! `self.corpus` and short-circuits when it is `None`
+//! (`ingest::commit::commit_corpus_to_redb` early-returns on `None`), and
+//! because `service::reindex::staging::should_stage(has_corpus_store())` is
+//! `false` here, so such a reindex never even stages.
+//!
+//! The invariant holds because the only producer of `corpus_open_failed ==
+//! true` (`service::persistence_loader::build_indexer_from_entry`) is exactly
+//! the path that wires NO corpus, and the only way to wire one
+//! ([`CodeIndexer::set_corpus_store`]) clears the flag in the same call.
+//!
+//! **If you add an in-process corpus reopen/retry, you will break this.** A
+//! retry that wires a corpus without clearing the flag — or that sets the flag
+//! on an index that still holds one — re-opens the exact data-loss hole this
+//! module closes, and every existing test stays green while it does. The two
+//! `debug_assert!`s (in [`CodeIndexer::refuse_incremental_write`] and in
+//! `commit_corpus_to_redb`) exist to make that failure loud instead of silent.
+//!
 //! Test: `crates/trusty-search/tests/corpus_open_quarantine_4122.rs`.
 
 use std::sync::atomic::Ordering;
@@ -103,6 +127,19 @@ impl CodeIndexer {
         if !self.corpus_open_failed {
             return false;
         }
+        // Issue #4122, see the module-level invariant: a quarantined index must
+        // never hold a wired corpus. If it ever does, the ungated BULK reindex
+        // path (auto-fired by boot reconcile) would write durably to a corpus
+        // this module has declared unsafe — silently, with CI green.
+        debug_assert!(
+            self.corpus.is_none(),
+            "index '{}': INVARIANT VIOLATED — corpus_open_failed is set while a \
+             CorpusStore is wired. The ungated bulk-reindex path is safe only \
+             because a quarantined index has no corpus to write through. Did you \
+             add an in-process corpus reopen that skips set_corpus_store (issue \
+             #4122)?",
+            self.index_id
+        );
         let refused = self
             .incremental_writes_refused
             .fetch_add(1, Ordering::Relaxed)
@@ -120,10 +157,14 @@ impl CodeIndexer {
                  watcher/incremental writes against an unopened corpus builds a fresh \
                  PARTIAL corpus over the original and destroys it permanently (issue \
                  #4122). {refused} write(s) refused so far; the on-disk corpus is \
-                 untouched and still recoverable. Fix the underlying redb file \
-                 (permissions, stale lock, corruption) and restart the daemon — a \
-                 successful corpus open lifts the quarantine automatically. Saves \
-                 dropped while quarantined are picked up by the next reindex."
+                 untouched and still recoverable. TO RECOVER: fix the underlying redb \
+                 file (permissions, stale lock, corruption), then RESTART THE DAEMON — \
+                 only a successful CorpusStore::open lifts the quarantine, and it is \
+                 attempted solely at load time (there is no in-process reopen retry). \
+                 A reindex will NOT clear this state and will NOT persist anything: \
+                 with no corpus wired it skips staging entirely, so its results are \
+                 discarded at the next restart. Saves dropped while quarantined are \
+                 picked up by the first reindex AFTER a successful restart."
             );
         } else {
             tracing::debug!(
