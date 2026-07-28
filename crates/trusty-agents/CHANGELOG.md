@@ -9,6 +9,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`[[plugins.python]]` bundled Python tools are now callable from persona
+  chat (#446, epic #3052):** the `PythonToolPlugin` subprocess primitive
+  (spawn `python3 <script>`, one NDJSON `tool_call` in / one `tool_result`
+  out, per-call timeout + RBAC tier guard) was already fully built and tested
+  but `run_pm_task_with_persona` never read `persona_cfg.plugins.python`, so an
+  agent declaring a `[[plugins.python]]` tool silently got nothing registered.
+  A new `register_python_plugins` helper now builds each declared entry via
+  `PythonToolPlugin::from_config` — resolving a package-relative `script`
+  against the agent/skill package dir (`<project>/.trusty-agents/agents`) — and
+  registers it as a callable tool. A single malformed entry (e.g. an unknown
+  `restricted_tiers` string) is logged and skipped rather than failing the
+  chat turn; the existing `[tools].allow` filter still gates whether the tool
+  is advertised to the LLM. Ships a demo "enhanced skill" package
+  (`.trusty-agents/skills/crypto-price/` — `SKILL.md` + a co-located
+  `crypto_price.py` that speaks the NDJSON contract against CoinGecko's keyless
+  endpoint with a deterministic offline fallback) wired to a new minimal
+  `demo-assistant` agent. SECURITY NOTE / known follow-up: the Python
+  subprocess has NO OS-level sandbox — RBAC gates WHO may call the tool, not
+  WHAT the script does once spawned.
 - **Fireworks AI is reachable as an inference provider (#2410 Step 3, epic
   #2400):** `fireworks/<model>` now resolves to a dedicated
   `FireworksAdapter` (new `Provider::Fireworks` / `AuthSource::Fireworks`)
