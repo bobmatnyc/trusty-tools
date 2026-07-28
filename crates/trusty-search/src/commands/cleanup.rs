@@ -140,7 +140,11 @@ pub async fn handle_cleanup(yes: bool, dry_run: bool) -> Result<()> {
     let mut removed = 0usize;
     let mut failed: Vec<(String, String)> = Vec::new();
     for e in &empties {
-        let url = format!("{}/indexes/{}", base, e.id);
+        // Issue #4123: `DELETE` preserves on-disk data unless `delete_data=true`
+        // is passed. Opt in so `cleanup` keeps fully reclaiming the stub — every
+        // candidate here is 0-chunk by construction (step 4 filters on
+        // `chunk_count == 0`), so nothing of value can be destroyed.
+        let url = format!("{}/indexes/{}?delete_data=true", base, e.id);
         match client.delete(&url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 removed += 1;

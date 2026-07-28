@@ -287,7 +287,7 @@ disabled, 500 internal).
 | Route | Purpose |
 |---|---|
 | `GET /health` | liveness/readiness (`{status, version, indexes, update_available?, embedder_error?}`) |
-| `GET /indexes[?format=tree][?details=true]`, `POST /indexes`, `DELETE /indexes/{id}` | registry management; `?details=true` returns `{id, size_bytes}` objects; `?format=tree` reflects the nested hierarchy (#404) |
+| `GET /indexes[?format=tree][?details=true]`, `POST /indexes`, `DELETE /indexes/{id}[?delete_data=true]` | registry management; `?details=true` returns `{id, size_bytes}` objects; `?format=tree` reflects the nested hierarchy (#404); `DELETE` deregisters only unless `?delete_data=true` (#4123) |
 | `GET /indexes/{id}/status` | chunk count + walk diagnostics (#280) |
 | `POST /indexes/{id}/search` | hybrid search (+ branch boost) |
 | `POST /indexes/{id}/search_similar` | code-to-code similarity (re-embeds seed on LRU miss for skip_kg indexes, #484) |

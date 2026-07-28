@@ -59,6 +59,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   vanished, are both now reported to the operator with a skip reason rather
   than dropped silently.
 
+- **Session index GC would have silently stopped reclaiming trusty-search disk**
+  ([#4123](https://github.com/bobmatnyc/trusty-tools/issues/4123)):
+  trusty-search's `DELETE /indexes/:id` now preserves on-disk data unless
+  `?delete_data=true` is passed. Both index-GC call sites in `search_gc.rs` —
+  decommission teardown and the periodic orphan sweep — now opt in explicitly.
+  Without this they would have kept removing the registration while leaving the
+  index data behind forever: the workspace each one describes is a disposable
+  worktree that is about to be deleted, so nothing will ever re-register at
+  that root and the preserved data would be unreachable garbage.
+
 ---
 ## [1.2.0] — 2026-07-27
 

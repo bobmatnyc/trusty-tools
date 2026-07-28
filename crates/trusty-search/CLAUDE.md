@@ -154,13 +154,23 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   { "id": "my-project", "created": false, "reason": "already exists" }
   ```
 
-##### `DELETE /indexes/:id`
+##### `DELETE /indexes/:id[?delete_data=true]`
 
-Drop an index from the in-memory registry. On-disk redb data is preserved —
-re-registering with the same id will reuse it.
+Drop an index from the in-memory registry and from `indexes.toml` / `roots.toml`.
+
+By default on-disk redb data is **preserved** — re-registering with the same id
+reuses it. This is the safe deregistration verb for registry hygiene. Pass
+`?delete_data=true` to also destroy the index's data directory.
+
+> **Behaviour change (issue #4123).** Before this, `DELETE` ALWAYS destroyed the
+> data directory and the documented "preserved" contract above was not what the
+> handler did. Callers that rely on `DELETE` reclaiming disk must now pass
+> `?delete_data=true` explicitly.
 
 - **Request body**: none.
-- **Response 200**: `{ "id": "my-project", "removed": true }`
+- **Query**: `delete_data` (bool, default `false`). An unparseable value is
+  rejected with `400` rather than silently defaulting either way.
+- **Response 200**: `{ "id": "my-project", "removed": true, "data_deleted": false }`
 
 ##### `GET /indexes/:id/status`
 

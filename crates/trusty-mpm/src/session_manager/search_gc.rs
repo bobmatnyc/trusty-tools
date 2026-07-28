@@ -110,7 +110,12 @@ pub(super) async fn delete_search_index_best_effort(index_id: &str) {
             return;
         }
     };
-    let url = format!("{base}/indexes/{index_id}");
+    // Issue #4123: trusty-search's `DELETE /indexes/:id` now preserves on-disk
+    // data unless `delete_data=true` is passed. Opt in — the workspace this
+    // index describes is a disposable worktree that decommission is about to
+    // delete, so nothing will ever re-register at that root and preserved
+    // index data would be unreachable garbage on disk forever.
+    let url = format!("{base}/indexes/{index_id}?delete_data=true");
     match client.delete(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
             info!(
@@ -322,7 +327,11 @@ impl SessionManager {
 
         let mut removed = Vec::new();
         for id in candidates {
-            let url = format!("{base}/indexes/{id}");
+            // Issue #4123: opt in to data deletion — same rationale as
+            // `delete_search_index_best_effort`. Every candidate here is a
+            // worktree-scoped index with no live session, so its data is
+            // unreachable garbage; a bare DELETE would silently leak it.
+            let url = format!("{base}/indexes/{id}?delete_data=true");
             match client.delete(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     info!(index_id = %id, "search-index-gc: removed orphaned/0-chunk index");
