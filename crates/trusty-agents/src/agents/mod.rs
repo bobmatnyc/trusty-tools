@@ -16,6 +16,8 @@ pub mod claude_code_runner;
 pub mod claude_mpm_loader;
 mod config;
 pub mod context_filter;
+// #4172 (epic #4167): L0-only cross-project git/search scoping.
+pub mod cross_project;
 // ADR-0024: the KIND delegation predicate. `pub(crate)` — it is an
 // enforcement primitive, not part of the crate's public surface.
 pub(crate) mod delegation;
@@ -44,6 +46,8 @@ pub use params::{
     AgentCompressConfig, AgentPluginsConfig, LlmParams, RbacConfig, RunnerConfig,
     SessionCompressionConfig, ToolChoice, WorkstreamContextConfig,
 };
+// #4172: the L0-only cross-project scope resolver (epic #4167).
+pub use cross_project::CrossProjectScope;
 // #3936: the `[permissions]` section (DOC-57 §7).
 pub use permissions::{
     AutonomyMode, GrantMode, PermissionGrant, PermissionsConfig, effective_scopes,

@@ -1,17 +1,18 @@
 //! Working-tree-mutating git tools: stage, commit, and stash.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::agents::CrossProjectScope;
 use crate::git;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
-use super::helpers::fn_schema;
+use super::helpers::{scoped_root, scoped_schema};
 
 pub(super) struct GitStageTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -20,7 +21,8 @@ impl ToolExecutor for GitStageTool {
         "git_stage"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_stage",
             "Stage one or more files for the next commit.",
             json!({
@@ -48,7 +50,11 @@ impl ToolExecutor for GitStageTool {
         if files.is_empty() {
             return ToolResult::err("'files' must contain at least one path");
         }
-        match git::commit::stage_files(&files, &self.root).await {
+        let root = match scoped_root(&self.scope, &args, "git_stage") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::err(e),
+        };
+        match git::commit::stage_files(&files, &root).await {
             Ok(out) => {
                 let body = if out.is_empty() {
                     format!("Staged {} file(s)", files.len())
@@ -63,7 +69,7 @@ impl ToolExecutor for GitStageTool {
 }
 
 pub(super) struct GitCommitTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -72,7 +78,8 @@ impl ToolExecutor for GitCommitTool {
         "git_commit"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_commit",
             "Create a commit from staged changes. Honors hooks and signing via the git CLI.",
             json!({
@@ -89,7 +96,11 @@ impl ToolExecutor for GitCommitTool {
         let Some(message) = args.get("message").and_then(Value::as_str) else {
             return ToolResult::err("'message' is required");
         };
-        match git::commit::create_commit(message, &self.root).await {
+        let root = match scoped_root(&self.scope, &args, "git_commit") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::err(e),
+        };
+        match git::commit::create_commit(message, &root).await {
             Ok(out) => ToolResult::ok(out),
             Err(e) => ToolResult::err(format!("git_commit failed: {e}")),
         }
@@ -97,7 +108,7 @@ impl ToolExecutor for GitCommitTool {
 }
 
 pub(super) struct GitStashTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -106,7 +117,8 @@ impl ToolExecutor for GitStashTool {
         "git_stash"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_stash",
             "Stash management — push (save), pop (restore), or list.",
             json!({
@@ -125,13 +137,17 @@ impl ToolExecutor for GitStashTool {
             Some(a) => a,
             None => return ToolResult::err("'action' is required (push, pop, or list)"),
         };
+        let root = match scoped_root(&self.scope, &args, "git_stash") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::err(e),
+        };
         let res = match action {
             "push" => {
                 let msg = args.get("message").and_then(Value::as_str);
-                git::stash::stash_push(msg, &self.root).await
+                git::stash::stash_push(msg, &root).await
             }
-            "pop" => git::stash::stash_pop(&self.root).await,
-            "list" => git::stash::stash_list(&self.root).await,
+            "pop" => git::stash::stash_pop(&root).await,
+            "list" => git::stash::stash_list(&root).await,
             other => {
                 return ToolResult::err(format!(
                     "unknown stash action '{other}' — expected push, pop, or list"

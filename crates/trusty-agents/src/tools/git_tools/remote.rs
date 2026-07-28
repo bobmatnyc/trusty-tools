@@ -1,17 +1,18 @@
 //! Remote-interacting git tools: push, pull, and fetch.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::agents::CrossProjectScope;
 use crate::git;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
-use super::helpers::fn_schema;
+use super::helpers::{scoped_root, scoped_schema};
 
 pub(super) struct GitPushTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -20,7 +21,8 @@ impl ToolExecutor for GitPushTool {
         "git_push"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_push",
             "Push the current (or named) branch to origin.",
             json!({
@@ -35,7 +37,11 @@ impl ToolExecutor for GitPushTool {
     }
     async fn execute(&self, args: Value) -> ToolResult {
         let branch = args.get("branch").and_then(Value::as_str);
-        match git::remote::push(branch, &self.root).await {
+        let root = match scoped_root(&self.scope, &args, "git_push") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::err(e),
+        };
+        match git::remote::push(branch, &root).await {
             Ok(out) => ToolResult::ok(out),
             Err(e) => ToolResult::err(format!("git_push failed: {e}")),
         }
@@ -43,7 +49,7 @@ impl ToolExecutor for GitPushTool {
 }
 
 pub(super) struct GitPullTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -52,7 +58,8 @@ impl ToolExecutor for GitPullTool {
         "git_pull"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_pull",
             "Pull from upstream. Defaults to rebase mode for linear history.",
             json!({
@@ -67,7 +74,11 @@ impl ToolExecutor for GitPullTool {
     }
     async fn execute(&self, args: Value) -> ToolResult {
         let rebase = args.get("rebase").and_then(Value::as_bool).unwrap_or(true);
-        match git::remote::pull(rebase, &self.root).await {
+        let root = match scoped_root(&self.scope, &args, "git_pull") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::err(e),
+        };
+        match git::remote::pull(rebase, &root).await {
             Ok(out) => ToolResult::ok(out),
             Err(e) => ToolResult::err(format!("git_pull failed: {e}")),
         }
@@ -75,7 +86,7 @@ impl ToolExecutor for GitPullTool {
 }
 
 pub(super) struct GitFetchTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -84,14 +95,19 @@ impl ToolExecutor for GitFetchTool {
         "git_fetch"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_fetch",
             "Fetch refs from configured remotes without merging.",
             json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
         )
     }
-    async fn execute(&self, _args: Value) -> ToolResult {
-        match git::remote::fetch(&self.root).await {
+    async fn execute(&self, args: Value) -> ToolResult {
+        let root = match scoped_root(&self.scope, &args, "git_fetch") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::err(e),
+        };
+        match git::remote::fetch(&root).await {
             Ok(out) => ToolResult::ok(out),
             Err(e) => ToolResult::err(format!("git_fetch failed: {e}")),
         }

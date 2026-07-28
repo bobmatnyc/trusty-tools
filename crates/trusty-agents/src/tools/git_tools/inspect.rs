@@ -1,17 +1,18 @@
 //! Read-only git tools: status, log, and commit search.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::agents::CrossProjectScope;
 use crate::git;
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
-use super::helpers::{fn_schema, open_repo};
+use super::helpers::{open_scoped_repo, scoped_schema};
 
 pub(super) struct GitStatusTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -20,14 +21,15 @@ impl ToolExecutor for GitStatusTool {
         "git_status"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_status",
             "Show working-tree and index status (modified/added/deleted/untracked/renamed/conflicted files).",
             json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
         )
     }
-    async fn execute(&self, _args: Value) -> ToolResult {
-        let repo = match open_repo(&self.root) {
+    async fn execute(&self, args: Value) -> ToolResult {
+        let repo = match open_scoped_repo(&self.scope, &args, "git_status") {
             Ok(r) => r,
             Err(e) => return ToolResult::err(e),
         };
@@ -39,7 +41,7 @@ impl ToolExecutor for GitStatusTool {
 }
 
 pub(super) struct GitLogTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -48,7 +50,8 @@ impl ToolExecutor for GitLogTool {
         "git_log"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_log",
             "Show recent commits from HEAD. Optionally filter by substring search on commit messages.",
             json!({
@@ -69,7 +72,7 @@ impl ToolExecutor for GitLogTool {
             .map(|n| n as usize)
             .unwrap_or(10)
             .max(1);
-        let repo = match open_repo(&self.root) {
+        let repo = match open_scoped_repo(&self.scope, &args, "git_log") {
             Ok(r) => r,
             Err(e) => return ToolResult::err(e),
         };
@@ -86,7 +89,7 @@ impl ToolExecutor for GitLogTool {
 }
 
 pub(super) struct GitSearchCommitsTool {
-    pub(super) root: PathBuf,
+    pub(super) scope: Arc<CrossProjectScope>,
 }
 
 #[async_trait]
@@ -95,7 +98,8 @@ impl ToolExecutor for GitSearchCommitsTool {
         "git_search_commits"
     }
     fn schema(&self) -> Value {
-        fn_schema(
+        scoped_schema(
+            &self.scope,
             "git_search_commits",
             "Search commit history for a substring in the commit message (case-insensitive).",
             json!({
@@ -119,7 +123,7 @@ impl ToolExecutor for GitSearchCommitsTool {
             .map(|n| n as usize)
             .unwrap_or(10)
             .max(1);
-        let repo = match open_repo(&self.root) {
+        let repo = match open_scoped_repo(&self.scope, &args, "git_search_commits") {
             Ok(r) => r,
             Err(e) => return ToolResult::err(e),
         };

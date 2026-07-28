@@ -37,6 +37,23 @@ impl ProjectRegistry {
         })
     }
 
+    /// Create a registry handle pointing at an EXPLICIT `projects.json`
+    /// (#4172).
+    ///
+    /// Why: [`Self::new`] resolves `$HOME`, so any test that wants to drive
+    /// the real loader over a known registry file has to mutate `HOME` — a
+    /// process-global that races every other test in the binary. An explicit
+    /// path lets the #4172 cross-project boundary tests exercise the REAL
+    /// `load`/`list_active` code path over a real file in a tempdir instead
+    /// of hand-building `ProjectEntry` values and skipping the loader.
+    /// What: Same struct, no home-dir resolution, hence no failure mode.
+    /// Every read/write method behaves identically.
+    /// Test: `from_registry_loads_active_entries_for_l0`,
+    /// `from_registry_fails_closed_when_registry_is_unreadable`.
+    pub fn with_registry_path(registry_path: PathBuf) -> Self {
+        Self { registry_path }
+    }
+
     /// Load all registry entries from disk.
     ///
     /// Why: Callers need the full map to update and re-save it without losing

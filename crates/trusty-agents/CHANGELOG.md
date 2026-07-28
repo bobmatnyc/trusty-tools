@@ -62,6 +62,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **Cross-project git/search scoping granted to the L0 orchestration tier
+  ONLY** (#4172, epic #4167). New `agents::cross_project::CrossProjectScope` is
+  the single resolution point for "which repo roots and which search indexes
+  may THIS agent touch". An L0 agent's allow-set is its own home project root
+  plus every `~/.trusty-agents/projects.json` entry that is *simultaneously*
+  `Active`, a real project (no `/tmp`, `/var/folders`, `.tmp*`), existing, and
+  a git repository root. An L1 agent gets its home root and nothing else —
+  byte-identical to previous behaviour. **DOC-54 §5.1's one-OKG-store-per-agent
+  ceiling is untouched for either tier**: nothing here reads, writes, unions or
+  widens `[[stores]]`, and `extends`' replace-not-union rule is unchanged;
+  cross-project reach is resolved as *paths and tier-2 index ids*
+  (`[tools].search_indexes`, #3232), which is where multiplicity already
+  belongs. Containment is component-wise `Path::starts_with` against
+  *canonicalized* roots, so `..` traversal, symlink escape, and `/a/bc` vs
+  `/a/b` prefix-lookalike siblings are all refused; a relative candidate is
+  refused outright rather than joined to the cwd. Because libgit2's
+  `Repository::discover` walks *upward*, `open_scoped_repo` re-validates the
+  discovered work tree after discovery — a permitted seed cannot land on an
+  ancestor outside the allow-set. Registry failure denies reach: no `$HOME`, a
+  missing file, or malformed JSON yields an empty snapshot, collapsing even an
+  L0 agent to its home root. The per-call `repo` argument is advertised in the
+  JSON schema only when the scope is actually cross-project, so an L1 persona
+  is never shown a knob it cannot turn. Every refusal is logged at `warn` with
+  the same `tier=… cross_project=… roots=[…] indexes=[…]` audit line emitted at
+  construction. No per-project credential is read, copied, or forwarded.
 - **A read-only GitHub PR/CI inspection surface granted to the L0
   orchestration tier ONLY** (#4170, epic #4167). Five tools in a new
   `tools::gh_tools` — `gh_pr_list`, `gh_pr_view`, `gh_pr_checks`,
