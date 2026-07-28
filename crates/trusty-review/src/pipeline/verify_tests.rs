@@ -138,6 +138,29 @@ fn select_candidates_request_changes_uses_wide_net() {
 }
 
 #[test]
+fn select_candidates_skips_findings_with_a_decided_outcome() {
+    // #4081: a finding whose `verified` outcome is already decided is not a
+    // question worth re-asking. `claim_grounding` pre-stamps `Unverifiable` on a
+    // package-registry claim precisely so the verifier — a second model with the
+    // same stale training knowledge — can never launder it into `Confirmed`.
+    let mut findings = vec![finding(Effort::High, 0.95), finding(Effort::High, 0.95)];
+    assert_eq!(
+        select_candidates(Verdict::Block, &findings),
+        vec![0, 1],
+        "precondition: both clear the confidence net"
+    );
+
+    findings[0].verified = Some(VerifyOutcome::Unverifiable {
+        reason: "no registry lookup performed".to_string(),
+    });
+    assert_eq!(
+        select_candidates(Verdict::Block, &findings),
+        vec![1],
+        "an already-decided outcome must not be re-verified"
+    );
+}
+
+#[test]
 fn select_candidates_approve_uses_block_tier_only() {
     // On an APPROVE* verdict only blocking-tier (>= 0.90) findings are verified.
     let findings = vec![
