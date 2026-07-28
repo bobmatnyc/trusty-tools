@@ -287,7 +287,9 @@ async fn probe_existing_index(client: &Client) -> Option<u64> {
 
 async fn register_index(client: &Client) {
     let _ = client
-        .delete(format!("{DAEMON_URL}/indexes/{INDEX_NAME}"))
+        .delete(format!(
+            "{DAEMON_URL}/indexes/{INDEX_NAME}?delete_data=true"
+        ))
         .send()
         .await;
 

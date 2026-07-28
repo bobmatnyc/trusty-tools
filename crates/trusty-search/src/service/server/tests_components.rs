@@ -53,15 +53,24 @@ fn state_with_index(id: &str) -> Arc<SearchAppState> {
 /// default data dir (not just other `#[serial]`-tagged tests — serial_test's
 /// lock only excludes tests sharing its tag). See the module doc comment.
 /// What: sets `TRUSTY_DATA_DIR` in `new()`; `Drop` removes it.
-struct IsolatedDataDir {
-    _tmp: tempfile::TempDir,
+///
+/// Shared with `tests_4123` (issue #4123), which needs the same panic-safe
+/// restore — hence `pub(super)` and the [`Self::path`] accessor.
+pub(super) struct IsolatedDataDir {
+    tmp: tempfile::TempDir,
 }
 
 impl IsolatedDataDir {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
-        Self { _tmp: tmp }
+        Self { tmp }
+    }
+
+    /// The isolated dir itself, for tests that must also place fixtures inside
+    /// the sandbox they just pointed `TRUSTY_DATA_DIR` at.
+    pub(super) fn path(&self) -> &std::path::Path {
+        self.tmp.path()
     }
 }
 
