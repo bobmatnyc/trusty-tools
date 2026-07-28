@@ -680,7 +680,7 @@ pub(super) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// removed from the child environment.
 /// Test: `git_command_strips_repository_redirecting_env`,
 /// `git_command_pins_untracked_and_excludes_config`.
-fn git_command(dir: &Path, args: &[&str]) -> Command {
+pub(super) fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     cmd.args(GIT_PINNED_GLOBAL_ARGS)
         .arg("-C")
@@ -737,43 +737,39 @@ pub(crate) fn dirt_blocks_removal(
 /// LOOKS like a worktree (e.g. its git worktree entry was already pruned by
 /// something else, or the shape matched by coincidence). A disagreement is
 /// treated conservatively: skip rather than delete.
-/// What: runs `git -C <repo_root> worktree list --porcelain`, where
-/// `repo_root` is `candidate`'s grandparent directory — the SAME derivation
-/// `decommission::remove_session_worktree` uses, which works identically for
-/// both worktree-store shapes (`<repo>/.worktrees/<name>` and
-/// `<repo>/.base/.worktrees/<id>`, since either way the grandparent of the
-/// worktree leaf is the git checkout root). Returns `true` (agree — deletion
-/// may proceed, subject to the caller's other checks) when the git command
-/// cannot be run or fails outright — this check is an ADDITIONAL safety net
-/// on top of the sentinel/store checks, not a replacement for them, so a
-/// missing `git` binary or a transient failure never blocks a deletion those
-/// checks already approved. It is emphatically NOT the fail-safe gate; that
-/// role belongs to [`inspect_dirt`], which fails toward DIRTY. Returns `true`
-/// only when `candidate`'s canonicalized path appears among the porcelain
-/// output's `worktree <path>` lines.
+/// What (rebuilt git-native, #4207): asks the CANDIDATE'S OWN repository —
+/// `git -C <candidate> worktree list --porcelain` — rather than a repository
+/// guessed from the candidate's grandparent directory. The grandparent rule
+/// was an inference, not a fact, and it was wrong in both directions: for
+/// `<repo>/.claude/worktrees/<name>` it named `<repo>/.claude`, which is not a
+/// repository at all, and for the fourteen worktrees living under
+/// `<repo>/.base/.worktrees/` but REGISTERED to the parent repo `<repo>` it
+/// named `.base`, which correctly disowned them — so this check returned
+/// `false` for every one of them and the sweep skipped them conservatively,
+/// forever. Git resolves the owning repository from the candidate itself, so
+/// the answer no longer depends on where the worktree is parked.
+///
+/// Returns `true` (agree — deletion may proceed, subject to the caller's other
+/// checks) when the probe cannot be answered at all: this check is an
+/// ADDITIONAL safety net on top of the sentinel/store checks, not a
+/// replacement for them, so a missing `git` binary or a transient failure
+/// never blocks a deletion those checks already approved. It is emphatically
+/// NOT the fail-safe gate; that role belongs to [`inspect_dirt`], which fails
+/// toward DIRTY. Returns `true` only when `candidate`'s canonicalized path
+/// appears among the registered worktrees.
 /// Test: `git_worktree_list_agrees_true_for_real_worktree`,
-///       `git_worktree_list_agrees_false_for_untracked_dir`.
+///       `git_worktree_list_agrees_false_for_untracked_dir`,
+///       `git_worktree_list_agrees_true_for_worktree_registered_to_parent_repo`
+///       (#4207 — fails against the grandparent rule).
 pub(crate) fn git_worktree_list_agrees(candidate: &Path) -> bool {
-    let Some(repo_root) = candidate.parent().and_then(|p| p.parent()) else {
-        return true;
+    let Some(worktrees) = super::worktree_registry::list_registered_worktrees(candidate) else {
+        return true; // best-effort: an unanswerable probe must never block a delete
     };
-    let out = git_command(repo_root, &["worktree", "list", "--porcelain"]).output();
-    let Ok(out) = out else {
-        return true; // best-effort: git unavailable must never block a delete
-    };
-    if !out.status.success() {
-        return true;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
     let canonical_candidate =
         std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
-    stdout
-        .lines()
-        .filter_map(|l| l.strip_prefix("worktree "))
-        .any(|p| {
-            let pb = PathBuf::from(p);
-            std::fs::canonicalize(&pb).unwrap_or(pb) == canonical_candidate
-        })
+    worktrees
+        .into_iter()
+        .any(|wt| std::fs::canonicalize(&wt.path).unwrap_or(wt.path) == canonical_candidate)
 }
 
 #[cfg(test)]

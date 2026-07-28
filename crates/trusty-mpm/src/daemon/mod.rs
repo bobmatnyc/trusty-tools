@@ -658,10 +658,30 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // clone otherwise grows without bound (94 dirs observed for one
                 // project) because decommission-time cleanup (#1806/#1840) only
                 // covers sessions torn down AFTER that fix landed and the manual
-                // `tm session prune-worktrees` sweep is rarely run. Only leaf
-                // worktree dirs with NO live record are removed — active worktrees
-                // and the base clone are never touched. Inherits the orphan-GC env
-                // gate (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.
+                // `tm session prune-worktrees` sweep is rarely run.
+                //
+                // What actually bounds this call (#4207/#4224 — the previous
+                // wording here, "only leaf worktree dirs ... the base clone are
+                // never touched", described the removed five-shape walk and is
+                // no longer true: a registered worktree at ANY depth inside a
+                // managed project, e.g. `<repo>/agents/scratch/wt-1`, is a
+                // candidate). A directory must clear ALL of: git registers it as
+                // a worktree that is not main/bare/prunable/locked — this is
+                // what excludes the BASE CLONE, which is a separate
+                // `git clone --bare` absent from `<repo>`'s registry entirely
+                // and bare+main in its own; it is a strict descendant of the
+                // managed project whose registry named it, which is what puts
+                // the operator's own checkouts parked beside a project out of
+                // reach by POSITION rather than by name — note this gate does
+                // NOT exclude `.base`, which IS a strict descendant of `<repo>`,
+                // so do not re-attribute the base clone to it; it is in neither
+                // the initial nor the
+                // pre-deletion active set; it carries a #3649 ownership sentinel
+                // naming a provably-ownerless owner past the grace window; and
+                // the #4091/#4118 dirty gate finds no uncommitted or unpushed
+                // work. See `SessionManager::reap_orphaned_worktrees` for the
+                // authoritative list. Inherits the orphan-GC env gate
+                // (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.
                 let repos_root = managed_routes::inproject::repos_root();
                 match mgr.reap_orphaned_worktrees(&repos_root).await {
                     Ok(outcome) => {

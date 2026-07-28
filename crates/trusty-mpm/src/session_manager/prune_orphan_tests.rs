@@ -2,108 +2,76 @@
 //! (#1840, #1845, extended #3649).
 //!
 //! Why: split out of `prune.rs` (as `orphan_tests`) so that file stays under
-//! the 500-SLOC production cap — `prune.rs` mixes production code (the
-//! walk, the ownership gate, the git cross-check) with a large test surface,
-//! and only the production code counts against the cap once tests live in a
+//! the 500-SLOC production cap — `prune.rs` mixes production code (discovery,
+//! the ownership gate, the git cross-check) with a large test surface, and
+//! only the production code counts against the cap once tests live in a
 //! sibling `_tests.rs` file, mirroring the pattern already established by
 //! `decommission_worktree_tests.rs` / `reap_orphaned_worktrees_tests.rs`.
-//! What: orphan discovery (`find_orphaned_worktrees`, both worktree-store
-//! shapes), the TOCTOU fresh-active-set safety net, and the #3649 ownership
-//! gate (owner-unknown never deleted, terminal/absent owner reclaimed, live
-//! owner spared, `git worktree list` agreement).
+//! What: orphan discovery (`find_orphaned_worktrees`, now git-derived per
+//! #4207 — every worktree in these tests is a REAL `git worktree add`, because
+//! a `mkdir` is no longer a candidate and would make an assertion vacuous), the
+//! TOCTOU fresh-active-set safety net, and the #3649 ownership gate
+//! (owner-unknown never deleted, terminal/absent owner reclaimed, live owner
+//! spared, `git worktree list` agreement).
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
 use super::*;
 
+/// A live session's worktree must never be returned as an orphan (#1840).
+///
+/// #4207: the worktree is now a REAL `git worktree add`, not a `mkdir`. Under
+/// the git-native enumeration a bare directory is not a candidate at all, so
+/// the `mkdir` version of this test passed vacuously — it asserted an empty
+/// list against an empty list.
 #[test]
 fn prune_orphaned_worktrees_spares_active() {
-    // A live session's worktree must never be returned as an orphan (#1840).
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let wt = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("live-session");
-    std::fs::create_dir_all(&wt).unwrap();
-    let active: std::collections::HashSet<_> =
-        vec![std::fs::canonicalize(&wt).unwrap_or_else(|_| wt.clone())]
-            .into_iter()
-            .collect();
-    let orphans = find_orphaned_worktrees(root, &active);
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("live-session");
+    let active: std::collections::HashSet<_> = [wt.clone()].into_iter().collect();
+    let orphans = find_orphaned_worktrees(&fx.repos_root, &active);
     assert!(
         orphans.is_empty(),
-        "live session must not be listed as orphan"
+        "live session must not be listed as orphan; got {orphans:?}"
     );
 }
 
+/// Simulates TOCTOU: a worktree looks like an orphan in the initial snapshot
+/// but appears in the fresh active set before deletion — must NOT be removed.
 #[test]
 fn prune_orphaned_worktrees_fresh_active_set_blocks_deletion() {
-    // Simulates TOCTOU: a dir looks like an orphan in the initial snapshot
-    // but appears in the fresh active set before deletion — must NOT be removed.
-    // We test the `find_orphaned_worktrees` logic: with an empty initial set
-    // the candidate IS found; then the Phase 2 TOCTOU check (re-querying the
-    // store) is validated by confirming fresh set membership would block deletion.
-    // The full async TOCTOU path is validated by the integration tests.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let wt = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("session-xyz");
-    std::fs::create_dir_all(&wt).unwrap();
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("session-xyz");
 
-    // Empty initial snapshot → the dir looks like an orphan candidate.
+    // Empty initial snapshot → the worktree looks like an orphan candidate.
     let empty_initial: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
-    let candidates = find_orphaned_worktrees(root, &empty_initial);
+    let candidates = find_orphaned_worktrees(&fx.repos_root, &empty_initial);
     assert!(
         candidates.contains(&wt),
-        "empty initial set must find the dir as a candidate"
+        "empty initial set must find the worktree as a candidate; got {candidates:?}"
     );
 
-    // Fresh active set contains the canonicalized dir path — mirrors Phase 2 of
-    // prune_orphaned_worktrees, which canonicalizes workspace_paths before
-    // inserting them into fresh_active (#1840 TOCTOU check).
-    let canonical = std::fs::canonicalize(&wt).unwrap_or_else(|_| wt.clone());
-    let fresh: std::collections::HashSet<std::path::PathBuf> =
-        [canonical.clone()].into_iter().collect();
+    // A fresh active set containing it blocks the deletion (Phase 2, #1840).
+    let fresh: std::collections::HashSet<std::path::PathBuf> = [wt.clone()].into_iter().collect();
     assert!(
-        fresh.contains(&canonical),
-        "fresh active set must contain the canonicalized worktree path"
+        find_orphaned_worktrees(&fx.repos_root, &fresh).is_empty(),
+        "a candidate in the fresh active set must not be proposed for deletion"
     );
-    // The directory still exists — nothing deleted it.
     assert!(wt.exists(), "worktree must survive the TOCTOU check");
 }
 
+/// A worktree with no active session must be listed as an orphan (#1840).
 #[test]
 fn prune_orphaned_worktrees_collects_orphan() {
-    // A worktree with no active session must be listed as an orphan (#1840).
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let wt1 = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("live");
-    let wt2 = root
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("dead");
-    std::fs::create_dir_all(&wt1).unwrap();
-    std::fs::create_dir_all(&wt2).unwrap();
-    let active: std::collections::HashSet<_> =
-        vec![std::fs::canonicalize(&wt1).unwrap_or_else(|_| wt1.clone())]
-            .into_iter()
-            .collect();
-    let orphans = find_orphaned_worktrees(root, &active);
-    assert_eq!(orphans.len(), 1);
-    // Ordering not guaranteed — use contains rather than indexed access.
-    assert!(
-        orphans.contains(&wt2),
-        "expected {wt2:?} to be the orphan, got {orphans:?}"
+    let fx = GitWorktreeFixture::new();
+    let live = fx.add_worktree("live");
+    let dead = fx.add_worktree("dead");
+    let active: std::collections::HashSet<_> = [live.clone()].into_iter().collect();
+    let orphans = find_orphaned_worktrees(&fx.repos_root, &active);
+    assert_eq!(
+        orphans,
+        vec![dead],
+        "only the unclaimed worktree is an orphan"
     );
 }
 
@@ -151,24 +119,18 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
     }
 
     let store_dir = tempfile::tempdir().unwrap();
-    let repos_tmp = tempfile::tempdir().unwrap();
-
-    // Build a real .worktrees/<id>/ dir so Phase 1 finds it as a candidate.
+    // #4207: a REAL `git worktree add`, so Phase 1 genuinely finds it as a
+    // candidate — a `mkdir` is no longer enumerated and made this vacuous.
+    let fx = GitWorktreeFixture::new();
     let session_id = super::super::record::ManagedSessionId::new();
-    let wt_path = repos_tmp
-        .path()
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join(session_id.to_string());
-    std::fs::create_dir_all(&wt_path).expect("create worktree dir");
+    let wt_path = fx.add_worktree(&session_id.to_string());
 
     // Create the SessionManager and insert a live record for the worktree.
     let mgr = super::super::manager::SessionManager::new(store_dir.path(), Arc::new(NoopDriver))
         .await
         .expect("SessionManager::new");
 
-    let canonical_wt = std::fs::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
+    let canonical_wt = wt_path.clone();
     let record = super::super::record::SessionRecord {
         id: session_id,
         tmux_name: "test-toctou".into(),
@@ -208,7 +170,7 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
     // runs — still never removed, now for the #3649 safe-default reason
     // rather than (only) the #1845 TOCTOU fresh-snapshot reason.
     let outcome = mgr
-        .prune_orphaned_worktrees(repos_tmp.path(), &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -220,101 +182,60 @@ async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
     assert!(wt_path.exists(), "worktree dir must survive the prune");
 }
 
-// ── #3649: extended `.base/.worktrees` walk + ownership gating ──────────
+// ── #4207 slice 1: discovery is derived from git, not from location ─────
+//
+// The five location shapes this walk used to probe (`.worktrees/`,
+// `.base/.worktrees/`, `.claude/worktrees/`, `.base/.claude/worktrees/`, and
+// `.base/.worktrees/<id>/.claude/worktrees/`) each arrived as a bug report
+// about a location the previous list had missed. There is nothing left to
+// enumerate per-shape: a worktree is discovered because git registered it.
+// The two tests below replace all seven shape-coverage tests.
 
-/// `find_orphaned_worktrees` must ALSO discover the clone-based
-/// `.base/.worktrees/<id>` shape, not just the in-project `.worktrees/<name>`
-/// shape (#3649 item 4a — this walk previously covered ONLY the latter, so
-/// the entire `provisioner::workspace` worktree store was invisible to the
-/// orphan-GC, `tm doctor`, and `--dry-run`).
+/// THE #4207 regression test at the reclaim layer: a registered worktree at a
+/// location NONE of the five hard-coded shapes covered is discovered.
+///
+/// Why: `<repo>/agents/scratch/wt-1` matches no shape the removed walk probed,
+/// so reverting `find_orphaned_worktrees` to that walk makes this fail with an
+/// empty candidate list. Location is no longer a variable the code reasons
+/// about, which is the whole point of the slice.
 #[test]
-fn find_orphaned_worktrees_covers_base_worktrees_shape() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let base_wt = root
-        .join("owner")
-        .join("repo")
-        .join(".base")
-        .join(".worktrees")
-        .join("session-abc");
-    std::fs::create_dir_all(&base_wt).unwrap();
-    let empty_active: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
-    let orphans = find_orphaned_worktrees(root, &empty_active);
+fn find_orphaned_worktrees_discovers_worktree_at_unwalked_location() {
+    let fx = GitWorktreeFixture::new();
+    let parked = fx.add_worktree_at(&fx.repo.join("agents").join("scratch"), "wt-1");
+    let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let orphans = find_orphaned_worktrees(&fx.repos_root, &empty);
     assert!(
-        orphans.contains(&base_wt),
-        "the .base/.worktrees shape must be discovered as a candidate; got {orphans:?}"
+        orphans.contains(&parked),
+        "a registered worktree must be found wherever it lives; got {orphans:?}"
     );
 }
 
-// ── #3971: extended `.claude/worktrees` walk (Claude Code native agent
-// worktrees) ──────────────────────────────────────────────────────────────
-
-/// `find_orphaned_worktrees` must ALSO discover Claude Code's native
-/// `.claude/worktrees/agent-<hash>` shape, not just the two trusty-mpm-owned
-/// shapes (#3971 — this walk previously covered ONLY `.worktrees/<name>` and
-/// `.base/.worktrees/<id>`, so every Claude-Code-created agent worktree was
-/// invisible to the orphan-GC, `tm doctor`, and `--dry-run`, letting them
-/// accumulate silently).
+/// A plain directory parked in a worktree-shaped location is NOT a worktree and
+/// must never be proposed for deletion.
+///
+/// Why: the old walk collected any leaf directory under a `.worktrees/` parent,
+/// so a stray `mkdir` was indistinguishable from a checkout git created. This
+/// is the deliberate narrowing derive-not-walk buys, and it is the safer
+/// direction: a directory git does not own is not trusty-mpm's to reclaim.
 #[test]
-fn find_orphaned_worktrees_covers_claude_worktrees_shape() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let claude_wt = root
-        .join("owner")
-        .join("repo")
-        .join(".claude")
-        .join("worktrees")
-        .join("agent-0123456789abcdef0123456789abcdef01234567");
-    std::fs::create_dir_all(&claude_wt).unwrap();
-    let empty_active: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
-    let orphans = find_orphaned_worktrees(root, &empty_active);
+fn find_orphaned_worktrees_ignores_plain_directory() {
+    let fx = GitWorktreeFixture::new();
+    let fake = fx.repo.join(".worktrees").join("just-a-mkdir");
+    std::fs::create_dir_all(&fake).expect("mkdir");
+    let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let orphans = find_orphaned_worktrees(&fx.repos_root, &empty);
     assert!(
-        orphans.contains(&claude_wt),
-        "the .claude/worktrees shape must be discovered as a candidate; got {orphans:?}"
+        !orphans.contains(&fake),
+        "a plain directory is not a registered worktree; got {orphans:?}"
     );
 }
 
-/// A LIVE (non-orphaned) `.claude/worktrees/agent-<hash>` directory — one
-/// whose canonicalized path IS present in the caller-supplied active set —
-/// must never be returned as an orphan candidate (#3971). Mirrors the
-/// existing `prune_orphaned_worktrees_spares_active` guarantee for the other
-/// two shapes.
-#[test]
-fn find_orphaned_worktrees_spares_live_claude_worktree() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let claude_wt = root
-        .join("owner")
-        .join("repo")
-        .join(".claude")
-        .join("worktrees")
-        .join("agent-fedcba9876543210fedcba9876543210fedcba98");
-    std::fs::create_dir_all(&claude_wt).unwrap();
-    let active: std::collections::HashSet<_> =
-        vec![std::fs::canonicalize(&claude_wt).unwrap_or_else(|_| claude_wt.clone())]
-            .into_iter()
-            .collect();
-    let orphans = find_orphaned_worktrees(root, &active);
-    assert!(
-        orphans.is_empty(),
-        "a live .claude/worktrees entry must not be listed as orphan; got {orphans:?}"
-    );
-}
-
-/// Even when discovered as an orphan CANDIDATE by the walk, a
-/// `.claude/worktrees/agent-<hash>` directory is never created by
-/// trusty-mpm's own provisioning code, so it never carries the
-/// `.trusty-mpm-worktree` ownership sentinel. The existing #3649 ownership
-/// gate therefore classifies it as `SentinelOwner::Unknown` and the full
-/// `prune_orphaned_worktrees` sweep must NEVER auto-delete it — only report
-/// it via `OrphanSweepOutcome::owner_unknown`, exactly like any other
-/// legacy/owner-unknown worktree (#3971).
+/// A Claude-Code-native agent worktree is discovered but NEVER auto-deleted:
+/// it never carries trusty-mpm's ownership sentinel, so the #3649 gate reports
+/// it as owner-unknown (#3971, kept location-agnostic by #4207).
 #[tokio::test]
 async fn prune_orphaned_worktrees_never_deletes_claude_native_worktree() {
     let store_dir = tempfile::tempdir().unwrap();
-    let repos = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(
         store_dir.path(),
         crate::session_manager::tests::FakeTmuxDriver::new(),
@@ -322,19 +243,16 @@ async fn prune_orphaned_worktrees_never_deletes_claude_native_worktree() {
     .await
     .expect("manager");
 
-    let claude_wt = repos
-        .path()
-        .join("owner")
-        .join("repo")
-        .join(".claude")
-        .join("worktrees")
-        .join("agent-00112233445566778899aabbccddeeff00112233");
-    std::fs::create_dir_all(&claude_wt).unwrap();
-    // Deliberately NO sentinel file written — Claude Code's native
-    // `isolation: "worktree"` mechanism never writes trusty-mpm's sentinel.
+    let fx = GitWorktreeFixture::new();
+    // Deliberately NO sentinel written — Claude Code's native
+    // `isolation: "worktree"` mechanism never writes trusty-mpm's.
+    let claude_wt = fx.add_worktree_at(
+        &fx.repo.join(".claude").join("worktrees"),
+        "agent-00112233445566778899aabbccddeeff00112233",
+    );
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -344,177 +262,11 @@ async fn prune_orphaned_worktrees_never_deletes_claude_native_worktree() {
         outcome.removed
     );
     assert!(
-        outcome.owner_unknown.iter().any(|p| p == &claude_wt),
+        outcome.owner_unknown.contains(&claude_wt),
         "expected {claude_wt:?} to be reported as owner-unknown; got {:?}",
         outcome.owner_unknown
     );
     assert!(claude_wt.exists(), "worktree dir must survive the prune");
-}
-
-// ── #3971 follow-up: the two Claude-worktree locations the first #3971 fix
-// missed — `.base/.claude/worktrees` and the nested per-session-checkout
-// shape (BLOCK finding: the fix only anchored at `<repo>/.claude/worktrees`,
-// covering roughly a third of the real on-disk surface) ────────────────────
-
-/// `find_orphaned_worktrees` must discover Claude Code agent worktrees
-/// created directly inside the bare `.base` clone checkout itself, at
-/// `<repo>/.base/.claude/worktrees/<name>` — a sibling of the repo-root
-/// `.claude/worktrees` shape the first #3971 fix covered, but a distinct
-/// filesystem location the walk did not anchor at (confirmed live on the
-/// dogfood machine with 29 real entries).
-#[test]
-fn find_orphaned_worktrees_covers_base_claude_worktrees_shape() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let base_claude_wt = root
-        .join("owner")
-        .join("repo")
-        .join(".base")
-        .join(".claude")
-        .join("worktrees")
-        .join("agent-1111111111111111111111111111111111111111");
-    std::fs::create_dir_all(&base_claude_wt).unwrap();
-    let empty_active: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
-    let orphans = find_orphaned_worktrees(root, &empty_active);
-    assert!(
-        orphans.contains(&base_claude_wt),
-        "the .base/.claude/worktrees shape must be discovered as a candidate; got {orphans:?}"
-    );
-}
-
-/// `find_orphaned_worktrees` must discover Claude Code agent worktrees
-/// nested INSIDE a per-session checkout, at
-/// `<repo>/.base/.worktrees/<session-id>/.claude/worktrees/<name>` — the
-/// exact shape a Claude Code agent spawned from within its own trusty-mpm
-/// session checkout produces (this is literally the shape this leg's own
-/// `fix-worktree-hygiene` worktree lives under). The session-id leaf name is
-/// dynamic, so this exercises the `list_immediate_dirs` enumeration path,
-/// not a fixed join.
-#[test]
-fn find_orphaned_worktrees_covers_nested_session_claude_worktrees_shape() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path();
-    let nested_claude_wt = root
-        .join("owner")
-        .join("repo")
-        .join(".base")
-        .join(".worktrees")
-        .join("2eb72dca-de08-481b-8dfa-22ab7f81b1f9")
-        .join(".claude")
-        .join("worktrees")
-        .join("fix-worktree-hygiene");
-    std::fs::create_dir_all(&nested_claude_wt).unwrap();
-    let empty_active: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
-    let orphans = find_orphaned_worktrees(root, &empty_active);
-    assert!(
-        orphans.contains(&nested_claude_wt),
-        "the nested .base/.worktrees/<session-id>/.claude/worktrees shape must be \
-         discovered as a candidate; got {orphans:?}"
-    );
-}
-
-/// End-to-end through the real ownership gate (mirrors
-/// `prune_orphaned_worktrees_never_deletes_claude_native_worktree`): a
-/// sentinel-less `.base/.claude/worktrees/<name>` candidate is discovered but
-/// never auto-deleted, only reported as owner-unknown (#3971 follow-up).
-#[tokio::test]
-async fn prune_orphaned_worktrees_never_deletes_base_claude_native_worktree() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let repos = tempfile::tempdir().unwrap();
-    let mgr = SessionManager::new(
-        store_dir.path(),
-        crate::session_manager::tests::FakeTmuxDriver::new(),
-    )
-    .await
-    .expect("manager");
-
-    let base_claude_wt = repos
-        .path()
-        .join("owner")
-        .join("repo")
-        .join(".base")
-        .join(".claude")
-        .join("worktrees")
-        .join("agent-2222222222222222222222222222222222222222");
-    std::fs::create_dir_all(&base_claude_wt).unwrap();
-    // Deliberately NO sentinel file written.
-
-    let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
-        .await
-        .expect("prune must not error");
-
-    assert!(
-        outcome.removed.is_empty(),
-        "a Claude-Code-native worktree under .base/.claude must never be auto-deleted; got {:?}",
-        outcome.removed
-    );
-    assert!(
-        outcome.owner_unknown.iter().any(|p| p == &base_claude_wt),
-        "expected {base_claude_wt:?} to be reported as owner-unknown; got {:?}",
-        outcome.owner_unknown
-    );
-    assert!(
-        base_claude_wt.exists(),
-        "worktree dir must survive the prune"
-    );
-}
-
-/// End-to-end through the real ownership gate for the NESTED
-/// per-session-checkout shape: a sentinel-less
-/// `.base/.worktrees/<session-id>/.claude/worktrees/<name>` candidate is
-/// discovered but never auto-deleted, only reported as owner-unknown (#3971
-/// follow-up).
-#[tokio::test]
-async fn prune_orphaned_worktrees_never_deletes_nested_session_claude_worktree() {
-    let store_dir = tempfile::tempdir().unwrap();
-    let repos = tempfile::tempdir().unwrap();
-    let mgr = SessionManager::new(
-        store_dir.path(),
-        crate::session_manager::tests::FakeTmuxDriver::new(),
-    )
-    .await
-    .expect("manager");
-
-    let nested_claude_wt = repos
-        .path()
-        .join("owner")
-        .join("repo")
-        .join(".base")
-        .join(".worktrees")
-        .join("some-session-id")
-        .join(".claude")
-        .join("worktrees")
-        .join("nested-agent");
-    std::fs::create_dir_all(&nested_claude_wt).unwrap();
-    // Deliberately NO sentinel file written on the nested Claude worktree.
-    // The session-id leaf itself also has no sentinel — it must not be
-    // misclassified as a location-2 (`.base/.worktrees`) orphan candidate
-    // either, since it still contains a live-looking nested checkout; that
-    // is exercised implicitly here (only the leaf-most directory is ever a
-    // candidate for each scanned shape).
-
-    let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
-        .await
-        .expect("prune must not error");
-
-    assert!(
-        outcome.removed.is_empty(),
-        "a nested Claude-Code-native worktree must never be auto-deleted; got {:?}",
-        outcome.removed
-    );
-    assert!(
-        outcome.owner_unknown.iter().any(|p| p == &nested_claude_wt),
-        "expected {nested_claude_wt:?} to be reported as owner-unknown; got {:?}",
-        outcome.owner_unknown
-    );
-    assert!(
-        nested_claude_wt.exists(),
-        "worktree dir must survive the prune"
-    );
 }
 
 /// A candidate whose ownership sentinel is absent (no `.trusty-mpm-worktree`
@@ -523,7 +275,6 @@ async fn prune_orphaned_worktrees_never_deletes_nested_session_claude_worktree()
 #[tokio::test]
 async fn prune_orphaned_worktrees_skips_owner_unknown() {
     let store_dir = tempfile::tempdir().unwrap();
-    let repos = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(
         store_dir.path(),
         crate::session_manager::tests::FakeTmuxDriver::new(),
@@ -531,17 +282,12 @@ async fn prune_orphaned_worktrees_skips_owner_unknown() {
     .await
     .expect("manager");
 
-    let wt = repos
-        .path()
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("legacy-no-sentinel");
-    std::fs::create_dir_all(&wt).unwrap();
+    let fx = GitWorktreeFixture::new();
     // Deliberately NO sentinel file written — simulates a legacy worktree.
+    let wt = fx.add_worktree("legacy-no-sentinel");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -588,7 +334,6 @@ fn aged_sentinel_bytes(
 #[tokio::test]
 async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
     let store_dir = tempfile::tempdir().unwrap();
-    let repos = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(
         store_dir.path(),
         crate::session_manager::tests::FakeTmuxDriver::new(),
@@ -596,13 +341,8 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
     .await
     .expect("manager");
 
-    let wt = repos
-        .path()
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("ownerless-gone");
-    std::fs::create_dir_all(&wt).unwrap();
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("ownerless-gone");
     let never_registered_owner = ManagedSessionId::new();
     let aged = chrono::Utc::now()
         - crate::session_manager::worktree_ownership::OWNERLESS_GRACE
@@ -614,7 +354,7 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
     .expect("write sentinel");
 
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -630,6 +370,64 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
     );
 }
 
+/// THE OTHER DIRECTION of the #4224 containment boundary: a genuine tm-owned
+/// husk at a location NO hard-coded shape covers is still reclaimed, end to end.
+///
+/// Why: the #4224 review's HIGH is that git-native enumeration widened the
+/// auto-deletion surface, and the fix narrows it back to "inside the managed
+/// project". A narrowing is only correct if it costs no reclaim capability, and
+/// the cheapest way to satisfy a containment test is to stop deleting
+/// altogether — which would silently restore the very leak #4207 exists to fix
+/// while every exclusion test still passed. So this asserts the positive:
+/// `<repo>/agents/scratch/husk` matches none of the five removed shapes
+/// (`.worktrees/`, `.base/.worktrees/`, `.claude/worktrees/`,
+/// `.base/.claude/worktrees/`, `.base/.worktrees/<id>/.claude/worktrees/`), and
+/// it is REMOVED FROM DISK.
+///
+/// This runs the whole gauntlet, not just enumeration: the #3649 ownership
+/// gate (aged sentinel, owner that never resolves), the `git worktree list`
+/// cross-check, and the #4091/#4118 dirty gate.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_orphaned_worktrees_reclaims_owned_husk_at_an_unwalked_location() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let mgr = SessionManager::new(
+        store_dir.path(),
+        crate::session_manager::tests::FakeTmuxDriver::new(),
+    )
+    .await
+    .expect("manager");
+
+    let fx = GitWorktreeFixture::new();
+    let husk = fx.add_worktree_at(&fx.repo.join("agents").join("scratch"), "husk");
+    assert!(
+        !husk.starts_with(fx.repo.join(".worktrees"))
+            && !husk.starts_with(fx.repo.join(".claude"))
+            && !husk.starts_with(fx.repo.join(".base")),
+        "test invariant: the husk must sit at a location none of the five \
+         removed shapes covered, or this test cannot prove the #4207 fix \
+         survived the #4224 narrowing; got {}",
+        husk.display()
+    );
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&husk);
+
+    let outcome = mgr
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
+        .await
+        .expect("prune must not error");
+
+    assert!(
+        outcome.removed.iter().any(|p| p == &husk),
+        "a sentinel-bearing, ownerless worktree inside the project must be \
+         reclaimed wherever in the project it lives; got removed={:?} \
+         owner_unknown={:?} skipped_dirty={:?}",
+        outcome.removed,
+        outcome.owner_unknown,
+        outcome.skipped_dirty
+    );
+    assert!(!husk.exists(), "the reclaimed husk must be gone from disk");
+}
+
 /// A candidate whose sentinel names an owner with NO resolvable session
 /// record, but whose sentinel was stamped RECENTLY (within the creation-race
 /// grace window), must NOT be reclaimed — this is the exact bug the #3649
@@ -640,7 +438,6 @@ async fn prune_orphaned_worktrees_reclaims_terminal_owner() {
 #[tokio::test]
 async fn prune_orphaned_worktrees_spares_recent_unregistered_owner() {
     let store_dir = tempfile::tempdir().unwrap();
-    let repos = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(
         store_dir.path(),
         crate::session_manager::tests::FakeTmuxDriver::new(),
@@ -648,13 +445,8 @@ async fn prune_orphaned_worktrees_spares_recent_unregistered_owner() {
     .await
     .expect("manager");
 
-    let wt = repos
-        .path()
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("mid-creation-race");
-    std::fs::create_dir_all(&wt).unwrap();
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("mid-creation-race");
     let not_yet_persisted_owner = ManagedSessionId::new();
     std::fs::write(
         wt.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE),
@@ -662,8 +454,15 @@ async fn prune_orphaned_worktrees_spares_recent_unregistered_owner() {
     )
     .expect("write sentinel");
 
+    // The candidate IS discovered — otherwise this test would pass vacuously.
+    let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    assert!(
+        find_orphaned_worktrees(&fx.repos_root, &empty).contains(&wt),
+        "test invariant: the worktree must reach the ownership gate"
+    );
+
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -686,7 +485,6 @@ async fn prune_orphaned_worktrees_spares_recent_unregistered_owner() {
 #[tokio::test]
 async fn prune_orphaned_worktrees_spares_live_owner() {
     let store_dir = tempfile::tempdir().unwrap();
-    let repos = tempfile::tempdir().unwrap();
     let mgr = SessionManager::new(
         store_dir.path(),
         crate::session_manager::tests::FakeTmuxDriver::new(),
@@ -694,13 +492,8 @@ async fn prune_orphaned_worktrees_spares_live_owner() {
     .await
     .expect("manager");
 
-    let wt = repos
-        .path()
-        .join("owner")
-        .join("repo")
-        .join(".worktrees")
-        .join("live-owner-elsewhere");
-    std::fs::create_dir_all(&wt).unwrap();
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("live-owner-elsewhere");
 
     // Register the owner as a LIVE record whose workspace_path points
     // somewhere else entirely — so `wt` is NOT in `active_workspace_paths`
@@ -730,8 +523,15 @@ async fn prune_orphaned_worktrees_spares_live_owner() {
     )
     .expect("write sentinel");
 
+    // The candidate IS discovered — otherwise this test would pass vacuously.
+    let empty: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    assert!(
+        find_orphaned_worktrees(&fx.repos_root, &empty).contains(&wt),
+        "test invariant: the worktree must reach the ownership gate"
+    );
+
     let outcome = mgr
-        .prune_orphaned_worktrees(repos.path(), &[], false, DirtyWorktreePolicy::Skip)
+        .prune_orphaned_worktrees(&fx.repos_root, &[], false, DirtyWorktreePolicy::Skip)
         .await
         .expect("prune must not error");
 
@@ -835,6 +635,52 @@ fn git_worktree_list_agrees_false_for_untracked_dir() {
     assert!(
         !git_worktree_list_agrees(&untracked),
         "a directory git never registered as a worktree must disagree"
+    );
+}
+
+/// THE #4207 regression test for the ownership half of the slice: a worktree
+/// physically inside `<repo>/.base/.worktrees/` but REGISTERED to the parent
+/// repo `<repo>` must be recognised as a real worktree.
+///
+/// Why: this is the exact state fourteen worktrees on the dogfood machine were
+/// in on 2026-07-27, and it made every one of them STRUCTURALLY unreclaimable.
+/// The old rule derived the owning checkout from the candidate's GRANDPARENT,
+/// which here is `<repo>/.base` — a genuine but DIFFERENT repository that
+/// correctly disowns the path. `git_worktree_list_agrees` therefore returned
+/// `false` and the reclaim path skipped conservatively, forever, no matter how
+/// clean or how ownerless the worktree was.
+///
+/// REVERT-PROOF: restore
+/// `let repo_root = candidate.parent().and_then(|p| p.parent())` and aim the
+/// `worktree list` at it, and this test fails — `.base` is a real repository
+/// whose registry genuinely does not contain the candidate, so the old code
+/// takes its success path and returns `false`. The two tests above cannot
+/// catch it: in both, the grandparent happens to be the owning repository.
+#[test]
+fn git_worktree_list_agrees_true_for_worktree_registered_to_parent_repo() {
+    let fx = GitWorktreeFixture::new();
+    // Create the `.base` bare clone first, so the candidate's grandparent is a
+    // real repository — one that does NOT own the candidate.
+    fx.add_base_clone_worktree("owned-by-base");
+    let parent_registered = fx.add_worktree_at(
+        &fx.repo.join(".base").join(".worktrees"),
+        "registered-to-parent",
+    );
+
+    let grandparent = parent_registered
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("grandparent");
+    assert!(
+        crate::session_manager::worktree_registry::registry_root_for(grandparent).is_some(),
+        "test invariant: the grandparent must itself be a repository, or the old \
+         rule would fall through its best-effort `true` and pass by accident"
+    );
+
+    assert!(
+        git_worktree_list_agrees(&parent_registered),
+        "a worktree registered to the PARENT repo but living under .base must be \
+         recognised — asking the grandparent (.base) disowns it"
     );
 }
 

@@ -7,6 +7,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- Worktree discovery is derived from `git worktree list --porcelain` instead of
+  walking five hard-coded location shapes, so a session worktree is found
+  wherever it lives rather than only where someone remembered to look (#4207
+  slice 1).
+- The checkout that owns a worktree is now resolved with
+  `git rev-parse --git-common-dir` instead of being guessed as the candidate's
+  grandparent directory. Worktrees physically inside `.base/.worktrees/` but
+  registered to the parent repository were previously disowned by that guess
+  and were structurally unreclaimable — never deleted, never reportable (#4207,
+  underlying defect of #4204).
+- `tm session prune --worktrees` and the daemon orphan-GC no longer propose a
+  plain directory as a reclaim candidate. A directory git does not register is
+  not trusty-mpm's to remove.
+- Worktree reclamation is bounded by a structural containment rule: a candidate
+  must be a strict descendant of the managed project directory whose git
+  registry named it. Deriving discovery from git (above) widened what could be
+  proposed for deletion from five path shapes to anything registered anywhere
+  under the projects root — on this machine that admitted five of the
+  operator's own long-lived checkouts, leaving the ownership sentinel as the
+  only thing between enumeration and an unattended removal. Your own checkouts
+  and any worktree you park beside a managed project are now excluded by
+  position rather than by a list of names, so a new one is excluded the day you
+  create it. Location remains irrelevant *within* a project, so no reclaim
+  capability is lost (#4207).
+- A git-`locked` worktree is never enumerated for reclamation. Git itself
+  respects the lock — `git worktree remove --force` refuses it — but the
+  removal path treats that refusal as a generic git failure and falls back to
+  deleting the directory outright, which defeats the lock and strands git's
+  registry entry. Excluding locked worktrees from enumeration is the only place
+  `git worktree lock` is actually honoured (#4207).
+
 ---
 ## [1.2.3] — 2026-07-28
 
