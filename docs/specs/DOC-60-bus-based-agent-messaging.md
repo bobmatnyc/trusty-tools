@@ -3,13 +3,21 @@
 **Status:** Draft
 **Spec ID:** `SPEC-AGENTBUS-01~draft`
 **Subsystem:** trusty-mpm (bus host, daemon) — trusty-agents (assistants, sub-agents, ctrl) — trusty-channels (Slack/Telegram/etc.) — trusty-memory (consolidation target) — trusty-search (index target)
-**Last-updated:** 2026-07-28 (Rev 2: §12 Open Question 9, decline-ability of a
-peer request, moved into §5.3 as a normative consequence derived from
-ADR-0024's virtual-twin authority principle; remaining open questions
-renumbered. Rev 1: unified all three communication edges — user↔assistant,
-assistant↔sub-agent, assistant↔assistant — into equally-specified
-first-class sections per owner instruction; documents assistant↔assistant as
-the replacement for the delegation lane closed by PR #4240/ADR-0024)
+**Last-updated:** 2026-07-28 (Rev 3: three owner decisions recorded — (1) the
+persona peer channel (§5.3) ships independently of ADR-0019, with the
+persona-layer-only scope of the "one bus" claim made explicit (§1); (2)
+instance-bypass addressing is in scope and normative in §5.3, with the
+failure-mode semantics left pending the implementing engineer's decision
+(§12 Open Question 8, narrowed accordingly); (3) streaming chat token deltas
+explicitly stay on the retained per-crate buses (§3 #1/#2/#5) rather than
+riding this bus, stated normatively in §11. Rev 2: §12 Open Question 9,
+decline-ability of a peer request, moved into §5.3 as a normative consequence
+derived from ADR-0024's virtual-twin authority principle; remaining open
+questions renumbered. Rev 1: unified all three communication edges —
+user↔assistant, assistant↔sub-agent, assistant↔assistant — into
+equally-specified first-class sections per owner instruction; documents
+assistant↔assistant as the replacement for the delegation lane closed by
+PR #4240/ADR-0024)
 
 ## 1. Summary
 
@@ -20,7 +28,7 @@ durable, searchable message bus, as equally-specified first-class edges:
 2. **Assistant/PM ↔ Sub-Agent** (§5.2)
 3. **Assistant ↔ Assistant, peer-to-peer** (§5.3)
 
-Every cross-boundary message in the system — these three edges plus
+Every cross-boundary persona message in the system — these three edges plus
 inbound/outbound channel traffic (§8) — rides this one bus, retiring the five
 independent broadcast implementations that exist today because none of them
 address the unit that actually needs addressing: an **agent instance**.
@@ -58,6 +66,21 @@ alongside two already-real ones — it is the specified replacement for a
 capability that is already live-removed from the codebase, and until it is
 implemented, trusty-agents personas have **no** agent-to-agent messaging path
 of any kind.
+
+**Owner decision: §5.3 ships independently of ADR-0019.** The tm-session
+lane — tmux-pane CLI sessions addressed via `session_send`,
+`session_proxy_message`, and `tm sessions send` — is a separate,
+still-unimplemented spec (ADR-0019, Accepted, with, per its own Consequences
+section, no code landed since 2026-07-18 — see §2, §5.3). The persona peer
+channel specified in §5.3 does not wait for ADR-0019, does not depend on it
+landing first, and is not blocked by its absence; the two are independently
+shippable. **Honest consequence, stated so a reader does not overclaim:**
+until ADR-0019 lands, the "one bus" framing above is true at the **persona
+layer only** — user↔assistant, assistant↔sub-agent, assistant↔assistant
+(§5) plus channel traffic (§8). It is not yet true of the product as a
+whole: the tm-session (tmux CLI) lane keeps whatever delivery mechanism it
+has today, unaffected by and unintegrated with this spec, until ADR-0019 is
+separately implemented.
 
 This is a DRAFT. It resolves what is answerable from the current codebase and
 flags the rest explicitly in §12 for the owner.
@@ -306,11 +329,18 @@ cto-assistant lane.
 
 - **Addressing.** Same shape as §5.1: a peer message addresses a
   `definition_id` (§6a) — one assistant naming another by its persona name —
-  resolved to a live `instance_id` (§6b) when the target is running. Whether
-  a peer message may instead target a specific running `instance_id`
-  directly (bypassing definition-level resolution when the sender already
-  knows which instance it is talking to) is **not decided by this spec** —
-  see Open Question 8 (§12).
+  resolved to a live `instance_id` (§6b) when the target is running.
+  **Instance bypass is in scope and supported:** a sender that already holds
+  a live target `instance_id` (e.g. from a prior reply on the same thread)
+  MAY address that instance directly, skipping definition-level resolution,
+  for thread continuity. **Not decided here:** the failure-mode semantics —
+  what happens when the targeted instance died between the sender learning
+  that `instance_id` and the message actually being sent (fall back to
+  definition-level resolution and queue, return an explicit delivery error,
+  something else). That is being decided by the engineer implementing
+  instance-bypass delivery; this spec deliberately does not pre-specify an
+  answer that could contradict the landed implementation — see Open
+  Question 8 (§12), narrowed accordingly.
 - **Wake semantics.** Governed by the same rule as §5.1 (§7), explicitly: a
   peer message to a running instance delivers directly; a peer message to a
   stopped/never-started assistant definition queues to that definition's
@@ -626,6 +656,23 @@ payload vocabulary (§3 retirement #4) rather than invented from scratch.
 }
 ```
 
+**Explicit boundary, owner-decided: streaming chat token deltas do NOT ride
+this bus.** The `payload.type = "chat_text"` shown above is a complete
+message (one finished turn), not a live token-by-token stream. Token-level
+streaming deltas continue to ride the existing per-crate buses this spec
+retains for that exact job — the `tm` global and per-session event buses
+(§3 #1, #2) and trusty-code's `SessionEventEnvelope` bus (§3 #5) — precisely
+as those retirement-table verdicts already state they survive "for UI
+streaming." This section makes that split explicit rather than leaving it
+implied by the retirement table's rationale column alone: token deltas are
+high-volume UI telemetry (potentially dozens of partial updates per second
+per active response), not durable messages, and routing every delta through
+this bus's JSONL audit sink (§9) would flood it with content that has no
+standalone meaning once the turn completes and no reason to be individually
+searchable, threaded (`in_reply_to`), or retained. Only the completed turn —
+the payload this envelope actually carries — is bus traffic; the deltas that
+assembled it are not.
+
 ## 12. Open questions
 
 These cannot be resolved from the current codebase; the owner answers them,
@@ -662,12 +709,20 @@ not this spec.
    Today's `dream_consolidate_room` runs against a room's existing content
    on its own schedule; whether/how it is pointed at the bus replay API (poll
    on a cadence, triggered by a threshold, or manual) is not designed here.
-8. **Is a peer message addressed to an assistant DEFINITION or a specific
-   INSTANCE (§5.3)?** §5.1's user↔assistant edge addresses by definition and
-   resolves to an instance at send time; whether an assistant that already
-   knows a specific peer instance's id (e.g. from a prior reply on the same
-   thread) may address that instance directly, bypassing definition-level
-   resolution, is not decided here.
+8. **Failure-mode semantics for instance-bypass delivery (§5.3).** §5.3 now
+   settles that instance bypass is in scope and supported: a sender holding
+   a live peer `instance_id` MAY address it directly, bypassing
+   definition-level resolution. What remains open is what happens when the
+   targeted instance died between the sender learning that id and the
+   message being sent — fall back to definition-level resolution and queue,
+   return an explicit delivery error, or something else. This is being
+   decided by the engineer implementing instance-bypass delivery, not
+   settled here, so this spec does not risk contradicting the landed
+   implementation.
+
+   *(Former Open Question 8 — whether a peer message may address a
+   definition or a specific instance at all — is no longer open: instance
+   bypass is now normative text in §5.3.)*
 9. **Is there any ordering or delivery guarantee between peers (§5.3)?**
    §11's `delivery_state` field tracks a single envelope's own lifecycle
    (queued/delivered/acked/dropped), but does not establish whether two
