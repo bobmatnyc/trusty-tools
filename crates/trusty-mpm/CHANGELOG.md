@@ -7,6 +7,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Changed
+
+- `core::instruction_overrides`: the DEFAULT PM prompt — the bundled-fallback
+  configuration every project without a `.trusty-mpm/` section override receives
+  — is now composed through the typed `InstructionPackage`
+  (epic [#4183](https://github.com/bobmatnyc/trusty-tools/issues/4183)) instead
+  of a four-asset string concatenation. The new `core::bundled_pm_package` cuts
+  `PM_INSTRUCTIONS.md` into Core/Memory/Search blocks and `BASE_PM.md` into the
+  three absorbed floor blocks *at runtime*, deriving each block's join from the
+  exact bytes it removed, so re-sectioning an asset cannot move a byte and the
+  eight-section taxonomy now describes the prompt that actually ships. The
+  composed prompt is byte-identical to the previous assembly, gated by
+  `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`, which
+  reports the first differing byte offset with surrounding context on failure.
+  Scope is the bundled fallback ONLY: an `AGENT_DELEGATION.md` override
+  (replaces the section, so never consumes the computed roster) and
+  `PM_INSTRUCTIONS_DEPLOYED.md` (opaque body, no delegation section) are
+  currently inexpressible in the schema and stay on the legacy path by design —
+  neither `RosterNotConsumed` nor `SectionWithoutBlocks` is weakened to
+  accommodate them. `resolve_pm_prompt` now scans the deployed-agent tiers
+  exactly once whichever path it takes.
+
 ### Added
 
 - `core::instruction_package`: the sectioned-JSON instruction-package schema

@@ -21,6 +21,10 @@ pub mod artifact;
 pub mod auto_resume;
 pub mod budget;
 pub mod bundle;
+// Epic #4183: the DEFAULT (bundled-fallback) PM prompt, re-sourced through
+// `instruction_package`. Byte-identical to the legacy assembly it replaces; the
+// override configurations stay on that legacy path by design.
+pub mod bundled_pm_package;
 // DOC-28 cutover bridge: incremental catch-up runtime — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod catchup;
 pub mod circuit;
@@ -53,7 +57,7 @@ pub mod idle_nudge;
 pub mod idle_parking;
 pub mod instruction_overrides;
 // Issue #4184 / epic #4183: the sectioned-JSON instruction package schema. Types
-// + validation only — nothing in the launch path composes from it yet (#4186).
+// + validation only; `bundled_pm_package` is its first composing call site.
 pub mod instruction_package;
 pub mod instruction_pipeline;
 pub mod ipc;
