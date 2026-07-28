@@ -3,7 +3,7 @@
 //!
 //! Why: the re-scoped POC drives a REAL `claude` CLI session through trusty-mpm's
 //! existing machinery rather than an in-process trusty-code orchestrator. This
-//! module owns the launch ritual — `prepare_session` (deploy agents/skills/
+//! module owns the launch ritual — `prepare_isolated_session` (deploy agents/skills/
 //! CLAUDE.md/PM-prompt/MCP) → `SessionManager::create_with_id` (tmux host rooted
 //! at the project dir) → `ClaudeCodeAdapter::spawn` (launch `claude`) → send the
 //! task into the pane — and the time-bounded poll that waits for the session to
@@ -25,8 +25,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result};
 use tracing::{info, warn};
 
-use trusty_mpm::core::paths::FrameworkPaths;
-use trusty_mpm::core::session_launch::prepare_session;
+use trusty_mpm::core::session_launch::prepare_isolated_session;
 use trusty_mpm::runtime::{RuntimeKind, build_adapter};
 use trusty_mpm::session_manager::real_tmux::RealTmuxDriver;
 use trusty_mpm::session_manager::{ManagedSessionId, ManagedTmuxDriver, SessionManager};
@@ -155,10 +154,10 @@ pub(crate) async fn new_session_manager(state_dir: &Path) -> Result<SessionManag
 ///
 /// Why: this is the WI-A launch path (#1049) plus the WI-B poll (#1051), wired
 /// in-process with no daemon. It reuses the EXACT machinery a daemon launch uses
-/// ([`prepare_session`], [`SessionManager::create_with_id`], [`build_adapter`] →
+/// ([`prepare_isolated_session`], [`SessionManager::create_with_id`], [`build_adapter`] →
 /// `ClaudeCodeAdapter::spawn`) so the POC exercises the production path, not a
 /// parallel one.
-/// What: in order — (1) `prepare_session` deploys agents/skills/CLAUDE.md/PM
+/// What: in order — (1) `prepare_isolated_session` deploys agents/skills/CLAUDE.md/PM
 /// prompt/MCP into `project_dir` (a prep failure is non-fatal: logged, the launch
 /// proceeds); (2) creates a tmux session rooted at `project_dir` via
 /// `create_with_id` (cwd = project, so NO git clone happens — the `--no-provision`
@@ -180,8 +179,11 @@ pub(crate) async fn launch_and_wait(
 ) -> Result<LaunchReport> {
     // (1) Deploy the custom instructions. Non-fatal: a missing framework only
     // means the session launches without trusty-mpm agents/skills.
-    let fw = FrameworkPaths::default();
-    match prepare_session(&fw, project_dir) {
+    // #4203: deploy through the isolated seam — the pane created at (2) is
+    // rooted at `project_dir` and `ClaudeCodeAdapter::spawn` always appends
+    // `--setting-sources project,local` (`runtime/claude_code.rs`), so a
+    // `$HOME/.claude` deploy would never be read by the session it prepares.
+    match prepare_isolated_session(project_dir, None) {
         Ok(report) => info!(
             agents = report.deploy.deployed.len(),
             project = %project_dir.display(),
@@ -238,7 +240,7 @@ pub(crate) async fn launch_and_wait(
     info!(tmux = %record.tmux_name, "meta run: claude runtime spawned");
 
     // (4) Deliver the task to the session. `claude` reads the PM prompt from the
-    // `--append-system-prompt-file` set by `prepare_session`; the concrete task
+    // `--append-system-prompt-file` set by `prepare_isolated_session`; the concrete task
     // is typed into the pane through the shared readiness-gated injection seam
     // (`SessionManager::inject_task_when_ready`, #1903/#1299) — which polls for
     // the runtime to be ready instead of the blind fixed sleep this prototype

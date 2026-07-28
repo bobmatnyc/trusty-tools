@@ -1679,3 +1679,64 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
          proving launch(Some(worktree)) was invoked rather than launch(None)"
     );
 }
+
+/// Issue #4203: every CLI path whose spawn carries `--setting-sources
+/// project,local` must deploy through `prepare_isolated_session`, never through
+/// a self-resolved `FrameworkPaths::default()`.
+///
+/// Why a SOURCE-TEXT guard rather than a behavioural one: `launch()`,
+/// `connect()`, and `launch_and_wait()` are async functions that create tmux
+/// sessions, register with the daemon over HTTP, and then block on
+/// `attach-session`, so none of them is reachable from a unit test. A test that
+/// exercises the deploy layout alone proves the layout is right while staying
+/// completely silent if a call site stops using it — which is exactly how the
+/// first version of this guard shipped green with the bug reintroduced in both
+/// call sites. Binding the CALL SITES is the whole point, so the guard reads the
+/// call sites. Source-text guards are the established idiom here
+/// (`scripts/check_line_cap.sh` and the tracked-file CI guards are the same
+/// shape).
+///
+/// What: asserts neither file constructs `FrameworkPaths::default()`, and that
+/// each still routes through the isolated seam the expected number of times.
+/// The counts are deliberately exact — a call site deleted or a fourth one added
+/// without thought fails here and forces the author to confirm its spawn posture.
+#[test]
+fn launch_paths_prepare_through_the_isolated_seam() {
+    // `include_str!` is relative to THIS file (`src/bin/tm/`).
+    const LAUNCH_SRC: &str = include_str!("commands/launch.rs");
+    const META_LAUNCH_SRC: &str = include_str!("commands/meta/launch.rs");
+
+    for (name, src, expected_calls) in [
+        ("commands/launch.rs", LAUNCH_SRC, 2usize),
+        ("commands/meta/launch.rs", META_LAUNCH_SRC, 1usize),
+    ] {
+        assert!(
+            !src.contains("FrameworkPaths::default()"),
+            "{name} spawns `claude` with `{}`, which excludes the `user` tier \
+             `FrameworkPaths::default()` deploys into — deploy via \
+             `session_launch::prepare_isolated_session` instead (issue #4203)",
+            trusty_mpm::core::model_inject::SETTING_SOURCES_FLAG
+        );
+        assert_eq!(
+            src.matches("prepare_isolated_session(").count(),
+            expected_calls,
+            "{name} must deploy through `prepare_isolated_session` exactly \
+             {expected_calls}x (issue #4203); if a call site was added or removed, \
+             confirm its spawn's `--setting-sources` posture and update this count"
+        );
+    }
+
+    // `commands/session/start.rs` is deliberately NOT in the list above: it
+    // spawns a bare `claude {PERMISSION_MODE_FLAG}` with no `--setting-sources`,
+    // so Claude Code reads its default tiers INCLUDING `user` and
+    // `FrameworkPaths::default()` is correct there. Pin that premise — if
+    // `start.rs` ever gains the flag, it acquires this defect and this
+    // assertion is what says so.
+    const START_SRC: &str = include_str!("commands/session/start.rs");
+    assert!(
+        !START_SRC.contains("SETTING_SOURCES_FLAG"),
+        "commands/session/start.rs now carries a `--setting-sources` flag, so its \
+         `FrameworkPaths::default()` deploy has become the #4203 defect — route it \
+         through `prepare_isolated_session` and add it to the list above"
+    );
+}

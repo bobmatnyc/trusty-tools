@@ -2213,3 +2213,90 @@ fn resolve_statusline_binary_with_falls_back_to_bare_name() {
         "must degrade to the bare literal when both sources fail"
     );
 }
+
+// ── Issue #4203: the isolated deploy layout must land in a tier the spawn reads ──
+
+/// Why (#4203): `tm launch`, `tm connect`, and `tm meta launch` all spawn a
+/// harness carrying `--setting-sources project,local` and then deploy the agent
+/// roster. If the deploy destination is not in a tier that flag names, the
+/// roster is invisible to the session it was deployed for — and nothing errors,
+/// because the deploy itself succeeds. This asserts the RELATIONSHIP between the
+/// two, with both sides derived from production code, so it keeps biting if
+/// either moves. `isolated_framework_paths` is the single layout every isolated
+/// caller now shares, so this one test covers all three CLI paths at once.
+#[test]
+fn isolated_layout_deploys_into_a_tier_the_spawn_reads() {
+    // Derive the tier list from the flag itself — never hard-coded, so the
+    // check and the spawned command cannot drift apart.
+    let (flag, tier_list) = crate::core::model_inject::SETTING_SOURCES_FLAG
+        .split_once(' ')
+        .expect("SETTING_SOURCES_FLAG must be `--setting-sources <tiers>`");
+    assert_eq!(flag, "--setting-sources");
+    let tiers: Vec<&str> = tier_list.split(',').map(str::trim).collect();
+    assert!(
+        !tiers.is_empty() && !tiers.contains(&"user"),
+        "this invariant is only meaningful while the flag names tiers and excludes \
+         `user` (#1269); got {tiers:?}"
+    );
+    assert!(
+        tiers.contains(&"project"),
+        "the isolated deploy targets the project tier, so the flag must name it; \
+         got {tiers:?}"
+    );
+
+    // `project_dir` is the cwd the harness is spawned in: the managed worktree
+    // for `launch`, the live checkout for `connect`, the project dir for
+    // `meta launch`.
+    let project_dir = std::path::Path::new("/work/some-checkout");
+    let fw = isolated_framework_paths(project_dir);
+
+    // `<cwd>/.claude` is exactly what the `project` (and `local`) tiers read.
+    assert_eq!(
+        fw.claude_home_dir(),
+        project_dir,
+        "the deploy base must BE the harness cwd — anything else is the `user`-tier \
+         mismatch of #4203"
+    );
+    assert_eq!(
+        fw.claude_agents_dir(),
+        project_dir.join(".claude").join("agents"),
+        "agents must land under the harness cwd, not $HOME"
+    );
+    assert_eq!(
+        fw.claude_skills_dir(),
+        project_dir.join(".claude").join("skills"),
+        "skills must land under the harness cwd, not $HOME"
+    );
+}
+
+/// Why (#1931, restated for #4203): only the deploy DESTINATION moves
+/// workspace-local. If the framework SOURCE paths moved with it, the isolated
+/// seam would deploy from an empty `<workspace>/.trusty-mpm` and every session
+/// would come up with a zero-agent roster — a worse failure than the one #4203
+/// fixes, and equally silent.
+///
+/// Why serial: reads `FrameworkPaths::default()`, which resolves
+/// `dirs::home_dir()`; serialized against the other `HOME`-redirecting tests in
+/// this binary (the #2461 sweep).
+#[test]
+#[serial_test::serial]
+fn isolated_layout_keeps_framework_source_at_the_install_root() {
+    let project_dir = std::path::Path::new("/work/some-checkout");
+    let fw = isolated_framework_paths(project_dir);
+
+    assert_eq!(
+        fw.root,
+        FrameworkPaths::default().root,
+        "the framework install root must NOT move workspace-local"
+    );
+    assert!(
+        !fw.agent_source_dir().starts_with(project_dir),
+        "agent SOURCE must never resolve inside the deploy destination; got {}",
+        fw.agent_source_dir().display()
+    );
+    assert!(
+        !fw.skill_source_dir().starts_with(project_dir),
+        "skill SOURCE must never resolve inside the deploy destination; got {}",
+        fw.skill_source_dir().display()
+    );
+}

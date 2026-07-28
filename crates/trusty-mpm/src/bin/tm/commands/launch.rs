@@ -204,10 +204,12 @@ pub(crate) async fn launch(
     // 7c. Deploy the `.claude` framework into the worktree (best-effort).
     //     Non-fatal: a deploy failure never aborts the session — the operator can
     //     run `tm install` / `tm catalog sync` to populate agents manually.
+    //     #4203: deploy through the isolated seam so the roster lands in the
+    //     worktree (the harness cwd, set at step 12) rather than `$HOME` — the
+    //     `claude` spawned at step 13 carries `--setting-sources project,local`
+    //     and would never read a `$HOME/.claude` deploy.
     {
-        let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-        match trusty_mpm::core::session_launch::prepare_session_with_repo_url(
-            &fw,
+        match trusty_mpm::core::session_launch::prepare_isolated_session(
             &managed_path,
             Some(&origin_url),
         ) {
@@ -467,8 +469,11 @@ pub(crate) async fn connect(
     //     under `path` — so a repo with no GitHub remote or with uncommitted
     //     changes still launches. Best-effort: a prep failure is logged and
     //     never aborts the connect.
-    let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-    match trusty_mpm::core::session_launch::prepare_session(&fw, &path) {
+    //     #4203: deploy through the isolated seam so the roster lands in the
+    //     live checkout (the harness cwd, set at step 4) rather than `$HOME` —
+    //     the `claude` spawned at step 5 carries `--setting-sources
+    //     project,local` and would never read a `$HOME/.claude` deploy.
+    match trusty_mpm::core::session_launch::prepare_isolated_session(&path, None) {
         Ok(report) => {
             for err in &report.roster_errors {
                 tracing::error!("roster provisioning gap for {}: {err}", path.display());
