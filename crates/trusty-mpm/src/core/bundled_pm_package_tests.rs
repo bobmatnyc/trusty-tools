@@ -8,8 +8,17 @@
 //! join that changed.
 
 use super::*;
-use crate::core::instruction_overrides::{assemble_sections, delegation_with_roster};
+use crate::core::delegation_authority::deployed_roster_section;
+use crate::core::instruction_overrides::{
+    FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_MEMORY, FILE_WORKFLOW, OVERRIDE_DIR_NAME,
+    PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt,
+    resolve_pm_prompt_with_source,
+};
 use crate::core::instruction_package::ValidationError;
+use crate::core::stack_profile::stack_profile_section;
+use std::fs;
+use std::path::Path;
+use tempfile::TempDir;
 
 /// A fixed, deterministic roster — the composition-time input the byte-equality
 /// gate holds constant.
@@ -233,6 +242,213 @@ fn floor_blocks_are_the_contiguous_tail() {
     assert_eq!(package.blocks.len() - first_floor, BASE_PM_CUTS.len());
 }
 
+// ---------------------------------------------------------------------------
+// The gate at the production entry point (#4183 review, HIGH-1).
+//
+// Everything above compares `compose_bundled_fallback` against
+// `assemble_sections` given hand-supplied arguments. That proves the two
+// composers agree, but NOT that `resolve_pm_prompt` hands the package the same
+// inputs it would have handed the legacy assembly — and the wiring is where a
+// delivered-prompt regression actually lives. The review demonstrated two live
+// mutations at that seam surviving a fully green suite:
+//
+//   * `addendum.as_deref()` → `None`, silently dropping every project's
+//     `.trusty-mpm/INSTRUCTIONS.md` from the delivered prompt;
+//   * deleting the `workflow_override.is_none() && memory_override.is_none()`
+//     filter, silently discarding a `WORKFLOW.md` / `MEMORY.md` override.
+//
+// Both survived because the composed branch requires a roster, and no
+// `resolve_pm_prompt` test deployed an agent — so on a clean CI runner every one
+// of them took the LEGACY branch. The tests below deploy a project-tier agent
+// first, which makes `deployed_roster_section` return `Some` regardless of the
+// machine's `~/.claude/agents`, so the composed branch is a property of the test
+// rather than of the developer's `$HOME`. No `$HOME` manipulation is involved,
+// deliberately — the project tier is sufficient, and scoping `$HOME` would
+// reintroduce the cross-test `HOME_LOCK` race for no added coverage.
+// ---------------------------------------------------------------------------
+
+/// Deploy a composed agent into the PROJECT tier (`<project>/.claude/agents`).
+///
+/// The project tier is the highest-precedence roster source and the one the
+/// daemon managed-spawn path deploys into, so writing here guarantees
+/// `deployed_roster_section` returns `Some` without depending on — or
+/// forbidding — the machine's `~/.claude/agents`.
+fn deploy_agent(project: &Path, name: &str) {
+    let dir = project.join(".claude").join("agents");
+    fs::create_dir_all(&dir).expect("create .claude/agents");
+    fs::write(
+        dir.join(format!("{name}.md")),
+        format!(
+            "---\nname: {name}\nrole: {name}\ndescription: Handles {name} work.\n\
+             model: sonnet\n---\n\n# {name}\n"
+        ),
+    )
+    .expect("write agent");
+}
+
+/// Write `<project>/.trusty-mpm/<name>`.
+fn write_override(project: &Path, name: &str, content: &str) {
+    let dir = project.join(OVERRIDE_DIR_NAME);
+    fs::create_dir_all(&dir).expect("create .trusty-mpm");
+    fs::write(dir.join(name), content).expect("write override");
+}
+
+/// A project with one deployed agent, so the composed branch is guaranteed.
+fn project_with_roster() -> TempDir {
+    let tmp = TempDir::new().expect("tempdir");
+    deploy_agent(tmp.path(), "ticketing");
+    tmp
+}
+
+#[test]
+fn resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed() {
+    // Without this, every assertion below would still pass if the package branch
+    // were deleted outright — the two composers are byte-identical, so the
+    // delivered string cannot reveal which one ran. This is the positive
+    // statement that the composed path is the one under test.
+    let tmp = project_with_roster();
+    let (_, source) = resolve_pm_prompt_with_source(tmp.path());
+    assert_eq!(
+        source,
+        PromptSource::Package,
+        "a deployed roster with no section override must compose via InstructionPackage"
+    );
+}
+
+#[test]
+fn resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly() {
+    // THE ACCEPTANCE GATE, at the layer that ships the prompt (#4183). Both the
+    // stack profile and the roster are recomputed from the same project, so the
+    // comparison is deterministic whatever the ambient agent tiers hold; what is
+    // under test is the WIRING — that `resolve_pm_prompt` hands the package
+    // exactly the inputs the legacy assembly would have received.
+    let tmp = project_with_roster();
+
+    let (composed, source) = resolve_pm_prompt_with_source(tmp.path());
+    assert_eq!(source, PromptSource::Package);
+
+    let roster = deployed_roster_section(tmp.path()).expect("a deployed agent yields a roster");
+    let legacy = legacy_bundled_fallback(&stack_profile_section(tmp.path()), &roster, None);
+
+    assert_byte_identical(&legacy, &composed);
+}
+
+#[test]
+fn resolve_pm_prompt_is_byte_identical_with_a_project_addendum() {
+    // Kills the `addendum.as_deref()` → `None` mutation: the legacy oracle reads
+    // INSTRUCTIONS.md, so dropping it at the call site diverges the two.
+    let tmp = project_with_roster();
+    write_override(
+        tmp.path(),
+        FILE_INSTRUCTIONS,
+        "# Project Rules\n\nALWAYS_RUN_MAKE_CHECK\n",
+    );
+
+    let (composed, source) = resolve_pm_prompt_with_source(tmp.path());
+    assert_eq!(source, PromptSource::Package);
+    assert!(
+        composed.contains("ALWAYS_RUN_MAKE_CHECK"),
+        "the project addendum must reach the delivered prompt on the composed path"
+    );
+
+    let roster = deployed_roster_section(tmp.path()).expect("roster");
+    let legacy = legacy_bundled_fallback(
+        &stack_profile_section(tmp.path()),
+        &roster,
+        Some("# Project Rules\n\nALWAYS_RUN_MAKE_CHECK"),
+    );
+    assert_byte_identical(&legacy, &composed);
+}
+
+#[test]
+fn workflow_override_forces_the_legacy_path_even_with_a_roster() {
+    // Kills half the "delete the override filter" mutation. With the filter gone
+    // the composed branch would run and silently substitute the BUNDLED
+    // workflow, discarding the project's override.
+    let tmp = project_with_roster();
+    write_override(
+        tmp.path(),
+        FILE_WORKFLOW,
+        "# Custom Workflow\n\nTWO_PHASE_ONLY\n",
+    );
+
+    let (prompt, source) = resolve_pm_prompt_with_source(tmp.path());
+    assert_eq!(
+        source,
+        PromptSource::Legacy,
+        "a WORKFLOW.md override is not expressible in the package; it must stay legacy"
+    );
+    assert!(prompt.contains("TWO_PHASE_ONLY"));
+    assert!(
+        !prompt.contains("# PM Workflow Configuration"),
+        "the bundled workflow must not survive a WORKFLOW.md override"
+    );
+}
+
+#[test]
+fn memory_override_forces_the_legacy_path_even_with_a_roster() {
+    // The other half. A MEMORY.md override slots a delimited block after
+    // PM_INSTRUCTIONS, which the package model has no generator for.
+    let tmp = project_with_roster();
+    write_override(
+        tmp.path(),
+        FILE_MEMORY,
+        "Recall from the `team` palace first.\n",
+    );
+
+    let (prompt, source) = resolve_pm_prompt_with_source(tmp.path());
+    assert_eq!(source, PromptSource::Legacy);
+    assert!(prompt.contains("## Memory Behavior (project override)"));
+    assert!(prompt.contains("Recall from the `team` palace first."));
+}
+
+#[test]
+fn delegation_override_forces_the_legacy_path_even_with_a_roster() {
+    // Configuration 2 (#4247): the override replaces the whole section, so the
+    // roster is deliberately NOT re-appended and the package — which requires
+    // the roster to be consumed — cannot express it.
+    let tmp = project_with_roster();
+    write_override(
+        tmp.path(),
+        FILE_AGENT_DELEGATION,
+        "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER\n",
+    );
+
+    let (prompt, source) = resolve_pm_prompt_with_source(tmp.path());
+    assert_eq!(source, PromptSource::Legacy);
+    assert!(prompt.contains("ROUTE_ALL_TO_ENGINEER"));
+    assert!(
+        !prompt.contains("### ticketing"),
+        "an override replaces the section outright — the roster is not re-appended"
+    );
+}
+
+#[test]
+fn deployed_prompt_override_forces_the_legacy_path_even_with_a_roster() {
+    // Configuration 3 (#4247): a full body replacement contributes no delegation
+    // section at all.
+    let tmp = project_with_roster();
+    write_override(
+        tmp.path(),
+        crate::core::instruction_overrides::FILE_PM_DEPLOYED,
+        "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
+    );
+
+    let (prompt, source) = resolve_pm_prompt_with_source(tmp.path());
+    assert_eq!(source, PromptSource::Legacy);
+    assert!(prompt.contains("DO_EXACTLY_THIS"));
+    assert!(prompt.contains("# BASE_PM Framework Floor"));
+}
+
+#[test]
+fn resolve_pm_prompt_wrapper_matches_the_source_reporting_form() {
+    // The public entry point must return exactly what the seam returns — the
+    // logging wrapper may not alter the prompt.
+    let tmp = project_with_roster();
+    let (with_source, _) = resolve_pm_prompt_with_source(tmp.path());
+    assert_byte_identical(&resolve_pm_prompt(tmp.path()), &with_source);
+}
+
 #[test]
 fn missing_cut_marker_is_an_error() {
     // An asset edited so a cut marker no longer exists must fail loudly. The
@@ -253,6 +469,147 @@ fn missing_cut_marker_is_an_error() {
             marker: "## Context-First Protocol",
         }
     );
+}
+
+#[test]
+fn duplicated_cut_marker_is_an_error() {
+    // The failure the byte-equality gate STRUCTURALLY CANNOT catch. Reassembly
+    // reproduces `asset.trim()` wherever the cuts land, so a second
+    // `## Agent Routing` would relocate the fourth cut, move "Both tools are
+    // stable…" from Search into Core, and leave every byte and every existing
+    // assertion unchanged — a silently wrong section model that #4247 would then
+    // act on. Uniqueness is what makes it red.
+    let doctored = PM_INSTRUCTIONS.replace(
+        "Both tools are stable",
+        "## Agent Routing\n\nBoth tools are stable",
+    );
+
+    let err = split_asset(
+        "PM_INSTRUCTIONS.md",
+        &doctored,
+        PM_INSTRUCTIONS_CUTS,
+        Join::Rule,
+    )
+    .expect_err("an ambiguous cut marker must not compose");
+
+    assert_eq!(
+        err,
+        PackageError::MarkerNotUnique {
+            asset: "PM_INSTRUCTIONS.md",
+            marker: "## Agent Routing",
+            count: 2,
+        }
+    );
+}
+
+#[test]
+fn adjacent_cut_markers_report_an_empty_piece() {
+    // The marker WAS found here; reporting `MarkerNotFound` would send the reader
+    // hunting for a string that is present.
+    let doctored = "## Context-First Protocol\n\n2. `search` (`mcp__trusty-search__search`)\n\n\
+         ## Agent Routing\n\nbody\n";
+
+    let err = split_asset(
+        "PM_INSTRUCTIONS.md",
+        doctored,
+        PM_INSTRUCTIONS_CUTS,
+        Join::Rule,
+    )
+    .expect_err("an empty leading piece must not compose");
+
+    assert_eq!(
+        err,
+        PackageError::EmptyPiece {
+            asset: "PM_INSTRUCTIONS.md",
+            marker: "",
+        }
+    );
+}
+
+#[test]
+fn shipped_cut_markers_each_occur_exactly_once() {
+    // States the property as a standalone fact about what we ship, so a future
+    // asset edit that introduces a duplicate fails here with the marker named
+    // rather than deep inside a composition error.
+    for (asset, text, cuts) in [
+        ("PM_INSTRUCTIONS.md", PM_INSTRUCTIONS, PM_INSTRUCTIONS_CUTS),
+        ("BASE_PM.md", BASE_PM, BASE_PM_CUTS),
+    ] {
+        for cut in cuts.iter().skip(1) {
+            assert_eq!(
+                text.matches(cut.start_marker).count(),
+                1,
+                "{asset}: cut marker {:?} must occur exactly once",
+                cut.start_marker
+            );
+        }
+    }
+}
+
+#[test]
+fn pm_instructions_cut_locations_are_pinned_by_content() {
+    // Reassembly plus the section-id sequence is NOT enough: both hold for cuts
+    // at the wrong offsets. Pinning each block's opening content is what makes a
+    // relocated cut visible.
+    let blocks = split_asset(
+        "PM_INSTRUCTIONS.md",
+        PM_INSTRUCTIONS,
+        PM_INSTRUCTIONS_CUTS,
+        Join::Rule,
+    )
+    .expect("cuts resolve");
+
+    assert!(block_text(&blocks, 0).starts_with("<!-- PM_INSTRUCTIONS_VERSION:"));
+    assert!(block_text(&blocks, 0).contains("## Prohibitions (CANONICAL"));
+
+    let memory = block_text(&blocks, 1);
+    assert!(memory.starts_with("## Context-First Protocol"));
+    assert!(memory.contains("`memory_recall` (trusty-memory)"));
+    assert!(
+        memory.ends_with("the injected block did not surface."),
+        "the Memory block must stop before the search item, got tail {:?}",
+        &memory[memory.len().saturating_sub(60)..]
+    );
+
+    let search = block_text(&blocks, 2);
+    assert!(search.starts_with("2. `search` (`mcp__trusty-search__search`)"));
+    assert!(
+        search.contains("Both tools are stable"),
+        "the closing sentence rides with Search — see the #4247 constraint on PM_INSTRUCTIONS_CUTS"
+    );
+
+    assert!(block_text(&blocks, 3).starts_with("## Agent Routing"));
+}
+
+#[test]
+fn base_pm_cut_locations_are_pinned_by_content() {
+    let blocks =
+        split_asset("BASE_PM.md", BASE_PM, BASE_PM_CUTS, Join::Rule).expect("cuts resolve");
+
+    assert!(block_text(&blocks, 0).starts_with("# BASE_PM Framework Floor"));
+    assert!(block_text(&blocks, 0).contains("## Identity"));
+
+    let rules = block_text(&blocks, 1);
+    assert!(rules.starts_with("## Non-Overridable Rules"));
+    assert!(
+        rules.contains("## Customizing PM Behavior"),
+        "the customization contract rides with the non-overridable rules"
+    );
+
+    assert!(
+        block_text(&blocks, 2).starts_with("## Framework-Guaranteed Conventions (Non-Overridable)")
+    );
+    assert!(block_text(&blocks, 2).contains("Generated with trusty-mpm"));
+
+    assert!(block_text(&blocks, 3).starts_with("## Trusty Tool Priority (Non-Overridable)"));
+}
+
+/// The text of a text block, for pinning cut locations.
+fn block_text(blocks: &[InstructionBlock], index: usize) -> &str {
+    match blocks.get(index).map(|b| &b.body) {
+        Some(BlockBody::Text { text }) => text,
+        other => panic!("block {index} is not a text block: {other:?}"),
+    }
 }
 
 #[test]

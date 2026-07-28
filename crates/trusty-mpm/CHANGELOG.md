@@ -26,8 +26,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `PM_INSTRUCTIONS_DEPLOYED.md` (opaque body, no delegation section) are
   currently inexpressible in the schema and stay on the legacy path by design —
   neither `RosterNotConsumed` nor `SectionWithoutBlocks` is weakened to
-  accommodate them. `resolve_pm_prompt` now scans the deployed-agent tiers
-  exactly once whichever path it takes.
+  accommodate them. The gate is asserted through `resolve_pm_prompt` itself with
+  a project-tier agent deployed, so the composed branch is a property of the test
+  rather than of the machine's `~/.claude/agents`, and `resolve_pm_prompt` now
+  reports which composer produced the prompt — the two are byte-identical by
+  contract, so the delivered string alone cannot tell you.
 
 ### Added
 

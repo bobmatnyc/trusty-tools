@@ -41,15 +41,29 @@
 //! * every block that comes from a bundled asset is *cut out of that asset at
 //!   runtime* by [`split_asset`], which derives each block's [`Join`] from the
 //!   exact bytes it removed. Reassembling the pieces therefore reproduces the
-//!   asset by construction — re-sectioning an asset cannot move a byte, and
-//!   editing an asset cannot silently change the composed output;
+//!   asset by construction, so re-sectioning an asset cannot move a byte;
 //! * [`Join::Rule`] is `"\n\n---\n\n"`, the same literal as
 //!   [`crate::core::instruction_pipeline::SECTION_SEPARATOR`], so top-level
 //!   section boundaries match the legacy `join_sections` join.
 //!
+//! WHAT BYTE-EQUALITY DOES NOT COVER, stated precisely because the reassembly
+//! property cuts both ways: composed output equals `asset.trim()` **wherever the
+//! cuts land**, so the byte gate is structurally incapable of catching a cut
+//! placed at the wrong offset. Bytes would be fine; the section *attribution* —
+//! the thing this module exists to establish, and which #4247 will act on —
+//! would be silently wrong. Two guards cover that instead of the byte gate:
+//! [`split_asset`] requires every marker to occur EXACTLY ONCE in its asset
+//! ([`PackageError::MarkerNotUnique`]), which makes a duplicated marker red
+//! rather than silent; and the cut tests pin each block's opening content, not
+//! merely the section-id sequence. A marker that is deleted is
+//! [`PackageError::MarkerNotFound`]; one that moves in a way that reorders the
+//! sections fails the same way, because marker search is forward-only.
+//!
 //! Test: `bundled_pm_package_tests.rs` — in particular
 //! `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`, which
-//! diffs the two strings and reports the first differing byte offset.
+//! diffs the two strings and reports the first differing byte offset, and
+//! `resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly`, which asserts
+//! the same through the production entry point.
 
 use crate::core::instruction_overrides::ROSTER_PRECEDENCE_NOTE;
 use crate::core::instruction_package::{
@@ -63,13 +77,15 @@ pub(crate) const PACKAGE_ID: &str = "trusty-mpm.pm.bundled-fallback";
 
 /// A failure building or composing the bundled-fallback package.
 ///
-/// Why: both variants mean the delivered PM prompt would be wrong, so neither
-/// may be swallowed. `MarkerNotFound` in particular fires when a bundled asset
-/// was edited so that a section boundary this module cuts on no longer exists
-/// — a loud error there is what stops a silently re-sectioned prompt.
-/// What: a missing cut marker, or a composition failure from the package type.
-/// Test: `missing_cut_marker_is_an_error`, and
-/// `shipped_assets_build_and_validate` proves neither occurs for what we ship.
+/// Why: every variant means the delivered PM prompt, or the section model
+/// behind it, would be wrong — so none may be swallowed. The two marker
+/// variants are the guards that make a mis-cut asset loud, since the
+/// byte-equality gate cannot see one (see the module docs).
+/// What: an absent cut marker, an ambiguous (duplicated) one, an empty piece, or
+/// a composition failure from the package type.
+/// Test: `missing_cut_marker_is_an_error`, `duplicated_cut_marker_is_an_error`,
+/// `adjacent_cut_markers_report_an_empty_piece`, and
+/// `shipped_assets_build_and_validate` proves none occurs for what we ship.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum PackageError {
     /// A cut marker is absent from the asset it is supposed to split.
@@ -80,6 +96,31 @@ pub(crate) enum PackageError {
         /// The marker that could not be located.
         marker: &'static str,
     },
+    /// A cut marker occurs more than once, so the cut location is ambiguous.
+    ///
+    /// This is the guard the byte gate cannot provide: a duplicated marker still
+    /// reassembles to identical bytes while attributing the wrong text to a
+    /// section.
+    #[error(
+        "asset {asset} contains the section cut marker {marker:?} {count} times; \
+         a cut marker must occur exactly once or the section boundary is ambiguous"
+    )]
+    MarkerNotUnique {
+        /// The asset file name.
+        asset: &'static str,
+        /// The ambiguous marker.
+        marker: &'static str,
+        /// How many times it occurs.
+        count: usize,
+    },
+    /// Two cut markers are adjacent, so a block would carry no content.
+    #[error("asset {asset} yields an empty piece starting at marker {marker:?}")]
+    EmptyPiece {
+        /// The asset file name.
+        asset: &'static str,
+        /// The marker that starts the empty piece.
+        marker: &'static str,
+    },
     /// Composing the built package failed.
     #[error(transparent)]
     Compose(#[from] CompositionError),
@@ -88,8 +129,10 @@ pub(crate) enum PackageError {
 /// One section boundary inside a bundled markdown asset.
 ///
 /// `start_marker` is the literal text that begins the piece; the first cut of
-/// an asset uses `""` to mean "start of asset". Markers are searched forward
-/// from the previous cut, so they need only be unique in the remaining text.
+/// an asset uses `""` to mean "start of asset". [`split_asset`] requires each
+/// marker to occur exactly once in its asset and searches forward from the
+/// previous cut, so both a duplicated marker and a reordering edit are errors
+/// rather than a silent re-cut.
 struct Cut {
     /// Section the resulting block is attributed to.
     section: SectionId,
@@ -108,8 +151,21 @@ struct Cut {
 /// [`SectionId::Identity`] — that section is the non-overridable floor's
 /// identity block, and attributing an overridable block to it would make every
 /// later block "overridable after the floor".
+///
+/// CONSTRAINT FOR #4247, recorded here because the declaration that creates it
+/// is here. Memory and Search declare tier `project` — a machine-readable claim
+/// that a project may replace either independently — but the underlying asset
+/// text is one numbered list. Replacing Memory alone would delete item `1.` and
+/// leave Search opening on a bare `2.`, and the closing sentence "Both tools are
+/// stable and recommended…" refers to *both* tools while sitting in the Search
+/// block. Harmless today (nothing honours the tiers yet), a malformed system
+/// prompt the moment #4247 does. Memory and Search are therefore NOT
+/// independently overridable until `PM_INSTRUCTIONS.md` gives each its own
+/// heading; #4247 must either restructure the asset first or ship those two
+/// sections as a single override unit.
 /// What: four pieces — Core prologue, Memory, Search, Core remainder.
-/// Test: `pm_instructions_cuts_reassemble_the_asset`.
+/// Test: `pm_instructions_cuts_reassemble_the_asset`,
+/// `pm_instructions_cut_locations_are_pinned_by_content`.
 const PM_INSTRUCTIONS_CUTS: &[Cut] = &[
     Cut {
         section: SectionId::Core,
@@ -139,7 +195,8 @@ const PM_INSTRUCTIONS_CUTS: &[Cut] = &[
 /// `validate_floor_is_last` deliberately permits.
 /// What: four pieces; `## Customizing PM Behavior` rides with
 /// `## Non-Overridable Rules`, and `## Trusty Tool Priority` returns to it.
-/// Test: `base_pm_cuts_reassemble_the_asset`, `floor_blocks_are_the_contiguous_tail`.
+/// Test: `base_pm_cuts_reassemble_the_asset`, `floor_blocks_are_the_contiguous_tail`,
+/// `base_pm_cut_locations_are_pinned_by_content`.
 const BASE_PM_CUTS: &[Cut] = &[
     Cut {
         section: SectionId::Identity,
@@ -234,12 +291,16 @@ fn join_for_gap(gap: &str) -> Join {
 /// asset edit. Cutting at runtime makes reassembly true by construction: each
 /// block carries the literal gap that was removed before it, so concatenating
 /// the blocks with their joins reproduces `asset.trim()` exactly.
-/// What: locates each cut's `start_marker` (searching forward from the previous
-/// cut), slices the asset, trims each piece, and records the removed whitespace
-/// as the next block's [`Join`]. `lead_join` is the join before the FIRST
-/// piece, i.e. the boundary with whatever precedes this asset in the stream.
+/// What: first requires every marker to occur EXACTLY ONCE in the asset — the
+/// guard against a cut silently relocating to a duplicate, which reassembly
+/// alone cannot detect — then locates each marker (searching forward from the
+/// previous cut, so a reordering edit also fails), slices the asset, trims each
+/// piece, and records the removed whitespace as the next block's [`Join`].
+/// `lead_join` is the join before the FIRST piece, i.e. the boundary with
+/// whatever precedes this asset in the stream.
 /// Test: `pm_instructions_cuts_reassemble_the_asset`, `base_pm_cuts_reassemble_the_asset`,
-/// `missing_cut_marker_is_an_error`.
+/// `missing_cut_marker_is_an_error`, `duplicated_cut_marker_is_an_error`,
+/// `adjacent_cut_markers_report_an_empty_piece`.
 fn split_asset(
     asset: &'static str,
     raw: &str,
@@ -247,6 +308,27 @@ fn split_asset(
     lead_join: Join,
 ) -> Result<Vec<InstructionBlock>, PackageError> {
     let text = raw.trim();
+
+    // Ambiguity check BEFORE any cutting. A marker that occurs twice would cut
+    // at the first hit, attribute the wrong text to a section, and still
+    // reassemble to identical bytes — invisible to the byte-equality gate.
+    for cut in cuts.iter().skip(1) {
+        let count = text.matches(cut.start_marker).count();
+        if count != 1 {
+            return Err(if count == 0 {
+                PackageError::MarkerNotFound {
+                    asset,
+                    marker: cut.start_marker,
+                }
+            } else {
+                PackageError::MarkerNotUnique {
+                    asset,
+                    marker: cut.start_marker,
+                    count,
+                }
+            });
+        }
+    }
 
     // Resolve each cut to an absolute byte offset, forward-only.
     let mut offsets: Vec<usize> = Vec::with_capacity(cuts.len());
@@ -260,6 +342,8 @@ fn split_asset(
             .get(search_from..)
             .and_then(|t| t.find(cut.start_marker))
         else {
+            // Unique but behind the previous cut: the asset reordered its
+            // sections, so the declared cut order no longer holds.
             return Err(PackageError::MarkerNotFound {
                 asset,
                 marker: cut.start_marker,
@@ -277,10 +361,11 @@ fn split_asset(
         let piece = text.get(start..end).unwrap_or_default();
         let body = piece.trim();
         if body.is_empty() {
-            // An empty piece means two cut markers are adjacent — a mis-authored
-            // cut table, not valid content. `validate` would reject it anyway;
-            // failing here names the asset.
-            return Err(PackageError::MarkerNotFound {
+            // Two cut markers are adjacent — a mis-authored cut table, not valid
+            // content. Distinct from `MarkerNotFound`: the marker WAS found, so
+            // reporting it as missing would send the reader hunting for a string
+            // that is present.
+            return Err(PackageError::EmptyPiece {
                 asset,
                 marker: cut.start_marker,
             });

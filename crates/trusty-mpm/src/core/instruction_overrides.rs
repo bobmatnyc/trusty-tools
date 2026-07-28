@@ -153,6 +153,43 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// `stack_profile_present_when_detected`, `stack_profile_neutral_when_undetected`,
 /// and the robustness tests.
 pub fn resolve_pm_prompt(project_dir: &Path) -> String {
+    let (prompt, source) = resolve_pm_prompt_with_source(project_dir);
+    tracing::debug!(?source, "resolved the PM system prompt");
+    prompt
+}
+
+/// Which composer produced a resolved prompt.
+///
+/// Why: the two composers are byte-identical by contract (#4183), so the
+/// delivered string cannot tell you which one ran. That is exactly the property
+/// that let a call-site mutation survive a green suite — a test asserting
+/// byte-equality through [`resolve_pm_prompt`] would keep passing even if the
+/// package branch were deleted outright. Reporting the source turns "the
+/// composed path was actually taken" into an assertable fact, and gives the
+/// operator a log line saying which model produced their prompt.
+/// What: [`PromptSource::Package`] for the re-sourced bundled fallback,
+/// [`PromptSource::Legacy`] for the two override configurations and for the
+/// compose-error degradation.
+/// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
+/// `workflow_override_forces_the_legacy_path_even_with_a_roster`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromptSource {
+    /// Composed via [`crate::core::bundled_pm_package`] / `InstructionPackage`.
+    Package,
+    /// Assembled by the legacy string concatenation.
+    Legacy,
+}
+
+/// [`resolve_pm_prompt`], additionally reporting which composer ran.
+///
+/// Why: see [`PromptSource`] — byte-identical outputs make the path
+/// unobservable from the result alone, so the seam is what keeps the acceptance
+/// gate anchored to the branch it claims to cover.
+/// What: the resolved prompt plus its source. All composition logic lives here;
+/// [`resolve_pm_prompt`] is a thin logging wrapper.
+/// Test: `resolve_pm_prompt_is_byte_identical_to_the_legacy_assembly`,
+/// `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`.
+pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, PromptSource) {
     let dir = project_dir.join(OVERRIDE_DIR_NAME);
 
     // Floor is always appended last and never replaceable.
@@ -176,7 +213,7 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
             sections.push(extra);
         }
         sections.push(floor.trim().to_string());
-        return join_sections(sections);
+        return (join_sections(sections), PromptSource::Legacy);
     }
 
     // Branch 2: section-by-section assembly with per-section overrides.
@@ -207,7 +244,7 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
                     roster,
                     addendum.as_deref(),
                 ) {
-                    Ok(prompt) => return prompt,
+                    Ok(prompt) => return (prompt, PromptSource::Package),
                     // Unreachable for the shipped assets — `shipped_assets_
                     // build_and_validate` proves it — so this is a loud last
                     // resort, never a routine fallback. The legacy assembly
@@ -228,7 +265,10 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
 
     let workflow = workflow_override.unwrap_or_else(|| WORKFLOW.trim().to_string());
 
-    assemble_sections(stack, memory_override, workflow, delegation, addendum)
+    (
+        assemble_sections(stack, memory_override, workflow, delegation, addendum),
+        PromptSource::Legacy,
+    )
 }
 
 /// The legacy section-by-section assembly (branch 2).
