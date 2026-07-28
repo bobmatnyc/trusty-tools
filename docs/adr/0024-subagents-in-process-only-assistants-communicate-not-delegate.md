@@ -335,20 +335,15 @@ stipulating it:
   assistants, never to sub-agents** (decision 5): responsibility follows
   authority, and only assistants hold any.
 
-**Terminology note — "virtual twin" already names something else in this
-corpus.** DOC-42 ("Engineering Lead / Virtual Twin Cross-Tool Orchestration
+**Terminology note.** "Virtual twin" also appears elsewhere in this corpus —
+DOC-42 ("Engineering Lead / Virtual Twin Cross-Tool Orchestration
 Architecture," PR #3006, closed unmerged, its live claim since moved to
-DOC-44) and ADR-0016 (which cites DOC-42) use "virtual twin" to name the
-**Engineering Lead** — a single, persistent, portfolio-level supervisor role
-that sits ABOVE PM, not the plural `role = "assistant"` population this ADR
-governs. Issue #3011 states it directly: *"This is the 'virtual twin'
-itself... a persistent lead agent... spawns liaisons."* The owner's rationale
-above uses "virtual twin" as a PROPERTY every assistant instance holds
-(authority over its own actions), not as a name for one Lead role. These are
-two distinct usages of the same term, live in the same corpus at the same
-time. This ADR does not reconcile them and flags the collision rather than
-silently picking one — a future pass across ADR-0016/DOC-44/this ADR should
-resolve whether one term should be renamed.
+DOC-44) and ADR-0016 (which cites DOC-42) use it as a **role name** for the
+Engineering Lead, a persistent, portfolio-level supervisor above PM. Here,
+by contrast, "virtual twin" is **philosophical framing, not a technical
+identifier**: it names the sense in which each assistant owns its own
+actions, motivating the authority principle above. The two usages coexist
+and neither constrains the other.
 
 ## Normative Rule: Delegation Authority Is Governed by Kind, Not by Tier Order
 
@@ -903,10 +898,9 @@ Vetted against prior ADRs (`docs/adr/INDEX.md`) on 2026-07-28 (revision 2):
   "assistant" population are still different things sharing one name.
   Additionally, §7 above uses ADR-0016's PM-analogy sibling (the trusty-mpm
   PM, not ADR-0016 itself) as prior art — worth a forward cross-reference
-  from ADR-0016 once this ADR is accepted. A SECOND, separate naming
-  collision now exists too: "Rationale" above uses "virtual twin" for a
-  property of every assistant, while ADR-0016 (via DOC-42/DOC-44) uses it as
-  the Engineering Lead's role name — flagged there, not resolved here.
+  from ADR-0016 once this ADR is accepted. "Rationale" above also uses
+  "virtual twin" in a philosophical sense distinct from ADR-0016's Engineering
+  Lead role name of the same phrase; the two are not in tension.
 - **ADR-0018 (Loopback-only doctrine, Accepted):** Consistent — unchanged.
 - **ADR-0019 (Unified IPC messaging, Accepted, unimplemented):** Extends —
   unchanged, still the most likely foundation for the "communicate"
