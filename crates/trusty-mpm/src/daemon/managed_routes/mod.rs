@@ -860,6 +860,14 @@ pub async fn decommission_managed_session(
         Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
         }
+        // #3764: the cross-session worktree guard REFUSED — the caller's record
+        // points at a live peer's worktree. That is a conflict in the request,
+        // not a server fault, so 409 (matching the sibling delete route's
+        // running-guard refusal) instead of the catch-all 500. The manager's
+        // message already names both sessions and the contested path.
+        Err(e @ crate::session_manager::ManagedError::ForeignActiveWorktree(..)) => {
+            (StatusCode::CONFLICT, e.to_string()).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

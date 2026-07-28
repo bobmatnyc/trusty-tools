@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use super::manager::SessionManager;
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::worktree_integrity::{WorktreeIntegrity, check};
+use std::time::Duration;
 
 /// Run a git command, panicking with stderr on failure.
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -77,7 +78,7 @@ fn make_worktree(root: &Path, bare: bool) -> PathBuf {
 }
 
 /// Destroy a worktree the way the three incidents did: every tracked file AND
-/// the `.git` pointer file are gone, but the directory itself remains.
+/// the `.git` pointer file are gone, but the directory itself remains EMPTY.
 fn strip_worktree(wt: &Path) {
     for entry in std::fs::read_dir(wt).expect("read worktree dir") {
         let path = entry.expect("dir entry").path();
@@ -279,5 +280,158 @@ async fn audit_ignores_non_worktree_workspace() {
     assert!(
         mgr.audit_worktree_integrity().await.is_empty(),
         "a non-.worktrees workspace must never be audited"
+    );
+}
+
+// ── code-critic HIGH-3: linkage lost vs work lost ───────────────────────────
+
+/// Deleting ONLY the base repo's admin gitdir unlinks the worktree while every
+/// file survives — the detector must say `LinkageLost`, never `Destroyed`.
+///
+/// Why: this is the critic's reproduction, and it is not hypothetical for this
+/// repo. When the `.base` bare clone was destroyed on 07-21 it orphaned ~70
+/// worktrees whose contents were **entirely intact**. Under the first draft
+/// every one of them would have alarmed *"Its uncommitted work is GONE. Stop the
+/// session and recreate it"* — advice that, followed, runs `decommission` (which
+/// carries no #4118 dirt guard) and deletes the very work that survived. A
+/// detector that says that is a destroyer.
+/// Test: this function IS the test.
+#[test]
+fn linkage_lost_with_surviving_files_does_not_claim_work_gone() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let wt = make_worktree(root.path(), true);
+
+    // Real uncommitted work sitting in the worktree.
+    std::fs::write(wt.join("precious.txt"), b"three days of uncommitted work")
+        .expect("write precious.txt");
+
+    // Destroy ONLY the base's administrative gitdir for this worktree —
+    // the worktree's own files (a.txt, precious.txt, .git pointer) all remain.
+    let admin = root.path().join("base").join("worktrees").join("wt");
+    assert!(
+        admin.is_dir(),
+        "test premise: admin gitdir must exist at {admin:?}"
+    );
+    std::fs::remove_dir_all(&admin).expect("remove admin gitdir");
+
+    let verdict = check(&wt);
+    match verdict {
+        WorktreeIntegrity::LinkageLost { surviving, .. } => {
+            let n = surviving.expect("the directory is readable, so the count must be Some");
+            assert!(
+                n >= 2,
+                "a.txt and precious.txt must both be counted as surviving; got {n}"
+            );
+        }
+        other => panic!(
+            "files still on disk must NEVER be reported as Destroyed — that alarm tells \
+             the operator to recreate, which deletes them. Got {other:?}"
+        ),
+    }
+
+    // The evidence, restated as a filesystem fact: the work really is still there.
+    assert_eq!(
+        std::fs::read(wt.join("precious.txt")).expect("read precious.txt"),
+        b"three days of uncommitted work",
+    );
+}
+
+/// A worktree emptied of files IS `Destroyed` — the distinction has teeth in
+/// both directions.
+///
+/// Why: the regression half of the test above. A split that reported
+/// `LinkageLost` for everything would pass that test while making the
+/// `Destroyed` verdict unreachable and the detector useless.
+/// Test: this function IS the test.
+#[test]
+fn emptied_worktree_is_destroyed_not_linkage_lost() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let wt = make_worktree(root.path(), true);
+    strip_worktree(&wt);
+    assert!(
+        matches!(check(&wt), WorktreeIntegrity::Destroyed(_)),
+        "an EMPTY unlinked worktree must be Destroyed; got {:?}",
+        check(&wt)
+    );
+}
+
+// ── code-critic HIGH-2: the git probe must be bounded ───────────────────────
+
+/// A probe that exceeds its timeout yields `Unknown` — never a destruction
+/// verdict, and never `Intact`.
+///
+/// Why: the first draft awaited `spawn_blocking(check)` unbounded inside
+/// `orphan_gc_loop`. One worktree on a stalled mount would block the audit,
+/// the rest of that tick, and every future tick, indefinitely. A timeout is an
+/// absence of evidence, so it must land on `Unknown`: reporting `Intact` would
+/// be the fail-open this module exists to prevent, and reporting `Destroyed`
+/// would tell an operator to delete a healthy tree.
+/// What: drives the audit with a 1 ns budget, which the `git` subprocess cannot
+/// possibly meet, against a HEALTHY worktree — so an unbounded implementation
+/// returns `Intact` (no finding at all) and fails this test.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn audit_times_out_into_unknown_never_destroyed() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(dir.path(), super::tests::FakeTmuxDriver::new())
+        .await
+        .expect("manager");
+
+    let root = crate::test_support::hermetic_temp_dir();
+    let wt = make_worktree(root.path(), true); // healthy
+    let id = ManagedSessionId::new();
+    mgr.store
+        .write()
+        .await
+        .upsert(active_record(id, Some(wt)))
+        .await
+        .expect("upsert");
+
+    let findings = mgr
+        .audit_worktree_integrity_with_timeout(Duration::from_nanos(1))
+        .await;
+
+    assert_eq!(
+        findings.len(),
+        1,
+        "a timed-out probe must produce a finding, not silently pass as healthy"
+    );
+    match &findings[0].verdict {
+        WorktreeIntegrity::Unknown(why) => {
+            assert!(
+                why.contains("timed out"),
+                "the verdict must say it timed out; got {why:?}"
+            );
+        }
+        other => panic!("a timeout must be Unknown, never {other:?}"),
+    }
+}
+
+/// The default audit still uses a bounded timeout, not an unbounded await.
+///
+/// Why: `audit_worktree_integrity_with_timeout` being correct is worthless if
+/// the production entry point does not route through it.
+/// Test: this function IS the test — a healthy worktree audited through the
+/// DEFAULT entry point produces no finding, proving the generous production
+/// budget is applied rather than a 1 ns one.
+#[tokio::test]
+async fn default_audit_is_bounded_but_generous() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(dir.path(), super::tests::FakeTmuxDriver::new())
+        .await
+        .expect("manager");
+
+    let root = crate::test_support::hermetic_temp_dir();
+    let wt = make_worktree(root.path(), true);
+    mgr.store
+        .write()
+        .await
+        .upsert(active_record(ManagedSessionId::new(), Some(wt)))
+        .await
+        .expect("upsert");
+
+    assert!(
+        mgr.audit_worktree_integrity().await.is_empty(),
+        "the production timeout must be generous enough for a real git call"
     );
 }

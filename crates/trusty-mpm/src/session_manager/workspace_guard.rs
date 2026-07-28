@@ -15,23 +15,23 @@
 //! three separate worktree-destruction incidents was a #1744 cwd collision in
 //! which THREE Active session records pointed at ONE worktree path; any
 //! decommission of the two impostor records would have taken the real owner's
-//! live tree with it, with containment passing cleanly. [`foreign_active_owner`]
+//! live tree with it, with containment passing cleanly. [`foreign_owner`]
 //! adds the missing identity half.
 //!
 //! What: [`is_safe_to_remove`] canonicalizes both paths and verifies that the
 //! workspace is strictly INSIDE the managed root, rejecting: path == root, path
 //! outside root, paths with too few components, and `$HOME`.
-//! [`foreign_active_owner`] is the pure decision half of the identity guard:
+//! [`foreign_owner`] is the pure decision half of the identity guard:
 //! given the owner DECLARED BY THE WORKTREE ITSELF (its on-disk ownership
 //! sentinel — not the possibly-corrupt session record that asked for the
 //! removal) it reports whether that owner is a different, still-Active session.
-//! Test: `is_safe_to_remove_*` and `foreign_active_owner_*` unit tests below.
+//! Test: `is_safe_to_remove_*` and `foreign_owner_*` unit tests below.
 
 use std::path::Path;
 
 use tracing::warn;
 
-use super::record::{ManagedSessionId, ManagedSessionState};
+use super::record::ManagedSessionId;
 
 /// Decide whether `workspace_path` is safe to `remove_dir_all` (#1511).
 ///
@@ -118,9 +118,9 @@ pub(crate) fn is_safe_to_remove(workspace_path: &Path, managed_root: &Path) -> b
     true
 }
 
-/// Identify a worktree whose ON-DISK owner is a DIFFERENT, still-Active session
-/// than the one being torn down (#3764 item 1) — the pure decision half of the
-/// cross-session deletion guard.
+/// Identify a worktree that belongs to a DIFFERENT session which is NOT provably
+/// ownerless (#3764 item 1) — the pure decision half of the cross-session
+/// deletion guard.
 ///
 /// Why: [`is_safe_to_remove`] answers "is this path inside the managed root?"
 /// and nothing else, so every cross-session deletion it is asked about passes.
@@ -129,53 +129,67 @@ pub(crate) fn is_safe_to_remove(workspace_path: &Path, managed_root: &Path) -> b
 /// (`daemon/mcp_session.rs`, `daemon/sm_stdio/control.rs`, the HTTP routes, the
 /// idle reaper, `dedup`) passes `caller: None` and therefore skips it entirely.
 /// That leaves the exact incident shape unguarded: a corrupt/colliding record
-/// whose `workspace_path` points at a PEER's live worktree gets decommissioned,
-/// and the peer's tree is destroyed under it while the peer keeps running.
-/// This guard is deliberately independent of `caller` — it asks the worktree
-/// ITSELF who owns it and refuses when that answer names a live peer, so it
-/// holds even for an operator-authority (`caller: None`) removal.
+/// whose `workspace_path` points at a PEER's worktree gets decommissioned, and
+/// the peer's tree is destroyed under it. This guard is deliberately
+/// independent of `caller`, so it holds even for an operator-authority
+/// (`caller: None`) removal.
 ///
-/// What: returns `Some(owner)` ONLY when all three hold — (a) the worktree's
-/// on-disk ownership sentinel names an owner at all, (b) that owner is not
-/// `target` (the session whose teardown is running), and (c) that owner's
-/// record is currently [`ManagedSessionState::Active`]. Every other case
+/// **Reclaimability is decided by [`SessionManager::resolve_ownerless`], NOT by
+/// `state == Active` (code-critic HIGH-1 on the #3764 PR).** The first draft of
+/// this guard refused only for an `Active` owner, which made it strictly WEAKER
+/// than the #3649 gate sitting twenty lines earlier in the same function — that
+/// gate refuses whenever `!resolve_ownerless(owner)`, which is `false` for
+/// `Stopped`/`Errored`/`Provisioning`. The result was backwards: `caller: Some`
+/// protected a Stopped peer's worktree while `caller: None` — every daemon path
+/// this guard exists to cover — happily deleted it. The reachable sequence:
+/// `idle_reaper` stops peer P, later reaps colliding record I via
+/// `decommission(&I, None)`, the sentinel names P, and P's RESUMABLE tree is
+/// destroyed. A Stopped session is precisely the one whose worktree must
+/// survive — it is going to be resumed. `prune.rs`'s adjacent orphan sweep
+/// already uses `resolve_ownerless_with_grace` for this same question, so
+/// anything else would be a third, disagreeing notion of "reclaimable".
+///
+/// What: returns `Some(owner)` ONLY when all three hold — (a) an owner is known
+/// at all, (b) that owner is not `target` (the session whose teardown is
+/// running), and (c) that owner is NOT provably ownerless. Every other case
 /// returns `None` (removal proceeds), deliberately:
 ///   * owner unknown (`None` — legacy pre-#3649 worktree, or an unparsable
 ///     sentinel) → no evidence of a peer; preserves backward compatibility.
+///     The store-side companion check in
+///     [`SessionManager::foreign_active_worktree_owner`] covers this case
+///     without needing any on-disk file.
 ///   * owner == target → the session is removing its OWN worktree; the normal case.
-///   * owner is Stopped / Errored / Provisioning / terminal / absent from the
-///     store → NOT Active, so #3649's orphan-GC and every existing reclaim
+///   * owner provably ownerless (terminal `Decommissioned`/`Deleted`, or absent
+///     from the store entirely) → #3649's orphan-GC and every existing reclaim
 ///     path keep working exactly as before. This guard can only ever REFUSE a
 ///     deletion the tree previously allowed; it never permits a new one.
 ///
-/// Test: `foreign_active_owner_blocks_live_peer`,
-/// `foreign_active_owner_allows_self`,
-/// `foreign_active_owner_allows_unknown_owner`,
-/// `foreign_active_owner_allows_stopped_peer`,
-/// `foreign_active_owner_allows_absent_peer` in this module; the wired-in
-/// behaviour is covered by
-/// `decommission_refuses_to_delete_live_peer_worktree` in
-/// `super::decommission::tests`.
-pub(crate) fn foreign_active_owner(
+/// Test: `foreign_owner_blocks_live_peer`, `foreign_owner_blocks_stopped_peer`,
+/// `foreign_owner_allows_self`, `foreign_owner_allows_unknown_owner`,
+/// `foreign_owner_allows_ownerless_peer` in this module; the wired-in behaviour
+/// is covered by `decommission_refuses_to_delete_live_peer_worktree` and
+/// `decommission_refuses_to_delete_stopped_peer_worktree` in
+/// `super::worktree_identity_guard_tests`.
+pub(crate) fn foreign_owner(
     declared_owner: Option<ManagedSessionId>,
     target: ManagedSessionId,
-    owner_state: Option<ManagedSessionState>,
+    owner_is_ownerless: bool,
 ) -> Option<ManagedSessionId> {
     let owner = declared_owner?;
     if owner == target {
         return None;
     }
-    match owner_state {
-        Some(ManagedSessionState::Active) => Some(owner),
-        _ => None,
+    if owner_is_ownerless {
+        return None;
     }
+    Some(owner)
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
-    use super::{ManagedSessionId, ManagedSessionState, foreign_active_owner, is_safe_to_remove};
+    use super::{ManagedSessionId, foreign_owner, is_safe_to_remove};
 
     // ── is_safe_to_remove unit tests (#1511) ────────────────────────────────
 
@@ -281,87 +295,98 @@ mod tests {
         );
     }
 
-    // ── foreign_active_owner identity guard (#3764 item 1) ──────────────────
+    // ── foreign_owner identity guard (#3764 item 1) ─────────────────────────
+    //
+    // Reclaimability here is `resolve_ownerless`'s answer, passed in as a bool
+    // (see the function doc for why `state == Active` was wrong). The mapping
+    // these tests encode, matching `resolve_ownerless`:
+    //   Active / Stopped / Errored / Provisioning -> NOT ownerless -> REFUSE
+    //   Decommissioned / Deleted / absent record  -> ownerless     -> ALLOW
 
-    /// A worktree owned by a DIFFERENT, still-Active session is refused.
+    /// A worktree owned by a DIFFERENT, still-live session is refused.
     ///
     /// Why: this IS the incident shape — a corrupt/colliding record whose
     /// `workspace_path` points at a live peer's worktree. Before #3764 the
     /// containment guard passed and the peer's tree was destroyed.
     /// Test: this function IS the test.
     #[test]
-    fn foreign_active_owner_blocks_live_peer() {
+    fn foreign_owner_blocks_live_peer() {
         let peer = ManagedSessionId::new();
         let target = ManagedSessionId::new();
         assert_eq!(
-            foreign_active_owner(Some(peer), target, Some(ManagedSessionState::Active)),
+            foreign_owner(Some(peer), target, false),
             Some(peer),
             "a live peer's worktree must be refused"
         );
     }
 
-    /// A session removing its OWN worktree is allowed — the normal case.
+    /// A STOPPED peer's worktree is refused too (code-critic HIGH-1).
     ///
-    /// Why: the guard must not break every legitimate decommission.
+    /// Why: a Stopped session is resumable — its worktree is exactly the one
+    /// that must survive, because it is going to be resumed. The first draft
+    /// refused only for `Active`, which made this guard weaker than the #3649
+    /// gate beside it and let `idle_reaper`'s `caller: None` reap destroy a
+    /// stopped peer's tree. `resolve_ownerless` returns `false` for every
+    /// live/resumable state, so all of them land here.
     /// Test: this function IS the test.
     #[test]
-    fn foreign_active_owner_allows_self() {
+    fn foreign_owner_blocks_stopped_peer() {
+        let peer = ManagedSessionId::new();
+        let target = ManagedSessionId::new();
+        // `resolve_ownerless` == false for Stopped/Errored/Provisioning alike.
+        assert_eq!(
+            foreign_owner(Some(peer), target, false),
+            Some(peer),
+            "a resumable (Stopped/Errored/Provisioning) peer's worktree must be refused"
+        );
+    }
+
+    /// A session removing its OWN worktree is allowed — the normal case.
+    ///
+    /// Why: the guard must not break every legitimate decommission. Checked
+    /// even when the owner is NOT ownerless, since a live session tearing down
+    /// its own workspace is the ordinary path.
+    /// Test: this function IS the test.
+    #[test]
+    fn foreign_owner_allows_self() {
         let id = ManagedSessionId::new();
         assert_eq!(
-            foreign_active_owner(Some(id), id, Some(ManagedSessionState::Active)),
+            foreign_owner(Some(id), id, false),
             None,
             "a session must always be able to remove its own worktree"
         );
     }
 
-    /// An owner-unknown worktree is allowed (legacy / unparsable sentinel).
+    /// An owner-unknown worktree is allowed by THIS predicate.
     ///
-    /// Why: pre-#3649 worktrees carry a zero-byte sentinel with no owner. The
-    /// guard must stay backward-compatible and never block on absent evidence.
+    /// Why: pre-#3649 worktrees carry a zero-byte sentinel with no owner, so
+    /// the sentinel half must stay backward-compatible and never block on
+    /// absent evidence. The store-side companion check in
+    /// `foreign_active_worktree_owner` is what covers this case — see
+    /// `decommission_refuses_when_store_shows_live_peer_without_sentinel`.
     /// Test: this function IS the test.
     #[test]
-    fn foreign_active_owner_allows_unknown_owner() {
+    fn foreign_owner_allows_unknown_owner() {
         assert_eq!(
-            foreign_active_owner(None, ManagedSessionId::new(), None),
+            foreign_owner(None, ManagedSessionId::new(), false),
             None,
-            "an owner-unknown worktree must not be blocked"
+            "an owner-unknown worktree must not be blocked by the sentinel half"
         );
     }
 
-    /// A peer in a non-Active state does NOT block removal.
+    /// A provably-ownerless peer does NOT block removal.
     ///
     /// Why: this is what keeps #3649's orphan-GC and every existing reclaim
-    /// path working unchanged — only a LIVE peer is protected.
+    /// path working unchanged — a terminal (`Decommissioned`/`Deleted`) or
+    /// absent owner is reclaimable, and `tm sessions delete <stale-id>` is
+    /// therefore the operator's escape hatch when a sentinel goes stale.
     /// Test: this function IS the test.
     #[test]
-    fn foreign_active_owner_allows_stopped_peer() {
-        let peer = ManagedSessionId::new();
-        for state in [
-            ManagedSessionState::Stopped,
-            ManagedSessionState::Errored,
-            ManagedSessionState::Provisioning,
-            ManagedSessionState::Decommissioned,
-            ManagedSessionState::Deleted,
-        ] {
-            assert_eq!(
-                foreign_active_owner(Some(peer), ManagedSessionId::new(), Some(state.clone())),
-                None,
-                "a peer in {state:?} must not block removal"
-            );
-        }
-    }
-
-    /// A peer with no record in the store at all does NOT block removal.
-    ///
-    /// Why: an absent record is the strongest available evidence that nothing
-    /// can contest the reclaim — matching `resolve_ownerless`'s existing rule.
-    /// Test: this function IS the test.
-    #[test]
-    fn foreign_active_owner_allows_absent_peer() {
+    fn foreign_owner_allows_ownerless_peer() {
         assert_eq!(
-            foreign_active_owner(Some(ManagedSessionId::new()), ManagedSessionId::new(), None),
+            foreign_owner(Some(ManagedSessionId::new()), ManagedSessionId::new(), true),
             None,
-            "a peer absent from the store must not block removal"
+            "a provably-ownerless peer must not block removal"
         );
     }
 }

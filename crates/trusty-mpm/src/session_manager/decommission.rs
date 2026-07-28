@@ -366,13 +366,27 @@ impl SessionManager {
         // #3764 item 1 — cross-session deletion guard. Deliberately runs AFTER
         // the #3649 authority gate (which it does not weaken or replace) and
         // BEFORE any teardown side effect, including `graceful_terminate_runtime`
-        // and the search-index id derivation: if this record points at a live
-        // peer's worktree it is the RECORD that is wrong, and nothing about this
-        // decommission should proceed. Unlike #3649's gate this is independent
-        // of `caller`, so it also covers every operator/daemon-internal
-        // (`caller: None`) remove path — the MCP `session_decommission` tool,
-        // the sm-stdio control channel, the HTTP routes, the idle reaper, and
-        // `dedup` — which is where the hole actually was.
+        // and the search-index id derivation: if this record points at another
+        // session's worktree it is the RECORD that is wrong, and nothing about
+        // this decommission should proceed. Unlike #3649's gate this is
+        // independent of `caller`, so it also covers every operator/daemon-
+        // internal (`caller: None`) remove path — the MCP `session_decommission`
+        // tool, the sm-stdio control channel, the HTTP routes, the idle reaper,
+        // and `dedup` — which is where the hole actually was.
+        //
+        // SCOPE: only when this decommission would actually TOUCH THE
+        // FILESYSTEM. `decommission` deletes the workspace in exactly two
+        // cases — an SM-owned workspace (`remove_dir_all` below) or an
+        // in-project worktree (`remove_session_worktree`) — and otherwise just
+        // warns and tombstones the record. Guarding the record-only case would
+        // be pure over-refusal, and it breaks a legitimate caller: `dedup`
+        // collapses a dead duplicate that by construction shares a
+        // `workspace_path` with the record it is deduplicating against
+        // (`reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record`).
+        // That collapse is the very registry reconciliation this guard wants an
+        // operator to perform, and it destroys nothing. Scoping the guard to
+        // destructive removals makes it exactly coextensive with the harm it
+        // prevents.
         //
         // The `error!` is the alarm surface, not decoration: the daemon composes
         // `trusty_common::error_capture::bug_capture_layer`, which persists
@@ -381,15 +395,17 @@ impl SessionManager {
         // is NOT captured, so an alarm at WARN would be silent to every
         // operator-facing surface — exactly the failure mode #3764 exists to end.
         if let Some(ref ws) = record.workspace_path
+            && (record.workspace_owned || is_session_worktree(ws))
             && let Some(owner) = self.foreign_active_worktree_owner(ws, *id).await
         {
             tracing::error!(
                 target_session = %id,
-                live_owner = %owner,
+                contesting_owner = %owner,
                 workspace = %ws.display(),
                 "WORKTREE CORRUPTION GUARD: refusing to decommission — this record's \
-                 workspace_path points at a worktree owned by session {owner}, which is \
-                 still ACTIVE. No files were touched (#3764)"
+                 workspace_path points at a worktree belonging to session {owner}, which \
+                 is still live or resumable. No files were touched. Reconcile the registry \
+                 (`tm ls`), then `tm sessions delete {owner}` if that record is stale (#3764)"
             );
             return Err(ManagedError::ForeignActiveWorktree(
                 *id,

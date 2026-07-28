@@ -295,8 +295,8 @@ impl SessionManager {
     }
 
     /// The I/O half of the #3764 cross-session deletion guard: does the
-    /// worktree AT `path` declare an owner that is a different, still-Active
-    /// session than `target`?
+    /// worktree AT `path` belong to a different session that is NOT provably
+    /// ownerless?
     ///
     /// Why: [`Self::known_owner_of`] resolves ownership from the RECORD first
     /// (`record.worktree_owner`, sentinel only as fallback). That is right for
@@ -304,30 +304,103 @@ impl SessionManager {
     /// a record whose `workspace_path` points at a PEER's worktree, so trusting
     /// the record's own idea of ownership would launder the corruption — the
     /// impostor record names itself as owner and the guard would never fire.
-    /// This deliberately reads ONLY the on-disk sentinel: the worktree is asked
-    /// who owns it, and the record asking for its removal gets no say.
-    /// What: reads `path`'s ownership sentinel via [`read_sentinel_owner`],
-    /// looks up that owner's current state in the store (absent → `None`
-    /// state), and delegates the decision to
-    /// [`workspace_guard::foreign_active_owner`](super::workspace_guard::foreign_active_owner)
-    /// — see that function for the full allow/refuse matrix.
+    /// Ownership is therefore established from evidence the record asking for
+    /// the removal does not control.
+    ///
+    /// TWO independent sources are consulted, and either one refusing is enough
+    /// (code-critic MEDIUM on the #3764 PR):
+    ///
+    /// 1. **The on-disk ownership sentinel.** Authoritative when present, but it
+    ///    is a plain file INSIDE the worktree that any agent in any session can
+    ///    write or delete, and pre-#3649 worktrees carry a zero-byte one with no
+    ///    owner at all. On those paths the sentinel half is silently inert —
+    ///    which is precisely where legacy worktrees live.
+    /// 2. **The store.** Any OTHER record whose canonicalized `workspace_path`
+    ///    equals this one, and which is not provably ownerless, refuses the
+    ///    removal. This needs no on-disk file, cannot be forged or erased by an
+    ///    agent, and is the #1744 cwd-collision incident shape verbatim — two
+    ///    live records bound to one worktree. It is what makes the guard hold on
+    ///    exactly the legacy paths where the sentinel does not.
+    ///
+    /// Reclaimability in both cases is [`Self::resolve_ownerless`], NOT
+    /// `state == Active` — see
+    /// [`workspace_guard::foreign_owner`](super::workspace_guard::foreign_owner)
+    /// for why that distinction is the difference between protecting a Stopped
+    /// peer's resumable tree and destroying it.
+    /// What: reads `path`'s sentinel, resolves the named owner's
+    /// reclaimability, and delegates to `foreign_owner`; if that allows, scans
+    /// the store for a colliding non-ownerless record. Returns the blocking
+    /// owner id, or `None` when the removal may proceed.
     /// Test: `decommission_refuses_to_delete_live_peer_worktree`,
-    /// `decommission_removes_own_worktree_despite_guard` in
-    /// `super::decommission::tests`.
+    /// `decommission_refuses_to_delete_stopped_peer_worktree`,
+    /// `decommission_refuses_when_store_shows_live_peer_without_sentinel`,
+    /// `decommission_removes_own_worktree_despite_guard`,
+    /// `decommission_allows_reclaim_when_peer_is_terminal` in
+    /// `super::worktree_identity_guard_tests`.
     pub(crate) async fn foreign_active_worktree_owner(
         &self,
         path: &Path,
         target: ManagedSessionId,
     ) -> Option<ManagedSessionId> {
+        // Source 1: the worktree's own ownership sentinel.
         let declared = match read_sentinel_owner(path) {
             SentinelOwner::Known(owner, _created_at) => Some(owner),
             SentinelOwner::Unknown => None,
         };
-        let owner_state = match declared {
-            Some(owner) => self.get(&owner).await.ok().map(|r| r.state),
-            None => None,
+        let declared_ownerless = match declared {
+            Some(owner) => self.resolve_ownerless(owner).await,
+            // Irrelevant when no owner is declared — `foreign_owner` short-
+            // circuits on `None` before this value is consulted.
+            None => true,
         };
-        super::workspace_guard::foreign_active_owner(declared, target, owner_state)
+        if let Some(owner) =
+            super::workspace_guard::foreign_owner(declared, target, declared_ownerless)
+        {
+            return Some(owner);
+        }
+
+        // Source 2: the store. Unforgeable — no file inside the worktree is
+        // involved, so this survives a deleted/zero-byte/legacy sentinel.
+        self.colliding_live_record(path, target).await
+    }
+
+    /// Find another non-ownerless record bound to the SAME worktree path
+    /// (#3764, code-critic MEDIUM) — the unforgeable half of the guard.
+    ///
+    /// Why: keyed on store state rather than on a file an agent can write, so
+    /// it cannot be laundered by the impostor record requesting the removal.
+    /// Two live records bound to one worktree IS the #1744 collision that
+    /// preceded the corruption, and the #3764 item-2 alarm fires on the very
+    /// same condition — this is that alarm's enforcement half.
+    /// What: canonicalizes `path` and every candidate's `workspace_path`
+    /// (falling back to the raw path when canonicalization fails, matching
+    /// `correlate_session_start`'s comparison so the two cannot disagree),
+    /// skips `target` itself, and returns the first colliding record that is
+    /// not provably ownerless.
+    /// Test: `decommission_refuses_when_store_shows_live_peer_without_sentinel`
+    /// in `super::worktree_identity_guard_tests`.
+    async fn colliding_live_record(
+        &self,
+        path: &Path,
+        target: ManagedSessionId,
+    ) -> Option<ManagedSessionId> {
+        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        for record in self.list().await {
+            if record.id == target {
+                continue;
+            }
+            let Some(ref ws) = record.workspace_path else {
+                continue;
+            };
+            let ws_canon = std::fs::canonicalize(ws).unwrap_or_else(|_| ws.clone());
+            if ws_canon != canon {
+                continue;
+            }
+            if !self.resolve_ownerless(record.id).await {
+                return Some(record.id);
+            }
+        }
+        None
     }
 }
 

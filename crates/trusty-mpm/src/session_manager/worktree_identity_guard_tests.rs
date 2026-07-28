@@ -204,15 +204,22 @@ async fn decommission_removes_own_worktree_despite_guard() {
     assert_eq!(record.state, ManagedSessionState::Decommissioned);
 }
 
-/// A peer in a NON-Active state does not block reclamation.
+/// A provably-ownerless (terminal) peer does not block reclamation.
 ///
 /// Why: #3649's orphan-GC and every operator-driven reclaim path depend on
-/// being able to tear down a worktree whose owner is Stopped/terminal. The
-/// guard must narrow to LIVE peers only — this test pins that it does not
-/// silently freeze the existing GC.
+/// being able to tear down a worktree whose owner is terminal or gone. The
+/// guard must narrow to peers that are NOT provably ownerless — this test pins
+/// that it does not freeze the existing GC.
+///
+/// This replaces an earlier `..._when_peer_is_stopped` test that asserted the
+/// OPPOSITE for a Stopped peer. That assertion encoded the HIGH-1 bug: a
+/// Stopped session is resumable, so its worktree must be protected, not
+/// reclaimed. Terminal is the correct boundary, and it is also the operator's
+/// escape hatch — `tm sessions delete <stale-id>` marks a record `Deleted`,
+/// which is terminal, which releases the guard.
 /// Test: this function IS the test.
 #[tokio::test]
-async fn decommission_allows_reclaim_when_peer_is_stopped() {
+async fn decommission_allows_reclaim_when_peer_is_terminal() {
     let dir = crate::test_support::hermetic_temp_dir();
     let mgr = SessionManager::new(dir.path(), super::tests::FakeTmuxDriver::new())
         .await
@@ -225,9 +232,9 @@ async fn decommission_allows_reclaim_when_peer_is_stopped() {
     mgr.store
         .write()
         .await
-        .upsert(record_at(peer, ManagedSessionState::Stopped, None))
+        .upsert(record_at(peer, ManagedSessionState::Decommissioned, None))
         .await
-        .expect("upsert stopped peer");
+        .expect("upsert terminal peer");
 
     let reclaimer = ManagedSessionId::new();
     mgr.store
@@ -244,7 +251,209 @@ async fn decommission_allows_reclaim_when_peer_is_stopped() {
     let (_record, removed) = mgr
         .decommission_with_root(&reclaimer, managed_root.path(), None)
         .await
-        .expect("a stopped peer must not block reclamation");
+        .expect("a terminal peer must not block reclamation");
     assert!(removed, "reclamation must still remove the workspace");
     assert!(!ws.exists(), "the reclaimed worktree must be gone");
+}
+
+/// A STOPPED peer's worktree is refused — the HIGH-1 regression.
+///
+/// Why (code-critic HIGH-1): the first draft refused only for an `Active`
+/// owner, which made this `caller: None` guard strictly WEAKER than the #3649
+/// gate twenty lines earlier in the same function — that gate uses
+/// `resolve_ownerless`, which returns `false` for `Stopped`. The result was
+/// backwards: `caller: Some` protected a Stopped peer while `caller: None` —
+/// every daemon path this guard exists to cover — deleted it.
+///
+/// The reachable sequence in shipped code: `idle_reaper` stops peer P at the
+/// idle threshold; later it reaps colliding record I at the done threshold via
+/// `decommission(&I, None)`; the sentinel names P; P is Stopped; the guard
+/// passed; `remove_session_worktree` destroyed P's RESUMABLE tree. A stopped
+/// session's worktree is exactly the one that must survive — it is going to be
+/// resumed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_refuses_to_delete_stopped_peer_worktree() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(dir.path(), super::tests::FakeTmuxDriver::new())
+        .await
+        .expect("manager");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let peer = ManagedSessionId::new();
+    let ws = worktree_owned_by(managed_root.path(), peer);
+
+    // The peer is STOPPED — runtime not running, but workspace INTACT and
+    // RESUMABLE (see `ManagedSessionState::Stopped`).
+    mgr.store
+        .write()
+        .await
+        .upsert(record_at(
+            peer,
+            ManagedSessionState::Stopped,
+            Some(ws.clone()),
+        ))
+        .await
+        .expect("upsert stopped peer");
+
+    let impostor = ManagedSessionId::new();
+    mgr.store
+        .write()
+        .await
+        .upsert(record_at(
+            impostor,
+            ManagedSessionState::Active,
+            Some(ws.clone()),
+        ))
+        .await
+        .expect("upsert impostor");
+
+    let err = mgr
+        .decommission_with_root(&impostor, managed_root.path(), None)
+        .await
+        .expect_err("a STOPPED peer's resumable worktree must not be deleted");
+    match err {
+        ManagedError::ForeignActiveWorktree(target, owner, _path) => {
+            assert_eq!(target, impostor);
+            assert_eq!(owner, peer);
+        }
+        other => panic!("expected ForeignActiveWorktree, got {other:?}"),
+    }
+
+    assert!(
+        ws.join("live-work.txt").exists(),
+        "the stopped peer's work must survive — it is going to be resumed"
+    );
+    assert_eq!(
+        mgr.get(&peer).await.expect("get peer").state,
+        ManagedSessionState::Stopped,
+    );
+}
+
+/// The guard holds with NO sentinel at all, purely from store state.
+///
+/// Why (code-critic MEDIUM): the sentinel is a plain file inside the worktree
+/// that any agent in any session can write or delete, and pre-#3649 worktrees
+/// carry a zero-byte one naming nobody. On exactly those legacy paths the
+/// sentinel half is silently inert. The store-side check is unforgeable — two
+/// live records bound to one canonical path IS the #1744 collision shape — and
+/// this test removes the sentinel entirely to prove the guard does not depend
+/// on it.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_refuses_when_store_shows_live_peer_without_sentinel() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(dir.path(), super::tests::FakeTmuxDriver::new())
+        .await
+        .expect("manager");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let peer = ManagedSessionId::new();
+    let ws = worktree_owned_by(managed_root.path(), peer);
+    // Legacy / tampered worktree: no ownership sentinel whatsoever.
+    std::fs::remove_file(ws.join(WORKTREE_SENTINEL_FILE)).expect("remove sentinel");
+
+    mgr.store
+        .write()
+        .await
+        .upsert(record_at(
+            peer,
+            ManagedSessionState::Active,
+            Some(ws.clone()),
+        ))
+        .await
+        .expect("upsert peer");
+
+    let impostor = ManagedSessionId::new();
+    mgr.store
+        .write()
+        .await
+        .upsert(record_at(
+            impostor,
+            ManagedSessionState::Active,
+            Some(ws.clone()),
+        ))
+        .await
+        .expect("upsert impostor");
+
+    let err = mgr
+        .decommission_with_root(&impostor, managed_root.path(), None)
+        .await
+        .expect_err("the store-side check must refuse even with no sentinel on disk");
+    match err {
+        ManagedError::ForeignActiveWorktree(_, owner, _) => assert_eq!(owner, peer),
+        other => panic!("expected ForeignActiveWorktree, got {other:?}"),
+    }
+    assert!(
+        ws.join("live-work.txt").exists(),
+        "the peer's work must survive a sentinel-less refusal"
+    );
+}
+
+/// A record-only collapse — no filesystem removal — is NOT blocked, even when
+/// a live peer shares the path.
+///
+/// Why: `decommission` only deletes a workspace when it is SM-owned or an
+/// in-project `.worktrees/` slice; otherwise it warns and merely tombstones the
+/// record. Guarding that case is pure over-refusal, and it breaks `dedup`, whose
+/// job is collapsing a dead duplicate that BY CONSTRUCTION shares a
+/// `workspace_path` with the record it deduplicates against — the reconciliation
+/// this guard actually wants an operator to perform. Scoping the guard to
+/// destructive removals keeps it exactly coextensive with the harm it prevents.
+///
+/// Caught by `reconcile_dedup_collapses_exact_workspace_duplicate_of_live_record`
+/// and `..._dead_duplicate_of_owned_record` when the guard was first wired
+/// unscoped; this test pins the boundary directly so the reason survives.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_allows_record_only_collapse_sharing_a_path() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let mgr = SessionManager::new(dir.path(), super::tests::FakeTmuxDriver::new())
+        .await
+        .expect("manager");
+
+    // A PLAIN directory: not SM-owned, not under `.worktrees/` — so
+    // `decommission` will not touch the filesystem at all.
+    let plain = crate::test_support::hermetic_temp_dir();
+    let ws = plain.path().join("proj").join("checkout");
+    std::fs::create_dir_all(&ws).expect("create plain workspace");
+    std::fs::write(ws.join("work.txt"), b"user work").expect("write");
+
+    let live = ManagedSessionId::new();
+    let mut live_rec = record_at(live, ManagedSessionState::Active, Some(ws.clone()));
+    live_rec.workspace_owned = false;
+    mgr.store
+        .write()
+        .await
+        .upsert(live_rec)
+        .await
+        .expect("upsert live");
+
+    let stale = ManagedSessionId::new();
+    let mut stale_rec = record_at(stale, ManagedSessionState::Stopped, Some(ws.clone()));
+    stale_rec.workspace_owned = false;
+    mgr.store
+        .write()
+        .await
+        .upsert(stale_rec)
+        .await
+        .expect("upsert stale");
+
+    let managed_root = crate::test_support::hermetic_temp_dir();
+    let (record, removed) = mgr
+        .decommission_with_root(&stale, managed_root.path(), None)
+        .await
+        .expect("a record-only collapse must not be blocked by the worktree guard");
+
+    assert!(!removed, "no filesystem removal should have occurred");
+    assert_eq!(record.state, ManagedSessionState::Decommissioned);
+    assert!(
+        ws.join("work.txt").exists(),
+        "the shared directory and its contents must be untouched"
+    );
+    assert_eq!(
+        mgr.get(&live).await.expect("get live").state,
+        ManagedSessionState::Active,
+        "the live record must survive the collapse"
+    );
 }

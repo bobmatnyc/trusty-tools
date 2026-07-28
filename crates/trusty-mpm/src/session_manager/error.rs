@@ -146,10 +146,20 @@ pub enum ManagedError {
     /// authority. It is returned rather than silently skipped because the
     /// tombstone path clears `workspace_path`, which would destroy the only
     /// remaining evidence of the mis-pointing record.
-    /// What: `(target, owner, path)` — the record asked about, the live owner
-    /// the worktree's on-disk sentinel names, and the contested path. No files
-    /// are touched when this is returned; both records need investigation
-    /// before any retry.
+    /// What: `(target, owner, path)` — the record asked about, the contesting
+    /// owner (named by the worktree's sentinel, or found in the store bound to
+    /// the same canonical path), and the contested path. No files are touched
+    /// when this is returned; both records need investigation before any retry.
+    ///
+    /// **Escape hatch.** The guard releases as soon as the contesting owner is
+    /// provably ownerless, so a stale or wrong owner is cleared with
+    /// `tm sessions delete <owner-id>` — that marks the record `Deleted`, which
+    /// is terminal, which `resolve_ownerless` accepts. No `force` flag is
+    /// needed and none is offered, deliberately: a flag would be reachable by
+    /// the same automated `caller: None` paths this guard exists to stop,
+    /// whereas reconciling the registry is exactly the corrective action the
+    /// operator should be taking. The message states this so the recourse is
+    /// visible at the point of refusal.
     #[error(
         "refusing to remove worktree {2} while decommissioning session {0}: its on-disk sentinel names session {1}, still ACTIVE — this record points at a LIVE peer's worktree (#3764)"
     )]

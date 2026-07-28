@@ -21,9 +21,11 @@ these was deliberately escalated.
 
 | Alarm text (grep for this) | Source | Means |
 |---|---|---|
-| `WORKTREE DESTROYED` | `session_manager::worktree_integrity` | An **Active** session's own worktree is no longer a git work tree. Its uncommitted work is already gone. |
+| `WORKTREE DESTROYED` | `session_manager::worktree_integrity` | An **Active** session's worktree is no longer a git work tree **and the directory is empty**. The work is gone. |
+| `WORKTREE LINKAGE LOST` | `session_manager::worktree_integrity` | Same, but the **files are still on disk**. The work is NOT lost — see §4.0 before doing anything. |
+| `worktree-integrity audit is DARK` | `session_manager::worktree_integrity` | Every audited session returned an inconclusive verdict — nothing is being checked. Fix the detector first. |
 | `SESSION REGISTRY CORRUPTION` | `daemon::cwd_collision` | ≥2 Active records resolve to one worktree path. The observed **precursor** state. |
-| `WORKTREE CORRUPTION GUARD: refusing to decommission` | `session_manager::decommission` | A teardown was refused because the record pointed at a live peer's worktree. Nothing was deleted. |
+| `WORKTREE CORRUPTION GUARD: refusing to decommission` | `session_manager::decommission` | A teardown was refused because the record pointed at another live/resumable session's worktree. Nothing was deleted. |
 | `active session path has failed to canonicalize for N consecutive` | `session_manager::prune` (#1845 F3 streak) | Sustained canonicalize failure on a live path — fired for ~8 h unnoticed before #3715. |
 
 ---
@@ -106,6 +108,25 @@ Verified empirically; see the module doc for the matrix.
 
 ## 4. Triage
 
+**4.0 — If the alarm was `WORKTREE LINKAGE LOST`, the work is still there.
+STOP and copy it out first.**
+
+```bash
+cp -a "$WT" "$INC/surviving-worktree"
+```
+
+Only git's linkage is gone; every file remains. This is what a destroyed or
+moved **parent clone** produces — the 07-21 `.base` destruction left ~70
+worktrees in exactly this state with their contents fully intact. Do **not**
+decommission, prune, or "recreate" the session: `decommission` carries no
+uncommitted-work guard, so it would delete the very files that survived.
+Recover by copying aside, then either repairing the parent clone's
+`worktrees/<leaf>` admin entry or re-creating the worktree and copying the files
+back in.
+
+`WORKTREE DESTROYED` is the *other* case — linkage gone **and** the directory
+empty. Only then is the work actually lost, and only then is recreating safe.
+
 1. **Do not "repair" the directory.** Recreating the root masks the loss —
    exactly the #3715 behaviour the `write_scrollback` guard was added to stop.
 2. **Check for a cwd collision** (`SESSION REGISTRY CORRUPTION` in the log, or
@@ -116,7 +137,13 @@ Verified empirically; see the module doc for the matrix.
    `session/<leaf>` branch: `git -C "$BASE" log --all --oneline`.
 4. **Stop the blinded session.** An Active session in a destroyed worktree is
    still running and still committing into nothing.
-5. **File with the capture attached**, referencing #3715 and #3764.
+5. **If a guard refusal is blocking a legitimate teardown**, the release valve
+   is registry reconciliation, not a force flag: `tm ls` to find the contesting
+   record, then `tm sessions delete <owner-id>` if it is stale. That marks it
+   `Deleted` (terminal), which the guard accepts. There is deliberately no
+   `--force` on the decommission path — a flag would be reachable by the same
+   automated callers the guard exists to stop.
+6. **File with the capture attached**, referencing #3715 and #3764.
 
 ---
 

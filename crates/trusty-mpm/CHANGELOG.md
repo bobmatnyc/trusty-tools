@@ -11,18 +11,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Detect a session whose own worktree has been destroyed underneath it**
   ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)): the
-  orphan-GC tick now audits every Active session's own worktree and raises an
-  ERROR-level `WORKTREE DESTROYED` alarm when it is no longer a git work tree.
-  Nothing previously asked this question, which is why a session ran for three
-  days inside a stripped worktree while every surface reported it healthy: with
-  the `.git` pointer gone, git discovery walks up to the enclosing clone, so
-  `git log` still prints plausible commits and `git status`'s fatal renders as
-  `Status: (clean)`. The probe is `git rev-parse --show-toplevel` compared
-  against the session's own root — deliberately **not**
-  `--is-inside-work-tree`, which returns `true` for a fully destroyed worktree
-  whenever the parent clone is non-bare (regression-tested against real git in
-  both layouts). A probe that cannot run reports `Unknown`, never healthy. The
-  audit is read-only: it reports, never repairs.
+  orphan-GC tick now audits every Active session's own worktree and alarms at
+  ERROR when it is no longer a git work tree. Nothing previously asked this
+  question, which is why a session ran for three days inside a stripped worktree
+  while every surface reported it healthy: with the `.git` linkage gone, git
+  discovery walks up to the enclosing clone, so `git log` still prints plausible
+  commits and `git status`'s fatal renders as `Status: (clean)`. The probe is
+  `git rev-parse --show-toplevel` compared against the session's own root —
+  deliberately **not** `--is-inside-work-tree`, which returns `true` for a fully
+  destroyed worktree whenever the parent clone is non-bare (regression-tested
+  against real git in both layouts). The alarm distinguishes **linkage lost with
+  files still on disk** (recover them; do NOT decommission) from a genuinely
+  **empty** directory, so it never tells an operator their work is gone on a
+  tree whose files survive — the state the 07-21 `.base` destruction left ~70
+  worktrees in. The git probe is bounded by the same timeout
+  `remove_session_worktree` uses, so a stalled mount cannot wedge the sweep; a
+  probe that times out or cannot run reports `Unknown`, never healthy, and an
+  audit in which *every* verdict is `Unknown` alarms at ERROR in its own right
+  ("the detector is dark"). Findings are latched — alarm on transition, then
+  hourly — so one persistent finding cannot rotate the 500-entry error ring and
+  evict everything else from `list_recent_errors`. The audit is read-only: it
+  reports, never repairs.
 - **Forensics runbook for worktree corruption**
   ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)):
   `docs/runbooks/worktree-corruption-forensics.md` — what to capture, in what
@@ -30,37 +39,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   one probe that is safe to trust from inside a suspect directory. The #1845 F3
   streak alarm now names this runbook in-message; a test pins that the path
   resolves so the pointer cannot rot.
-
-### Fixed
-
-- **Refuse to delete a live peer session's worktree**
-  ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)):
-  `decommission` now asks the worktree's on-disk ownership sentinel who owns it
-  and refuses, with an ERROR alarm and a new `ForeignActiveWorktree` error, when
-  that owner is a different session that is still Active. The pre-existing
-  containment guard only ever checked that a path was inside the managed root —
-  which every sibling session's worktree also is — and #3649's owner gate only
-  fires when a session self-identifies as `caller`, so every daemon-routed
-  remove path (the `session_decommission` MCP tool, the sm-stdio control
-  channel, the HTTP routes, the idle reaper, `dedup`) passed `None` and skipped
-  it entirely. That left the observed incident shape unguarded: a #1744 cwd
-  collision leaves several Active records pointing at one worktree, and
-  decommissioning any impostor destroys the real owner's live tree. The new
-  guard is independent of `caller`, reads ownership from the tree rather than
-  from the (possibly corrupt) record that asked, and can only ever refuse a
-  deletion — a non-Active owner still reclaims exactly as before, so #3649's
-  orphan-GC and #3721's recreation guard are untouched.
-- **The #1744 cwd collision is now a corruption alarm, not a silent skip**
-  ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)): when ≥2
-  Active session records resolve to the same worktree path,
-  `correlate_session_start` raises an ERROR-level `SESSION REGISTRY CORRUPTION`
-  alarm naming every colliding session id, instead of the previous `warn!` that
-  logged only a count. Two Active records at one worktree describes a state that
-  cannot physically exist, and a 3-way collision on the exact path was the
-  observed precursor hours before the last corruption. The level is
-  load-bearing: the daemon's bug-capture layer persists only ERROR events to
-  `errors.jsonl`, so at WARN this condition was invisible to
-  `list_recent_errors` and `tm doctor` alike.
 
 - **Cross-branch `git push` guard for every worktree of a managed base clone**
   ([#2867](https://github.com/bobmatnyc/trusty-tools/issues/2867)): a bundled
@@ -169,6 +147,41 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   ordering-dependent behaviour is reproducible.
 
 ### Fixed
+
+- **Refuse to delete another session's worktree**
+  ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)):
+  `decommission` now establishes who owns a worktree from evidence the record
+  requesting the removal does not control — the worktree's own on-disk ownership
+  sentinel, plus an unforgeable store-side check for any OTHER record bound to
+  the same canonical path — and refuses with an ERROR alarm and a new
+  `ForeignActiveWorktree` error (HTTP 409) when that owner is a different
+  session which is not provably ownerless. The pre-existing containment guard
+  only ever checked that a path was inside the managed root, which every sibling
+  session's worktree also is; and #3649's owner gate only fires when a session
+  self-identifies as `caller`, so every daemon-routed remove path (the
+  `session_decommission` MCP tool, the sm-stdio control channel, the HTTP
+  routes, the idle reaper, `dedup`) passed `None` and skipped it. That left the
+  observed incident shape unguarded: a #1744 cwd collision leaves several
+  records pointing at one worktree, and decommissioning any impostor destroys
+  the real owner's tree. Reclaimability uses the same `resolve_ownerless`
+  predicate as the #3649 gate and the orphan sweep, so a **Stopped** peer's
+  resumable worktree is protected too — the reachable case being `idle_reaper`
+  stopping a peer and later reaping a colliding record via `caller: None`. Only
+  a provably ownerless owner (terminal, or absent from the store) still
+  reclaims, so #3649's orphan-GC and #3721's recreation guard are untouched, and
+  `tm sessions delete <stale-id>` remains the operator's release valve for a
+  stale sentinel.
+- **The #1744 cwd collision is now a corruption alarm, not a silent skip**
+  ([#3764](https://github.com/bobmatnyc/trusty-tools/issues/3764)): when ≥2
+  Active session records resolve to the same worktree path,
+  `correlate_session_start` raises an ERROR-level `SESSION REGISTRY CORRUPTION`
+  alarm naming every colliding session id, instead of the previous `warn!` that
+  logged only a count. Two Active records at one worktree describes a state that
+  cannot physically exist, and a 3-way collision on the exact path was the
+  observed precursor hours before the last corruption. The level is
+  load-bearing: the daemon's bug-capture layer persists only ERROR events to
+  `errors.jsonl`, so at WARN this condition was invisible to
+  `list_recent_errors` and `tm doctor` alike.
 
 - **Two wrong instructions corrected in the bundled assets composed into every
   session's prompt.** Both were static text that no project could override, and
